@@ -1,20 +1,9 @@
 """Entry points that mutate something must answer their command line before they do it.
 
-`tests/test_validator_entrypoints.py` holds this rule for the read-only gates. This file holds it
-for the two commands in `chemclaw.cli` that reach a broker or a database, plus the reporting
-command an operator runs beside them.
-
-The defect these were written against is one shape seen three times. `chemclaw.cli.schedules` had
-no `argparse` at all — `asyncio.run(main())` ran under `if __name__ == "__main__"` and every
-argument was discarded, so `python -m chemclaw.cli.schedules --help` *applied the Temporal
-Schedules* and exited 0: asking a broker-mutating command what it does performed it.
-`chemclaw.cli.explain` read `sys.argv[1]` raw, so `--help` and `--not-a-flag` were both looked up
-as session ids under a heading naming the flag, and `""` matched the rows written before the
-correlation id existed — another actor's audit rows and durable jobs, printed under a blank
-heading. `validate_kg`'s own docstring records this exact fault as fixed one directory over.
-
-Nothing here connects to Temporal: `_apply` is stubbed to fail if it is reached, which is what
-makes "parsed the argument instead of applying" an assertion rather than a claim.
+`tests/test_validator_entrypoints.py` holds this for the read-only gates; this file holds it for
+the `chemclaw.cli` commands that reach a broker or a database, plus the reporting command run
+beside them: `--help` must not apply Schedules, and a flag or a blank id must not be looked up as
+a session id. `_apply` is stubbed to fail if reached, so "parsed instead of applied" is asserted.
 """
 
 from pathlib import Path
@@ -78,10 +67,8 @@ def test_applying_stays_the_default_because_a_container_invokes_it_bare(
 ) -> None:
     """No arguments must still apply.
 
-    Deliberately *unlike* its data-touching siblings, which preview by default. This one is a
-    container command in `deploy/helm/chemclaw/templates/schedules-job.yaml`, invoked with no
-    arguments — a preview-by-default would turn every deployment's Schedule Job into a no-op that
-    exits 0, which is the same green-while-doing-nothing failure moved rather than fixed.
+    Unlike its preview-by-default siblings, this runs as a container command with no arguments
+    (`schedules-job.yaml`); previewing by default would make every Schedule Job a green no-op.
     """
     from chemclaw.cli import schedules
 
@@ -122,12 +109,10 @@ def test_the_audit_reconstruction_refuses_a_flag_shaped_argument(
 def test_the_audit_reconstruction_refuses_a_blank_session_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The blank id is the disclosure arm, not just a usability one.
+    """The audit reconstruction refuses a blank session id.
 
-    Rows written before the correlation id was recorded carry `session_id = ''`, so `explain ""` —
-    which is what an unset shell variable expands to — printed another actor's audit rows and
-    durable jobs under a blank heading. Refused for the reason `erase_actor` refuses a blank
-    actor.
+    Rows written before the correlation id existed carry `session_id = ''`, so `explain ""` (an
+    unset shell variable) would print another actor's audit rows.
     """
     from chemclaw.cli import explain
 
@@ -156,13 +141,10 @@ def test_an_unreachable_database_is_one_line_rather_than_a_stack_trace(
 def test_a_damaged_soak_record_is_reported_rather_than_raised(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A truncated record is the expected damaged input, not an exotic one.
+    """A damaged soak record is reported rather than raised.
 
-    `infra/live/soak.sh` appends a line per round while a long run is in flight, so an operator
-    reporting on a run that was killed mid-write gets a half-written line. That surfaced as a
-    `json.decoder.JSONDecodeError` traceback; the missing-file case one line above was already
-    handled cleanly, which is the split this closes. A directory argument reached `read_text` the
-    same way and raised `IsADirectoryError`.
+    `infra/live/soak.sh` appends per round, so a killed run leaves a half-written line; a directory
+    argument is reported the same way.
     """
     from chemclaw.cli import soak_report
 

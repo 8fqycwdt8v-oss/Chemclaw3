@@ -1,16 +1,9 @@
 """A workflow file GitHub refuses to load is a workflow that never runs, and nothing says so.
 
-`.github/workflows/mutants.yml` carried `cancelled()` in a step's `env:` from 2026-09-22 until this
-file. A job-status function is legal only in a job's or a step's `if:`, and GitHub validates the
-whole file before it reads the triggers — so the weekly schedule stopped firing and every push, on
-every branch, recorded a failed `mutants` run with no jobs and the one line "This run likely failed
-because of a workflow file issue". That is a red row nobody can act on from the run page, next to
-green `ci` checks, and it reads as noise until someone runs `actionlint`.
-
-The class is checkable offline with the YAML parser the suite already has: find every `${{ }}`
-expression outside an `if:` and refuse a status function in it. Narrow on purpose — it is the one
-context rule that has bitten this repository, not a reimplementation of GitHub's context table —
-and the scope is derived from the directory, so a new workflow is covered without being named.
+A job-status function (`cancelled()` etc.) is legal only in an `if:`; anywhere else GitHub rejects
+the whole file, so schedules stop firing and every push records an unactionable failed run. This
+finds every `${{ }}` expression outside an `if:` and refuses a status function in it — one narrow
+context rule, over every workflow in the directory.
 """
 
 import re

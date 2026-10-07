@@ -1,9 +1,7 @@
-"""Behavioral tests for the mcp-rxnfp reaction capability (plan step 3.4).
+"""Behavioral tests for the mcp-rxnfp reaction capability.
 
-Proves DRFP is deterministic, invalid reactions fail clearly, and Tanimoto ranking over
-reactions returns most-similar-first — without a database. The reaction path reuses the
-generic fingerprint store, so ranking correctness is already covered by test_molfp; here
-we prove the DRFP-specific fingerprinting and that it plugs into the shared store.
+DRFP is deterministic, invalid reactions fail clearly, and Tanimoto ranking returns
+most-similar-first, with no database. Generic store ranking is covered by `test_molfp`.
 """
 
 import pytest
@@ -73,13 +71,8 @@ async def test_find_similar_reactions_ranks_by_tanimoto() -> None:
 
 # --- The agent slot has to change the bits, not just the notation --------------------------------
 #
-# The measurements below are the point of this block. A previous change moved solvent and catalyst
-# into the reaction SMILES' agent slot and four places recorded that the solvent no longer
-# dominated similarity — but `DrfpEncoder.internal_encode` opens with `sides[0] += "." + sides[1]`,
-# folding the agent slot straight back onto the reactants, so the three-part and two-part forms
-# encode to byte-identical bits. Every one of those claims was false, and nothing here measured the
-# thing they claimed. So these tests assert *numbers*, taken from the pinned drfp: a fingerprint
-# change that produces the same bits is the exact failure being repaired.
+# `DrfpEncoder` folds the agent slot onto the reactants, so the three-part and two-part forms
+# encode identically. These tests assert numbers from the pinned drfp.
 
 
 def _suzuki(solvent: str) -> OrdReaction:
@@ -102,13 +95,9 @@ _THF, _METHF = _suzuki("C1CCOC1"), _suzuki("CC1CCCO1")
 
 
 def test_the_agent_slot_alone_changes_no_bits_which_is_why_species_are_excluded() -> None:
-    """The defect, pinned so no future change can re-claim the notation as a fix.
+    """Writing a species in the agent slot changes no bits; this is why species are excluded.
 
-    DRFP folds `>agents>` onto the reactants before it shingles anything, so writing a solvent in
-    the middle slot and writing it on the left are the same input. This is a property of the pinned
-    encoder rather than of our code, which is exactly why it is worth asserting: it is the fact
-    that makes `transformation_smiles` necessary, and a reader looking at the three-part record
-    form has no way to guess it.
+    A property of the pinned encoder that makes `transformation_smiles` necessary.
     """
     folded_back = (
         "Brc1ccc(C)cc1.OB(O)c1ccccc1.[K+].[K+].[O-]C([O-])=O.CC(=O)O[Pd]OC(C)=O.C1CCOC1"
@@ -118,14 +107,10 @@ def test_the_agent_slot_alone_changes_no_bits_which_is_why_species_are_excluded(
 
 
 def test_excluding_the_agents_actually_moves_the_bits() -> None:
-    """The fix has to be visible in the fingerprint, not only in the string.
+    """Excluding the agents moves the bits.
 
-    Held against the *standardized* three-part form rather than against `reaction_smiles`, so the
-    exclusion is the only difference under test. Compared with the raw record form this assertion
-    survives removing the exclusion entirely — standardization alone moves the bits, and the test
-    would then pass while measuring the wrong half of the change. That is the same shape of
-    mistake as the defect itself: a claim about the encoding checked against something that
-    happens to differ for another reason.
+    Compared against the standardized three-part form, so the exclusion is the only difference;
+    standardization alone also moves the bits.
     """
     excluded = _THF.transformation_smiles()
     reactants, products = excluded.split(">>")
@@ -136,21 +121,11 @@ def test_excluding_the_agents_actually_moves_the_bits() -> None:
 
 
 def test_two_solvents_of_one_coupling_are_the_same_transformation() -> None:
-    """The behaviour the whole change is for, as a number.
+    """Two solvents of one coupling are the same transformation.
 
-    Indexed as recorded, the THF and 2-MeTHF runs of one coupling scored 0.82 against each other —
-    the solvent, present only on the left, survives DRFP's symmetric difference whole and spends a
-    large constant block of bits on the variable being optimized. Indexed as transformations they
-    are identical, which is the honest answer: they are the same chemistry run two ways, and the
-    solvent is recorded beside the note rather than inside the structure.
-
-    `as_recorded`'s pin moved from 0.8194 to 0.7937 under REV-1 (`drfp_bitstring` now standardizes
-    every `.`-separated species, agent slot included, so the two calls under test are symmetric
-    with `test_the_agent_slot_alone_changes_no_bits...`'s hand-folded fixture — see
-    `_standardize_species`). The shift is `Cleanup`'s metal disconnection reaching this fixture's
-    agents for the first time: `CC(=O)O[Pd]OC(C)=O` becomes two acetate anions plus bare Pd2+,
-    identically on both sides, so the qualitative claim (`as_indexed > as_recorded`, near-1.0 once
-    agents are excluded) is untouched.
+    Indexed as recorded, the solvent dominates the difference; indexed as transformations, the
+    runs are identical. The `as_recorded` pin reflects metal disconnection during per-species
+    standardization; the claim `as_indexed > as_recorded` is unaffected.
     """
     as_recorded = tanimoto(
         drfp_bitstring(_THF.reaction_smiles()), drfp_bitstring(_METHF.reaction_smiles())
@@ -165,11 +140,9 @@ def test_two_solvents_of_one_coupling_are_the_same_transformation() -> None:
 
 
 def test_a_reagent_still_belongs_to_the_transformation() -> None:
-    """The other half of the rule: a base is consumed stoichiometrically and stays on the left.
+    """A reagent such as a base is consumed and stays on the left of the transformation.
 
-    Without this, "exclude what is not the transformation" quietly becomes "exclude everything
-    that is not a named reactant", which would erase the base and ligand screens that process
-    development actually runs.
+    Otherwise base and ligand screens would be erased.
     """
     without_base = _THF.model_copy(
         update={"inputs": [c for c in _THF.inputs if c.role is not Role.REAGENT]}
@@ -180,23 +153,18 @@ def test_a_reagent_still_belongs_to_the_transformation() -> None:
 
 
 def test_the_indexed_string_is_standardized() -> None:
-    """`STANDARDIZATION_VERSION` is in the definition, so the rows have to actually be standardized.
+    """The indexed string is standardized, as `STANDARDIZATION_VERSION` in the definition claims.
 
-    They were not: `reaction_smiles` built the string from raw `c.smiles`, so the standardization
-    half of the definition bump was bits-neutral for every reaction row while the token claimed
-    otherwise. Asserted through a spelling RDKit re-canonicalizes, so it fails if the call is
-    dropped rather than merely if the pipeline changes.
+    Asserted through a spelling RDKit re-canonicalizes, so dropping the call fails.
     """
     assert _THF.transformation_smiles().startswith("Cc1ccc(Br)cc1")  # from `Brc1ccc(C)cc1`
     assert STANDARDIZATION_VERSION in reaction_definition()
 
 
 def test_the_definition_retires_rows_built_under_the_old_encoding() -> None:
-    """Old rows must fall out of similarity search rather than be ranked against new ones.
+    """A new definition token retires rows built under the old encoding.
 
-    The store refuses to rank across definitions, so the token is the whole retirement mechanism —
-    and a token that did not move would leave rows encoding a solvent-dominated fingerprint being
-    compared against solvent-neutral ones and reporting the difference as chemistry.
+    The store refuses to rank across definitions, so the token is the whole retirement mechanism.
     """
     definition = reaction_definition()
     assert "agents-excluded" in definition
@@ -207,13 +175,9 @@ def test_the_definition_retires_rows_built_under_the_old_encoding() -> None:
 
 
 async def test_a_charged_species_query_matches_the_row_indexed_from_its_neutral_form() -> None:
-    """A query spelling one reagent as its charged form still finds the standardized row.
+    """A query spelling a reagent in its charged form still finds the standardized row.
 
-    The index is built from `transformation_smiles()`, which runs every species through
-    `standard_smiles` before fingerprinting (acetic acid, not the acetate anion). Before REV-1's
-    fix a query spelled any other way scored against a form it could never equal — measured, not
-    argued: acetate and acetic acid are different molecules to a DRFP that has not standardized
-    them, so a match here can only come from the query being standardized the same way.
+    The index runs every species through `standard_smiles`, so the query must be standardized too.
     """
     store = InMemoryFingerprintStore()
     indexed = OrdReaction(
@@ -236,12 +200,7 @@ async def test_a_charged_species_query_matches_the_row_indexed_from_its_neutral_
 
 
 async def test_a_tautomer_query_matches_the_row_indexed_from_its_canonical_tautomer() -> None:
-    """A query spelling one reagent as another tautomer still finds the standardized row.
-
-    Acetylacetone's enol and keto forms are different SMILES for the same substance;
-    `standard_smiles` canonicalizes to one, and a query in the other tautomer must land on the
-    same row.
-    """
+    """A query spelling one reagent as another tautomer still finds the standardized row."""
     store = InMemoryFingerprintStore()
     indexed = OrdReaction(
         reaction_id="acac-amine",
@@ -261,12 +220,7 @@ async def test_a_tautomer_query_matches_the_row_indexed_from_its_canonical_tauto
 
 
 def test_an_already_standardized_query_is_bits_neutral() -> None:
-    """REV-1's fix must be a no-op wherever standardization was already a no-op.
-
-    `_ESTER_ETHYL` is already every species' `standard_smiles` form (plain organic, neutral,
-    one tautomer), so folding it through the new per-species pass must reproduce exactly the
-    bits `DrfpEncoder` computes with no preprocessing at all — proving the fix changes what a
-    query means only where standardization does real work, per the backlog row's own claim.
+    """An already standardized query is bits-neutral: the per-species pass reproduces raw DRFP bits.
     """
     direct = DrfpEncoder.encode(_ESTER_ETHYL, n_folded_length=settings.drfp_bits)[0]
     direct_bits = "".join("1" if value else "0" for value in direct)
@@ -322,12 +276,7 @@ def _sited(reaction_id: str, source: str, reaction_smiles: str) -> FingerprintRe
 async def test_two_sources_sharing_an_entry_id_keep_two_fingerprints() -> None:
     """`EXP-1001` at two sites is two experiments, and the index key has to be able to say so.
 
-    Keyed on the bare id, the second ingest overwrote the first and the first site's chemistry
-    stopped being findable at all — worse than the transcription tier's version of this defect
-    (D-2026-08-26), because there the losing row survived and only the citation was ambiguous.
-    The in-memory backend is asserted here for the same reason it is asserted anywhere: it is the
-    reference the Postgres backend is required to match, and `tests/test_rxnfp_postgres.py` runs
-    the identical scenario in SQL.
+    The in-memory backend is the reference; `tests/test_rxnfp_postgres.py` runs the same scenario.
     """
     store = InMemoryFingerprintStore()
     await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
@@ -340,13 +289,9 @@ async def test_two_sources_sharing_an_entry_id_keep_two_fingerprints() -> None:
 
 
 async def test_a_hit_carries_the_source_a_citation_would_need() -> None:
-    """A search knows which site it matched, which a bare `reaction-<id>` citation cannot say.
+    """A search hit carries the source it matched, which a bare `reaction-<id>` citation cannot say.
 
-    The *spelling* that consumed this is gone: `note_id_for_reaction` had an optional `source`
-    argument no caller in `src/` ever passed, and none of the six readers that would have to
-    resolve `reaction-<source>.<id>` accept it, so the qualified id it built resolved to nothing
-    (D-2026-08-27, review section 3). What the hit carries is not gone and is not dead — it is what
-    such a citation would be built *from* on the day those readers accept one, and it is what
+    It is what a source-qualified citation would be built from, and what
     `ingest.eln.records._one_of` refuses to guess at.
     """
     store = InMemoryFingerprintStore()
@@ -363,12 +308,7 @@ async def test_a_hit_carries_the_source_a_citation_would_need() -> None:
 
 
 async def test_a_single_source_deployment_is_unchanged() -> None:
-    """One enabled ELN has nothing to disambiguate, and pays nothing for the key change.
-
-    One row per entry id, and the citation is the bare `reaction-<id>` every merged note already
-    carries — the property that makes this migration safe to apply to a deployment that will never
-    enable a second source.
-    """
+    """A single-source deployment has one row per entry id and bare `reaction-<id>` citations."""
     store = InMemoryFingerprintStore()
     await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
     await store.add(_sited("EXP-1001", "eln-a", _ESTER_PROPYL))  # the entry, amended
@@ -380,11 +320,9 @@ async def test_a_single_source_deployment_is_unchanged() -> None:
 
 
 async def test_a_sourced_write_supersedes_the_row_migration_063_could_not_name() -> None:
-    """A row stored before the key had a source half is replaced, never duplicated.
+    """A row stored before the key had a source is replaced by a sourced write, never duplicated.
 
-    `063` backfills every row a single-claimant `reaction_labels` row can name; what it leaves
-    under the empty source would otherwise sit beside its own replacement with identical bits and
-    one label, so a similarity search would report two precedents where a chemist has one run.
+    A duplicate would report two precedents for one run.
     """
     store = InMemoryFingerprintStore()
     await store.add(record_for_reaction("EXP-1001", _ESTER_ETHYL))  # pre-063 row
@@ -394,13 +332,10 @@ async def test_a_sourced_write_supersedes_the_row_migration_063_could_not_name()
     assert [(h.id, h.source) for h in hits] == [("EXP-1001", "eln-a")]
 
 
-# --- atom maps are reaction bookkeeping, not structure (D-2026-09-09) --------------------------
+# --- atom maps are reaction bookkeeping, not structure ----------------------------------------
 #
-# DRFP shingles atom environments *as SMILES strings*, and an atom-map number lives inside those
-# strings — so `[CH3:1][C:2](=[O:3])[OH:4]` and `CC(=O)O` shingle to disjoint sets. `CLAUDE.md`
-# names Pistachio as the first live integration and Pistachio reaction SMILES are atom-mapped,
-# while `ingest/eln/ord.py` builds ELN rows from unmapped component SMILES. Left unfixed the two
-# tables are mutually unsearchable at any threshold, which reads as "we have no precedent".
+# DRFP shingles atom environments as SMILES strings, so map numbers make mapped and unmapped forms
+# disjoint. Literature corpora are atom-mapped and ELN rows are not, so the maps are stripped.
 
 # One esterification, written four ways: unmapped, fully mapped, half mapped, and mapped with a
 # different (equally valid) numbering. RXNMapper picks the numbering, so the last pair is not
@@ -423,21 +358,13 @@ _RENUMBERED = (
 def test_an_atom_mapped_reaction_fingerprints_as_its_own_unmapped_form(spelling: str) -> None:
     """One reaction, four spellings, one fingerprint — bit-identical, not merely similar.
 
-    Asserted on the bits rather than on a Tanimoto floor because the property is invariance: a
-    threshold would let the map numbers move the fingerprint a little and still pass, and "a
-    little" is what a 0.3 cut-off turns into "no precedent" once the molecules are bigger than an
-    ester.
+    A Tanimoto floor would let map numbers move the fingerprint and still pass.
     """
     assert drfp_bitstring(spelling) == drfp_bitstring(_UNMAPPED)
 
 
 def test_the_mapped_and_unmapped_corpora_are_searchable_against_each_other() -> None:
-    """The consequence, stated as the search a chemist actually runs.
-
-    `ingest/labels/corpus.py` fingerprints an atom-mapped literature reaction and
-    `ingest/eln/ord.py` fingerprints an unmapped in-house one. Below the configured threshold the
-    two tables answer nothing about each other, which is indistinguishable from a corpus that
-    holds no precedent.
+    """Mapped and unmapped corpora are searchable against each other above the configured threshold.
     """
     similarity = tanimoto(drfp_bitstring(_MAPPED), drfp_bitstring(_UNMAPPED))
     assert similarity == 1.0, (

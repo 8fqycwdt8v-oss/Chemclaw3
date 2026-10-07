@@ -1,10 +1,7 @@
-"""Standing queries as a *durable* channel back into a prompt (gap IDEA-1).
+"""Standing queries are a durable channel back into a prompt.
 
-A watch outlives the conversation that created it — that is the whole point of it being standing —
-and its `query` is free text the model wrote through `watch_for`, out of whatever it had just read.
-So `list_watches` is a replay of model-authored text into a later turn, in a later session, in a
-later process, which is the shape `agent/framing.py` exists for and which this module reached the
-prompt without.
+A watch's `query` is model-written text replayed into later turns and sessions by `list_watches`,
+so it must be neutralised like any other replayed text.
 """
 
 import pytest
@@ -16,13 +13,10 @@ from tests.pg import migrated_db_or_skip
 
 
 async def test_a_saved_query_cannot_replay_a_live_envelope_delimiter() -> None:
-    """A watch is durable, so a delimiter smuggled into one is replayed for the life of the row.
+    """A delimiter smuggled into a watch is defanged on every span that replays it.
 
-    The three prompt-facing spans are asserted together because they are one span at three ages:
-    `watch_for`'s confirmation echoes it on the turn that wrote it, `list_watches` replays it on
-    every turn after, and `stop_watching`'s confirmation echoes it once more on the way out. Defang
-    rather than frame, for the reason `agent/tool_framing.py` gives a helper's report — a saved
-    query is this system's own note, not evidence a citation may name.
+    `watch_for`, `list_watches` and `stop_watching` echo the same query at three ages, so they are
+    asserted together. Defanged rather than framed: a saved query is this system's own note.
     """
     await migrated_db_or_skip()
     oid = "watch-oid-4c7a"
@@ -49,11 +43,9 @@ async def test_a_saved_query_cannot_replay_a_live_envelope_delimiter() -> None:
 
 @pytest.mark.parametrize("unset", ["", None])
 async def test_a_watch_with_no_note_type_round_trips_it_unchanged(unset: str | None) -> None:
-    """Neutralising `note_type` must not change what "no type" is.
+    """Neutralising `note_type` must not turn `None` into `""`.
 
-    `defang` returns a string, so applying it unconditionally would map a `None` note type onto
-    `""` — and `_SELECT_OWNER` hands `None` back for a NULL column, so the two are distinguishable
-    values that a careless rewrite would merge.
+    A NULL column comes back as `None`, which is a distinct value from the empty string.
     """
     await migrated_db_or_skip()
     oid = "watch-oid-9b02"

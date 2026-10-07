@@ -1,16 +1,8 @@
 """The ungated observations tier: what it may notice, and what it may never count (D-161).
 
-Knowledge has had one tier and one gate, and the gate is right for anything asserted as fact. It is
-also why there is no proactive cross-project learning loop: every candidate learning would cost a
-reviewer a PR, and most do not earn one. An observation is explicitly not truth, so it does not
-need the gate — the gate moves to the few worth promoting.
-
-That only holds if two rules hold, and both are tested here rather than documented. Support must
-count distinct *merged* notes, or the agent writes an observation, later counts its own
-observation as corroboration, and inflates into a PR — a self-confirming loop that looks exactly
-like cross-project evidence from outside. And an observation must never enter the evidence list,
-or "what the record shows" and "what the agent noticed" become the same kind of thing at ranking
-time.
+An observation is explicitly not truth. Two rules make that safe: support counts distinct cited
+records, never the agent's own observation (or it corroborates itself), and an observation never
+enters the evidence list, so "what the record shows" and "what the agent noticed" stay apart.
 """
 
 from pathlib import Path
@@ -66,12 +58,10 @@ class TestTheAntiFeedbackRule:
         assert not hasattr(observation, "support_count")
 
     def test_the_id_is_the_scope_so_a_growing_finding_stays_one_row(self) -> None:
-        """The statement changes whenever the evidence does, so it must not be part of the id.
+        """The id is the scope, not the statement, so a growing finding stays one row.
 
-        A cluster gaining a member is routine under periodic ELN sync, and it rewrites the
-        statement ("2 runs" -> "3 runs"). Hashing that would mint a new row on *every* growth step,
-        so support would never accumulate at all and the promotion threshold would never be
-        crossed.
+        The statement changes as the cluster grows ("2 runs" -> "3 runs"); hashing it would mint a
+        new row each time and support would never accumulate.
         """
         first = Observation(statement="seen in 2 projects", scope="t").with_id()
         grown = Observation(statement="seen in 3 projects", scope="t").with_id()
@@ -81,18 +71,11 @@ class TestTheAntiFeedbackRule:
         assert Observation(statement="seen in 2 projects", scope="u").with_id().id != first.id
 
     def test_the_cluster_anchor_moves_when_a_lower_id_joins(self) -> None:
-        """`min(cluster)` is not merge-stable, and `with_id` now says so instead of claiming it is.
+        """`min(cluster)` is not merge-stable, and that cost is pinned rather than fixed.
 
-        The docstring used to justify the anchor with "stable as the cluster grows, since clusters
-        are disjoint partitions" — a non sequitur: disjointness means two clusters never claim one
-        scope, which is collision-freedom, not stability. A reaction whose id sorts below the
-        current anchor (a re-ingested older run, a differently-prefixed ELN batch) moves it, and so
-        does a new reaction bridging two clusters under single linkage.
-
-        Pinned rather than fixed, and this test is what makes the accepted cost visible: the growth
-        step that keeps the anchor still upserts one row, and the step that moves it mints a second
-        whose support strictly exceeds the row it supersedes — so `open_observations`, which orders
-        by support, always ranks the current finding above the subset it leaves behind.
+        A reaction sorting below the current anchor, or one bridging two clusters, moves the anchor
+        and mints a second row. That row's support strictly exceeds the one it supersedes, so
+        `open_observations`, ordered by support, ranks the current finding first.
         """
         pair = mine_corpus(
             [
@@ -129,12 +112,10 @@ class TestTheCorpusMiner:
     """It picks up precisely what the playbook bar throws away, and only that."""
 
     def test_a_cross_project_failure_cluster_becomes_an_observation(self) -> None:
-        """The signal the playbook path must discard and this tier can hold.
+        """A cross-project failure cluster becomes an observation.
 
-        `find_playbook_candidates` keeps successes only, and correctly — distilling a recurring
-        failure into a playbook would invert what the record says. But that drops the *finding*
-        along with the recommendation, and "this went badly in two projects" is exactly what a
-        process chemist wants to know before trying it in a third.
+        The playbook path rightly keeps successes only, but "this went badly in two projects" is
+        what a chemist wants to know before trying it in a third.
         """
         found = mine_corpus(
             [
@@ -149,20 +130,11 @@ class TestTheCorpusMiner:
         assert "failed in 2 runs" in found[0].statement
 
     def test_the_statement_never_asserts_more_than_the_cluster_it_counted(self) -> None:
-        """The observation must not contradict the record it is derived from.
+        """The statement never asserts more than the cluster it counted.
 
-        Successes are dropped *before* fingerprinting, so a cluster only ever holds non-successful
-        runs — and the statement used to read "…has failure outcomes on every recorded attempt (2
-        runs)" for a transformation the corpus records five successes for. That is the opposite of
-        what happened, and `observation_jobs._promotion_summary` copies the sentence verbatim into a
-        promoted playbook's **note body**, cited only by the non-success runs — so nobody meeting it
-        can see what falsifies it. It must scope itself to the runs it actually counted.
-
-        **This paragraph said "PR body" and "the human at the gate", and there is neither**
-        (D-2026-09-05-the-gate-follows-behaviour-not-knowledge). That makes the defect
-        *worse* rather than smaller: a false statement used to be one a reviewer might catch before
-        it landed, and now it lands — which is the whole reason the gate's removal rests on a note
-        being readable beside its own citations.
+        Successes are dropped before fingerprinting, so the statement must scope itself to the runs
+        it counted rather than claim every recorded attempt failed. A promotion copies it verbatim
+        into a note body, readable at once, cited only by those runs.
         """
         corpus = [
             _reaction(f"s{n}", "alpha" if n % 2 else "beta", OutcomeClass.SUCCESS) for n in range(5)
@@ -181,11 +153,10 @@ class TestTheCorpusMiner:
         assert found.evidence_note_ids == ["reaction-r1", "reaction-r2"]
 
     def test_an_inconclusive_run_is_named_apart_from_the_failures(self) -> None:
-        """`OutcomeClass` calls the distinction structural, so the sentence has to keep it.
+        """An inconclusive run is named apart from the failures.
 
-        An aborted, mis-charged or never-assayed run carries no evidence about the chemistry.
-        Folding it into the failure count would teach the corpus something untrue — the exact
-        thing `INCONCLUSIVE` exists to prevent.
+        An aborted or never-assayed run carries no evidence about the chemistry; folding it into the
+        failure count would teach the corpus something untrue.
         """
         [found] = mine_corpus(
             [
@@ -204,17 +175,11 @@ class TestTheCorpusMiner:
         assert "across 2 projects (alpha, beta)" in found.statement
 
     def test_recurrence_is_counted_over_the_projects_that_actually_failed(self) -> None:
-        """Cross-project recurrence is the premise of the tier, so it must count failures.
+        """Cross-project recurrence counts only the projects that actually failed.
 
-        The project set was taken over the whole cluster, which by construction holds
-        `INCONCLUSIVE` members too — so one project's failure beside a second project's aborted or
-        never-assayed runs read as "failed in 1 run across 2 projects (alpha, beta)", cleared both
-        shipped promotion thresholds, and `durable.observation_jobs._promotion_summary` copied that
-        sentence verbatim into a playbook note. Whoever retrieves it then reads a recurrence claim
-        about a transformation that has failed in exactly one project, cited by runs that
-        `OutcomeClass` says carry no evidence about the chemistry either way — and reads it as
-        current knowledge, because there is no gate between the miner and the graph
-        (D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
+        The cluster also holds `INCONCLUSIVE` members, so counting projects over the whole cluster
+        could claim a two-project recurrence for one project's failure and clear the promotion
+        thresholds.
         """
         assert (
             mine_corpus(
@@ -228,11 +193,9 @@ class TestTheCorpusMiner:
         )
 
     def test_a_purely_inconclusive_cluster_states_nothing(self) -> None:
-        """Runs that were never assayed are not a finding, in either direction.
+        """A purely inconclusive cluster states nothing.
 
-        The filter is "not SUCCESS", so these clustered and were asserted to have "inconclusive
-        outcomes on every recorded attempt" — a sentence that reads as a result while contradicting
-        `OutcomeClass`'s own rule that an inconclusive run says nothing about the chemistry.
+        Runs that were never assayed are not a finding in either direction.
         """
         assert (
             mine_corpus(
@@ -293,11 +256,10 @@ class TestTheCorpusMiner:
         assert three.evidence_note_ids == ["reaction-r1", "reaction-r2", "reaction-r3"]
 
     def test_mining_is_deterministic(self) -> None:
-        """A workflow re-runs, and an unstable miner would mint a new row every night.
+        """Mining is deterministic, or a re-run would mint new rows.
 
-        The corpus has to be one this miner actually emits something for, or the assertion below
-        holds over two empty lists and pins nothing: the failures alone must span two projects,
-        which is why the inconclusive run here is a third member rather than the second.
+        The failures alone span two projects so the miner emits something and the assertion is not
+        over two empty lists.
         """
         corpus = [
             _reaction("r1", "alpha", OutcomeClass.FAILURE),
@@ -333,10 +295,8 @@ class TestTheInteractionMiner:
         assert len(found) == 1
         assert found[0].origin == "interaction"
         assert found[0].projects_seen == ["alpha", "beta"]
-        # **The cited reactions only.** The interaction note names what was observed and is in
-        # `scope`, but it is `created_by: agent` and reaches the corpus with no human step, so
-        # counting it as its own support was the self-confirming loop: it alone carried a
-        # two-project interaction from support 2 to the promotion threshold of 3.
+        # The cited reactions only: the interaction note is in `scope` but is `created_by: agent`,
+        # so counting it as its own support would be self-confirmation.
         assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
         assert found[0].scope == "interaction:interaction-42"
         assert found[0].support == 2, "below observation_promote_min_evidence, so it cannot promote"
@@ -373,17 +333,10 @@ class TestTheInteractionMiner:
 async def test_the_recall_tool_says_the_tier_is_off_rather_than_saying_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Off by default, and "off" is not "empty" — the tool used to render them identically.
+    """The recall tool says the tier is off rather than returning nothing.
 
-    `if not settings.observations_enabled: return []` made a disabled subsystem indistinguishable
-    from a corpus in which nothing has been noticed, on the one tier whose whole content is "the
-    system noticed something". **This is a defect by this repository's own standard**: the
-    calculator ledger handles the identical case correctly one package over, where `OutlierReport`
-    carries `enabled=settings.calibration_enabled` and its verdict says "an empty one may mean the
-    ledger is switched off entirely".
-
-    "Off" must still mean the tool touches no database, which is the half this test already held:
-    the store is replaced with something that raises, and the disabled arm never reaches it.
+    A disabled tier must be distinguishable from one that has noticed nothing, as the calibration
+    ledger's `OutlierReport.enabled` is. Off still touches no database: the store here raises.
     """
     from chemclaw.agent import memory_tools
 
@@ -414,25 +367,17 @@ def test_the_migration_forbids_self_citation_in_sql_too() -> None:
 
 
 def _open_read_order_by() -> str:
-    """The ORDER BY the shipped retrieval-bucket statement actually carries.
-
-    Read out of `_SELECT_OPEN` rather than restated, because a restatement is a second copy of the
-    thing under test: the defect this guards against is precisely a *declaration* that no longer
-    describes the query it names.
-    """
+    """The ORDER BY the shipped retrieval-bucket statement carries, read out of `_SELECT_OPEN`."""
     _, _, tail = store._SELECT_OPEN.partition("ORDER BY ")
     clause, _, _ = tail.partition(" LIMIT")
     return " ".join(clause.split())
 
 
 def test_the_open_index_declares_the_sort_the_open_read_performs() -> None:
-    """The index and the ORDER BY are one decision — so a change to either fails here.
+    """The open-observations index declares the sort the open read performs.
 
-    Migration `025` indexed `(status, last_seen DESC)` while calling it the index for "open
-    observations newest-first", and the bucket has never sorted that way: support leads, so the
-    index served the `status` filter and the sort ran in memory on every read. That mismatch was
-    invisible because nothing compared the two texts. This does, and it runs with no database, so
-    the offline sandbox catches it too — the plan assertion below cannot.
+    Compared as text, so a change to either side fails offline; the plan assertion below needs a
+    database.
     """
     order_by = _open_read_order_by()
     assert order_by == "cardinality(evidence_note_ids) DESC, last_seen DESC"
@@ -447,17 +392,10 @@ def test_the_open_index_declares_the_sort_the_open_read_performs() -> None:
 
 
 async def test_the_open_read_is_served_by_the_index_rather_than_by_a_sort() -> None:
-    """The half only a planner can answer: the index is *chosen*, not merely present.
+    """The planner chooses the index for the open read rather than sorting.
 
-    An index the planner never picks is worse than none — it is a claim that something is
-    optimised. So this runs the shipped statement through `EXPLAIN` on a populated table and asks
-    for the plan, not for rows. 500 rows is above the ~50 where the index starts winning and far
-    below where it stops being a fair question; without it the same plan is a sequential scan and a
-    top-N heapsort, which is 234 ms at a million open rows and 6 ms at ten thousand — inside a
-    conversation turn either way.
-
-    Postgres-backed, so it skips where no database is reachable; the text check above is what holds
-    offline.
+    Runs the shipped statement through `EXPLAIN` on 500 rows, above where the index starts winning.
+    Skips without Postgres.
     """
     await migrated_db_or_skip()
     async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
@@ -494,13 +432,10 @@ async def test_the_open_read_is_served_by_the_index_rather_than_by_a_sort() -> N
 
 
 def test_a_promoted_observation_cites_its_evidence_by_the_ids_it_counted() -> None:
-    """A promotion may not manufacture a note id, and an interaction observation is where it did.
+    """A promotion cites its evidence by the exact ids it counted.
 
-    `playbook_note` used to take bare reaction ids and prefix them, which silently assumed every
-    caller's evidence was a reaction. An interaction observation's support includes the
-    `interaction` note itself, so the prefixing turned `interaction-42` into a link to
-    `reaction-interaction-42` — dangling, and `kg-validate` fails the PR the promotion just
-    opened, after the observation has already been marked promoted and will never be retried.
+    An interaction observation's support includes the `interaction` note itself, so prefixing ids as
+    reactions would produce dangling links.
     """
     from chemclaw.memory.playbook import playbook_note
 
@@ -518,12 +453,7 @@ def test_a_promoted_observation_cites_its_evidence_by_the_ids_it_counted() -> No
 async def test_the_recall_tool_frames_the_statement_it_returns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An observation's statement is corpus-mined text, so it is evidence and must arrive framed.
-
-    It is assembled from note bodies nobody wrote for this purpose. `gather_evidence` frames the
-    very notes an observation rests on, and this channel handed the model the derived reading of
-    them unframed — the narrower half of "no tool result is ever framed".
-    """
+    """An observation's statement is corpus-mined text, so the recall tool frames it as evidence."""
     from chemclaw.agent import memory_tools
     from chemclaw.agent.framing import ENVELOPE_TAG
 
@@ -549,11 +479,9 @@ async def test_the_recall_tool_frames_the_statement_it_returns(
 async def test_the_recall_tool_neutralizes_the_project_names_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`projects_seen` is the same corpus text one field over, and rides outside the envelope.
+    """`projects_seen` is unconstrained ELN text, so it is neutralised too.
 
-    It comes from `OrdReaction.project`, an unconstrained ELN string, so a forged closing delimiter
-    in a project name reads as the envelope ending and everything after it as the model's own
-    instructions — the exact escape framing the statement was meant to close.
+    Otherwise a forged closing delimiter in a project name would end the envelope early.
     """
     from chemclaw.agent import memory_tools
     from chemclaw.agent.framing import ENVELOPE_TAG
@@ -578,17 +506,11 @@ async def test_the_recall_tool_neutralizes_the_project_names_too(
 
 
 async def test_a_partial_pass_may_re_record_an_observation_with_no_evidence_yet() -> None:
-    """`_ACCUMULATE`'s array union must survive both sides being empty.
+    """`_ACCUMULATE`'s array union survives both sides being empty.
 
-    `array_agg` over zero rows returns `NULL`, not `'{}'`, and both columns are `NOT NULL` (025) —
-    so before the `COALESCE` this second call aborted with `NotNullViolation` and took the whole
-    `executemany` batch with it. The `_REPLACE` branch never had the fault, which is what made it
-    invisible: only a *partial* corpus read takes this path.
-
-    Reachability, stated rather than implied: neither shipped miner emits such a row — both skip a
-    finding with fewer than two projects — so this drives `record()` itself, which is where the
-    contract that permits it lives (`Observation` declares both fields `default_factory=list`).
-    That is the boundary being fixed, and it is the boundary a third miner would arrive at.
+    `array_agg` over zero rows is `NULL` and both columns are `NOT NULL`, hence the `COALESCE`. No
+    shipped miner emits such a row, so this drives `record()` directly, whose `Observation` contract
+    permits empty lists.
     """
     await migrated_db_or_skip()
     empty = Observation(
@@ -615,16 +537,11 @@ async def test_a_partial_pass_may_re_record_an_observation_with_no_evidence_yet(
 
 
 def test_a_promoted_observation_is_dated_so_it_reaches_a_subscriber() -> None:
-    """A promotion wrote a note into the graph and told nobody, and the reason was one absent date.
+    """A promoted observation is dated so it reaches a subscriber.
 
-    `playbook_note` set no `valid_from`, which `Note.is_current` and `durable/digest._is_new` both
-    read as *open-ended* — true for as long as anyone has known. So a distilled rule the corpus had
-    just started supporting looked, to the one mechanism that notifies anybody, exactly like
-    something that had always been there.
-
-    Asserted against the activity's source rather than by driving Temporal: what is claimed is that
-    the promotion passes the day it ran, and `workflow_safe_today` is the only clock an activity may
-    read.
+    An absent `valid_from` reads as open-ended to `Note.is_current` and `durable/digest._is_new`, so
+    the note would look like it had always been there. Asserted against the activity source:
+    `workflow_safe_today` is the only clock an activity may read.
     """
     import ast
     from pathlib import Path

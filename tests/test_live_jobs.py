@@ -1,17 +1,8 @@
 """The durable smoke's own logic, offline.
 
-`make live-jobs` is by definition a thing you run against a live stack, so what is testable here is
-not "does the job run" — that is the smoke's job and it needs a broker. What is testable is the
-part that decides *whether a green result means anything*, and that part has already been wrong
-once: the first version of the wedged-worker check reused the smoke's symmetry numbers on a
-different equation, and the engine rejected the payload. The lane reported the failure correctly,
-which is the argument for the lane, but a bad probe that reads as a system fault is worth catching
-before it ships.
-
-So these pin the invariants that make the smoke honest: the payloads are valid for their own
-equations, a run only reports success when every check passed, and — the one that matters most —
-the payload varies between runs, because a fixed one would rejoin the previous run's workflow and
-pass every check against residue.
+Pins what makes `make live-jobs` honest: payloads are valid for their own equations, a run
+reports success only when every check passed, and the payload varies between runs so a rerun
+cannot rejoin the previous workflow and pass against residue.
 """
 
 from __future__ import annotations
@@ -37,11 +28,10 @@ def _species(payload: dict[str, object]) -> set[str]:
 
 
 def test_each_payload_names_a_symmetry_number_for_every_species_in_its_own_equation() -> None:
-    """The check that the first wedged-worker payload failed.
+    """Each payload names a symmetry number for every species in its own equation.
 
-    `science.calc.reaction._checked_symmetry_numbers` rejects a map naming a species the equation
-    does not contain, and reports no free energy for a species the map omits. Either way the smoke
-    stops measuring the durable path and starts measuring its own input.
+    `science.calc.reaction._checked_symmetry_numbers` rejects an extra species and omits free energy
+    for a missing one; either way the smoke would measure its own input.
     """
     for name, payload in (("smoke", SMOKE_PAYLOAD), ("wedge", WEDGE_PAYLOAD)):
         sigmas = payload["symmetry_numbers"]
@@ -59,12 +49,10 @@ def test_the_two_payloads_are_different_reactions() -> None:
 
 
 def test_the_payload_varies_between_runs_so_a_rerun_cannot_pass_on_residue() -> None:
-    """The subtlest way this lane could go green while testing nothing.
+    """The payload varies between runs, so a rerun cannot pass on residue.
 
-    A durable job's workflow id is a hash of its payload and a duplicate launch deliberately
-    rejoins the existing run rather than recomputing (D-011). With a payload fixed across runs, the
-    *second* `make live-jobs` against the same database would start nothing and pass every check
-    against the first run's rows — a lane that reports a working durable path it never exercised.
+    A workflow id is a hash of its payload and a duplicate launch rejoins the existing run, so a
+    fixed payload would start nothing on a second run and pass against the first run's rows.
     """
     assert SMOKE_PAYLOAD["temperature_k"] == live_jobs._RUN_TEMPERATURE_K
     assert WEDGE_PAYLOAD["temperature_k"] == live_jobs._RUN_TEMPERATURE_K

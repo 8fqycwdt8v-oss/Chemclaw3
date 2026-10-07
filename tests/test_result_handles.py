@@ -1,11 +1,9 @@
 """Every stored tool result ends with `⟨r:<12 hex>⟩`, outside the envelope, and nothing reads it.
 
-`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`: an artefact binds a cell to the
-result it came from by naming that result's handle, so the handle has to (a) name bytes that were
-stored before the model saw it, (b) sit outside the framing and the defang, where nothing a tool
-wrote can reach it, (c) be stored once and reused by the stream and the transcript, and (d) never be
-read by a grounding check as a figure or an id. Each of those is driven here on the real
-middlewares, and the composition once through the front door.
+An artefact binds a value to the result it came from by that handle, so the handle must name
+bytes stored before the model saw them, sit outside the framing and defang, be stored once and
+reused by stream and transcript, and never be read by grounding as a figure or an id. Driven on
+the real middlewares and once through the front door.
 """
 
 import asyncio
@@ -151,13 +149,10 @@ def test_a_failure_or_an_empty_result_carries_no_handle(
 def test_no_handle_is_stamped_where_no_binding_could_resolve_it(
     sink: _Collecting, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The stamp follows the resolver: no handle that every binding would be refused on.
+    """No handle is stamped where no binding could resolve it.
 
-    Two cases. Under the in-memory session store the result store still keeps the result (the
-    transcript opens it), but `exhibits.bindings` cannot resolve one — before, every result there
-    carried a handle and every `$bind` naming it was refused. And a result that is not evidence — an
-    artefact readout, a helper's report, a scratchpad file (`exhibits.evidence`) — is stored and
-    never bindable, so it carries none either.
+    Under the in-memory session store `exhibits.bindings` cannot resolve one, and a result that is
+    not evidence (artefact readout, helper report, scratchpad file) is never bindable.
     """
     ref = content_address(_PAYLOAD)
     for name in sorted({*EXHIBIT_TOOLS, "task", "read_file", "write_todos", "transfer_to_x"}):

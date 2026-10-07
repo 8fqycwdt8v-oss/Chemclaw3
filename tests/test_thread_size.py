@@ -1,11 +1,8 @@
-"""A turn is not admitted onto a conversation larger than the front door can load twelve of.
+"""A turn is not admitted onto a conversation larger than the front door can afford to load.
 
-Every turn loads its whole checkpointed thread — compaction trims only what is *sent* — so what an
-admitted turn costs the pod grows with the conversation it continues, and twelve permits on 10 MB
-threads OOM-killed a 1Gi front door at turn 76
-(`D-2026-09-24-a-turn-costs-the-thread-it-loads`). `session_max_thread_bytes` is the bound, read off
-the stored thread so a restart or a second replica cannot hand it a fresh allowance the way it
-hands the in-process turn caps one.
+Every turn loads its whole checkpointed thread, so a turn's memory cost grows with the
+conversation. `session_max_thread_bytes` bounds it, read off the stored thread so a restart or a
+second replica cannot grant a fresh allowance.
 """
 
 from collections.abc import AsyncIterator
@@ -38,11 +35,10 @@ def _echo_graph(saver: Any) -> Any:
 async def test_the_stored_size_is_the_newest_blob_a_turn_would_load(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Measured off real checkpoint writes: it grows with the thread and names the *newest* copy.
+    """The stored size grows with the thread and names the newest checkpoint blob.
 
-    The newest, because `checkpoint_retain_per_thread` keeps superseded copies beside it and a sum
-    over them would refuse a thread for history no turn loads. And 0 for a thread with no
-    checkpoint, which is every session's first turn.
+    Superseded copies kept by `checkpoint_retain_per_thread` are not loaded, so summing them would
+    refuse threads wrongly. A thread with no checkpoint measures 0.
     """
     monkeypatch.setattr(settings, "session_store", "postgres")
     await migrated_db_or_skip()
@@ -184,9 +180,8 @@ def test_the_check_under_the_permit_is_the_one_that_binds(
 ) -> None:
     """A thread that crosses its ceiling while its turn queued is refused on the stream.
 
-    `budget_exhausted` and not retryable — the code already means "this session was refused before
-    the turn started and has no answer with it", so a surface stops offering a retry that would
-    fail identically — and the agent never runs, so the thread is never loaded.
+    The refusal is `budget_exhausted` and not retryable, since a retry would fail identically, and
+    the agent never runs, so the thread is never loaded.
     """
     client, asked = _recording_client(monkeypatch, [0, 10**9])
     with client:

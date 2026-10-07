@@ -1,16 +1,9 @@
 """A turn that lost its connectors must say so (REV-6, D-138).
 
-`open_reachable` returned "the names of the connectors that are not connected, for the caller to
-surface", and all four callers — the front-door runner, the CLI, and both template activities —
-called it bare and dropped the list. The result is the quietest failure in the system: the model is
-handed a shorter tool list, never learns one is missing, and answers confidently from what remains.
-"the ELN has nothing on that batch" and "the ELN was unreachable" arrive as the same sentence.
-
-These tests drive a connector that comes up *unconnected* — which is what a dark host actually looks
-like here, since `chemclaw.connectors.transport` makes `connect` non-fatal by construction — and
-assert on
-what reaches the chemist and the scrape. They fail on the unfixed code, where the stream carried
-tokens and an answer and nothing else.
+Otherwise the model gets a shorter tool list and answers confidently from what remains: "the ELN
+has nothing" and "the ELN was unreachable" read the same. These tests drive a connector that comes
+up unconnected (connect is non-fatal by construction) and assert on what reaches the chemist and
+the scrape.
 """
 
 import asyncio
@@ -32,13 +25,10 @@ from tests.test_service import _client, _FakeAgent
 
 @pytest.fixture(autouse=True)
 def _reachable_durable_subsystem(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Hold the durable subsystem up, so these tests say something about *connectors*.
+    """Hold the durable subsystem up, so these tests say something about connectors.
 
-    The same event now also carries the durable subsystem when Temporal does not answer its health
-    probe, and no broker runs in a test process — so without this every turn here would open by
-    announcing an outage that is not the one under test, and "a healthy turn announces nothing"
-    would be asserting on a turn that is not healthy. The durable half has its own tests in
-    `tests/test_runner.py`.
+    No Temporal runs here, so without this every turn would announce a durable-subsystem outage.
+    That half is tested in `tests/test_runner.py`.
     """
 
     async def _reachable() -> bool:
@@ -51,11 +41,8 @@ def _reachable_durable_subsystem(monkeypatch: pytest.MonkeyPatch) -> Iterator[No
 def _dark_connector(name: str) -> Any:
     """A connector whose host is down: a spec pointing at a port nothing is listening on.
 
-    Pointed at a closed port rather than faked, deliberately. The degradation these tests pin is a
-    property of the real open path — `create_session` fails, `HeldConnectorSession` absorbs it, and
-    the name comes back in `unreachable`, the same three steps a dark host in a cluster produces —
-    and a stub that merely reported itself unreachable would keep passing over a runner that had
-    stopped opening connectors at all.
+    A closed port rather than a stub, so the real open path (`create_session` fails,
+    `HeldConnectorSession` absorbs it, the name comes back in `unreachable`) is what is tested.
     """
     # The tool never answers — this address is deliberately dark — but a manifest may not
     # declare an empty `tools` list, because that used to turn the allow-list off and leave
@@ -83,11 +70,9 @@ def _stream_events(connectors: list[Any]) -> list[dict[str, Any]]:
 
 
 def test_a_dark_connector_is_announced_before_the_answer_streams() -> None:
-    """The chemist learns the answer is partial while it is still arriving, not afterwards.
+    """The chemist learns the answer is partial before the first token, not afterwards.
 
-    Ordering is the assertion that matters: a marker appended after the answer is read by a person
-    who has already acted on it. Before the first token, a surface can render the answer as
-    provisional from the start.
+    A marker appended after the answer is read by someone who has already acted on it.
     """
     events = _stream_events([_dark_connector("eln")])
 

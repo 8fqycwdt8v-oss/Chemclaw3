@@ -1,12 +1,8 @@
 """The live lane's index step (`cli/live_index.py`), against a real broker and a real database.
 
-On the four-repo lane `substrate_precedent` reported 0 of 4,282 reactions labelled and
-`similar_reactions` a partial index, on every run and across `down`/`up` (#520): nothing ran the
-label drain, and nothing carried or disposed of a previous lane's fingerprint generation. These
-drive the step's two halves where they act — `ReactionLabelWorkflow` on a Temporal server, the
-disposal on a Postgres table — because a stub of either would be blind to the property each half
-exists for: a second bring-up must rejoin a running drain rather than race it, and a disposal must
-never drop a row the current generation does not hold.
+Drives `ReactionLabelWorkflow` on a Temporal server and the generation disposal on a Postgres
+table, because a stub of either is blind to its property: a second bring-up must rejoin a running
+drain rather than race it, and a disposal must never drop a row the current generation lacks.
 """
 
 from __future__ import annotations
@@ -38,9 +34,8 @@ from tests.temporal_env import pydantic_client, start_local_env_or_skip
 class _Labeller:
     """The drain's two activities, standing in for the index and the `rxnlabel` server.
 
-    Registered under the real activities' names, so the workflow under test is the shipped one.
-    `release` holds the first batch until the test lets it go — the state in which a second
-    bring-up arrives while the first drain is still running.
+    Registered under the real activity names, so the workflow is the shipped one. `release` holds
+    the first batch so a second bring-up arrives while the drain is running.
     """
 
     def __init__(self) -> None:
@@ -78,9 +73,8 @@ async def _drain_env() -> AsyncIterator[tuple[Client, _Labeller]]:
 async def test_a_second_bring_up_rejoins_the_running_drain_and_a_later_one_starts_afresh() -> None:
     """One drain per stale set: rejoined while it runs, started again once it has finished.
 
-    Two drains over one stale set would contend on the same rows and label nothing the first would
-    not — `live_data.backfill`'s argument, and the reason the id is fixed. And a finished drain must
-    not block the next bring-up from labelling rows that have gone stale since.
+    Two drains over one stale set would contend on the same rows; a finished drain must not block
+    labelling rows that went stale since.
     """
     async for client, labeller in _drain_env():
         first = await live_index.start_label_drain(client)
@@ -167,11 +161,10 @@ async def _rows() -> list[tuple[str, str]]:
 
 
 async def test_a_completed_rebuild_disposes_of_the_shelf_and_the_index_is_whole_again() -> None:
-    """The lane's `index_partial: true` was a previous lane's generation, rebuilt and still shelved.
+    """A completed rebuild disposes of the shelved generation, and the index is whole again.
 
-    After the re-key every shelved row has a current twin, so the superseded generation holds
-    nothing the search does not — and until it is gone every search says PARTIAL, because the
-    probe reads the table's definitions, not whether they were rebuilt.
+    Every shelved row has a current twin after the re-key; until the shelf is gone every search
+    reports PARTIAL, because the probe reads table definitions.
     """
     async for store in _scratch_store():
         for smiles in ("CCO", "CCCO"):

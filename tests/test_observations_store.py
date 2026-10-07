@@ -1,16 +1,8 @@
-"""The observations tier against a real database — the half no pure test can reach (D-161).
+"""The observations tier against a real database (D-161).
 
-`tests/test_observations.py` covers the miners and the model, which is where the domain rules
-live. It cannot cover the SQL, and the SQL here is not boilerplate: the upsert makes a run
-authoritative for the rows it names *when it saw the whole corpus* — `evidence_note_ids` and
-`projects_seen` are then replaced rather than merged — and the anti-feedback rule is a CHECK
-constraint. Both are the kind of thing that is valid Python and wrong SQL, and both are
-load-bearing: replacement is what makes support track the corpus in *both* directions (the
-`array_agg(DISTINCT …)` union it replaces could only grow, so a reaction re-assayed SUCCESS backed
-a promotion forever), the union survives for the partial pass that has not earned replacement, and
-the constraint is the guarantee behind "an observation can never corroborate itself".
-
-Skipped where no Postgres is reachable, so this is the offline sandbox's blind spot and CI's job.
+Covers the SQL the pure tests cannot: a complete pass replaces `evidence_note_ids` and
+`projects_seen` so support tracks the corpus both ways, a partial pass only unions, and a CHECK
+constraint forbids an observation citing an observation. Skipped without Postgres.
 """
 
 import psycopg
@@ -66,17 +58,10 @@ def _finding(statement: str = "s", **overrides: object) -> Observation:
 
 
 async def test_a_growing_finding_accumulates_the_support_its_run_observed() -> None:
-    """The whole reason support means anything across runs.
+    """A finding seen again with another reaction is backed by both notes and both projects.
 
-    Support must follow the corpus: a finding seen again with another reaction behind it ends up
-    backed by both notes and both projects.
-
-    **Accumulation comes from the miner seeing more, and from nowhere else.** A run is
-    authoritative for the rows it names: the SQL replaces an observation's evidence rather than
-    unioning it, because a union lets evidence outlive the corpus that justified it. That is safe
-    only because both miners emit an observation's *complete* membership every pass — they mine the
-    whole corpus each time (`all_reactions()` reads from `datetime.min`) — which is what makes
-    "supported by N notes" mean "what the record currently shows" rather than "what it ever showed".
+    Accumulation comes from the miner seeing more: both miners emit an observation's complete
+    membership every pass, so the SQL can replace evidence rather than union it.
     """
     await _clean_db_or_skip()
     await store.record([_finding()], complete=True)
@@ -100,19 +85,11 @@ async def test_a_growing_finding_accumulates_the_support_its_run_observed() -> N
 async def test_a_run_drops_the_evidence_the_corpus_has_since_retracted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Support must not count a reaction that has left the cluster.
+    """A run drops evidence the corpus has since retracted.
 
-    Run end to end through the real `mine_corpus` → `record` → `promotable` chain, because that is
-    what the claim is about and hand-written payloads cannot show it: three cross-project failures
-    make a 3-note observation over the promotion threshold; `ddd3` is then re-assayed a SUCCESS, so
-    `mine_corpus` drops it *before* fingerprinting and the next pass's cluster holds two. Under the
-    old union the row kept all three — a promotion crossed on a documented success, and a PR body
-    that says "failed in 2 runs across 2 projects … no successful run is in this cluster" one
-    paragraph before "supported by 3 merged notes across 3 projects".
-
-    Hand-written `_finding(...)` payloads cannot state this. Feeding the store two payloads whose
-    evidence lists differ proves the SQL replaces an array; what has to be shown is that the miner
-    *emits* the shrunken cluster, which is the step that makes replacement mean anything.
+    Driven through `mine_corpus` → `record` → `promotable`: `ddd3` is re-assayed a SUCCESS, the
+    miner drops it, and the stored row must shrink from three notes to two. Hand-written payloads
+    could only show that the SQL replaces an array, not that the miner emits the shrunken cluster.
     """
     monkeypatch.setattr(settings, "observation_promote_min_evidence", 3)
     monkeypatch.setattr(settings, "observation_promote_min_projects", 2)
@@ -140,17 +117,10 @@ async def test_a_run_drops_the_evidence_the_corpus_has_since_retracted(
 
 
 async def test_a_partial_pass_may_not_rewrite_an_observation_down() -> None:
-    """Replacement is what an *authoritative* pass earns, and a degraded pass has not earned it.
+    """A partial pass may only add; a complete pass still drops what the corpus retracted.
 
-    The retraction fix made every pass replace the stored arrays. But a pass is only authoritative
-    if it saw the whole corpus, and `read_corpus()` cannot promise that: an entry `map_to_ord`
-    rejects is skipped and the read continues. So a run that saw one project's reactions rewrote a
-    three-project observation down to one — measured on live Postgres, support 3 → 1 — and could
-    knock a row out of `promotable()`. That is a degraded input rendering as an authoritative
-    complete result, which is the very defect this lane is named for.
-
-    Both halves are pinned here: a partial pass may only add (the old union, now scoped to the case
-    that needs it), and a complete pass still drops what the corpus retracted.
+    `read_corpus()` skips entries `map_to_ord` rejects, so a pass is authoritative only when it saw
+    the whole corpus. A degraded pass must not rewrite a row down or knock it out of `promotable()`.
     """
     await _clean_db_or_skip()
     await store.record(
@@ -200,12 +170,7 @@ async def test_a_partial_pass_may_not_rewrite_an_observation_down() -> None:
 
 
 async def test_the_statement_follows_the_evidence_it_accumulated() -> None:
-    """A row backed by two projects must not still read as though it were backed by one.
-
-    The statement is the mutable part now that identity is the scope, so the upsert refreshes it.
-    Keeping the first run's wording would leave the tier saying one thing and its own evidence
-    column saying another — and the statement is what a reviewer reads on a promotion PR.
-    """
+    """The upsert refreshes the statement so it matches the evidence it accumulated."""
     await _clean_db_or_skip()
     await store.record([_finding("seen in 1 project")], complete=True)
     await store.record(
@@ -231,11 +196,10 @@ async def test_re_recording_an_identical_finding_changes_nothing_but_last_seen()
 
 
 async def test_the_database_refuses_an_observation_citing_an_observation() -> None:
-    """The guarantee, not the courtesy.
+    """The database itself refuses an observation citing an observation.
 
-    `Observation` refuses this at construction so a miner fails where it is written. That protects
-    the path that goes through the model; this protects the *table*, including from a future
-    writer that does not. The insert is made deliberately around the validator to prove it.
+    `Observation` refuses it at construction; the CHECK protects the table from writers that bypass
+    the model. The insert here deliberately goes around the validator.
     """
     await _clean_db_or_skip()
     async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
@@ -303,18 +267,10 @@ async def test_a_promoted_observation_leaves_the_open_set() -> None:
 async def test_a_retired_observation_comes_back_when_the_corpus_does(
     complete: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Retirement has to be reversible, or the tier empties permanently instead of breathing.
+    """A retired observation reopens when the corpus shows it again.
 
-    Neither `_REPLACE` nor `_ACCUMULATE` touched `status`, and every read is `status = 'open'`, so
-    a re-observed finding had its evidence replaced and its `last_seen` bumped while staying
-    invisible to `open_observations`, `promotable` and `recall_observations` forever. Measured
-    before the fix, on both statements: `retire_stale() == 1`, then re-recording left
-    `status='retired'` with a fresh `last_seen`, and the row appeared in neither read.
-
-    Two ordinary paths reach it — a finding that lapses for `observation_retire_after_days` and
-    returns, and an ingest source quiet for that long — so this is a permanently dead row rather
-    than a temporarily hidden one. It also stops being counted by `retire_stale`, which is the
-    tier's own stated instrumentation for whether the miners are producing noise.
+    Every read is `status = 'open'`, so without revival a returning finding would stay invisible
+    forever and drop out of `retire_stale`'s count.
     """
     monkeypatch.setattr(settings, "observation_retire_after_days", 30)
 
@@ -336,11 +292,10 @@ async def test_a_retired_observation_comes_back_when_the_corpus_does(
 
 @pytest.mark.parametrize("complete", [True, False], ids=["replace", "accumulate"])
 async def test_re_observing_a_promoted_observation_does_not_reopen_it(complete: bool) -> None:
-    """Revival must reach `retired` only — `promoted` is the state that stops the nightly PR.
+    """Revival reaches `retired` only; a promoted finding stays promoted.
 
-    `test_a_promoted_observation_leaves_the_open_set` pins why: a promoted finding that returned to
-    the open set would be re-promoted on the next pass and open the same PR forever. The miners
-    keep re-observing a promoted finding by construction, so this is the routine case, not an edge.
+    Miners re-observe promoted findings by construction, and reopening one would re-promote it every
+    pass.
     """
     await _clean_db_or_skip()
     await store.record([_finding()], complete=complete)
@@ -392,13 +347,10 @@ async def test_the_best_supported_observation_is_read_first() -> None:
 async def test_the_recall_page_says_how_much_of_the_tier_it_is(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`open_observations` clamps to `observation_max_results`, and nothing counted the rest.
+    """The recall page says how much of the tier it shows.
 
-    The count half of this tier was weak-honest rather than silent — the tool's `limit` docstring
-    does tell the model "a full page may mean the tier holds more than you were shown" — which is
-    exactly the docstring-only pattern a verdict field exists to end: the docstring is read once
-    when the tool is defined, and the payload is what sits in the context window when the answer is
-    written. `count_open_observations` is the number that makes the sentence checkable.
+    `open_observations` clamps to `observation_max_results`; `count_open_observations` puts the
+    total in the payload the model reads when it answers.
     """
     monkeypatch.setattr(settings, "observations_enabled", True)
 

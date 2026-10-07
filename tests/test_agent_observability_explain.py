@@ -1,16 +1,9 @@
-"""The trail's own timestamps and ordering, and the "why" column that was structurally blank.
+"""The trail's own timestamps and ordering, and the plan step `explain` renders.
 
-The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. `PostgresAuditSink.record` buffers and
-returns, `audit_events.ts` defaulted to `now()` at INSERT and `id` is a `BIGSERIAL` assigned at the
-same moment — so under load a turn's rows were both dated and *ordered* by whenever a batch happened
-to drain, and `chemclaw explain` reconstructs a turn from that order.
-
-Beside it, `explain` rendered `purpose`, which has been empty on every row ever written and cannot
-be authored honestly (`agent/audit.AuditEvent.purpose`). It now renders `plan_step`, which is a
-narrower question with an exact answer.
-
-Postgres-backed, because both claims are about columns: what the INSERT binds and what the SELECT
-orders by. Skipped where no database is configured — the run's own epilogue says so.
+Decision: `D-2026-08-27-a-refusal-is-not-a-crash`. `PostgresAuditSink.record` buffers, so `ts` is
+bound from the middleware's stamp and `chemclaw explain` orders by it rather than by insert
+order. `explain` renders `plan_step` (the always-empty `purpose` is gone). Postgres-backed: both
+claims are about columns.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -43,9 +36,7 @@ def _event(tool: str, *, ts: datetime, plan_step: str, session: str) -> AuditEve
 async def test_the_row_keeps_the_timestamp_the_middleware_stamped() -> None:
     """The INSERT binds `ts` rather than letting the column default to the flush moment.
 
-    A minute in the past is used deliberately: `now()` would be indistinguishable from a correct
-    stamp taken a millisecond earlier, so the test would pass against the defect it exists to
-    catch.
+    A minute in the past, so a defaulted `now()` cannot pass for the stamp.
     """
     await migrated_db_or_skip()
     session = "explain-ts-session"
@@ -64,9 +55,8 @@ async def test_the_row_keeps_the_timestamp_the_middleware_stamped() -> None:
 async def test_explain_orders_by_when_the_tool_ran_and_names_the_plan_step() -> None:
     """Both halves of the reconstruction, over rows written in the *wrong* order on purpose.
 
-    The second call is recorded first, so `id ASC` alone would report them backwards — which is
-    exactly what a batching sink under load produces. Ordering by `ts` is what makes the
-    reconstruction the turn's story rather than the flusher's.
+    The second call is recorded first, as a batching sink under load can do, so `id ASC` would
+    report them backwards; ordering by `ts` tells the turn's story.
     """
     await migrated_db_or_skip()
     session = "explain-order-session"

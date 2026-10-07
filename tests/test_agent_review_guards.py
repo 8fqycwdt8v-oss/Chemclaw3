@@ -1,19 +1,10 @@
-"""Two guards a reviewer found were claimed rather than held, in the modules that claim them.
+"""Two guards held by tests in the modules that state them.
 
-Both are the same shape: a rule stated in prose beside code that does not implement it.
-
-- `core/tracing.SpanHandle.failed` swallows because "a tracing failure must not replace the failure
-  being reported", and it is called from `except` blocks on the tool path. `set_attribute` is
-  called from those same blocks — `agent/audit.py` stamps the outcome one line before it marks the
-  span — and did not swallow.
-- `infra/sql/059` builds an index on `audit_events`, the one table `durable/retention.py` refuses
-  to prune, with a lock that blocks every audit INSERT for the build. `CONCURRENTLY` cannot run in
-  `core/migrate.py`'s single transaction, so the deployment escape hatch is to build it
-  concurrently *before* deploying and let `IF NOT EXISTS` no-op the migration. That hatch only
-  exists while every index in this directory is `IF NOT EXISTS`, which is what this pins.
-
-Here rather than in `tests/test_agent_observability_*.py` because neither belongs to an
-observability surface: one is the tracing seam every layer shares, the other is the schema.
+- `core/tracing.SpanHandle.set_attribute`, like `failed`, must swallow: both are called from
+  `except` blocks on the tool path, where a tracing failure must not replace the real failure.
+- Every migration index is `IF NOT EXISTS`, so an operator can pre-build one `CONCURRENTLY`
+  (which `core/migrate.py`'s single transaction cannot) before deploying, as `infra/sql/059`'s
+  header advises for the unpruned `audit_events` table.
 """
 
 import re
@@ -44,11 +35,10 @@ class _DeadSpan:
 
 
 def test_stamping_an_attribute_cannot_replace_the_failure_being_reported() -> None:
-    """The rule `failed` states and `set_attribute` did not follow.
+    """Stamping an attribute cannot replace the failure being reported.
 
-    `agent/audit.py` calls both from one `except` block, one line apart, so a raising
-    `set_attribute` would surface a `RuntimeError` about tracing in place of the tool failure the
-    handler was written to record — losing the audit row, the metric and the real fault together.
+    `agent/audit.py` calls `set_attribute` and `failed` from one `except` block; a raise there would
+    lose the audit row, the metric and the real fault together.
     """
     handle = SpanHandle(_DeadSpan())
     handle.set_attribute("chemclaw.outcome", "error")
@@ -64,17 +54,11 @@ def test_the_untraced_path_still_costs_one_check() -> None:
 def test_every_index_is_if_not_exists_so_it_can_be_pre_built_concurrently(
     migration: Path,
 ) -> None:
-    """The escape hatch `059`'s header offers a deployment, held open for every migration.
+    """Every index is `IF NOT EXISTS`, so it can be pre-built concurrently.
 
-    `core/migrate.py` runs the whole set inside one transaction (`pg_advisory_xact_lock`), and
-    Postgres refuses `CREATE INDEX CONCURRENTLY` inside a transaction block — so an index on a
-    table that grows forever can only be built without blocking writes if an operator builds it
-    concurrently *ahead of the deploy* and the migration then finds it already there. Measured on
-    this repository's Postgres image over `audit_events`' shape: **1.24 s per million rows**, and
-    that table is never pruned.
-
-    A bare `CREATE INDEX` would fail on the second run with a duplicate-index error, taking the
-    hatch away for that migration and, worse, doing it silently until the day it is needed.
+    Migrations run in one transaction, where `CREATE INDEX CONCURRENTLY` is refused, so an index on
+    a large table can only be built without blocking writes ahead of the deploy. A bare `CREATE
+    INDEX` would then fail as a duplicate.
     """
     text = migration.read_text(encoding="utf-8")
     for match in _CREATE_INDEX.finditer(text):
@@ -86,11 +70,10 @@ def test_every_index_is_if_not_exists_so_it_can_be_pre_built_concurrently(
 
 
 def test_the_index_this_was_written_for_is_still_the_one_on_the_unpruned_table() -> None:
-    """The guard on the guard: the rule above is only worth having while that index exists.
+    """The index the rule above was written for still exists on the unpruned table.
 
-    If `audit_events_tool_outcome_ts_idx` were ever dropped or moved, the header explaining its
-    cost would be describing nothing — the failure mode this repository calls a claim rather than a
-    control.
+    If `audit_events_tool_outcome_ts_idx` were dropped or moved, `059`'s header would describe
+    nothing.
     """
     header = (_MIGRATIONS / "059_audit_plan_step.sql").read_text(encoding="utf-8")
     assert "audit_events_tool_outcome_ts_idx" in header

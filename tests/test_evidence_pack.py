@@ -1,12 +1,8 @@
 """The evidence pack: assembly, not capture.
 
-Every component has existed since it was written — the audit trail, `job_records`,
-`plan_approvals`, `effects`. What was missing is the read that puts them beside each other, which is
-the artefact a regulated deployment is asked for and the one an engineer wants after an incident.
-
-Three properties are asserted rather than described, because each is a claim the pack makes about
-itself: it draws from all four stores, an empty pack says so rather than reading as "nothing
-happened", and refusals are part of the record rather than a list of faults.
+The pack reads the audit trail, `job_records`, `plan_approvals`, `effects` and `turn_costs` side
+by side. Asserted: it draws from every store, an empty pack says so rather than reading as
+"nothing happened", and refusals are part of the record rather than a list of faults.
 """
 
 import asyncio
@@ -20,19 +16,16 @@ from tests.pg import migrated_db_or_skip
 
 SESSION = "pack-test-session"
 
-#: Distinctive enough that no other test's search can match it. `test_job_record_postgres.py`
-#: searches `job_records` by the *reason a run was launched*, and this file's fixture writes one —
-#: so a rationale sharing any ordinary word with another file's query makes that file fail in a full
-#: run and pass alone, which is exactly how it first showed up.
+#: Distinctive enough that no other test's search matches it: `test_job_record_postgres.py` searches
+#: `job_records` by rationale, and a shared word would make that file fail only in a full run.
 RATIONALE = "zzz-evidence-pack-fixture-rationale-zzz"
 
 
 async def _clear() -> None:
-    """Remove this file's rows from the five shared tables.
+    """Remove this file's rows from the shared tables.
 
-    Called before *and* after each seeding test. These tables are shared by the whole suite — the
-    isolation schema is per process, not per file — so a fixture that only cleans on the way in
-    leaves rows for every later test to trip over.
+    Called before and after each seeding test, because the isolation schema is per process, not per
+    file.
     """
     async with await connect(settings.postgres_dsn) as conn:
         for table in ("audit_events", "job_records", "effects", "plan_approvals", "turn_costs"):
@@ -94,11 +87,10 @@ async def _seed() -> None:
 
 
 def test_the_pack_draws_from_every_store_that_holds_part_of_the_record() -> None:
-    """Four reads rather than one join.
+    """The pack draws from every store that holds part of the record, in separate reads.
 
-    The stores are independent by design — an effect is recorded whether or not a job ran, and a
-    job record survives the session's messages being pruned — so a join would silently drop a row
-    whose partner had been disposed of under a different retention rule.
+    The stores have independent retention, so a join would silently drop a row whose partner had
+    been disposed of.
     """
 
     async def _run() -> None:
@@ -123,11 +115,10 @@ def test_the_pack_draws_from_every_store_that_holds_part_of_the_record() -> None
 
 
 def test_a_refusal_is_part_of_the_record_rather_than_a_fault() -> None:
-    """A gate refusing is the control operating.
+    """A refusal is part of the record rather than a fault.
 
-    Surfaced as a property of the calls rather than as a separate section, so a pack cannot be read
-    as a list of things that went wrong — and the reason is carried, because "refused" without one
-    is indistinguishable from a broken tool.
+    Surfaced as a property of the calls, with its reason, since "refused" without one is
+    indistinguishable from a broken tool.
     """
 
     async def _run() -> None:
@@ -144,11 +135,9 @@ def test_a_refusal_is_part_of_the_record_rather_than_a_fault() -> None:
 
 
 async def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -> None:
-    """The one thing a caller must check before presenting a pack.
+    """An empty pack says so rather than reading as "nothing happened".
 
-    An empty pack is a statement about the *record* — a window outside retention reads identically
-    to a session in which nothing was done — which is the same distinction `Coverage` exists to
-    make one module over.
+    A window outside retention reads identically to a session in which nothing was done.
     """
     await migrated_db_or_skip()
     pack = await assemble("pack-test-session-that-never-existed")
@@ -157,18 +146,12 @@ async def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -
 
 
 def test_the_far_sides_own_text_reaches_the_model_with_no_live_delimiter() -> None:
-    """Two fields of the pack are neither this system's words nor a bounded vocabulary.
+    """Text from the far side reaches the model with no live delimiter.
 
-    The tool defangs `rationale` and `summary` under a comment calling the rest "identifiers,
-    outcomes and timestamps from bounded vocabularies". Two fields in the same rows are not:
-    `PackJob.failure_reason` is whatever the connector said — `durable/connector_job.failure_reason`
-    walks the Temporal chain and returns the first application frame, which is why the string seeded
-    here is produced by that function rather than typed — and `PackEffect.external_ref` is a handle
-    a foreign system returned.
-
-    Driven through the tool rather than through `assemble`, because the defang is the tool's and the
-    pack is deliberately raw: `assemble` also answers a person reading the record, where escaping
-    would be noise.
+    `PackJob.failure_reason` is whatever the connector said (seeded through
+    `durable/connector_job.failure_reason`), and `PackEffect.external_ref` is a foreign system's
+    handle. Driven through the tool, since the defang is the tool's and `assemble` stays raw for
+    human readers.
     """
     from chemclaw.agent.evidence_tools import assemble_evidence_pack
     from chemclaw.agent.framing import ENVELOPE_TAG
@@ -240,12 +223,10 @@ def test_the_far_sides_own_text_reaches_the_model_with_no_live_delimiter() -> No
 
 
 def test_the_pack_carries_the_three_things_a_reader_must_not_supply_themselves() -> None:
-    """`limits` is on the object, not in a docstring.
+    """The pack carries its `limits` on the object.
 
-    The first of the three is the one that matters most and is the easiest to overstate: the trail
-    is append-only by *database privilege*, which is not tamper-evidence. The system prompt already
-    says this to chemists, and a pack presented to an auditor must not say more than the prompt
-    says to the person doing the work.
+    The first matters most: the trail is append-only by database privilege, which is not
+    tamper-evidence, and the pack must not claim more than the system prompt tells chemists.
     """
 
     async def _run() -> None:
@@ -285,13 +266,10 @@ async def _seed_turn(session_id: str, correlation_id: str, outcome: str, **colum
 
 
 def test_a_degraded_session_no_longer_assembles_the_pack_a_clean_one_does() -> None:
-    """The finding, driven against the real stores.
+    """A degraded session does not assemble the same pack a clean one does.
 
-    Measured before the fifth read, with one session loop-capped and the durable tier dark: the
-    two packs were **byte-identical** once the timestamp and the latency were scrubbed. `assemble`
-    read `audit_events`, `job_records`, `effects` and `plan_approvals` — and `turn_costs`, which
-    holds `outcome`, was not among them. This is the module whose stated purpose is a
-    context-of-use record, and whose `LIMITS` names four other gaps and did not name this one.
+    Driven against the real stores, with one session loop-capped and the durable tier dark; the turn
+    outcome comes from `turn_costs`.
     """
 
     async def _run() -> None:
@@ -321,11 +299,9 @@ def test_a_degraded_session_no_longer_assembles_the_pack_a_clean_one_does() -> N
 
 
 def test_a_clean_turn_is_recorded_and_is_not_called_degraded() -> None:
-    """The control arm: `degraded_turns` empty on a turn that answered.
+    """The control arm: `degraded_turns` is empty on a turn that answered.
 
-    Without it the assertion above is satisfied by calling every turn degraded, which would make
-    the pack's headline mean nothing — the same reason `refusals` is asserted beside a successful
-    call rather than alone.
+    Without it the assertion above is satisfied by calling every turn degraded.
     """
 
     async def _run() -> None:
@@ -346,12 +322,10 @@ def test_a_clean_turn_is_recorded_and_is_not_called_degraded() -> None:
 
 
 def test_a_session_whose_only_record_is_an_abandoned_turn_is_not_reported_as_empty() -> None:
-    """A turn that spent tokens and was then abandoned writes a cost row and nothing else.
+    """A session whose only record is an abandoned turn is not reported as empty.
 
-    No audit row, no job, no approval — so before the fifth read the pack said "nothing recorded"
-    for a session that demonstrably ran and demonstrably cost money. `is_empty` is documented as
-    "the one thing a caller must check before presenting a pack", which is exactly the check that
-    was wrong here.
+    An abandoned turn writes a cost row and nothing else, and `is_empty` is the check a caller makes
+    before presenting a pack.
     """
 
     async def _run() -> None:
@@ -369,20 +343,10 @@ def test_a_session_whose_only_record_is_an_abandoned_turn_is_not_reported_as_emp
 
 
 async def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
-    """`degraded_turns` had no reader in `src/` at all — one grep hit, its own `def`.
+    """The pack's `degraded_turns` headline reaches the model's payload.
 
-    Its docstring calls it *"the pack's own headline"* and says *"a reader who checks nothing else
-    must be able to check this"*, in the present tense. Measured before this test: `grep -rn
-    degraded_turns --include=*.py src/` returned the definition and nothing else, its only callers
-    were three assertions in this file, and because a plain `@property` is not a `computed_field`
-    it was absent from `model_dump()` too — while its two siblings, `is_empty` and `refusals`, were
-    both surfaced on the payload the model receives.
-
-    That is a member kept alive by a test that calls it directly, carrying a present-tense claim
-    about a control: the two shapes this repository deletes on sight, in one object, added by the
-    wave that introduced it. Surfaced rather than deleted because that wave's finding was "a
-    degraded answer that reads as complete", and the pack is where that is supposed to stop being
-    true. This test is the reader the docstring claimed to have.
+    A plain `@property` is absent from `model_dump()`; it is surfaced like `is_empty` and
+    `refusals`, so a reader who checks nothing else can check it. This test is its reader.
     """
     await migrated_db_or_skip()
     await _clear()
@@ -406,18 +370,11 @@ async def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests()
 
 
 def test_a_section_is_built_from_its_columns_by_name_and_not_by_their_order() -> None:
-    """Reversing a SELECT list must change nothing about the section it builds.
+    """A section is built from its columns by name, not by their order.
 
-    **This is the failure the pack could least afford and had.** `PackJob` was assembled by
-    unpacking a ten-element tuple whose first nine columns are all `TEXT` — `job_id`, `connector`,
-    `job`, `rationale`, `requested_by`, `summary`, `state`, `failure_reason`, `note_id` — so
-    editing the SELECT list swapped fields silently, passed `mypy --strict`, and produced a
-    plausible-looking evidence pack: a run attributed to the wrong person, with somebody else's
-    reason, in the one document a reader is told to treat as the record.
-
-    Both directions are driven, because only the pair is a control: the hostile order returns the
-    same section, and a column the model has no field for raises naming it rather than being
-    dropped.
+    `PackJob`'s leading columns are all `TEXT`, so positional unpacking would swap fields silently
+    and still type-check, misattributing a run. Both directions: a reversed SELECT returns the same
+    section, and a column the model has no field for raises naming it.
     """
     import pydantic
 
@@ -446,13 +403,10 @@ def test_a_section_is_built_from_its_columns_by_name_and_not_by_their_order() ->
 
 
 def test_a_hallucinated_tool_name_is_bounded_on_the_field_rather_than_by_its_reader() -> None:
-    """`audit_events.tool` is the model's own string, so the bound belongs on `ToolCall.tool`.
+    """A hallucinated tool name is bounded on the field rather than by its reader.
 
-    It used to be applied in the comprehension that built the section, and the comment beside it
-    recorded the reason that is not enough: "the sanitisation went into one reader of this column
-    and not its sibling in the same package". A row factory removes the comprehension altogether —
-    `class_row` builds the model straight out of the row and calls nothing of this module's on the
-    way — so a bound that lived in the reader would simply have been deleted by the conversion.
+    `audit_events.tool` is the model's own string, and `class_row` builds the model straight from
+    the row, so the bound belongs on `ToolCall.tool`.
     """
 
     async def _run() -> None:

@@ -1,17 +1,10 @@
-"""Offboarding: the conversation is erasable, the record of what was done is not (D-2026-08-08).
+"""Offboarding: the conversation is erasable, the record of what was done is not.
 
-The two-tier rule in `chemclaw.agent.leaver` is a data-protection decision, so these tests assert
-the *line* rather than the plumbing: that a departed person's sessions, preferences and watches go,
-that the rows attributing scientific work to them stay and are counted rather than quietly ignored,
-that a dry run writes nothing while still reporting real numbers, and that one person's erasure
-cannot take another's data with it.
-
-The last of those has two halves now that a writer which cannot authenticate its caller records the
-claimed id as `unverified:<id>`: both spellings are the same person and must be *seen*, and a
-different person whose id merely contains theirs must not be — the two tests that pin the closed set
-of exact forms in `_actor_forms` against the one-line substring match that would fail the second.
-
-Postgres-backed and skipped where no database is reachable, like every other store test here.
+These tests assert the data-protection line in `chemclaw.agent.leaver`: a departed person's
+sessions, preferences and watches go; rows attributing scientific work to them stay and are
+counted; a dry run writes nothing but reports real numbers; and one person's erasure cannot take
+another's data. Both spellings of an actor (`<id>` and `unverified:<id>`) are the same person,
+while an id that merely contains theirs is not. Postgres-backed; skipped without a database.
 """
 
 import asyncio
@@ -63,24 +56,9 @@ def _runbook_section(text: str, heading: str) -> str:
     return re.split(r"\n#{2,3} ", body, maxsplit=1)[0]
 
 
-# The column *spellings* this system uses for a person that are not covered by the `_by` suffix
-# below. Not every TEXT column — a derived set needs a vocabulary, and this is the irregular half
-# of it.
-#
-# **The vocabulary was itself a hand-written list of every spelling, which is the defect this test
-# exists to prevent, one level up.** It happened twice. `audit_anchors.reseal_by` names "who
-# accepted the gap and why" (`infra/sql/032_audit_anchors.sql`) and was missing, so a live
-# person-column sat in neither tier with this test green; `experiment_protocol_revisions.author`
-# (073) landed in `_RETAINED` because its author happened to think of it, not because anything
-# here would have failed if they had not.
-#
-# It happened a third time and that is why this is no longer the whole predicate: measured on
-# 2026-09-06, `effects.approved_by` and `pending_requests.answered_by` were *live person-columns
-# the completeness check could not see*, because neither spelling was in the list — and deleting
-# `approved_by` from every tier in `leaver.py` left `tests/test_leaver.py` at 23 passed. So the
-# regular half is matched by suffix (`_LIKE_A_PERSON` below) and only the spellings a suffix cannot
-# reach are enumerated here. A future `signed_off_by` is then in the scan on the day the migration
-# adds it, rather than on the day somebody remembers to add it here.
+# Person-column spellings not covered by the `_by` suffix matched in `_LIKE_A_PERSON` below.
+# The regular half is matched by suffix so a new `*_by` column is scanned the day its migration
+# lands; only spellings a suffix cannot reach are enumerated here.
 _ACTOR_COLUMN_NAMES = frozenset({"actor", "author", "owner", "holder"})
 
 # The regular half: `<verb>_by` is what this schema calls the person who did something.
@@ -136,10 +114,8 @@ async def _seed(actor: str, session_id: str) -> None:
 async def _seed_campaign(campaign_id: str, actor: str) -> None:
     """Give `actor` one BO campaign and one suggestion against it, written exactly as stored.
 
-    `actor` goes in verbatim — the caller passes either the bare id (what the durable path writes,
-    from a validated Temporal memo) or `unverified:<id>` (what the synchronous MCP path writes,
-    because `connectors/bo` declares `auth: mode: none` and its actor is an unauthenticated header).
-    Both are the same chemist, which is the whole point of these tests.
+    `actor` goes in verbatim: the bare id (durable path) or `unverified:<id>` (the synchronous MCP
+    path, whose actor is an unauthenticated header). Both are the same chemist.
     """
     async with await connect(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -167,9 +143,7 @@ async def _count(table: str, column: str, value: str) -> int:
 async def test_a_dry_run_reports_real_counts_and_writes_nothing() -> None:
     """The number an operator signs off on is the number that will be deleted.
 
-    The dry run really executes the deletes and rolls back, rather than running a second counting
-    query that hopes to predict them — a preview computed a different way from the thing it
-    previews is a preview of something else.
+    The dry run executes the deletes and rolls back rather than predicting them with a second query.
     """
     await migrated_db_or_skip()
     await _seed(_ANNA, "sess-dry")
@@ -207,12 +181,10 @@ async def test_one_persons_erasure_leaves_another_persons_data_alone() -> None:
 
 
 async def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
-    """The retained half of the rule, and the half a caller must not be able to miss.
+    """The audit trail survives an erasure, and the report names and counts it.
 
-    An attributable record that can be deleted on request is not an attributable record, and for a
-    tool call that changed nothing durable the trail is the only place it is recorded at all. So the
-    row stays — and the report *names it and counts it*, because a partial erasure that looks
-    complete is worse than one that refuses out loud.
+    An attributable record that can be deleted on request is not attributable; a partial erasure
+    that looks complete is worse than one that says what it kept.
     """
     await migrated_db_or_skip()
     await _seed(_ANNA, "sess-audit")
@@ -233,11 +205,9 @@ async def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
 
 
 async def test_a_blank_actor_is_refused() -> None:
-    """A blank id matches every un-attributed row of a dev deployment, not one person's data.
+    """A blank actor, or a bare `unverified:`, is refused.
 
-    `unverified:` on its own is the same refusal wearing a disguise: it is a non-empty string, but
-    the id behind the marker is blank, and matching it would sweep every row any writer ever marked
-    — everyone's, from a single stray paste.
+    Either would match every un-attributed or marked row in the deployment, not one person's data.
     """
     for blank in ("   ", "unverified:", "unverified:  "):
         try:
@@ -269,12 +239,8 @@ async def _seed_shared_blob(hash_: str, sessions: tuple[str, ...]) -> None:
 async def test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_other() -> None:
     """A blob two sessions link is not one person's to take away.
 
-    **Measured before the fix**, against a live database: two sessions link one blob, erasing the
-    first owner deleted the blob, and `ON DELETE CASCADE` took the *second* session's link row with
-    it — so a chemist who erased nobody found their own transcript pointing at a result the surface
-    could no longer fetch. `session_store._SESSION_DELETE` has had the "unless another session links
-    it" arm since the single-session delete was written; this is the same rule reaching the same
-    table through the other door.
+    Deleting it would cascade the other session's link row, leaving that chemist's transcript
+    pointing at an unfetchable result. Same rule as `session_store._SESSION_DELETE`.
     """
     await migrated_db_or_skip()
     shared = "sha-shared-blob"
@@ -305,13 +271,11 @@ async def test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_o
 
 
 async def test_an_unread_digest_does_not_survive_its_owners_erasure() -> None:
-    """The mailbox is a session id no ownership row backs, so the reachability join never saw it.
+    """An unread digest does not survive its owner's erasure.
 
-    A digest lands in `digest-<oid>` (`durable/digest.digest_channel`), deliberately without a
-    `session_owners` row. Every other `session_events` row is reached through that table, so before
-    this an erasure removed the person's standing queries and left the digests those queries had
-    already produced — reporting `session_events: 0`, which reads as complete. The row here is
-    unconsumed on purpose: that is the population nothing else in the system ever drains.
+    A digest lands in `digest-<oid>` with no `session_owners` row, so it is not reached through the
+    ownership join every other `session_events` row uses. The row is unconsumed on purpose: nothing
+    else ever drains that population.
     """
     await migrated_db_or_skip()
     await _seed(_CARLA, "s-carla-digest")
@@ -341,13 +305,11 @@ async def test_an_unread_digest_does_not_survive_its_owners_erasure() -> None:
 
 
 async def test_a_publication_naming_a_person_is_reported_rather_than_silently_kept() -> None:
-    """The one actor this schema holds inside a payload is counted, not omitted.
+    """A publication naming a person is retained and counted, not omitted.
 
     `result_publications.document` carries `publications[].actor`, `.session_id` and a free-text
-    `.rationale`. The column is called `document`, so the schema-derived check above could never see
-    it and the two-tier report did not mention the table at all — an erasure that looked complete
-    over a row holding the person's id and their own words. It is retained rather than erased, by
-    the same line as every other record: a publication says who asked for a result and why.
+    `.rationale` inside a payload the schema-derived check cannot see. Retained like every record: a
+    publication says who asked for a result and why.
     """
     await migrated_db_or_skip()
     document = {
@@ -363,10 +325,8 @@ async def test_a_publication_naming_a_person_is_reported_rather_than_silently_ke
             )
         await conn.commit()
 
-    # Cleaned up in a `finally`, because `result_publications` is not in the erase tier and so
-    # nothing in this run removes it: without this the row outlived the test and the next
-    # assertion about `_ERIK`'s retained count in this file saw it. A fixture that survives its
-    # own test is a fixture the next test is measuring.
+    # Cleaned up in a `finally`: `result_publications` is not in the erase tier, so the row would
+    # otherwise skew later assertions about `_ERIK`'s retained count.
     try:
         report = await erase_actor(_ERIK)
 
@@ -395,18 +355,11 @@ async def test_a_publication_naming_a_person_is_reported_rather_than_silently_ke
 async def test_a_publication_payload_it_cannot_read_counts_zero_rather_than_ending_the_erasure(
     publications: object,
 ) -> None:
-    """One unreadable row must not make erasure impossible for the whole deployment.
+    """One unreadable publication payload counts zero rather than making every erasure fail.
 
-    `jsonb_array_elements` is a partial function and the retained count runs in the same
-    transaction as every DELETE, so before the `jsonb_typeof` guard a single
-    `{"publications": null}` row — in a table this command does not even erase — turned every
-    actor's erasure into `ErasureError: cannot extract elements from a scalar`, permanently, with
-    no operator workaround short of editing that row by hand.
-
-    Parametrized over the shapes Postgres refuses, because "it does not raise on the one I thought
-    of" is what the first version of this predicate could already claim. `document` is
-    `JSONB NOT NULL` with no CHECK and the table carries a `schema_version` precisely because the
-    record shape is expected to change, so these are reachable rather than hypothetical.
+    `jsonb_array_elements` is partial and the retained count shares the transaction with every
+    DELETE, so one malformed `document` would block all erasures. Parametrised over the shapes
+    Postgres refuses; `document` has no CHECK and a versioned shape, so they are reachable.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -432,17 +385,11 @@ async def test_a_publication_payload_it_cannot_read_counts_zero_rather_than_endi
 
 
 async def test_a_session_the_leaver_deleted_themselves_does_not_spare_their_own_blob() -> None:
-    """An orphan link is not another person, and treating it as one left the leaver's data behind.
+    """An orphan link left by the leaver's own `delete_session` does not spare their blob.
 
-    `delete_session` deliberately leaves the link row when its blob is shared. The first version of
-    the erasure arm asked only whether a link *outside* the leaver's sessions existed, so that
-    orphan — the leaver's own — spared the blob. Measured: a chemist tidies up one of their own
-    sessions, later asks to be erased, and their untruncated tool output survives while the report
-    prints `tool_result_blobs: 0`, which reads as "there were none".
-
-    The pairing with `test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_other` is
-    the whole point: that one proves another *person* still spares the blob, this one proves an
-    orphan does not. A fix that satisfies only one of the two is the defect in the other direction.
+    Pairs with `test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_other`: another
+    *person* spares the blob, an orphan does not. Satisfying only one is the defect in the other
+    direction.
     """
     await migrated_db_or_skip()
     shared = "sha-self-orphan"
@@ -474,16 +421,9 @@ async def test_a_session_the_leaver_deleted_themselves_does_not_spare_their_own_
 async def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> None:
     """No column may name a person without this module having a position on it.
 
-    **The test the hand-written list needed.** The first version of `_RETAINED` enumerated six
-    columns from memory and missed two — `note_proposals.decided_by` and `bo_campaigns.opened_by` —
-    so a departing PR-gate reviewer was told zero `note_proposals` rows mentioned them while the
-    column recording every sign-off they gave still did. A list of columns checked against nothing
-    is a list that drifts the moment a migration adds one.
-
-    So the set is derived from the live schema instead: every column whose name is one this system
-    uses for a person must appear in the erase tier or the retain tier. A new one is then a failing
-    test with the column named, and the author has to decide which tier it belongs to — which is the
-    decision, and it should never be made by omission.
+    The set is derived from the live schema: every column whose name is a person spelling must be in
+    the erase or the retain tier, so a new one fails with the column named and its tier is decided
+    deliberately rather than by omission.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -498,10 +438,8 @@ async def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> No
             found = {(t, c) for t, c in await cur.fetchall()}
 
     retained = {(table, col) for table, cols, _ in _RETAINED for col in cols}
-    # The scan has to be able to *see* every column this module already has a position on,
-    # or the completeness check below is a completeness check over whatever the predicate
-    # happens to match. A retained column the scan misses is a spelling the vocabulary does
-    # not know, and the next column with that spelling would be accounted for by nobody.
+    # The scan must see every column this module already has a position on; a retained column it
+    # misses is a spelling the vocabulary does not know.
     invisible = sorted(retained - found)
     assert not invisible, (
         f"the scan does not match {invisible}, which `_RETAINED` already names as person "
@@ -512,10 +450,9 @@ async def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> No
     # rather than always naming the actor column directly, so the column-level assertion that
     # fits the retain tier would be wrong here.
     erased_tables = {table for table, _ in _ERASE}
-    # Two further answers, both of which have to be *given* rather than assumed: a table whose
-    # person sits inside a payload (`_RETAINED_IN_PAYLOAD`, where the column is `document` and
-    # the vocabulary above can never match it), and one this command can neither clear nor
-    # count (`_BEYOND_REACH`). Both are accounted-for positions; neither is silence.
+    # Two further positions must be stated explicitly: a person inside a payload
+    # (`_RETAINED_IN_PAYLOAD`) and a table this command can neither clear nor count
+    # (`_BEYOND_REACH`).
     payload_tables = {table for table, *_ in _RETAINED_IN_PAYLOAD}
     # The declared column has to exist, or the predicate over it matches nothing in silence —
     # which is exactly how this tier's table came to be missing in the first place.
@@ -545,11 +482,9 @@ async def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> No
 
 
 async def test_a_proposal_someone_wrote_and_reviewed_is_counted_once() -> None:
-    """Two columns of one row are one retained record, not two.
+    """Two person columns on one row are one retained record, not two.
 
-    `note_proposals` names a person twice, and the count an operator reads is a count of *records*
-    they still appear in. Summing per column would inflate exactly the table whose retention is
-    hardest to explain.
+    The operator reads a count of records; summing per column would inflate it.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -586,16 +521,11 @@ async def test_a_reviewers_signoff_is_retained_even_when_they_proposed_nothing()
 
 
 async def test_a_claim_marked_unverified_is_the_same_person_and_is_counted() -> None:
-    """The regression: one chemist, two spellings, and a report that saw only one of them.
+    """A claim marked `unverified:<id>` is the same person and is counted.
 
-    `connectors/bo` declares `auth: mode: none`, so its synchronous MCP path cannot authenticate the
-    caller and records the claimed actor as `unverified:<id>` — while the durable path, reading a
-    validated principal off the run's memo, writes the bare id into the *same* two columns. Erasure
-    matched actor columns byte-exactly, so an offboarding report for `oid-carla` counted the durable
-    rows and silently missed the inline ones: an under-count of rows that still hold that person's
-    identifier, which is precisely the number this command exists to state correctly.
-
-    Either spelling may be named, because an operator pastes what they read out of the column.
+    The synchronous MCP path records `unverified:<id>` while the durable path writes the bare id
+    into the same columns; matching byte-exactly would under-count rows that still hold the
+    identifier. Either spelling may be named, since an operator pastes what they read.
     """
     await migrated_db_or_skip()
     await _seed_campaign("camp-carla-durable", _CARLA)
@@ -612,13 +542,11 @@ async def test_a_claim_marked_unverified_is_the_same_person_and_is_counted() -> 
 
 
 async def test_erasing_one_person_spares_another_whose_id_contains_theirs() -> None:
-    """The dangerous way to have fixed the above, caught before it can be shipped.
+    """Erasing one person spares another whose id contains theirs.
 
-    `LIKE '%' || actor || '%'` sees the `unverified:` form in one line — and also sees `oid-erik-2`
-    when erasing `oid-erik`, deleting a working chemist's conversation and attributing their
-    campaigns to the leaver. So the match stays exact equality against the closed set of spellings
-    `_actor_forms` enumerates, and this test is what says so: the bystander keeps every row, in both
-    of *their* spellings, and appears in nobody else's report.
+    A `LIKE '%' || actor || '%'` match would erase `oid-erik-2` with `oid-erik`, so matching stays
+    exact equality against `_actor_forms`. The bystander keeps every row in both spellings and
+    appears in nobody else's report.
     """
     await migrated_db_or_skip()
     await _seed(_ERIK, "sess-erik")
@@ -665,33 +593,13 @@ def test_every_retained_table_states_why() -> None:
 
 
 async def test_the_erase_statements_are_valid_sql() -> None:
-    """Parse every statement against the real schema, so a typo'd column fails here.
+    """Every erase statement executes against the real schema; the report covers every table.
 
-    Runs each delete inside a rolled-back transaction on an actor nobody has: the statements must
-    be *executable*, which a string never proves on its own.
-
-    **The library-created tables are reported but not necessarily parsed here.** The checkpointer's
-    three come from `AsyncPostgresSaver.setup()` and the memory store's two from
-    `AsyncPostgresStore.setup()`, rather than from a migration, so `erase_actor` skips — and reports
-    zero for — any that this schema does not have. Their statements are executed against real tables
-    in `tests/test_message_migration.py`, which is where a typo in one would fail. The keys stay
-    asserted here because a table silently dropping out of the report is the failure this test is
-    for.
-
-    **`tool_result_blobs` was the shape this test could not see.** It is reached only through
-    `tool_result_links.session_id`, and the completeness check below derives its expectations from
-    columns whose *name* identifies a person — so a table holding the full untruncated text of
-    everything a chemist's tools returned was invisible to the derivation, and the erasure report
-    said nothing about it. A partial erasure that looks complete is the one outcome this module says
-    it must never produce. The link rows are not listed because they are not deleted here: the
-    cascade removes them, which is what lets the grant keep withholding DELETE on that table.
-
-    **`store` and `store_vectors` were added by the arrival they exist to catch.** The scratchpad
-    gave a turn durable memories under an actor-keyed namespace, `agent/leaver.py` grew the two
-    statements that erase them, and this assertion went red on the *addition* — which is the same
-    alarm working in the useful direction. Growing the set is the deliberate act the test forces;
-    the failure it is really guarding against is the silent shrink, because a table that stops being
-    reported is a departing person's data nobody knows is still there.
+    Each delete runs in a rolled-back transaction for an actor nobody has. Library-created tables
+    (checkpointer, memory store) are skipped when absent and executed in
+    `tests/test_message_migration.py`, but their keys stay asserted here. `tool_result_blobs` is
+    reached only through its links, so it must be listed explicitly; the link rows go by cascade. A
+    table silently dropping out of the report is the failure this guards.
     """
     await migrated_db_or_skip()
     report = await erase_actor("oid-nobody-at-all")
@@ -709,10 +617,8 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         "subscriptions",
         "user_preferences",
         "budget_usage",
-        # The departing person's own composed workflows. Erased rather than retained for the
-        # reason the preference row above it is: a working procedure names no result and cites
-        # no evidence, so it is part of their conversation with this system rather than part of
-        # the record of what they did to the science.
+        # Composed workflows are erased like preferences: a working procedure cites no evidence, so
+        # it is part of the conversation, not the record.
         "composed_workflows",
         # A shared session's standing and authorship in sessions somebody else owns
         # (`D-2026-09-27-in-a-shared-session-the-sender-governs`).
@@ -735,20 +641,11 @@ async def test_the_erase_statements_are_valid_sql() -> None:
 
 
 def test_the_cli_reports_a_statement_level_database_error_instead_of_raising() -> None:
-    """A `psycopg.Error` that is not a connection failure must still print, not traceback.
+    """A statement-level `psycopg.Error` prints a message instead of a traceback.
 
-    **Two earlier versions of this test were worthless, in different ways.** The first asserted
-    `issubclass(psycopg.OperationalError, Exception)` — true of every exception, and it passed with
-    the CLI's error handling deleted. The second drove the CLI at an unreachable port, which
-    `chemclaw.core.db` already translates into `ConnectionError`, so it passed against the narrow
-    `except (ValueError, ConnectionError)` it was written to condemn.
-
-    The gap is a *statement-level* error: `psycopg.Error` is neither a `ValueError` nor a
-    `ConnectionError`, so `InsufficientPrivilege` — what a deployment gets when `make db-grants`
-    has not been re-applied for this command's own `DELETE ON session_owners` — escaped as a raw
-    traceback. That is the single likeliest failure the first operator to run this will hit.
-    Reproduced here by pointing the search path at a schema with no tables, which raises
-    `UndefinedTable` from the same family, against a database that is reachable and healthy.
+    `psycopg.Error` is neither `ValueError` nor `ConnectionError`; the likeliest operator failure is
+    `InsufficientPrivilege` from missing grants. Reproduced with a search path over an empty schema,
+    which raises `UndefinedTable` against a healthy, reachable database.
     """
     # Synchronous on purpose, where every other test in this file is a coroutine: the subject is
     # `erase_actor_main`, a console entry point that owns an `asyncio.run` of its own, and a nested
@@ -780,17 +677,10 @@ async def _claim(session_id: str, holder: str) -> bool:
 
 
 async def test_an_erasure_refuses_while_a_turn_holds_one_of_the_persons_sessions() -> None:
-    """The guard both single-session paths had and the fleet-wide sweep did not.
+    """An erasure refuses while a turn holds one of the person's sessions, naming the session.
 
-    Measured before this guard existed, against a real graph on a real checkpointer: the sweep
-    reported 15 checkpoints, 2 messages and the ownership row erased; the still-running turn then
-    rewrote its whole in-memory message list back onto the thread; and the conversation from
-    *before* the erasure was in the database again in full — under a session id whose
-    `session_owners` row was gone, which puts it beyond `delete_session`, beyond the retention
-    sweep and beyond a second `erase_actor`, all three of which reach a session through that row.
-    A second erasure erased nothing and printed zeros, which reads as "there were none".
-
-    So the run is refused, and the refusal names the session an operator has to deal with.
+    A running turn would rewrite its in-memory messages after the sweep, restoring the conversation
+    under a session with no `session_owners` row, beyond every path that reaches sessions by owner.
     """
     await migrated_db_or_skip()
     await _seed(_FRAN, "sess-fran-live")
@@ -807,11 +697,10 @@ async def test_an_erasure_refuses_while_a_turn_holds_one_of_the_persons_sessions
 
 
 async def test_a_refused_erasure_gives_back_every_claim_it_took() -> None:
-    """A refusal must leave the fleet exactly as it found it, or it locks out the sessions it read.
+    """A refused erasure releases every claim it took.
 
-    The sweep claims every one of the person's sessions before it touches a table, so a refusal on
-    the last one has already taken the others. Releasing them is what keeps a refused erasure from
-    costing a chemist a whole lease of 409s on conversations that were never busy.
+    The sweep claims all of the person's sessions first, so a refusal on the last must give back the
+    others or they answer 409 until the lease expires.
     """
     await migrated_db_or_skip()
     await _seed(_FRAN, "sess-fran-a")
@@ -839,14 +728,11 @@ async def test_a_quiet_session_is_erased_and_the_sweep_holds_no_claim_afterwards
 
 
 async def test_a_row_that_comes_back_under_an_erased_session_is_counted_not_missed() -> None:
-    """The half the claims cannot cover: a write this sweep could not have refused.
+    """A row written under an erased session after the sweep is counted, not missed.
 
-    A lease that lapsed under a sweep wider than one lease, a session created between the
-    enumeration and the commit, or a deployment where nothing takes a durable claim at all
-    (`api/state._default_turn_claims` returns `None` off the Postgres session store) all land the
-    same way — a row under a session id whose ownership row is gone. Re-running the erasure is not
-    the remedy, because that is exactly what cannot find it, so the count is the remedy: it turns
-    an unreachable residue into a report that says so.
+    A lapsed lease, a session created mid-sweep, or a deployment without durable claims all leave
+    rows under a session whose ownership row is gone. Re-running the erasure cannot find them, so
+    the residue count reports them.
     """
     await migrated_db_or_skip()
     await _seed(_FRAN, "sess-fran-residue")
@@ -869,12 +755,7 @@ async def test_a_row_that_comes_back_under_an_erased_session_is_counted_not_miss
 
 
 def test_the_residue_probe_asks_about_every_table_a_session_delete_names() -> None:
-    """The probe is derived from the delete, so a table added to one is asked about by the other.
-
-    A hand-written second list of "where a session's rows live" is the failure this whole check
-    exists to catch, one indirection out: it would go stale in silence and the residue count would
-    return zeros for the table that actually came back.
-    """
+    """The residue probe is derived from the session delete, so the two cover the same tables."""
     named = {table for table, _ in _residue_columns()}
     for table, _ in _session_delete_statements():
         if table == "tool_result_blobs":
@@ -886,21 +767,10 @@ def test_the_residue_probe_asks_about_every_table_a_session_delete_names() -> No
 
 
 def test_the_runbook_offboarding_section_names_no_table_and_points_at_the_constants() -> None:
-    """The section a data-protection request is answered from may not carry a list of tables.
+    """The runbook's offboarding section names no table and points at the constants instead.
 
-    It carried one, and it was half a list: "Per-actor rows live in nine tables" over six retained
-    tables named, against `_ERASE` 12 + `_RETAINED` 12 + `_RETAINED_IN_PAYLOAD` 1 = 25 tables, 13
-    of them retained. "Nine" is reconstructible as `_ERASE` before the checkpointer and store
-    tables joined it, so it was true once and the tier grew under it in silence — while the seven
-    omitted retained tables (`effects`, `pending_requests`, the three `experiment_protocol_*`,
-    `bo_campaigns`, `result_publications`) each name a person. A DPO enumerating the retained tier
-    from that paragraph reported six tables and was wrong about seven more, including the one whose
-    data has already left for a store this system cannot erase from.
-
-    So the assertion is the cheap direction this repository keeps choosing (`api/routes/README.md`,
-    `deploy/README.md`'s expensive-actions section): the section names **no** table, states no
-    count of tables, and names the three constants instead — the dry run already prints every table
-    with its row count and its retention reason, so the maintained list is the command's output.
+    A hand-maintained list of tables goes stale as the tiers grow; the dry run already prints every
+    table with its row count and retention reason, so the command's output is the maintained list.
     """
     text = (_REPO_ROOT / "docs" / "guides" / "runbook.md").read_text(encoding="utf-8")
     section = _runbook_section(text, "### Offboard: erase their data")
@@ -937,11 +807,8 @@ _GRETA = "oid-greta"
 async def _write_racing_rows(session_id: str, *, messages: int = 0, checkpoints: int = 0) -> None:
     """What a turn that outlived the sweep leaves behind, on its own committed connection.
 
-    Two shapes rather than one, and separately, because the two records of a conversation can
-    disagree by exactly one turn (`D-2026-09-06-an-erasure-that-races-a-live-turn-is-not-an-
-    erasure`: a turn cancelled between the graph run and the transcript write leaves
-    `checkpoints: 8, session_messages: 0`). A residue is therefore not reliably both, and a finish
-    that only worked when both were present would fail on the commoner half.
+    Messages and checkpoints are written separately because the two records can differ by one turn;
+    a residue is not reliably both.
     """
     async with await connect(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -965,23 +832,11 @@ async def _write_racing_rows(session_id: str, *, messages: int = 0, checkpoints:
 
 
 def test_an_erasure_a_live_turn_interrupted_is_finished_by_session_id() -> None:
-    """The remedy `residue` names, end to end: erase, race, finish, prove it is gone.
+    """Erase, race, finish, prove gone: the remedy `residue` names, end to end.
 
-    **Reproduced before it was fixed, with the numbers.** A session is erased; a turn commits two
-    messages afterwards; `_residue_for` sees them. A second `erase_actor` for the same person then
-    reports **zeros in every table** — it reaches the session through `session_owners`, which the
-    first run deleted — and the rows are still there. That is the state
-    `D-2026-09-06-an-erasure-that-races-a-live-turn-is-not-an-erasure` closed on, and its last line
-    is "It stays open".
-
-    What closes it is that the residue was never out of the runtime role's reach; the *query* that
-    finds it was. `finish_erasure` deletes by session id through
-    `session_store._session_delete_statements()` — the same statements `delete_session` already
-    runs, none of which reads `session_owners`.
-
-    Watched failing with `_delete_orphaned_sessions` replaced by one that filters its targets
-    through `session_owners` first, which is what every session-scoped route in this system did
-    before this one: `removed_total == 0` and the residue still standing.
+    A second `erase_actor` reaches sessions through `session_owners` and so finds nothing. The
+    finish deletes by session id via `session_store._session_delete_statements()`, which never reads
+    `session_owners`.
     """
 
     async def _run() -> tuple[dict[str, int], list[str], dict[str, int], int, bool, dict[str, int]]:
@@ -1011,14 +866,10 @@ def test_an_erasure_a_live_turn_interrupted_is_finished_by_session_id() -> None:
 
 
 def test_a_residue_that_is_only_graph_state_is_finished_too() -> None:
-    """A residue is not reliably both records of the conversation, and the finish must not need it.
+    """A residue that is only graph state is finished too.
 
-    The transcript and the checkpoint stream can differ by exactly one turn — measured on a real
-    `run_turn` cancelled between the graph run and the transcript write: `checkpoints: 8,
-    session_messages: 0`, the model seeing the exchange and the chemist seeing neither. So the
-    residue a racing turn leaves may be graph state with no message row at all, and a finish that
-    reported "nothing to do" there would leave the conversation itself recoverable from the
-    checkpointer while claiming the erasure was complete.
+    The transcript and the checkpoint stream can differ by one turn, so a residue may be checkpoints
+    with no message row; reporting "nothing to do" would leave the conversation recoverable.
     """
 
     async def _run() -> tuple[dict[str, int], int, dict[str, int]]:
@@ -1043,12 +894,10 @@ def test_a_residue_that_is_only_graph_state_is_finished_too() -> None:
 
 
 def test_finishing_refuses_a_session_that_still_has_an_owner() -> None:
-    """The safety property of the finish route: it can only clear what is already orphaned.
+    """The finish route clears only sessions that are already orphaned.
 
-    Without this, `--finish <any session id>` would be an unscoped conversation delete that skips
-    the ownership check every other path in this system makes — a bigger hole than the one this
-    route closes. A session that still has an ownership row is reachable by its owner and by the
-    actor erasure, so this refuses it by name rather than deleting it.
+    Otherwise `--finish <session id>` would be an unscoped conversation delete skipping the
+    ownership check. A session with an owner is refused by name.
     """
 
     async def _run() -> tuple[dict[str, str], int, int]:
@@ -1069,12 +918,10 @@ def test_finishing_refuses_a_session_that_still_has_an_owner() -> None:
 
 
 def test_the_finish_says_what_it_leaves_behind() -> None:
-    """Every table this route cannot clear is named, for the reason the erasure names its own.
+    """Every table the finish cannot clear is named.
 
-    `tool_result_links` is the one, and by design: `infra/sql/grants/app_privileges.sql` withholds
-    DELETE on it so a link can only disappear behind the content-addressed blob it points at. A
-    finish that silently omitted it would be claiming a completeness it has not got, and one that
-    reported it as *remaining* would read as unfinished for ever.
+    `tool_result_links` is withheld DELETE by the grants so a link disappears only with its blob;
+    omitting it would overclaim completeness, and listing it as remaining would read as unfinished.
     """
     leaves = dict(finish_leaves())
     assert "tool_result_links" in leaves, (
@@ -1086,13 +933,10 @@ def test_the_finish_says_what_it_leaves_behind() -> None:
 
 
 def test_the_cli_finishes_a_residue_and_says_so_in_its_exit_code() -> None:
-    """The remedy is one command away from the failure that names it, and it is scriptable.
+    """The CLI finishes a residue and says so in its exit code.
 
-    The actor form exits `2` when it leaves a residue, which is what tells an operator's script the
-    erasure did not finish. Before the finish route that exit code named a condition with no next
-    command — the report said "an operator with owner rights has to remove these rows" and gave
-    them neither the session ids nor a way to do it. So the pair is asserted together: the actor run
-    exits `2` and prints the session ids, and the finish run over exactly those ids exits `0`.
+    The actor run exits `2` and prints the residual session ids; the finish run over exactly those
+    ids exits `0`.
     """
 
     async def _seed_residue() -> str:
@@ -1124,12 +968,10 @@ def test_the_cli_finishes_a_residue_and_says_so_in_its_exit_code() -> None:
 
 
 def test_the_cli_refuses_an_actor_and_a_finish_in_one_run() -> None:
-    """Two halves of one operation, never both at once.
+    """An actor and `--finish` are refused in one run.
 
-    They target different things — a person, and a set of orphaned session ids — and a run that
-    accepted both would have to guess which scoping the `--apply` belongs to. `argparse`'s
-    mutually-exclusive group cannot express this once `actor` is optional (it means "at most one"),
-    so the rule is checked explicitly and this is what holds it.
+    They scope `--apply` differently; argparse's mutually-exclusive group cannot express this once
+    `actor` is optional, so the rule is checked explicitly.
     """
     with pytest.raises(SystemExit) as refused:
         erase_actor_main([_GRETA, "--finish", "sess-anything"])
@@ -1140,23 +982,15 @@ def test_the_cli_refuses_an_actor_and_a_finish_in_one_run() -> None:
     assert empty.value.code == 2
 
 
-# The scale half of the guard: a person with thousands of sessions, and a lease short enough that
-# the test costs seconds rather than the three and a half minutes the full reproduction takes.
-#
-# **A shortened lease is the same defect, not a smaller one.** What lapses a claim is the ratio
-# between how long the sweep holds it and how long the lease lasts — measured at the shipped
-# 60 s lease and ~56 claims/s, the first claims expire at ~3,500 sessions and 40% of a
-# 6,000-session fleet is unprotected before the claim loop even finishes. Both tests below hold the
-# ratio and shrink the wall clock.
+# The scale half of the guard: many sessions and a short lease. What lapses a claim is the ratio of
+# hold time to lease, so a shortened lease reproduces the defect in seconds.
 _HOLGER = "oid-holger"
 
 
 async def _seed_many(actor: str, session_ids: list[str]) -> None:
     """Give `actor` a session apiece, in two statements rather than five per session.
 
-    `tests/test_leaver.py::_seed` writes a preference, a watch and an event as well, which is what
-    a *behavioural* test of the two tiers needs. These two want a fleet, and a fleet seeded row by
-    row costs more than the thing under test.
+    These tests need a fleet, not the preference, watch and event `_seed` writes.
     """
     async with await connect(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -1190,22 +1024,11 @@ async def _claims_state(session_ids: list[str]) -> tuple[int, int]:
 
 
 def test_a_sweep_that_outlasts_its_lease_still_holds_every_claim() -> None:
-    """The claim has to survive the erasure, not the first minute of it.
+    """Every claim survives a sweep that outlasts its lease.
 
-    `_sessions_held` took every claim and **nothing refreshed it**, while the sweep it guards runs
-    for as long as the deletion takes — measured, 85 s for 400k rows, on top of a claim loop that
-    ran at ~56 sessions/s. So the guard expired under its own sweep and
-    `_TURN_CLAIM`'s `WHERE session_turns.expires_at <= now()` made every lapsed slot re-takeable
-    by anyone. Reproduced at 600 sessions against a 10 s lease: 37 claims expired before the loop
-    finished, 113 by the time the erase transaction would have run, and a second pod took
-    `sess-000001` at t+10.3 s while the sweep was still going — which is exactly the live turn
-    this whole guard exists to refuse, admitted by the guard itself.
-
-    Watched failing against the unfixed loop: `pod-2 claimed 20 of the sessions this sweep is
-    holding` and `20 of this sweep's own claims have lapsed while it holds them`.
-
-    Driven with a short lease rather than a large fleet, because what lapses a claim is the ratio
-    of hold time to lease and not the row count.
+    A deletion can run longer than the lease, and a lapsed claim is re-takeable by any pod,
+    admitting the live turn the guard exists to refuse. Driven with a short lease rather than a
+    large fleet, since the ratio of hold time to lease is what matters.
     """
     sessions = [f"sess-holger-{index:03d}" for index in range(20)]
 
@@ -1217,12 +1040,8 @@ def test_a_sweep_that_outlasts_its_lease_still_holds_every_claim() -> None:
         claims = SessionTurnClaims()
         try:
             async with _sessions_held(sessions):
-                # Longer than the lease, and short beside the 85 s an erase transaction measured.
-                #
-                # The margin is deliberate rather than tight: the heartbeat refreshes three times
-                # per lease, so the last one before this check lands ~0.7 s before it and pushes
-                # the claims 2 s past that — a test that asserted at 1.05 leases would be asking
-                # whether the machine was busy, not whether the claims are held.
+                # Longer than the lease. The heartbeat refreshes three times per lease, so asserting
+                # just past one lease would test machine load rather than whether claims are held.
                 await asyncio.sleep(3.0)
                 stolen = [
                     session_id
@@ -1250,19 +1069,11 @@ def test_a_sweep_that_outlasts_its_lease_still_holds_every_claim() -> None:
 
 
 async def test_the_claim_sweep_does_not_pay_a_round_trip_per_session() -> None:
-    """One statement per session is what makes the lease lapse in the first place.
+    """The claim sweep does not pay a round trip per session.
 
-    The two halves are one defect: at ~56 claims/s a fleet of 6,000 takes 104 s to claim, which is
-    longer than the 60 s lease before the sweep has deleted anything — so refreshing alone would be
-    a heartbeat racing a loop that never needed to be a loop. Counted as *connections borrowed*,
-    because that is the round trip: `SessionTurnClaims.claim` and `.release` each open one, so the
-    unfixed loop borrows 2N.
-
-    Driven with `CLAIM_BATCH` shrunk to 50 over 200 sessions, so the batching is exercised as four
-    statements rather than as the one a real fleet of this size would be — a loop that happens to
-    fit in a single batch proves the statement and not the loop around it.
-
-    Watched failing against the unfixed loop: `400 connection borrows for 200 sessions`.
+    Per-session claims on a large fleet take longer than the lease before anything is deleted.
+    Counted as connections borrowed, since `claim` and `release` each open one. `CLAIM_BATCH` is
+    shrunk so the batching runs as several statements, proving the loop and not only the statement.
     """
     sessions = [f"sess-hilde-{index:03d}" for index in range(200)]
     batch = 50
@@ -1297,18 +1108,11 @@ async def test_the_claim_sweep_does_not_pay_a_round_trip_per_session() -> None:
 
 
 def test_an_erasure_does_not_take_the_organisations_judgment() -> None:
-    """The org skills tier is nobody's data, so the sweep must not reach it.
+    """An erasure does not reach the organisation skills tier.
 
-    **An absence is not a decision until something asserts it.**
-    `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` states that a departing person's
-    words inside an organisation skill are a *content* question for an administrator — a revert or a
-    retire — rather than a prefix sweep, because the document is the organisation's judgment and
-    other people's turns depend on it. Without this test that rule is indistinguishable from
-    somebody having forgotten to add a third prefix beside the two in `store_prefixes`.
-
-    Asserted through `store_prefixes`, the function `erase_actor` really calls, and against the
-    namespace the tier really writes under — so a later change that starts keying org rows by actor
-    turns this red rather than quietly making the tier erasable by whoever leaves next.
+    An org skill is the organisation's judgment that other turns depend on; a departing person's
+    words in it are an administrator's content decision, not a prefix sweep. Asserted through
+    `store_prefixes` against the namespace the tier writes under.
     """
     from chemclaw.agent.leaver import store_prefixes
     from chemclaw.agent.org_skills import org_skills_namespace, org_versions_namespace
@@ -1324,12 +1128,10 @@ def test_an_erasure_does_not_take_the_organisations_judgment() -> None:
 
 
 async def test_a_members_artefact_in_someone_elses_session_is_reported_and_findable() -> None:
-    """Ben's artefact in Anna's session outlives Ben's erasure — and the report says where it is.
+    """A member's artefact in another's session survives their erasure; the report says where.
 
-    The erase tier reaches artefacts through `session_owners`, so a header naming Ben as its
-    creator or last author in a session Anna owns is out of reach by design (it is Anna's
-    document). Accounted for rather than silent: `_BEYOND_REACH` names the two columns, and the
-    query it hands an operator is run here, so a sentence that finds nothing fails this test.
+    The erase tier reaches artefacts through `session_owners`, so it is out of reach by design;
+    `_BEYOND_REACH` names the columns and the query it hands an operator is run here.
     """
     await migrated_db_or_skip()
     session = f"sess-xb-{uuid4().hex[:8]}"

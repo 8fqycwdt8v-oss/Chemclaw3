@@ -1,28 +1,10 @@
-"""Integration tests for the Postgres turn-cost ledger (`infra/sql/033_cost_attribution.sql`, R1.5).
+"""Integration tests for the Postgres turn-cost ledger (`infra/sql/033_cost_attribution.sql`).
 
-`PostgresTurnCostSink` had no direct test: `test_turn_cost.py` proves the fire-and-forget scheduling
-contract entirely against `_RecordingSink`/`_FailingSink` fakes, never the durable sink a deployment
-actually writes to. That leaves the one property this table exists to hold — "a retried write is an
-upsert, never a double-count" (the module's own docstring) — unproven against a real database.
-
-**The read-back is this file's own SQL, and it used to be production code.**
-`turn_cost_store.read_spend_by_actor` called itself "the whole point of the table" and had no caller
-in `src/`; its three semantics tests here (window, filter, ordering) were tests of a query nothing
-asked, and the three below used it only to see what the write had written. It was deleted in the
-2026-08-27 dead-code sweep, and the read-back it provided lives here as `_spend`, where a test
-helper belongs. What that costs is one duplicated `SELECT`; what it buys is that the ledger's
-surface is what a deployment can reach, and not one function more.
-
-Follows `tests/test_postgres_store.py`'s pattern: `migrated_db_or_skip()` skips cleanly offline and
-runs for real in CI; each test is a sync `def` wrapping an inner `async def _run()` driven by
-`asyncio.run`; isolation comes from the session-scoped schema redirect in `conftest.py`, with a
-distinct `correlation_id`/actor prefix per test on top so tests sharing one schema cannot see each
-other's rows.
-
-The upsert's conflict target is `turn_id` since migration 088, not `correlation_id`
-(`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`), and the two tests around that distinction are
-deliberately a pair: one asserts a retried write of a record does not double, the other that two
-records do not merge.
+Proves against a real database that a retried write is an upsert, never a double-count, and that
+two records sharing a correlation id do not merge: the conflict target is `turn_id`
+(`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`). The read-back is this file's own `_spend`;
+nothing in `src/` reads the ledger this way. Skips without Postgres; tests use distinct
+`correlation_id`/actor prefixes because the schema is shared.
 """
 
 from chemclaw.agent.turn_cost import TurnCost
@@ -79,16 +61,9 @@ async def test_recording_a_cost_is_findable_with_its_own_totals() -> None:
 
 
 async def test_a_retried_write_of_one_record_replaces_never_adds() -> None:
-    """The one arithmetic error this ledger must not make (module docstring): no double-count.
+    """A retried write of one record replaces, never adds.
 
-    A retry — the *same record*, written twice — must overwrite the row rather than accumulate a
-    second one, proven by asserting both the row count and the summed tokens, not merely that the
-    final value looks plausible.
-
-    **Written as one object recorded twice, which is what a retry is.** It used to be two different
-    `TurnCost`s sharing a correlation id, and that is a different claim: it asserted that the row's
-    identity was the correlation id, which is the id the front door *adopts* off the request
-    (`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`). The test below is the other half.
+    One object recorded twice, which is what a retry is; asserted on row count and summed tokens.
     """
     sink = await _sink_or_skip()
     actor = "pgcost-actor-upsert"
@@ -100,19 +75,11 @@ async def test_a_retried_write_of_one_record_replaces_never_adds() -> None:
 
 
 async def test_two_turns_under_one_correlation_id_are_two_rows_and_neither_is_erased() -> None:
-    """The ledger is not erasable by the party it bills.
+    """Two turns under one correlation id are two rows, and neither is erased.
 
-    `api/middleware._request_correlation_id` adopts an inbound `X-Chemclaw-Correlation-Id` whenever
-    it matches `[A-Za-z0-9_-]{8,64}` — deliberately, so a chemist's click is traceable from the
-    browser inwards — and `run_turn` keys the turn on it. While that id was also this table's
-    primary key under `ON CONFLICT … DO UPDATE`, a client that repeated one header collapsed its own
-    history to the *last* turn's numbers: measured 2026-09-06, 900,000 and 1,000 input tokens for
-    one actor left one row reading 1,000, with `chemclaw_tokens_total` and `api/budget.py` still
-    seeing both turns.
-
-    So the header is asserted here too, not just the two rows: the reason this is reachable at all
-    is that the filter accepts a caller's string, and a fix that quietly stopped adopting one would
-    make this pass while removing a feature the tracing depends on.
+    The front door adopts a caller's `X-Chemclaw-Correlation-Id` for tracing, so keying the ledger
+    on it would let a client collapse its own history. The header is asserted too, so a fix that
+    stopped adopting it cannot pass by removing the feature.
     """
     sink = await _sink_or_skip()
     from chemclaw.api.middleware import _CORRELATION_ID
@@ -142,14 +109,10 @@ async def test_distinct_correlation_ids_both_count() -> None:
 
 
 async def test_a_row_written_before_the_knowledge_columns_existed_reads_as_unknown() -> None:
-    """The ambiguous zero, in a column — and why these five are nullable and undefaulted.
+    """A row written before the knowledge columns existed reads as unknown (NULL).
 
-    `retrieval_calls = 0` is the most interesting value this table can hold: a turn that answered
-    without consulting the record. `NOT NULL DEFAULT 0` would assert exactly that about every row
-    written before the column existed, so a query for "turns that answered blind" would return the
-    whole history of the table, none of which was measured. This drives both halves against a real
-    schema: a row inserted without the columns reads NULL, and a row the sink writes carries the
-    numbers it was handed.
+    `retrieval_calls = 0` means "answered without consulting the record", so defaulting old rows to
+    0 would assert that about history that was never measured.
     """
     sink = await _sink_or_skip()
     async with db.connection(_dsn()) as conn:
@@ -197,18 +160,11 @@ async def test_a_row_written_before_the_knowledge_columns_existed_reads_as_unkno
 
 
 async def test_an_estimate_reaches_the_ledger_and_stays_out_of_the_measured_sum() -> None:
-    """A turn the provider never reported writes a real number, in its own column.
+    """A turn's usage estimate reaches the ledger in its own column, outside the measured sum.
 
-    `stream_options.include_usage` puts a request's usage on the terminal chunk, so a turn the
-    client abandons mid-message is billed by the gateway and reported by nobody. Wave 4 measured
-    that end to end: `input_tokens=0, output_tokens=0` on a row for a turn that really spent, while
-    the budget — which meters the measured tokens *plus* the estimate — had the number all along
-    and had nowhere durable to put it (migration 087).
-
-    Both halves are asserted, because either alone would pass a wrong implementation. That the
-    estimate **arrives** catches a column the writer never sets; that `_SPEND` is **unchanged by
-    it** catches the tempting fix of adding it to `input_tokens`, which would let an inferred
-    number pass for a provider's in every existing dashboard and eval that reads this table.
+    An abandoned stream is billed but never reported, so the budget's estimate is stored. Both
+    halves: the estimate arrives, and `_SPEND` is unchanged by it, so an inferred number never
+    passes for a provider's.
     """
     sink = await _sink_or_skip()
     actor = "pgcost-actor-estimated"

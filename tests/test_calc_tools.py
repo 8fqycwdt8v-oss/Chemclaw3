@@ -1,19 +1,11 @@
 """The agent's calculator tools: the surface did not move, and the cache still decides.
 
-These tools are named by string in profiles, eval probes and `SKILL.md`s, so their
-signatures and return types are a contract this suite has to hold still even though everything
-underneath them changed: after `D-2026-08-16-the-physics-leaves-the-cache-stays` not one of them
-computes anything. The physics answers over MCP, this side keys it, stores it and composes it.
-
-So what is asserted here is what the tool layer is now responsible for — which tool it asks the
-server for, with which arguments, how many times, and what it does with the answer before handing
-it to a model. The chemistry itself is asserted in the repository that owns it, and the two
-properties this side must get right that a physics test would never catch are both here: a Fukui
-ranking re-ranked on a cache *hit*, and a version read off a payload rather than derived.
-
-`tests/calc_server_fake.py` stands in for the server; the store is swapped for an in-memory one, as
-before. `default_store` is patched on the tools module and the session is patched on
-`connectors.calc.remote`, so every call travels its real chain.
+The tools are named by string in profiles, eval probes and `SKILL.md`s, so their signatures are a
+contract. The physics answers over MCP; what is asserted here is the tool layer's part — which
+server tool it asks for, with which arguments, how many times, and what it does with the answer
+(e.g. re-ranking a Fukui result on a cache hit, reading the version off the payload).
+`tests/calc_server_fake.py` stands in for the server and the store is in-memory, so every call
+travels its real chain.
 """
 
 import asyncio
@@ -47,10 +39,8 @@ async def test_compute_xtb_energy_tool_runs_and_caches(
 ) -> None:
     """The tool returns the parsed result and the second call is served from the store.
 
-    D-011 survives the wire: the miss path got longer, the rule did not change. What a hit costs is
-    one `calculation_key` round trip, which is why the key call count is two while the compute count
-    is one — if that ever became zero the client would be deriving keys locally, which is the thing
-    the whole transport exists to prevent.
+    A hit costs one `calculation_key` round trip, so the key count is two while the compute count is
+    one; zero key calls would mean the client derives keys locally.
     """
     first = await calc_tools.compute_xtb_energy("O")
     second = await calc_tools.compute_xtb_energy("O")
@@ -77,17 +67,12 @@ async def test_electronic_properties_tool_returns_the_populated_result(
 async def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
     server: FakeCalcServer,
 ) -> None:
-    """The client must wait as long as the binary-only calculators' own server-side budget.
+    """The binary-only calculators get the `xtb` binary's own, longer wait budget.
 
-    `compute_atomic_descriptors`/`compute_surface_potential` are pinned to the `xtb` binary
-    regardless of `CHEMCLAW_XTB_ENGINE`, whose own server-side timeout can run to 3600 s —
-    `calc_server_timeout_seconds`'s default of 900 s would abandon a calculation the server is
-    still computing, and Temporal then retries the (retryable) activity, doubling the cost while
-    the first, orphaned run keeps burning CPU. See `calc_atomic_timeout_seconds`'s own docstring.
-
-    The fake server does not implement either tool's payload — that is not what this test is
-    about — so both calls are expected to fail; what is asserted is the session's own read bound,
-    which `install()` records before any tool is dispatched.
+    Their server-side timeout can exceed `calc_server_timeout_seconds`; waiting less abandons a
+    running calculation and the retried activity doubles the cost. The fake does not implement these
+    tools, so the calls fail; what is asserted is the session's read bound, recorded before
+    dispatch.
     """
     assert settings.calc_atomic_timeout_seconds >= settings.calc_server_timeout_seconds
 
@@ -107,17 +92,12 @@ async def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
 async def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_first(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:
-    """The defect the split introduced and this is the guard against it.
+    """A second Fukui mode re-ranks the cached result rather than serving the first mode's ranking.
 
-    The three single points behind a Fukui ranking do not depend on the mode, so the server keys
-    them without it — measured: all three modes on phenol derive one key. The server re-ranks on the
-    way out, which is why a *remote* call is always right; a cache hit never reaches the server. So
-    without `SiteReactivityResult.ranked_for` the second mode asked for would be served the first
-    mode's ordering carrying the first mode's labels, a confidently wrong regiochemistry answer with
-    nothing raising anywhere.
-
-    The fake ranks `f_minus` descending and `f_plus` ascending, so the two modes order the atoms
-    oppositely and a mis-served ranking cannot look like a coincidence.
+    The server keys the three single points without the mode and re-ranks on the way out, but a
+    cache hit never reaches the server, so `SiteReactivityResult.ranked_for` is what prevents a
+    wrong regiochemistry answer. The fake ranks the two modes oppositely, so a mis-served ranking
+    cannot pass by coincidence.
     """
     electrophilic = await calc_tools.predict_site_reactivity("Oc1ccccc1", top_n=13)
     nucleophilic = await calc_tools.predict_site_reactivity(
@@ -157,13 +137,10 @@ async def test_site_reactivity_truncates_to_the_configured_default(
 async def test_predict_solubility_logs_the_version_the_result_was_computed_under(
     server: FakeCalcServer, shared_store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The single most load-bearing change in the tool layer, asserted on the value that is logged.
+    """`predict_solubility` logs the version the result was computed under, read off the payload.
 
-    `binary_version()` answered the literal string `"absent"` rather than raising when a binary was
-    missing, so a locally-derived version would be *well-formed*, match zero rows in a ledger keyed
-    exactly on `(calc_type, calc_version, input_hash)`, and make `calculator_trust` report a
-    confident `UNCALIBRATED`. The version now comes off the payload, so a cache hit logs the version
-    that produced the number rather than the one that happens to be current.
+    A locally derived version would be well-formed, match no ledger row, and make `calculator_trust`
+    report `UNCALIBRATED`; and a cache hit must log the version that produced the number.
     """
     logged: list[tuple[str, str]] = []
 
@@ -212,13 +189,10 @@ def test_predict_developability_profile_tool_flags_ro5(
 async def test_optimize_geometry_stores_the_full_result_and_summarizes_it_here(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:
-    """One key, one payload shape — the collision this tool would otherwise cause.
+    """`optimize_geometry` stores the full result and summarizes it here.
 
-    `optimize_geometry` and `relax_structure` derive the **same** `xtb.opt` key on the server while
-    returning different payloads: a summary without coordinates, and the full result with them.
-    Caching the summary under that key would poison every later `relax_structure` hit with a
-    validation error deep inside a reaction job, so this tool asks for the full result and drops the
-    geometry here, where it costs nothing.
+    It shares the `xtb.opt` key with `relax_structure`, so caching a coordinate-less summary would
+    poison later `relax_structure` hits.
     """
     summary = await calc_tools.optimize_geometry("CCO")
     assert summary.structure_id.startswith("st_")
@@ -257,9 +231,7 @@ async def test_predict_logd_tool_defaults_ph_and_reuses_the_pka(
 ) -> None:
     """The logD tool defaults pH and reports the pKa uncertainty it was derived from.
 
-    Its expensive half is a *cached* pKa; the rest is a Crippen sum and one Henderson-Hasselbalch
-    term, both local. So asking again at a different pH costs no calculation at all — which is the
-    whole reason this composite was decomposed instead of shipped.
+    The expensive half is a cached pKa; the rest is local, so another pH costs no calculation.
     """
     result = await calc_tools.predict_logd("OC(=O)c1ccccc1")
     other_ph = await calc_tools.predict_logd("OC(=O)c1ccccc1", ph=2.0)
@@ -275,13 +247,10 @@ async def test_predict_logd_tool_defaults_ph_and_reuses_the_pka(
 def test_report_measurement_never_claims_a_store_that_did_not_happen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With the ledger disabled — the **default** — the tool must not answer "Recorded".
+    """With the ledger disabled (the default) the tool must not answer "Recorded".
 
-    `calibration_enabled` is False out of the box, and `record_observation` returned `0` for both
-    "disabled, stored nothing" and "stored it, nothing had predicted it". The tool read that single
-    zero as the second and told the chemist "the measurement is kept and the next prediction of it
-    will be scored against this value" — in every unconfigured deployment, on every call, while no
-    table was touched at all.
+    `record_observation` must distinguish "disabled, stored nothing" from "stored, nothing had
+    predicted it".
     """
     monkeypatch.setattr(settings, "calibration_enabled", False)
     answer = asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9, "pKa"))
@@ -294,13 +263,10 @@ def test_report_measurement_never_claims_a_store_that_did_not_happen(
 def test_report_measurement_surfaces_a_failed_write_instead_of_swallowing_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A database failure must reach the caller, not be logged and reported as success.
+    """A database failure reaches the caller rather than being reported as success.
 
-    `record_prediction` swallows its errors and is right to: a prediction row is advice *about*
-    work that already happened, so losing it must not cost the calculation. `record_observation`
-    had inherited the same `except Exception` and it is wrong there — the measurement is the
-    entire deliverable of the call, so swallowing turns the tool's only job into a false success
-    (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed).
+    Unlike `record_prediction` (advice about finished work, rightly best-effort), the measurement is
+    the whole deliverable of this call.
     """
     monkeypatch.setattr(settings, "calibration_enabled", True)
 
@@ -327,27 +293,17 @@ def test_a_disabled_ledger_is_none_and_a_stored_unpredicted_value_is_zero(
 
 
 def test_a_measurement_with_no_stated_unit_is_refused_rather_than_stamped() -> None:
-    """The value that reaches the ledger must be in the unit the ledger says it is in.
+    """A measurement with no stated unit is refused rather than stamped with the ledger's unit.
 
-    `unit` used to default to empty and the row was stamped with the ledger's own unit regardless,
-    so a chemist reporting "0.5 mg/mL" had `0.5` recorded as **log S**. For MW 300 the true log S is
-    −2.78, so `calculator_trust` would report that calculator as biased by 3.3 log units — a factor
-    of ~2000 — on the strength of one row. Worse than the empty string it replaced: an empty unit
-    marked the row as unstated, and asserting the wrong one removes the only way to find it again.
-
-    The refusal names the ledger's unit, so the model can ask the chemist rather than guess.
+    Otherwise "0.5 mg/mL" is recorded as log S and skews `calculator_trust` by orders of magnitude.
+    The refusal names the ledger's unit, so the model can ask the chemist.
     """
     with pytest.raises(ValueError, match="state the unit"):
         asyncio.run(calc_tools.report_measurement("solubility", "CCO", 0.5))
     with pytest.raises(ValueError, match="state the unit"):
         asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
 
-    # **And the spellings that used to walk around it.** The lookup was exact-match on a
-    # model-supplied string, so one capital letter or a trailing space skipped the refusal
-    # and stored
-    # the row with the empty unit the control exists to prevent. (The first version of this test
-    # asserted this case with `"pka"`, which *is* calibrated — so it covered the same branch twice
-    # and its comment described coverage that did not exist.)
+    # The property lookup is normalised, so case and whitespace variants cannot skip the refusal.
     for spelling in ("PKA", "pka ", " Solubility"):
         with pytest.raises(ValueError, match="state the unit"):
             asyncio.run(calc_tools.report_measurement(spelling, "CCO", 15.9))
@@ -356,13 +312,10 @@ def test_a_measurement_with_no_stated_unit_is_refused_rather_than_stamped() -> N
 def test_a_measurement_is_filed_under_the_name_the_ledger_reads_not_the_one_it_was_typed_as(
     server: FakeCalcServer, shared_store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of the same normalisation, on the write rather than the unit gate.
+    """A measurement is filed under the normalised name the ledger reads.
 
-    The lookup above was normalised and the *write* was not, so `"PKA"` passed the unit check,
-    reconciled nothing (predictions are logged as `pka`), and was stored under a name no reader
-    asks for: `calculator_trust("pka")` never sees the row and `calculator_trust("PKA")` refuses
-    outright. The chemist was told "Nothing had predicted PKA for it yet", which is false — and
-    the calibration point is gone. A control that only covers the unit is not the control.
+    Otherwise `"PKA"` passes the unit check but is stored where `calculator_trust("pka")` never sees
+    it, and no prediction is reconciled.
     """
     monkeypatch.setattr(settings, "calibration_enabled", True)
 

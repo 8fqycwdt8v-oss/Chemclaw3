@@ -1,13 +1,9 @@
 """The gate between a model proposing a behaviour change and that change acting on anybody.
 
-**This file is the control.** `propose_skill` is a tool the model calls; nothing it can call
-decides. If what is here does not hold, the queue is a longer road to the thing
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` refuses outright — an agent writing its own
-judgment into its own prompt.
-
-Four properties, each the thing that would be false without it: the agent cannot decide, a decision
-binds to the document the person was shown, accepting actually writes what was accepted, and the
-bound on the personal tier holds on this door as well as on the other one.
+`propose_skill` is a tool the model calls; nothing it can call decides (see
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). Four properties: the agent cannot
+decide, a decision binds to the document shown, accepting writes what was accepted, and the
+personal tier's bound holds on this door too.
 """
 
 import asyncio
@@ -46,10 +42,8 @@ def _no_connectors(profile: str | None = None) -> list[object]:
 def _in_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """One process, one queue, and a fresh one per test.
 
-    `monkeypatch.setattr` on the module singleton rather than a shared one, because
-    `behaviour_proposals._IN_MEMORY` is a process-level object for the reason the CLI needs it to
-    be — and a test that inherited the previous test's decisions would pass on rows it did not
-    write.
+    `behaviour_proposals._IN_MEMORY` is a process-level singleton, so each test replaces it rather
+    than inheriting earlier decisions.
     """
     from chemclaw.agent import behaviour_proposals
 
@@ -65,10 +59,8 @@ def _in_process(monkeypatch: pytest.MonkeyPatch) -> None:
 def skills_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryStore:
     """A real `BaseStore` for the tier an acceptance writes.
 
-    Patched on **both** route modules, because each imports `turn_store` by name. That is not a
-    workaround for a seam — in production both resolve to the one function, and patching one and
-    reading through the other is how a test can watch an acceptance "succeed" while the skill it
-    accepted was never written.
+    Patched on both route modules, since each imports `turn_store` by name; patching one would let a
+    test see an acceptance "succeed" without the skill being written.
     """
     backing = InMemoryStore()
 
@@ -112,14 +104,10 @@ def _propose(actor: str = _ALICE.oid, content: str = _BODY, name: str = "cold-qu
 
 
 def test_no_tool_can_decide_a_proposal() -> None:
-    """The property this whole file exists for, asserted over the registry rather than by reading.
+    """No tool can decide a proposal, asserted over the registry.
 
-    `propose_skill` is registered and is the only thing in the queue's direction a model holds.
-    Deciding is `POST /proposals/...`, and a tool that could decide would let the agent propose a
-    change to its own behaviour and grant it in the next tool call — with the trail recording a
-    person's decision that no person took, which is exactly the defect `plan_approvals` was built
-    after (`infra/sql/020_plan_approvals.sql`: "the trail therefore showed an attributable approval
-    with no human act behind it").
+    Deciding is `POST /proposals/...`; a deciding tool would let the agent grant its own behaviour
+    change with a trail showing a human decision nobody took.
     """
     from chemclaw.agent import tool_modules  # noqa: F401 - populates the registry
 
@@ -133,9 +121,8 @@ def test_no_tool_can_decide_a_proposal() -> None:
 def test_a_decision_binds_to_the_document_the_person_was_shown(app: FastAPI) -> None:
     """A hash the caller did not read is a 404, not a decision.
 
-    The proposer can supersede an open proposal between the read and the click, so a decision that
-    named only the skill would authorize whatever that name currently holds — the control
-    `plan_approvals` gets from keying on `plan_hash` rather than on the session.
+    The proposer can supersede between the read and the click, so a decision keyed on the skill name
+    alone would authorize whatever it now holds.
     """
     digest = _propose()
     client = _as(app, _ALICE)
@@ -165,9 +152,8 @@ def test_a_decision_binds_to_the_document_the_person_was_shown(app: FastAPI) -> 
 def test_accepting_writes_what_was_accepted(app: FastAPI, skills_store: InMemoryStore) -> None:
     """A queue that records "accepted" and writes nothing is worse than no queue.
 
-    The person would believe they had changed something and they would not have, with the record
-    agreeing with them. So the write happens inside the decision, and this reads the tier through
-    the store as well as through the route — the two agreeing is the assertion.
+    The write happens inside the decision; the tier is read through the store and the route, and
+    their agreement is the assertion.
     """
     digest = _propose()
     client = _as(app, _ALICE)
@@ -204,10 +190,8 @@ def test_the_personal_tiers_cap_holds_on_this_door_too(
 ) -> None:
     """Accepting is a second way into `agent_local_skills_max`, and a second door is a hole.
 
-    Every personal skill sits in the prefix of every turn its owner takes, which is why
-    `POST /skills/mine` refuses past the cap. Refused here with the same 409 — and the proposal
-    stays **open**, so the person can remove one and come back. A recorded acceptance that failed
-    to write would not be recoverable.
+    Refused with the same 409 as `POST /skills/mine`, and the proposal stays open so the person can
+    make room and return.
     """
     monkeypatch.setattr(settings, "agent_local_skills_max", 1)
     first = _propose()
@@ -276,12 +260,7 @@ def test_a_decision_is_not_replaced_by_a_second_one(app: FastAPI) -> None:
 def test_a_deployment_that_keeps_no_store_refuses_the_acceptance_rather_than_recording_it(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """503 rather than an accepted proposal whose skill went nowhere.
-
-    The same distinction `skills.py` draws: a confident answer about a mechanism that is not
-    running is worse than an error, and here it would be a person's decision recorded as effective
-    when it changed nothing.
-    """
+    """503 rather than an accepted proposal whose skill went nowhere."""
 
     async def _none() -> Any:
         return None
@@ -307,11 +286,9 @@ def test_an_acceptance_that_loses_the_race_to_a_decline_undoes_its_write(
 ) -> None:
     """A Decline that commits between the read and the decision wins, and the skill is not left.
 
-    The acceptance writes before its conditional `decide`, so a concurrent Decline (a second tab, a
-    double submit) can take the row in between. Driven by committing the decline from inside the
-    write: without the check, the skill acted on every turn while the queue said "rejected", and
-    the route answered 200. What the tier held before — nothing, or an earlier version — is what it
-    holds after.
+    The acceptance writes before its conditional `decide`, so a concurrent Decline can win; the
+    write is then undone. Driven by committing the decline from inside the write; the tier ends as
+    it began.
     """
     from chemclaw.agent.local_skills import read_local_skill, save_local_skill
 
@@ -346,9 +323,8 @@ def test_a_lost_race_whose_undo_fails_is_still_a_409_that_names_the_live_skill(
 ) -> None:
     """A store fault in the undo does not turn the lost race into a 500 that says nothing.
 
-    The accepted body is then still in the chemist's tier while the queue records the other
-    decision, so the answer is the 409 the race earned, telling the person the skill may still be
-    there, and an ERROR naming who and which skill for whoever removes it.
+    The answer is the 409 the race earned, saying the skill may still be there, plus an ERROR naming
+    who and which skill.
     """
     from chemclaw.agent.local_skills import read_local_skill, save_local_skill
 

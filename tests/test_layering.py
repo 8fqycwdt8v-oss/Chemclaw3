@@ -1,78 +1,20 @@
 """Package layering: every cross-package import is either an allowed edge or a declared exception.
 
-**Derived, not enumerated.** The old version of this file hand-maintained three module lists (the
-core modules, the retrieval modules, and the "siblings" a kernel module must not import) and
-parametrized a subprocess check over their product. Those lists drifted from disk — `core` grew
-`tracing`, `metrics_bridge` and `worker_http` after the list was last updated — and drift in an
-*allow-list* is invisible: a module missing from the list is a module never checked, so the kernel
-rule silently stopped covering three files, one of which (`worker_http`) had actually broken it —
-it imported the metrics registry from `chemclaw.api` at module scope, back when the registry lived
-there. This version AST-walks every `.py` file
-under `src/chemclaw` to build the real package→package import graph and checks *that* against a
-small, hand-authored policy of which package may depend on which — a policy is unavoidably
-declared (that is what a layering rule *is*), but the graph it is checked against no longer is.
+The import graph is derived by AST-walking every `.py` under `src/chemclaw` and checked against a
+small hand-authored policy of which package may depend on which; only the policy is declared, so
+a new module is covered without editing a list.
 
-**Module scope vs. function scope, and why both are walked.** A static walk sees an import wherever
-it is written, so a `def foo(): from chemclaw.x import y` inside a function reads the same as one at
-the top of the file unless the walk distinguishes them. The codebase leans on that distinction
-deliberately: `core.logging` lazily imports `connectors.registry` *inside* a filter's `__init__`
-specifically so `core.logging` — which every entrypoint imports first — does not depend on that
-layer *at import time*, while still being able to use it once the process has finished
-bootstrapping. A rule that only looked at module scope would bless that pattern implicitly and then
-bless an accidental module-scope sibling import identically, because both are "not in the
-module-scope list". So this file checks **both scopes**, against **two different policies**:
-module-scope edges must be in `_ALLOWED_MODULE_EDGES` (the package dependency graph the four-layer
-architecture actually has); function-scope edges may additionally use `_ALLOWED_LAZY_EDGES`, each
-entry a documented, deliberate exception.
+Imports are walked in three scopes against different policies: module-scope edges must be in
+`_ALLOWED_MODULE_EDGES`; function-scope (lazy) edges may also use `_ALLOWED_LAZY_EDGES`, each a
+documented exception; `if TYPE_CHECKING:` edges are checked against `_ALLOWED_AT_ANY_SCOPE`
+rather than exempted, so the guard is not an escape hatch.
 
-**`if TYPE_CHECKING:` is a third bucket, not an exemption.** It used to be skipped outright, on the
-reasoning that such an import never executes and so creates no runtime edge. That is true and it is
-not the whole story: a *skipped* import is an unchecked one, so the guard doubled as a working
-escape hatch — `if TYPE_CHECKING: from chemclaw.agent import X` inside `core` would have passed
-every test here. The measurement that makes this cheap to close is that the hatch guards **zero**
-cross-package imports today, so the skip was dead code documenting a way around the rule. Those
-imports are now walked into their own scope and checked against `_ALLOWED_AT_ANY_SCOPE`: an
-annotation-only dependency is still a dependency a reader has to reason about, and declaring it
-costs one row.
+Package cycles are declared in `_CYCLE_EDGES`, each direction with its own reason, because the
+reason for A->B does not excuse B->A. `cli` is checked like any other package.
 
-**Six package-level cycles are real, not accidental**, each recorded in `_CYCLE_EDGES` with the
-one-line reason a reader needs. Five are "data down, control up" pairs where a registry builds and
-launches a durable job and the job's workflow module imports the registry's own manifest/template
-types back: `templates↔durable`, `templates↔agent`, `connectors↔durable`, `agent↔durable`,
-`agent↔connectors`. The sixth turned up in the walk that no prior note named: `kg↔science` (the
-D-080 hazard gate needs `kg.Note` from `science`, and `kg.validate` needs the hazard screen back
-from `science`). All six are declared, not hidden, and each direction is checked independently —
-the reason for A→B does not excuse B→A.
-
-**Three of the nine cycles this file declared a phase ago were made of one or two imports each**,
-and R2 deleted all three by moving the code rather than excusing the edge: `kg.proposal` reached
-into `chemclaw.agent` for the turn's ambient actor/session/correlation id, `connectors.server`
-reached into `chemclaw.api` for the metrics registry, and a durable workflow reached into
-`chemclaw.cli` for a check's implementation. The primitives now live in `chemclaw.core` (which every
-package already depends on) and the check in `chemclaw.durable`, so `kg -> agent`,
-`connectors -> api` and `durable -> cli` are gone from the graph *and* from the policy — those
-imports are now forbidden rather than merely unused. `cli -> durable` survives as an ordinary
-downward edge and is declared in `_ALLOWED_MODULE_EDGES` rather than here.
-
-**`chemclaw.cli` is not a special case**, even though it carries no cycle. A previous version of
-this file excluded `cli` from the sibling list on the premise that "nothing imports it". That was
-false while `cli.schedules` still held the library logic `api.app` and a durable workflow needed at
-module scope — a front door and a Temporal workflow reaching into the entrypoint layer for library
-functions, which is exactly backwards for a layer that is supposed to be the outermost one. It
-moved to `durable/` (R2.B): `chemclaw.durable.schedules` holds the logic, its callers import it
-directly (an ordinary same-or-lower-layer edge, no `cli` involved), and `cli.schedules` is left as a
-thin `main()` shim that calls back down into `durable` to run — a plain `cli→durable` edge, declared
-in the flat set below like every other package `cli` reaches into, not a cycle.
-
-**The kernel rule stays a runtime check, driven by the derived module list.** A static walk cannot
-see a *transitive* import — module A importing module B which happens, at runtime, to import
-module C — so `chemclaw.core imports no sibling` (the rule this file exists to protect; see
-`core/README.md`) is additionally checked by importing each of `chemclaw.core`'s modules (computed
-from disk, not listed) in a clean interpreter and asserting no forbidden sibling shows up in
-`sys.modules`. The former per-(module, sibling) parametrization spawned 12 × 11 = 132 subprocesses
-for this rule alone; one subprocess per module, checking every forbidden sibling in that single
-process, needs one per core module plus one per retrieval module. See `--durations=0` for the
-wall-clock this bought back.
+A static walk cannot see transitive imports, so the kernel rule (`chemclaw.core` imports no
+sibling) is also checked at runtime: each core module, computed from disk, is imported in a clean
+interpreter and `sys.modules` is checked for forbidden siblings.
 """
 
 from __future__ import annotations
@@ -115,8 +57,7 @@ def _resolve_relative(current_module: str, level: int, submodule: str | None) ->
     """Resolve `from .[.[...]][submodule] import x` written in `current_module` to a dotted name.
 
     Mirrors `importlib._bootstrap._resolve_name`: a package's `__init__.py` resolves relative to
-    itself, a plain module resolves relative to its parent, and each extra dot beyond the first
-    climbs one more package level.
+    itself, a plain module relative to its parent, and each extra dot climbs one package level.
     """
     parts = current_module.split(".")
     base = parts if _IS_PACKAGE.get(current_module, False) else parts[:-1]
@@ -136,9 +77,8 @@ class _Import:
 class _ImportVisitor(ast.NodeVisitor):
     """Collect every first-party (`chemclaw.*`) import in one file, tagged by scope.
 
-    `if TYPE_CHECKING:` bodies go into their own scope rather than being discarded, so an
-    annotation-only edge is visible and declarable instead of silently exempt. The `orelse` branch
-    is what actually runs, so it is walked as ordinary code.
+    `if TYPE_CHECKING:` bodies get their own scope so an annotation-only edge is visible and
+    declarable; the `orelse` branch is what runs, so it is walked as ordinary code.
     """
 
     def __init__(self, module: str, path: Path) -> None:
@@ -235,9 +175,8 @@ _FUNCTION_SCOPE_EDGES = _edges("function")
 _TYPE_CHECKING_EDGES = _edges("type_checking")
 
 # ---------------------------------------------------------------------------------------------
-# The declared policy: which package may depend on which. This is the one part of this file that
-# is necessarily hand-authored — it *is* the layering rule — but it is now a graph over 13
-# packages instead of a list of files that has to be kept in step with the filesystem.
+# The declared policy: which package may depend on which. This is the layering rule itself, so it
+# is necessarily hand-authored.
 # ---------------------------------------------------------------------------------------------
 
 # The six package-level cycles, each direction with the one-line reason it exists. Declaring them
@@ -316,26 +255,18 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.api", "chemclaw.durable"),
     ("chemclaw.api", "chemclaw.kg"),
     ("chemclaw.api", "chemclaw.protocols"),
-    # The same edge as `protocols` beside it, and for the same reason: a front-door route
-    # reads and decides on a stored document this layer owns. `api/routes/workflows.py` serves
-    # the human approval a composed workflow needs before it may launch a durable job
-    # (`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`), and that approval is a
-    # column on `composed_workflows` — so the route reaches the store directly rather than
-    # through `agent`, which would be indirection with no second caller to justify it.
+    # Like `protocols`: a front-door route decides on a stored document this layer owns (the
+    # composed-workflow approval is a column on `composed_workflows`), so it reaches the store
+    # directly.
     ("chemclaw.api", "chemclaw.templates"),
     ("chemclaw.cli", "chemclaw.agent"),
-    # `cli.leak_probe` builds the *real* front door in its own process — that is the whole point:
-    # the leak it measures is in what a turn retains, and an in-process repro that faked the app
-    # measured zero. A CLI that drives the service it ships beside is the same shape as
-    # `cli.connectors_dev` driving the connector servers, not a layering inversion: nothing in
-    # `api` imports `cli`, so the edge stays one-way.
+    # `cli.leak_probe` builds the real front door in its own process, since the leak it measures is
+    # in what a turn retains. Nothing in `api` imports `cli`, so the edge stays one-way.
     ("chemclaw.cli", "chemclaw.api"),
     ("chemclaw.cli", "chemclaw.connectors"),
     ("chemclaw.cli", "chemclaw.core"),
-    # `cli.schedules` is a thin `main()` shim that calls back down into its durable-layer
-    # implementation (`durable.schedules`) — the library logic itself moved out of `cli` (R2.B)
-    # because `api.app` needed it at module scope, which no longer makes this a cycle: only `cli`
-    # reaches into `durable` now.
+    # `cli.schedules` is a thin `main()` shim over `durable.schedules`; only `cli` reaches into
+    # `durable`, so this is not a cycle.
     ("chemclaw.cli", "chemclaw.durable"),
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
@@ -348,15 +279,12 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # `operations.activity.safe_tool_name` bounds for its own readers — and a bound applied to one
     # reader of a column is not a bound, which that function's docstring argues.
     ("chemclaw.cli", "chemclaw.operations"),
-    # `cli/verifier_margin.py` measures the judge's roll-to-roll margin
-    # (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss), and the judge's input type is
-    # `retrieval.evidence.EvidenceChunk` — building the pairs from anything else would measure a
-    # different call than the one the turn makes.
+    # `cli/verifier_margin.py` measures the judge's margin, and the judge's input type is
+    # `retrieval.evidence.EvidenceChunk`; any other input would measure a different call.
     ("chemclaw.cli", "chemclaw.retrieval"),
-    # `cli/rekey_campaigns.py` re-keys recorded BO campaigns after a change to how a campaign id is
-    # derived (D-2026-08-21). The derivation is `science.bo.campaign_record.campaign_id_for` over an
-    # `OptimizationProblem`, so a re-key that did not import it would be a second copy of the rule
-    # it exists to apply — which is the one thing a re-key must not have.
+    # `cli/rekey_campaigns.py` re-keys BO campaigns with
+    # `science.bo.campaign_record.campaign_id_for`; a re-key must not carry a second copy of the
+    # derivation it applies.
     ("chemclaw.cli", "chemclaw.science"),
     ("chemclaw.cli", "chemclaw.templates"),
     ("chemclaw.connectors", "chemclaw.agent"),
@@ -397,32 +325,17 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # the kernel by construction: a reading of the record must not be able to reach the
     # capability that wrote it, or the trail would be able to describe itself.
     ("chemclaw.operations", "chemclaw.core"),
-    # The result-publication seam (D-2026-08-25). It is a leaf that consumes what the system
-    # produced: it reads the kernel and, for its SQL driver, the warehouse connection Protocol that
-    # `ingest` already defines — reusing that rather than defining a second `module:callable`
-    # driver seam with the same shape and the same credential discipline. Nothing imports back:
-    # `publish` is imported *by* `durable` (the drain) and lazily by `science` (the enqueue hook),
-    # and imports neither.
-    # The outbound delivery seam (F7). A leaf on the kernel, like `publish`: it reads config
-    # and the log redaction filter and nothing else. `durable` imports it (the digest job
-    # is the caller); it imports nothing back, and nothing reads *from* a channel.
+    # The outbound delivery seam: a leaf on the kernel, like `publish`. It reads config and the log
+    # redaction filter; `durable` (the digest job) imports it, and it imports nothing back.
     ("chemclaw.deliver", "chemclaw.core"),
     ("chemclaw.durable", "chemclaw.deliver"),
-    # The prescriptive-design layer (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`).
-    # A leaf like `publish`, and narrower: it reads the kernel for SMILES arithmetic, ids and the
-    # connection pool, and `science.labels.vocabulary` for the *one* species-role vocabulary the
-    # precedent questions already use — so "the ligand a precedent used" and "the ligand this design
-    # charges" are the same word rather than two enums that agree by accident. It deliberately
-    # imports neither `ingest` nor `kg`: a design is prescriptive and their shapes are descriptive,
-    # and reusing `OrdReaction.StepKind` or `ProcessConditions` here would have put an instruction
-    # and a measurement in one model.
+    # The prescriptive-design layer: a leaf reading the kernel and `science.labels.vocabulary`, so a
+    # design and a precedent share one species-role vocabulary. It imports neither `ingest` nor
+    # `kg`: a design is prescriptive and their shapes are descriptive.
     ("chemclaw.protocols", "chemclaw.core"),
     ("chemclaw.protocols", "chemclaw.science"),
-    # Artefacts (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). A leaf on the
-    # kernel like `protocols`, with one edge into it: the revision diff's `FieldChange` shape and
-    # the CSV formula-injection guard are `protocols`' and are reused rather than copied, so one UI
-    # component renders both diffs and one trigger list guards every CSV this system serves. The
-    # agent's three tools and the routes reach it the way they reach `protocols`.
+    # Artefacts: a leaf on the kernel that reuses `protocols`' `FieldChange` diff shape and CSV
+    # formula-injection guard rather than copying them.
     ("chemclaw.exhibits", "chemclaw.core"),
     ("chemclaw.exhibits", "chemclaw.protocols"),
     # A `geometry` artefact may cite a calculation by-product rather than copy it
@@ -435,12 +348,9 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.durable", "chemclaw.exhibits"),
     ("chemclaw.agent", "chemclaw.exhibits"),
     ("chemclaw.api", "chemclaw.exhibits"),
-    # The narrowest package in the tree, and deliberately: `analytical` reads `core.units` and
-    # nothing else. It imports no `science` — there is no chemistry in "is this number under that
-    # number" — and no `kg` or `ingest`, for the same reason `protocols` does not: a specification
-    # is prescriptive and a `reaction_records` row is descriptive, so a shared shape would put a
-    # limit and a measurement in one model. If a second edge ever appears here, the question to ask
-    # is whether the thing being added is a verdict about numbers or a judgment about a batch.
+    # `analytical` reads only `core.units`: comparing a number to a limit needs no chemistry, and a
+    # specification (prescriptive) must not share a shape with a `reaction_records` row
+    # (descriptive).
     ("chemclaw.analytical", "chemclaw.core"),
     # The agent reaches the analytical tier the same way it reaches `protocols`: one tools module
     # over the models, with no logic of its own beyond parsing what the model wrote into the
@@ -454,11 +364,8 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # validator entrypoint has: a terminal command that reads one seam's manifests and
     # binds each driver's signature. Nothing in `deliver` imports back.
     ("chemclaw.cli", "chemclaw.deliver"),
-    # The `results` bundle's job re-queues stored calculations, and the walk it runs is
-    # `publish.backfill`. That module is in the publish layer rather than in `cli/` *because* of
-    # this edge: the walk began in the CLI, which made this a connector importing a terminal
-    # entrypoint, and the gate caught it. A connector reaching down into publish is ordinary; the
-    # inversion was not.
+    # The `results` bundle's job re-queues stored calculations via `publish.backfill`, which lives
+    # in `publish` rather than `cli` so a connector does not import a terminal entrypoint.
     ("chemclaw.connectors", "chemclaw.publish"),
     ("chemclaw.retrieval", "chemclaw.core"),
     ("chemclaw.retrieval", "chemclaw.kg"),
@@ -469,19 +376,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.templates", "chemclaw.durable"),
 } | set(_CYCLE_EDGES)
 
-# Function-scope-only exceptions: a documented, deliberate lazy import of a package that may not be
-# imported at module scope. Each is a real edge in `_FUNCTION_SCOPE_EDGES` that is *not* in
-# `_ALLOWED_MODULE_EDGES` above - that asymmetry is the point, not a gap.
-#
-# **Exactly one of these originates in `chemclaw.core`, and that is the measurement R2 exists to
-# produce.** `core -> api` was the metrics registry and `core -> agent` was
-# `logging.ContextFilter`'s ambient-identity getters; both of those imports now resolve inside
-# `chemclaw.core` and register as no edge at all. What remains from core is the connector registry,
-# which is a real capability layer rather than a primitive that was merely filed one package too
-# high, so it is not a move that would retire this entry. The sentence used to read "there is
-# exactly one left" of the whole dict, and survived two additions to it — `test_core_has_one_lazy_
-# exception_and_the_dict_says_which` is the same claim in a form that fails when it stops being
-# true.
+# Function-scope-only exceptions: deliberate lazy imports of a package that may not be imported at
+# module scope. Each is in `_FUNCTION_SCOPE_EDGES` and deliberately absent from
+# `_ALLOWED_MODULE_EDGES`. Exactly one originates in `chemclaw.core` (the connector registry);
+# `test_core_has_one_lazy_exception_and_the_dict_says_which` holds that.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
     ("chemclaw.hypotheses", "chemclaw.core"): (
         "`dispatch.structure_of` validates a subject's SMILES with `core.chem`, which imports "
@@ -586,9 +484,8 @@ def test_cycle_edges_are_all_still_real() -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-# The runtime check: a static walk cannot see a transitive import, so `chemclaw.core imports no
-# sibling` - the rule this file exists to protect - is also verified by actually importing each
-# core module in a clean interpreter. Driven by the derived module/package lists, not a hand list.
+# The runtime check: a static walk cannot see a transitive import, so the kernel rule is also
+# verified by importing each core module in a clean interpreter, driven by the derived lists.
 # ---------------------------------------------------------------------------------------------
 
 _CORE_MODULES = sorted(m for m in _MODULE_NAMES.values() if _package_of(m) == "chemclaw.core")
@@ -632,11 +529,10 @@ def _assert_no_forbidden_transitive_import(module: str, forbidden: list[str]) ->
 
 @pytest.mark.parametrize("module", _CORE_MODULES)
 def test_the_kernel_imports_no_sibling(module: str) -> None:
-    """`chemclaw.core` is what everything else builds on, so nothing it imports may reach back up.
+    """`chemclaw.core` is what everything builds on, so nothing it imports may reach back up.
 
-    One subprocess per core module (15, derived from disk), each checked against every other
-    top-level package at once - including `chemclaw.cli`, which a prior version of this test
-    excluded on the false premise that nothing imports it.
+    One subprocess per core module (derived from disk), each checked against every other top-level
+    package at once, `chemclaw.cli` included.
     """
     _assert_no_forbidden_transitive_import(module, _CORE_FORBIDDEN_SIBLINGS)
 
@@ -648,18 +544,11 @@ def test_retrieval_does_not_import_orchestration(module: str) -> None:
 
 
 def test_the_connector_job_wrapper_imports_no_connector() -> None:
-    """`durable/connector_job.py`'s central claim, machine-checked for the one module that makes it.
+    """`durable/connector_job.py` imports nothing from any connector.
 
-    The wrapper's docstring says it "imports nothing from any connector" — that is the whole seam:
-    a child is addressed by a workflow type name and a task queue, two plain strings, so core needs
-    no knowledge of any bundle. The policy above cannot express it, because it is *package*
-    granular and `chemclaw.durable → chemclaw.connectors` is legitimately allowed for
-    `template_activities`. So the claim was machine-unguarded: importing a bundle's workflow class
-    straight into the wrapper would have passed every test in this file. Found by the 2026-08-05
-    review.
-
-    Read from the AST rather than by importing, so a module that is merely *reachable* from the
-    wrapper at runtime does not count — the claim is about what this file declares.
+    A child job is addressed by workflow type name and task queue, so core needs no knowledge of any
+    bundle. The package-granular policy cannot express this, because `durable -> connectors` is
+    allowed for `template_activities`. Read from the AST, so only what the file declares counts.
     """
     source = (_SRC_ROOT / "durable" / "connector_job.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -719,27 +608,12 @@ if loaded_bundles or loaded_heavy:
 
 @pytest.mark.parametrize("module", _AGENT_LAUNCH_SURFACE)
 def test_the_agent_layer_imports_no_bundle_workflow(module: str) -> None:
-    """The agent may name a *core-queue* workflow type; it may never name a bundle's (D-2026-08-17).
+    """The agent may name a core-queue workflow type, never a bundle's.
 
-    `agent/durable_tools.py` importing `DevelopmentReportWorkflow` to launch it looks like the
-    conversation layer reaching into the durable one, and it is not: D-002 forbids merging the two
-    *durability models*, and that module stores nothing — it is the thin adapter D-002 asks for.
-    Measured, the two workflow-class imports add **10 modules and zero third-party packages** to
-    this process, because the report's closure is what core already carries for `gather_evidence`.
-    What the typed reference buys is real: `mypy --strict` rejects a wrong argument through
-    `start_workflow(Workflow.run, ...)` and is silent through the by-name form.
-
-    The rule that *does* protect this process is therefore one layer down — a bundle's workflow is
-    reached by name across its queue, so `bofire`/`botorch`/`tblite` load in the bundle's own worker
-    and nowhere else. That held and nothing asserted it. The policy above cannot: it is *package*
-    granular and `chemclaw.agent -> chemclaw.connectors` is legitimately allowed for the generated
-    tool surface, so importing `chemclaw.connectors.bo.workflows` into an agent tool would have
-    passed every other test in this file — the same hole that produced
-    `test_the_connector_job_wrapper_imports_no_connector` on the other side of the same seam.
-
-    Bundles are derived from the registry rather than listed, so one added tomorrow is covered on
-    the day it is created. Checked in a clean interpreter, because the failure is *transitive*:
-    the import that drags a bundle in is rarely the one that names it.
+    A bundle's workflow is reached by name across its queue, so `bofire`/`botorch`/`tblite` load
+    only in the bundle's own worker. The package-granular policy cannot express this because `agent
+    -> connectors` is allowed for the generated tool surface. Bundles are derived from the registry,
+    and the check runs in a clean interpreter because the offending import is usually transitive.
     """
     from chemclaw.connectors.registry import discovered
 
@@ -764,19 +638,10 @@ def test_the_agent_layer_imports_no_bundle_workflow(module: str) -> None:
 
 
 def test_core_has_one_lazy_exception_and_the_dict_says_which() -> None:
-    """`ARCHITECTURE.md` states this as a property of the kernel, so it is asserted as one.
+    """Exactly one lazy edge out of `chemclaw.core`, and `_ALLOWED_LAZY_EDGES` says which.
 
-    `chemclaw.core` is imported by every entrypoint first, which is why a lazy edge out of it is a
-    measurement worth keeping at exactly one: each is a place where the shared kernel reaches back
-    into a layer above it, deferred to call time so the import graph stays acyclic. The remaining
-    entries in `_ALLOWED_LAZY_EDGES` do not originate in `core` and say nothing about this — a
-    count is deliberately not written here, because the sentence that said "the other two" went
-    stale in the very commit that added a third, three lines from the data that refutes it, in the
-    file whose closing paragraph is about exactly that.
-
-    The comment above the dict claimed "there is exactly one left" of the whole dict, and stayed
-    there through two additions — a count in prose, three lines from the data that refutes it, in
-    the file whose subject is enforcing a rule rather than asking for it.
+    `core` is imported first by every entrypoint, so each lazy edge out of it is the kernel reaching
+    back into a layer above; `ARCHITECTURE.md` states the count as a property of the kernel.
     """
     from_core = sorted(edge for edge in _ALLOWED_LAZY_EDGES if edge[0] == "chemclaw.core")
     assert from_core == [("chemclaw.core", "chemclaw.connectors")], (

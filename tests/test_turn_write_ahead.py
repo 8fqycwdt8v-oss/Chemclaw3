@@ -1,17 +1,10 @@
-"""A turn's question is written ahead of it, and a turn whose process died says so — once.
+"""A turn's question is written ahead of it, and a turn whose process died says so, once.
 
-`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`. Measured on the kind cluster
-(K5 §1): a front-door pod killed mid-turn left the chemist's question in the LangGraph checkpoint
-and out of `session_messages`, so the next turn's model read a question the chemist's transcript did
-not show; the reattach answered a bare 404; and no `turn_costs` row said how the turn ended.
-
-**A dead process is simulated by what it leaves behind, not by a stub of the noticer.** The turn is
-the real `run_turn` over the real graph, the real Postgres checkpointer and the real transcript
-store; its model call hangs, the way a pod killed mid-call looks from the thread's side. The task is
-then cancelled with the two teardown writes a SIGKILL never runs (`_settle_after_teardown`,
-`_book_turn_spend`) disabled, and the turn's claim — taken as the route takes it, under a holder
-that is never refreshed again — is aged past its lease. Everything that notices is production code:
-the next turn, the reattach route and the transcript route.
+`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`. A dead process is
+simulated by what it leaves behind: the real `run_turn` over the real graph, checkpointer and
+transcript store hangs in its model call, is cancelled with the two teardown writes a SIGKILL
+never runs disabled, and its claim is aged past its lease. Everything that notices is production
+code: the next turn, the reattach route and the transcript route.
 """
 
 import asyncio
@@ -291,13 +284,11 @@ async def test_an_answered_turn_reads_back_as_it_always_did_with_its_question_se
 async def test_a_turn_whose_process_died_is_marked_interrupted_once_and_the_next_turn_runs(
     durable: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The K5 §1 scenario, end to end, with every noticer production code.
+    """A turn whose process died is marked interrupted once, and the next turn runs.
 
-    While the dead turn's lease runs nothing may call it interrupted — that is indistinguishable
-    from a slow turn on another replica. Once it lapses: the reattach answers 410
-    `turn_interrupted` (not a bare 404), the transcript shows the question marked `interrupted`, the
-    outcome is booked exactly once however many readers noticed, and the next turn runs and leaves
-    the model's record and the chemist's agreeing about every question asked.
+    While the lease runs nothing may call it interrupted, since that looks like a slow turn on
+    another replica. Once it lapses the reattach answers 410 `turn_interrupted`, the question is
+    marked `interrupted`, the outcome is booked exactly once, and the two records agree.
     """
     # The reattach inside the lease asks the claim's holder for a view
     # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`); a short relay
@@ -526,14 +517,10 @@ def test_a_stopped_turns_settle_lands_before_the_message_behind_it_runs(
 ) -> None:
     """Stop a turn with a message waiting behind it: the stopped turn is `stopped`, booked once.
 
-    **The ordering this pins.** A Stop cancels the pump, and the cancelled teardown settles the
-    question `stopped` on a task of its own (it may not `await`). The pump's `finally` then released
-    the claim and woke the line — so a message waiting on this same process could take the claim
-    and run its own `settle_interrupted_turns` *before that settle landed*: it found the stopped
-    turn's question still `running` under a successor's claim, marked it `interrupted`, and booked a
-    second outcome beside the `abandoned` the turn had already booked for itself. The settle is
-    slowed here so the window is wide rather than lucky; the fix is that the pump's `finally` waits
-    for it before giving the claim up.
+    The cancelled teardown settles the question on a task of its own, so the pump's `finally` must
+    wait for that settle before releasing the claim; otherwise the next message's
+    `settle_interrupted_turns` marks it `interrupted` and books a second outcome. The settle is
+    slowed here so the window is wide.
     """
     real_finish = PostgresHistoryProvider.finish_turn
 
@@ -599,12 +586,10 @@ async def _true(value: bool) -> bool:
 async def test_a_turn_whose_settle_failed_is_marked_but_not_booked_a_second_time(
     durable: None,
 ) -> None:
-    """The degraded path: the turn booked its own outcome, then could not settle its question.
+    """A turn that booked its outcome but could not settle its question is marked, not rebooked.
 
-    Its process was alive to write `turn_costs` and the store refused the settle (or the process
-    died between the two writes), so the question is still `running` with nobody behind it. The
-    next reader marks it — the transcript should say the turn is over — and books nothing, because
-    a second outcome would count one turn twice on the ledger and on the turns counter.
+    The next reader marks the question so the transcript shows the turn is over, and books nothing,
+    since a second outcome would count one turn twice.
     """
     session_id = await _session()
     history = PostgresHistoryProvider()

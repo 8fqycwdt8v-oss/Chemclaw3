@@ -1,15 +1,8 @@
-"""The torsion handle, and the contract between this repository and `Chemclaw3-mcp`.
+"""The torsion handle contract between this repository and `Chemclaw3-mcp`.
 
-`servers/chem` mints handles; this repository checks them, and neither may import the other. So the
-definition is written twice, and this table is what makes a divergence *detectable*: the same
-literals are asserted in that repository's own `test_torsion_handle_contract.py`, so whichever
-side moves first — an RDKit bump, a change to how the class pair is built — turns a test red
-instead of quietly answering differently. It is the arrangement `require_canonical_smiles` already
-has with that server, applied to the one other value that crosses between them.
-
-**A drift here is not a broken feature, it is a wrong answer.** A handle that does not match is
-refused, which is safe. A handle that matches the *wrong bond* is a profile of something else,
-reported as an answer.
+`servers/chem` mints handles and this repository checks them, with no import between the two, so
+the same literals are asserted on both sides and a divergence turns a test red. A handle that
+matches the wrong bond would profile something else and report it as an answer.
 """
 
 import pytest

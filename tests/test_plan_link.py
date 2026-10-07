@@ -1,12 +1,9 @@
-"""A launched job names the plan step it serves — without the plan ever being written.
+"""A launched job names the plan step it serves, without the plan ever being written.
 
-The decision is D-2026-08-27-a-job-names-the-step-it-serves. The old link was a marker prefixed
-into a todo's `content`, deleted twice because it revoked the approval keyed on the plan's
-identity. What replaced it is a stamp on the *job*: a middleware
-binds the current step ambiently per tool call, and the launch copies it onto the workflow input,
-the durable record and the `job_started` announcement. So what is proven here is the whole chain —
-the selection rule, the bind/reset discipline, the launch stamp, the signal — and the property the
-whole design exists to protect: a launch leaves the plan's identity untouched.
+Per `D-2026-08-27-a-job-names-the-step-it-serves`, a middleware binds the current step per tool
+call and the launch copies it onto the workflow input, the durable record and the `job_started`
+announcement. Proven: the selection rule, bind/reset, the launch stamp, the signal, and that a
+launch leaves the plan's identity (and so its approval) untouched.
 """
 
 import asyncio
@@ -138,15 +135,10 @@ async def test_the_job_started_announcement_carries_the_ambient_step() -> None:
 
 
 def test_the_stamp_reads_the_batchs_own_rewrite_not_the_pre_batch_snapshot() -> None:
-    """The canonical "tick step N, do step N+1" batch must stamp step N+1, not step N.
+    """A "tick step N, do step N+1" batch stamps step N+1.
 
-    `request.state["todos"]` is the snapshot taken *before* the whole tool batch, so it still shows
-    step N ("compute the barrier") as `in_progress` even though this call's own `write_todos` — in
-    the *same* assistant message — has already flipped it to `completed` and step N+1
-    ("propose the note") to `in_progress`. Reading only `request.state` stamped the step that had
-    just finished, not the one this call actually serves. `enforce_plan_approval` already judges a
-    call in this exact batch shape against the plan the batch *writes*
-    (`rewrite_todos_in_batch`/`plan_after_batch`); this is the same reading applied here.
+    `request.state["todos"]` is the pre-batch snapshot, so the stamp reads the plan the batch
+    writes, as `enforce_plan_approval` does (`plan_after_batch`).
     """
 
     async def _run() -> None:
@@ -193,11 +185,10 @@ def test_the_stamp_reads_the_batchs_own_rewrite_not_the_pre_batch_snapshot() -> 
 
 
 def test_an_unanswerable_batch_rewrite_falls_back_to_the_pre_batch_snapshot() -> None:
-    """Two rewrites gathered concurrently have no answerable post-batch plan, so this falls back.
+    """Two concurrent rewrites have no answerable post-batch plan, so the stamp falls back.
 
-    Unlike `enforce_plan_approval`, which must fail *closed* on an unanswerable batch, the stamp has
-    no safety property to protect either way — falling back to `request.state` is just the same
-    honest-best-effort this middleware already gives an absent `todos` key.
+    Unlike the plan gate, which fails closed there, the stamp protects no safety property, so the
+    pre-batch snapshot is an acceptable best effort.
     """
 
     async def _run() -> None:
@@ -241,32 +232,14 @@ def test_the_stamp_is_attached_exactly_when_the_harness_is() -> None:
 
 
 def test_the_link_is_bound_inside_a_real_compiled_graph() -> None:
-    """The one property a hand-built `ToolCallRequest` cannot establish: that this works at all.
+    """The link is bound inside a real compiled graph.
 
-    Every other test in this file calls the middleware directly with a request whose `state` the
-    test itself wrote — which proves the selection rule and proves nothing about whether a tool
-    running inside `build_langgraph_agent`'s compiled graph is handed `todos` in the first place.
-    `tests/test_state_channels.py` exists because that exact gap produced three defects in one
-    week: "a middleware was tested by calling its hook directly, the hook returned the right dict,
-    and the channel it wrote did not exist on the graph." LangGraph drops such a write in silence,
-    and the read here fails the same way — `plan_link_from_todos` would see no `todos`, return
-    `("", "")`, and every job would stamp an empty step while all seven tests above stayed green.
-
-    So this drives the real thing: the real builder, the real `TodoListMiddleware`, the real
-    `write_todos` tool writing the real channel, and a real `ToolNode` invoking a real tool whose
-    body reads the ambient link the way `connectors/jobs.py` does.
-
-    **Measured, because "it covers a gap" is a claim like any other.** Detaching
-    `TodoListMiddleware` in `agent_middleware()` — so the plan channel is never created and a tool
-    is handed no `todos`, while this module, its predicate and every request built by hand stay
-    untouched — fails **this test alone**: 1 failed, 11 passed. Every other test in this file,
-    including the one asserting the stamp is attached, goes green against a graph where the stamp
-    can never see a plan. That is the whole of what a hand-built `state` cannot tell you.
-
-    `harness_autonomy="execute"` rather than `plan_only`, deliberately: it keeps the plan gate out
-    of the way (an unapproved plan would refuse a state-changing call before the stamp was ever
-    reached) *and* it proves the attachment predicate this module chose — the stamp follows the
-    harness, not the gate, because the todo list exists in either autonomy.
+    The other tests hand-build `request.state`, which cannot show that a tool inside
+    `build_langgraph_agent`'s graph receives `todos` at all; a missing channel is dropped silently
+    and every job would stamp `("", "")`. This drives the real builder, `TodoListMiddleware`,
+    `write_todos` and `ToolNode`, with a tool reading the ambient link as `connectors/jobs.py` does.
+    `harness_autonomy="execute"` keeps the plan gate out of the way and proves the stamp follows the
+    harness, not the gate.
     """
     from chemclaw.agent.audit import NullAuditSink
     from chemclaw.agent.langgraph_agent import build_langgraph_agent

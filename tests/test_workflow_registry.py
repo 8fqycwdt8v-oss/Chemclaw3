@@ -1,9 +1,7 @@
 """Durable capabilities declare their own queue, and the workers serve what is declared.
 
-The failure this guards is silent and was hit for real while building the xTB job: a
-workflow that is written, tested and imported but missing from a worker's hardcoded list
-never runs, and nothing fails until someone submits one and it waits in the queue
-forever.
+A workflow missing from its worker never runs, and nothing fails until one is submitted and waits
+in the queue forever.
 """
 
 import asyncio
@@ -18,11 +16,9 @@ from typing import Any
 import pytest
 from temporalio import workflow
 
-# This module *defines* two workflows (the stance probes at the foot of the file), so Temporal's
-# sandbox re-imports it — and everything it imports — when it validates them. Passing the
-# first-party import through keeps that re-import from walking the whole package inside the
-# sandbox's restricted environment, the same guard `tests/test_orchestrator.py` needed for the
-# same reason.
+# This module defines two workflows (the stance probes at the foot of the file), so Temporal's
+# sandbox re-imports it to validate them; passing the first-party import through keeps that
+# re-import from walking the whole package inside the sandbox.
 with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import (
         describe,
@@ -35,9 +31,8 @@ with workflow.unsafe.imports_passed_through():
 def test_every_declared_capability_reaches_its_worker() -> None:
     """The worker serves exactly what the registry holds for its queue.
 
-    Importing the worker module is what registers its capabilities, so this also
-    proves the imports are still there — the one thing adding a workflow to a *new*
-    module still requires.
+    Importing the worker module is what registers its capabilities, so this also proves the imports
+    are still there.
     """
     from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 
@@ -48,9 +43,8 @@ def test_every_declared_capability_reaches_its_worker() -> None:
 def test_the_queues_do_not_overlap() -> None:
     """A capability belongs to one queue. Two would mean two workers racing for it.
 
-    Core has one queue now, so the pairs worth checking are core's against each bundle's — which is
-    where the overlap could actually appear, because a bundle module that forgot `bundle_queue`
-    and wrote `"background"` would silently ask core's worker to serve its heavy closure.
+    Checked as core's queue against each bundle's: a bundle module that wrote `"background"` instead
+    of `bundle_queue` would ask core's worker to serve its heavy closure.
     """
     import chemclaw.connectors.bo.worker
     import chemclaw.connectors.calc.worker  # noqa: F401 — registration
@@ -85,18 +79,11 @@ def test_a_connectors_durable_work_is_on_its_own_queue_only() -> None:
 
 
 def test_cores_workers_import_no_bundle() -> None:
-    """The real guarantee behind "a bundle's heavy deps never load into core's worker" (D-118).
+    """Core's workers import no bundle, so a bundle's heavy deps never load into them (D-118).
 
-    This used to be asserted as the *absence of a decorator*: bundles left their workflows
-    undecorated, on the reasoning that registering them would put `bofire`/`tblite` into core's
-    background worker. That reasoning had the mechanism backwards. The registry is populated at
-    **import** time, and core's workers never import `connectors.<bundle>` — so a decorator
-    cannot move anything into core, and withholding it bought nothing while forcing each bundle
-    to hand-maintain the list of what its worker serves.
-
-    What actually keeps the closure out is the import boundary, so that is what this asserts, in
-    a fresh interpreter: importing core's workers must not pull in a bundle package or any of the
-    heavy third-party libraries that arrive only through one.
+    The registry is populated at import time, so the import boundary is what keeps a bundle's
+    closure out of core. Asserted in a fresh interpreter: importing core's workers pulls in no
+    bundle package and none of the heavy third-party libraries that arrive only through one.
     """
     probe = textwrap.dedent(
         """
@@ -110,10 +97,9 @@ def test_cores_workers_import_no_bundle() -> None:
     )
     loaded = set(json.loads(completed.stdout.strip().splitlines()[-1]))
 
-    # A *bundle* is a discovered sub-package of `connectors/`; the flat modules beside them
-    # (`registry`, `queues`, `identity`, `transport`, …) are core's own seam and are fine to
-    # import. Derived from the filesystem rather than listed, so adding a bundle extends the
-    # check on the day it is created instead of the day someone remembers to widen a set.
+    # A *bundle* is a discovered sub-package of `connectors/`; the flat modules beside them are
+    # core's own seam and fine to import. Derived from the filesystem, so a new bundle is covered at
+    # once.
     from chemclaw.connectors.registry import discovered
 
     bundle_prefixes = tuple(f"chemclaw.connectors.{name}." for name in discovered())
@@ -126,9 +112,7 @@ def test_cores_workers_import_no_bundle() -> None:
 
 
 #: The queue the registry probes below register on. Not `background`: the registry is
-#: process-global, so a probe registered there stays in `registered_workflows("background")` for
-#: every test that runs afterwards — including the sandbox check, which would then try to validate
-#: a class that was never a workflow.
+#: process-global, so a probe there would leak into later tests, including the sandbox check.
 _PROBE_QUEUE = "registry-probe"
 
 
@@ -151,9 +135,8 @@ def test_a_name_claimed_by_two_modules_is_rejected() -> None:
 def test_re_registering_the_same_definition_is_allowed() -> None:
     """Temporal's workflow sandbox re-imports workflow modules, re-running the decorator.
 
-    So the guard compares the defining *module* rather than object identity — otherwise
-    every workflow task would raise on a duplicate that is not one, and the worker would
-    die on its first piece of work.
+    So the guard compares the defining module rather than object identity; otherwise every workflow
+    task would raise on a false duplicate.
     """
     module = "chemclaw.durable.reimport_probe"
     durable_workflow(_PROBE_QUEUE)(_probe("RegistryReimportProbe", module))
@@ -175,9 +158,8 @@ def test_describe_names_what_a_worker_serves() -> None:
 def _every_served_workflow() -> list[tuple[str, type]]:
     """Every workflow every shipped worker serves, as `(queue, class)`, derived from the imports.
 
-    Core's worker and each bundle that ships a `worker` module, imported for their registration
-    side effect — the same imports the processes themselves perform — so a new bundle worker is
-    covered the day it exists.
+    Imports core's worker and each bundle's `worker` module, as the processes do, so a new bundle
+    worker is covered the day it exists.
     """
     import importlib
     import importlib.util
@@ -198,18 +180,11 @@ def _every_served_workflow() -> list[tuple[str, type]]:
 def test_every_served_workflow_passes_the_sandbox_its_worker_validates_it_in() -> None:
     """A workflow module whose import graph trips the sandbox takes its whole worker down at boot.
 
-    `Worker(...)` validates every workflow it is handed in Temporal's import sandbox before it
-    polls anything, and one refusal raises out of the constructor. So one import placed outside
-    `workflow.unsafe.imports_passed_through()` is not a defect in one workflow: it is every job on
-    that queue. Driven: `durable/memory_jobs.py` imported `ingest.eln.warehouse.expr` unpassed,
-    which imports `regex`, whose module body calls `locale.getpreferredencoding` — refused inside
-    the sandbox — and `python -m chemclaw.durable.background_worker` exited on startup with
-    `Failed validating workflow PublishNoteWorkflow`. Nothing in the suite constructs the real
-    worker, because doing so needs a broker, so it was green throughout.
-
-    This runs the same validation the constructor runs, with the runner it defaults to and no
-    broker: `SandboxedWorkflowRunner.prepare_workflow` is the call `Worker.__init__` makes per
-    workflow. Inside an event loop because the sandbox's validation instantiates the workflow.
+    `Worker(...)` validates every workflow in Temporal's import sandbox before polling, and one
+    refusal raises out of the constructor, so one import outside
+    `workflow.unsafe.imports_passed_through()` stops every job on that queue. This runs the same
+    validation (`SandboxedWorkflowRunner.prepare_workflow`) with no broker, inside an event loop
+    because validation instantiates the workflow.
     """
     from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
@@ -240,28 +215,11 @@ def test_every_served_workflow_passes_the_sandbox_its_worker_validates_it_in() -
 def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
     """A plain exception in workflow code must fail the run, not park it forever.
 
-    The SDK treats an exception raised in workflow *code* as a suspected bug: it suspends the run
-    in an internal workflow-task-failure loop that ignores the retry policy and never gives up.
-    That is a defensible default for a workflow nobody is waiting on. It is the wrong one for this
-    path, where a chemist has already been told the job is running and the only way they ever hear
-    otherwise is a push-back the run must reach in order to send.
-
-    Both halves were measured against a live broker before this test existed. A bundle workflow
-    returning something that is not the envelope left `ConnectorJobWorkflow` RUNNING indefinitely,
-    its history repeating `workflow_task_failed: "Failed decoding arguments"` every ~10 s with the
-    worker re-polling the poisoned task forever; and a child reading an absent optional key from
-    its payload hung the child, the parent, and the session's expectation with it. Neither parent
-    carries an `execution_timeout` of its own, so nothing ends either one.
-
-    Scoped to the job path rather than to every registered workflow, deliberately: these are the
-    runs a person is waiting on. The periodic workflows were decided one at a time instead
-    (`D-2026-08-27-a-periodic-job-decides-for-itself-whether-a-bug-should-park-it`), and
-    `test_every_background_workflow_holds_the_stance_argued_for_it` below is where those decisions
-    live — including the six that deliberately keep parking.
-
-    The check is over the *registry* rather than a list of names, so a bundle added later is
-    covered without editing this file — which is the property the seam claims and the reason the
-    hole existed at all: nothing checked it.
+    The SDK treats such an exception as a suspected bug and retries the workflow task forever,
+    ignoring the retry policy. On the job path a chemist is waiting and these runs carry no
+    `execution_timeout`, so they must declare failure. Periodic workflows are decided individually
+    in `test_every_background_workflow_holds_the_stance_argued_for_it`. Checked over the registry,
+    so a bundle added later is covered.
     """
     import chemclaw.connectors.bo.workflows
     import chemclaw.connectors.calc.workflows  # noqa: F401 — registration
@@ -288,18 +246,13 @@ def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
 
 
 # The stance argued for each workflow on core's `background` queue, from
-# `D-2026-08-27-a-periodic-job-decides-for-itself-whether-a-bug-should-park-it`. That ADR carries
-# the reason for every name here and each workflow carries its own beside its decorator; this is
-# the table a test can read.
+# `D-2026-08-27-a-periodic-job-decides-for-itself-whether-a-bug-should-park-it`.
 #
-# **The rule the split follows**, so a new workflow can be placed rather than guessed at: a plain
-# exception in workflow code parks the run in the SDK's unbounded workflow-task-failure loop.
-# Declare `failure_exception_types` where that park has **no ceiling, or a ceiling somebody is
-# waiting through** — a workflow a tool, a CLI or a webhook starts (none of those sites passes an
-# `execution_timeout`), or a fan-out child whose hour of `fan_out_child_timeout_seconds` is charged
-# to a parent that a chemist is polling. Leave it parking where the only starter is a Temporal
-# Schedule: that action carries `schedule_run_timeout_seconds`, nothing reads the result, and every
-# such job is cursored or idempotent, so the fires it skips cost a delay and not a record.
+# **The rule**: a plain exception in workflow code parks the run indefinitely. Declare
+# `failure_exception_types` where that park has no ceiling or a ceiling somebody waits through — a
+# workflow started by a tool, CLI or webhook, or a fan-out child a chemist's parent is polling.
+# Leave it parking where the only starter is a Temporal Schedule: the run is bounded by
+# `schedule_run_timeout_seconds`, nothing reads its result, and the work is cursored or idempotent.
 # `EvalDriftWorkflow` is the argued exception on the schedule side — see its decorator.
 _MUST_FAIL = frozenset(
     {
@@ -318,26 +271,19 @@ _MUST_FAIL = frozenset(
         # `get_durable_job_status`, so it is on the job path: a parked tournament is a job the
         # chemist is waiting on that never answers and never fails.
         "HypothesisTournamentWorkflow",
-        # The durable wait (D-2026-08-29). Somebody is holding a question open and somebody else is
-        # waiting on the answer, so a bug in it must surface as a failed wait rather than park: a
-        # parked wait is a request that stays in an inbox forever with nothing listening, which is
-        # indistinguishable from one nobody has got to yet — the worst state this primitive has.
+        # The durable wait. A parked wait is a request left in an inbox with nothing listening,
+        # indistinguishable from one nobody has got to yet, so a bug must fail the wait.
         "AwaitAnswerWorkflow",
         # Fan-out children of those. A parked child is dropped only when its execution timeout
         # expires, and that hour is spent by the parent the chemist is polling.
         "PublishNoteWorkflow",
         "ReportSectionWorkflow",
-        # Schedule-only since its webhook starter was deleted unreferenced on 2026-09-07, and
-        # declared on the visibility argument instead: a failed scheduled run reaches an operator
-        # through `ScheduleHealth.last_outcome`, a parked one reaches nobody while the index it
-        # rebuilds goes stale. See the comment on the workflow itself.
+        # Schedule-only, but declared: a failed run reaches an operator through
+        # `ScheduleHealth.last_outcome`, while a parked one reaches nobody as the index goes stale.
         "NoteReindexWorkflow",
-        # The check-in over blocked work. Schedule-only, and the one nightly sweep that fails
-        # rather than parks: its output *is* the absence of silence, so a parked run reads as
-        # "nothing of yours is blocked" — the good state — while under `SKIP` it silently
-        # skips every subsequent night and the requester goes back to hearing nothing until
-        # expiry. That is the defect the sweep was built to fix, reproduced by its own
-        # failure mode.
+        # The check-in over blocked work, the one nightly sweep that fails rather than parks: a
+        # parked run reads as "nothing of yours is blocked", and under `SKIP` every later night is
+        # silently skipped.
         "CheckInWorkflow",
         # An uncapped second starter beside the Schedule: the live lane's backfill, which awaits
         # `handle.result()`.
@@ -345,21 +291,16 @@ _MUST_FAIL = frozenset(
         # Schedule-only, and declared anyway: its output is a claim about a moment, so a resumed
         # park delivers a day-old verdict as current.
         "EvalDriftWorkflow",
-        # Schedule-only drains, declared by their own merged argument before this table existed
-        # (`corpus_sync.py`, `label_sync.py`). D-2026-08-27 records that the rule above would not
-        # have required either, and that reversing a merged declaration on a tie is not worth the
-        # churn — the entry is here so removing one is a decision someone takes, not a tidy-up.
+        # Schedule-only drains declared by their own modules (`corpus_sync.py`, `label_sync.py`).
+        # The rule would not require it; removing one is a decision, not a tidy-up.
         "ReactionCorpusWorkflow",
         "ReactionLabelWorkflow",
     }
 )
 
-# Deliberate non-changes. Each is reached only from a Temporal Schedule, so the park is bounded by
-# `schedule_run_timeout_seconds`; nothing reads the run; and the work is idempotent or cursored, so
-# a skipped fire costs a delay. Declaring these would buy a failure state that no surface reported
-# when this was decided — `ScheduleHealth` carries `last_outcome` now, which reopens that trade
-# rather than settling it — and cost the run its chance to finish once a same-day redeploy fixes
-# the bug.
+# Deliberately parking. Each is reached only from a Temporal Schedule, so the park is bounded by
+# `schedule_run_timeout_seconds`; nothing reads the run; the work is idempotent or cursored, so a
+# skipped fire costs a delay, and a parked run can still finish once a fix is deployed.
 _MAY_PARK = frozenset(
     {
         "ArtifactEvictionWorkflow",
@@ -367,10 +308,8 @@ _MAY_PARK = frozenset(
         "DocumentShareSyncWorkflow",
         "ObservationSynthesisWorkflow",
         "PublishResultsWorkflow",
-        # The commitment mirror. A periodic job over an export nobody is waiting on: a bug in it
-        # should park until somebody ships a fix rather than fail, because a mirror that stops
-        # refreshing reports its own staleness through `observed_at` and every reading leads with
-        # it — so the failure is visible without the workflow having to fail.
+        # The commitment mirror. Parks rather than fails: a stale mirror reports its own staleness
+        # through `observed_at`, so the failure is visible without the workflow failing.
         "CommitmentSyncWorkflow",
         # The orphaned-wait sweep: Schedule-only, idempotent, and nothing reads the run
         # (`durable/orphaned_waits.py`).
@@ -387,10 +326,8 @@ _MAY_PARK = frozenset(
 def _real_background_workflows() -> dict[str, type]:
     """The `@workflow.defn` classes on core's queue, by name.
 
-    Filtered to classes Temporal actually has a definition for, because two tests above register
-    bare `type()` probes on `background` to exercise the collision guard. Keying on the presence of
-    `__temporal_workflow_definition` is the same fact the stance check reads, so a probe cannot
-    make this table look incomplete and a real workflow cannot hide behind the filter.
+    Filtered on `__temporal_workflow_definition`, because tests above register bare `type()` probes
+    on `background`; it is the same fact the stance check reads.
     """
     return {
         cls.__name__: cls
@@ -402,9 +339,8 @@ def _real_background_workflows() -> dict[str, type]:
 def _declares_failure(cls: type) -> bool:
     """Whether `cls` turns a plain `Exception` in workflow code into a workflow *failure*.
 
-    Read off the definition Temporal itself consults (`workflow_is_failure_exception`), and
-    checking that `Exception` is actually covered rather than that the tuple is merely non-empty —
-    `failure_exception_types=[ValueError]` is a different decision from this one.
+    Read via `workflow_is_failure_exception`, checking `Exception` itself is covered —
+    `failure_exception_types=[ValueError]` is a different decision.
     """
     definition = getattr(cls, "__temporal_workflow_definition", None)
     declared = getattr(definition, "failure_exception_types", ()) or ()
@@ -414,16 +350,9 @@ def _declares_failure(cls: type) -> bool:
 def test_every_background_workflow_holds_the_stance_argued_for_it() -> None:
     """Each periodic workflow either fails or parks *because someone argued it should*.
 
-    The backlog row this closes asked for a decision per workflow and said in as many words that
-    widening the job-path assertion across all of them was the wrong answer. So this asserts both
-    directions: a workflow in `_MUST_FAIL` that stops declaring goes red, **and a workflow in
-    `_MAY_PARK` that starts declaring goes red too**. The second half is what makes this a record
-    of decisions rather than a snapshot of the tree — flipping a stance means revisiting the
-    argument in D-2026-08-27 and moving the name, which is a diff a reviewer can see.
-
-    What the two stances actually *do* is measured rather than assumed, by
-    `test_the_two_stances_behave_as_the_table_assumes` below — because this table would be a table
-    of decorator spellings otherwise.
+    Both directions are asserted: a `_MUST_FAIL` workflow that stops declaring goes red, and so does
+    a `_MAY_PARK` workflow that starts. Flipping a stance means moving the name, a diff a reviewer
+    sees. `test_the_two_stances_behave_as_the_table_assumes` checks what the stances actually do.
     """
     from chemclaw.durable import background_worker  # noqa: F401 — registration
 
@@ -486,15 +415,9 @@ class _FailsOnAPlainException:
 def test_the_two_stances_behave_as_the_table_assumes() -> None:
     """One plain exception, two decorators, against a real broker: one fails, one hangs.
 
-    The whole decision table above rests on a claim about the SDK — that an exception raised in
-    workflow *code* parks the run rather than failing it, unless the definition says otherwise —
-    and a table resting on documentation is a table of spellings. So the claim is run.
-
-    Measured here on the time-skipping server: the declared workflow reached `FAILED` with an
-    `ApplicationError` on its first attempt, and the undeclared one was still `RUNNING` five
-    seconds later, the worker re-failing and re-polling the same poisoned task. Nothing ends the
-    second one — neither start carries an `execution_timeout`, which is exactly the shape of the
-    tool- and webhook-started workflows in `_MUST_FAIL`.
+    The decision table rests on the SDK parking an exception in workflow code unless declared
+    otherwise, so the claim is run on the time-skipping server: the declared workflow reaches
+    `FAILED`, the undeclared one is still `RUNNING` with no `execution_timeout` to end it.
     """
     from temporalio.client import WorkflowFailureError
     from temporalio.types import MethodAsyncNoParam

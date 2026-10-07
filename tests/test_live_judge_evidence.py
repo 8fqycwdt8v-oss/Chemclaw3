@@ -1,15 +1,8 @@
 """What the live judge is shown of a tool result, and what it is told of a conditional capability.
 
-Two defects from the 2026-09-27 run against a real model, both of them the judge grading against
-less than the turn had:
-
-- **pl-16** was judged "fabricated" for citing "Buckley et al., Org. Process Res. Dev. 2021, 25,
-  587" and "Bretherick's Handbook, 8th ed." — both of which `screen_hazards` had returned, as the
-  citations of its first and third flags, past character 200 of a result the model read whole. The
-  judge saw the 200-character preview.
-- **ws-12, rp-09, pl-22** were judged "fabricated" for offering to run code in a lane that could
-  (`needs_bundle: pyexec`); the judge had the bucket and nothing saying whether the bundle was
-  bound.
+The judge must grade against what the turn had: the whole tool result the model read (not a short
+preview, which hides citations past it), and whether a conditional bundle such as `pyexec` was
+actually bound when the model offered to use it.
 """
 
 import pytest

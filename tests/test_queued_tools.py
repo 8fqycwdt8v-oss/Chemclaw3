@@ -1,18 +1,8 @@
 """Queued tool calls: a heavy call waits for a slot in one global queue instead of being refused.
 
-What is asserted, in the order a call travels:
-
-- the manifest refuses a queued tool the endpoint does not serve;
-- a turn's connector session routes exactly the queued tools through the queue and leaves every
-  other tool on the direct path, with the tool object the agent binds unchanged;
-- the activity, against a real MCP server, returns an answer or a domain refusal as the server's
-  own `CallToolResult`, and turns only a *full* server into the retryable failure;
-- end to end on Temporal: an inline answer, a full server retried until it admits, identical
-  concurrent calls sharing one run, and a call that outlasts the inline wait handing back a job id
-  and delivering its answer to the session afterwards.
-
-The Temporal-backed half skips where the test server cannot be fetched, like every workflow test
-here; everything above it runs everywhere.
+Covers the manifest check, the turn's routing of queued tools, the activity against a real MCP
+server (only a full server is retryable), and the Temporal path end to end. The Temporal half
+skips where the test server cannot be fetched.
 """
 
 import asyncio
@@ -116,9 +106,7 @@ def test_a_turn_routes_only_the_queued_tools_through_the_queue(
 ) -> None:
     """The queued tool reaches `dispatch_queued`; the other goes straight to the server.
 
-    Through `open_connector_specs`, the path every turn takes, against a real server — so the
-    property is the adapter's interceptor being installed where a turn builds its tools, not a
-    function called in isolation.
+    Driven through `open_connector_specs`, the path every turn takes, against a real server.
     """
     dispatched: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -208,11 +196,10 @@ def _call(tool: str, **arguments: Any) -> QueuedToolCall:
 def test_the_activity_returns_answers_and_refusals_and_retries_only_a_full_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Against a real server: an answer and a domain refusal come back as the server sent them.
+    """An answer and a domain refusal come back as the server sent them; only a full server raises.
 
-    A full server is the one outcome raised, as the retryable `ConnectorAtCapacity` — a refusal
-    is the tool's answer and asking again cannot change it, while a full pod admits the identical
-    call a moment later.
+    `ConnectorAtCapacity` is retryable because a full pod admits the identical call later, while a
+    refusal is the tool's answer.
     """
     port = _free_port()
     monkeypatch.setattr("chemclaw.connectors.registry.connector_spec", lambda name: _spec_for(port))
@@ -231,11 +218,8 @@ def test_the_activity_returns_answers_and_refusals_and_retries_only_a_full_serve
 
 
 def test_a_queued_call_touches_no_database(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The interactive worker holds no Postgres pool, and the connection budget counts on it.
-
-    `chemclaw.fleetPools` charges it nothing (measured: an idle worker opened zero connections), so
-    the activity must never borrow one. Every way into the database goes through `db.connection`
-    or `db.pooled_connection`; both are made to fail here and a real call is made.
+    """The interactive worker holds no Postgres pool, so a queued call must never touch the
+    database.
     """
     from chemclaw.core import db
 
@@ -451,11 +435,9 @@ def test_a_call_that_outlasts_the_wait_becomes_a_job_and_is_delivered(
 def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The card must not read "running" while the call sits in the queue.
+    """A waiting call reports `queued` (with the broker's count or `None`), then `running`.
 
-    One slot, held by a first call; a second call waits behind it. Its turn reports `queued` (with
-    the broker's waiting count, or `None` where the broker cannot say) and then `running` once the
-    slot frees, and the answer still comes back as the tool's own result.
+    The card must not read "running" while the call sits in the queue.
     """
     gate = threading.Event()
     # Each call holds its slot a second past the gate, so the waiting call is seen running.
@@ -486,10 +468,8 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
     waiting_id = queued_workflow_id(_CONNECTOR, "heavy", {"smiles": "N"})
     states = [state for _tool, job_id, state, _n in reported if job_id == waiting_id]
     assert not result.isError
-    # **The model reads the wait too, not only the card.** `tool_queued` goes to the chemist's
-    # stream alone, and on the 2026-10-02 lane the model answered "No call waited, queued, or was
-    # refused" about two calls that had waited 8 and 14 s. The waiting call's result now says so,
-    # after the server's own block, which stays exactly what the server returned.
+    # The model must see the wait too: the result carries a note after the server's own block,
+    # which stays exactly what the server returned.
     texts = [cast(TextContent, block).text for block in result.content]
     assert texts[0] == "heavy:{'smiles': 'N'} for oid-chemist", texts
     assert len(texts) == 2 and "waited about" in texts[1] and repr(_CONNECTOR) in texts[1], texts
@@ -507,11 +487,7 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
 def test_a_call_on_a_queue_nothing_polls_says_queued_and_never_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The live lane started no interactive worker, and every such call's card read "running".
-
-    No worker here at all: the run is accepted and never picked up, so there is no pending
-    activity to read. The turn must still say `queued` on its first look — and never `running` —
-    and hand back the job id once the wait is spent.
+    """On a queue no worker polls, the turn says `queued`, never `running`, then returns the job id.
     """
     reported: list[tuple[str, str, str, int | None]] = []
     monkeypatch.setattr(
@@ -557,11 +533,8 @@ def test_progress_says_nothing_when_no_activity_is_pending(monkeypatch: pytest.M
 
 
 def test_progress_reads_queued_before_any_worker_has_picked_the_run_up() -> None:
-    """The other side of the same empty list: never seen running, it is waiting for a worker.
-
-    It answered `None` here too, which on a queue nothing polls meant the card read "running" for
-    the whole wait. The count is `None` — the run is not in the activity backlog yet — rather than a
-    number that would leave this call out.
+    """A run no worker has picked up reads as queued, with a `None` count rather than a wrong
+    number.
     """
     from chemclaw.connectors import queued
 
@@ -609,12 +582,9 @@ def test_a_queued_signal_becomes_a_tool_queued_event() -> None:
 
 
 def test_the_wait_note_is_its_own_paragraph_after_the_servers_json() -> None:
-    """Flattened the way the model receives it, the note no longer glues onto the payload (N9).
+    """The wait note is its own paragraph after the server's JSON in the text the model receives.
 
-    The 2026-10-02 lane showed `…}(Queue: this call waited about 10 s …)`: every reader joins text
-    blocks with `""`, and the note block began with its parenthesis. Converted here by
-    `langchain_mcp_adapters` — the conversion every connector tool result goes through — and joined
-    by `tool_result_size.full_text`, so the assertion is on the text a turn actually holds.
+    Readers join text blocks with `""`, so the assertion runs on the converted, joined text.
     """
     import json
 

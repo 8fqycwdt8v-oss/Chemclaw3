@@ -1,16 +1,8 @@
-"""Integration tests for the Postgres artifact store (D-124, R1.5).
+"""Integration tests for the Postgres artifact store (D-124).
 
-`PostgresArtifactStore` had no direct test anywhere: `test_calc_artifacts.py` and
-`test_artifact_eviction.py` both exercise the contract through `InMemoryArtifactStore` or the raw
-SQL strings, never the durable backend that a deployment actually runs. That leaves the one thing
-this module exists for — bytes that survive a process restart, addressed by content — with no
-proof the round trip, the dedup, or the overwrite semantics work against a real database.
-
-Follows `tests/test_postgres_store.py`'s pattern: `migrated_db_or_skip()` skips cleanly with no
-Postgres reachable (this sandbox), runs for real in CI; each test is a sync `def` wrapping an inner
-`async def _run()` driven by `asyncio.run` (no pytest-asyncio); isolation comes from
-`tests.pg`/`conftest.py`'s per-session schema redirect, so each test also uses its own `calc_key`
-prefix to stay independent of any other test run against the same schema.
+Proves the durable backend's round trip, content-addressed dedup and overwrite semantics against a
+real database. Skips without Postgres (`migrated_db_or_skip()`); each test uses its own `calc_key`
+prefix because the session schema is shared.
 """
 
 import asyncio
@@ -92,11 +84,10 @@ async def test_identical_bytes_dedupe_to_one_blob_but_keep_both_links() -> None:
 
 
 async def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob() -> None:
-    """A second `put` under the same `(calc_key, name)` updates the link (D-124's upsert).
+    """A second `put` under the same `(calc_key, name)` repoints the link (D-124's upsert).
 
-    `_UPSERT_LINK` is `ON CONFLICT (calc_key, name) DO UPDATE`, never a second row — so the link
-    must resolve to the *new* content afterwards, while the old blob (addressed by its own hash)
-    stays retrievable on its own hash, since eviction — not an overwrite — is what reclaims it.
+    The link resolves to the new content, while the old blob stays retrievable by its own hash until
+    eviction reclaims it.
     """
     store = await _store_or_skip()
     calc_key = "pgart-overwrite:1"
@@ -114,21 +105,11 @@ async def test_overwriting_a_name_repoints_the_link_without_losing_the_old_blob(
 
 
 def test_relinking_an_artifact_without_a_cost_keeps_what_the_original_run_measured() -> None:
-    """`compute_seconds` is written once and never erased — the eviction ranking depends on it.
+    """Relinking without a cost keeps the `compute_seconds` the original run measured.
 
-    `_UPSERT_LINK` is `ON CONFLICT DO UPDATE`, so any later write to the same `(calc_key, name)`
-    that does not carry a cost would otherwise `SET compute_seconds = NULL`. `put`'s signature
-    makes that the *default* — `compute_seconds` is keyword-only with a `None` default and only
-    `run_cached_with_artifacts` passes one — so a re-`put` from any other path is the ordinary
-    case, not an exotic one.
-
-    A nulled cost is not a cosmetic loss: `_EVICT_TO_FIT` ranks by
-    `COALESCE(MAX(a.compute_seconds) / …, 0)`, and 0 is the bottom of the order. The four-minute
-    Hessian the ranking exists to protect would be evicted *first*, and the next question about
-    that molecule pays for the run again — D-011's cost guarantee inverted by an upsert clause.
-
-    Replacing that line with `compute_seconds = EXCLUDED.compute_seconds,` leaves the whole
-    artifact and eviction suite green (measured: 42 passed).
+    `put` defaults `compute_seconds` to `None`, so most re-puts carry no cost. `_EVICT_TO_FIT` ranks
+    a missing cost as 0, so erasing it would evict the most expensive artifacts first and force
+    their recomputation.
     """
 
     async def _run() -> tuple[float | None, float | None]:

@@ -1,13 +1,8 @@
 """An unreachable Temporal broker says so, once, for every durable tool.
 
-The defect these guard (live run 2026-08-03): `connect()` raised temporalio's raw
-`RuntimeError('Failed client connect: … tonic::transport::Error …')`, MAF collapsed it to
-"Error: Function failed." for the model, and the model — told nothing else —
-**wrote an entire development report by hand** and presented it as having entered the PR-gate.
-The generator never ran.
-
-Every test here drives the real `connect()` against a real closed port: the thing under test is
-precisely what temporalio does on a refused connection, so substituting it would prove nothing.
+Without a clear message the model is told nothing and may fabricate the job's output. Every test
+drives the real `connect()` against a real closed port, since temporalio's behaviour on a refused
+connection is the thing under test.
 """
 
 import asyncio
@@ -36,9 +31,8 @@ def _closed_address() -> str:
 def unreachable_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point `connect()` at a closed port, with a fresh singleton and lock for this test.
 
-    `_CLIENT` must start empty or the warm path returns a cached client and never connects; the
-    lock is replaced because `asyncio.Lock` binds to the first event loop that acquires it, and
-    each test runs its own `asyncio.run`.
+    `_CLIENT` must start empty or the cached client skips connecting; the lock is replaced because
+    `asyncio.Lock` binds to the first event loop that acquires it.
     """
     monkeypatch.setattr(settings, "temporal_address", _closed_address())
     monkeypatch.setattr(temporal_client, "_CLIENT", None)
@@ -48,11 +42,11 @@ def unreachable_broker(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_unreachable_broker_is_named_and_its_consequence_stated(
     unreachable_broker: None,
 ) -> None:
-    """The message must name Temporal, say nothing was queued, and disown the user's input.
+    """The message names Temporal, says nothing was queued, and disowns the user's input.
 
-    All three carry weight. Naming the subsystem stops the model guessing at a chemistry cause;
-    "nothing was queued" is what keeps a chemist from waiting on a job that does not exist; and
-    saying it is an outage stops the retry-with-different-SMILES storm the live run produced.
+    Naming the subsystem stops the model guessing at a chemistry cause, "nothing was queued" stops a
+    chemist waiting on a nonexistent job, and calling it an outage stops retries with different
+    input.
     """
     with pytest.raises(SubsystemUnavailableError) as excinfo:
         asyncio.run(temporal_client.connect())
@@ -79,11 +73,10 @@ def test_the_underlying_transport_error_is_kept_as_the_cause(unreachable_broker:
 def test_a_failed_connect_does_not_poison_the_singleton_or_the_lock(
     unreachable_broker: None,
 ) -> None:
-    """An outage must leave `connect()` able to retry: no cached client, no held lock.
+    """An outage leaves `connect()` able to retry: no cached client, no held lock.
 
-    `connect()` caches its client in a module singleton behind a lock, so a failure that assigned
-    a broken value would make the outage permanent for the process, and one that left the lock
-    acquired would hang every later caller instead of failing them.
+    A cached broken client would make the outage permanent for the process; a held lock would hang
+    every later caller.
     """
 
     async def connect_twice() -> tuple[Exception, Exception]:
@@ -105,12 +98,10 @@ def test_a_failed_connect_does_not_poison_the_singleton_or_the_lock(
 
 
 def test_the_outage_error_is_not_bad_data(unreachable_broker: None) -> None:
-    """It must not be catchable as `ChemclawError`/`ValueError` — see `chemclaw.core.errors`.
+    """The outage error is not catchable as `ChemclawError`/`ValueError`.
 
-    The reject-and-continue boundaries that catch bad data would otherwise swallow an outage as a
-    poison record, and `chemclaw.durable.publish` would classify it non-retryable. Asserted on the
-    real raised instance rather than on the class hierarchy, because the hierarchy is what a future
-    edit would change.
+    Bad-data boundaries would otherwise swallow it as a poison record and `durable.publish` would
+    classify it non-retryable. Asserted on the real raised instance.
     """
     with pytest.raises(SubsystemUnavailableError) as excinfo:
         asyncio.run(temporal_client.connect())

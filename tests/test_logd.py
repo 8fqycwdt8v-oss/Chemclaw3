@@ -1,17 +1,10 @@
-"""The local half of logD: a Crippen sum, one Henderson-Hasselbalch term, and the domain it holds.
+"""The local half of logD: a Crippen sum, one Henderson-Hasselbalch term, and its domain.
 
-logD was decomposed rather than shipped (`D-2026-08-16-the-physics-leaves-the-cache-stays`): its
-expensive half is a *cached* pKa on the calculation server, and everything else is RDKit. So this
-file drives `logd_from_pka` with a `PkaResult` the caller supplies, which is what the tool does with
-whatever the cache served it — no server, no SCF, and the arithmetic under test is exactly the
-arithmetic that runs in production.
-
-What is asserted is the part that stayed and the part that is easy to get silently wrong: the
-**direction** of the correction (it runs the opposite way for a base), the **domain** (one term
-cannot describe two ionised sites), and the site **enumeration** that decides which of those a
-molecule is. The pKa values themselves are the other repository's business, and the ones used below
-are the numbers the shipped predictor produced for these molecules, so the pinned outputs are the
-pinned outputs of the whole composition.
+logD is composed from a cached pKa (calculation server) and RDKit, so these drive `logd_from_pka`
+with a supplied `PkaResult`: the arithmetic under test is what runs in production. Asserted: the
+direction of the correction (opposite for a base), the domain (one term cannot describe two
+ionised sites), and the site enumeration deciding which a molecule is. The pKa values are those
+the shipped predictor produced, so the pinned outputs are the whole composition's.
 """
 
 import math
@@ -62,16 +55,11 @@ def test_logd_increases_as_ph_drops_below_the_pka() -> None:
 
 
 def test_the_uncertainty_is_a_propagation_of_its_two_inputs_and_not_a_copy() -> None:
-    """LogD's error bar is Crippen's RMSE and the pKa's, each carried through its own derivative.
+    """LogD's error bar propagates Crippen's RMSE and the pKa's, each through its own derivative.
 
-    `logD = clogP - log10(1 + 10**(±(pH - pKa)))`, so `dlogD/dclogP = 1` and `dlogD/dpKa` is the
-    **ionised fraction** — between 0 and 1, and near zero for exactly the molecules this
-    composition is allowed to serve, since `_require_a_single_equilibrium` refuses a polyprotic
-    molecule above `logd_negligible_ionised_fraction`. Copying the pKa's residual across is
-    therefore neither a propagation nor, in general, the dominant term.
-
-    Pyridine at pH 7.4 is the measured case: 0.67 % ionised, so the pKa contributes 0.0094 log
-    units of the bar it was reported as the whole of.
+    `dlogD/dclogP = 1` and `dlogD/dpKa` is the ionised fraction, near zero for the molecules this
+    composition serves, so copying the pKa residual is neither a propagation nor usually dominant.
+    Pyridine at pH 7.4 is 0.67 % ionised.
     """
     from chemclaw.core.config import settings
 
@@ -113,15 +101,8 @@ def test_a_fully_ionised_acid_carries_both_terms_in_quadrature() -> None:
 def test_a_base_is_corrected_in_the_other_direction() -> None:
     """Henderson-Hasselbalch runs the opposite way for a base, and the sign is everything.
 
-    A cross-branch regression, invisible to either side alone. This arithmetic was written when the
-    pKa predictor covered acids only, so it hard-coded the acid form
-    `logD = clogP - log10(1 + 10**(pH - pKa))`. X11 widened the predictor to aromatic and aryl
-    nitrogen, and pyridine — which previously *raised* — began flowing into that formula as though
-    it were an acid.
-
-    Measured: pyridine (pKaH 5.4) at pH 7.4 came out at -0.92 against a clogP of 1.08, two full log
-    units too lipophobic, and nothing raised. A base two units *below* the working pH is essentially
-    all neutral, so its logD must be its clogP — which is the assertion.
+    Pyridine (pKaH 5.4) at pH 7.4 is essentially all neutral, so its logD must equal its clogP; the
+    acid form would make it two log units too lipophobic.
     """
     result = logd_from_pka(_pka(_PYRIDINE, 5.4, site="base"), ph=7.4)
     molecule = Chem.MolFromSmiles(result.smiles)
@@ -130,74 +111,57 @@ def test_a_base_is_corrected_in_the_other_direction() -> None:
 
 
 def test_a_polyprotic_acid_is_refused_rather_than_corrected_once() -> None:
-    """One Henderson-Hasselbalch term cannot describe two ionised carboxyls (gate G4).
+    """One Henderson-Hasselbalch term cannot describe two ionised carboxyls, so it refuses.
 
-    Measured on the single-term code: succinic acid at pH 7.4 returned **-1.48 ± 1.6** against a
-    true logD near **-5**. The predictor reports the most acidic site only, so the second carboxyl —
-    ionised at this pH too — contributed nothing, and the error it left is three to four times the
-    uncertainty printed beside it. The second pKa is not obtainable from that predictor at all, so
-    there is no number to correct with and the honest output is none.
+    The predictor reports only the most acidic site, and the second carboxyl is also ionised at
+    pH 7.4, so a single-term answer would be several times outside its printed uncertainty.
     """
     with pytest.raises(CalculationDomainError, match="2 acidic O-H/S-H site"):
         logd_from_pka(_pka(_SUCCINIC_ACID, 4.4), ph=7.4)
 
 
 def test_a_polyprotic_acid_is_still_served_where_no_site_is_ionised() -> None:
-    """The refusal is about ionisation, not about site count — the distinction is the whole rule.
+    """A polyprotic acid is still served where no site is ionised.
 
-    At pH 1 both of succinic acid's carboxyls are neutral, and the predictor reports the *most*
-    acidic of them: every other site is therefore less ionised still, so the one term it omits is
-    bounded and negligible. Refusing here instead would take out every polyol and sugar (O-H,
-    pKa ~15, never ionised in the pH window this calculator serves) for no gain in honesty.
+    At pH 1 every site is less ionised than the most acidic one, so the omitted terms are
+    negligible; refusing would exclude every polyol and sugar for no gain.
     """
     result = logd_from_pka(_pka(_SUCCINIC_ACID, 4.4), ph=1.0)
     assert result.log_d == pytest.approx(result.clogp, abs=0.01)
 
 
 def test_an_amphoteric_molecule_is_refused_rather_than_treated_as_an_acid() -> None:
-    """Glycine must not slip past the aliphatic-amine refusal by also carrying a carboxyl.
+    """An amphoteric molecule (glycine) is refused rather than treated as an acid.
 
-    The bypass, measured: the predictor takes the acid branch whenever *any* O-H is present, so
-    glycine never reached the amine branch that refuses piperidine, and logD came back at **-2.81**
-    with no error at all — one ionisation term, applied to the carboxyl, with the amine that
-    dominates glycine's speciation at pH 7.4 unmodelled and unmentioned. The refusal that already
-    existed was not weak here, it was simply never consulted.
+    The predictor takes the acid branch whenever an O-H is present, so the aliphatic-amine refusal
+    must be consulted too, or the dominant amine ionisation goes unmodelled.
     """
     with pytest.raises(CalculationDomainError, match="amphoteric"):
         logd_from_pka(_pka(_GLYCINE, 2.3), ph=7.4)
 
 
 def test_an_amide_beside_an_acid_does_not_read_as_amphoteric() -> None:
-    """Paracetamol gets a logD: its nitrogen is an amide, and an amide nitrogen is not a base.
+    """Paracetamol gets a logD: an amide nitrogen is not a basic centre.
 
-    The amphoteric refusal above is only honest if it fires on molecules that are actually
-    amphoteric. The site enumeration counted any neutral nitrogen with free valence, so paracetamol
-    — a phenol with an anilide, no basic centre anywhere — was refused a logD along with glycine.
-    One of the most-screened molecules in pharma is not an acceptable casualty of a domain gate,
-    and the fix belonged in the enumeration: an amide's lone pair is conjugated into the carbonyl,
-    and protonated acetamide (pKaH ~ -0.5) protonates on the oxygen.
+    An amide's lone pair is conjugated into the carbonyl (protonated acetamide protonates on
+    oxygen), so the amphoteric refusal must not fire on a phenol with an anilide.
     """
     result = logd_from_pka(_pka(_PARACETAMOL, 9.6), ph=7.4)
     assert result.log_d == pytest.approx(result.clogp, abs=0.01)
 
 
 def test_a_monoprotic_acid_is_unchanged_by_the_multi_site_refusal() -> None:
-    """The exact pre-fix numbers for benzoic acid, pinned so nothing since can shift them.
+    """Benzoic acid's logD is pinned so the multi-site refusal cannot shift a monoprotic result.
 
-    Values recorded from the shipped single-term calculator before the domain check existed, and
-    they survived the move: the Crippen descriptor and the Henderson-Hasselbalch term are both still
-    computed in this process, so the whole composition still lands on `0.2315` given the pKa the
-    predictor produced. A refusal — or a migration — that perturbed the molecules it was meant to
-    leave alone would be a worse bug than the one it fixes, and only a pinned value can tell.
+    A refusal that perturbed the molecules it was meant to leave alone would be worse than the bug
+    it fixes, and only a pinned value can tell.
     """
     result = logd_from_pka(_pka(_BENZOIC_ACID, 6.2784), ph=7.4)
     assert result.clogp == pytest.approx(1.3848, abs=1e-4)
     assert result.pka == pytest.approx(6.2784, abs=1e-3)
     assert result.log_d == pytest.approx(0.2315, abs=1e-3)
-    # The *uncertainty* deliberately did move: it was the pKa residual copied across, and is now
-    # that residual carried through `dlogD/dpKa` and combined with Crippen's own RMSE. Benzoic acid
-    # at pH 7.4 is 93 % ionised, so almost all of the pKa term survives the derivative and the bar
-    # grows rather than shrinks — see `test_a_fully_ionised_acid_carries_both_terms_in_quadrature`.
+    # The uncertainty is the pKa residual carried through `dlogD/dpKa` and combined with Crippen's
+    # RMSE; benzoic acid at pH 7.4 is 93 % ionised, so most of the pKa term survives.
     assert result.uncertainty == pytest.approx(1.6356, abs=1e-4)
 
 
@@ -253,26 +217,13 @@ def test_a_monoprotic_acid_is_unchanged_by_the_multi_site_refusal() -> None:
 def test_ionisable_sites_counts_only_sites_that_are_really_sites(
     smiles: str, acidic: int, basic: int, why: str
 ) -> None:
-    """The enumeration the amphoteric and polyprotic refusals both read, and its exclusions.
+    """`_ionisable_sites` counts only sites with an available lone pair or acidic proton.
 
-    Free valence says a lone pair *exists*; it does not say the pair is available. Three classes
-    have one that is not — amide/carbamate/urea/sulfonamide, nitrile, and pyrrole-type aromatic
-    nitrogen — and each exclusion is a delocalized or unavailable lone pair rather than a
-    convenience. Counting them instead is what put imidazole (one basic centre) and paracetamol (no
-    basic centre) outside the single-equilibrium domain they belong in.
-
-    **Duplicated across the repository boundary now**, deliberately: this mirrors the enumeration
-    the pKa predictor runs before any xTB, it is pure graph inspection, and asking the server for it
-    would cost a round trip on a refusal path. It is therefore exactly as good as that enumeration
-    and no better, which is what the docstring says and what this table pins.
-
-    **The rules are an RDKit SMARTS table now, and this table is the whole of what changed about
-    them — which is nothing.** ~80 lines of `GetBonds()` walking became `_ACIDIC_SITE` and
-    `_BASIC_SITE`, and the transcription was proven rather than reviewed: both implementations were
-    run over 742 molecules on 2026-09-16 — this file's fixtures, every `records.csv` structure in
-    the sibling `Chemclaw3-mcp` fleet, every `compound_smiles` in `data/`, and a 592-molecule
-    systematic sweep pairing 24 left fragments with 26 right ones — with **0 disagreements**. The
-    rows below are the same table's readable half, one per arm of the two patterns.
+    Amide/carbamate/urea/sulfonamide, nitrile and pyrrole-type nitrogen have delocalized or
+    unavailable lone pairs and are excluded, which keeps imidazole and paracetamol in the
+    single-equilibrium domain. The enumeration mirrors the pKa predictor's (pure graph inspection,
+    so no round trip on a refusal path) and is no better than it. The rules are the RDKit SMARTS
+    patterns `_ACIDIC_SITE` and `_BASIC_SITE`; each row is one arm of them.
     """
     sites = ionisable_sites(smiles)
     assert (sites.acidic, sites.basic) == (acidic, basic), why

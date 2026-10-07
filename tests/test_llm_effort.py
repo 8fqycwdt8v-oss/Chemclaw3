@@ -1,22 +1,8 @@
-"""The reasoning-effort knob reaches the constructed client, and is absent from the request unset.
+"""The reasoning-effort knob reaches the request payload, and is absent from it when unset.
 
-**Asserted on the request payload rather than on a captured kwargs dict**, which is the house
-pattern in `tests/test_llm_provider.py` and here it is load-bearing rather than stylistic:
-`ChatOpenAI` is `extra="ignore"`, so a kwarg it stopped accepting — a rename upstream, a client
-swap — would be **dropped in silence**, as would one a gateway does not understand. A test that
-asserted "we passed `reasoning_effort=`" would stay green through exactly that failure while every
-turn ran at the endpoint's default effort.
-
-The absence case is the other half and is not symmetric with it: "unset" has to mean the key is
-missing from the request rather than present and null, because some OpenAI-compatible endpoints
-reject an explicit null — the rule `core/config/llm.py` records having broken every turn once.
-
-**Half this file used to be about a refusal, and the refusal is gone.** Two guards — a settings
-validator and a check inside `build_chat_model` — existed because `langchain-anthropic` turned the
-same kwarg into extended thinking. With one gateway there is one meaning
-(`D-2026-09-04-a-gateway-is-the-only-provider`), so `effort` is unconditionally usable and the
-tests that drove the refusal are deleted rather than inverted. What survives from them is the
-*method*: read the payload, never the attribute.
+Asserted on the payload, because `ChatOpenAI` is `extra="ignore"`: a kwarg it stopped accepting
+would be dropped silently while an attribute check stayed green. "Unset" means the key is
+missing, not null, because some OpenAI-compatible endpoints reject an explicit null.
 """
 
 from typing import Any
@@ -36,17 +22,9 @@ def _openai(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_configured_effort_reaches_the_wire(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Asserted on the **request payload**, not on the constructed object.
+    """The configured effort reaches the request payload built by `_default_params`.
 
-    The first version of this file asserted `model.reasoning_effort == "high"` and called that
-    proof the feature worked. It is not: `ChatOpenAI` is an `extra="ignore"` pydantic model, so the
-    attribute says the constructor accepted a kwarg and says nothing about what is sent. That gap
-    is where a real defect lived — the same attribute assertion passed against the second client
-    this seam used to have, while the wire carried `output_config` plus injected extended thinking.
-    A gateway that silently ignores the parameter is the same gap, one hop further out.
-
-    `_default_params` is what `ChatOpenAI` builds its request from, so this reads the payload the
-    endpoint would receive.
+    An attribute assertion only proves the constructor accepted the kwarg, not what is sent.
     """
     _openai(monkeypatch)
     monkeypatch.setattr(settings, "llm_effort", "high")
@@ -59,11 +37,10 @@ def test_the_configured_effort_reaches_the_wire(monkeypatch: pytest.MonkeyPatch)
 def test_an_unset_effort_leaves_the_parameter_off_the_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shipped default sends nothing — an absent key, not a null one.
+    """The shipped default sends nothing: an absent key, not a null one.
 
-    This is the case that protects every existing deployment: a 400 from a parameter an endpoint
-    dislikes is deliberately *not* failed over (`_failover_exceptions`), so a knob that defaulted
-    to sending something would fail every turn on an endpoint that had never been asked about it.
+    A 400 for a disliked parameter is deliberately not failed over, so a default that sent something
+    would break every turn on an endpoint that never expected it.
     """
     _openai(monkeypatch)
     monkeypatch.setattr(settings, "llm_effort", None)
@@ -98,11 +75,10 @@ def test_a_profile_that_states_no_effort_inherits_the_deployment_s(
 def test_the_fallback_endpoint_thinks_no_harder_than_the_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A degraded turn must not quietly exceed the effort the profile asked for.
+    """The fallback endpoint gets the same effort as the primary.
 
-    The failover instance is built by a second call to `_openai_compatible_model`, so it is a
-    separate place the parameter has to arrive — and the one a reader is most likely to forget,
-    because nothing exercises it until an endpoint is already down.
+    The failover instance is built by a second `_openai_compatible_model` call, a separate place the
+    parameter must arrive, and exercised only when an endpoint is down.
     """
     _openai(monkeypatch)
     monkeypatch.setattr(settings, "llm_fallback_base_url", "http://fallback.invalid/v1")
@@ -116,13 +92,10 @@ def test_the_fallback_endpoint_thinks_no_harder_than_the_primary(
 
 
 def test_the_profile_field_and_the_settings_field_accept_the_same_set() -> None:
-    """One vocabulary, pinned in both directions.
+    """The profile field and the settings field accept the same effort vocabulary.
 
-    `AgentProfile` deliberately imports no settings module, so the two `Literal`s are written out
-    twice and nothing but this test stops them drifting — a profile accepting a value the
-    deployment setting refuses (or the reverse) would be a knob whose meaning depended on where it
-    was spelled. The same invariant `tests/test_profile_autonomy_validation.py` holds for
-    `harness_autonomy`.
+    `AgentProfile` imports no settings module, so the two `Literal`s are written twice and only this
+    test stops them drifting.
     """
 
     def _values(annotation: Any) -> set[str]:
@@ -140,11 +113,10 @@ def test_the_profile_field_and_the_settings_field_accept_the_same_set() -> None:
 
 
 def test_a_misspelled_effort_value_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A typo is a loud error, not a silently ignored knob.
+    """A misspelled effort value is refused at load time.
 
-    `ChatOpenAI` is `extra="ignore"` and types the field `str | None`, so nothing
-    downstream would object to `"hihg"` — it would reach the endpoint and come back a 400 that is
-    not failed over, on every turn. The `Literal` is what turns that into a refusal at load time.
+    `ChatOpenAI` types the field `str | None`, so a typo would reach the endpoint and 400 on every
+    turn; the `Literal` turns it into a load-time refusal.
     """
     with pytest.raises(ValueError, match="effort"):
         AgentProfile(name="typo", effort="hihg")  # type: ignore[arg-type]
@@ -153,18 +125,10 @@ def test_a_misspelled_effort_value_is_refused(monkeypatch: pytest.MonkeyPatch) -
 def test_effort_is_no_longer_refused_anywhere_and_reaches_the_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The widening this collapse bought, asserted on the wire rather than announced in a comment.
+    """Effort from both the settings and a profile reaches the payload without refusal.
 
-    Two guards used to refuse a non-`None` effort: `LlmSettings._effort_is_provider_scoped` for the
-    deployment setting, and a `RuntimeError` inside `build_chat_model` for `AgentProfile.effort`,
-    which never passes through a settings validator. Both existed because `langchain-anthropic`
-    folded the kwarg into `output_config` *and* injected `thinking={'type': 'adaptive'}` — a
-    different feature, with a `temperature` conflict and a claim on `llm_max_tokens`.
-
-    With one client there is one meaning, so a profile's effort now simply arrives. Asserted from
-    *both* inputs, because the two guards were separate and their removal has to be too — and on
-    `_default_params`, because a gateway that does not understand `reasoning_effort` drops it in
-    silence and the attribute would say nothing about that.
+    Asserted from both inputs, on `_default_params`, since a gateway that does not understand
+    `reasoning_effort` would drop it silently.
     """
     _openai(monkeypatch)
     monkeypatch.setattr(settings, "llm_effort", None)

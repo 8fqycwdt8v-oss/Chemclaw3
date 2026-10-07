@@ -1,82 +1,16 @@
-"""The second layering policy: which package may import which *third-party stack*.
+"""The second layering policy: which package may import which third-party stack.
 
-`tests/test_layering.py` derives the real package→package import graph and checks it against a
-declared policy — but it records an import only `if target.startswith("chemclaw")`
-(`_ImportVisitor._record`). So it enforces the *first-party* half of the layering rules and none of
-the third-party half, which is the half every architecture document actually writes down:
+`tests/test_layering.py` polices first-party edges only. This file AST-walks every file, buckets
+each import by scope, and checks the derived (package, stack) graph against three tables:
+`_ALLOWED_MODULE_STACKS` (the package owns that stack), `_ALLOWED_LAZY_STACKS` (function-scope
+only) and `_KNOWN_LEAKS` (forbidden but present, keyed by file so a leak cannot grow). Every row
+must still be observed, so a stale row cannot re-bless an edge. `_STACKS` is a watch-list: only
+roots with layering meaning are mapped, so a new significant dependency must be added there.
+A separate ratchet, `_KNOWN_PRIVATE_IMPORTS`, covers private-module imports of any dependency.
 
-- `CLAUDE.md`: "Durability lives **only** in Temporal, never in the conversation layer's own
-  ad-hoc stores."
-- `CLAUDE.md`: "merging them would put Temporal imports inside the physics" (`science/` vs bundle).
-- `science/README.md`: "None of these import Temporal, MCP, FastAPI or `chemclaw.agent` … and
-  `tests/test_layering.py` keeps it that way."
-
-Measured, only the last clause of that last sentence was true: `science/` *is* clean, but
-`import temporalio` in `science/`, `import langgraph` in `durable/` and `import fastapi` in
-`kg/` all passed every test in this repo. This file is the missing half, in the same shape as the
-first-party one: AST-walk every file, bucket each import by scope, check the derived graph against
-a small hand-authored policy.
-
-**Three dictionaries for the stack policy, deliberately not one** (a fourth,
-`_KNOWN_PRIVATE_IMPORTS`, answers a different question further down). An allow-list that mixes
-"this stack *is* that layer's job" with "this is a violation nobody has fixed yet" is how a policy
-stops meaning anything, so the two are separate and named for what they are:
-
-- `_ALLOWED_MODULE_STACKS` — the package owns that stack; the row carries the sentence that says so.
-- `_ALLOWED_LAZY_STACKS` — the package may touch it only inside a function, deliberately.
-- `_KNOWN_LEAKS` — the architecture forbids it, it exists anyway, and the row names the reason it
-  is not fixed here. Keyed by **file**, not by package, so a third module joining an existing leak
-  fails: blessing `chemclaw.agent → temporal` wholesale would have made the leak's own growth
-  invisible, which is the failure mode this file exists to prevent.
-
-**Pinned in both directions.** Every declared row must still be observed in the tree. Without that
-the policy is a snapshot: delete the leaking import and the row sits there re-blessing it for the
-next author who reaches for it. `test_layering.py` does the same for its `_CYCLE_EDGES`.
-
-**`_STACKS` is a named watch-list, not a dependency scan.** Only roots that carry a layering
-meaning are mapped; `pydantic`, `numpy`, `yaml`, `networkx`, `pypdf` create no layer edge and are
-absent on purpose. That is a real limit — a stack nobody named cannot be policed — so a new
-architecturally-significant dependency belongs in `_STACKS` at the same time it enters the lockfile.
-
-**That limit bounds the stack policy and nothing else.** It used to bound the private-import
-ratchet too, because both questions were asked through the same early return, and the effect was
-that a rule whose whole subject is "an unbounded dependency moves a private name" saw eight
-distributions. Measured: `import pydantic._internal._model_construction` in `kg/graph.py` passed
-this file, all eight tests. The two questions are separate now — a layer edge needs a named stack,
-reaching into a dependency's internals does not — and the ratchet covers every root that is not
-first-party. It flags nothing today: measured over `src/`, all 31 underscore-prefixed imports name
-`chemclaw` itself, which is a different question (`tests/test_layering.py`'s) and not this one's.
-
-**The other limits, each measured rather than supposed.** A review enumerated what this policy
-provably cannot see, and every item below is written down because a limit nobody states reads as
-coverage:
-
-- **A composed hop.** `from chemclaw.core.temporal_client import Client` in `science/` passes: it
-  is a first-party import, so this file never sees it, and `test_layering.py` sees a declared
-  `science → core` edge. `core → temporal` is separately declared. Neither policy composes hops,
-  so a science module can obtain a live Temporal `Client` through two individually-legal steps.
-  This is the sharpest hole and it is **not** closed here — closing it means a re-export policy
-  ("which first-party symbols carry a stack with them"), which is a design decision, not a walk.
-  Tracked in `BACKLOG.md`.
-- **A dynamic import**, which defeats both rules for one reason. `importlib.import_module(
-  "temporalio")` in `science/` passes the stack policy and `importlib.import_module(
-  "pydantic._internal")` passes the private ratchet: an AST walk cannot resolve a string, and a
-  rule banning `importlib` outright would be a different rule. This is the residual the ratchet
-  keeps after it stopped being limited to named roots.
-- **Attribute access, on either rule.** `sys._getframe`, or `pydantic._internal` reached as an
-  attribute of an already-imported `pydantic`, is not an `import` statement and is not seen. The
-  rule is about what a module *imports*, which is what breaks at process start.
-- **An aliased clock of a root** — anything that reaches a stack without naming its distribution
-  root in an `import` statement.
-- **Package-keyed allowed rows against file-keyed leaks.** `_KNOWN_LEAKS` is keyed by file so a
-  leak cannot grow quietly, and `_ALLOWED_MODULE_STACKS` is keyed by package on purpose: an
-  allowed edge is a *design decision about a layer* ("layer 1 IS LangGraph"), where a leak is *debt
-  about a file*. The cost is real and worth naming: `("chemclaw.connectors", "langgraph")` says
-  "connectors/transport.py builds the tool objects — the one adapter point", and that sentence is
-  true of one file out of 54 while the row licenses all of them. Narrowing those rows to files
-  would mean re-deciding, per file, what is currently one architectural sentence — and would make
-  ordinary growth inside a layer that owns a stack fail the build. The row's *reason* is prose
-  about intent; the row itself is about the layer.
+Known limits: a composed first-party hop (science → core → temporal), dynamic imports via
+`importlib`, attribute access to private names, and package-keyed allowed rows licensing every
+file in a layer.
 """
 
 from __future__ import annotations
@@ -95,14 +29,8 @@ _SRC_ROOT = _REPO_ROOT / "src" / "chemclaw"
 # `fastapi` + `starlette` + `sse_starlette` + `uvicorn`); the policy is written about the stack.
 _STACKS: dict[str, str] = {
     "temporalio": "temporal",
-    # Layer 1 (D-2026-08-10). The `maf` label that stood beside these until M13 is gone with the
-    # dependency: `agent-framework-*` is out of `pyproject.toml`, and a root nothing can install is
-    # a row this file's own both-directions pinning would fail on anyway.
-    #
-    # `langchain_openai`/`langchain_anthropic` are deliberately **not** here: they are provider
-    # SDK wrappers, so they belong to the `llm` stack beside `openai` and `anthropic`, and giving
-    # them the framework's label would let any package holding the framework row build a model
-    # client. That is the distinction `agent/llm_provider.py` exists to keep.
+    # Layer 1. The provider wrappers `langchain_openai`/`langchain_anthropic` belong to the `llm`
+    # stack instead, so holding the framework row does not license building a model client.
     "langchain": "langgraph",
     "langchain_core": "langgraph",
     "langgraph": "langgraph",
@@ -123,83 +51,39 @@ _STACKS: dict[str, str] = {
     "torch": "ml",
     "linear_operator": "ml",
     "httpx": "httpx",
-    # The client half of SSE, on the `httpx` stack for the same reason `sse_starlette` sits on the
-    # server half's: it is an `httpx.AsyncClient` extension, not a stack of its own, and a root
-    # nobody maps is a root this walk cannot see. Without the row `import httpx_sse` in `science/`
-    # would pass the policy that exists to keep an HTTP client out of the physics.
+    # The client half of SSE, an `httpx.AsyncClient` extension, so it shares the `httpx` stack.
     "httpx_sse": "httpx",
     "openai": "llm",
     "anthropic": "llm",
-    # The warehouse driver's client. Tracked here so its lazy import is a *declared* exception
-    # rather than one this file simply cannot see — an untracked root is invisible to the walk,
-    # which would make "no undeclared third-party import" a weaker claim than it reads as.
-    # `databricks-vectorsearch` is a different matter: the vector adapter reaches it through
-    # `importlib.import_module`, a string no AST walk resolves, and
-    # `retrieval/vectors/databricks.py` says so in its own docstring.
+    # The warehouse driver's client, tracked so its lazy import is a declared exception.
+    # `databricks-vectorsearch` is reached via `importlib.import_module`, which no AST walk
+    # resolves.
     "databricks": "warehouse",
-    # Added after a review measured what `_STACKS` was leaving unpoliced. Three roots present in
-    # `src/` carry a layering meaning the first version missed; the rest of what it flagged
-    # (`pydantic`, `numpy`, `yaml`, `networkx`, `frontmatter`, `openpyxl`, `pypdf`, …) is correctly
-    # absent for the reason the module docstring gives.
-    #
-    # `jwt` is the most consequential of the three. F4's architecture is "one authorization gate,
-    # `require_actor` reject-if-absent": a second module that validates a token is the worst
-    # layering violation this system can have, and `import jwt` in `science/`, `connectors/` or
-    # `kg/` is exactly what that looks like in source.
+    # `jwt`: there is one authorization gate, so a token-validating import anywhere else is the
+    # worst layering violation this system can have.
     "jwt": "token",
-    # Key material. **No package imports it today**, which is why the row is kept rather than
-    # deleted: the one site was a warehouse driver's key-pair auth, and a `cryptography` import
-    # reappearing outside the identity path is a thing to notice in review rather than to discover
-    # afterwards. There is no allowed `(package, "crypto")` row below, so any such import fails this
-    # file. (The review that asked for the original row placed it in `api/auth.py` alongside `jwt`;
-    # measured, it is not there and never was — `api/auth.py` imports `jwt` only.)
+    # Key material. No package imports it today and there is no allowed `crypto` row, so any import
+    # outside the identity path fails here.
     "cryptography": "crypto",
-    # The xTB engine itself. **No package may import it any more**, which is the point of keeping
-    # the row: `D-2026-08-16-the-physics-leaves-the-cache-stays` moved the engines to
-    # `Chemclaw3-mcp`, so an `import tblite` reappearing anywhere in this tree is a copy of a
-    # capability that lives elsewhere — the second-copy failure D-148 forbids, arriving as a
-    # dependency rather than as a directory. There is no allowed `(package, "xtb")` row below, so
-    # any such import fails this file rather than needing to be noticed in review.
+    # The xTB engine lives in `Chemclaw3-mcp`; there is no allowed `xtb` row, so any import here
+    # fails.
     "tblite": "xtb",
-    # The unit registry behind `core/units.py`, with the two roots its own distribution pulls in.
-    # All three carry one layering meaning and so share one label: **only the kernel may hold a
-    # unit registry.** A `pint` import in `science/`, `connectors/` or `publish/` would be a second
-    # answer to "how many kJ/mol is a hartree" — the failure `core/units.py` exists to end, arriving
-    # as a dependency rather than as a literal, and the one it already had three times when the
-    # constant was written out in three files. `flexparser` and `flexcache` are `pint`'s definition
-    # parser and its cache: no first-party module imports either, and mapping them is what makes
-    # that a checked fact rather than an assumption — an unmapped root is invisible to this walk,
-    # so the policy would pass a module that imported one directly to reach pint's internals.
+    # The unit registry behind `core/units.py`, with the two roots its distribution pulls in. Only
+    # the kernel may hold a unit registry; mapping `flexparser`/`flexcache` keeps a direct reach
+    # into pint's internals visible.
     "pint": "units",
     "flexparser": "units",
     "flexcache": "units",
-    # The BPE tokenizer, mapped although the import is lazy and inside one function: an *unmapped*
-    # root is skipped by the walk entirely, which is this file's own stated blind spot and is how
-    # `httpx_sse` and `pint` both reached the tree unpoliced. Its own stack, not `llm`, because the
-    # `llm` rows license *building a model client* and counting tokens is the opposite question —
-    # `agent/context_budget.py` measures a request without dialling anything.
+    # The BPE tokenizer, mapped although its import is lazy, since an unmapped root is invisible.
+    # Its own stack rather than `llm`: counting tokens is not building a model client.
     "tiktoken": "tokenizer",
-    # The three roots the same review wave added and then did **not** map, found by two independent
-    # readers of the commit that wrote the blind-spot comment four lines above. That is the comment
-    # being right about `httpx_sse` and `pint` and blind about its own diff: `flexparser` and
-    # `flexcache`, which no first-party module imports, were mapped, while `pathspec` and
-    # `charset_normalizer` — real module-scope imports in `ingest/documents/` — were not, so the
-    # walk skipped them entirely and the ADR's "every new root mapped to a stack" held nothing
-    # about two of its own six adoptions.
-    #
-    # `share` rather than a stack of their own, and one label for both, because they carry the same
-    # single layering meaning: **only the document-share reader decides what a file on a mounted
-    # share is.** A `pathspec` import outside `ingest/` would be a second answer to "is this path
-    # excluded" and a `charset_normalizer` one would be a second answer to "what encoding is this",
-    # and the share is the only place in this tree that may ask either.
+    # Only the document-share reader decides what a file on a mounted share is: whether a path is
+    # excluded (`pathspec`) and what encoding it has (`charset_normalizer`).
     "pathspec": "share",
     "charset_normalizer": "share",
-    # `numpy` stays deliberately unmapped for the reason the docstring gives — it is arithmetic, and
-    # every layer may do arithmetic. `scipy` is not that: its submodules are separate capabilities
-    # (`sparse` a data structure, `linalg` an eigensolver, `constants` the CODATA tables), and each
-    # one is a thing a layer either may or may not reach for. One label rather than three, because
-    # `_STACKS` is keyed by *root* and a submodule split would be a distinction this walk cannot
-    # make; the per-row reasons below are where the difference is written down.
+    # `numpy` stays unmapped because every layer may do arithmetic. `scipy`'s submodules are
+    # separate capabilities, but `_STACKS` is keyed by root, so one label; the per-row reasons say
+    # which is used.
     "scipy": "scipy",
 }
 
@@ -212,10 +96,8 @@ Site = tuple[str, str]  # (path relative to the repo root, stack or target modul
 
 # One row per (package, stack) the architecture states is that package's job.
 _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
-    # --- `scipy`, four rows, and three of them are older than the row that declares them. ------
-    # Mapping `scipy` made the walk see imports it had skipped since they were written: only
-    # `memory/similarity.py` is this review wave's. The other two are pre-existing and were
-    # unpoliced, which is the blind spot stated for new roots turning out to apply to old ones too.
+    # --- `scipy`: one row per package that uses it.
+    # ------------------------------------------------
     ("chemclaw.memory", "scipy"): (
         "similarity clustering: one `csr @ csr.T` and one `connected_components` in place of an "
         "O(n^2) Python pairwise loop over the same fingerprints"
@@ -242,29 +124,16 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
         "restricted (`pint.UnitRegistry(None)` plus a declared definition list), and a second one "
         "built anywhere else would be a second registry with a different idea of what a percent is"
     ),
-    # `core/mcp_session.py` is the one *outbound* MCP client session, beside `core/db.py`'s pool and
-    # `core/http.py`'s client factory. It is here rather than in `connectors/` because the second
-    # caller is `ingest/labels/labeller.py`, and `ingest -> connectors` is not an edge this tree
-    # has: putting it there would have meant either a new layering edge or a second copy of four
-    # separately-measured hazards (the connect bound behind a long read bound, the timeout ordering
-    # that decides whether a lost answer raises, the credential-rejection walk through the task
-    # group's ExceptionGroup, and the internal-error string that decides retry-or-die).
-    #
-    # Note the direction: this is a *client*. `connectors -> mcp` below is the server half, and the
-    # two allowances are independent — the kernel serves nothing.
+    # `core/mcp_session.py` is the one outbound MCP client session. It lives in the kernel because
+    # `ingest/labels/labeller.py` also needs it and `ingest -> connectors` is not an edge. This is
+    # the client; `connectors -> mcp` below is the server half.
     ("chemclaw.core", "mcp"): (
         "core/mcp_session.py is the one outbound MCP client session; its second caller is in "
         "ingest/, which may not import connectors/"
     ),
     # `core/turn_signals.py` publishes a turn's out-of-band signals through `get_stream_writer()`.
-    #
-    # This is a real coupling the contextvar it replaced did not have, and it is declared rather
-    # than worked around because the alternative is worse. The recording ends are `connectors/` and
-    # `templates/` — a connector job and a template step both announce their launch — so moving the
-    # module into `agent/` would make capability code import layer 1, which is the one direction
-    # this file exists to prevent. The kernel already owns the other engines' single primitives on
-    # everyone's behalf (`core/db.py` the pool, `core/temporal_client.py` the client-per-process);
-    # the stream writer is that same kind of thing, and one publish call is the whole of it.
+    # Its recorders are `connectors/` and `templates/`, so placing it in `agent/` would make
+    # capability code import layer 1; the kernel owns shared engine primitives like this one.
     ("chemclaw.core", "langgraph"): (
         "core/turn_signals.py publishes a turn's signals on the graph's custom stream; the "
         "recording ends are connectors/ and templates/, so this cannot live in agent/"
@@ -324,11 +193,9 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.science", "rdkit"): "the cheminformatics toolkit is the engine",
     ("chemclaw.science", "ml"): "science/bo is BoFire on BoTorch on torch",
     ("chemclaw.science", "postgres"): "the calculation cache is a table (D-011)",
-    # the leaf packages: each owns its own tables and nothing else.
-    # publish: the outbound result seam (D-2026-08-25). It reaches an external results store, so
-    # a database client and an HTTP client are its two shipped drivers rather than an exception to
-    # anything — the seam exists precisely to hold them. `postgres` is also the *local* outbox,
-    # which is a table like every other durable queue in this tree.
+    # The leaf packages: each owns its own tables and nothing else.
+    # publish: the outbound result seam. A database client and an HTTP client are its shipped
+    # drivers, and `postgres` is also its local outbox.
     ("chemclaw.publish", "postgres"): (
         "the outbox is a table, and the shipped SQL driver reaches a Postgres results store"
     ),
@@ -382,11 +249,8 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
 # Function-scope-only exceptions: a stack this package must not depend on at *import* time. The
 # asymmetry with the dict above is the point — each row is a deliberate lazy import.
 _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
-    # A row for the kernel's one *framework* import was here — `configure_telemetry` calling the
-    # conversation framework's OTel bootstrap inside the function. That bootstrap is now written
-    # out against the OTel SDK directly, so the kernel names no conversation framework at any
-    # scope, and the row went with the import: this file's own rule is that a declared row must
-    # still be observed in the tree, or it re-blesses the edge for the next author.
+    # The kernel names no conversation framework at any scope; telemetry bootstraps the OTel SDK
+    # directly.
     ("chemclaw.agent", "tokenizer"): (
         "agent/context_budget.py resolves the encoding inside `_encoding()`, so a deployment "
         "with no baked merge table never imports it at all — the fallback to the chars/4 "
@@ -448,18 +312,11 @@ _KNOWN_LEAKS: dict[Site, str] = {
     ),
 }
 
-# Imports of a *private* module of any dependency: `langgraph.prebuilt._internal` is not API, and
-# every dependency here is floor-pinned with no upper bound, so a patch release that moves any such
-# symbol is an ImportError at process start of both the front door and the worker. The risk is not
-# hypothetical — it is what this rule was written from: layer 1's previous framework had already
-# moved two symbols out of its package top level, and two chemclaw modules were importing them from
-# a private one. Nothing in that argument is about any particular vendor, so the rule is not
-# restricted to `_STACKS`'s roots; `pydantic._internal` is the same bet. Keyed by (file, target).
+# Imports of a private module of any dependency. Dependencies are floor-pinned with no upper bound,
+# so a patch release moving such a symbol is an ImportError at process start. Applies to every
+# non-first-party root, not just `_STACKS`. Keyed by (file, target).
 _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
-    # It was empty for a while, and that emptiness was the point: the two rows that lived here were
-    # removed rather than re-blessed, and then the framework they named was removed too. The ratchet
-    # above is what deleted them — a private import that gains a public home, or goes away, loses
-    # its row on the next run.
+    # Empty on purpose: a private import that gains a public home or goes away loses its row.
     (
         "src/chemclaw/agent/turn_usage.py",
         "langchain_openai.chat_models.base._create_usage_metadata",
@@ -505,8 +362,7 @@ _KNOWN_PRIVATE_IMPORTS: dict[Site, str] = {
 
 # ---------------------------------------------------------------------------------------------
 # The walk. Same scope rules as tests/test_layering.py, with one difference: `if TYPE_CHECKING:`
-# is its own bucket rather than being discarded, so an annotation-only stack import is visible
-# instead of silently exempt.
+# is its own bucket rather than being discarded, so an annotation-only stack import is visible.
 # ---------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class _Imp:
@@ -558,16 +414,11 @@ class _Visitor(ast.NodeVisitor):
             self.visit(stmt)
 
     def _record(self, target: str, lineno: int) -> None:
-        """Keep an import if it carries a layer edge, or if it reaches into *any* dependency.
+        """Keep an import if it carries a layer edge, or if it reaches into any dependency's
+        internals.
 
-        Two questions, deliberately not one gate. The stack policy is about named roots and
-        early-returns for anything `_STACKS` gives no layering meaning — that is the watch-list the
-        module docstring describes. The private-import ratchet is about a versioning bet nobody
-        made on purpose, and that bet is identical whichever distribution is on the other end of
-        it: `pydantic._internal`, `networkx.algorithms._x` and `langgraph._internal` all move
-        without a major bump. Filtering both questions through `_STACKS` made the ratchet see eight
-        roots while its docstring implied it saw the tree; an unstacked private import is kept with
-        `stack=""`, which `_edges` skips and no policy row can match.
+        The stack policy concerns only `_STACKS` roots; the private-import ratchet concerns every
+        dependency. An unstacked private import is kept with `stack=""`, which `_edges` skips.
         """
         parts = target.split(".")
         stack = _STACKS.get(parts[0], "")
@@ -587,14 +438,11 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        """Record the module, or — when private names are pulled from it — each of those.
+        """Record the module, or, when private names are pulled from it, each of those.
 
-        `from langgraph import _internal` reaches into private API exactly as
-        `from langgraph._internal import x` does, and recording only `node.module` made the first
-        form invisible to `_private_imports`: measured, it passed the whole file. It is also the
-        form a package re-exporting its own internals produces, so it is the likely one. The
-        target is spelled `<module>.<name>` so `(file, target)` still identifies the import, and
-        the `(package, stack)` edge is unchanged either way — the distribution root is the same.
+        `from langgraph import _internal` reaches private API just as `from langgraph._internal
+        import x` does. The target is spelled `<module>.<name>`; the `(package, stack)` edge is
+        unchanged.
         """
         if node.level != 0:  # a relative import is first-party by construction
             self.generic_visit(node)
@@ -623,10 +471,7 @@ _IMPORTS = _collect()
 def _edges(scope: str) -> dict[Edge, list[_Imp]]:
     """The (package, stack) edges observed at one scope, keyed by edge.
 
-    Imports with no stack are dropped rather than keyed as a `(package, "")` edge: they are in
-    `_IMPORTS` only because the private-import ratchet asked for them, they carry no layering
-    meaning by construction, and an empty-stack edge matches no policy row — so keeping them would
-    report one private import twice, once under a rule that has nothing to say about it.
+    Imports with no stack are present only for the private-import ratchet and are dropped here.
     """
     out: dict[Edge, list[_Imp]] = defaultdict(list)
     for imp in _IMPORTS:
@@ -740,22 +585,11 @@ def _image_install_commands() -> list[str]:
 
 
 def test_the_xtb_engine_is_not_in_the_runtime_closure() -> None:
-    """The sibling of the `tblite` row above, asked of the manifest *and* of the image reading it.
+    """The xTB engine is not in the runtime closure, in the manifest or in the image.
 
-    Forbidding the *import* left the *dependency* declared, so the runtime image still installed a
-    compiled quantum-chemistry library that nothing in `src/` could legally call. What kept it there
-    was a test: `tests/test_solvents.py` re-derives `ALPB_SOLVENTS` against the installed copy. That
-    is the right check, so the package stays — in the dev group, where a test dependency belongs,
-    rather than in every deployed pod.
-
-    **The second half is here because an audit defeated the first.** This test cited
-    `deploy/Containerfile`'s `uv sync --frozen --no-dev` as the mechanism that keeps the dev group
-    out of the image, and then never read the Containerfile — so deleting `--no-dev` reshipped the
-    compiled engine to every pod with this green. A manifest that files a dependency under `dev`
-    means nothing on its own; it is the *install command* that decides what a pod gets, and a
-    docstring naming a mechanism is not the mechanism. Both are asserted now, and the flag is
-    checked as a decision rather than as a word: a later `--all-groups` on the same command takes
-    `--no-dev` back.
+    `tblite` stays in the dev group for `tests/test_solvents.py`. A dev-group dependency stays out
+    of pods only if the install command excludes it, so `deploy/Containerfile`'s `--no-dev` is
+    asserted too, and a later `--all-groups` on that command counts as undoing it.
     """
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     runtime = pyproject["project"]["dependencies"]

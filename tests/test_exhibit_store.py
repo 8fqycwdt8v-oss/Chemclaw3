@@ -1,9 +1,8 @@
 """The artefact store on both backends, and the lifecycle a conversation's artefacts follow.
 
-`InMemoryExhibitStore` is a real backend — what a deployment without Postgres runs on — so every
-behavioural test is parametrized over both, and a failure names which one. The Postgres-only tests
-are the ones about rows a database keeps: the cascade from header to revisions on a session delete,
-an erasure, and a retention sweep.
+`InMemoryExhibitStore` is a real backend, so behavioural tests are parametrized over both. The
+Postgres-only tests cover rows a database keeps: the session-delete cascade, an erasure and a
+retention sweep.
 """
 
 from typing import Any
@@ -264,13 +263,11 @@ async def test_an_artefact_at_its_revision_cap_is_refused_another(
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 async def test_the_chemists_figures_are_read_as_recorded_each_once(backend: str) -> None:
-    """What the grounding check reads: each figure people introduced, once, in order.
+    """The grounding check reads each figure people introduced, once, in order.
 
-    Recorded at write time, so the read parses no spec for a recorded row. A person's revision with
-    nothing recorded — every one written before migration 119 — is derived from its spec and its
-    parent's, as before the column existed: counting it as introducing nothing flagged the
-    chemist's own figures after an upgrade. An agent revision records nothing; another session's
-    artefact is unknown.
+    Recorded at write time. A person's revision with nothing recorded (written before migration 119)
+    is derived from its spec and its parent's, so an upgrade does not flag the chemist's own
+    figures. An agent revision records nothing; another session's artefact is unknown.
     """
     store = await _backend(backend)
     session = _session()

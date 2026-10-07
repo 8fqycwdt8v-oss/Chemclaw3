@@ -1,11 +1,8 @@
-"""Pin the retrieval gold-set metrics against the fixed corpus (audit KM-13).
+"""Pin the retrieval gold-set metrics against the fixed corpus.
 
-These are regression pins, not mocks: each expected recall/precision is computed from the real
-`GraphRetriever` over the versioned `data/evals/retrieval_corpus/` fixture. If a change to the
-substring filter or the evidence path moves what a query surfaces, one of these numbers moves and
-the test
-fails — which is the whole point of the KM-13 gate. The gold cases and their expected-source lists
-live in `data/evals/cases/retrieval-*.md`; this file loads those exact cases and scores them.
+Each expected recall/precision is computed from the real `GraphRetriever` over
+`data/evals/retrieval_corpus/`, so a change in what a query surfaces moves a number and fails.
+The gold cases live in `data/evals/cases/retrieval-*.md`.
 """
 
 import asyncio
@@ -24,11 +21,8 @@ from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.retrievers import GraphRetriever
 
 _REPO = Path(__file__).resolve().parent.parent
-# Derived from the setting's own default rather than spelled out, so moving the corpus (D-156 put it
-# under `data/`) cannot leave this pointing at nothing. It did exactly that once: the stale literal
-# made every gold case score `0/2 expected sources retrieved`, which reads as a retrieval regression
-# rather than as a missing directory. `_corpus` below asserts the directory exists for the same
-# reason — an empty corpus and a wrong path produce identical numbers.
+# Derived from the setting's default so moving the corpus cannot leave this stale; `_corpus`
+# asserts the directory exists, since an empty corpus and a wrong path score identically.
 _CORPUS = _REPO / EvalSettings.model_fields["eval_retrieval_corpus_dir"].default
 
 # (case id, expected recall, expected precision, gate pass). Pinned from the fixture corpus.
@@ -84,12 +78,10 @@ def test_gold_case_recall_precision(case_id: str, _corpus: None) -> None:
 def test_memo_shares_one_retrieval_and_observes_corpus_changes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Recall + precision on one case run live retrieval once — until the corpus changes on disk.
+    """Recall and precision on one case share one live retrieval until the corpus changes on disk.
 
-    The memo lives for the process, and the scheduled drift worker is a long-lived process:
-    an on-disk corpus edit must be a natural memo miss (fresh retrieval, fresh ids), never a
-    stale hit served for the pod's lifetime. No manual `.clear()` — the invalidation is the
-    behavior under test.
+    The drift worker is long-lived, so a corpus edit must be a natural memo miss; no manual
+    `.clear()`.
     """
     corpus = tmp_path / "corpus"
     shutil.copytree(_CORPUS, corpus)
@@ -121,11 +113,8 @@ def test_memo_shares_one_retrieval_and_observes_corpus_changes(
     # `retrieval_top_k` a precision below 1 is the ordinary case rather than a regression.
     assert precision.value == pytest.approx(_EXPECTED["retrieval-suzuki"][1])
 
-    # The corpus changes on disk: one of the two expected notes disappears. The memo must
-    # miss (a second live retrieval) and the metric must reflect the current corpus.
-    # `<type>/<id>.md` — the layout the PR-gate actually files notes under. The corpus used to sit
-    # flat, which `validate_kg` reported as six layout problems on a directory whose own README
-    # called every file valid.
+    # One expected note disappears on disk: the memo must miss and the metric reflect the current
+    # corpus. The corpus uses the `<type>/<id>.md` layout notes are filed under.
     (corpus / "reaction" / "reaction-suzuki-biaryl.md").unlink()
     stale_free = get_metric("retrieval_recall")(case)
     assert calls == [case.output["query"]] * 2  # a fresh retrieval, not a stale hit
@@ -145,12 +134,9 @@ def test_run_eval_scores_the_full_gold_set(_corpus: None) -> None:
 def test_the_metric_refuses_rather_than_mislabel_a_different_retrieval_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Switching to hybrid retrieval flips the product to a path this metric does not score.
+    """Under hybrid retrieval the metric raises rather than report a graph-only recall.
 
-    That is the entire point of F10-A, and until now the gate kept reporting a graph-only recall
-    under the name `retrieval_recall` — a green number about a retriever nobody was running. A
-    figure that looks like coverage it does not have is worse than a missing figure, so the metric
-    raises and `run_eval` names the case and metric that triggered it.
+    `run_eval` names the case and metric that triggered it.
     """
     case = EvalCase(
         id="retrieval-x",
@@ -172,17 +158,10 @@ def test_the_metric_refuses_rather_than_mislabel_a_different_retrieval_path(
 def test_metric_scores_correctly_from_inside_a_running_event_loop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A metric that drives live retrieval must not require its caller to be a plain sync frame.
+    """A metric that drives live retrieval works from inside a running event loop.
 
-    `_retrieved_ids` used to reach the retriever with a bare `asyncio.run`, which raises
-    `RuntimeError: asyncio.run() cannot be called from a running event loop` the moment a metric is
-    scored from a coroutine — exactly the shape `chemclaw.durable.eval_drift` (66% async) or any
-    future async surface can take if it scores a case inline rather than wrapping `run_eval` in
-    `asyncio.to_thread` (R7). Scoring here from inside `asyncio.run(...)` reproduces that shape
-    directly and must still return the same, correct number.
-
-    A fresh corpus copy (not the shared fixture corpus) guarantees a live retrieval actually runs
-    inside the loop rather than serving a memo hit some other, already-run test left behind.
+    A bare `asyncio.run` would raise there. A fresh corpus copy ensures a live retrieval runs inside
+    the loop rather than a memo hit.
     """
     corpus = tmp_path / "corpus"
     shutil.copytree(_CORPUS, corpus)
@@ -214,20 +193,12 @@ def test_the_shipped_default_is_still_scored() -> None:
 
 
 def test_the_recall_floor_can_see_a_single_lost_gold_note() -> None:
-    """The floor must sit strictly above `(n-1)/n` for every gated gold set.
+    """The recall floor sits strictly above `(n-1)/n` for every gated gold set.
 
-    At the shipped 0.75, a case with **four** gold notes scored exactly 0.75 when one of them was
-    lost — and passed. Four of the nine gated cases have four gold notes, so on nearly half the
-    case set the floor was blind to the smallest regression that can occur.
-
-    Asserted as the inequality rather than against the number, so that adding a case with a larger
-    gold set fails here — loudly, naming the case — instead of quietly reopening the blind spot for
-    that case alone.
+    Otherwise losing one gold note passes. Asserted as the inequality, so a case with a larger gold
+    set fails here by name.
     """
-    # The **shipped** default, off the model field — not `settings.retrieval_recall_min`, which the
-    # `_corpus` fixture pins to 0.75 so the other cases' gate outcomes stay stable regardless of it.
-    # This test is about what a deployment actually gets, so a fixture's pin would make it assert
-    # nothing.
+    # The shipped default off the model field, not `settings`, which the `_corpus` fixture pins.
     floor = EvalSettings.model_fields["retrieval_recall_min"].default
     blind: dict[str, float] = {}
     for case in load_eval_cases(settings.eval_case_dir):

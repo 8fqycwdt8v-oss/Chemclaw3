@@ -27,11 +27,8 @@ _HALOGENATION = "c1ccccc1.BrBr>>Brc1ccccc1"
 async def _store_or_skip() -> PostgresFingerprintStore:
     """Return a migrated Postgres reaction store, or skip if no database is reachable.
 
-    `source_keyed=True` is not decoration: since `063` the table's primary key is `(source, id)`,
-    so a store constructed without it writes `ON CONFLICT (id)` and Postgres refuses the statement
-    outright ("there is no unique or exclusion constraint matching the ON CONFLICT specification").
-    That is the same refusal the ADR's rollback section describes, reached here from the other
-    direction — which is why the flag has to be a constructor argument rather than a default.
+    `source_keyed=True` is required: the primary key is `(source, id)`, so `ON CONFLICT (id)` would
+    be refused by Postgres.
     """
     await migrated_db_or_skip()
     return PostgresFingerprintStore(
@@ -112,12 +109,10 @@ async def _rows(reaction_id: str) -> list[tuple[str, str]]:
 
 
 async def test_two_sources_sharing_an_entry_id_keep_two_rows_in_postgres() -> None:
-    """The primary key and the `ON CONFLICT` target are the deployment's half of the rule.
+    """Two sources sharing an entry id keep two rows in Postgres.
 
-    Measured before `063`, this scenario left **one** row — site B's bromination — and searching
-    the index for site A's own esterification returned no hits under the verdict "this is a genuine
-    negative result". The transcription tier already kept both rows (D-2026-08-26); the structural
-    index is what made one site's chemistry disappear.
+    The primary key and `ON CONFLICT` target are the deployment's half of the rule; a bare-id key
+    made one site's chemistry disappear.
     """
     store = await _store_or_skip()
     await store.add(_sited("pg-shared-1001", "pg-eln-a", _ESTER_ETHYL))
@@ -130,13 +125,7 @@ async def test_two_sources_sharing_an_entry_id_keep_two_rows_in_postgres() -> No
 
 
 async def test_a_postgres_hit_carries_the_source_it_matched() -> None:
-    """Each site's reaction finds its own row, and the hit says which site that was.
-
-    The half that could not be answered before the key change: one row behind two runs, and a
-    search with no source to report. The source-qualified *citation* this used to spell is gone —
-    no reader resolved it (D-2026-08-27, review section 3) — and the fact it was spelled from is
-    what is asserted here instead.
-    """
+    """Each site's reaction finds its own row, and the hit says which site that was."""
     store = await _store_or_skip()
     await store.add(_sited("pg-cite-1001", "pg-eln-a", _ESTER_ETHYL))
     await store.add(_sited("pg-cite-1001", "pg-eln-b", _HALOGENATION))
@@ -163,22 +152,11 @@ async def test_a_single_source_deployment_reads_exactly_as_before() -> None:
 
 
 async def test_a_sourced_write_leaves_the_unsourced_row_063_could_not_resolve() -> None:
-    """The write path must NOT delete the row `063` left under `''` — for two reasons.
+    """A sourced write leaves the unsourced row the backfill could not resolve.
 
-    The first is a privilege: `app_privileges.sql` grants this table INSERT and UPDATE only, in
-    the group whose comment says withholding DELETE is what makes `retention.py`'s refusal to
-    prune enforced rather than intended. A `DELETE` here raises `permission denied` for the
-    runtime role, and since it would share the upsert's transaction the fingerprint would not land
-    either — every ELN and corpus ingest, on any deployment that runs `make db-grants`. Nothing in
-    this tree connects as that role, so the suite cannot see it; this test stands in for the half
-    it can see, and `tests/test_database_privileges.py` covers the other half.
-
-    The second is that the row is not a *twin*. An unsourced row is whichever site synced last
-    before `063`, or a pre-051 entry that merely shares an id, so deleting it on a same-id write
-    from another source destroys that site's only fingerprint.
-
-    The cost is real and is accepted: two rows can carry one id until a reindex, so a similarity
-    search can return both. That is the pre-`063` behaviour for exactly these rows.
+    The runtime role has no `DELETE` on this table, and a delete sharing the upsert's transaction
+    would fail the ingest (`tests/test_database_privileges.py` covers the grant). The unsourced row
+    may also be another site's only fingerprint. Two rows may carry one id until a reindex.
     """
     store = await _store_or_skip()
     await store.add(record_for_reaction("pg-legacy-1001", _ESTER_ETHYL))

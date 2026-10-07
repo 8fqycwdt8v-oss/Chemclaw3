@@ -1,28 +1,13 @@
 """The gateway boot guard, driven as processes rather than asserted as a call.
 
-The defect this file exists to hold shut is not that a function was wrong — it was right — but that
-it was **unreachable from three of the four process kinds that need it**. It lived in
-`api/middleware.py` and `api/app.py` was its only caller, so a background worker, whose
-`run_agent_step` activity builds a LangGraph agent, inherited the shipped loopback gateway and
-dialled it silently (`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`).
+Every process kind that can make a model call must refuse the shipped loopback gateway at boot,
+not only the front door. The arms start real processes (`background_worker`, `mcp_face`,
+`cli.chat`) and read what they do. Each has a positive control naming a real gateway, which must
+then fail on the next step instead; both arms of a pair point Temporal or the service port at
+something unreachable, so the gateway address is the only difference.
 
-**A test that asserts the guard function is called is the test that was always going to pass.** So
-the arms below start real processes — `python -m chemclaw.durable.background_worker`,
-`python -m chemclaw.api.mcp_face`, `python -m chemclaw.cli.chat` — and read what they do. Each has a
-**positive control**, because a harness that never got as far as the guard would report every
-refusal identically: the control names a real gateway and the process must then fail on the *next*
-thing instead, which is how "it got past the guard" is observed without a broker, a database or a
-model.
-
-The differential is one environment variable. Both arms of a pair point `CHEMCLAW_TEMPORAL_ADDRESS`
-(or `CHEMCLAW_SERVICE_PORT`) at something deliberately unreachable, so the only difference between
-"refused by the guard" and "reached the next step" is the gateway address.
-
-**Proxy variables are scrubbed from every child.** `core.netguard.arm_from_settings` refuses an
-undeclared ambient proxy at `chemclaw.core.config` import
-(`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`), which in a sandbox that has one
-would abort every arm before the guard under test ran — and the two refusals read alike enough that
-the suite would have looked green while measuring nothing.
+Proxy variables are scrubbed from every child, because `core.netguard.arm_from_settings` would
+otherwise abort every arm before the guard under test ran, with a refusal that reads alike.
 """
 
 from __future__ import annotations
@@ -62,9 +47,7 @@ def _free_port() -> int:
 def _run(module: str, *, gateway: str | None, extra: dict[str, str], args: list[str]) -> str:
     """Start `module` as a process and return everything it said before exiting.
 
-    `gateway` of `None` leaves `CHEMCLAW_LLM_BASE_URL` unset, which is the case that matters: the
-    shipped default is the loopback mock, so "a deployment that configured nothing" and "a
-    deployment that never overrode this" are the same environment.
+    `gateway=None` leaves `CHEMCLAW_LLM_BASE_URL` unset, i.e. the shipped loopback default.
     """
     environment = {
         key: value
@@ -91,11 +74,10 @@ def _run(module: str, *, gateway: str | None, extra: dict[str, str], args: list[
 
 @pytest.fixture(scope="module")
 def unreachable_temporal() -> dict[str, str]:
-    """A loopback Temporal address nothing serves: the step a worker reaches *after* the guard.
+    """A loopback Temporal address nothing serves: the step a worker reaches after the guard.
 
-    Loopback on purpose. `core.netguard` permits any loopback destination without allowlisting, so
-    the failure the control arm reports is a refused connection rather than the egress guard's own
-    refusal — two RuntimeErrors that would otherwise be easy to mistake for each other.
+    Loopback because `core.netguard` permits it, so the control fails with a refused connection
+    rather than an egress refusal that could be mistaken for the guard.
     """
     return {
         "CHEMCLAW_TEMPORAL_ADDRESS": f"127.0.0.1:{_free_port()}",
@@ -109,12 +91,7 @@ def unreachable_temporal() -> dict[str, str]:
 
 @pytest.mark.timeout(300)
 def test_a_worker_on_the_dev_gateway_refuses_to_boot(unreachable_temporal: dict[str, str]) -> None:
-    """The closable half of the backlog row, measured on the process it was open in.
-
-    Driven before the fix, this same arm printed the worker's `connected` line and began polling:
-    neither guard was in the module's namespace and `run_agent_step` was a registered activity, so
-    the pod was one turn away from dialling its own loopback port.
-    """
+    """A background worker on the dev gateway refuses to boot rather than connecting and polling."""
     said = _run(
         "chemclaw.durable.background_worker",
         gateway=None,
@@ -128,11 +105,9 @@ def test_a_worker_on_the_dev_gateway_refuses_to_boot(unreachable_temporal: dict[
 def test_a_worker_naming_a_real_gateway_boots_past_the_guard(
     unreachable_temporal: dict[str, str],
 ) -> None:
-    """The positive control: the same process, one variable different, gets further.
+    """The positive control: the same process with a real gateway gets past the guard.
 
-    Without this arm the refusal above proves nothing — a harness that could not import the worker
-    at all would fail identically. What "further" means here is observable and specific: the guard
-    runs before `connect()`, so a control that passes it must fail on the broker instead.
+    The guard runs before `connect()`, so passing it means failing on the broker instead.
     """
     said = _run(
         "chemclaw.durable.background_worker",
@@ -152,12 +127,10 @@ def test_a_worker_naming_a_real_gateway_boots_past_the_guard(
 
 @pytest.mark.timeout(300)
 def test_the_mcp_face_on_the_dev_gateway_refuses_to_boot() -> None:
-    """The face makes model calls, which is why it is in scope and was never covered.
+    """The MCP face on the dev gateway refuses to boot.
 
-    `condense_protocols` is read-only, is not in `mcp_face.WITHHELD`, and builds a chat model of its
-    own (`agent/condense.py`). So a face pointed at the shipped default serves a tool that cannot
-    answer — and nothing said so at boot, because the guard was in `api/middleware.py` and
-    `create_face_app` is not `create_app`.
+    It serves `condense_protocols`, which builds its own chat model (`agent/condense.py`), so the
+    face is in scope even though `create_face_app` is not `create_app`.
     """
     said = _run(
         "chemclaw.api.mcp_face",
@@ -170,11 +143,10 @@ def test_the_mcp_face_on_the_dev_gateway_refuses_to_boot() -> None:
 
 @pytest.mark.timeout(300)
 def test_the_mcp_face_naming_a_real_gateway_boots_past_the_guard() -> None:
-    """The control: a bound port is what it fails on instead, so the guard was passed.
+    """The control: with a real gateway the face fails on an occupied port instead.
 
-    The port is taken by this process for the whole call, so uvicorn's own bind is what refuses —
-    a failure that can only happen *after* the guard, and one that does not need a model, a broker
-    or a database to be reached.
+    The port is held by this process for the whole call, so uvicorn's bind refuses, a failure that
+    can only happen after the guard.
     """
     with socket.socket() as held:
         held.bind(("127.0.0.1", 0))
@@ -197,11 +169,9 @@ def test_the_mcp_face_naming_a_real_gateway_boots_past_the_guard() -> None:
 
 @pytest.mark.timeout(300)
 def test_the_chat_cli_on_the_dev_gateway_refuses_with_a_message_not_a_traceback() -> None:
-    """The `chemclaw` console script: a refusal, translated, with an exit code.
+    """The `chemclaw` console script refuses with a message and an exit code, not a traceback.
 
-    Placed inside `main`'s `try` precisely so it joins the three families that function already
-    turns into one sentence — a startup failure here must not arrive as nine frames of asyncio, for
-    the reason `cli/chat.main`'s own docstring gives.
+    The guard sits inside `main`'s `try`, which turns startup failures into one sentence.
     """
     said = _run("chemclaw.cli.chat", gateway=None, extra={}, args=["--help"])
     assert _REFUSAL in said, said[-2000:]
@@ -224,11 +194,10 @@ def test_the_chat_cli_naming_a_real_gateway_reaches_its_own_argument_parsing() -
 
 
 def test_a_loopback_gateway_is_refused_in_every_posture(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The swap this ADR made: the exemption is a stated posture, not a bind.
+    """A loopback gateway is refused in every posture, including a loopback `service_host`.
 
-    The old predicate returned early whenever `service_host` named a loopback interface, which made
-    the guard a statement about the front door's socket. Both values of that field are driven here,
-    because "it still refuses when the bind is loopback" is the half that is new.
+    The exemption is a stated posture, not the front door's bind address; both bind values are
+    driven.
     """
     monkeypatch.setattr(settings, "llm_allow_loopback_gateway", False)
     monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:8820/v1")
@@ -239,12 +208,7 @@ def test_a_loopback_gateway_is_refused_in_every_posture(monkeypatch: pytest.Monk
 
 
 def test_the_whole_of_127_is_loopback_here(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Not a set of literals: `core.http.is_loopback_url` is the one definition and it parses.
-
-    A second address in `127.0.0.0/8` was the measured gap between this guard and the egress guard
-    before they shared a predicate (`core/http.py`), and it is the shape a hand-kept set of three
-    strings reintroduces the moment somebody adds a fourth.
-    """
+    """All of `127.0.0.0/8` is loopback, via the one predicate `core.http.is_loopback_url`."""
     monkeypatch.setattr(settings, "llm_allow_loopback_gateway", False)
     monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.2:8820/v1")
     with pytest.raises(RuntimeError, match="loopback address"):
@@ -268,20 +232,13 @@ _SPELLINGS_THAT_REACH_THIS_HOST = ("127.1", "2130706433", "0x7f.1", "0177.1", "0
 def test_a_gateway_spelled_to_evade_the_parser_is_still_refused(
     spelling: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The refusal and the reason for it, measured in the same test.
+    """A gateway spelled to evade the parser is refused, and the spelling reaches this host.
 
-    `is_loopback_host` parsed with `ipaddress.ip_address`, which accepts only the dotted-quad form,
-    while what a socket is ultimately handed is `inet_aton(3)` — so the short, decimal, octal and
-    hexadecimal spellings of `127.0.0.1` were *not* loopback to the guard and booted clean. The
-    fifth, `0.0.0.0`, is a different failure with the same effect: it is genuinely not loopback as a
-    **bind** (which is why `core.http` still answers False for it and two callers depend on that),
-    and as a **destination** it never leaves the host, so `core.llm_gateway` normalises it itself.
-
-    Neither egress layer catches the follow-on: `derive_allowed` puts the same literal on the
-    allowlist, and the compiled interposer sees `inet_ntop`'s canonical `127.0.0.1`, which is
-    loopback-exempt. So the boot guard is the only layer that can refuse this, and the second arm
-    here is what makes the first mean something — it connects and reports the peer the kernel
-    actually gave, rather than asserting from a table that the spelling is equivalent.
+    `inet_aton(3)` accepts short, decimal, octal and hex forms of `127.0.0.1`, which
+    `ipaddress.ip_address` does not. `0.0.0.0` is not loopback as a bind but never leaves the host
+    as a destination, so `core.llm_gateway` normalises it. The egress layers cannot catch these (the
+    allowlist admits the literal and the interposer sees canonical loopback), so the boot guard is
+    the only refusal. The second arm connects and reports the peer the kernel gave.
     """
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -341,12 +298,9 @@ def test_the_opt_in_does_not_warn_about_a_real_gateway(
 
 # -------------------------------------------------------------- which process kinds are in scope
 
-#: The components `deploy/entrypoint.sh` dispatches, and for each one whether it can reach a model
-#: call — which is the question that decides whether the guard belongs in its entrypoint.
-#:
-#: **A partition, not an allow-list**, for `mcp_face.WITHHELD`'s reason: the test below reads the
-#: component names out of the script, so a component added there without a verdict here fails
-#: rather than quietly joining the unguarded half.
+#: The components `deploy/entrypoint.sh` dispatches, each mapped to whether it can reach a model
+#: call and so needs the guard. A partition, not an allow-list: names are read from the script, so a
+#: new component without a verdict here fails.
 _COMPONENT_MAKES_MODEL_CALLS: dict[str, bool] = {
     # `api/runner.py` builds the graph for every turn.
     "service": True,
@@ -362,14 +316,10 @@ _COMPONENT_MAKES_MODEL_CALLS: dict[str, bool] = {
     # A connector's interactive worker: one activity that makes an MCP call on a chemist's behalf
     # (`connectors/queued_call.py`) and one workflow. It builds no graph and no chat model.
     "interactive-worker-*": False,
-    # The hook Jobs, which became components in
-    # `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py` because a chart `command:`
-    # replaces the image ENTRYPOINT and so skipped the arming block. None of the three reaches a
-    # model: `cli.schedules` creates and prunes Temporal Schedules, `core.migrate`/`core.grants`
-    # issue DDL and GRANTs, and `agent.message_migration` rewrites stored rows. `cli.schedules`
-    # *imports* `core.embeddings` transitively through `durable.schedules` (measured) and calls
-    # nothing in it, which is why the verdict is about the call and not about the import — the
-    # import-closure proxy below is applied to connector bundles, where the seam is the point.
+    # The hook Jobs. None calls a model: `cli.schedules` manages Temporal Schedules,
+    # `core.migrate`/`core.grants` issue DDL and GRANTs, and `agent.message_migration` rewrites
+    # stored rows. `cli.schedules` imports `core.embeddings` transitively but calls nothing in it,
+    # so the verdict is about the call, not the import.
     "schedules": False,
     "migrate": False,
     "convert": False,
@@ -386,9 +336,7 @@ _GUARDED_ENTRYPOINTS: dict[str, tuple[str, str]] = {
 def _entrypoint_components() -> set[str]:
     """Every `CHEMCLAW_COMPONENT` value `deploy/entrypoint.sh` has a case for.
 
-    Read off the script rather than transcribed, because a component added to the image is a
-    process kind this guard has to have an answer about, and a list here would go stale silently —
-    the failure `MODULES.md`'s port registry and this repository's own `make`-target counts record.
+    Read off the script rather than transcribed, so a new component cannot go unconsidered.
     """
     script = (_REPO_ROOT / "deploy" / "entrypoint.sh").read_text()
     body = script[script.index('case "${component}" in') :]
@@ -422,11 +370,10 @@ def _calls_the_guard(relative: str, function: str) -> bool:
 def test_each_model_calling_component_calls_the_guard_in_its_entrypoint(
     component: str, where: tuple[str, str]
 ) -> None:
-    """The shape assertion, kept *beside* the effect ones rather than instead of them.
+    """Each model-calling component calls the guard in its entrypoint.
 
-    It earns its place on the one thing a process arm cannot say cheaply: `service` is driven by
-    `create_app` in-process above, and this is what notices if a future refactor moves the call out
-    of the function the image actually execs.
+    A shape check kept beside the process arms: it notices a refactor moving the call out of the
+    function the image actually execs.
     """
     assert _COMPONENT_MAKES_MODEL_CALLS[component] is True
     assert _calls_the_guard(*where), (
@@ -434,18 +381,16 @@ def test_each_model_calling_component_calls_the_guard_in_its_entrypoint(
     )
 
 
-#: Modules under `src/` that are a process in their own right (a `main` plus a `__main__` block)
-#: **and** import a model seam at module scope, mapped to whether they must call the guard. Derived
-#: against, not transcribed: the module docstring of `core/llm_gateway` used to promise "every
-#: process that makes a model call" while one of these two was unguarded and nothing looked.
+#: Modules under `src/` that are processes of their own (a `main` plus a `__main__` block) and
+#: import a model seam at module scope, mapped to whether they must call the guard. Checked against
+#: the tree.
 _MODEL_TOUCHING_CLIS: dict[str, bool] = {
     # Its own docstring: "needs a model credential; refuses without one rather than measuring a
     # mock" — and the shipped gateway *is* the mock, so the promise needed the guard to be true.
     "cli/verifier_margin.py": True,
-    # `make reindex` / `make reindex-full`, a documented local target against the local embedding
-    # endpoint. The note index is regenerable by definition (D-011's sibling argument), so a local
-    # rebuild against the mock costs a re-run rather than a wrong answer to a chemist — and the
-    # deployment's own reindex is the `background-worker`'s scheduled job, which is guarded.
+    # `make reindex`, a local target against the local embedding endpoint. The note index is
+    # regenerable, so a mock rebuild costs a re-run; the deployment's reindex runs in the guarded
+    # `background-worker`.
     "retrieval/vector_index.py": False,
 }
 
@@ -487,12 +432,10 @@ def _entrypoint_modules_that_reach_a_model() -> dict[str, bool]:
 
 
 def test_every_model_touching_cli_has_a_verdict_and_matches_it() -> None:
-    """The promise in `core/llm_gateway`'s docstring, made checkable in both directions.
+    """Every model-touching CLI has a verdict and matches it.
 
-    A partition rather than a list of the guarded ones: a new `python -m` module that builds a chat
-    model or an embedding client fails here until somebody writes down whether it must refuse a
-    loopback gateway. The three deployment components have their own arms above; this covers the
-    processes an operator starts by hand, which is where the promise was wider than the test.
+    A partition: a new `python -m` module building a chat model or embedding client fails until
+    someone records whether it must refuse a loopback gateway.
     """
     actual = _entrypoint_modules_that_reach_a_model()
     assert set(actual) == set(_MODEL_TOUCHING_CLIS), (
@@ -505,13 +448,10 @@ def test_every_model_touching_cli_has_a_verdict_and_matches_it() -> None:
 
 
 def test_the_unguarded_components_cannot_reach_the_gateway() -> None:
-    """The other half of the partition, checked rather than asserted in prose.
+    """The unguarded components cannot reach the gateway.
 
-    A connector bundle reaches the model gateway only through `agent.llm_provider` (a chat model)
-    or `core.embeddings` (the embedding endpoint, which is the same address). Neither is imported by
-    any bundle, which is what makes leaving `connector-*` and `connector-worker-*` unguarded a
-    measurement rather than an oversight — and what turns it red the day a bundle grows a model
-    call.
+    A connector bundle reaches it only through `agent.llm_provider` or `core.embeddings`; no bundle
+    imports either, and this turns red the day one does.
     """
     forbidden = {"chemclaw.agent.llm_provider", "chemclaw.core.embeddings"}
     offenders: dict[str, set[str]] = {}

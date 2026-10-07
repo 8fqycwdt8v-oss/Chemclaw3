@@ -1,9 +1,7 @@
 """What keeps `make live-turn-cost` capable of seeing a cost regression.
 
-The command exists because `turn_cost_ratio` was attached to a case of committed literals and so
-could not move for any reason a release can cause. Every assertion here is about the way that
-failure could come back: a workload whose bill does not follow the request, a recorded case that
-was written rather than measured, and a comparison that never fails.
+Each assertion guards a way the lane could stop measuring: a workload whose bill does not follow
+the request, a recorded case written rather than measured, and a comparison that never fails.
 """
 
 import json
@@ -26,17 +24,11 @@ def _recorded_case_turns() -> list[TurnCost]:
 
 
 def test_the_workload_asks_the_one_behaviour_whose_bill_follows_the_request() -> None:
-    """Every question carries a marker naming a behaviour that bills by size, not a constant.
+    """Every question names a behaviour that bills by request size, not a constant.
 
-    This is the whole difference between a lane that can see a prefix regression and a second gate
-    that cannot fire. Measured: 20 of the 22 entries in `cli/storm_behaviours.py` name a constant
-    `input_tokens` of 900, so a workload that landed on one of them would bill 900 whether the
-    static prefix were 40,000 tokens or 400,000 — and the ratio would then be a constant of the
-    mock, which is the same defect one layer out that the committed literals were.
-
-    Asserted against the behaviour catalogue rather than against the marker string, so pointing the
-    workload at a constant-billing behaviour fails here instead of silently producing a lane that
-    measures nothing.
+    Most behaviours in `cli/storm_behaviours.py` bill a constant `input_tokens`, which would make
+    the ratio a constant of the mock. Asserted against the behaviour catalogue, not the marker
+    string.
     """
     by_name = {b.name: b for b in BEHAVIOURS}
     name = lane.BEHAVIOUR_MARKER.strip("[]")
@@ -53,12 +45,10 @@ def test_the_workload_asks_the_one_behaviour_whose_bill_follows_the_request() ->
 
 
 def test_the_recorded_case_was_measured_rather_than_written() -> None:
-    """The committed case's turns cost what a real request costs, not what a default bills.
+    """The committed case's turns cost what a real request costs, not `Behaviour`'s default.
 
-    A case emitted from a constant-billing lane would carry `Behaviour`'s default 900 on every
-    turn. Every recorded turn bills orders of magnitude more, because the bill is
-    `input_tokens_per_char` over the serialized request — which is where the instructions, the
-    skills listing and every bound tool schema are.
+    The bill is `input_tokens_per_char` over the serialized request, which includes instructions,
+    skills listing and tool schemas, so a measured turn bills orders of magnitude more than 900.
     """
     turns = _recorded_case_turns()
     assert turns, "no measured turns are recorded; run `make live-turn-cost ARGS=--emit`"
@@ -71,12 +61,10 @@ def test_the_recorded_case_was_measured_rather_than_written() -> None:
 
 
 def test_a_worsening_drift_is_a_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The comparison itself: the recorded turns pass, more expensive ones fail.
+    """The recorded turns pass and more expensive ones fail with a nonzero exit.
 
-    The front door and the ledger are the only things substituted — the metric, the recorded case,
-    the drift band and the verdict are all the shipped ones. Without that substitution this
-    assertion would need a running lane, and a check that can only run where a lane is up is a
-    check nobody runs.
+    Only the front door and the ledger are substituted; the metric, recorded case, drift band and
+    verdict are the shipped ones.
     """
     recorded = _recorded_case_turns()
 
@@ -132,19 +120,11 @@ def test_an_unreachable_lane_is_never_a_pass(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_the_emitted_case_carries_no_identity(tmp_path: Path) -> None:
-    """A measured case records what a turn cost, never who asked for it.
+    """An emitted case records what a turn cost, never who asked for it.
 
-    `model_dump()` writes every field `TurnCost` has, and the first emitted case therefore
-    published `model: ""` and `outcome: "unknown"` beside real numbers — defaults wearing the
-    appearance of measurements — along with `actor` and `session_id`, which identify a person and a
-    conversation.
-
-    **The narrowing is asserted as a relation rather than as a count.** The module comment beside
-    `_EMITTED` used to say `TurnCost` had "eighteen" fields against a model that had grown to 28,
-    which is a number in prose going stale about its own subject. What matters is that the emitted
-    keys are exactly `_EMITTED` and that `_EMITTED` is a **strict** subset of the model — the
-    second half being what makes `include=` a narrowing rather than a no-op, and what would fail if
-    someone widened it to the whole model.
+    The emitted keys are exactly `_EMITTED`, a strict subset of `TurnCost`: that excludes `actor`,
+    `session_id` and defaults that would pose as measurements, and makes `include=` a real
+    narrowing.
     """
     lane._emit(_recorded_case_turns(), tmp_path / "case.md")
     text = (tmp_path / "case.md").read_text(encoding="utf-8")

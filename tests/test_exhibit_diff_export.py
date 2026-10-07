@@ -1,9 +1,9 @@
 """What changed between two revisions of an artefact, and the files a chemist keeps.
 
-The diff's paths are the frozen contract's (`"lines 12-14"`, `"rows[3].yield"`, `"columns"`,
-`"items[2].smiles"`, `"series[0].y[4]"`, `"spec"`), and its shape is `protocols.diff.FieldChange`'s
-so one UI component renders both. The CSV exports go through the protocol export's formula guard;
-the injection case is driven on a cell, a header and a structure label.
+Diff paths follow the frozen contract (`"lines 12-14"`, `"rows[3].yield"`, `"columns"`,
+`"items[2].smiles"`, `"series[0].y[4]"`, `"spec"`), in `protocols.diff.FieldChange`'s shape so one
+UI component renders both. CSV exports go through the formula guard, driven on a cell, a header
+and a structure label.
 """
 
 import csv
@@ -186,12 +186,10 @@ def test_an_export_filename_cannot_carry_a_header_break() -> None:
 
 
 def test_a_pathological_document_diff_is_bounded_and_returns_quickly() -> None:
-    """200 kB of repeated lines against a shifted copy: one hunk, in well under a second.
+    """A pathological document diff is bounded and returns quickly.
 
-    The unbounded alignment measured 0.47 s at 500 such lines and 33 s at 2,000 (cubic), and this
-    document is 100,000 lines — it would not have returned at all. Past `exhibit_diff_max_lines`
-    the differing middle is one hunk, which is true and coarser; the common head and tail are
-    stripped first, so the hunk still says where the edit is.
+    Unbounded alignment is cubic. Past `exhibit_diff_max_lines` the differing middle is one hunk,
+    with the common head and tail stripped first so the hunk still locates the edit.
     """
     before = "0\n1\n" * 50_000
     after = "intro\n" + "1\n2\n0\n" * 33_000

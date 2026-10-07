@@ -1,19 +1,12 @@
 """A Temporal worker refuses to boot with sign-in off unless that posture is stated.
 
-`D-2026-09-26-a-worker-states-its-unauthenticated-posture`: the front door's refusal reads a *bind*
-(`api/middleware._refuse_unauthenticated_exposure`), and a worker binds no request surface, so a
-deployment that forgot `CHEMCLAW_ENTRA_REQUIRED` started every worker with the shared dev principal
-and every authorization gate open while its front door refused to boot. The guard is
-`durable/serve.refuse_unauthenticated_worker`.
+A worker binds no request surface, so the front door's bind-based refusal never reaches it; the
+guard is `durable/serve.refuse_unauthenticated_worker`
+(`D-2026-09-26-a-worker-states-its-unauthenticated-posture`).
 
-**Driven as processes, in the shape `tests/test_llm_gateway_guard.py` established and for its
-reason**: a test asserting the guard is *called* is the test that passes throughout the defect. Each
-refusal has a positive control that differs in one variable and must get further — to the broker,
-which is dialled only after the guard, on a loopback port nothing serves. That the control reached
-the broker is read off the output by that port, which nothing before `connect()` prints.
-
-The entrypoints are derived, not listed: `test_every_worker_entrypoint_refuses_before_it_connects`
-walks every `Worker(` construction in `src/`, so a third worker cannot join the unguarded half.
+Driven as processes: each refusal has a positive control differing in one variable that must reach
+the broker (a loopback port nothing serves, read off the output). Entrypoints are derived from
+every `Worker(` in `src/`, so a new worker cannot join the unguarded half.
 """
 
 from __future__ import annotations
@@ -65,9 +58,8 @@ def _free_port() -> int:
 def _run(module: str, extra: dict[str, str]) -> tuple[str, str]:
     """Start a worker module and return what it said, plus the broker address it was given.
 
-    Every inherited `CHEMCLAW_*` and proxy variable is scrubbed, for the reasons
-    `tests/test_llm_gateway_guard._run` gives: the child must see the shipped defaults, and an
-    ambient proxy would be refused at config import before any guard ran.
+    Inherited `CHEMCLAW_*` and proxy variables are scrubbed, so the child sees shipped defaults and
+    an ambient proxy is not refused at config import before any guard runs.
     """
     broker = f"127.0.0.1:{_free_port()}"
     environment = {
@@ -170,10 +162,8 @@ def _calls_named(function: ast.AST, name: str) -> list[int]:
 def test_every_worker_entrypoint_refuses_before_it_connects() -> None:
     """Derived from every `Worker(` in `src/`, so a new worker cannot skip the guard by omission.
 
-    The function that builds a `Worker` is the entrypoint that would poll, and it must call the
-    guard before its first `connect()` — after it, a refused worker has already opened a broker
-    connection it did not need, and a guard below `Worker(...)` could be reached by nothing if the
-    constructor raised first.
+    The function that builds a `Worker` must call the guard before its first `connect()`, so a
+    refused worker opens no broker connection.
     """
     builders: list[tuple[Path, str]] = []
     for path in sorted(_SRC.rglob("*.py")):

@@ -1,24 +1,12 @@
-"""The model call had no taxonomy, no counter, no log and no span — and could drop a tool call.
+"""Model calls are classified, counted, logged and traced, and an unparseable tool call is kept.
 
-The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. Three failures met at this boundary and
-each was separately invisible: a provider 429 had no counter distinct from the front door's own
-*inbound* limiter, a context-length `BadRequestError` was classified `("internal", False)` — "do not
-retry", about the one failure a shorter question fixes — and `RunnableWithFallbacks` absorbing 100%
-of traffic onto the fallback endpoint produced no log line at all.
+Decision: `D-2026-08-27-a-refusal-is-not-a-crash`. A provider 429, a context-length error and a
+transport failure are distinct outcomes, and a call LangChain puts on
+`AIMessage.invalid_tool_calls` is promoted onto `tool_calls` so the tool chain fails it visibly.
 
-Beside them, an unparseable tool call vanished: LangChain puts it on `AIMessage.invalid_tool_calls`
-and nothing in `src/` read that field.
-
-**This file asserts what the two middlewares *decide*, by calling the hook directly.** What the
-decision then *connects to* is a different question and lives in `tests/test_invalid_tool_calls.py`,
-which drives a compiled graph — the split `tests/test_state_channels.py` exists for. So nothing
-here asserts a `tool_failed`, an audit row or a `ToolMessage`: since
-`D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure` those are produced by the tool
-chain the promoted call now crosses, not by this module, and asserting them from a hook call would
-be asserting a producer that is no longer here.
-
-The classification is driven with **real provider SDK exceptions**, constructed the way the SDK
-constructs them. A test that classified a stand-in class would prove only that `isinstance` works.
+This file asserts what the two middlewares decide, by calling the hooks directly; what that
+connects to downstream is `tests/test_invalid_tool_calls.py`, over a compiled graph.
+Classification is driven with real provider SDK exceptions.
 """
 
 import asyncio
@@ -74,9 +62,8 @@ def find_notes(text: str) -> str:
 class _NamedTool:
     """The minimum a bound tool needs to expose for the invalid-tool-call label clamp: a name.
 
-    Kept beside the real `@tool` above rather than in place of it: `_metric_label` reads `.name`
-    off whatever the request bound, and the two shapes — a LangChain tool object and a bare
-    duck-typed one — are the two a `ModelRequest` can actually carry.
+    Beside the real `@tool`: a `ModelRequest` can carry either shape, and `_metric_label` reads
+    `.name` off both.
     """
 
     def __init__(self, name: str) -> None:
@@ -86,9 +73,8 @@ class _NamedTool:
 def _request(messages: list[Any], tools: list[Any] | None = None) -> ModelRequest[Any]:
     """A `ModelRequest` carrying only what these middlewares read.
 
-    `tools` defaults to the one-tool surface these cases name, because the unparseable-call metric
-    clamps its label against exactly this list: a request that bound nothing can only ever produce
-    the `unknown` bucket, which would make the clamp's own test vacuous.
+    `tools` defaults to a one-tool surface, because the label clamp compares against it and an empty
+    surface would make the clamp's test vacuous.
     """
     return ModelRequest(
         model=None,  # type: ignore[arg-type]
@@ -105,10 +91,7 @@ def _request(messages: list[Any], tools: list[Any] | None = None) -> ModelReques
 def test_the_taxonomy_is_the_one_the_failover_set_already_knew() -> None:
     """`classify_model_failure` reuses `_failover_exceptions` rather than restating it.
 
-    The point of the reuse is that this seam has *always* distinguished "the endpoint is down" from
-    "the request is wrong" — failover depends on it — and nothing recorded the distinction. A second
-    table would be a second answer to one question, which is how a failover and a metric come to
-    disagree about what a transport failure is.
+    One table, so failover and the metric agree about what a transport failure is.
     """
     for kind in _failover_exceptions():
         assert issubclass(kind, BaseException)
@@ -120,9 +103,8 @@ def test_the_taxonomy_is_the_one_the_failover_set_already_knew() -> None:
 def test_a_rate_limit_and_a_timeout_are_not_transport() -> None:
     """Order is the classification: `APITimeoutError` subclasses `APIConnectionError`.
 
-    A linear scan that tested transport first would report every timeout as a dead endpoint, which
-    is the difference between "the provider is throttling us" and "the provider is gone" — two
-    outages with different remedies.
+    Testing transport first would report every timeout as a dead endpoint; throttling and an outage
+    need different remedies.
     """
     import openai
 
@@ -134,11 +116,10 @@ def test_a_rate_limit_and_a_timeout_are_not_transport() -> None:
 
 
 def test_the_context_length_error_is_finally_its_own_outcome() -> None:
-    """The one failure mode `agent/compaction.py` exists to prevent, and it was unmeasurable.
+    """The context-length error is its own outcome.
 
-    It arrives as an ordinary `BadRequestError`, so `api/runner._classify` fell through to
-    `("internal", False)` — the chemist was told "internal error, do not retry" about the one
-    failure that a shorter question fixes.
+    It arrives as an ordinary `BadRequestError`; without this the chemist would be told "internal
+    error, do not retry" about the one failure a shorter question fixes.
     """
     openai_shape = _openai_error(
         "BadRequestError",
@@ -154,18 +135,11 @@ def test_the_context_length_error_is_finally_its_own_outcome() -> None:
 
 
 def test_a_renamed_sdk_class_degrades_the_label_instead_of_raising() -> None:
-    """`_openai_exceptions` is deliberately tolerant, and nothing exercised that until now.
+    """A renamed SDK class degrades the label instead of raising.
 
-    It is the asymmetry with `_failover_exceptions`, which imports its classes by name so a rename
-    upstream breaks the build: that function configures a *control*, this one feeds a *label*. A
-    classifier that raised would replace the failure it was called to describe with an
-    `AttributeError` about its own lookup, at the moment a model call has already failed — and a
-    turn would surface a name error instead of "the endpoint rate-limited you".
-
-    The tolerance used to be a `try: import` around a second, optional SDK, carrying a
-    `# pragma: no cover`. That branch went with the second provider
-    (`D-2026-09-04-a-gateway-is-the-only-provider`) — `openai` is a hard dependency, so it was
-    unreachable — and this is the half of it that is still real, driven rather than pragma'd.
+    `_openai_exceptions` feeds a label, so it is tolerant; `_failover_exceptions` configures a
+    control, so it imports by name and fails the build on a rename. A raising classifier would
+    replace the model failure it describes with its own `AttributeError`.
     """
     from chemclaw.agent.llm_provider import _openai_exceptions
 
@@ -190,10 +164,8 @@ def test_an_unrecognised_failure_is_error_rather_than_a_guess() -> None:
 def test_a_refused_credential_is_its_own_outcome_not_an_outage_or_an_error() -> None:
     """A 401 or a 403 from the gateway is `auth`: an operator's key, not a provider outage.
 
-    It was `error` until 2026-10-04, so the series could not tell a rotated `CHEMCLAW_LLM_API_KEY`
-    from a code fault — and it must not be laundered into `transport` either, which would send an
-    operator to the gateway's availability about a credential. `langchain_openai`'s own subclasses
-    are what a real call raises, so both spellings are driven.
+    Neither `error` (a code fault) nor `transport` (gateway availability). `langchain_openai`'s own
+    subclasses are what a real call raises, so both spellings are driven.
     """
     from langchain_openai.chat_models.base import (
         OpenAIAuthenticationError,
@@ -210,11 +182,9 @@ def test_a_refused_credential_is_its_own_outcome_not_an_outage_or_an_error() -> 
 
 
 def test_a_model_call_is_counted_and_timed() -> None:
-    """`chemclaw_model_calls_total{outcome}` — the series that did not exist.
+    """`chemclaw_model_calls_total{outcome}` counts and times every model call.
 
-    No `provider` label: the collapse to one gateway left it with one possible value
-    (`D-2026-09-04-a-gateway-is-the-only-provider`), and a label with one value is cardinality that
-    answers nothing.
+    No `provider` label: with one gateway it would have one value.
     """
     before = METRICS.observations("chemclaw_model_call_duration_seconds")[0]
 
@@ -235,9 +205,8 @@ def test_a_failed_model_call_is_counted_under_its_outcome_and_logged_with_its_cl
 ) -> None:
     """The WARNING names the provider and the exception class — never the provider's message.
 
-    A provider's error text can quote the request, and the request is the chemist's question. What
-    an operator needs is the family and the class, which is exactly what separates a rate limit from
-    a dead endpoint from a thread that no longer fits.
+    A provider's error text can quote the chemist's question; the family and class are what an
+    operator needs.
     """
     before = METRICS.value("chemclaw_model_calls_total")
     failure = _openai_error("RateLimitError", 429, "please slow down, quota 12345 exceeded")
@@ -266,9 +235,7 @@ def test_a_refused_credential_names_the_gateway_and_status_and_never_the_key(
 ) -> None:
     """The operator's line: host and HTTP status at ERROR, with neither the key nor the body.
 
-    `model.call_failed` carries the class; this is the line that says what to fix. The gateway's
-    body can quote the key it refused (OpenAI's does, abbreviated), so it stays out like every
-    other provider message does.
+    The gateway's body can quote the refused key, so it stays out.
     """
     failure = _openai_error("AuthenticationError", 401, "Incorrect API key provided: sk-abc123")
 
@@ -293,11 +260,10 @@ def test_a_refused_credential_names_the_gateway_and_status_and_never_the_key(
 
 
 def test_an_unparseable_tool_call_is_found_where_nothing_looked() -> None:
-    """`AIMessage.invalid_tool_calls` — read by nothing in `src/` before this.
+    """`AIMessage.invalid_tool_calls` is read.
 
-    The agent iterates `tool_calls`, so a call whose arguments did not parse produced no
-    `tool_failed`, no `tool_result`, no audit row and no span. With prose beside it the turn
-    proceeded as though no tool had been needed.
+    The agent iterates `tool_calls`, so an unparseable call would otherwise produce no failure,
+    audit row or span, and the turn would proceed as though no tool had been needed.
     """
     broken = AIMessage(
         content="",
@@ -331,9 +297,8 @@ def test_an_unparseable_tool_call_is_found_where_nothing_looked() -> None:
 def test_a_clean_reply_is_returned_untouched() -> None:
     """The negative case: the promotion must be inert on every turn that does not need it.
 
-    Object identity rather than equality, because the promotion edits the response **in place** —
-    a middleware that rebuilt the message would lose its id, its usage metadata and its response
-    metadata, and equality would not notice.
+    Object identity, because the promotion edits in place; a rebuilt message would lose its id and
+    metadata while still comparing equal.
     """
     reply = ModelResponse(result=[AIMessage(content="the pKa is 4.2")])
     calls = 0
@@ -354,18 +319,14 @@ def test_a_clean_reply_is_returned_untouched() -> None:
 def test_the_broken_call_moves_onto_the_field_the_tool_node_iterates() -> None:
     """The whole mechanism, as a decision: a change of address plus a sentinel.
 
-    Three properties, and each is what makes something downstream work:
+    - It lands on `tool_calls`, the only field `ToolNode` iterates.
+    - `invalid_tool_calls` is cleared, so no reader sees the call twice.
+    - The model's own id is kept, pairing the tool chain's `tool_failed` with the streamed
+      `tool_call` event.
 
-    - it lands on `tool_calls`, because `ToolNode` iterates that field and nothing else — the
-      defect was never the malformed JSON, it was the address;
-    - `invalid_tool_calls` is cleared, so no reader sees the same call twice;
-    - the model's **own id** is kept, which is what pairs the `tool_failed` the tool chain raises
-      with the `tool_call` event the stream already emitted. The design this replaced dropped it,
-      and that is what forced a suppression guard into `api/graph_stream.py`.
-
-    The arguments carry the raw document under `_UNPARSED_ARGUMENTS` rather than being `{}`,
-    because an empty dict satisfies the schema of every tool with no required argument — the trap
-    `refuse_unparsed_arguments` is positioned before the tool body to close.
+    The arguments carry the raw document under `_UNPARSED_ARGUMENTS`, not `{}`, because an empty
+    dict satisfies every tool with no required argument; `refuse_unparsed_arguments` refuses it
+    first.
     """
     broken = AIMessage(
         content="I will look that up.",
@@ -396,9 +357,7 @@ def test_the_broken_call_moves_onto_the_field_the_tool_node_iterates() -> None:
 def test_a_valid_call_beside_a_broken_one_survives_the_promotion() -> None:
     """The valid sibling is kept, and the broken one is appended after it.
 
-    The design this replaced discarded the *whole reply* to retry it, so a turn that asked for two
-    tools and mis-serialised one ran neither. Order matters as much as survival: appending keeps
-    the model's own sequence for the calls that were fine.
+    Appending keeps the model's own order for the calls that were fine.
     """
     reply = AIMessage(
         content="",
@@ -425,22 +384,11 @@ def test_a_valid_call_beside_a_broken_one_survives_the_promotion() -> None:
 
 
 def test_the_promotion_works_on_the_synchronous_hook_too() -> None:
-    """Both hooks are declared, and until now only one of them was ever driven.
+    """The promotion works on the synchronous hook too.
 
-    `create_agent` puts a middleware declaring either `wrap_model_call` or `awrap_model_call` into
-    **both** chains — the trap `agent/compaction.RecordContextCompaction` records — so a promotion
-    implemented on the async path alone is green under `graph.ainvoke` and silently promotes
-    nothing under `graph.invoke`.
-
-    **This test exists because its absence was measured.** Gutting `wrap_model_call` to
-    `return handler(request)` left all 137 tests across the seven files this mechanism touches
-    green: every graph-driven test goes through `astream`, and every hook-level test calls
-    `awrap_model_call` directly. The design this replaced had exactly this coverage
-    (`test_the_sync_path_announces_what_the_async_path_announces`) and it was deleted with the
-    mechanism rather than re-pointed at its replacement.
-
-    Asserted as an equality with the async path rather than as a property of its own, so the two
-    cannot drift: whatever promotion means, it must mean the same thing on both.
+    `create_agent` puts a middleware declaring either hook into both chains, so an async-only
+    promotion would silently do nothing under `graph.invoke` — and graph-driven tests all use
+    `astream`. Asserted equal to the async path so the two cannot drift.
     """
 
     def _sync_handler(request: ModelRequest[Any]) -> Any:
@@ -461,17 +409,12 @@ def test_the_promotion_works_on_the_synchronous_hook_too() -> None:
 
 
 def test_a_budget_too_small_for_one_character_still_bounds_the_parse_error() -> None:
-    """`text[-0:]` is the whole string, and the binary search leant on it being empty.
+    """`text[-0:]` is the whole string, so a budget too small for one character must be
+    special-cased.
 
-    When no suffix fits the budget the search leaves `lo` at 0, and `repr(text[-0:])` is then a
-    `repr` of the **entire** document. Measured before the fix, against a 100 kB parse error at a
-    budget of 0, 1 or 2: **100,024 characters returned** — a total loss of the bound, which is
-    worse than the loose bound this function was written to replace, and it appears at exactly the
-    tightening an operator would make to be safer.
-
-    Reachable rather than theoretical: `agent_audit_max_arg_chars` is `Field(..., ge=0)` with no
-    floor anywhere, and `repr` of a single character is already three characters wide, so every
-    budget under 3 lands here. The shipped default is 200, which is why nothing caught it.
+    When no suffix fits, the search leaves `lo` at 0, and `repr(text[-0:])` would return the entire
+    document. Reachable: `agent_audit_max_arg_chars` has no floor and a one-character `repr` is
+    three characters wide.
     """
     from chemclaw.agent.model_calls import _bounded_reason
 
@@ -496,17 +439,10 @@ def test_a_budget_too_small_for_one_character_still_bounds_the_parse_error() -> 
 def test_the_bounded_reason_is_the_longest_suffix_that_fits_at_every_budget() -> None:
     """The search is the whole of this function, so it is checked against a linear scan.
 
-    Three boundaries, because each is a different branch and two of them were defects. A budget
-    **larger than the whole document** must return the document quoted and *unmarked* — no
-    ellipsis, since nothing was cut — and that is the early return above the search rather than
-    the search finding `len(text)`. A budget too small for one character returns the ellipsis
-    alone. Everything between returns the longest suffix that fits, which is asserted against a
-    scan rather than against a transcribed number: a number here would be a claim about `repr`'s
-    escaping table, and the scan is that table.
-
-    The document mixes a newline, a quote and a backslash on purpose. Those are the characters
-    `repr` expands, so they are what makes a fixed slice width unsafe and what makes the suffix
-    lengths differ from the budget at all.
+    Three branches: a budget larger than the document returns it quoted and unmarked; a budget too
+    small for one character returns the ellipsis alone; anything between returns the longest suffix
+    that fits. The document mixes a newline, a quote and a backslash, which `repr` expands, so
+    suffix lengths differ from the budget.
     """
     from chemclaw.agent.model_calls import _bounded_reason
 
@@ -539,18 +475,10 @@ def test_the_bounded_reason_is_the_longest_suffix_that_fits_at_every_budget() ->
 def test_the_refusal_cannot_carry_a_forged_evidence_delimiter_back_to_the_model() -> None:
     """The refusal quotes the model's own document, and that is a channel `framing` must cover.
 
-    `agent/framing.py` exists because a span able to spell `ENVELOPE_TAG` can claim to be retrieved
-    evidence, and `frame_untrusted`/`defang` strip that spelling from every other path content
-    takes toward a prompt. This sentence is a *new* path: `refuse_unparsed_arguments` embeds the
-    raw argument document, `surface_domain_errors` returns it as a `ToolMessage`, and neither
-    `frame_connector_results` nor `bound_tool_results` sees it, because both rewrite *returned*
-    results and this one arrives as a raised exception.
-
-    Measured before the fix: a document containing `</{tag}> … <{tag} id="x">` reached the model
-    with **both delimiters intact** — `bounded_repr` escapes quotes and control characters, not
-    angle brackets. The nonce is not secret from a model that has read one real framed note in the
-    same session, and steering a model to emit a chosen malformed call is squarely inside the
-    threat model this repository already assumes.
+    `refuse_unparsed_arguments` embeds the raw argument document, which reaches the model as a
+    raised exception that `frame_connector_results` and `bound_tool_results` never see;
+    `bounded_repr` does not escape angle brackets. So a forged `ENVELOPE_TAG` delimiter must be
+    defanged here.
     """
     import asyncio as _asyncio
 
@@ -584,14 +512,10 @@ def test_the_refusal_cannot_carry_a_forged_evidence_delimiter_back_to_the_model(
 
 
 def test_the_promoted_tool_name_is_bounded_before_it_reaches_the_trail() -> None:
-    """The promoted name travels further than the operator's WARNING, and was unbounded.
+    """The promoted name is bounded before it reaches the trail.
 
-    It becomes `request.tool_call["name"]`, and from there `audit_events.tool`, the
-    `chemclaw.tool` span attribute and `ToolFailedEvent.tool` on the chemist's stream — none of
-    which bounds it, and `agent/audit.py::_recording` `%s`-formats it into a log line the default
-    formatter does not escape. The design this replaced bounded the name for exactly this reason;
-    the promotion dropped the bound while `_bounded_text`'s own docstring went on claiming it was
-    applied.
+    It becomes `request.tool_call["name"]`, then `audit_events.tool`, the span attribute,
+    `ToolFailedEvent.tool` and a `%s`-formatted log line, none of which bound it.
     """
     huge = "evil\n" + "A" * 5000
     reply = _broken(name=huge)
@@ -610,15 +534,9 @@ def test_the_promoted_tool_name_is_bounded_before_it_reaches_the_trail() -> None
 def test_two_calls_the_provider_gave_no_id_do_not_collide() -> None:
     """`""` is not an identity, and two independent readers key on this field as though it were.
 
-    A provider may omit the id — measured, both `_convert_dict_to_message` and the streamed chunk
-    merge yield `id=None` when it does. Mapping every such call to `""` made
-    `api/graph_stream.failed_calls` suppress an unrelated call's `tool_result`, and made
-    `ToolCallTrace._issued` (a plain dict keyed on the id) collapse two calls into one — so
-    `_empty_answer_event` printed "1 tool call(s) attempted, 2 refused by a gate", a count that
-    cannot happen.
-
-    The synthetic id is per-reply because that is the scope that collides, and it is distinct from
-    anything a provider mints.
+    A provider may omit the id. Mapping each such call to `""` would make `failed_calls` suppress an
+    unrelated call's result and `ToolCallTrace._issued` collapse two calls into one. The synthetic
+    id is unique per reply and distinct from anything a provider mints.
     """
     reply = AIMessage(
         content="",
@@ -650,17 +568,11 @@ def test_two_calls_the_provider_gave_no_id_do_not_collide() -> None:
 
 
 def test_one_reply_cannot_promote_an_unbounded_number_of_calls() -> None:
-    """The ceiling deleted on a false premise, restored — and nothing past it is lost.
+    """One reply cannot promote an unbounded number of calls, and nothing past the ceiling is lost.
 
-    `agent_max_reported_lost_calls` was removed saying `agent_max_parallel_tool_calls` "bounds how
-    many calls a reply may hold". It does not: it is LangGraph's `max_concurrency`, which bounds
-    how many run at once. Measured with nothing in between, one reply carrying 1000 unparseable
-    calls produced 1000 audit rows, 1000 `tool_failed` events and 268 kB of `ToolMessage`s back
-    into the model's own context.
-
-    The second assertion is the half that makes the bound acceptable: every call is still counted,
-    so the operator's record is complete even though the chemist's stream and the model's context
-    are not flooded.
+    `agent_max_parallel_tool_calls` bounds concurrency, not how many calls a reply holds, so
+    `agent_max_reported_lost_calls` caps the promoted calls. Every call is still counted, so the
+    operator's record stays complete.
     """
     reply = AIMessage(
         content="",
@@ -692,10 +604,9 @@ def test_one_reply_cannot_promote_an_unbounded_number_of_calls() -> None:
 def test_the_promotion_wraps_the_recorder_and_takes_no_model_call_of_its_own() -> None:
     """Order is nesting, and here it is what keeps the latency histogram honest.
 
-    `create_agent` nests `wrap_model_call` in list order, so the promotion sits outside the
-    recorder and reads the response the recorder timed. Unlike the repair it replaced it invokes
-    no handler, so one model call is booked per model call — which is the assertion beside the
-    order, because the order alone cannot say that.
+    `create_agent` nests `wrap_model_call` in list order, so the promotion sits outside the recorder
+    and reads the response it timed. It invokes no handler of its own, so one model call is booked
+    per call.
     """
     assert [type(entry).__name__ for entry in model_call_middleware()] == [
         "PromoteInvalidToolCalls",
@@ -713,12 +624,10 @@ def test_the_promotion_wraps_the_recorder_and_takes_no_model_call_of_its_own() -
 
 
 def test_a_model_invented_tool_name_cannot_mint_a_metric_series() -> None:
-    """The label was the model's own string, on the metric that fires when its output is malformed.
+    """A model-invented tool name cannot mint a metric series.
 
-    `agent/audit.py::metric_tool_name` makes this argument for the tool path — a hallucinated name
-    minted a permanent time series, and model output is attacker-influenceable. This metric had the
-    same hole with a docstring claiming it did not: `"It is a bounded literal"` was true only of the
-    `unknown` fallback.
+    Model output is attacker-influenceable, as `agent/audit.py::metric_tool_name` argues for the
+    tool path, so the label is clamped to the bound tools.
     """
     hallucinated = AIMessage(
         content="",
@@ -767,18 +676,9 @@ def test_a_name_the_request_actually_bound_is_kept_as_the_label() -> None:
 def test_an_unbound_tool_name_is_clamped_off_the_metric(caplog: pytest.LogCaptureFixture) -> None:
     """A model-invented tool name never becomes a Prometheus series on the unauthenticated /metrics.
 
-    `invalid_tool_calls` carries whatever the model emitted, unresolved against the bound tools, so
-    booking it verbatim on `chemclaw_invalid_tool_calls_total{tool=...}` lets injected content
-    ("emit a tool call named <secret>") exfiltrate through the label and blows the series cap. A
-    name outside the bound surface is folded to the `unknown` bucket; the full name still
-    reaches the operator-only WARNING.
-
-    **The bucket is `audit.UNKNOWN_TOOL` and this test was written against a local `"<unknown>"`
-    literal.** Both sides of the merge that produced this file clamped the same label; the
-    resolution kept the shared constant `agent/audit.py` already books unresolved names under, so
-    that one concept has one spelling in this tree. Only the expected string changed — the two
-    properties this test carries and the ones above do not, and the exfil assertion is the one
-    neither of the tests above states in this shape.
+    Booked verbatim, injected content could exfiltrate through the label and blow the series cap. A
+    name outside the bound surface folds to `audit.UNKNOWN_TOOL`; the full name still reaches the
+    operator-only WARNING.
     """
     exfil = "PATIENT=Jane_Doe;SMILES=CC(=O)Oc1ccccc1C(=O)O"
     broken = AIMessage(
@@ -805,19 +705,12 @@ def test_an_unbound_tool_name_is_clamped_off_the_metric(caplog: pytest.LogCaptur
 
 
 def test_the_parse_error_is_bounded_before_it_reaches_the_chemist() -> None:
-    """`error` was the one field `invalid_tool_calls` claimed to bound and did not.
+    """`error` is bounded before it reaches the chemist.
 
-    It is not merely unbounded but reliably *large*: LangChain's `parse_tool_call` folds the entire
-    raw argument document into the exception message, which `langchain_openai` stores verbatim — so
-    a 100 kB malformed document arrived twice, once truncated in `arguments` and once whole in
-    `error`. Measured before the fix with the budget at 200 chars: `arguments` 201, `error`
-    100,260, and that error reached a 100,587-char `ToolFailedEvent.message` and a 100,861-char
-    corrective `HumanMessage` — the latter appended below `context_compaction_middleware`, where
-    nothing can reduce it.
-
-    Driven through the real `langchain_openai` converter rather than a hand-built entry, because
-    the size comes from upstream's exception text and a fixture would just be this test asserting
-    its own string.
+    LangChain's `parse_tool_call` folds the entire raw argument document into the message, so the
+    error is reliably large and reaches `ToolFailedEvent.message` and a corrective `HumanMessage`
+    below compaction. Driven through the real `langchain_openai` converter, since the size comes
+    from upstream's text.
     """
     from langchain_openai.chat_models.base import _convert_dict_to_message
 
@@ -866,19 +759,10 @@ def _broken(name: str = "predict_pka", error: str | None = None) -> AIMessage:
 def test_the_parse_error_keeps_its_reason_where_head_bounding_would_lose_it() -> None:
     r"""The tail bound, asserted as a **diff** against the head bound — the only non-vacuous form.
 
-    LangChain builds the message as `Function {name} arguments:\n\n{document}\n\nare not valid
-    JSON. Received JSONDecodeError {reason}`, so the head is the tool name and a verbatim second
-    copy of the document, and the reason — the only part not already printed beside it — is at the
-    very end. Head-bounding therefore prints the same document twice and drops the outcome, which
-    is the general rule `agent/tool_result_size.py` states.
-
-    **This test previously proved nothing, and the fixture is why.** Its 79-character document fit
-    inside the budget whole, so head-bounding and tail-bounding produced the same string and the
-    assertion held under the defect it was written for. Measured on that fixture: the head form
-    keeps the reason at 79 and 108 characters and loses it from 228 upward. So the document here is
-    long enough to separate the two, and the separation is asserted directly — `_bounded_text` is
-    the head-bounded function that still serves the tool name beside it, so the comparison is
-    against a real alternative rather than a re-implementation of one.
+    LangChain's message is `Function {name} arguments:\n\n{document}\n\nare not valid JSON. Received
+    JSONDecodeError {reason}`, so the reason is at the end and head-bounding drops it. The document
+    is long enough that the two bounds differ, and the comparison is against `_bounded_text`, the
+    real head-bounded function.
     """
     from langchain_openai.chat_models.base import _convert_dict_to_message
 
@@ -918,14 +802,8 @@ def test_the_parse_error_keeps_its_reason_where_head_bounding_would_lose_it() ->
 def test_the_bounded_reason_never_cuts_an_escape_sequence_in_half() -> None:
     r"""The tail slice is taken on the text and quoted after, not taken on the quoted form.
 
-    Slicing `repr(text)` is what the first version did, and a cut landing between the two
-    characters of `\n` leaves the letter `n` in the reason a chemist reads — a corruption that
-    reads as content rather than as a truncation. Measured at a 13-character budget on a document
-    ending `"\nreason here"`: the old form produced `…nreason here'`, an unbalanced fragment whose
-    newline had become an `n`.
-
-    The budget is set rather than assumed, because the defect only appears when the cut lands on
-    that boundary and the shipped default does not put it there.
+    Slicing `repr(text)` can cut `\n` in half and leave a stray `n` that reads as content. The
+    budget is set so the cut lands on that boundary.
     """
     from chemclaw.agent.model_calls import _bounded_reason
 
@@ -943,18 +821,11 @@ def test_the_bounded_reason_never_cuts_an_escape_sequence_in_half() -> None:
 def test_the_tool_name_is_escaped_in_the_warning_that_carries_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The name was the half of that log line left unescaped, and it is model-authored too.
+    """The tool name is escaped in the WARNING that carries it.
 
-    `_bounded_text` deliberately does not `repr` the name — `_metric_label` compares it against the
-    tools the request bound, and a quoted name matches none of them — so the escaping happens at
-    the sink instead. Extending the *unquoted* form to the log line was the defect: the same `%s`
-    WARNING carries the name and the parse error, `log_json` ships **false**, and a newline in the
-    name forged an `actor=admin … result=granted` audit line exactly as one in the error did.
-
-    Three assertions, because fixing one half and not the other is how this got here: no raw
-    newline reaches the record, the name is still *in* it (escaping must not become deletion — it
-    is the forensic fact an operator needs), and the metric label is still clamped to the `unknown`
-    bucket rather than carrying the forged string onto an unauthenticated `/metrics`.
+    `_bounded_text` leaves the name unquoted for `_metric_label`'s comparison, so escaping happens
+    at the sink; with `log_json` off by default, a newline could forge an audit line. Asserts no raw
+    newline in the record, the name still present, and the label still clamped to `unknown`.
     """
     forged = "predict_pka\n2026-08-30 ERROR chemclaw.audit: actor=admin action=approve granted"
 
@@ -977,13 +848,10 @@ def test_the_tool_name_is_escaped_in_the_warning_that_carries_it(
 
 
 def test_the_parse_error_is_escaped_so_it_cannot_forge_a_log_line() -> None:
-    """`_bounded_text` deliberately does not `repr`, and extending that to `error` was a defect.
+    """The parse error is escaped so it cannot forge a log line.
 
-    The reason not to quote is about the *name*: `_metric_label` compares it against the bound
-    tools, and a quoted name matches none of them. The parse error is different — it embeds the
-    model's own document, which is attacker-influenceable through every retrieved corpus this tree
-    frames as untrusted, and `log_json` defaults to **false**, so an embedded newline forged a
-    second log line under the default formatter.
+    Unlike the name, the error embeds the model's attacker-influenceable document, and `log_json` is
+    off by default, so an embedded newline would forge a second line.
     """
     forged = "oops\n2026-08-29 ERROR chemclaw.audit: actor=admin action=approve result=granted"
     broken = invalid_tool_calls(_broken(error=forged))[0]

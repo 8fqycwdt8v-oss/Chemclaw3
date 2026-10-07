@@ -1,30 +1,11 @@
-"""The turn-event contract cannot change silently — because another repository mirrors it by hand.
+"""The turn-event contract cannot change silently, because another repository mirrors it by hand.
 
-`api/events.py` is a contract two surfaces read: this service produces it and `Chemclaw3_ui`
-renders it. (`Chemclaw3_mock` stands in for external MCP tools, not for this front door — this
-docstring and the failure message below claimed it held "its copy of the same contract" until
-2026-08-27, when a grep of that tree found **zero** occurrences of any event name. A mirror that
-does not exist cannot be updated, and telling someone to update it sends them searching another
-repository for a file that was never there.) Nothing mechanical connects the mirrors that do
-exist. The consequence is
-recorded at length in the UI's own `shared/events.ts`, which has now been wrong **nine times** — six
-missing *members* (`capability_degraded`, `tool_failed`, `job_failed`, `evidence_source`, `handoff`,
-and one more before them) and three missing *fields* (`plan.plan_hash`, `tool_failed.reason`,
-`evidence_source.failed`). Its normaliser rebuilds every event field by field, so an unmirrored
-field is not merely untyped over there — it is **deleted in transit**, and the consumer receives a
-well-formed event with the qualifying half removed.
+`api/events.py` is produced here and rendered by `Chemclaw3_ui`, whose normaliser rebuilds every
+event field by field, so an unmirrored field is deleted in transit. This side can change the
+contract and stay green, so this golden file makes the moment of change loud where it happens.
 
-Every one of those nine was added here, on a green build. That is the root cause: this side can
-change the contract and stay green, so the only thing standing between a new field and a surface
-that silently drops it is whether the author remembered two repositories they were not editing.
-
-This is the tripwire. It does not — cannot — check the other repositories; it makes the *moment of
-change* loud on the side where the change happens, and names what has to follow. A golden file
-rather than a rule about field names, because the failure has never been a malformed contract; it
-has been a correct one that nobody propagated.
-
-**A diff here is not a problem to suppress.** It means the wire format changed, which is a
-deliberate act, and the fixture is updated in the same commit that makes it — with the mirrors.
+A diff here is not a problem to suppress: the wire format changed, and the fixture is updated in
+the same commit, with the mirrors.
 """
 
 import json
@@ -45,9 +26,8 @@ _UPDATE = "CHEMCLAW_UPDATE_EVENT_CONTRACT"
 def _render(annotation: object) -> str:
     """One field's type, as a short stable string.
 
-    Rendered rather than schema-dumped: `model_json_schema()` is precise and its *output* is a
-    pydantic implementation detail, so a library bump would rewrite this file and teach everyone to
-    regenerate it without reading the diff — which is the one thing this fixture must not become.
+    Rendered rather than schema-dumped, so a pydantic bump does not rewrite the fixture and teach
+    everyone to regenerate it without reading the diff.
     """
     if isinstance(annotation, type):
         return annotation.__name__
@@ -91,9 +71,7 @@ def test_the_wire_contract_matches_what_the_other_repositories_mirror() -> None:
 def test_every_member_is_reachable_from_the_union_by_its_discriminator() -> None:
     """No two members share a `type`, or a consumer switching on it would be ambiguous.
 
-    Cheap, and it is the one way the fixture above could be wrong while looking right: it is keyed
-    by discriminator, so a duplicate would silently collapse two members into one entry and the
-    contract would record a surface smaller than the one that ships.
+    The fixture is keyed by discriminator, so a duplicate would silently collapse two members.
     """
     discriminators = [model.model_fields["type"].default for model in typing.get_args(Event)]
     assert len(discriminators) == len(set(discriminators)), (
@@ -102,25 +80,12 @@ def test_every_member_is_reachable_from_the_union_by_its_discriminator() -> None
 
 
 def test_the_published_document_declares_every_event_this_service_streams() -> None:
-    """The fixture holds this side to its models; the document is what the other side can read.
+    """The published OpenAPI document declares every event this service streams.
 
-    Two halves of one contract, and only the first existed. The fixture beside this file makes a
-    change to `api/events.py` loud **here** — which is the right tripwire and cannot help
-    anybody else, because a golden file in this repository is not an artefact another repository
-    fetches. What `Chemclaw3_ui` fetches is `/openapi.json`, and measured on 2026-09-14 that
-    document declared **2 of 17** members and **0 of 10** error codes: an SSE body is
-    `text/event-stream`, which FastAPI cannot infer from a return annotation, so the union never
-    reached `components.schemas` at all
-    (`D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`).
-
-    Asserted against the **fixture** rather than against `api/events.py` directly, deliberately:
-    the fixture is already held to the models by the test above, so going through it means one
-    number governs both halves and a new member cannot satisfy one check by failing to reach the
-    other.
-
-    Driven off the real `create_app()` document rather than off `event_schemas()`, because the
-    subject is the merge — a component builder that is correct and never called is exactly what a
-    schema-side assertion would pass.
+    The fixture makes a change loud here; `/openapi.json` is what the UI fetches. An SSE body is
+    `text/event-stream`, which FastAPI cannot infer, so the union is merged into
+    `components.schemas` explicitly. Asserted against the fixture so one list governs both halves,
+    and driven off the real `create_app()` document because the subject is the merge.
     """
     document = json.dumps(_published_document())
     contract = json.loads(_FIXTURE.read_text(encoding="utf-8"))
@@ -139,14 +104,11 @@ def test_the_published_document_declares_every_event_this_service_streams() -> N
 
 
 def test_both_streaming_routes_point_at_the_union_they_stream() -> None:
-    """A component nothing references is an orphan a generator will not emit a type for.
+    """Every streaming route's response points at the union it streams.
 
-    Merging the union into `components.schemas` makes it *present*; the `$ref` on each streaming
-    route's `text/event-stream` response is what makes a client generator bind it to the route.
-    Every such route, because they stream the same union — the turn itself, a participant following
-    it (`GET /sessions/{id}/turn/stream`, `D-2026-09-27-a-queued-message-waits-in-its-senders-
-    request`), and the push-back stream — and a stream a client renders with a different type is the
-    same hand-mirroring this whole contract exists to end.
+    The `$ref` on each `text/event-stream` response is what binds the component to the route for a
+    client generator. The turn, a participant following it, and the push-back stream all stream the
+    same union.
     """
     document = _published_document()
     streams = {
@@ -171,10 +133,8 @@ def test_both_streaming_routes_point_at_the_union_they_stream() -> None:
 def _published_document() -> dict[str, typing.Any]:
     """The OpenAPI document `create_app()` actually serves, built once per call.
 
-    The two startup refusals are satisfied rather than patched out: a loopback bind and an
-    explicit loopback-gateway acknowledgement are the same two statements `make chat` makes, and
-    turning either guard off to read a document would be testing a configuration this service
-    refuses to run in.
+    The startup refusals are satisfied (loopback bind, loopback-gateway acknowledgement, as `make
+    chat` does) rather than patched out.
     """
     from chemclaw.api.app import create_app
     from chemclaw.core.config import settings

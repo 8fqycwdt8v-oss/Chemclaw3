@@ -1,8 +1,7 @@
 """`core/connect.option_type_mismatch` judges a manifest value against the annotation it meets.
 
-Two holes the review of 2026-09-26 drove open: a factory module under
-`from __future__ import annotations` stores `"bool"` rather than `bool`, so the check passed
-everything there; and `True` is an `int` to `isinstance`, so an `int` parameter took a YAML flag.
+Covers string annotations (a factory under `from __future__ import annotations` stores `"bool"`)
+and `bool` being an `int` to `isinstance`, so an `int` parameter must not take a YAML flag.
 """
 
 from chemclaw.core.connect import option_type_mismatch

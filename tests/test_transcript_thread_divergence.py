@@ -1,22 +1,10 @@
 """The two records of one conversation, observed together across one teardown.
 
-`session_messages` is what a chemist sees on reload; the checkpointer's thread is what the *model*
-is built from next turn. `tests/test_turn_cancellation.py` pins the transcript half — "the
-transcript is all-or-nothing across a teardown" — on a `ScriptedTurn` fake that has no checkpointer
-at all, so nothing in this suite had ever looked at **both** records after one teardown, and the
-runner carried two present-tense docstrings saying they could not disagree ("there is no third
-outcome").
-
-They can, and this is the third outcome: a teardown landing between the graph run and
-`_record_transcript` leaves the exchange in the model's record and out of the chemist's. Measured
-before it was counted at `checkpoints: 8, session_messages: 0`, with the runner logging "the
-committed turn is kept". Since the question is written ahead of the turn, what is left of the
-divergence is the answer alone: the question is in both records, marked `stopped`.
-
-**The window is instrumented rather than waited for**, the way the review that found it did:
-`build_answer_event` is wrapped to block, which is the window the verifier's judge call really
-occupies under `verifier_enabled`. Nothing else is patched — the graph, the saver, the transcript
-provider and `run_turn` itself are the real ones.
+`session_messages` is what a chemist sees; the checkpointer's thread is what the model is built
+from next turn. A teardown between the graph run and `_record_transcript` leaves the answer in the
+model's record only; the question, written ahead of the turn, is in both and marked `stopped`.
+The window is held open by blocking `build_answer_event`; the graph, saver, transcript provider
+and `run_turn` are real.
 """
 
 import asyncio
@@ -63,13 +51,10 @@ def _factory(**kwargs: Any) -> Any:
 async def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both records, after one teardown — and the counter that now says they parted company.
+    """After a late teardown the checkpoint is ahead of the transcript, and a counter says so.
 
-    The turn is *not* rolled back and must not be: the exchange it committed is complete and
-    correctly paired, and deleting it because a client dropped is the expensive failure
-    `_roll_back_unfinished` exists to avoid. What was missing is that nothing said the two records
-    had diverged — the runner logged "the committed turn is kept" and moved no counter, and both
-    docstrings on this path denied the outcome existed.
+    The turn is not rolled back: its committed exchange is complete and correctly paired, and
+    deleting it because a client dropped is the failure `_roll_back_unfinished` exists to avoid.
     """
     # Both engines are gated on this one setting: `_turn_checkpointer` returns `None` off the
     # Postgres store, which is the configuration in which this divergence cannot arise at all —
@@ -93,10 +78,7 @@ async def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_trans
         raise AssertionError("unreachable")  # pragma: no cover
 
     before = METRICS.value("chemclaw_transcript_thread_divergence_total")
-    # Patched by string on the module `run_turn` looks the name up in, not where it is
-    # defined: `runner` imports it, so patching the definition would not intercept the call,
-    # and a direct attribute assignment is neither an export mypy follows nor a form ruff
-    # allows. `MonkeyPatch` restores it.
+    # Patched on the module `run_turn` looks the name up in, since `runner` imports it.
     patch = pytest.MonkeyPatch()
     patch.setattr("chemclaw.api.runner.build_answer_event", _slow_answer)
     try:
@@ -138,10 +120,8 @@ async def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_trans
     # The measurement, pinned so the "no third outcome" claim cannot come back.
     assert "the question the chemist asked" in thread, thread
     assert "the answer" in thread, thread
-    # **What the divergence is now, since the question is written ahead of the turn**
-    # (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`): the chemist's
-    # question is in both records and says how its turn ended, and only the answer the teardown
-    # cut off is the model's alone. Before the write-ahead the transcript held nothing at all.
+    # The question is in both records and says how its turn ended; only the cut-off answer is the
+    # model's alone.
     assert [str(message.content) for message in transcript] == ["the question the chemist asked"]
     assert stored_turn_status(transcript[0]) == "stopped", transcript[0].additional_kwargs
     after = METRICS.value("chemclaw_transcript_thread_divergence_total")

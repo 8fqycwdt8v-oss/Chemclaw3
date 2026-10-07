@@ -1,15 +1,8 @@
-"""The LLM gateway seam builds one client, against the configured address, and only here (F0).
+"""The LLM gateway seam builds one client, against the configured address, and only here.
 
-These prove the *wiring* — that `build_chat_model` carries the endpoint, credential and transport
-into the constructed client — without any network call. The client is constructed for real, because
-a LangChain chat model exposes those values as attributes: the stronger assertion is available, and
-it doubles as a live check of this module's "construction only, no network call" claim.
-
-**Three of these are about a destination rather than a wiring**, and they are here because this is
-the module that decides one. `D-2026-09-04-a-gateway-is-the-only-provider` removed the provider
-concept after measuring that a second arm silently ignored `llm_base_url`; what makes that
-irreversible is not the deletion but the assertions below that no first-party module can name a
-second vendor's client again.
+These prove the wiring (`build_chat_model` carries endpoint, credential and transport into a really
+constructed client) without network calls. Some assert a destination: no first-party module may
+name a second vendor's client.
 """
 
 import ast
@@ -24,10 +17,8 @@ from chemclaw.core.config import Settings, settings
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
-# The distributions that ship a model client, and the *only* first-party modules that may name one.
-# Each entry says what it builds and why nothing else may build it — the sentence
-# `core/config/llm.py` used to make in prose ("No provider client class is imported outside
-# `agent/llm_provider.py`"), which was false in three places and enforced by nothing.
+# The distributions that ship a model client, and the only first-party modules that may name one,
+# each with what it builds and why nothing else may.
 _PROVIDER_ROOTS = frozenset({"openai", "anthropic", "langchain_openai", "langchain_anthropic"})
 
 _CLIENT_SEAMS: dict[str, str] = {
@@ -49,10 +40,8 @@ _TYPES_ONLY: dict[str, str] = {
     "cli/mock_llm.py": "the mock gateway serves the protocol; it emits frames, it does not dial",
 }
 
-# Modules that name a provider distribution for one *function*, and neither dial nor deserialise a
-# frame. A third bucket rather than a stretched second one: `_TYPES_ONLY`'s assertion is that the
-# target is a `.types` module, which is what makes granting that row safe, and widening it to admit
-# a helper would have retired the check that the row rests on.
+# Modules that name a provider distribution for one *function* and neither dial nor deserialise a
+# frame. Kept separate from `_TYPES_ONLY`, whose grant rests on the target being a `.types` module.
 _HELPERS_ONLY: dict[str, str] = {
     "agent/turn_usage.py": (
         "reads `_create_usage_metadata` to normalise the usage block of a call the gateway billed "
@@ -84,14 +73,7 @@ def _provider_imports() -> dict[str, list[str]]:
 
 
 def test_a_provider_client_class_is_imported_only_at_the_two_declared_seams() -> None:
-    """The config comment's claim, as an assertion instead of a sentence.
-
-    It read "No provider client class is imported outside `agent/llm_provider.py`" and was false in
-    three places at once, with nothing checking it — `tests/test_third_party_layering.py` in fact
-    *licensed* three packages to import the `llm` stack. A present-tense claim about a control that
-    nothing enforces is the shape this repository has a standing rule against, so the sentence was
-    narrowed to what the tree actually guarantees and this is what holds it there.
-    """
+    """A provider client class is imported only at the two declared seams."""
     declared = set(_CLIENT_SEAMS) | set(_TYPES_ONLY) | set(_HELPERS_ONLY)
     found = _provider_imports()
     assert set(found) == declared, (
@@ -119,13 +101,10 @@ def test_a_types_only_module_holds_no_client() -> None:
 
 
 def test_a_helper_only_module_holds_no_client() -> None:
-    """A module granted one function may not also name something that dials.
+    """A module granted one helper function may not also import something that dials.
 
-    The same distinction `_TYPES_ONLY` rests on, asked of a different grant: importing a helper is
-    borrowing an arithmetic, importing a client is opening a second way out of the pod. Asserted by
-    name rather than by module path, because a helper lives beside the client class it belongs to —
-    `_create_usage_metadata` and `ChatOpenAI` are both in `langchain_openai.chat_models.base`, so
-    the module tells you nothing and only the imported symbol does.
+    Asserted by imported symbol rather than module path, because a helper lives beside its client
+    class (`_create_usage_metadata` and `ChatOpenAI` share a module).
     """
     for path, reason in _HELPERS_ONLY.items():
         tree = ast.parse((_SRC / path).read_text(encoding="utf-8"), filename=path)
@@ -145,15 +124,10 @@ def test_a_helper_only_module_holds_no_client() -> None:
 
 
 def test_no_first_party_module_imports_the_anthropic_sdk() -> None:
-    """The absence, asserted, because a re-added import is how a second destination comes back.
+    """No first-party module imports the Anthropic SDK.
 
-    `anthropic` and `langchain-anthropic` are no longer declared in `pyproject.toml`, but they stay
-    in the resolved closure because `deepagents` requires the wrapper — so "it is not installed" is
-    not the control and never was. The control is that nothing here imports it —
-    `evals/live_judge.py` was the last importer, and it posted that vendor's own protocol to
-    `<gateway>/v1/messages`,
-    which against an OpenAI-compatible gateway is a doubled path and a 404 degraded to `ungraded`
-    on every probe.
+    `deepagents` keeps `anthropic` in the resolved closure, so "not installed" is not the control;
+    the control is that nothing here imports it.
     """
     offenders = {
         path: targets
@@ -168,19 +142,7 @@ def test_no_first_party_module_imports_the_anthropic_sdk() -> None:
 
 
 def test_a_configured_gateway_is_where_the_model_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The whole defect, as one assertion: the configured address is the address dialled.
-
-    Measured on the pre-change tree, with `llm_base_url` set to an internal gateway and the
-    provider left at its shipped default of `anthropic`::
-
-        build_chat_model("agent").anthropic_api_url == 'https://api.anthropic.com'
-
-    — the base URL was accepted by the config, passed every validator, and never reached a client.
-    `api/middleware._refuse_public_llm_exposure` then returned early *because* it was set, and
-    `core/netguard.derive_allowed` put the public host on the egress allowlist. There is no
-    configuration that reproduces it now, which is why this asserts the positive: there is one
-    branch, so the field either arrives or the test is red.
-    """
+    """The configured gateway address is the address the model is built against."""
     _use_settings(
         monkeypatch,
         llm_base_url="https://gateway.internal/v1",
@@ -230,10 +192,8 @@ def test_keyless_endpoint_gets_placeholder_for_the_model_half(
 ) -> None:
     """A keyless gateway still constructs, which is why there is no credential preflight.
 
-    Many internal gateways ignore the bearer, and the OpenAI SDK refuses to construct with an empty
-    `api_key` — so an empty `CHEMCLAW_LLM_API_KEY` is a legitimate configuration served by a
-    placeholder, not a misconfiguration to fail at startup. That is what replaced D-037's eager
-    `ANTHROPIC_API_KEY` check, and `cli/chat.py` says so where it used to promise the check.
+    The OpenAI SDK refuses an empty `api_key`, so an empty `CHEMCLAW_LLM_API_KEY` is served by a
+    placeholder: many internal gateways ignore the bearer.
     """
     _use_settings(
         monkeypatch,
@@ -245,20 +205,11 @@ def test_keyless_endpoint_gets_placeholder_for_the_model_half(
 
 
 def test_the_openai_compatible_model_asks_the_endpoint_for_token_usage() -> None:
-    """Without this the cost ledger reads zero, and nothing else notices.
+    """The OpenAI-compatible model asks the endpoint for token usage.
 
-    `ChatOpenAI` default-enables `stream_usage` only when *no* custom base URL and *no* custom HTTP
-    client are configured. `_openai_compatible_model` sets both — the gateway address and the
-    private-CA bundle — so upstream turns it off, the endpoint is never asked to report usage, no
-    usage chunk arrives, and `runner_usage.graph_usage_tokens` correctly reads nothing.
-
-    Measured before the fix: 15 turns through the graph engine wrote `turn_costs` rows totalling
-    **0** tokens against 2,040 per session on the other engine. That is the same failure
-    `usage_tokens`'s docstring records from the other direction, and it disarms the runaway-cost
-    guard rather than making it conservative.
-
-    Asserted on the built model rather than on a live stream, because the defect is a construction
-    argument — and a test needing a real endpoint is a test that would not have run.
+    `ChatOpenAI` enables `stream_usage` only with no custom base URL and no custom HTTP client;
+    `_openai_compatible_model` sets both, so without forcing it no usage chunk arrives and the cost
+    ledger reads zero, disarming the runaway-cost guard. Asserted on the built model.
     """
     from chemclaw.agent.llm_provider import _openai_compatible_model
 
@@ -268,12 +219,9 @@ def test_the_openai_compatible_model_asks_the_endpoint_for_token_usage() -> None
 def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The escape hatch is a setting, because upstream's caution is about real endpoints.
+    """An endpoint that rejects `stream_options` can turn usage reporting off with a setting.
 
-    LangChain disables the default on the stated grounds that "many non-OpenAI endpoints do not
-    support streaming token usage". A deployment whose endpoint rejects `stream_options` needs a
-    way out that is not a code change — and the ledger reading zero is then a stated consequence
-    rather than a silent one.
+    The ledger then reads zero as a stated consequence rather than a silent one.
     """
     from chemclaw.agent.llm_provider import _openai_compatible_model
 
@@ -284,26 +232,9 @@ def test_an_endpoint_that_cannot_report_usage_can_be_told_so(
 def _reset_gateway_clients() -> None:
     """Close the process-scoped gateway clients, then drop them from the cache.
 
-    `_tls_http_clients` is `@cache`d and now holds a *pair*, so a bare `cache_clear()` orphans two
-    live connection pools where it used to orphan one. Closing what you orphan is the whole reason
-    — and the reason is **not** a `ResourceWarning` count, which is what the commit introducing
-    this claimed.
-
-    **That claim was measured wrong and is corrected here rather than left standing.** It read the
-    suite's warning total across full runs (129 → 137) as this change's effect. Those runs differ
-    for unrelated reasons: the totals across four consecutive green runs were 129, 141, 137 and
-    143, and the run *after* this helper landed was the highest of the four. Driven directly, three
-    runs of this file and `test_protocol_condense.py` emit **0** `ResourceWarning`s with the helper
-    and **0** without it — the warnings the grep found belong to `test_connector_identity.py`. A
-    number that moves without the code moving is not evidence about the code, which is
-    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` with a noisy instrument instead of a
-    stale one.
-
-    So the justification is hygiene, stated plainly: a test that takes a live connection pool out of
-    the only reference holding it should close it first. Production never clears the cache (one pair
-    per process is the point), so this is a test concern only, and it is a helper rather than an
-    autouse fixture because the tests that clear are the tests that are *about* the cache — hiding
-    the clear from them would hide what they assert.
+    `_tls_http_clients` is `@cache`d and holds a pair of live pools; a test that drops the only
+    reference should close them first. Production never clears the cache. A helper rather than an
+    autouse fixture, because the tests that clear are the ones asserting on the cache.
     """
     from chemclaw.agent.llm_provider import _tls_http_clients
 
@@ -317,12 +248,10 @@ def _reset_gateway_clients() -> None:
 
 
 def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A graph is compiled per turn, so an uncached client factory is a per-turn socket leak.
+    """The gateway clients are built once per process.
 
-    `build_chat_model` runs on every graph build and reaches `_tls_http_clients`. Uncached, that
-    built a fresh `AsyncClient` (its own pool, its own TLS context) per question asked, and nothing
-    ever closed one. The verifier client already pays `@cache` for exactly this on a colder path;
-    this is the hot one.
+    A graph is compiled per turn and reaches `_tls_http_clients`, so an uncached factory would leak
+    a client (pool and TLS context) per turn.
     """
     import certifi
 
@@ -336,10 +265,8 @@ def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.Monk
     try:
         first = _tls_http_clients()
         assert _tls_http_clients() is first, "a second turn must reuse the process's clients"
-        # The bundle is still reaching the context, asserted here because this file is the only
-        # place that says so: an earlier version checked `is not None` against a factory that
-        # returned `None` without one, and dropping that left the *configured* bundle pinned
-        # nowhere but `tests/test_protocol_condense.py`'s unrelated `FileNotFoundError` path.
+        # The configured CA bundle still reaches the TLS context; this file is the only place that
+        # pins it.
         for client in first:
             context = client._transport._pool._ssl_context
             assert context.get_ca_certs(), "the configured bundle produced an empty trust store"
@@ -350,22 +277,11 @@ def test_the_gateway_clients_are_built_once_per_process(monkeypatch: pytest.Monk
 def test_both_gateway_clients_exist_and_refuse_the_environment_with_no_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shipped configuration is the no-bundle one, and it used to be the unprotected one.
+    """With no CA bundle, both gateway clients are still ours and refuse the proxy environment.
 
-    **This test is the inverse of the one it replaces.** `test_no_bundle_leaves_the_sdk_its_own
-    _client` asserted that no bundle yields `None` — "a publicly-trusted endpoint wants the SDK's
-    own default" — which is true about TLS and was the whole defect about proxies. `None` means
-    the SDK builds the client, and an SDK-built httpx client carries `trust_env=True`: measured on
-    that configuration with `HTTP_PROXY` naming a local recorder, the recorder received
-    `POST /v1/chat/completions` with the prompt body and the gateway `Authorization` bearer, on
-    both `invoke` and `ainvoke`, while `netguard._refused` stayed at 0. A guard cannot see a
-    proxied call, because the destination has left the address
-    (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
-
-    So both clients are ours on every branch, and the bundle decides only *verification*. Asserted
-    on the sync client as well as the async one because the sync one was never passed at all —
-    `ChatOpenAI` got `http_async_client=` alone, so `invoke` went out on a client this repository
-    had never seen.
+    An SDK-built httpx client has `trust_env=True`, so an ambient `HTTP_PROXY` would receive the
+    prompt and the bearer while the egress guard sees nothing. The bundle decides only verification.
+    Asserted on the sync and async clients, since both are passed.
     """
     from chemclaw.agent.llm_provider import _tls_http_clients
 
@@ -385,12 +301,10 @@ def test_both_gateway_clients_exist_and_refuse_the_environment_with_no_bundle(
 def test_the_chat_model_is_handed_both_of_this_process_s_clients(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """What the model is *built with*, not what the factory returns — the gap the defect lived in.
+    """The chat model is constructed with both of this process's clients.
 
-    The factory could be perfect and the constructor still pass one of its two results, which is
-    exactly what happened: `http_async_client=` alone, so every `invoke` used an SDK-built client.
-    Reads the objects off the constructed `ChatOpenAI` rather than the call, so an argument dropped
-    in a refactor fails here.
+    Read off the constructed `ChatOpenAI`, so a constructor argument dropped in a refactor fails
+    here even when the factory is correct.
     """
     _openai_endpoint(monkeypatch)
     from chemclaw.agent.llm_provider import _tls_http_clients, build_chat_model
@@ -413,11 +327,9 @@ def _openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_no_fallback_configured_returns_the_model_itself(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default is off, so an existing deployment's model object does not change shape.
+    """With no fallback configured, `build_chat_model` returns the model itself, not a wrapper.
 
-    Asserted because wrapping unconditionally would be the easy mistake: every caller of
-    `build_chat_model` would start receiving a `RunnableWithFallbacks`, and the one that noticed
-    would be whichever code path calls a `ChatOpenAI`-only attribute.
+    Callers using `ChatOpenAI`-only attributes would break on a `RunnableWithFallbacks`.
     """
     _openai_endpoint(monkeypatch)
     monkeypatch.setattr(settings, "llm_fallback_base_url", "")
@@ -462,16 +374,10 @@ def test_the_fallback_may_name_its_own_model_and_credential(
 
 
 def test_only_an_endpoint_that_is_down_fails_over(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A refused *request* must not be re-sent to the standby, and this is where that is decided.
+    """Only an endpoint that is down fails over; a refused request is not re-sent to the standby.
 
-    `with_fallbacks` defaults to catching every `Exception`. Under that default a malformed request
-    is rejected by the primary, sent to the standby, and rejected identically — twice the latency
-    for the same answer, and a 400 laundered into something that looks like an outage. It is the
-    same distinction `connectors/calc/remote.py` draws between a refused call and an unreachable
-    service: a retry fixes exactly one of them.
-
-    Asserted on the handled set rather than by driving a live failure, because what can go wrong
-    here is the *configuration* of the wrapper, and that is visible directly.
+    `with_fallbacks` catches every `Exception` by default, which would double latency for a
+    malformed request and disguise a 400 as an outage. Asserted on the handled exception set.
     """
     from openai import APIConnectionError, APITimeoutError, BadRequestError, InternalServerError
 
@@ -488,13 +394,10 @@ def test_only_an_endpoint_that_is_down_fails_over(monkeypatch: pytest.MonkeyPatc
 
 
 def test_binding_tools_reaches_the_fallback_too(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The failover answer must still be able to call tools, or it is worse than no failover.
+    """Binding tools reaches the fallback too.
 
-    `create_agent` binds the turn's tools to whatever `build_chat_model` returned. If that binding
-    reached only the primary, an outage would produce a model that answers fluently and cannot do
-    anything — a degraded mode that looks like it is working. Measured here rather than assumed,
-    because "wrapping a chat model loses its tool surface" is exactly the shape of upstream
-    behaviour this repository has been caught by before.
+    `create_agent` binds tools to whatever `build_chat_model` returns; a failover model without
+    tools would answer fluently and do nothing.
     """
     from langchain_core.tools import StructuredTool
 

@@ -2,21 +2,10 @@
 
 ADR: `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`.
 
-`durable/awaiting.py` already re-notifies on a timer, and it notifies **`asked_of`** — the person
-who has to do the thing. The requester is written to exactly once, on expiry. With
-`awaiting_max_days` at 90 that is three months of silence about their own suspended campaign,
-followed by a notice that it failed. This sweep is the notice in between.
-
-Driven against the real query on a migrated database rather than against a fake grouping, because
-the query *is* the feature: four predicates decide who hears what, and each one of them excludes a
-population that would otherwise be told the wrong thing.
-
-**And against the real workflow, because nothing here used to run it.** Every test below the query
-ones drives `CheckInWorkflow` on a broker: the loop, the `delivered` count, the notify-then-deliver
-ordering, the replay guard on the metric, the mailbox payload's own shape and the kind its outbound
-copy travels under were each asserted at one end or the other and none of them end to end — so
-renaming `BlockedRequest.open_days` left the suite green while `GET /check-ins` answered 0 for every
-entry, and the hand-typed literal dict that stood in for the writer agreed with nothing.
+`durable/awaiting.py` re-notifies `asked_of`; the requester otherwise hears only on expiry. The
+query tests run on a migrated database because the query's predicates are the feature; the rest
+drive the real `CheckInWorkflow` and activities on a broker, so the seam between them (payload
+shape, kind, ordering, metric) is tested end to end.
 """
 
 import asyncio
@@ -103,9 +92,8 @@ async def _open(
 async def _collected() -> list[CheckIn]:
     """Every page the activity serves, walked the way the workflow walks them.
 
-    The activity is paged (`D2`), so a test that read one page would be asserting about a prefix and
-    calling it the population — which is the shape of the defect paging exists to fix. The loop also
-    pins the termination condition: `more` false, or a cursor that failed to advance.
+    Reading one page would assert about a prefix. Termination: `more` false, or a cursor that failed
+    to advance.
     """
     items: list[CheckIn] = []
     after = ""
@@ -233,22 +221,16 @@ async def test_the_message_carries_what_a_person_needs_to_act() -> None:
 
 
 def test_the_sweep_runs_no_model() -> None:
-    """An absence test, because "it interprets nothing" is the ADR's load-bearing claim.
+    """The sweep runs no model.
 
-    The richer version — an agent reading the blocked work and saying what it blocks — needs a
-    `StepIdentity`, and a Schedule has none: synthesizing one from a `requested_by` string is this
-    system granting itself a chemist's identity on a timer, for work that chemist did not ask for.
-    A prose promise that this does not happen is worth what every unproducible claim in this tree
-    has been worth, so it is asserted instead.
+    An agent interpreting blocked work would need a `StepIdentity`, and a Schedule has none;
+    inventing one from `requested_by` would grant the system a chemist's identity on a timer.
     """
     import ast
     from pathlib import Path
 
-    # **Over the parsed tree, not the text.** The first draft of this test scanned
-    # `source.split('\"\"\"')[2]` — the slice between the module docstring and the first class
-    # docstring, measured at **18%** of the file — so a violation anywhere below it passed. Walking
-    # the AST covers every statement and excludes docstrings for free, because a docstring is an
-    # `ast.Constant` and carries no `Name`, `Attribute` or `alias`.
+    # Walk the AST rather than the text: it covers every statement and excludes docstrings, which
+    # are `ast.Constant`s with no `Name`, `Attribute` or `alias`.
     tree = ast.parse(Path("src/chemclaw/durable/check_in.py").read_text(encoding="utf-8"))
     forbidden = {"run_agent_step", "AgentStepInput", "StepIdentity", "build_langgraph_agent"}
     named: set[str] = set()
@@ -273,9 +255,8 @@ def test_the_schedule_is_planned_only_when_a_deployment_asks(
 ) -> None:
     """Off by default, on when enabled — and named, so the pruner does not delete it.
 
-    `OWNED_SCHEDULE_IDS` is the prune namespace: an id missing from it is a Schedule the applier is
-    not authorised to remove, which strands it firing a workflow after a deployment turns the
-    feature off.
+    An id missing from `OWNED_SCHEDULE_IDS` cannot be pruned, stranding a Schedule that keeps firing
+    after the feature is turned off.
     """
     from chemclaw.durable.schedules import OWNED_SCHEDULE_IDS, planned_schedules
 
@@ -288,13 +269,10 @@ def test_the_schedule_is_planned_only_when_a_deployment_asks(
 
 
 async def test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open() -> None:
-    """The round trip, and the defect it was written to catch was mine.
+    """The mailbox the sweep writes is one a reader can open.
 
-    `CHECK_IN_KIND` shipped with no reader: `GET /digests` claims `DIGEST_KIND` only, so a check-in
-    would have landed in the mailbox nightly and nothing would ever have opened it — which is
-    `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` a second time, in a commit whose own
-    settings comment cited the ADR about it. Asserted end to end rather than at either half,
-    because both halves passed their own tests while the feature delivered nothing.
+    `CHECK_IN_KIND` needs a reader distinct from `GET /digests`; asserted end to end because each
+    half can pass alone while nothing is delivered.
     """
     from fastapi.testclient import TestClient
 
@@ -305,10 +283,8 @@ async def test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open() -> None:
 
     await migrated_db_or_skip()
     await claim_unconsumed(digest_channel(_OWNER))  # start clean
-    # **Built by the writer's own model, not typed out.** The literal dict this replaced agreed
-    # with `BlockedRequest` on the day it was written and with nothing afterwards: renaming
-    # `open_days` would have left this test green while every entry `GET /check-ins` served read
-    # 0, which is the one number the notice exists to carry.
+    # Built by the writer's own model rather than typed out, so a field rename cannot leave this
+    # test agreeing with nothing.
     await record_session_event(
         digest_channel(_OWNER),
         CHECK_IN_KIND,
@@ -342,11 +318,10 @@ async def test_the_mailbox_the_sweep_writes_is_one_a_reader_can_open() -> None:
 
 
 def test_a_check_in_does_not_reach_another_chemists_mailbox() -> None:
-    """The channel is derived from the authenticated principal, so there is nothing to authorize.
+    """A check-in does not reach another chemist's mailbox.
 
-    Asserted anyway, because "nothing to authorize" is a claim about the derivation rather than a
-    property nobody has to check — and the row must be left *untouched* for its owner, not merely
-    filtered out of the wrong caller's answer.
+    The channel is derived from the authenticated principal; the row must be left untouched for its
+    owner, not merely filtered from the wrong caller's answer.
     """
     from fastapi.testclient import TestClient
 
@@ -357,10 +332,8 @@ def test_a_check_in_does_not_reach_another_chemists_mailbox() -> None:
 
     async def _write() -> None:
         await migrated_db_or_skip()
-        # Deleted rather than claimed: `claim_unconsumed` leaves the rows it consumed in place, so
-        # a neighbour test's already-consumed row would sit in this channel and the "untouched"
-        # assertion below would read its `consumed_at` as this test's doing. Found by running the
-        # file rather than the test.
+        # Deleted rather than claimed: `claim_unconsumed` leaves consumed rows in place, and a
+        # neighbour test's consumed row would break the "untouched" assertion below.
         async with db.connection(_dsn()) as conn:
             await conn.execute(
                 "DELETE FROM session_events WHERE session_id = ANY(%s)",
@@ -393,11 +366,10 @@ def test_a_check_in_does_not_reach_another_chemists_mailbox() -> None:
 
 
 async def test_a_deadline_is_floored_rather_than_rounded() -> None:
-    """`::int` rounds, so 4.6 days left arrived as "5 left" — half a day of borrowed deadline.
+    """Days left are floored, not rounded.
 
-    The direction is what makes it worth a test rather than a shrug: over-stating how long is left
-    makes a requester act later than they can afford to, and the whole point of the notice is that
-    it reaches them *before* the deadline. `FLOOR` is the conservative side of the same arithmetic.
+    Over-stating the time left makes a requester act later than they can afford to; `FLOOR` is the
+    conservative side.
     """
     await migrated_db_or_skip()
     await _clear()
@@ -415,13 +387,10 @@ async def test_a_deadline_is_floored_rather_than_rounded() -> None:
 
 
 def test_the_outbound_copy_is_not_delivered_as_a_digest() -> None:
-    """The ADR's central claim, on the half a chemist who closed the tab actually receives.
+    """The outbound copy is sent with the check-in kind, not the default `"digest"`.
 
-    `_message` built its `OutboundMessage` with no `kind=`, so every check-in took the default
-    `"digest"`: `FileDeliveryDriver` names files `<kind>-<identity>`, so it landed in the
-    standing-query digest's own outbox file, and the webhook driver folds the kind into its
-    `Idempotency-Key`. The mailbox honoured the distinction (`CHECK_IN_KIND`) and the channel did
-    not, which is the one place the two notices are genuinely indistinguishable to a reader.
+    File delivery names files by kind and the webhook folds it into `Idempotency-Key`, so the wrong
+    kind merges the check-in into the digest's outbox.
     """
     item = CheckIn(
         owner=_OWNER,
@@ -470,18 +439,12 @@ async def _open_many(requesters: dict[str, int], *, text_chars: int = 40) -> Non
 
 
 def test_a_page_stays_inside_the_blob_limit_and_the_walk_still_sees_everybody() -> None:
-    """The most severe one: an unbounded activity result fails the sweep for ever at ~7,600 rows.
+    """A page stays inside the blob limit and the walk still reaches everybody.
 
-    Measured end to end on the live broker at 10,000 rows before the fix: `ServerError: Complete
-    result exceeds size limit`, non-retryable, the run dead in 0.3 s and dead again every night
-    after it — zero requesters told anything, which is precisely what the sweep exists to prevent,
-    reproduced by its own scaling. With ~1 kB of model-authored text per request the crossover is
-    ~2,000 rows, and `pending_requests` caps neither `subject` nor `rationale`.
-
-    Driven at a size that spans three pages, and asserted on the three properties that make paging
-    correct rather than merely present: every page fits, every requester is reached exactly once,
-    and no requester is split across two pages — a split would be two notices each claiming to be
-    the whole of somebody's blocked work.
+    An unbounded activity result exceeds Temporal's size limit, failing the sweep non-retryably
+    every night. Driven across three pages and asserting every page fits, every requester is reached
+    once, and no requester is split across two pages (that would be two notices each claiming to be
+    whole).
     """
     #: Temporal's own gRPC payload ceiling, which is what the failure above is.
     blob_limit = 2 * 1024 * 1024
@@ -521,13 +484,11 @@ def test_a_page_stays_inside_the_blob_limit_and_the_walk_still_sees_everybody() 
 
 
 def test_one_requester_who_fills_a_page_alone_is_truncated_and_says_so() -> None:
-    """The one case the requester boundary cannot honour, and it must not stall the walk.
+    """One requester who fills a page alone is truncated and says so.
 
-    Dropping the last requester in a full page is what keeps anybody from being split — but when
-    they are the *only* requester in that page, dropping them leaves the cursor where it was and the
-    workflow re-reads the same page for ever. So they are carried short, `truncated` says so, and
-    the outbound copy says so in words: a silent truncation reads as completeness, which is
-    `kg/conflicts.py`'s rule and the reason a short list is trustworthy here.
+    Dropping them would leave the cursor in place and the walk would loop forever, so they are
+    carried short with `truncated` set, and the outbound copy says so: a silent truncation reads as
+    complete.
     """
 
     async def _run() -> tuple[CheckIn, CheckIn]:
@@ -551,11 +512,10 @@ def test_one_requester_who_fills_a_page_alone_is_truncated_and_says_so() -> None
 
 
 def test_a_rationale_longer_than_the_bound_is_cut_and_names_what_it_cut() -> None:
-    """A row cap is not a byte cap while the text is unbounded — and both fields are.
+    """A rationale longer than the bound is cut and names what it cut.
 
-    `subject` and `rationale` are model-authored and `pending_requests` declares no length on
-    either, so one oversized rationale defeats any number of rows. Cut in the query, and named in
-    the text the reader sees rather than trimmed in silence.
+    `subject` and `rationale` are model-authored and unbounded, so a row cap alone is not a byte
+    cap.
     """
     overshoot = 250
 
@@ -575,14 +535,10 @@ def test_a_rationale_longer_than_the_bound_is_cut_and_names_what_it_cut() -> Non
 
 
 def test_a_junk_day_count_costs_one_field_and_not_the_whole_notice() -> None:
-    """`_check_in`'s docstring promised totality and its two `int(...)` conversions were not total.
+    """A junk day count costs one field, not the whole notice.
 
-    The claim it makes is load-bearing: by the time the mapper runs, `claim_unconsumed` has already
-    marked the row consumed, so a raise does not defer the notice — it destroys it, along with every
-    other row claimed in the same batch, and there is nothing to re-find afterwards. Measured
-    against this route before the fix: a text `open_days` raised `ValueError` and a dict raised
-    `TypeError`, each a 500 with the row already gone. The sibling `_digest` is total on the same
-    junk, which is what made the asymmetry easy to miss.
+    `claim_unconsumed` marks rows consumed before the mapper runs, so a raise destroys every row in
+    the batch. `_check_in` must be total.
     """
     from chemclaw.api.routes.streams import _check_in
 
@@ -617,16 +573,10 @@ def test_a_junk_day_count_costs_one_field_and_not_the_whole_notice() -> None:
 async def _sweep_worker(
     client: Client, activities: Sequence[Callable[..., Any]] | None = None
 ) -> AsyncIterator[None]:
-    """A worker serving `CheckInWorkflow` and, by default, its four **real** activities.
+    """A worker serving `CheckInWorkflow` and, by default, its four real activities.
 
-    Real rather than faked, because the three defects the end-to-end tests below were written for
-    all live in the seam between the workflow and its activities — the mailbox payload's shape, the
-    kind its outbound copy travels under, and what the previous night left behind. A fake collector
-    would have agreed with whatever the workflow expected, which is how this file came to have a
-    "mailbox end to end" test that never called the writer.
-
-    Unsandboxed for speed: the sandbox re-imports `durable/check_in.py` (and its transitive
-    `chemclaw.core.db`) on every workflow task, and nothing here is testing the sandbox.
+    Real activities, because the defects these tests guard live in the seam between workflow and
+    activities. Unsandboxed for speed; nothing here tests the sandbox.
     """
     async with Worker(
         client,
@@ -659,15 +609,10 @@ async def _sweep(client: Client, suffix: str) -> int:
 
 
 def test_the_sweep_itself_writes_the_mailbox_a_reader_can_open() -> None:
-    """`CheckInWorkflow.run` was executed by nothing in this suite, so nothing joined the two ends.
+    """The sweep itself writes the mailbox a reader can open.
 
-    The loop, the `delivered` count, the notify-then-deliver ordering, the metric and the kind its
-    outbound copy travels under were each asserted at one end or the other — and the "end to end"
-    mailbox test wrote a hand-typed literal dict of its own. Renaming `BlockedRequest.open_days`
-    left the whole file green while `GET /check-ins` answered `0` for every entry.
-
-    This drives the real workflow against the real activities on the real broker, and reads what it
-    wrote back out through the route a chemist's surface calls.
+    Drives the real workflow against the real activities on the broker and reads the result back
+    through the route a chemist's surface calls.
     """
     from fastapi.testclient import TestClient
 
@@ -705,17 +650,11 @@ def test_the_sweep_itself_writes_the_mailbox_a_reader_can_open() -> None:
 
 
 def test_a_second_night_replaces_the_first_and_a_read_check_in_becomes_prunable() -> None:
-    """Nightly for ever into a mailbox retention can never empty, was the shape of it.
+    """A second night replaces the first, and a read check-in becomes prunable.
 
-    There was no watermark of any kind, so a request open the full `awaiting_max_days` wrote ~87
-    consecutive rows per requester, each differing by one integer — the habituation
-    `check_in_quiet_days` exists to prevent, one layer down. And retention's `session_events`
-    predicate is `consumed_at IS NOT NULL`, so until a surface calls `GET /check-ins` every one of
-    them is unread for ever.
-
-    In the shape of `test_digest.py`'s "a read digest becomes prunable and an unread one does not",
-    and asserting the half that test cannot: the *population* is one row per requester however many
-    nights run, and reading is still what makes the survivor disposable.
+    Without superseding, an open request writes one row per night, and retention only prunes
+    consumed rows. Asserted: one row per requester however many nights run, and reading still makes
+    it disposable.
     """
     from chemclaw.durable.retention import prune_expired_rows
 
@@ -874,17 +813,11 @@ def _page(owners: Sequence[str], *, after: str = "", more: bool = False) -> Chec
 
 
 def test_requesters_are_told_in_bounded_batches_rather_than_one_after_another() -> None:
-    """Serial per requester × two activities × a 15-minute queue-wait bound is 30 minutes each.
+    """Requesters are told in bounded batches rather than one after another.
 
-    `light_write_queue_wait_timeout()` bounds the *wait* for a slot, not the work, so with
-    `background-jobs` unserved the worst case was 30 minutes of serial wall clock per requester
-    against a Schedule whose `run_timeout` is its own interval — past ~48 blocked requesters the run
-    is still going when the next fires, and `ScheduleOverlapPolicy.SKIP` drops it silently. Batched,
-    the waits overlap instead of summing.
-
-    Asserted as observed concurrency rather than as elapsed time: a wall-clock threshold on a shared
-    CI box is a flake, and the property is "more than one requester is in flight", bounded so the
-    sweep cannot monopolise a queue that also carries hour-long searches' heartbeats.
+    Each activity's queue-wait bound applies per call, so serial delivery can overrun the Schedule
+    interval and `ScheduleOverlapPolicy.SKIP` drops the next fire silently. Asserted as observed
+    concurrency (more than one, bounded) rather than elapsed time, which would flake on shared CI.
     """
     owners = [f"check-in-batch-{index:02d}" for index in range(_CONCURRENT_REQUESTERS * 2 + 3)]
     watch = _Concurrency()
@@ -910,14 +843,10 @@ def test_requesters_are_told_in_bounded_batches_rather_than_one_after_another() 
 
 
 def test_the_delivery_count_is_not_re_counted_on_every_replay() -> None:
-    """A workflow task replays its whole history on a cache miss, and this counter was unguarded.
+    """The delivery count is not re-counted on every replay.
 
-    Measured before the fix: one real run of three deliveries followed by three replays moved
-    `chemclaw_work_check_ins_total` 3 → 6 → 9 → 12. The dashboard reads
-    `sum(increase(...[1d]))`, so the over-report is in the direction that makes a half-broken sweep
-    look healthy — the panel's whole job is to say how many requesters were reached.
-    `durable/notify.py` guards the identical pattern and `durable/orchestrator.py` writes out the
-    rule.
+    A workflow task replays its history on a cache miss; an unguarded counter over-reports and makes
+    a half-broken sweep look healthy.
     """
     from temporalio.contrib.pydantic import pydantic_data_converter
     from temporalio.worker import Replayer
@@ -963,13 +892,10 @@ def test_the_delivery_count_is_not_re_counted_on_every_replay() -> None:
 def test_a_run_that_spends_its_budget_defers_the_rest_instead_of_overrunning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half of D6: batching makes the loop faster, it does not bound it.
+    """A run that spends its budget defers the rest instead of overrunning.
 
-    The Schedule's `run_timeout` is its own interval and its overlap policy is SKIP, so a run still
-    going when the next fires does not queue — the next fire is *dropped*, silently, and the
-    requesters it would have told hear nothing. A run that stops at half the interval and says what
-    it deferred is the bounded version of the same outcome, and it leaves a line an operator can
-    read instead of a Schedule that quietly fires half as often.
+    Overlap policy SKIP drops a fire that arrives while a run is still going; stopping at half the
+    interval and logging what was deferred is the bounded version.
     """
     # 60 ms of budget against a 150 ms batch: the first batch overruns it by construction.
     monkeypatch.setattr(settings, "check_in_schedule_minutes", 0.002)
@@ -1005,9 +931,7 @@ def test_a_run_deferred_mid_page_keeps_the_notices_of_the_requesters_it_did_not_
 ) -> None:
     """The supersede is scoped to the batch about to be written, not to the whole page.
 
-    Issued once per page, it dropped every requester's unread notice up front and the budget then
-    deferred partway through — so everybody after the break lost last night's check-in and got
-    nothing in its place, the outcome `_SUPERSEDE` names as worse than the duplicate.
+    Otherwise a run deferred mid-page deletes the unread notices of requesters it never reached.
     """
     monkeypatch.setattr(settings, "check_in_schedule_minutes", 0.002)
     owners = [f"check-in-midpage-{index:02d}" for index in range(_CONCURRENT_REQUESTERS * 3)]
@@ -1046,13 +970,10 @@ def test_a_run_deferred_mid_page_keeps_the_notices_of_the_requesters_it_did_not_
 
 
 def test_the_supersede_leaves_alone_a_requester_this_run_is_not_writing_to() -> None:
-    """The narrowing that keeps a deferred requester's only notice, and its stated cost.
+    """The supersede leaves alone a requester this run is not writing to.
 
-    A delete over every unread check-in in the table is simpler and is wrong in one direction that
-    matters: `_run_budget` can stop a run part way, and a requester whose page never ran would have
-    had last night's notice taken away with nothing put in its place. Scoped to the page about to be
-    written, the worst case is a stale row for somebody who is no longer blocked — one row, gone the
-    next time they are, and prunable the moment they read it.
+    A table-wide delete would remove a deferred requester's only notice. The cost of scoping is at
+    most one stale row for someone no longer blocked, prunable once read.
     """
     from chemclaw.agent.session_events import record_session_event
 
@@ -1105,12 +1026,10 @@ async def _wire(owner: str) -> list[dict[str, Any]]:
 
 
 def test_a_blocked_question_carries_its_kind_and_the_conversation_that_raised_it() -> None:
-    """Both are columns of the row the query already reads, and one of them was not selected.
+    """A blocked question carries its kind and the session that raised it.
 
-    `kind` is what the pending inbox two sections up badges every row by, and `session_id` is the
-    link both other inboxes on that page end in — a check-in ended nowhere. `pending_requests` has
-    carried both since `076`; `_BLOCKED` selected `kind` and not `session_id`, so the second was
-    unavailable at every layer above it rather than dropped at one.
+    `kind` badges the row and `session_id` is the link the inbox ends in; both are selected by
+    `_BLOCKED`.
     """
 
     async def _run() -> BlockedRequest:
@@ -1131,13 +1050,10 @@ def test_a_blocked_question_carries_its_kind_and_the_conversation_that_raised_it
 
 
 def test_the_wire_carries_what_the_card_badges_links_and_warns_by() -> None:
-    """The three fields, at the model that decides what a client may see.
+    """The wire model carries the fields the card badges, links and warns by.
 
-    `CheckInOut` restates `BlockedRequest` rather than importing it, so a field reaching the worker
-    shape reaches nobody until it is added here too — which is why this is asserted at the route
-    and not only at the collector. `truncated` is the page's rather than the request's, so it is
-    stamped onto every row the short notice carried: a reader asks "is this list complete", and the
-    answer belongs on whatever they are looking at.
+    `CheckInOut` restates `BlockedRequest`, so this is asserted at the route. `truncated` is the
+    page's, stamped onto every row it carried.
     """
     from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 
@@ -1170,11 +1086,10 @@ def test_the_wire_carries_what_the_card_badges_links_and_warns_by() -> None:
 
 
 def test_a_payload_written_before_these_fields_is_still_read() -> None:
-    """The leniency `_check_in` claims, asserted on exactly the fields this commit adds.
+    """A payload written before these fields is still read.
 
-    The claim is the consume, so a row this route cannot parse is destroyed rather than deferred —
-    and a sweep's recorded activity result replays across a release. Three additive fields must
-    therefore read as empty rather than as a failure.
+    The claim consumes the row, so an unparseable row is destroyed; and recorded activity results
+    replay across a release. New fields must read as empty.
     """
     from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 
@@ -1210,28 +1125,18 @@ def test_a_payload_written_before_these_fields_is_still_read() -> None:
 
 
 def test_a_requester_served_short_is_told_so_by_the_sweep_rather_than_only_by_email() -> None:
-    """`CheckIn.truncated` existed, said so in the outbound copy, and reached the mailbox nowhere.
+    """A requester served short is told so in the mailbox, not only in the email.
 
-    The backlog row this closes reads `_check_in` as dropping the flag. It does not: `_tell` wrote
-    `{"requests": [...]}` and nothing else, so there was no flag at the route to drop. Driven
-    through the real workflow for that reason — the gap is in the seam between the two halves, and
-    both halves passed their own tests.
+    Driven through the real workflow, because the flag must cross the seam between `_tell` and the
+    route.
     """
     owner = "check-in-short"
 
     async def _forget() -> None:
-        """Remove this test's rows, **after** it as well as before.
+        """Remove this test's rows after it as well as before.
 
-        It is the only test in the suite that inserts more than a page of `pending_requests`, and
-        `pending_store.open_requests` counts every waiting row rather than one requester's — so
-        `tests/test_pending_store.py::test_the_inbox_query_says_how_much_it_did_not_return`, which
-        asserts a 200-row fetch is not truncated, saw this test's 205 rows on top of its own 35 and
-        failed with `total_waiting=284`. It passed locally and reds on CI for the ordinary reason
-        two files share one database and the order between them is not fixed.
-
-        Cleaning before a test only protects that test. What a test owes the ones after it is to
-        leave the table as it found it, and a row count is exactly the shared state a later
-        assertion cannot defend itself against.
+        It inserts more than a page of `pending_requests`, and other files (e.g.
+        `tests/test_pending_store.py`) count every waiting row in the shared database.
         """
         async with db.connection(_dsn()) as conn:
             await conn.execute("DELETE FROM pending_requests WHERE requested_by = %s", (owner,))

@@ -1,37 +1,19 @@
 """Archived Temporal histories, and the replay that checks today's code still accepts them.
 
-**A workflow's history is a contract with every later version of its own code.** Temporal replays
-a run from its history on whatever worker picks it up, so a redeploy that changes the *sequence of
-commands* a workflow issues meets histories the previous version wrote. The background worker is
-the sharp case: `deployment-workers.yaml` deliberately deploys it `Recreate` (one replica, no
-overlap — `D-2026-08-27-what-a-second-background-worker-would-race-on`), so after the cut there is
-exactly one code version and it is handed every unfinished run on `background-jobs`.
+A redeploy that changes a workflow's command sequence meets histories the previous version
+wrote; the background worker deploys `Recreate`, so one code version inherits every unfinished
+run. A history recorded from a released shape and committed here is an ordinary fixture, so the
+check runs in `make test` with no live broker.
 
-`durable/connector_job.py` already argued why the suite could not hold this: a test that runs a
-workflow and then replays the history it just produced compares code against a history that same
-code wrote, so the two agree by construction. Its conclusion — "a CI job rather than a unit test" —
-named the wrong obstacle. What a self-recorded history lacks is *age*, not a runner. An **archived**
-history, recorded from a released shape and committed beside the code, is an ordinary fixture, so
-this runs in `make test` with everything else and needs no separate job and no live broker.
+- `fixtures/histories/` — histories today's code must replay clean.
+- `fixtures/histories/superseded/` — one history today's code is known to diverge from, proving
+  the control still detects a divergence.
 
-**Two directories, two opposite assertions.**
+Activities are stubs: a history records what the workflow asked for, never an activity's body.
 
-- `fixtures/histories/` — histories today's code must replay clean. Recorded from the shape this
-  repository ships; the next change to a workflow's command sequence is what they catch.
-- `fixtures/histories/superseded/` — one history today's code is *known* to diverge from, kept so
-  the control can prove it detects a divergence at all. Without it, a replay check that silently
-  stopped detecting anything would stay green forever.
-
-**The activities are stubs, and that costs nothing.** A history records what the *workflow* asked
-for; an activity's body never appears in it. Recording therefore needs no RDKit, no model and no
-database, only the real workflow code against a real broker.
-
-**Re-recording is a decision, not a refresh.** A fixture going red means the current code no longer
-accepts a history the shipped code wrote. The two honest responses are to gate the change with
-`workflow.patched`, or to re-record *and* say why no run of the old shape can still be in flight —
-for `TemplateWorkflow` that is `template_run_timeout_seconds` (12.6 h at the shipped default), the
-execution timeout `templates/registry.py` starts every run with. Re-recording without asking is how
-this control would come to certify only itself.
+Re-recording is a decision: gate the change with `workflow.patched`, or re-record and say why no
+run of the old shape can still be in flight (for `TemplateWorkflow`, its
+`template_run_timeout_seconds` execution timeout).
 
 To re-record, with a broker up (`make up`):
 
@@ -51,22 +33,14 @@ from temporalio.client import WorkflowHistory
 _HISTORY_DIR = Path(__file__).parent / "fixtures" / "histories"
 _SUPERSEDED_DIR = _HISTORY_DIR / "superseded"
 
-# How long one replay may take before the control gives up on it. A clean replay of the shipped
-# fixtures measures well under a second of actual work; the rest is the sandbox importing the
-# workflow module. The bound exists because **a divergence can hang the replayer instead of
-# failing it**, which is the second thing this ADR measured: a workflow declared
-# `failure_exception_types=[Exception]` (both wrappers here are, deliberately — REV-13) converts
-# *any* exception raised in workflow code into a workflow-failure *command*, and
-# `NondeterminismError` is an exception. A closed history cannot accept that command, so the
-# replayer evicts the run and re-queues it forever. Measured on 2026-09-09: identical history and
-# code, `failure_exception_types=[Exception]` never returned; emptied, it raised
-# `NondeterminismError` in under a second.
+# How long one replay may take. A divergence can hang the replayer instead of failing it: with
+# `failure_exception_types=[Exception]` (as both wrappers here are), `NondeterminismError` becomes
+# a failure command a closed history cannot accept, and the replayer re-queues the run forever.
 REPLAY_DEADLINE_SECONDS = 60.0
 
 # The SDK's own words for that eviction, logged on `temporalio.worker._workflow` at DEBUG. Watching
-# for it is what turns the hang above into a prompt, well-named failure instead of a 60 s wait; the
-# deadline stays as the backstop for the day upstream rewords this, so a reworded message costs the
-# control its error text and not its teeth.
+# for them turns the hang into a prompt failure; the deadline is the backstop if upstream rewords
+# them.
 _NONDETERMINISM_MARKERS = ("NonDeterministicError", "TMPRL1100")
 
 
@@ -125,10 +99,8 @@ class _NondeterminismWatcher(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         """Record the first non-determinism message and wake whoever is waiting on it.
 
-        Woken through `call_soon_threadsafe` because the SDK may log this from its workflow-task
-        executor thread, and `asyncio.Event.set` called off-loop sets the flag without waking a
-        loop already parked in `select()` — which would leave this watcher correct and useless,
-        detecting the divergence and still waiting out the deadline.
+        Woken through `call_soon_threadsafe` because the SDK may log from another thread, and
+        `asyncio.Event.set` off-loop does not wake a loop parked in `select()`.
         """
         message = record.getMessage()
         if not self.tripped.is_set() and any(m in message for m in _NONDETERMINISM_MARKERS):
@@ -139,9 +111,8 @@ class _NondeterminismWatcher(logging.Handler):
 async def replay_failure(archived: ArchivedHistory, workflow_class: type) -> str:
     """Replay one archived history against today's code; return "" if it replayed clean.
 
-    Returns the divergence rather than raising it, because both assertions this module serves need
-    the *answer* — one that it is empty, one that it is not — and a helper that raised would make
-    the second one read as an expectation of failure rather than as a check that the control works.
+    Returns the divergence rather than raising, because callers assert both that it is empty and
+    that it is not.
     """
     # Imported here rather than at module scope: constructing a `Replayer` builds an SDK bridge
     # worker, and this module is imported by the test collector on every run, including the ones
@@ -163,26 +134,15 @@ async def replay_failure(archived: ArchivedHistory, workflow_class: type) -> str
             timeout=REPLAY_DEADLINE_SECONDS,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        # Cancelled and **not awaited**, which is deliberate and was measured: a replay abandoned
-        # mid-divergence is parked in the SDK's bridge poll and does not answer cancellation —
-        # `asyncio.gather` on it had not returned after 20 s, so awaiting here would reintroduce
-        # exactly the hang this function exists to convert into an answer. Each caller runs this
-        # through its own `asyncio.run`, so the loop closing behind it is the teardown.
+        # Cancelled and not awaited: a replay abandoned mid-divergence is parked in the SDK's bridge
+        # poll and ignores cancellation, so awaiting would reintroduce the hang. Each caller's own
+        # `asyncio.run` tears the loop down.
         for task in pending:
             task.cancel()
-        # **The watcher is asked first, and the order is the whole control.** `asyncio.wait` with
-        # `FIRST_COMPLETED` returns every future that finished in that cycle, not one — so when the
-        # SDK logs the divergence and the replay coroutine then completes without raising, *both*
-        # are in `done`. Asking `replay` first took its silence over the watcher's evidence and
-        # returned "", which reports a known-divergent history as clean: measured, both futures
-        # done, `tripped` set, `reason` populated, verdict "". That is
-        # `test_the_control_still_detects_the_divergence_it_was_built_for` going green for the one
-        # reason its own docstring says would be a real finding — while the finding was false.
-        #
-        # `reason` rather than `tripped` because `emit` assigns it synchronously and only
-        # *schedules* the event through `call_soon_threadsafe`, so it is set in strictly more cases
-        # and is the earliest honest answer. Absence of an exception is absence of evidence;
-        # a logged `TMPRL1100` is evidence. Evidence wins.
+        # The watcher is asked first: with `FIRST_COMPLETED`, both futures can be done in one cycle,
+        # and a replay that completed without raising must not override a logged divergence.
+        # `reason` rather than `tripped` because `emit` sets it synchronously, while the event is
+        # only scheduled.
         if watcher.reason:
             return watcher.reason
         if replay in done:

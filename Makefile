@@ -8,7 +8,7 @@ EVAL_CASE_SET_VERSION ?= live-cost-2026-09-14
 
 # pytest-xdist workers for `test` and `cov`; 0 is serial. Not `auto`: each worker draws its own
 # Postgres pools, so tests/conftest.py caps each worker's pool instead.
-PYTEST_WORKERS ?= 4
+PYTEST_WORKERS ?= 0
 PYTEST_XDIST := $(if $(filter-out 0,$(PYTEST_WORKERS)),-n $(PYTEST_WORKERS),)
 
 # How deps-audit classifies pip-audit output; tests/test_deploy_chart.py asserts against these.
@@ -72,7 +72,7 @@ lint:  ## Ruff lint + format check (no writes; use `uv run ruff format` to fix).
 type:  ## Static type check, strict (the whole package, plus examples and tests).
 	uv run mypy src examples tests
 
-test:  ## Run the test suite (4 xdist workers; `PYTEST_WORKERS=0` for serial).
+test:  ## Run the test suite (serial; `PYTEST_WORKERS=4` for ~2x, re-run a parallel-only failure serially).
 	uv run pytest $(PYTEST_XDIST)
 
 cov:  ## Run the test suite with coverage (first-party packages; report missing lines).

@@ -1,13 +1,8 @@
 """Trust is a distribution, not a number: the residual listing and its property table (D-169).
 
-`calculator_trust` reduced the whole ledger to six aggregates, and did it through
-`if property_name == "solubility"` followed by two ternaries — so *every* other name was answered
-with pKa's version and pKa's unit. An unknown property got a confident report about the wrong
-calculator, and nothing in the response said so.
-
-The listing is the other half. A model that is 0.3 log units off overall may be fine on neutrals
-and two units low on every acid; the two populations average into one reassuring number, and no
-aggregate can pull them apart.
+Each property name resolves through a table, so an unknown property is refused rather than
+answered with pKa's version and unit. The listing exists because aggregates hide sub-populations
+(e.g. fine on neutrals, two units low on acids).
 """
 
 import pytest
@@ -32,11 +27,8 @@ _LEDGER = [
 def _ledger(monkeypatch: pytest.MonkeyPatch) -> None:
     """Serve the fixed ledger above instead of the database, for every test here.
 
-    `calibration_enabled` is switched on with it, because the two go together in production: the
-    real `reconciled_for` returns `[]` without touching the database when the ledger is off, so a
-    populated ledger under a disabled flag is a state that cannot occur. Leaving the flag at its
-    default (False) would make every report here read "CALIBRATION NOT RECORDED" beside four
-    residuals.
+    `calibration_enabled` is switched on with it, because a populated ledger under a disabled flag
+    cannot occur in production.
     """
 
     async def _reconciled(calc_type: str, calc_version: str) -> list[Residual]:
@@ -64,13 +56,10 @@ async def test_an_uncalibrated_property_is_refused_and_the_message_names_the_rea
 async def test_a_disabled_ledger_does_not_render_as_a_well_behaved_calculator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default deployment's answer, and it was an empty list with nothing to read it by.
+    """A disabled ledger does not render as a well-behaved calculator.
 
-    `calibration_enabled` defaults to **False**, so `reconciled_for` returns `[]` without raising
-    and this tool answered `[]` — which its own docstring tells the model means "few
-    measurements". Its sibling `calculator_trust` was given a verdict for exactly this collapse in
-    the same commit; the listing was left a bare list, so disabled ≡ nothing measured ≡ nothing
-    missed, all one payload.
+    `calibration_enabled` defaults to False and `reconciled_for` then returns `[]`; the tool must
+    say the ledger is off rather than return a bare empty list meaning "nothing missed".
     """
     monkeypatch.setattr(settings, "calibration_enabled", False)
 
@@ -158,22 +147,12 @@ def test_an_empty_substructure_query_is_rejected_rather_than_matching_everything
 
 
 async def test_the_calibrated_version_comes_from_the_server_and_never_from_here() -> None:
-    """The single most important correctness item of the split, asserted where it is read.
+    """The calibrated version comes from the server, never from here.
 
-    `calculator_trust` and `calculator_outliers` used to derive the version locally, from
-    `xtb --version` and seven calibration settings this process can no longer see. That failure is
-    silent: `binary_version()` answered the literal string `"absent"` rather than raising when the
-    binary was missing, so a pod without it would build a **well-formed** version, match zero rows
-    in a ledger keyed exactly on `(calc_type, calc_version, input_hash)` (D-139, no pooling), and
-    report a confident `UNCALIBRATED` — the state that machinery exists to distinguish, reached by
-    a route it never anticipated, with every historical residual unreachable at once.
-
-    So the version is a `calculation_key` round trip, and both tools take the same route. What is
-    asserted is that the string reaching the ledger query is the server's — and, because the
-    derivation lived in `_calibrated` for both, that neither tool has its own copy.
-
-    `tests/test_calc_remote.py` asserts the other half statically, over the source: no module in
-    this repository defines a `calc_version`.
+    A locally derived version would be well-formed, match no ledger row and report `UNCALIBRATED`
+    silently. Both tools take the `calculation_key` route; asserted is that the string reaching the
+    ledger query is the server's and that neither tool has its own derivation.
+    `tests/test_calc_remote.py` holds the static half.
     """
     asked: list[tuple[str, str]] = []
 

@@ -1,13 +1,8 @@
 """What one profile advertises, without building an agent to find out.
 
-Every test that asked "does this profile narrow the tools / swap the instructions / drop that
-connector" used to build a whole agent object behind a `chat_client=object()` stand-in and read
-`agent.default_options["tools"]`. It worked, and it made the assertion about a framework object's
-internal keys rather than about the decision.
-
-The three answers are three first-party functions, so this is what a profile *is*. Building a
-compiled graph to inspect the same three would be the same mistake in a new framework — and would
-need a model credential, which is exactly what the stand-in client existed to dodge.
+A profile's tools, instructions and connectors are three first-party functions, so tests assert
+on them directly rather than on a compiled graph's internals (which would also need a model
+credential).
 """
 
 from dataclasses import dataclass
@@ -30,9 +25,8 @@ def surface(profile: str | AgentProfile | None = None) -> Surface:
     """Resolve `profile` and report what it advertises.
 
     Args:
-        profile: A profile name, an `AgentProfile`, or `None` for the default — the same three
-            forms `build_langgraph_agent` accepts, resolved the same way, so a test cannot be
-            asking about a profile the agent would resolve differently.
+        profile: A profile name, an `AgentProfile`, or `None` for the default — resolved as
+            `build_langgraph_agent` resolves it.
     """
     resolved = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Names, not objects. A capability tool is a plain `@tool`-registered function until

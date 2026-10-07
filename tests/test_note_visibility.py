@@ -1,19 +1,8 @@
-"""When does a recorded note become visible to a reader? Measured: immediately, on purpose.
+"""A recorded note is visible to readers immediately, by design.
 
-**This file is the inversion of the one it replaces, and the inversion is the decision.** It used
-to ask whether a reader could see an *unreviewed* note while the PR-gate was submitting it, and
-every assertion existed to prove they could not: the gate was the review line, and the whole
-control rested on an agent-authored note being invisible as knowledge until a human merged it.
-`D-2026-09-05-the-gate-is-deleted-not-dormant` removed that control, so the question no longer has
-a subject — a note is *meant* to be readable the moment it is written.
-
-What survives is the mitigation that used to be secondary and is now the whole of it: a note
-carries `created_by: agent` through the loader, so a reader can tell machine-written content from
-curated content at the point of use. That assertion is kept, promoted from "the mitigation that
-also exists" to the thing the deletion rests on.
-
-Real git throughout, not a stub, for the reason the old file gave: the property under test is what
-is on disk in the tree readers scan, so a fake writer would test the fake.
+What makes that safe is provenance: a note carries `created_by: agent` through the loader, so a
+reader can tell machine-written content from curated content. Real git throughout, because the
+property is what is on disk in the tree readers scan.
 """
 
 import asyncio
@@ -61,12 +50,8 @@ def _submission(note_id: str = "agent-proposal") -> NoteWrite:
 def knowledge_clone(tmp_path: Path) -> Path:
     """A real bare remote plus a real working clone with one merged note in it.
 
-    Real git, not a stub: the window under test was created by a working tree being switched, so a
-    fake submitter would test the fake. The merged note gives the reader something legitimate to
-    see, which is what makes "and also the unreviewed one" a detectable difference.
-
-    The clone carries its own committer identity because the submitter commits inside the worktree
-    through `asyncio.create_subprocess_exec` and does not inherit the per-command env `_git` uses.
+    The clone carries its own committer identity because the writer commits via
+    `asyncio.create_subprocess_exec` and does not inherit the per-command env `_git` uses.
     """
     bare = tmp_path / "remote.git"
     bare.mkdir()
@@ -96,12 +81,10 @@ def _submitter(clone: Path) -> GitNoteWriter:
 
 
 def test_a_reader_sees_the_note_as_soon_as_it_is_written(knowledge_clone: Path) -> None:
-    """The headline inversion: no window, because visibility is the point.
+    """`load_notes` returns the agent note as soon as the write completes.
 
-    The old assertion was that `load_notes` never returns the agent note at any instant of the
-    submission. It now returns it as soon as the write completes, from the same directory
-    `settings.knowledge_path` resolves to — and the writer drops the graph cache, so a reader that
-    scanned a moment earlier does not go on serving a graph without it.
+    Read from the directory `settings.knowledge_path` resolves to; the writer drops the graph cache
+    so an earlier reader does not keep serving a graph without it.
     """
     notes_dir = knowledge_clone / "knowledge"
     invalidate_cache(notes_dir)
@@ -116,16 +99,10 @@ def test_a_reader_sees_the_note_as_soon_as_it_is_written(knowledge_clone: Path) 
 
 
 def test_the_note_records_who_authored_it(knowledge_clone: Path) -> None:
-    """The control the deletion rests on, promoted from a secondary mitigation to the whole of it.
+    """An agent-authored note carries `created_by: agent` through the writer and out of the loader.
 
-    An agent-authored note carries `created_by: agent` **through the writer and out of the
-    loader**, so a reader can tell machine-written content from curated content. Under the gate
-    this sat behind a human review step; there is no review step now, so this field and the
-    citations beside it are what a chemist has. A change to it is a change to the control.
-
-    Driven through `GitNoteWriter` rather than `write_text`, which is what this test used to do —
-    that version exercised `load_notes` and `parse_note` and nothing the deletion changed, so it
-    was evidence about the loader while billed as evidence about the control.
+    With no review step, this field and the note's citations are what a chemist has to judge it by.
+    Driven through `GitNoteWriter` so the writer path is covered, not only the loader.
     """
     notes_dir = knowledge_clone / "knowledge"
     writer = GitNoteWriter(repo_dir=str(knowledge_clone), base_branch="main", remote="origin")
@@ -139,12 +116,10 @@ def test_the_note_records_who_authored_it(knowledge_clone: Path) -> None:
 def test_a_reader_is_not_excluded_while_the_writer_holds_the_checkout(
     knowledge_clone: Path,
 ) -> None:
-    """`load_notes` still takes no lock, and that is now harmless rather than the mechanism.
+    """`load_notes` takes no lock while the writer holds the checkout.
 
-    The writer holds two locks — a process-wide `asyncio.Lock` and an OS `flock`
-    (`git_writer._checkout_lock`) — and neither is a *reader* lock. Kept, rather than deleted with
-    the rest of the old subject, because it is the pin that says no reader lock was ever added: if
-    one is, this is where that decision surfaces.
+    The writer's process lock and `flock` (`git_writer._checkout_lock`) are writer-only; this pin
+    surfaces any reader lock added later.
     """
     notes_dir = knowledge_clone / "knowledge"
     invalidate_cache(notes_dir)

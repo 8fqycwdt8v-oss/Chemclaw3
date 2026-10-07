@@ -1,15 +1,8 @@
-"""Integration tests for the Postgres BO campaign store (`infra/sql/031_bo_campaigns.sql`, R1.5).
+"""Integration tests for the Postgres BO campaign store (`infra/sql/031_bo_campaigns.sql`).
 
-`PostgresCampaignStore` had no direct test: `test_bo_campaign_record.py` exercises the *contract*
-(`CampaignStore` Protocol) entirely through `InMemoryCampaignStore`, which is correct for pinning
-the identity and append-only design, but it means the durable backend an actual deployment runs —
-the upsert that keeps the original opener, the append-only suggestion sequence, the `LIMIT`/`ORDER
-BY` a resumed session relies on — has never touched a database in a test.
-
-Follows `tests/test_postgres_store.py`'s pattern: `migrated_db_or_skip()` skips cleanly offline and
-runs for real in CI; each test is a sync `def` wrapping an inner `async def _run()` driven by
-`asyncio.run`; isolation comes from the session-scoped schema redirect in `conftest.py`, with a
-distinct `campaign_id` per test on top so tests sharing one schema cannot see each other's rows.
+Covers what the in-memory contract tests cannot: the upsert that keeps the original opener, the
+append-only suggestion sequence and the ordering a resumed session relies on. Skips without
+Postgres; each test uses a distinct `campaign_id` because the session schema is shared.
 """
 
 import asyncio
@@ -168,13 +161,10 @@ async def test_distinct_campaigns_keep_independent_suggestion_histories() -> Non
 
 
 async def test_a_retried_durable_write_hits_the_unique_index_instead_of_appending() -> None:
-    """The idempotency the durable path needs, against the index that actually enforces it.
+    """A retried durable write hits `bo_suggestions_job_idx` instead of appending.
 
-    `bo_suggestions_job_idx` is where this lives — the in-memory backend implements the same rule
-    in Python, but a partial unique index and an `ON CONFLICT ... WHERE` inference are exactly the
-    kind of thing that is right in prose and wrong in SQL, so it is asserted here against a real
-    database. The retry must be *invisible*, not merely harmless: the caller gets back the id the
-    first attempt got.
+    A partial unique index with `ON CONFLICT ... WHERE` inference is easy to get wrong in SQL, so it
+    is asserted against a real database. The retry is invisible: it returns the first attempt's id.
     """
     store = await _store_or_skip()
     campaign_id = "pgcamp-retried-job"
@@ -188,10 +178,8 @@ async def test_a_retried_durable_write_hits_the_unique_index_instead_of_appendin
     first, created = await store.record(_campaign(campaign_id), suggestion)
     again, created_again = await store.record(_campaign(campaign_id), suggestion)
     assert again == first, "a retry must return the id the first attempt got, not a new row"
-    # The other half of the same write, and it must *not* be idempotent in the same direction:
-    # the first call created the campaign row and the retry found it, which is precisely the
-    # signal `suggest_next_experiment` reports as `opened_new_campaign`. Reading it off a
-    # `SELECT` before the write could not distinguish these two calls under concurrency.
+    # The first call created the campaign row and the retry found it; that is the
+    # `opened_new_campaign` signal, which a pre-write `SELECT` could not give under concurrency.
     assert (created, created_again) == (True, False)
     assert len(await store.suggestions_for(campaign_id, limit=10)) == 1
 
@@ -231,21 +219,11 @@ async def test_a_suggestion_round_trips_the_space_it_was_proposed_against() -> N
 
 
 async def test_two_turns_opening_one_campaign_at_once_agree_on_who_opened_it() -> None:
-    """The race the `xmax` read replaced a `SELECT` to close, driven concurrently for real.
+    """Two turns opening one campaign at once agree on who opened it.
 
-    `suggest_next_experiment` reports `opened_new_campaign` so a chemist who supplied runs against
-    a campaign with no record is told they may have forked one. It used to be answered by a
-    `campaign_is_known` read taken just before the write — and under two turns opening the same
-    decision space at once, both reads see nothing, both report having opened a campaign, and the
-    upsert underneath then serializes them so exactly one is right with nothing able to say which.
-
-    Postgres answers it instead: `ON CONFLICT ... RETURNING (xmax = 0)` is true only for the
-    statement that actually inserted the row. Two concurrent transactions must therefore return
-    exactly one `True` between them, whichever wins.
-
-    Driven with `asyncio.gather` over the real store rather than the in-memory one, because the
-    property under test *is* the database's concurrency control: the in-memory backend has no
-    contention to lose and would pass this test while proving nothing about a deployment.
+    `ON CONFLICT ... RETURNING (xmax = 0)` is true only for the statement that inserted the row, so
+    two concurrent transactions return exactly one `True`. Driven with `asyncio.gather` on the real
+    store, since the property is the database's concurrency control.
     """
     store = await _store_or_skip()
     campaign_id = "campaign-concurrent-open"
@@ -287,18 +265,11 @@ _AGREEMENT_SCENARIOS: list[tuple[str, list[Candidate], bool]] = [
 
 
 async def test_the_two_campaign_stores_accept_and_refuse_exactly_the_same_writes() -> None:
-    """`InMemoryCampaignStore` claims its Postgres sibling's rules "hold here" — they did not.
+    """The two campaign stores accept and refuse exactly the same writes.
 
-    Measured before the fix, from one input: `record()` **succeeded** against the in-memory store
-    and **raised `ValueError: Out of range float values are not JSON compliant`** against Postgres.
-    A `session_store="memory"` dev stack recorded the campaign; the deployment lost the chemist's
-    suggestion — and lost it *after* the candidates had been computed, because `ValueError` is not
-    in `_TRANSIENT_WRITE_FAILURES` and so escapes `record_suggestion`, whose whole contract is that
-    a write failure must not turn a computed suggestion into a failed tool call.
-
-    Neither suite could see it: `test_bo_campaign_record.py` drives the in-memory backend and this
-    file drives Postgres, so one scenario list against both is the only shape that catches a
-    divergence rather than each half's own behaviour.
+    One scenario list against both backends catches divergence, such as a non-finite float the
+    in-memory store accepted and Postgres refused with a non-transient `ValueError`, losing a
+    computed suggestion.
     """
     durable = await _store_or_skip()
     memory = InMemoryCampaignStore()

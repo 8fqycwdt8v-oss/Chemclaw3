@@ -1,20 +1,8 @@
 """Cost attribution: who spent what, on tokens and on compute.
 
-The readiness row read *"token metrics carry `profile` only, so 'what did team X cost' is
-unanswerable, and compute spend is entirely unmetered — no counter for jobs launched or
-node-hours"*. Half of that is a real gap and half is not, and the tests below separate them:
-
-- **Real.** Nothing durable recorded what a turn cost, against whom. The `profile` label answers a
-  deployment-wide question; the budget tracker meters per user in memory *to refuse a turn* and
-  resets on restart. Per-actor spend over a quarter had no store at all.
-- **Not.** `chemclaw_jobs_started_total` has existed since D-118 (`connectors/jobs.py`). What was
-  missing on the compute path is not a count but a *magnitude*: a two-second xTB call and a six-hour
-  DFT run incremented it identically.
-
-The one design decision worth a test of its own is why this is a table rather than an `actor` label:
-`core/metrics` refuses a counter past 64 label series on purpose, because the value is
-attacker-influenced. That refusal is the reason for the table, so it is asserted here rather than
-described.
+Turn costs are recorded durably per actor in a table, and job records carry the runtime a job
+consumed, so magnitude rather than just a launch count is visible. It is a table rather than an
+`actor` metric label because `core/metrics` refuses unbounded, attacker-influenced label series.
 """
 
 import asyncio
@@ -57,15 +45,10 @@ async def _drain() -> None:
 
 
 def test_the_metric_registry_refuses_an_unbounded_label_which_is_why_this_is_a_table() -> None:
-    """The premise of the whole design, asserted rather than asserted-in-prose.
+    """The metric registry refuses an unbounded label, which is why per-actor spend is a table.
 
-    A per-actor token counter is the obvious fix and is not available: the registry caps a counter
-    at `core/metrics._MAX_SERIES_PER_COUNTER` label series and refuses past it (D-152), because a
-    label value is attacker-influenced and minting tokens for many `oid`s is exactly the way around
-    a per-principal limit. Any deployment with more users than the cap would silently lose series —
-    which is worse than not having them. Driven one past the cap rather than at a fixed count, so
-    raising the cap (it is sized against the route table) cannot silently turn this into a test of
-    nothing.
+    Driven one past `_MAX_SERIES_PER_COUNTER` rather than at a fixed count, so raising the cap
+    cannot turn this into a test of nothing.
     """
     from chemclaw.core.metrics import _MAX_SERIES_PER_COUNTER
 
@@ -105,12 +88,10 @@ async def test_a_turn_cost_carries_the_identity_the_metric_cannot(
 
 
 async def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The runner books this from a `finally` in which an `await` re-raises a pending cancellation.
+    """Recording a cost never awaits.
 
-    That block runs on the disconnect path too (D-130), and an `await` there would skip the five
-    context-var resets after it, leaking one turn's ambient identity into the next turn on this
-    worker. So the contract is that `record_turn_cost` is an ordinary function — and the way to
-    prove it is to call it from a *cancelled* task and watch the write still land.
+    The runner books it from a `finally` where an `await` re-raises a pending cancellation and would
+    skip the context-var resets after it. Proven by calling it from a cancelled task.
     """
     sink = _RecordingSink()
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: sink)
@@ -184,12 +165,7 @@ def test_no_database_means_no_write_task_at_all(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_a_job_record_carries_what_the_run_consumed() -> None:
-    """`job_records` said what ran and why, and nothing about how much of the cluster it took.
-
-    So the durable record of the most expensive thing this system does could not distinguish a
-    two-second xTB call from a six-hour DFT run, and `chemclaw_jobs_started_total` — which does
-    exist, contrary to the row that asked for it — counted them identically.
-    """
+    """A job record carries the runtime the job consumed."""
     from chemclaw.durable.connector_job import (
         ConnectorJobInput,
         ConnectorJobResult,
@@ -212,11 +188,9 @@ def test_a_job_record_carries_what_the_run_consumed() -> None:
 
 
 def test_finished_job_runtime_reaches_the_consumption_counter() -> None:
-    """A launch counter is the least informative number available on the expensive path.
+    """Finished job runtime reaches the consumption counter.
 
-    Accumulated seconds is the consumption shape — `rate()` reads as compute-seconds per second,
-    the same shape as the token counters — and it is labelled by connector, which is bounded by the
-    chart exactly as `profile` is.
+    Accumulated seconds labelled by connector, so `rate()` reads as compute-seconds per second.
     """
     registry = Metrics()
     registry.increment("chemclaw_job_runtime_seconds_total", 21600.0, {"connector": "qm"})
@@ -227,20 +201,12 @@ def test_finished_job_runtime_reaches_the_consumption_counter() -> None:
 
 
 def test_the_wrapper_measures_the_run_rather_than_hardcoding_it() -> None:
-    """The one claim on this path that no offline test could otherwise hold.
+    """The wrapper passes a measured runtime, not a constant.
 
-    `job_record_for` is pure and testable, but it takes `runtime_seconds` as an argument — so it
-    passes just as happily on a hardcoded `0.0` as on a measurement, and the place the measurement
-    actually happens is `ConnectorJobWorkflow.run`, which needs a Temporal server. The end-to-end
-    test there cannot supply a lower bound either: the fixture child returns immediately, and the
-    time-skipping server may legitimately report both of the wrapper's clock reads as the same
-    instant, so `> 0` would be a flake rather than an assertion. (A sleep in the fixture to force a
-    gap was tried and broke that test outright — the shared harness is the wrong place to buy this.)
-
-    So the claim is checked where it is cheap and exact: over the AST. The argument must be a
-    *computed expression* mentioning `workflow.now`, never a constant. Parsed rather than
-    string-matched, because a substring check is satisfied by the comment above the line — a trap
-    this repository has already fallen into twice (`tasks/lessons.md`).
+    `ConnectorJobWorkflow.run` needs a Temporal server, and a time-skipping server can report both
+    clock reads as one instant, so this is checked over the AST: the argument must be a computed
+    expression mentioning `workflow.now`. Parsed rather than string-matched, so a comment cannot
+    satisfy it.
     """
     import ast
     import inspect
@@ -276,54 +242,21 @@ def test_the_runtime_counter_is_declared_on_the_process_registry() -> None:
 def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
     """Each reader of the ledger ships with the route, command or report that asks it.
 
-    This began as an *absence* pin. `turn_costs` had two readers and neither had a caller:
-    `turn_cost_store.read_spend_by_actor` described itself as "the whole point of the table" and was
-    reached by no route, CLI or ops endpoint; `evals/live.session_tokens` was the only producer of
-    `ProbeOutcome.tokens` and was called by nothing at all, so every probe of every live run
-    recorded `None`. Both were deleted on 2026-08-27 for the reason
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` gives: a function that
-    only its own test calls is a claim that a capability exists.
+    A query function with no caller claims a capability that does not exist. The list is exhaustive,
+    so a reader added without a surface fails here:
 
-    The rule that absence enforced was never "no reader" — it was *a query function needs the route,
-    command or report that asks it, in the same change*
-    (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). This pin used to state it as
-    "exactly one module reads the table", which is a **proxy** for the rule rather than the rule,
-    and the proxy failed the first time the rule was satisfied by somebody else: a wave-14 review
-    found that a turn stopped by its model-call cap reconstructed identically to a clean one in
-    `cli/explain.py` and assembled an identical evidence pack in `operations/evidence_pack.py` —
-    because `outcome` lives in this table and neither surface read it. Both fixes ship *with* their
-    surface, which is what the rule asks; refusing them for the count would have been the proxy
-    outranking the thing it stands for.
+    - `operations/activity.py`: the aggregate read model behind the `review_activity` tool.
+    - `operations/evidence_pack.py`: `assemble`, the context-of-use record for one session.
+    - `cli/distill.py`: `make distill`, reading `skills_loaded` for the self-confirmation guard.
+    - `cli/explain.py`: `python -m chemclaw.cli.explain`, the audit reconstruction.
+    - `cli/live_turn_cost.py`: `make live-turn-cost`, reading back only the session it opened.
+    - `evals/delegation_run.py`: `make live-delegation`, reading back the billed tokens of the
+      sessions
+      it drove.
+    - `agent/session_store.py`: `PostgresHistoryProvider.mark_interrupted`, which checks whether an
+      interrupted turn already has a row so its outcome is never booked twice.
 
-    The list is exhaustive and each entry is named with what asks it, so a reader added with no
-    surface still fails here — which is the half that matters:
-
-    - `operations/activity.py` — the aggregate read model, reached by the `review_activity` tool.
-    - `operations/evidence_pack.py` — `assemble`, the context-of-use record for one session.
-    - `cli/distill.py` — `make distill`, which reads `skills_loaded` and nothing else: it is the
-      self-confirmation guard's input, and the guard is why that column exists at all
-      (`D-2026-09-18-a-guard-with-nothing-to-read-is-not-a-guard`).
-    - `cli/explain.py` — `python -m chemclaw.cli.explain`, the audit reconstruction.
-    - `cli/live_turn_cost.py` — `make live-turn-cost`, which drives a fixed workload and scores
-      what the ledger says it cost. Its surface is the command itself, and it reads back only the
-      session it just opened.
-    - `evals/delegation_run.py` — `make live-delegation`, which reads back only the sessions it just
-      drove, one arm-run at a time. `ArmRun.billed_tokens`' own comment is why it has to come from
-      here: the delegation experiment's cost claim is about what a turn *billed*, and an estimator
-      would measure the wrong thing through a ratio `agent/context_budget.py` has twice found to be
-      content-dependent.
-
-    - `agent/session_store.py` — `PostgresHistoryProvider.mark_interrupted`, which asks only whether
-      a turn it is marking interrupted *already has* a row, so that the outcome a turn's own process
-      booked is never booked a second time (`api/runner.settle_interrupted_turns`). Its askers are
-      the session's next turn, a reattach that finds nothing running, and a transcript read.
-
-    Note what the count never protected: `evidence_pack.py` has always read `audit_events`,
-    `job_records`, `effects` and `plan_approvals` with its own SQL, so "operations/activity.py is
-    the only reader" was never true of this system's tables generally — only of this one.
-
-    `tests/test_postgres_turn_cost_store.py` reads the table with its own SQL, which is where a
-    test's read-back belongs.
+    Tests read the table with their own SQL.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     readers = sorted(

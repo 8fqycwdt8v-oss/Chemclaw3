@@ -1,15 +1,8 @@
-"""What a turn looked at, cited and wrote back — the dimensions `turn_costs` lacked.
+"""What a turn looked at, cited and wrote back, recorded on `turn_costs`.
 
-That row has recorded a turn's spend since migration 033 and how it *ended* since 060. It could not
-say whether the turn consulted the knowledge record at all. Two separate reviews of this system's
-knowledge loop each had to answer that with a bespoke script, and the answer is not recoverable
-after the fact: the event stream ends with the turn, and `session_messages` holds the prose rather
-than which tool ran.
-
-The one that motivated it: `retrieval_calls == 0` on a turn that made a claim about this
-programme's own chemistry. `D-2026-09-04-a-ranker-that-sorts-alphabetically-is-not-a-ranker` put an
-obligation to search before answering into the system prompt, and this column is the only way to
-find out whether that obligation moved anything. A prompt rule nobody can measure is a hope.
+The event stream ends with the turn and `session_messages` holds prose rather than which tool ran,
+so whether a turn consulted the knowledge record is only answerable if it is booked at the time.
+That makes the system prompt's search-before-answering obligation measurable.
 """
 
 import pytest
@@ -38,11 +31,10 @@ def _ledger() -> object:
 
 
 def test_a_turn_that_searched_the_record_is_distinguishable_from_one_that_did_not() -> None:
-    """The zero that matters: a turn that answered without looking.
+    """A turn that searched the record is distinguishable from one that answered without looking.
 
-    Counted off `ToolCallEvent` in `note_event`, which the module calls "the one place the counts
-    are taken" — so a subagent's search and a mid-turn resume are counted the same way as the
-    supervisor's, because all three pass through it.
+    Counted off `ToolCallEvent` in `note_event`, so a subagent's search and a mid-turn resume are
+    counted the same way as the supervisor's.
     """
     silent, searching = _ledger(), _ledger()
     searching.note_event(ToolCallEvent(tool="gather_evidence", arguments=""))  # type: ignore[attr-defined]
@@ -62,11 +54,10 @@ def test_a_write_is_counted_as_capture_rather_than_as_retrieval() -> None:
 
 
 def test_a_calculation_is_not_a_capture() -> None:
-    """The column answers "did this turn write anything back", not "did it change something".
+    """A calculation is not a capture.
 
-    `capture_calls` was derived from `side_effecting_tools()`, which spans 49 tools — so a turn
-    that computed one xTB energy and wrote nothing to the record booked a capture. That is a
-    different question, and one `tool_calls` minus the reads already approximates.
+    `capture_calls` answers "did this turn write anything back", not "did it change something", so
+    it is not derived from `side_effecting_tools()`.
     """
     ledger = _ledger()
     ledger.note_event(ToolCallEvent(tool="compute_xtb_energy", arguments=""))  # type: ignore[attr-defined]
@@ -90,9 +81,8 @@ def test_every_knowledge_write_tool_is_still_gated() -> None:
 def test_a_tool_that_is_neither_moves_neither_count() -> None:
     """`ask_clarifying_question` is read-only and consults nothing.
 
-    This is why `KNOWLEDGE_READ_TOOLS` is a stated subset rather than the authz partition: authz
-    answers "may this run without approval", and counting by it would book a turn that asked the
-    chemist a question as a turn that searched the record.
+    `KNOWLEDGE_READ_TOOLS` is a stated subset rather than the authz partition, which answers a
+    different question.
     """
     ledger = _ledger()
     ledger.note_event(ToolCallEvent(tool="ask_clarifying_question", arguments=""))  # type: ignore[attr-defined]
@@ -134,11 +124,9 @@ def test_an_ungraded_turn_records_no_confidence_rather_than_a_zero() -> None:
 
 
 def test_every_knowledge_read_tool_is_still_a_read() -> None:
-    """The guard the hand-written subset needs.
+    """Every knowledge-read tool is still read-only.
 
-    `KNOWLEDGE_READ_TOOLS` is written out rather than derived, because "did this turn consult the
-    record" is not the question authz partitions on. The risk that creates is a tool becoming
-    state-changing while still being counted as a read — this is what fails when that happens.
+    The subset is written out by hand, so this fails if one of its tools becomes state-changing.
     """
     assert KNOWLEDGE_READ_TOOLS <= READ_ONLY_TOOLS, (
         f"not read-only any more: {sorted(KNOWLEDGE_READ_TOOLS - READ_ONLY_TOOLS)}"
@@ -146,11 +134,9 @@ def test_every_knowledge_read_tool_is_still_a_read() -> None:
 
 
 def test_the_row_carries_every_dimension_the_ledger_counted() -> None:
-    """The store's column list and the model must not drift apart.
+    """The store's column list and the `TurnCost` model do not drift apart.
 
-    A field added to `TurnCost` and forgotten in `_COLUMNS` is written nowhere and raises nothing —
-    the row is simply narrower than the code believes, which is the silent half of this kind of
-    change.
+    A field missing from `_COLUMNS` would be written nowhere and raise nothing.
     """
     from chemclaw.agent.turn_cost_store import _COLUMNS
     from chemclaw.core.turn_cost import TurnCost
@@ -169,17 +155,11 @@ def test_the_row_carries_every_dimension_the_ledger_counted() -> None:
 def test_the_answers_grade_reaches_the_booked_row_and_not_only_the_ledger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The end-to-end arm, and the reason this file needed one.
+    """The answer's grade reaches the booked row, end to end.
 
-    Every other test here calls `note_event` directly, and all of them passed while the three
-    columns read off the `AnswerEvent` were `NULL/false/0` on every row a deployment has ever
-    written — because that event is *built* in `run_turn` rather than streamed, so it never
-    reached the one place the counts are taken. A reader with no caller passes its own unit tests
-    by construction; this one drives `run_turn` and asserts what `record_turn_cost` was handed.
-
-    It asserts the booked row *against the yielded event* rather than against literals, so the
-    test says "these two agree" — which is the actual invariant — and stays true under a
-    deployment where the verifier runs and fills `confidence` in.
+    `AnswerEvent` is built in `run_turn` rather than streamed, so unit tests of `note_event` cannot
+    show it is counted. This drives `run_turn` and asserts the booked row against the yielded event,
+    so it stays true when the verifier fills `confidence` in.
     """
     import asyncio
     from collections.abc import AsyncIterator
@@ -220,13 +200,10 @@ def test_the_answers_grade_reaches_the_booked_row_and_not_only_the_ledger(
 
 
 def test_a_bundles_search_over_the_record_counts_as_retrieval() -> None:
-    """The half core cannot name, and the reason the set is a union.
+    """A bundle's search over the record counts as retrieval.
 
-    `rxnfp` searches the reaction corpus and `molfp` the fingerprint index — both are the record a
-    turn consults before answering, and both were invisible to this column, so a turn that answered
-    entirely from `substrate_precedent` booked `retrieval_calls` zero. Counting them by listing
-    them in core would be the copy of somebody else's classification D-118 forbids; each bundle
-    declares its own `knowledge_read`.
+    Each bundle declares its own `knowledge_read` tools, so core does not copy another bundle's
+    classification; the counted set is the union.
     """
     ledger = _ledger()
     ledger.note_event(ToolCallEvent(tool="substrate_precedent", arguments=""))  # type: ignore[attr-defined]
@@ -259,21 +236,11 @@ def test_the_declared_reads_of_every_enabled_bundle_reach_the_counted_set() -> N
 
 
 def test_a_refused_or_failed_call_is_not_a_consultation() -> None:
-    """These count consultations, not attempts — the field's own question is what was *read*.
+    """A refused or failed call is not a consultation.
 
-    Both counts are taken on the `ToolCallEvent`, which is where the tool's name is classified, and
-    nothing took them back when the call did not happen. Measured 2026-09-06 through a real turn:
-    one successful `find_notes`, one repeat-refused `find_notes` and one `expand_note` that raised
-    booked `retrieval_calls = 3` while the record was consulted **once**. For the 0-vs-nonzero
-    reading the column exists for that is harmless; for any rate built on it — "how often does the
-    retrieval obligation actually move a turn" — it is a threefold overstatement, and the repeat
-    refusal is the clearest case of all, since it is refused *because* an identical call already
-    happened and was already counted.
-
-    `tool_calls`, `tool_failures` and `tool_refusals` are asserted alongside, because those three
-    are attempt counts and must **not** move: the correction belongs to the two knowledge fields
-    only, and folding it into the tool counters would break the invariant that a refusal is the
-    control working rather than a call that never occurred.
+    The knowledge counts measure what was read, so a refused or failed call is taken back.
+    `tool_calls`, `tool_failures` and `tool_refusals` are attempt counts and must not move: a
+    refusal is the control working, not a call that never occurred.
     """
     ledger = _ledger()
     ledger.note_event(ToolCallEvent(tool="find_notes", arguments=""))  # type: ignore[attr-defined]
@@ -294,12 +261,10 @@ def test_a_refused_or_failed_call_is_not_a_consultation() -> None:
 
 
 def test_a_write_that_was_refused_is_not_a_capture_either() -> None:
-    """The same correction in the write direction, and the floor under it.
+    """A refused write is not a capture either, and the count never goes negative.
 
-    `capture_calls` answers "did this turn write anything back", so a refused write must not read
-    as one — a plan-gate refusal is precisely the case where nothing was written. The second half
-    is the floor: a failure event may arrive for a call this ledger never saw start (a subagent's,
-    a resumed run's), and the count must not go negative on it.
+    A failure event may arrive for a call this ledger never saw start (a subagent's, a resumed
+    run's).
     """
     ledger = _ledger()
     ledger.note_event(  # type: ignore[attr-defined]

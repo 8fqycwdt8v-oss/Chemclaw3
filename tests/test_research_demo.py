@@ -1,14 +1,8 @@
 """Test that the end-to-end research-loop demo runs and produces a cited, computed answer.
 
-Guards the credential-free walkthrough (`examples/research_demo.py`) as real behavior: it must
-gather cited evidence, cross-learn structurally, compute the untried solvent's property
-proactively, and propose a next experiment — the whole loop, no LLM, no database. This is the
-harness that shows the agent's tools composing an answer without live credentials.
-
-The solubility model left for `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`),
-so the one step that used to compute in-process now crosses a wire. The demo names that dependency;
-this file supplies it as `tests/calc_server_fake.py`, which keeps the whole loop covered with
-nothing running and still drives the real client, the real cache and the real tool.
+`examples/research_demo.py` must gather cited evidence, cross-learn structurally, compute the
+untried solvent's property and propose a next experiment, with no LLM and no database. The calc
+server is supplied by `tests/calc_server_fake.py`, so the real client, cache and tool are driven.
 """
 
 import subprocess
@@ -38,13 +32,10 @@ def test_demo_produces_a_cited_computed_answer(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_the_documented_command_refuses_rather_than_crashing_without_the_calc_server() -> None:
-    """`examples/README.md` sends a reader here first, so the missing dependency must refuse.
+    """Without the calc server, the documented command refuses rather than crashing.
 
-    The module docstring already promised this — "refuses rather than inventing a number if it is
-    absent" — and what actually happened was a `CalcServerError` through `asyncio.run`: an
-    unhandled traceback, which is a crash, not a refusal. Driven as a subprocess because the
-    behaviour under test is the `__main__` block, and pointed at a port nothing listens on so the
-    refusal is the real one rather than a patched stand-in.
+    Driven as a subprocess against a port nothing listens on, since the `__main__` block is what
+    is under test.
     """
     result = subprocess.run(
         [sys.executable, "-m", "examples.research_demo"],

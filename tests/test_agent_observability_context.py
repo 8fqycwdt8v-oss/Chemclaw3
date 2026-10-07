@@ -1,15 +1,8 @@
-"""One compaction counter answered neither compaction question, and a failing edit killed the turn.
+"""Compaction reports which edit fired, and a failing edit costs the reduction, not the turn.
 
-The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. `chemclaw_context_compactions_total` is
-unlabelled, and the middleware composes two edits with opposite consequences: `ClearToolUsesEdit` is
-lossless (the `tool_use` record survives and the model can re-fetch) while
-`KeepLastConversationGroupsEdit` is destructive (conversation turns are deleted from what the model
-sees). "The agent forgot what I told it three turns ago" and "the agent re-ran a tool it already
-ran" *are* those two edits.
-
-And there was no `try` in `agent/compaction.py` at all, so a raising edit ended the turn as a
-generic internal error — losing the answer, the tokens already spent and every tool the turn had
-run, in order to save tokens.
+Decision: `D-2026-08-27-a-refusal-is-not-a-crash`. `ClearToolUsesEdit` is lossless (the model can
+re-fetch) while `KeepLastConversationGroupsEdit` deletes turns from view, so the record names
+both. Each edit is guarded so a raising edit leaves the request uncompacted instead of failing.
 """
 
 import logging
@@ -35,9 +28,8 @@ from chemclaw.core.metrics import METRICS
 def _fresh_degradation_latch() -> Iterator[None]:
     """Start every case with nothing yet reported loudly.
 
-    The guards below report the *first* failure of each kind in a process at ERROR and the rest at
-    DEBUG — see `compaction._degrade_once` — so without this the level a case observes would depend
-    on which case ran before it, which is a test that passes for a reason unrelated to its subject.
+    The guards log the first failure of each kind per process at ERROR and the rest at DEBUG
+    (`compaction._degrade_once`), so the latch must be reset for each case to be order-independent.
     """
     _REPORTED.clear()
     yield
@@ -92,9 +84,8 @@ def test_the_record_names_the_tools_whose_results_were_cleared_and_the_groups_dr
 ) -> None:
     """The distinction one counter could not carry, as one structured record per turn.
 
-    Counts and names only: which tool's answer the model lost is the actionable half, and the
-    arguments and payloads `_cleared_calls` also holds are not — a log line is not a place to
-    re-publish a chemist's question or a corpus excerpt.
+    Counts and tool names only — never arguments or payloads, which would republish a chemist's
+    question or corpus text into logs.
     """
     thread = _thread(6)
     # The model is sent the last two groups only: the window dropped four, and the tool results
@@ -136,9 +127,8 @@ def test_a_raising_edit_costs_the_reduction_rather_than_the_turn(
 ) -> None:
     """Continuing uncompacted is the safe direction, and the messages are left as they were.
 
-    A request over budget still has a chance of being answered — both triggers sit well below the
-    provider's hard ceiling, and if it does fail the provider's context-length error is now
-    classified and told to the chemist as such. A failed turn has no such chance.
+    An over-budget request may still be answered (triggers sit below the provider ceiling, and a
+    context-length error is classified for the chemist); a failed turn cannot.
     """
     before = METRICS.value("chemclaw_degraded_total")
     messages = _thread(3)
@@ -180,10 +170,8 @@ def test_a_raising_observer_costs_only_the_observation(caplog: pytest.LogCapture
 def test_both_edits_are_guarded_including_the_one_that_wraps_upstream() -> None:
     """Both edits construct upstream code with this repository's arguments, so both are guarded.
 
-    `ClearOlderToolResultsEdit` builds a `ClearToolUsesEdit` per apply — with the batch-aware
-    `keep` and the overshoot as `clear_at_least` — so upstream's strategy still runs and is still
-    exactly as capable of raising on an unexpected message shape as the first-party window is.
-    Guarding only what we wrote would leave the larger of the two able to end a turn.
+    `ClearOlderToolResultsEdit` builds a `ClearToolUsesEdit` per apply, which can raise on an
+    unexpected message shape as readily as the first-party window.
     """
     editing = context_compaction_middleware()[1]
     assert [type(edit).__name__ for edit in editing.edits] == ["GuardedEdit", "GuardedEdit"]
@@ -196,18 +184,11 @@ def test_both_edits_are_guarded_including_the_one_that_wraps_upstream() -> None:
 def test_a_standing_degradation_is_loud_once_and_counted_every_time(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """One ERROR-with-traceback per model call, per turn, per pod is not a report — it is a flood.
+    """A standing degradation is loud once and counted every time.
 
-    Both guards here are inside `wrap_model_call`, so the realistic failure — an upstream shape
-    change, not a one-off — recurs on every model call the fleet makes until someone ships a fix.
-    A 30-step turn wrote 30 identical tracebacks at ERROR, which is the level an operator pages on.
-    `KeepLastConversationGroupsEdit` demotes its own per-call line to DEBUG on exactly this
-    argument, and `agent/langgraph_agent.py::_log_narrowing` makes it again.
-
-    **The count is deliberately not latched.** `chemclaw_degraded_total` is a rate, and a rate that
-    reported once per process would understate the degradation exactly as the run got worse — the
-    failure `metrics_bridge.degraded` exists to correct. So the assertion is asymmetric: one loud
-    line, two increments.
+    Both guards run inside `wrap_model_call`, so a real failure recurs on every model call; one
+    ERROR per call would flood. The count is not latched, because `chemclaw_degraded_total` is a
+    rate: one loud line, two increments.
     """
     before = METRICS.value("chemclaw_degraded_total")
     edit = GuardedEdit(_RaisingEdit())
@@ -251,10 +232,8 @@ def test_the_observer_latches_separately_from_the_edits() -> None:
 def test_the_module_does_not_claim_a_guard_over_upstreams_own_copy_and_count() -> None:
     """`ContextEditingMiddleware.wrap_model_call` deep-copies and counts *outside* any `apply`.
 
-    "Nothing here may end a turn" was the claim; `GuardedEdit` wraps `ContextEdit.apply` only, and
-    upstream's own `deepcopy(list(request.messages))` and `count_tokens` closure run before the
-    first `apply` is reached. Asserted against the installed source rather than restated in prose,
-    because the whole defect was a docstring that outlived what it described.
+    `GuardedEdit` wraps `ContextEdit.apply` only, so upstream's own copy and token count are not
+    guarded; asserted against the installed source so the module cannot claim otherwise.
     """
     import inspect
 
@@ -272,19 +251,11 @@ def test_the_module_does_not_claim_a_guard_over_upstreams_own_copy_and_count() -
 def test_a_later_call_that_drops_a_conversation_group_is_announced_too(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The record follows the high-water reduction, which is what its own docstring promised.
+    """The record follows the high-water reduction, so a later destructive drop is announced too.
 
-    The two edits have opposite consequences and this line is the only thing that tells them apart,
-    so announcing the *first* reduction of a turn hides the destructive one whenever the lossless
-    one fired earlier — which is the ordinary order, because tool-result clearing runs before the
-    conversation window has anything to cut. Measured before the fix: a turn whose first call
-    reclaimed by clearing alone and whose second dropped four conversation groups emitted exactly
-    one `context.compacted`, reading `conversation_groups_dropped=0`, while
-    `chemclaw_context_reclaimed_tokens_total` — which *was* high-watered — went on rising.
-
-    The third call re-derives the second's standing reduction, and must stay silent: the edits are
-    non-destructive, so a per-call line would repeat the same reduction on every model call of the
-    turn.
+    Tool-result clearing usually fires first, so announcing only a turn's first reduction would hide
+    a later conversation-group drop. A third call that re-derives the same standing reduction stays
+    silent, since the edits are non-destructive and re-applied on every call.
     """
     thread = _thread(6)
     # The lossless edit alone: every tool result replaced, every conversation group still sent.

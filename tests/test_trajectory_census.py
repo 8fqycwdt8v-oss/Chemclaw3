@@ -1,9 +1,7 @@
 """The trajectory census computes exactly what its ADR defines.
 
-D-2026-08-27-count-the-trajectories-before-building-the-distiller turned "how many recurring
-trajectories are there" from a question someone would answer ad hoc into two pure functions, so
-the definitions — a turn's sequence, a retry collapsed, recurrence across sessions, and the
-would-have-helped ordering — are held here against constructed messages rather than trusted.
+A turn's sequence, retry collapsing, recurrence across sessions and the would-have-helped ordering
+are held against constructed messages.
 """
 
 from datetime import UTC, datetime
@@ -78,12 +76,10 @@ def test_recurrence_needs_two_sessions_not_two_turns() -> None:
 def test_the_recurrence_bar_is_the_distillers_constant_not_a_second_literal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The census and the distiller compare against one number, so moving it moves both.
+    """The census and the distiller compare against one recurrence bar.
 
-    `agent/distiller.MIN_INDEPENDENT_SESSIONS` documents itself as "the census's own bar restated";
-    when the census compared against its own literal `2`, raising the distiller's bar left the
-    census reporting classes the distiller would then refuse. Driven by raising the bar to three:
-    a class in two sessions stops recurring here too.
+    Raising `MIN_INDEPENDENT_SESSIONS` to three makes a class seen in two sessions stop recurring
+    here too.
     """
     from chemclaw.cli import trajectory_census
 
@@ -284,11 +280,10 @@ def test_the_failure_arm_cannot_change_the_procedure_arms_verdict() -> None:
 
 
 def test_a_corpus_of_pure_repeated_failure_reports_zero_on_the_first_arm() -> None:
-    """The blindness the second arm exists for, held as a fact rather than asserted in prose.
+    """Repeated failures taken by different routes recur only on the failure arm.
 
-    Two sessions hit the same failure and take *different* routes around it, which is what a
-    recurring failure actually looks like — so the sequences do not match and the procedure arm
-    correctly reports nothing, while the failure arm sees the recurrence.
+    The sequences differ, so the procedure arm correctly reports nothing while the failure arm sees
+    the recurrence.
     """
     turns = [
         Turn("s1", _at(1), ("gather_evidence", "screen_hazards", "predict_pka")),

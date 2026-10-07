@@ -1,11 +1,10 @@
 """The agent's three artefact tools, driven as the tool node calls them.
 
-Each tool reads the turn's session and actor from the ambient a turn binds, so these tests bind
-them the same way rather than passing them in. The properties pinned here are the ones the model's
-behaviour depends on: a `result` artefact is the chemist's to pin; `edits` applies only an `old`
-that occurs exactly once; a write on a stale base is refused with the instruction that keeps the
-chemist's change; `read_exhibit` shows what the chemist changed since the agent last wrote; the
-write is announced on the chemist's stream; and with the feature off nothing is bound at all.
+Each tool reads session and actor from the ambient a turn binds, so these tests bind them the same
+way. Pinned: a `result` artefact is the chemist's to pin; `edits` applies only an `old` occurring
+exactly once; a stale-base write is refused with the instruction that keeps the chemist's change;
+`read_exhibit` shows the chemist's changes since the agent last wrote; the write is announced on
+the chemist's stream; and with the feature off nothing is bound.
 """
 
 import json
@@ -220,9 +219,9 @@ async def test_figures_no_tool_in_the_session_returned_are_recorded_as_unchecked
 ) -> None:
     """Figures are checked against the session's stored tool results and the chemist's own edits.
 
-    A transcribed value passes, an invented one is recorded, a figure the chemist introduced and
-    the agent carried forward passes, a figure the chemist merely left in place does not, and
-    another session's result vouches for nothing.
+    A transcribed value passes, an invented one is recorded, a figure the chemist introduced and the
+    agent carried forward passes, one the chemist merely left in place does not, and another
+    session's result vouches for nothing.
     """
     await migrated_db_or_skip()
     monkeypatch.setattr(settings, "session_store", "postgres")
@@ -263,11 +262,10 @@ async def test_figures_no_tool_in_the_session_returned_are_recorded_as_unchecked
 
 
 def test_a_handoff_peer_keeps_the_artefact_tools_a_helper_loses() -> None:
-    """A peer answers the chemist itself, so nothing subtracts the writers from its surface.
+    """A handoff peer keeps the artefact tools a helper loses.
 
-    A peer's surface is the root's intersected with what its profile names
-    (`agent/turn_graph._peer_surface`); `SPEAKS_TO_THE_CHEMIST` is a helper's subtraction, never a
-    peer's. So a peer whose profile names the three holds all three.
+    A peer's surface is the root's intersected with its profile (`agent/turn_graph._peer_surface`);
+    `SPEAKS_TO_THE_CHEMIST` is subtracted only from a helper's.
     """
     from chemclaw.agent.profiles import AgentProfile
     from chemclaw.agent.turn_graph import _peer_surface, root_surface
@@ -329,12 +327,10 @@ async def test_the_grounding_scan_reads_in_configured_batches(
 async def test_reading_the_artefact_back_neither_grounds_its_figures_nor_lends_a_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The agent's own readout is not evidence and not a bindable result.
+    """Reading the artefact back neither grounds its figures nor lends a binding.
 
-    Every tool result of the turn is stored and linked, `read_exhibit`'s included — so before the
-    filter, reading the artefact back put the agent's figures into the evidence, and the next
-    revision found every one of them "returned by a tool": revise -> read -> revise cleared
-    `['9.95', '16']` to `[]`. And the readout's handle was a ref a `$bind` resolved against.
+    `read_exhibit`'s result is stored and linked like any other, but it is the agent's own text: it
+    must not clear the agent's figures as "returned by a tool", nor be a ref a `$bind` resolves.
     """
     await migrated_db_or_skip()
     monkeypatch.setattr(settings, "session_store", "postgres")
@@ -411,12 +407,10 @@ async def test_an_agent_write_is_an_exhibit_event_and_counted_and_so_is_a_refusa
 async def test_a_helpers_report_of_the_artefact_neither_grounds_its_figures_nor_lends_a_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A `task` helper that read the artefact and reported back is the agent's own text too.
+    """A `task` helper's report of the artefact is the agent's own text too.
 
-    After `read_exhibit` was excluded, the same figures came back through a helper: its report is
-    stored and linked under `task`, quoting the artefact, and the next revision found `9.95`
-    "returned by a tool". The evidence rule (`exhibits.evidence`) excludes every non-capability
-    result, so it stays flagged and a `$bind` into the report is refused.
+    The evidence rule (`exhibits.evidence`) excludes every non-capability result, so figures quoted
+    in the report stay flagged and a `$bind` into it is refused.
     """
     await migrated_db_or_skip()
     monkeypatch.setattr(settings, "session_store", "postgres")
@@ -452,11 +446,10 @@ async def test_a_helpers_report_of_the_artefact_neither_grounds_its_figures_nor_
 async def test_every_refusal_a_tool_words_is_counted_by_a_closed_reason(
     turn: tuple[str, list[ExhibitSignal]],
 ) -> None:
-    """The tools' own worded refusals reach `chemclaw_exhibit_refusals_total` too.
+    """The tools' own worded refusals reach `chemclaw_exhibit_refusals_total` with a closed reason.
 
-    Before, only `InvalidExhibit`, `StaleRevision` and `ExhibitLimit` were counted, so a pinned
-    result the agent tried to create or revise, `edits` on a table, an `old` that does not occur
-    once and an unknown id were refusals no series saw.
+    Covers a pinned result the agent tried to write, `edits` on a table, an `old` not occurring
+    once, and an unknown id.
     """
     from chemclaw.core.metrics import METRICS
 

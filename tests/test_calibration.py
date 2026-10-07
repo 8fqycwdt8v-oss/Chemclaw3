@@ -1,32 +1,16 @@
 """Two labs, one compound: what the calibration ledger does with a second measurement.
 
-`030_measurements.sql` keyed `measurements` on `(property, input_hash)` and argued the collapse in
-its own comment: *"A re-measurement replaces the row rather than accumulating, because two values
-for one property of one molecule is a correction, not two facts."* That is true of a lab correcting
-its own typo and false of a replicate, a second solvent system, or a second site — and the `source`
-column, the one field that can tell those apart, was written and then used only as the loser's
-epitaph.
-
-Measured through the production `record_observation` / `calibration_for` before the fix, one
-prediction of −0.30 log S against two equally valid measurements arriving in order:
-
-    lab-basel    reports -0.10   scored=1  n=1  bias=-0.200
-    lab-shanghai reports -0.95   scored=1  n=1  bias=+0.650      <- the sign flipped
-    measurements: [('solubility_logs', 'h-ethanol', -0.95, 'lab-shanghai')]
-
-`n` reported the honest 1 both times while concealing that a second observation had been taken and
-thrown away, and no counter moved. What is pinned here is that both facts survive and that the
-figure a chemist reads is the consensus of every source rather than whichever one wrote last.
+A second source's measurement of the same property is a second fact, not a correction, so both
+survive and the figure a chemist reads is the consensus over every source rather than whichever
+wrote last. A re-measurement from the same source still replaces its row.
 """
 
 import asyncio
 
 import pytest
 
-# The submodule form `tests/test_calc_tools.py` uses. `from ...server import tools` is what the
-# neighbouring calc tests spell, and under `--strict`'s `no_implicit_reexport` it resolves only
-# while some *other* file in the build has already imported the submodule by path — a dependency on
-# check order rather than on this file.
+# The submodule import form: `from ...server import tools` resolves under mypy's
+# `no_implicit_reexport` only when another file already imported the submodule.
 import chemclaw.connectors.calc.server.tools as tools
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -126,11 +110,9 @@ def test_a_repeat_under_one_source_replaces_it(monkeypatch: pytest.MonkeyPatch) 
 def test_a_prediction_written_after_two_measurements_scores_against_both(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The measure-then-predict order reconciles against the consensus, not an arbitrary row.
+    """A prediction written after two measurements scores against their consensus.
 
-    `_RECONCILE_FROM_MEASUREMENT` joins `predictions` to `measurements`; with two rows for one
-    molecule an unaggregated join takes whichever row the planner hands it first, so the scored
-    value was not merely stale — it was not determined by anything the caller could see.
+    An unaggregated join would take whichever measurement row the planner returns first.
     """
     monkeypatch.setattr(settings, "calibration_enabled", True)
 
@@ -173,14 +155,10 @@ def test_the_chemist_is_told_how_many_sources_stand_behind_the_value(
 def test_two_unnamed_chemists_are_told_the_value_did_not_accumulate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The collapse survives where the source is not named, so the reply has to say so.
+    """Two unnamed chemists are told the value did not accumulate.
 
-    `report_measurement` files an unnamed measurement under `chemist-reported`, which is one source
-    like any other — so two chemists who do not name their labs still write one row, and the second
-    still replaces the first. That is the correction case by construction and cannot be told apart
-    from a replicate without the chemist naming one. What must not happen is the old reply:
-    "Recorded; it reconciled 1 prediction(s)", identical whether a second fact had been stored or
-    the first had been deleted.
+    Unnamed measurements share the `chemist-reported` source, so the second replaces the first; the
+    reply must say so rather than read as if a second fact had been stored.
     """
     monkeypatch.setattr(settings, "calibration_enabled", True)
 

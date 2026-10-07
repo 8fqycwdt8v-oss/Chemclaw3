@@ -1,16 +1,8 @@
 """What the front door does when the *socket* is exposed and the configuration says it is not.
 
-`create_app`'s boot guard reads `settings.service_host`, which is a statement of intent rather than
-an observation: uvicorn binds whatever `--host` says, and the two are the same string only on the
-container path (`deploy/entrypoint.sh` derives one from the other). Measured on 2026-09-06 against a
-real uvicorn, both directions were wrong — `CHEMCLAW_SERVICE_HOST=127.0.0.1 uvicorn --host 0.0.0.0`
-booted with no warning of any kind and answered `POST /sessions` from an off-box address with 200
-and the shared dev principal, while the command `README.md` gives verbatim refused to boot.
-
-So these assertions are about the address a request *arrived on* (`scope["server"]`, which uvicorn
-fills from the accepted connection's own `sockname`), not about a setting. A test client carries no
-socket at all — its `server` is the base URL's host — which is why every case below states the
-address it is driving from.
+`settings.service_host` states intent; uvicorn binds whatever `--host` says. So these assertions
+are about the address a request arrived on (`scope["server"]`, from the accepted socket's
+`sockname`). A test client carries no socket, so every case states the address it drives from.
 """
 
 from typing import Any
@@ -44,9 +36,8 @@ def _get(base_url: str, **kwargs: Any) -> Any:
 def test_an_off_box_request_is_refused_when_every_gate_is_open(unauthenticated: None) -> None:
     """A request that arrived on a routable address must not be served the dev principal.
 
-    This is the direction that fails *open*: with `entra_required` off every request is
-    `dev-user` and every authorization gate is open, so serving one off-box request is the whole
-    exposure the boot guard claims to refuse.
+    With `entra_required` off every request is `dev-user` with every gate open, so this direction
+    fails open.
     """
     before = METRICS.value("chemclaw_auth_failures_total")
     response = _get(_OFF_BOX)
@@ -63,10 +54,8 @@ def test_a_loopback_request_is_served_when_every_gate_is_open(unauthenticated: N
 def test_an_in_process_caller_is_not_a_socket(unauthenticated: None) -> None:
     """A scope whose `server` is a *name* carries no socket, so there is no exposure to judge.
 
-    `testserver` is what every other test in this suite drives through, and it is not an address:
-    an in-process ASGI call has no accepted connection and therefore no `sockname`. Refusing it
-    would refuse the suite rather than an exposure — and the boot guard still covers the
-    configuration, which is the only thing knowable before a request exists.
+    An in-process ASGI call (`testserver`) has no `sockname`; the boot guard still covers the
+    configuration.
     """
     assert _get("http://testserver").status_code == 200
 

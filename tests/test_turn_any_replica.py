@@ -1,19 +1,13 @@
 """A running turn is followed and stopped from a replica that does not hold it.
 
-`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`. The defect, measured
-with two front-door processes on one database: a turn started on A answered 404 "no turn is
-running for this session" to `GET /sessions/{id}/turn/stream` and `POST /sessions/{id}/turn/stop`
-on B, and ran on to its answer as if nobody had pressed Stop — because the pump, its readers and
-its cancel live in A's memory, and the BFF reaches the front door through the Service.
+`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`. Two `create_app()`
+instances under their own uvicorn servers share one migrated database, modelling two pods, and
+are driven at the routes a client calls:
 
-Two `create_app()` instances, each under its own uvicorn server and event loop, over one migrated
-database with the durable stores — the faithful model of two pods (`tests.test_detach._Served`).
-Driven at the routes a client calls (`tasks/lessons.md` rule 55):
-
-- a participant follows the turn from B and sees it to the same ending the sender sees on A;
+- a participant follows the turn from B and sees the same ending the sender sees on A;
 - a Stop sent to B ends the turn on A, and its question settles `stopped`;
-- the sender-or-owner rule and the session gate hold on B exactly as on A — a member cannot stop
-  somebody else's turn from there (403), and a non-participant can neither follow nor stop it (404);
+- the sender-or-owner rule and the session gate hold on B: a member cannot stop somebody else's
+  turn (403), and a non-participant can neither follow nor stop it (404);
 - an unload stop sent to B is deferred on A, and the sender reattaching on B cancels it.
 """
 
@@ -175,10 +169,8 @@ def test_a_turn_held_on_one_replica_is_followed_to_its_end_from_another(
 ) -> None:
     """Ben follows Ana's turn from B and sees the same ending Ana sees on A; Dan cannot follow.
 
-    `relay-still-writing` slows each relayed write past several holder polls, which is the window
-    the first version lost the answer in: the turn ended, its requests stopped being read, and the
-    holder cancelled the relay as if the follower had gone — before it wrote the answer and the end
-    marker. The follower then saw the stream stop one token short. 1 run in 20 hit it unslowed.
+    `relay-still-writing` slows each relayed write past several holder polls, so the holder must not
+    cancel the relay before it writes the answer and the end marker.
     """
     if slow_relay:
         real_relay = TurnRemotes.relay
@@ -224,9 +216,8 @@ def test_a_stop_sent_to_another_replica_stops_the_turn_and_obeys_the_senders_rul
 ) -> None:
     """From B: Dan is 404, Ben (a member, not the sender) is 403, Ana's Stop ends the turn on A.
 
-    `claim-released-first` delays the holder's `stopped` answer: the stopped turn's teardown gives
-    its claim up before the holder can write it, so the asker sees the claim gone while the request
-    still reads `stopping` — a Stop that landed, which a first version reported as 404.
+    `claim-released-first` delays the holder's `stopped` answer until after the claim is released;
+    a request still reading `stopping` is a Stop that landed, not a 404.
     """
     if slow_answer:
         real_answer = TurnRemotes.answer
@@ -335,11 +326,9 @@ def test_a_follow_and_a_stop_on_the_holding_replica_are_unchanged(
 
 
 def test_a_request_names_one_turn_so_the_next_turn_never_serves_it() -> None:
-    """The holder reads requests by `(session, holder)`: a request for an old turn is invisible.
+    """The holder reads requests by `(session, holder)`, so a request for an old turn is invisible.
 
-    A request is addressed to the claim it was written against, so a follow or a stop meant for a
-    turn that has since ended cannot be served by the next turn on the session — which would stop
-    somebody else's question.
+    A follow or stop meant for an ended turn must not be served by the next turn on the session.
     """
 
     async def _run() -> tuple[list[str], list[str]]:

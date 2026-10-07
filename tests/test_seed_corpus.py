@@ -1,14 +1,8 @@
-"""The seed knowledge corpus has the shape the rest of the system is built to handle (STO-10).
+"""The seed knowledge corpus has the shape the rest of the system is built to handle.
 
-`knowledge/` used to contain `.gitkeep`, so `make kg-validate` passed by validating nothing and
-every crosslink, conflict and relation property was asserted against synthetic fixtures. A test
-suite that has never seen a real corpus proves the code runs, not that the corpus works.
-
-These tests are deliberately about *coverage and structure*, not about content: they assert that
-every note type and every relation has at least one real instance, that the awkward cases (a
-superseded pair, a declared conflict, a calculation crosslink) exist rather than being described,
-and that the whole thing validates. They do not assert chemistry — the notes are seed content and
-say so.
+These tests assert coverage and structure, not chemistry: every note type and relation has a
+real instance, the awkward cases (a superseded pair, a declared conflict, a calculation
+crosslink) exist, and the whole corpus validates.
 """
 
 from datetime import date
@@ -49,16 +43,9 @@ def test_the_corpus_is_not_empty() -> None:
 
 
 def test_every_note_type_has_a_real_instance() -> None:
-    """A type nothing in the corpus uses is a type no retrieval filter has ever been exercised on.
+    """Every note type has a real instance, so every retrieval filter is exercised on real content.
 
-    `KNOWN_NOTE_TYPES` was enforced at the gate with no corpus behind it, so a filter keyed on
-    `bo-candidate` or `failure-mode` could have been broken indefinitely without a failing test.
-
-    Checked against the *effective* vocabulary — core's set unioned with what the enabled bundles
-    declare — so that moving `job-result` and `bo-candidate` out of core's frozenset and into the
-    `qm` and `bo` manifests does not quietly drop them from this guarantee. They are exactly the
-    two types the docstring above names, so checking core's half alone would have retired the test's
-    own example.
+    Checked against the effective vocabulary — core's set unioned with what enabled bundles declare.
     """
     present = {note.type for note in _notes()}
     missing = sorted(known_note_types() - present)
@@ -75,11 +62,7 @@ def test_the_graph_is_connected_enough_to_traverse() -> None:
     """A corpus of islands would validate perfectly and exercise no graph query at all."""
     graph = build_graph(_KNOWLEDGE)
     assert graph.number_of_edges() >= 40
-    # The queries typed edges were added for, against real content rather than a fixture — in the
-    # direction the vocabulary declares. This test used to pin the *inverse* (`precursor-of`
-    # asserted from the reaction toward its starting materials), which is how twelve backwards
-    # edges merged green and `product-of` came to point both ways in one graph
-    # (`docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md` §1).
+    # The typed-edge queries against real content, in the direction the vocabulary declares.
     assert related(graph, "compound-4-bromoanisole", "precursor-of") == [
         "compound-4-methoxybiphenyl",
     ]
@@ -101,16 +84,10 @@ def test_a_superseded_note_is_excluded_from_current_evidence() -> None:
 
 
 def test_the_corpus_carries_edge_metadata_that_actually_reaches_a_reader() -> None:
-    """The exemplars for STO-9 must be live, not merely written down.
+    """The corpus carries edge metadata that actually reaches a reader.
 
-    Every note here that declares a frontmatter relation also writes the same link in its body,
-    which used to mean the body form won the deduplication and the confidence and validity window
-    were dropped at parse time. The corpus therefore *documented* edge metadata and contained none
-    a query could see: `related(..., as_of=)` had no dated edge to filter, and every
-    `Relation.confidence` in the graph read as `None`.
-
-    Asserted over `outgoing_relations` — what the graph is built from — rather than over
-    `note.relations`, because the frontmatter was never the thing that was lost.
+    Asserted over `outgoing_relations`, what the graph is built from, so confidence and validity
+    windows declared in frontmatter must survive parsing.
     """
     edges = [relation for note in _notes() for relation in note.outgoing_relations()]
     assert any(relation.confidence is not None for relation in edges), (
@@ -129,13 +106,10 @@ def test_the_corpus_contains_a_declared_conflict() -> None:
 
 
 def test_the_seed_corpus_cites_no_calculation_the_store_cannot_back() -> None:
-    """A seed `calc_ref` is a fabricated key, and `kg-validate` now checks every key exists.
+    """The seed corpus cites no calculation the store cannot back.
 
-    The corpus used to demonstrate the STO-7 crosslink with invented hex — exactly the "key
-    nothing produced" the existence gate (`unresolved_calc_refs`) was built to catch, so the
-    demonstration failed the gate on every fresh database. The crosslink itself is proven with
-    real stored keys in `tests/test_crosslink.py`; here, every seed job-result must instead say
-    in prose why its refs are empty, which is the discipline a real note is held to.
+    `kg-validate` checks every `calc_ref` exists, so seed job-results must say in prose why their
+    refs are empty; `tests/test_crosslink.py` proves the crosslink with real keys.
     """
     for note in _notes():
         assert cited_calculations(note) == [], (
@@ -145,12 +119,8 @@ def test_the_seed_corpus_cites_no_calculation_the_store_cannot_back() -> None:
 
 
 def test_the_seed_corpus_and_the_eval_corpus_stay_separate() -> None:
-    """`data/evals/retrieval_corpus/` must not be absorbed into the live graph.
-
-    Its own README says why: keeping the gold corpus outside `knowledge_dir` is what makes the
-    recall/precision numbers reproducible and independent of whatever is in the live graph. The
-    original plan proposed *promoting* those fixtures here, which would have coupled every pinned
-    eval number to an edit of the seed content.
+    """`data/evals/retrieval_corpus/` stays outside the live graph, so eval numbers stay
+    reproducible.
     """
     seeded = {note.id for note in _notes()}
     invalidate_cache()
@@ -167,18 +137,10 @@ def _seed_reactions() -> list[Note]:
 
 
 def test_a_seed_reaction_records_its_figures_where_a_machine_can_read_them() -> None:
-    """A figure stated only in prose is a figure the comparative tools cannot use.
+    """A seed reaction records its figures in `conditions`, where comparative tools can read them.
 
-    Every one of these notes describes a run that was performed and states its temperature, time or
-    yield in the body — and for a while every one of them stated it *only* there. `conditions` is
-    the frontmatter form those tools read (`ProcessConditions` says why), so a seed note that keeps
-    its numbers in sentences is a corpus that cannot exercise the half of the comparison built to
-    need no model at all.
-
-    At least one figure, not all three: what a note may claim is bounded by what its prose says.
-    Two of these record no temperature because their prose gives none — "0 °C to rt" is a ramp and
-    "reflux" is not a setpoint — and supplying a number the record does not contain is the one thing
-    every artifact downstream refuses to do.
+    At least one figure, not all three: a note may record only what its prose states, and a ramp
+    or "reflux" is not a setpoint.
     """
     for note in _seed_reactions():
         assert note.conditions is not None, (
@@ -190,13 +152,9 @@ def test_a_seed_reaction_records_its_figures_where_a_machine_can_read_them() -> 
 
 
 def test_the_corpus_exercises_the_comparison_that_needs_no_model() -> None:
-    """The deterministic half of `condense_protocols`, over the real corpus, with no client.
+    """The deterministic half of `condense_protocols` runs over the real corpus with no client.
 
-    This is the property the frontmatter exists for, asserted end to end rather than on a field:
-    `drop_empty_columns` removes a column no protocol recorded, so a corpus whose figures live in
-    prose renders a comparison with the recorded columns silently gone — which is exactly what
-    every local run and demo showed before the transcription. Driven with `client=None`, because
-    the point is that this half answers from the record and needs no credential.
+    `drop_empty_columns` would silently remove columns whose figures live only in prose.
     """
     import asyncio
 

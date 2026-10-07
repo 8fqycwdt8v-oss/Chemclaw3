@@ -1,26 +1,9 @@
 """Template arguments for a bundle this tree declares and does not run, checked offline.
 
-**The gap this closes.** `make template-validate` resolves a tool *name* through every discovered
-manifest, so a step naming `mtsr` passes; it resolves that tool's *arguments* through the bundle's
-own server module, which a declared-not-served bundle has none of
-(`connectors/registry.py::server_tools_module` returns `None` for it). Its own output says so —
-`arguments unchecked` — and the only gate that did check them,
-`chemclaw.cli.validate_template_args_live`, needs a **running** connector, which no CI lane has.
-
-So a template naming a fleet tool could carry any argument key at all. That is not a hypothetical
-risk: writing such a template means typing argument names for a server nothing in this lane can
-introspect, which is the fabricated-argument shape
-`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate` refuses one layer over.
-
-**The third authority.** Every fleet server records a `servers/<name>/tool-surface.json` — the same
-file `tests/test_sibling_manifest_agreement.py` already reads for the `calc` and `rxnlabel` backend
-seams, and for the same reason. It needs a shallow clone and no `.venv`, so unlike the live gate it
-is the half that can plausibly run in CI. Read here, it makes a fleet template's arguments as
-checkable as a local one's.
-
-`ToolArguments` is the shared vocabulary rather than a fourth reading of "what does this tool
-accept": `agent/template_surface.py`'s docstring makes that argument for its two existing
-authorities, and this is the third one arriving under it.
+`make template-validate` cannot check arguments for a declared-not-served bundle, since there is
+no local server module to introspect, and the live check needs a running connector. Every fleet
+server records `servers/<name>/tool-surface.json`, which needs only a sibling checkout, so read
+as `ToolArguments` it makes a fleet template's arguments as checkable as a local one's.
 """
 
 import json
@@ -38,9 +21,8 @@ from tests.siblings import SIBLING_SKIP, sibling_root
 def _recorded_surfaces(root: Path) -> dict[str, ToolArguments]:
     """Every tool the fleet records a surface for, by name, as `ToolArguments`.
 
-    Scoped to the bundles *this* tree declares and does not serve — a fleet server nothing here
-    names is not this repository's contract, and folding it in would make the returned set larger
-    than the thing being checked.
+    Scoped to the bundles this tree declares and does not serve; other fleet servers are not this
+    repository's contract.
     """
     surfaces: dict[str, ToolArguments] = {}
     for name, (_path, manifest) in discovered().items():
@@ -62,12 +44,9 @@ def _recorded_surfaces(root: Path) -> dict[str, ToolArguments]:
 
 
 def test_every_template_argument_for_a_fleet_tool_is_one_that_tool_takes() -> None:
-    """The check `template-validate` prints `arguments unchecked` for.
+    """Every template argument for a fleet tool is one that tool takes.
 
-    Skips with the reason when there is no sibling checkout, because a check that quietly shrinks
-    is worse than one that says what it did not look at — the argument
-    `cli/validate_connectors.py::unverified_tool_surfaces` makes about the identical blind spot one
-    layer over, and the discipline `tests/conftest.py`'s epilogue exists to keep visible.
+    Skips with a reason when there is no sibling checkout, so the blind spot stays visible.
     """
     root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     if root is None:
@@ -94,12 +73,9 @@ def test_every_template_argument_for_a_fleet_tool_is_one_that_tool_takes() -> No
 
 
 def test_the_recorded_surface_is_read_for_the_bundles_that_have_no_local_server() -> None:
-    """The scope is derived, not asserted non-empty, and this is what proves it is not vacuous.
+    """The recorded surface covers the bundles that have no local server.
 
-    `tasks/lessons.md`'s standing rule: a filter that silently matches nothing turns every
-    assertion downstream into a pass. If the process-development bundles stop being declared here,
-    or the fleet stops recording their surfaces, this is what says so rather than the test above
-    quietly checking zero templates.
+    Guards against the check above silently matching zero templates.
     """
     root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     if root is None:

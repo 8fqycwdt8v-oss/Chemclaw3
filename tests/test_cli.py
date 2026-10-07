@@ -1,8 +1,7 @@
 """The testing CLI resolves identity, parses args, and runs a turn (chemclaw/cli/chat.py).
 
-Credential-free: identity/arg logic is pure, and the run path is exercised with a stub agent so
-no LLM or MCP subprocess is needed — this proves the CLI plumbing (admin-only auth gate, actor
-resolution, single-turn text extraction), not model behavior.
+Credential-free: the run path uses a stub agent or a real graph over a fake model, so this proves
+CLI plumbing (admin-only auth gate, actor resolution, answer extraction), not model behaviour.
 """
 
 import asyncio
@@ -45,22 +44,12 @@ def test_admin_holds_no_roles_by_default(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_a_skill_visibility_gate_cannot_confer_tool_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The coupling that made an unauthenticated terminal fully privileged.
+    """A skill visibility gate cannot confer tool authorization.
 
-    `resolve_identity` used to hold the union of every role named in `skill_role_gates` — a map that
-    decides which *skills a chemist is shown*. `authorize_tool` and `authorize_trigger` read
-    `tool_role_gates` and `entra_privileged_role_set`. Unrelated maps, coupled by nothing but the
-    role *name*.
-
-    On the shipped chart the derivation was harmless. But `core/config/agent.py`'s own docstring
-    gives `{"deep-research": ["process-chemist"]}` as the skill-gate example, and the runbook's
-    remedy for a refused expensive job is to put a role in `entra_privileged_roles` — so an operator
-    following both, in two edits neither of which mentions the CLI, handed every tool and every
-    expensive action to anyone who could run the console script. `uv sync` installs it into the
-    image, so that is anyone who can `oc exec` into a pod.
-
-    This asserts the two maps are now independent: the exact configuration that opened everything
-    now confers nothing.
+    `skill_role_gates` decides which skills a chemist is shown; `authorize_tool` and
+    `authorize_trigger` read `tool_role_gates` and `entra_privileged_role_set`. The CLI identity
+    must not derive roles from the skill map, or an ordinary skill-gate configuration would grant
+    anyone who can run the console script every tool.
     """
     monkeypatch.setattr(
         settings, "skill_role_gates", {"deep-research": ["process-chemist"], "bo": ["ops"]}
@@ -96,14 +85,10 @@ def test_message_flag_parses_single_shot() -> None:
 
 
 def test_converse_returns_the_final_assistant_text() -> None:
-    """One turn returns the last *assistant* message's text (graph path, no LLM).
+    """One turn returns the last assistant message's text (graph path, no LLM).
 
-    The answer is a message rather than a single `response.text`, because a graph returns its whole
-    message list — and it is the last `AIMessage` rather than the tail, because the tail is not
-    always one. Both caps end a turn from `before_model`, which runs after the tool node, so a
-    capped turn ends on a `ToolMessage`; this test's own docstring used to argue that reading the
-    tail was what *stopped* a tool result surfacing as the answer, which is the reasoning that let
-    one through. See `test_a_capped_turn_never_answers_with_a_tool_result` below.
+    The last `AIMessage`, not the tail: a capped turn ends on a `ToolMessage` (see
+    `test_a_capped_turn_never_answers_with_a_tool_result`).
     """
 
     class _Agent:
@@ -115,13 +100,10 @@ def test_converse_returns_the_final_assistant_text() -> None:
 
 
 def test_a_capped_turn_never_answers_with_a_tool_result() -> None:
-    """What the chemist is shown when a cap stops the loop: prose, or nothing — never a payload.
+    """A capped turn never answers with a tool result: prose, or nothing.
 
-    `cli/chat.py` prints what `converse` returns, and both caps jump to `end` from `before_model`,
-    which runs *after* the tools node — so a capped turn's message list deterministically ends on a
-    `ToolMessage`, for any cap at all. Measured before the fix on the compiled graph at
-    `harness_max_loop_iterations=3`: the CLI printed `No files found`, the `ls` tool's own body, as
-    the agent's answer.
+    Both caps jump to `end` from `before_model`, which runs after the tools node, so a capped turn's
+    message list ends on a `ToolMessage`.
     """
 
     class _Agent:
@@ -142,14 +124,8 @@ def test_a_capped_turn_never_answers_with_a_tool_result() -> None:
 def test_successive_turns_continue_one_thread() -> None:
     """`converse` invokes under a stable `thread_id`, which is what makes the CLI multi-turn.
 
-    The checkpointer keys a conversation on that id, so passing a different one per turn would
-    give a terminal session amnesia between questions while every individual turn still worked.
-
-    Its ancestor asserted that `converse` passed a `session=` to `agent.run`, because under
-    `harness_enabled` MAF's `ToolApprovalMiddleware` raised "requires an TurnSession" on a
-    session-less run and the CLI could not take a single turn under the shipped Helm configuration
-    (D-152). A thread id is a string in a config dict; there is nothing to be absent, so what is
-    left worth pinning is that it does not *change*.
+    The checkpointer keys a conversation on that id; a fresh one per turn would forget between
+    questions while every single turn still worked.
     """
     seen: list[object] = []
 
@@ -170,17 +146,11 @@ def test_successive_turns_continue_one_thread() -> None:
 def test_the_repl_carries_what_the_operator_typed_into_the_next_turns_ambient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The CLI's half of the `basis="stated"` window, and it is a bypass if it differs.
+    """The REPL carries what the operator typed into the next turn's ambient.
 
-    The front door widens the quotable ambient to the thread's user turns by reading the session
-    transcript (`api.runner._earlier_user_texts`). This CLI writes no transcript, so its window is
-    the process: the REPL keeps what has been typed and hands it to `converse`. A terminal on which
-    a chemist's constraint from two prompts ago is unquotable, while the same conversation through
-    the front door accepts it, is one surface grading an attribution differently from the other.
-
-    The two operator commands stay out of it: `/plan` and `/approve` are instructions to the
-    terminal, and a `stated` slot quoting `'/approve'` would record a UI action as something a
-    chemist said.
+    The front door widens the `basis="stated"` window to the thread's user turns from the
+    transcript; the CLI writes none, so the REPL keeps what was typed. Otherwise the two surfaces
+    grade an attribution differently. `/plan` and `/approve` are terminal commands and stay out.
     """
     seen: list[tuple[str, ...] | None] = []
 
@@ -216,9 +186,8 @@ async def _plan_answer(_prompt: str, _actor: str, _saver: object) -> str:
 def cli_approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanApprovalStore]:
     """The CLI's real approval store, obtained the way `_plan_command` obtains it.
 
-    `session_store="memory"` is what a terminal is, so this is the production backend for this
-    front door rather than a double. The `@cache`d factory is cleared on both sides so the store is
-    neither inherited nor left behind.
+    `session_store="memory"` is the production backend for a terminal. The `@cache`d factory is
+    cleared on both sides.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     factory = store_module.plan_approval_store
@@ -233,12 +202,8 @@ def cli_approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanAppro
 def cli_plan(monkeypatch: pytest.MonkeyPatch) -> Callable[[list[str]], None]:
     """Set what the CLI's session is proposing, at the seam `_plan_command` reads it through.
 
-    The plan lives in the checkpointer now, and reading it is `agent/plan_state.session_plan`'s
-    job — tested against a real one in `tests/test_plan_state.py`. What these tests are about is
-    what `/plan` and `/approve` *decide* given a plan, so the read is the input, not the subject.
-
-    Each step declares `record_knowledge_note`, which is what makes the recorded approval's scope
-    non-empty and therefore worth asserting on; what a scope *does* is `tests/test_plan_scope.py`.
+    Reading the plan is tested in `tests/test_plan_state.py`; here the plan is the input. Each step
+    declares `record_knowledge_note`, so the approval's scope is non-empty.
     """
 
     def _set(titles: list[str]) -> None:
@@ -256,19 +221,10 @@ def cli_plan(monkeypatch: pytest.MonkeyPatch) -> Callable[[list[str]], None]:
 def test_approve_refuses_a_session_with_no_plan(
     cli_approvals: InMemoryPlanApprovalStore, cli_plan: Callable[[list[str]], None]
 ) -> None:
-    """`/approve` must decide on a *plan*, and an empty todo list is not one.
+    """`/approve` refuses a session with no plan.
 
-    The empty list hashes to `EMPTY_PLAN_HASH`, a constant every session in every deployment
-    proposes whenever it holds no todos — so a decision recorded against it means nothing, and the
-    gate refuses that identity anyway. Nothing unsafe followed when this was missing, but the
-    terminal answered "approved …; the session may now execute" when nothing had been approved and
-    the session could not execute, which is the one thing an approval prompt must never say.
-
-    Its ancestor made the same point about a session holding *only* the launcher's `awaiting-job:`
-    bookkeeping rows, which the display counted and the hash stripped — two questions, one guard.
-    That distinction is structural now rather than a parse: nothing writes job bookkeeping into
-    `todos` at all (a launched job is a `job_records` row and a `session_events` push-back), so such
-    a session is simply this one.
+    An empty todo list hashes to `EMPTY_PLAN_HASH`, shared by every session; recording against it is
+    meaningless, and the terminal must not claim the session may now execute.
     """
     cli_plan([])
 
@@ -290,10 +246,8 @@ def test_approve_records_and_arms_a_real_plan(
     """
     titles = ["screen the species", "compute the barrier"]
     cli_plan(titles)
-    # The steps the fixture feeds the command, in `session_plan`'s shape: the identity covers each
-    # step's declaration as well as its content
-    # (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), so a hash
-    # taken over the titles alone would be one the command never records against.
+    # The steps in `session_plan`'s shape: the plan identity covers each step's declared tools as
+    # well as its content, so a hash over titles alone would never match.
     steps = [
         {"content": title, "status": "pending", "tools": ["record_knowledge_note"]}
         for title in titles
@@ -307,10 +261,8 @@ def test_approve_records_and_arms_a_real_plan(
     reply, plan_hash, recorded = asyncio.run(_run())
     assert plan_hash != EMPTY_PLAN_HASH, "the precondition is a plan with real work items"
     assert plan_hash in reply, f"the terminal did not name the plan it approved: {reply}"
-    # The *session's* actor, not `settings.cli_admin_actor`. `--actor alice@lab` stamps the ambient
-    # identity every audit row and `requested_by` reads, and the approval used to hardcode the
-    # default instead — so the durable record of a sign-off named someone who took no action and
-    # disagreed with the audit rows for its own session.
+    # The session's actor, not `settings.cli_admin_actor`, so the approval record agrees with the
+    # session's audit rows.
     assert recorded is not None and (recorded.approved, recorded.actor) == (True, "alice@lab")
     # And the approval carries what the plan's steps declared: the gate reads this column rather
     # than the live todo list, so a decision recorded with an empty scope authorizes nothing
@@ -342,12 +294,10 @@ def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
 
 
 async def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The CLI is a multi-turn conversation, which it was not.
+    """A second CLI turn continues the first.
 
-    `converse` documented that reusing one `session_id` "continues the thread the last one left",
-    and `_build_cli_agent` passed no checkpointer at all, so every turn began from an empty thread.
-    Asserted against what the *model* was handed on the second turn, because that is the only place
-    the difference is visible — a graph with no checkpointer answers both turns quite happily.
+    Asserted on what the model is handed on the second turn, because a graph without a checkpointer
+    answers both turns without complaint.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
 
@@ -380,14 +330,10 @@ async def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch
 def test_the_plan_command_reads_the_store_the_turns_wrote_to(
     monkeypatch: pytest.MonkeyPatch, cli_approvals: InMemoryPlanApprovalStore
 ) -> None:
-    """`/plan` shows the plan the session actually proposed — the defect the saver thread fixes.
+    """`/plan` shows the plan the session actually proposed, from the saver the turns wrote to.
 
-    Deliberately **not** stubbing `plan_state.session_todos`, which is what every other test in this
-    file does and what made the defect invisible: the real function resolves *the configured*
-    checkpointer, so with the graph built on a different one (or on none) `/plan` answered
-    "(no plan yet)" for every session under every configuration, and the harness this CLI exists to
-    exercise could not be exercised. One saver, handed to both, is the whole fix — so the test hands
-    it to neither and threads it exactly as `_run` does.
+    `plan_state.session_todos` is not stubbed here: the real function reads a checkpointer, so the
+    test threads one saver to both the graph and `/plan` exactly as `_run` does.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     monkeypatch.setattr(settings, "harness_enabled", True)
@@ -408,8 +354,7 @@ def test_the_plan_command_reads_the_store_the_turns_wrote_to(
                                     "todos": [
                                         # `tools` is required: a step declares what it will call
                                         # and the approval is scoped to the union
-                                        # (`agent/plan_scope.py`). Omitting it here is a tool
-                                        # validation error, not a plan.
+                                        # (`agent/plan_scope.py`).
                                         {
                                             "content": plan,
                                             "status": "pending",
@@ -450,15 +395,10 @@ class _WriteTodosThenAnswer(GenericFakeChatModel):
 def test_a_startup_failure_is_a_message_and_an_exit_code_not_a_traceback(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The single most likely first run of the only interactive entrypoint, answered properly.
+    """A startup failure is a message and an exit code, not a traceback.
 
-    `_build_cli_agent`'s docstring promises the chat model "fails with a clear message if it is
-    missing (D-037), so a credential problem surfaces here, before the prompt". The message is
-    good; `main` had no exception handling and returned `None`, so it arrived under an asyncio and
-    graph-construction stack trace — and the console script exited on the traceback rather than on
-    a code. A new operator running `make chat` without a credential got nine frames instead of the
-    one sentence naming what to export, and the same hole covered every other startup failure: an
-    unreachable checkpointer DSN, a blanked `CHEMCLAW_LLM_BASE_URL`.
+    A missing credential, an unreachable checkpointer DSN or a blank `CHEMCLAW_LLM_BASE_URL` must
+    reach the operator as one sentence naming the fix.
     """
 
     def _fails(_args: object) -> None:
@@ -474,15 +414,9 @@ def test_the_console_script_returns_an_exit_code_on_the_happy_path_too(
 ) -> None:
     """`main` hands an exit code to the console script, not `None`, in both directions.
 
-    `[project.scripts] chemclaw = "chemclaw.cli.chat:main"` — the console-script wrapper turns
-    whatever `main` returns into the process status, so a `-> None` entrypoint always exited 0 and
-    a caller had no way to tell a refused startup from an answered question except by reading the
-    traceback. Asserted beside the failure case so the error path cannot be satisfied by returning
-    1 unconditionally.
-
-    **`main` now passes `_run`'s status through rather than discarding it**, which is what makes
-    the degraded exit reachable at all: it used to run `_run` for effect and `return 0`, so a
-    one-shot run that printed an incomplete answer exited exactly as a whole one did.
+    The console-script wrapper turns the return value into the process status. Asserted beside the
+    failure case so the error path cannot be satisfied by returning 1 always. `main` passes `_run`'s
+    status through, which makes the degraded exit reachable.
     """
 
     async def _clean(_args: object) -> int:
@@ -523,12 +457,10 @@ def _capped_script(first: str) -> Iterator[AIMessage]:
 def _cli_turn(
     monkeypatch: pytest.MonkeyPatch, cap: int, first: str = "Still checking; one more source."
 ) -> cli.CliTurn:
-    """Drive `converse` on a **real compiled graph** at `cap`, and report the turn.
+    """Drive `converse` on a real compiled graph at `cap`, and report the turn.
 
-    The graph is real for the reason `agent/loop_cap.py` gives about its own `can_jump_to`: calling
-    the hook proves the decision, and only a compiled graph proves the decision is connected to
-    anything. The cap's flag lives on an untracked channel, so nothing short of a real run leaves
-    it where `converse` reads it.
+    Only a compiled graph proves the cap decision is wired; its flag lives on an untracked channel
+    that only a real run sets.
     """
     monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
@@ -541,15 +473,9 @@ def _cli_turn(
 def test_a_capped_cli_turn_says_so_and_a_whole_one_says_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The defect and its control arm, both on a real graph with a real cap.
+    """A capped CLI turn says so and a whole one says nothing, both on a real graph.
 
-    Measured before the fix:
-
-        === CLI, LOOP-CAPPED (cap=2) ===  stdout: 'Still checking; one more source.'
-        === CLI, COMPLETE   (cap=20) ===  stdout: 'FINAL: pKa 3.49, confirmed against ELN batch 12.'
-
-    Exit code 0 in both. The control arm is here because a notice on every turn would satisfy the
-    first assertion and mean nothing.
+    The control arm stops a notice on every turn from satisfying the first assertion.
     """
     capped = _cli_turn(monkeypatch, 2)
     assert capped.answer == "Still checking; one more source."
@@ -577,12 +503,10 @@ def test_a_turn_that_answered_nothing_is_not_a_blank_line(
 def test_the_notice_names_the_spend_cap_and_the_silent_turn_apart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other two endings a returned state can carry, read off the state rather than a graph.
+    """The notice tells the spend cap and the silent turn apart.
 
-    Driven on states rather than a graph because the *readers* are what is under test here and the
-    graph arm above already proves they are wired to a real run — and because reaching the spend
-    cap through a real turn needs a billed-token budget, which is what the cap arm above sets to 0
-    precisely so the loop cap is the one that fires.
+    Driven on states rather than a graph: the readers are under test, and the graph arm above
+    already proves the wiring.
     """
     assert cli.turn_notice({"spend_capped": True}, "partial") == (
         "incomplete: the turn reached its token budget before it finished"
@@ -594,11 +518,10 @@ def test_the_notice_names_the_spend_cap_and_the_silent_turn_apart(
 def test_a_one_shot_run_exits_nonzero_when_the_answer_it_printed_is_incomplete(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The exit code is the only channel a piped `-m` run has, and it said success.
+    """A one-shot run exits non-zero when the answer it printed is incomplete.
 
-    stdout keeps the answer — a degraded answer is delivered, marked, not withheld — the reason
-    goes to stderr beside the connector warnings this function already writes there, and the status
-    is `_DEGRADED_EXIT` so a script can tell it from both a clean answer and a refused startup.
+    stdout keeps the answer (delivered, marked), the reason goes to stderr, and the status is
+    `_DEGRADED_EXIT`, distinct from success and from a refused startup.
     """
     monkeypatch.setattr(cli, "resolve_identity", lambda **_k: ("admin@localhost", frozenset()))
     monkeypatch.setattr(cli, "process_checkpointer", _none)

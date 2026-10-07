@@ -1,9 +1,8 @@
-"""The derived note index: in-memory ranking (offline) + a Postgres round-trip (skips offline).
+"""The derived note index: in-memory ranking (offline) and a Postgres round-trip (skips offline).
 
-Offline proves the reference ranking both backends share — dense by cosine, lexical by term
-overlap — and that `reindex_notes` embeds notes so a query with no id/substring overlap still finds
-the semantically-related note. The server-backed test proves `PostgresNoteIndex` upserts and ranks
-the same way over real pgvector + full-text search.
+Offline proves the shared reference ranking (dense by cosine, lexical by term overlap) and that
+`reindex_notes` embeds notes so a semantically related note is found without lexical overlap. The
+server-backed test proves `PostgresNoteIndex` ranks the same way over pgvector and full-text search.
 """
 
 import asyncio
@@ -147,12 +146,10 @@ def test_reindex_only_embeds_the_note_that_changed(
 def test_a_note_rewritten_while_the_pass_reads_it_heals_on_the_next_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The race between parsing a note and hashing it has to resolve toward re-embedding.
+    """A note rewritten between parsing and hashing is re-embedded on the next pass.
 
-    The pass reads the tree twice — once to parse, once to hash — and a write can land between the
-    two. Parsed first, that stored the *old* body under the *new* digest, which every later pass
-    reads as unchanged: the dense and lexical legs served the pre-amendment text indefinitely.
-    Driven by landing the write immediately after the parse, which is the harmful interleaving.
+    Storing the old body under the new digest would read as unchanged forever. The write is landed
+    immediately after the parse, the harmful interleaving.
     """
     _write_note(tmp_path, "note-a", "first note body")
     index = InMemoryNoteIndex()
@@ -194,12 +191,11 @@ def test_reindex_full_re_embeds_every_note_regardless_of_fingerprint(
 
 
 def test_reindex_indexes_a_note_whose_filename_does_not_match_its_id(tmp_path: Path) -> None:
-    """The defect: such a note was never indexed at all, and `full=True` did not help either.
+    """A note whose filename does not match its id is still indexed.
 
-    The two sides of the diff are keyed differently — the fingerprint scan by the file's stem, the
-    note list by the frontmatter id — so on a mismatch both lookups returned None, `None != None` is
-    False, and the note read as "unchanged" forever. `kg-validate` now refuses the mismatch, but a
-    tree a pod is serving is not a tree that passed a PR, so the indexer must still index it.
+    The fingerprint scan is keyed by stem and the note list by frontmatter id, so a mismatch must
+    not read as "unchanged". `kg-validate` refuses the mismatch, but a served tree may not have
+    passed it.
     """
     _write_note(tmp_path, "good-note", "a note whose filename matches its id")
     (tmp_path / "renamed-file.md").write_text(
@@ -277,12 +273,8 @@ async def _stored_embedding_keys() -> set[str]:
 async def test_postgres_index_within_is_a_predicate_not_a_filter_over_the_result() -> None:
     """`within` scopes the SQL query itself, so an eligible note past the global top-k is found.
 
-    What this **cannot** show is full top-k recall, which an earlier version of this docstring
-    claimed. Two rows are scanned exactly, so the approximation never appears: on a real corpus the
-    dense path's `within` is a *post*-filter over the HNSW candidate list, and a selective one can
-    return fewer than k (measured at N=20,000, k=8, index forced, a tenth of the corpus eligible:
-    5 of 8). See the comment on `_dense` in `retrieval/vector_index.py` and the `hnsw.ef_search`
-    row in `docs/planning/BACKLOG.md`. The lexical half below is exact.
+    This does not show full top-k recall: on a real corpus the dense `within` is a post-filter over
+    the HNSW candidate list and a selective one can return fewer than k. The lexical half is exact.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -393,22 +385,12 @@ async def test_reindex_incremental_against_postgres_embeds_only_the_change(
 
 
 def test_a_vector_from_a_superseded_configuration_is_not_ranked_as_evidence() -> None:
-    """The read path never asked which model made the vector it was scoring.
+    """A vector from a superseded embedding configuration is not ranked as evidence.
 
-    `embedding_config_key()` exists because "a vector is only reusable for the configuration that
-    made it… comparing its queries against the old model's vectors corrupts every similarity,
-    silently, and no error is ever raised". It gated re-embedding and nothing else: `fingerprints`
-    scoped by it correctly, and `search_dense` had no such predicate. So an operator repointing
-    `embedding_model` at another model of the same width — a 1536-dim swap raises nothing at insert
-    — put every stored vector into a state where the rebuild treats it as absent and the reader
-    treats it as a perfect match. Measured on one record stored under a MODEL-A key:
-
-        fingerprints('…MODEL-B') -> {}
-        search_dense(…)          -> [IndexHit(note_id='n1', score=0.9938…)]
-
-    The window is at least one `note_reindex_schedule_minutes` plus a full corpus re-embed, and
-    unbounded when the schedule is off. An empty dense leg is a result the sweep already reports
-    honestly; arbitrary notes cited as evidence is not.
+    A vector is only comparable with queries from the configuration that made it, and a same-width
+    model swap raises nothing at insert. `search_dense` must therefore scope by
+    `embedding_config_key()` as `fingerprints` does; otherwise stale vectors read as absent to the
+    rebuild and as matches to the reader.
     """
 
     async def _run(monkeypatch: pytest.MonkeyPatch) -> None:

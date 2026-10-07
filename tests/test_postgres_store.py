@@ -1,9 +1,7 @@
-"""Integration tests for the Postgres calculation store (plan step 1b.3).
+"""Integration tests for the Postgres calculation store.
 
-Runs against a real database (CI provides a Postgres service; the offline sandbox
-has none, so these skip). Proves the durable backend honors the same ResultStore
-contract as InMemoryStore: round-trip, upsert on the same key, distinct rows per
-version.
+Proves the durable backend honours the same `ResultStore` contract as `InMemoryStore`: round
+trip, upsert on the same key, distinct rows per version. Skips without Postgres.
 """
 
 import asyncio
@@ -57,30 +55,20 @@ async def test_round_trip_and_upsert() -> None:
 
 
 def test_default_store_is_postgres_backed() -> None:
-    """The production seam names the durable backend, not the in-memory one.
+    """`default_store()` names the durable backend, not the in-memory one.
 
-    `default_store()` is what every calculator resolves its store from, and its in-memory sibling
-    satisfies the same `ResultStore` Protocol — so a seam accidentally left pointing at
-    `InMemoryStore` type-checks, passes every store test, and silently discards the cache on
-    process exit, which is D-011 turned off. `tests/test_audit.py` pins the audit sink the same
-    way, and `test_default_artifact_store_is_postgres_backed` its artifact twin; this is the third
-    of the trio and the only one that was missing.
+    Both satisfy `ResultStore`, so a seam left on `InMemoryStore` would pass every store test while
+    discarding the cache on exit (D-011 off). The audit sink and artifact store have the same pin.
     """
     store: ResultStore = default_store()
     assert isinstance(store, PostgresStore)
 
 
 def test_a_rewrite_without_a_cost_keeps_what_the_original_miss_measured() -> None:
-    """`compute_seconds` is written once by the miss that paid it and never erased.
+    """A rewrite without a cost keeps the `compute_seconds` the original miss measured.
 
-    `StoredResult.compute_seconds` defaults to `None` and only `cached_compute` sets it, so every
-    other writer — `record_best_geometry`, a backfill, an admin correction of a payload — re-`put`s
-    the key with no cost attached. Without the `COALESCE` those writes `SET compute_seconds =
-    NULL`, and `find_calculations` then reports an expensive DFT run as costless: the one number
-    that says what the cache has saved, wrong in the direction that argues the cache is worthless.
-
-    Replacing that line with `compute_seconds = EXCLUDED.compute_seconds,` leaves the calculation
-    store, browse, artifact and in-memory suites green (measured: 47 passed).
+    Only `cached_compute` sets a cost; other writers re-put with `None`. The `COALESCE` keeps
+    `find_calculations` from reporting an expensive run as costless.
     """
 
     async def _run() -> tuple[float | None, float | None]:
@@ -102,16 +90,11 @@ def test_a_rewrite_without_a_cost_keeps_what_the_original_miss_measured() -> Non
 
 
 def test_a_rewrite_keeps_the_date_the_value_was_computed() -> None:
-    """`created_at` answers "when was this computed", so a rewrite must not move it.
+    """A rewrite keeps the date the value was computed.
 
-    The key is content-addressed: a second `put` under it is the same calculation being rewritten
-    — a backfill, an `ArrayOffloadingStore` offload, an admin correction — not a new one. The
-    upsert nonetheless set `created_at = now()`, so a rewrite restamped the row as freshly
-    computed, `find`'s newest-first order and its `since`/`until` window described the last
-    *write*, and `find_calculations` promises "results computed at or after it". Measured before
-    the fix on this shape: a row computed at 09:33:39 came back reading 09:33:40 after a backfill
-    that ran no calculator. `InMemoryStore` keeps whatever date the caller stored, so the two
-    backends disagreed as well.
+    The key is content-addressed, so a second `put` is the same calculation rewritten (backfill,
+    offload, correction). `created_at` drives `find`'s ordering and `since`/`until` window, and
+    `InMemoryStore` keeps the stored date too.
     """
 
     async def _run() -> tuple[datetime | None, datetime | None]:
@@ -156,12 +139,9 @@ async def test_get_miss_returns_none() -> None:
 
 
 async def test_find_matches_the_in_memory_backend() -> None:
-    """The browse query answers the same questions in Postgres as in memory (W2.2).
+    """The browse query answers the same questions in Postgres as in memory.
 
-    `ResultStore` is `@runtime_checkable`, so a method added to one backend and not the other
-    still satisfies the Protocol at runtime and fails only where it is called. The two are
-    exercised against the same fixtures here for that reason — the SQL expresses the same
-    predicate as `_matches`, and nothing but a test makes them stay equal.
+    The SQL restates `_matches`; only a differential test keeps them equal.
     """
     store = await _store_or_skip()
     memory = InMemoryStore()
@@ -204,11 +184,10 @@ async def test_find_matches_the_in_memory_backend() -> None:
 
 
 async def test_known_answers_existence_in_bulk_and_both_backends_agree() -> None:
-    """`known` is the `kg-validate` calc_refs probe: held keys come back, typos do not.
+    """`known` (the `kg-validate` calc_refs probe) returns held keys and not typos, on both
+    backends.
 
-    Checked against both backends in one test because the CLI runs the Postgres one while the
-    validate-layer unit tests run the in-memory one — if the two disagreed, the unit tests would
-    prove a gate the deployment does not run.
+    The CLI runs Postgres while unit tests run in memory, so they must agree.
     """
     store = await _store_or_skip()
     memory = InMemoryStore()
@@ -224,11 +203,10 @@ async def test_known_answers_existence_in_bulk_and_both_backends_agree() -> None
 
 
 async def _write_raw_result(key: CalculationKey, payload: object) -> None:
-    """Put `payload` into `calculation_results.result` without going through the store.
+    """Put `payload` into `calculation_results.result` directly with SQL, bypassing the store.
 
-    The column is bare `JSONB NOT NULL`, so every value here is one a restore, an operator, or a
-    calculation server returning a shape this repository does not check could leave behind. Written
-    with SQL for that reason: the store's own `put` is exactly the path these rows did not take.
+    The column is bare `JSONB NOT NULL`, so these are shapes a restore, an operator or an unchecked
+    server answer could leave behind.
     """
     from psycopg.types.json import Jsonb
 
@@ -253,12 +231,10 @@ async def _write_raw_result(key: CalculationKey, payload: object) -> None:
 
 
 def test_a_row_that_is_not_a_json_object_is_refused_by_name() -> None:
-    """`JSONB NOT NULL` accepts an array, a string, a number and `null`; psycopg parses all four.
+    """A row that is not a JSON object is refused by name.
 
-    The old read was `result if isinstance(result, dict) else json.loads(result)`, written for a
-    driver that returns a string — so each of these reached `json.loads` as a `list`/`str`/`int`
-    and produced `TypeError: the JSON object must be str, bytes or bytearray, not list`, which
-    names neither the table nor the row an operator has to delete.
+    `JSONB NOT NULL` admits arrays, strings, numbers and `null`; the error must name the table and
+    row an operator has to delete.
     """
 
     async def _run() -> list[str]:
@@ -282,17 +258,12 @@ def test_a_row_that_is_not_a_json_object_is_refused_by_name() -> None:
 
 
 def test_an_empty_result_is_neither_cached_nor_handed_back() -> None:
-    """`{}` is what a truncated or failed call to the calculation server degrades into.
+    """An empty result is neither cached nor handed back.
 
-    Measured before this: a `{}` row answered `hit=True computes=0` and flowed out as the tool's
-    answer, permanently — D-011 never recomputes a persisted result and `calculation_results` is
-    never pruned, so one such write poisons that key for the life of the deployment. Both doors are
-    asserted: the write gate in `cached_compute`, which is the one path a calculation server's
-    answer comes through, and the read, for a row that got in some other way.
-
-    A *wrong value* under a right key is deliberately not covered — catching that needs the
-    calculator's schema, which lives in `Chemclaw3-mcp` by
-    `D-2026-08-16-the-physics-leaves-the-cache-stays`.
+    `{}` is what a truncated server call degrades into, and a persisted result is never recomputed,
+    so one such row would poison its key forever. Both the write gate in `cached_compute` and the
+    read are asserted. A wrong value under a right key needs the calculator's schema, which lives in
+    `Chemclaw3-mcp`.
     """
 
     async def _run() -> tuple[bool, bool, int]:
@@ -327,11 +298,10 @@ def test_an_empty_result_is_neither_cached_nor_handed_back() -> None:
 
 
 def test_one_corrupt_row_does_not_empty_the_browse() -> None:
-    """`find` answers "what do we already have"; one poisoned row used to answer nothing at all.
+    """One corrupt row does not empty the browse.
 
-    The split is deliberate and is the opposite of `get`'s: an exact-key lookup must refuse the row
-    the caller asked for, and a listing must not be taken down by a row nobody asked for. The same
-    call `retrievers._chunks_from_hits` makes for an index hit whose note no longer loads.
+    Unlike `get`, which must refuse the row asked for, a listing skips a row nobody asked for, as
+    `retrievers._chunks_from_hits` does.
     """
 
     async def _run() -> list[str]:
@@ -349,18 +319,10 @@ def test_one_corrupt_row_does_not_empty_the_browse() -> None:
 
 
 def test_put_refuses_a_non_finite_float_in_this_process_not_at_the_wall() -> None:
-    """`store.put` is a second door, and `checked_payload` does not guard it.
+    """`store.put` refuses a non-finite float in this process rather than at the database.
 
-    `cached_compute` checks what a calculator returned; `put` is public and is called directly by
-    `ArrayOffloadingStore`'s rewrite, by a backfill, and by any future writer that does not come
-    through the cache — the same "paired with `put` rather than with `cached_compute`" argument
-    `publish_stored_result` already makes. Measured before this, a NaN reaching that door came back
-    as `psycopg.errors.InvalidTextRepresentation: invalid input syntax for type json / DETAIL:
-    Token "NaN" is invalid`, a server-side error naming a JSON token and no field.
-
-    `chemclaw.core.jsonb.json_column` turns that wall into a `ValueError` raised in this process,
-    at the column holding the value, with a stack naming the caller — which is the whole of what a
-    backstop behind an already-checked path can be worth.
+    `put` is public and called by writers that bypass `checked_payload`. `core.jsonb.json_column`
+    raises a `ValueError` naming the column, instead of a server error naming a JSON token.
     """
 
     async def _run() -> str:
@@ -386,15 +348,10 @@ def test_put_refuses_a_non_finite_float_in_this_process_not_at_the_wall() -> Non
 
 
 def test_the_two_backends_agree_about_a_superseded_epoch() -> None:
-    """The epoch exclusion is stated twice — in `_matches` and in `_FIND` — so it is pinned twice.
+    """The two backends agree about a superseded epoch.
 
-    `find` filters before it fetches, so the Postgres store cannot reuse `_matches`; every other
-    filter in this file is the same shape and the same risk. Driven here as a differential against
-    the reference store the Postgres one is written to match: one molecule, one `calc_version`, two
-    epochs, and both backends must answer with the current row only. A row written before migration
-    090 records no epoch and is deliberately still returned — a store cannot classify its own
-    history, and hiding it would answer "nothing found" about everything on disk the day the
-    migration ran.
+    The exclusion is stated in both `_matches` and `_FIND`, so it is pinned differentially. A row
+    with no recorded epoch is still returned: a store cannot classify its own history.
     """
 
     async def _run() -> tuple[list[str], list[str], list[str]]:
@@ -427,11 +384,10 @@ def test_the_two_backends_agree_about_a_superseded_epoch() -> None:
 
 
 def test_a_rewrite_that_carries_no_epoch_does_not_blank_a_recorded_one() -> None:
-    """`ArrayOffloadingStore`'s rewrite and a backfill re-`put` a row they did not compute.
+    """A rewrite carrying no epoch does not blank a recorded one.
 
-    Same rule as `structure_id` and `compute_seconds` above it in `_UPSERT`: an empty value on the
-    incoming row means "this writer does not know", and letting it overwrite a recorded one moves a
-    known-current row back into the unrecorded class the browse has to hand back and mark.
+    As with `structure_id` and `compute_seconds` in `_UPSERT`, an empty incoming value means "this
+    writer does not know".
     """
 
     async def _run() -> str:
@@ -447,24 +403,13 @@ def test_a_rewrite_that_carries_no_epoch_does_not_blank_a_recorded_one() -> None
 
 
 def test_a_large_float_keeps_its_value_and_loses_only_its_python_type() -> None:
-    """`jsonb` is not refused for this, and the reason is recorded so nobody "fixes" it later.
+    """A large float keeps its value and loses only its Python type through `jsonb`.
 
-    Measured through a real column: `1e16` reads back as `10000000000000000` and `6.02214076e23`
-    as `602214076000000000000000` — `int`, not `float`, because psycopg reads a `jsonb` number with
-    no decimal point as an integer.
-
-    **`float()` of what comes back is the original float, and that is the exact claim.** The looser
-    one — "the value is preserved exactly" — is false and this assertion is where that was caught:
-    `6.02214076e23` is the double `602214075999999987023872`, `json.dumps` writes its shortest
-    round-tripping decimal `6.02214076e+23`, and the integer that comes back is
-    `602214076000000000000000`, which is a *different* exact number and the *same* double. So a
-    reader comparing the returned object to the float it stored gets `False` while nothing about
-    the value has moved.
-
-    Refusing this is what would be wrong: Avogadro's number is a legitimate thing for a calculator
-    to return, and `checked_payload` draws its line at "refuse what fails, document what converts".
-    This is the documented half, asserted so the documentation is a measurement rather than a
-    memory.
+    psycopg reads a `jsonb` number without a decimal point as `int`, so `1e16` returns as an
+    integer. `float()` of the result equals the original float, which is the exact claim (the
+    returned integer is a different exact number for the same double). Refusing would be wrong:
+    values like Avogadro's number are legitimate, and `checked_payload` refuses what fails and
+    documents what converts.
     """
 
     async def _run() -> dict[str, object]:

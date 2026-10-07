@@ -1,9 +1,8 @@
-"""The one rule for which stored tool results are evidence, held against the agent's live surface.
+"""The rule for which stored tool results are evidence, held against the agent's live surface.
 
-`exhibits/evidence.py` names what is not evidence because it sits below `agent`; this is what keeps
-the name list equal to the division `agent/chemclaw_agent` draws between capabilities and the
-agent's own scaffolding, in both directions, so a new scaffolding tool reds here rather than quietly
-grounding figures the model wrote.
+`exhibits/evidence.py` names what is not evidence; this keeps that list equal to the division
+`agent/chemclaw_agent` draws between capabilities and scaffolding, both ways, so a new scaffolding
+tool cannot quietly ground figures the model wrote.
 """
 
 from chemclaw.agent.chemclaw_agent import available_tool_names, capability_tool_names

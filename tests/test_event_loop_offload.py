@@ -1,23 +1,9 @@
 """Synchronous CPU work must not run on the event loop that serves other requests.
 
-A 50-user load test measured throughput flat at ~1.18 turns/s from 10 users to 50 — five times
-the load for 1.7% more work — which is the signature of a single serialization point rather than
-a resource limit. The front door and each connector are one uvicorn process on one event loop,
-and the RDKit calls behind the chat tools are synchronous C++: while one turn embeds a conformer,
-every other turn on that process is stopped.
-
-**Three of these tests left with the `chem` server.** They covered `render_structure`,
-`stoichiometry_table` and `resolve_compound`, which this repository no longer runs — the capability
-is an MCP server in `Chemclaw3-mcp` now. The guard went with it rather than being deleted: that
-repository's `Chemclaw3-mcp:servers/chem/tests/test_event_loop_offload.py` asserts the same
-property against the
-same tools, because a `to_thread` hop whose test stayed behind is one nobody would notice losing.
-What remains here is what this process still runs on its own loop.
-
-These tests assert the property directly — the blocking call happens on a *different thread* than
-the coroutine that awaited it — rather than measuring wall-clock, which would be flaky and would
-not distinguish "fast" from "off the loop". Each one fails if the `asyncio.to_thread` hop is
-removed.
+The front door and each connector are one process on one event loop, so blocking work stops every
+other turn. The tests assert that the blocking call runs on a different thread than the awaiting
+coroutine, rather than measuring wall clock; each fails if the `asyncio.to_thread` hop is removed.
+The chem tools' equivalents live with the `chem` server in `Chemclaw3-mcp`.
 """
 
 import asyncio
@@ -44,16 +30,10 @@ def _thread_recording(target: Any, seen: list[int]) -> Any:
 
 
 def test_the_rrho_arithmetic_runs_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 3N x 3N eigendecomposition is blocking work, and this coroutine shares its loop.
+    """The RRHO arithmetic runs off the event loop.
 
-    The two blocking steps this test used to cover — embedding a molecule and deriving a cache key
-    that shelled out to `xtb --version` — both left with the engines
-    (`D-2026-08-16-the-physics-leaves-the-cache-stays`): the embed is a remote call and the key
-    comes back from the server. What is left on this side is real work all the same. Turning a
-    Hessian into a free energy diagonalizes a matrix that is 99x99 for a drug-sized molecule, once
-    per refinement pass, inside the connector's single-loop MCP server and inside Temporal
-    activities that are coroutines — so it has to be threaded, and the assertion is the thread it
-    actually ran on rather than the presence of a call to `to_thread`.
+    Turning a Hessian into a free energy diagonalizes a 3N x 3N matrix, inside the connector's
+    single-loop server and inside coroutine activities. Asserted on the thread it ran on.
     """
     from chemclaw.connectors.calc import compose
     from chemclaw.science.calc import thermo
@@ -78,9 +58,7 @@ def test_the_rrho_arithmetic_runs_off_the_event_loop(monkeypatch: pytest.MonkeyP
 def test_gather_evidence_runs_its_sources_concurrently() -> None:
     """Independent retrievers are gathered, so the sweep costs the slowest source, not their sum.
 
-    Two retrievers that each sleep are the honest model of "one reads the note tree, one queries
-    Postgres": awaited in sequence the tool takes both delays, gathered it takes one. Asserted as
-    overlap in time rather than a wall-clock threshold, so it is not timing-sensitive.
+    Asserted as overlap in time rather than a wall-clock threshold.
     """
     from chemclaw.agent import research_tools
 
@@ -91,10 +69,8 @@ def test_gather_evidence_runs_its_sources_concurrently() -> None:
         """A retriever that reports how many of its peers were in flight alongside it."""
 
         source_id = "slow"
-        # `SourceRetriever` declares `name`, and the fan-out reads it to label each branch's
-        # contribution. This double predated that read and omitted it, which made it not actually a
-        # `SourceRetriever` — filled in here rather than by making the sweep tolerant, because a
-        # production path defending against an incomplete test double hides the incompleteness.
+        # `SourceRetriever` declares `name`, which the fan-out reads to label each branch; the
+        # double supplies it rather than the production path tolerating its absence.
         name = "slow"
 
         async def retrieve(self, query: str, filters: dict[str, str]) -> list[Any]:
@@ -117,11 +93,8 @@ def test_gather_evidence_runs_its_sources_concurrently() -> None:
 def _worst_loop_stall(coro_factory: Any) -> tuple[float, list[int]]:
     """Run a coroutine while sampling the loop, returning the worst stall in ms and the loop thread.
 
-    The sampler wakes every 5 ms; whatever it *actually* waited, minus what it asked for, is the
-    time the loop was held by something that never yielded. That is the number the audit measured
-    (1,223.8 ms inline vs 27.0 ms threaded for the identical corpus work) and the only one that
-    distinguishes "this activity is slow" — which is fine, activities are — from "this activity
-    stops the other seven sharing its loop", which is not.
+    The sampler wakes every 5 ms; actual wait minus requested wait is time the loop was held. That
+    distinguishes a slow activity (fine) from one that stops the others sharing its loop.
     """
     stalls: list[float] = []
 
@@ -154,14 +127,10 @@ _BLOCK_SECONDS = 0.3
 def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`collect_digests` shares its loop with seven other activities, and held it for the parse.
+    """`collect_digests` reads and matches the corpus off the event loop.
 
-    `load_notes` is a recursive `rglob` + `stat` + YAML frontmatter parse of every note, and the
-    match pass after it is O(subscriptions x notes) of pure Python. Both ran inline in a
-    `background-jobs` coroutine that `worker_max_concurrent_activities=8` shares with — among
-    others — `beating()`'s heartbeat timers for a CREST search that costs hours if its heartbeat is
-    missed. Measured by the audit on a 2,000-note corpus: 1,223.8 ms of loop stall inline against
-    27.0 ms through `to_thread`, for identical work.
+    `load_notes` and the O(subscriptions x notes) match are blocking, on a loop shared with other
+    activities' heartbeats, including long searches that are costly to redeliver.
     """
     from chemclaw.durable import digest
 
@@ -172,11 +141,8 @@ def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
         time.sleep(_BLOCK_SECONDS)
         return []
 
-    # One subscription, not zero. `_match_corpus` returns before touching the corpus when nothing
-    # will read it — a deployment with no subscriptions was paying for a full `load_notes` and a
-    # `conflict_index` scan on every run — so a zero-subscription fixture asserts the offload of
-    # work this activity no longer does. It is also the more honest fixture: the match pass this
-    # test names is O(subscriptions x notes), and at zero subscriptions there is no match pass.
+    # One subscription, not zero: with none, `_match_corpus` returns before touching the corpus, so
+    # a zero-subscription fixture would assert the offload of work the activity does not do.
     async def _one_subscription() -> list[Any]:
         return [Subscription(id=1, owner="u-1", query="suzuki")]
 
@@ -207,11 +173,10 @@ def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
 def test_the_memory_note_builders_run_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch, activity_name: str
 ) -> None:
-    """The same corpus read, reached three-at-a-time by `MemorySynthesisWorkflow`'s fan-out.
+    """The memory note builders run off the event loop.
 
-    Each builder ends in `_with_supersedes`, which calls `load_notes`; the clustering in front of
-    it is pure CPU over the whole reaction corpus. Threading at the *activity* boundary covers both
-    and leaves `memory/jobs.py` the pure sync module its layer says it should be.
+    Each ends in `load_notes` after CPU-bound clustering over the reaction corpus. Threading at the
+    activity boundary covers both and keeps `memory/jobs.py` a pure sync module.
     """
     from chemclaw.durable import memory_jobs
 
@@ -260,18 +225,11 @@ _EXPORT_FILES = 3
 def test_the_eln_json_adapter_scans_its_drop_directory_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """`eln-json` is the shipped default source and it read the whole directory on the loop.
+    """The `eln-json` adapter scans its drop directory off the event loop.
 
-    `fetch_new_entries` is awaited from `sync_eln_entries`, an activity on the background worker,
-    whose one event loop also carries that activity's Temporal heartbeat and `/healthz`, `/readyz`
-    and `/metrics` (`core/worker_http.py`). The glob, every `read_text` and every `json.loads` ran
-    as one uninterrupted block across all of them: measured 2026-09-06 with a 1 ms heartbeat on
-    the same loop, 346.9 ms at 10,000 real-shaped exports and **1,899.8 ms at 50,000, the worst
-    gap equal to the whole scan** — which is how a large enough corpus starves the heartbeat and
-    earns the sync a redelivery that blocks again.
-
-    The per-file cost is injected rather than read off a corpus this test would have to write, so
-    the number asserted is the loop stall and not the speed of a CI box's disk.
+    The glob, reads and parses ran as one block on the worker loop that also carries heartbeats and
+    health endpoints, so a large corpus starves the heartbeat. The per-file cost is injected, so the
+    assertion is the loop stall, not disk speed.
     """
     import chemclaw.ingest.eln.json_adapter as json_adapter
 
@@ -383,17 +341,10 @@ def test_the_commitment_export_is_read_off_the_event_loop(
 def test_the_bo_activities_fit_their_surrogate_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A GP fit is pure synchronous CPU, and the campaign's only `await`s are between its rounds.
+    """The BO activities fit their surrogate off the event loop.
 
-    Measured 2026-09-06 against the in-process loop that used to live in `science/bo/campaign.py`:
-    a one-parameter problem, 5 seed points and 2 rounds, with a 5 ms sampler on the same loop, held
-    the loop for **16,069.7 ms of a 16,071 ms call** when the two BoFire calls ran inline. That
-    module had no `src/` caller and was deleted on 2026-09-07, so this drives the pair that ships —
-    `connectors/bo/activities.py`, the two activities `BoCampaignWorkflow` runs every round. It is
-    the same claim about the same two functions, asked of the path a chemist reaches.
-
-    BoFire is stubbed here rather than fitted: the property is *where* the fit runs, and a real one
-    would put a minute of surrogate arithmetic in the suite for a claim it does not sharpen.
+    A GP fit is pure synchronous CPU. Drives the two activities `BoCampaignWorkflow` runs every
+    round, with BoFire stubbed: the property is where the fit runs, not its result.
     """
     import chemclaw.connectors.bo.activities as activities
     from chemclaw.science.bo.problem import (

@@ -1,14 +1,8 @@
-"""The evidence pack's session-ownership gate, which shipped with no test at all.
+"""The evidence pack's session-ownership gate.
 
-`assemble_evidence_pack` takes a `session_id` argument and returns one conversation's whole record —
-every tool call with its actor, every job with its free-text rationale, every approval and every
-external effect. Before the gate it read *any* session, while its own docstring claimed the check
-lived on a FastAPI dependency that is not on this path. The gate closed that.
-
-**And then shipped unexercised**, which is how it would quietly re-open: a later "an unknown session
-should just return an empty pack" refactor makes `_may_read` return True on a missing row, the hole
-is back, and `make lint type test` stays green. So this file drives the predicate directly rather
-than asserting that a string appears in a dict.
+`assemble_evidence_pack` returns one conversation's whole record, so it must refuse a session the
+caller cannot read. The predicate is driven directly, so a refactor that made an unknown session
+readable would turn this red.
 """
 
 import pytest
@@ -54,12 +48,9 @@ def test_an_owner_less_row_follows_the_enforcement_posture(
 
 
 async def test_a_session_somebody_else_owns_is_refused_and_does_not_confirm_it_exists() -> None:
-    """The gate, driven end to end against a real ownership row.
+    """A session somebody else owns is refused, without confirming it exists.
 
-    The refusal deliberately uses the wording an *unknown* session gets: telling a caller that a
-    session exists but belongs to somebody else confirms the id, which is the leak the front door's
-    shared 404 rule exists to prevent — and the ids are discoverable, which is what made this
-    reachable in the first place.
+    The refusal uses the wording an unknown session gets, matching the front door's shared-404 rule.
     """
     await migrated_db_or_skip()
     await SessionOwnerStore().record(SESSION, OWNER)
@@ -90,11 +81,9 @@ async def test_a_session_somebody_else_owns_is_refused_and_does_not_confirm_it_e
 async def test_a_member_of_a_shared_session_reads_its_pack_and_a_stranger_still_does_not(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The tool admits whom the route admits (the shared-session ADR of 2026-09-27).
+    """A member of a shared session reads its pack, and a stranger still does not.
 
-    A member the owner let in reads the conversation at `/sessions/{id}/…`, so the agent's own read
-    of the same conversation must answer the same way — and admitting one person must not open the
-    session to the next.
+    The tool admits whom the session routes admit.
     """
     from chemclaw.agent import session_members
 

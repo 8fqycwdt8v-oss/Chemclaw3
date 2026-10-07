@@ -1,18 +1,11 @@
 """The citation-only tier: a reaction the source only half-drew is evidence, never a structure.
 
-`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` records the owner decision:
-a record naming a species without its structure — the Perera flow-Suzuki screen's `2a, Boronic
-Acid`, 5,760 of the mock's 10,011 seeded records — is ingested **citable** and **excluded from
-structure and similarity search**. Each test below pins one half of that sentence at the seam where
-it could break, starting from the entry points production calls:
-
-- the adapter carries the name verbatim and invents nothing;
-- the sync stores the record, in the tier, and writes **no** fingerprint, molecule or label row;
-- a structure search — the retriever a sweep runs and the tool a chemist calls — never returns
-  one, including the record whose stale fingerprint predates an amendment;
-- a chemist who reaches one by citation is told which tier it is in, by the system, outside the
-  source's framed text;
-- the memory miners, which are all structural, never see one.
+Per `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`, a record naming a
+species without its structure is ingested citable and excluded from structure and similarity
+search. Pinned from production entry points: the adapter carries the name verbatim; sync writes no
+fingerprint, molecule or label row; no structure search returns one (even with a stale
+fingerprint); a chemist reaching one by citation is told its tier outside the framed text; and the
+structural memory miners never see one.
 """
 
 import asyncio
@@ -240,12 +233,10 @@ def test_the_model_requires_an_input_and_a_product_across_both_tiers() -> None:
 
 
 def test_a_named_only_input_is_not_a_mass_balance_violation() -> None:
-    """The balance is not checkable without the partner, so it is not run — and says nothing.
+    """A named-only input skips the mass-balance check rather than reporting a violation.
 
-    Driven with a drawn product carrying boron that no *drawn* input supplies: the named reagent is
-    where the boron came from, so comparing the structured halves would report a false violation.
-    The control arm without the named reagent does report it, and a structure that does not parse
-    is still reported whatever the tier.
+    The named reagent may supply atoms no drawn input does. The control arm without it still
+    reports, and an unparseable structure is reported whatever the tier.
     """
     reaction = OrdReaction(
         reaction_id="r",
@@ -547,12 +538,8 @@ async def test_the_durable_store_keeps_the_tier_and_withholds_it_from_structure_
 
 # --- every structural answer says what it did not search -------------------------------------
 #
-# The 2026-10-02 lane (finding N6): with the indexes complete, `substrate_precedent` said
-# "COMPLETE: all 4282 …", `substructure_matches` said "a genuine negative result", and the model
-# told a chemist there was no in-house data on 6-iodoquinoline while
-# `reaction-suzuki-flow-hte-01243` drew it as a reactant and was citation-only because its partner
-# was only named. The exclusion is the decided tier and stays; what changes is that every verdict
-# states it, and names a record that lists the queried structure so the model can cite it.
+# The citation-only exclusion stays, but every structural verdict states it and names a record that
+# lists the queried structure, so an empty answer is not read as "no in-house data".
 
 # A quinoline only the structured control draws, so a query for it is one the tier cannot answer.
 _BROMOQUINOLINE = "Brc1ccc2ncccc2c1"
@@ -616,11 +603,10 @@ def _verdict(payload: dict[str, Any]) -> str:
 def test_a_structural_negative_names_the_citation_only_record_that_draws_the_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The N6 repro, through each structural tool's MCP surface: the empty answer cites the run.
+    """A structural negative names the citation-only record that draws the query, via MCP.
 
-    Driven from `server.call_tool`, because the payload MCP sends is the only thing the model reads
-    and a field `model_dump()` drops does not exist for it. The query is spelled in Kekulé form, so
-    the record's aromatic spelling is reached through the canonical spelling and not by luck.
+    Driven from `server.call_tool` because the MCP payload is what the model reads. The query is in
+    Kekulé form so the record is reached through canonicalisation.
     """
     monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
     stores = _synced_and_labelled(tmp_path)
@@ -722,11 +708,10 @@ def test_only_a_citable_citation_only_record_is_counted() -> None:
 
 
 async def test_the_durable_store_answers_the_disclosure_as_the_reference_does() -> None:
-    """`114`'s read against Postgres, differential to the in-memory oracle, by delta.
+    """The Postgres store answers the disclosure as the in-memory reference does, asserted by delta.
 
-    The session's schema is shared, so other tests' rows are counted too: the assertion is on what
-    this test's rows add. A ring-bond `%10` in a stored SMILES pins `strpos` over `LIKE`, where it
-    would be a wildcard matching any text.
+    The schema is shared, so only this test's rows are compared. A ring-bond `%10` pins `strpos`
+    over `LIKE`, where `%` would be a wildcard.
     """
     await migrated_db_or_skip()
     store = PostgresReactionRecordStore()

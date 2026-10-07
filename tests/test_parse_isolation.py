@@ -1,22 +1,10 @@
 """What happens to a replica when a parse does not come back.
 
-`agent/attachments.py` caps how many uploads may be parsed at once and sheds the rest, and that cap
-was real. What it could not do was ever get a slot *back*: a slot stands for a running worker
-thread and is released by that thread's completion callback, so a parse that never returns held its
-slot for the life of the process. Driven before the fix, at the shipped cap of 2: both callers were
-freed at their timeout, `in_flight` was still 2 five seconds later, and every later upload was shed.
-The upload path of that replica was down permanently and nothing said so.
-
-These tests hold the fix — `ingest/documents/isolate.py` — from both ends: that the work really
-leaves this process, that a parser's own refusal still arrives as itself across that boundary, and
-that a parse past its deadline costs a slot for the deadline rather than for the process. The last
-one is the regression test for the wedge, and it is written as "the *next* upload is served"
-because that is the property a chemist experiences; `in_flight` is the mechanism, not the promise.
-
-The fourth is one layer down and was found by driving the third: `core/netguard.py` refused the
-`AF_UNIX` socket the forkserver talks to itself over, while its own docstring said it exempted
-local IPC. Nothing asserted it in either direction, and the C half of the same control
-(`netguard_preload.c`) had it right — it reads `sa_family` and checks only the internet families.
+A parse slot stands for a running worker; if a parse never returned, its slot was never released
+and the replica's upload path died silently. `ingest/documents/isolate.py` runs the parse in a
+killable child. These tests hold that the work leaves this process, that a parser's refusal
+arrives as itself across the boundary, that a parse past its deadline frees its slot for the next
+upload, and that `core/netguard.py` does not refuse the forkserver's local `AF_UNIX` socket.
 """
 
 import asyncio
@@ -56,17 +44,9 @@ from chemclaw.ingest.documents.parse import (
 from tests.egress_probe import egress_posture
 from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-defined]
 
-# A CSV big enough that parsing it is unmistakably longer than the deadline the wedge test sets,
-# and small enough that building it costs nothing.
-#
-# **Wide rows rather than many narrow ones, and that is a memory shape rather than a preference.**
-# The same 20 MB as `b"aaaa,bbbb,cccc,dddd\n" * 1_000_000`, which is what this was, and which now
-# exceeds `document_parse_memory_bytes` and comes back as a refusal instead of a slow parse: a
-# million rows is a million `str` objects in the rendered lines, and a `str` costs ~50 bytes of
-# header before its characters. 100,000 rows of the same total length cost a tenth of that.
-# Re-measured on this tree after the change: 0.56 s isolated against the 0.2 s deadline below, a
-# factor of 2.8 where this comment used to claim ten. Ten is no longer available and that is the
-# budget working: a CSV slow enough for it is a CSV whose rendered text does not fit one parse.
+# A CSV whose parse clearly outlasts the wedge test's deadline and costs nothing to build. Wide rows
+# rather than many narrow ones, so the rendered text stays under `document_parse_memory_bytes` (each
+# `str` carries ~50 bytes of header) and the result is a slow parse, not a memory refusal.
 _SLOW_CSV = (b",".join([b"a" * 24] * 8) + b"\n") * 100_000
 
 # Above this, a fork round trip is the reason a derived deadline has no room, and no change to
@@ -80,25 +60,12 @@ _SLOW_FIXTURE_SKIP = "process creation is too expensive on this box"
 
 
 def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
-    """A parse now runs in a process this repository did not previously have, so say what it may do.
+    """A parse child is still inside the no-egress posture.
 
-    The whole deployment posture is that nothing dials out. Moving untrusted bytes into a *new*
-    process is exactly the move that could carry them outside a guard armed in the parent, and
-    "the child inherits it" is an assumption rather than an observation — `forkserver` starts its
-    server by fork **and exec**, so the child's guard is whatever that fresh interpreter armed, not
-    a copy of the parent's memory.
-
-    It is armed, and the mechanism is worth naming because it is not obvious: `_PRELOAD` imports
-    `chemclaw.ingest.documents.parse`, which imports `chemclaw.core.config`, whose module body ends
-    in `arm_egress_guard(settings)`. So the guard is armed in the forkserver before it forks
-    anything, and every parse child inherits an armed one.
-
-    **The probe is in `tests/egress_probe.py` because the chain is what is under test.** A target
-    `forkserver` pickles by reference is imported in the child along with its whole module, so
-    while this probe lived here the child imported this file — and with it `chemclaw.core.config`,
-    which armed the guard on the spot. Driven: with `_PRELOAD` emptied the test still passed. Its
-    own module imports `socket` and `sys`, and `tests/__init__.py` imports nothing, so the only
-    way the guard can be armed in that child is the chain this docstring names.
+    `forkserver` forks and execs, so the child's guard is whatever that fresh interpreter armed: the
+    preload imports `chemclaw.ingest.documents.parse` → `chemclaw.core.config`, whose module body
+    calls `arm_egress_guard(settings)`. The probe lives in `tests/egress_probe.py`, which imports no
+    first-party module, so that chain is the only way the guard can be armed in the child.
     """
     context = parse_context()
     reader, writer = context.Pipe(duplex=False)
@@ -119,11 +86,7 @@ def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
 
 
 def _in_process_parse_seconds(raw: bytes) -> float:
-    """What `raw` costs to parse here, so a deadline can be derived instead of transcribed.
-
-    In-process on purpose: the number wanted is the *parse*, and going through
-    `parse_document_isolated` would fold a fork round trip into it and then be compared against a
-    deadline that has to contain one.
+    """What `raw` costs to parse in-process, so a deadline can be derived rather than transcribed.
     """
     started = time.perf_counter()
     parse_document("slow.csv", raw, None)
@@ -131,18 +94,10 @@ def _in_process_parse_seconds(raw: bytes) -> float:
 
 
 def _fork_round_trip_seconds() -> float:
-    """What one fork-and-answer costs, measured rather than written down.
+    """What one fork-and-answer costs, measured here.
 
-    **The constant this replaces was wrong twice, in both directions.** It stood for the floor a
-    derived deadline may not go under — the *small* upload has to fit inside the same deadline — and
-    an absolute number cannot do that job when every other term in the comparison scales with the
-    machine. First it was padded to 50 ms and then multiplied by three, refusing a deadline already
-    five times the round trip; corrected to 20 ms it then refused CI, where the parse it is measured
-    against is 0.203 s rather than the 0.36 s this box sees, so the derived deadline fell to 51 ms
-    and the fixed floor did not move with it.
-
-    Measuring both ends is what makes the comparison scale-free: a faster runner shortens the parse
-    and the fork together, and their ratio is the thing the test actually depends on.
+    Measuring both the parse and the fork makes deadline comparisons scale-free: a faster runner
+    shortens both together.
     """
     _warm_the_forkserver()
     started = time.perf_counter()
@@ -151,30 +106,13 @@ def _fork_round_trip_seconds() -> float:
 
 
 def _budgets_the_slow_fixture_overruns() -> tuple[float, float]:
-    """`(cost, deadline)` for `_SLOW_CSV`, measured here rather than written down.
+    """`(cost, deadline)` for `_SLOW_CSV`, derived from what the parse costs on this box.
 
-    **Three tests in this file time themselves against this fixture, and every one of them had a
-    constant in it.** `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` rewrote
-    `_parse_csv` to render row by row and cut the parse from ~2.3 s to 0.36 s here and **0.258 s**
-    on the CI runner, which left a hardcoded 0.2 s deadline ahead of it by 1.3x. Two of the three
-    raced, on separate runs, and each was found and fixed on its own — which is how the third was
-    still sitting there with a 2x margin.
-
-    So the budgets are derived from what the parse costs on the box running the test. A quarter is
-    the margin; the floor is one fork round trip, because a deadline under that kills the child
-    before it reads a byte and the test would be about process creation instead.
-
-    **When that floor is not clear, which of the two measurements moved decides whether this is a
-    failure or a skip**, and it used to be a failure either way. The ratio can collapse from below —
-    `_parse_csv` got faster once already and will again — and that must red the gate, because the
-    three tests downstream stop being evidence about a parse outrunning its deadline. It can equally
-    collapse from above, on a box where creating a process is expensive: measured in the Claude Code
-    Remote sandbox, five runs gave a **0.165 s median** fork round trip against the **0.030 s** the
-    CI runner measures, with the parse at 0.205 s — matching CI's 0.258 s, so nothing was wrong with
-    the parse and the ratio was 1.24 against a required 4. That is not a defect this repository can
-    fix and it is not evidence about anything; `_FORK_IS_THE_PROBLEM` is where the two cases part.
-    The bound is 2.7x CI's own figure, so no change to `_parse_csv` can reach it, and well under
-    this sandbox's — which is the property that keeps the failure arm real.
+    The deadline is a quarter of the parse cost, with one fork round trip as the floor (below that
+    the child dies before reading a byte). If the ratio collapses because the parse got faster, this
+    fails: the downstream tests would no longer be evidence. If it collapses because process
+    creation is unusually slow (`_FORK_IS_THE_PROBLEM`), it skips, since that says nothing about
+    this code.
     """
     cost = _in_process_parse_seconds(_SLOW_CSV)
     fork = _fork_round_trip_seconds()
@@ -200,15 +138,9 @@ def _budgets_the_slow_fixture_overruns() -> tuple[float, float]:
 def test_the_fixture_guard_tells_a_slow_box_from_a_fast_parse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both arms of `_budgets_the_slow_fixture_overruns`' floor, driven with the clocks faked.
+    """Both arms of the fixture guard's floor, driven with faked clocks.
 
-    The floor used to fail either way, which reddened the gate in the Claude Code Remote sandbox for
-    a property of the sandbox. Splitting it is only safe if the *failure* arm still fires, so both
-    are asserted here rather than left to whichever box happens to run the suite — the whole defect
-    being that a machine-dependent branch is exercised by nobody on purpose.
-
-    Fake seconds, not real ones: this asserts the branch, and measuring it for real would reproduce
-    the sampling problem one level up.
+    The machine-dependent branch must be exercised on purpose, and the failure arm must still fire.
     """
     monkeypatch.setattr("tests.test_parse_isolation._in_process_parse_seconds", lambda raw: 0.200)
 
@@ -231,23 +163,17 @@ def test_the_fixture_guard_tells_a_slow_box_from_a_fast_parse(
 def _warm_the_forkserver() -> None:
     """Pay the forkserver's one-off start before a test measures anything.
 
-    Measured: the first isolated parse in a process is ~0.93 s (the server is exec'd and preloads
-    the parsers) and every one after it is ~0.04 s under pytest, ~0.01 s from a plain entry point.
-    A test that timed a *first* parse would be timing that start-up, which is exactly the number
-    `attachment_parse_reap_grace_seconds` exists to absorb and not the number under test.
+    The first isolated parse in a process includes starting the server and preloading parsers, which
+    is what `attachment_parse_reap_grace_seconds` absorbs and not what tests measure.
     """
     parse_document_isolated("warm.csv", b"a,b\n1,2\n", None, 60.0)
 
 
 def test_the_parse_does_not_run_in_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The work crosses a process boundary, proven by breaking this process's copy of it.
+    """The parse runs in another process, proven by breaking this process's copy of it.
 
-    `isolate.parse_document` is the name `_parse_into` calls. Replacing it here would stop any
-    in-process parse dead; the child imports its own copy from the forkserver, which never saw this
-    assignment, so a parse that still succeeds could only have happened somewhere else.
-
-    Asserted this way rather than by comparing pids because a pid would have to be smuggled back
-    through the result — a test seam in production code to prove a property the code already has.
+    The child imports its own `isolate.parse_document` from the forkserver, so a parse that succeeds
+    after this one is replaced happened elsewhere, without adding a pid seam to production code.
     """
     _warm_the_forkserver()
 
@@ -261,12 +187,10 @@ def test_the_parse_does_not_run_in_this_process(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_a_parsers_refusal_crosses_the_process_boundary_as_itself() -> None:
-    """A scanned PDF is still a `ScannedDocumentError`, not a generic "the reader died".
+    """A scanned PDF is still a `ScannedDocumentError` across the process boundary.
 
-    This is what the tagged pair on the pipe buys. An exception raised in the child and left to
-    kill it would reach the parent as an exit code, and the share sync — which counts scans apart
-    from unsupported formats so an operator can see how much of a corpus needs OCR — would have
-    been counting process deaths.
+    The share sync counts scans apart from unsupported formats so an operator sees how much needs
+    OCR; a dying child would turn that into process-death counts.
     """
     _warm_the_forkserver()
     with pytest.raises(ScannedDocumentError) as excinfo:
@@ -292,44 +216,14 @@ def test_a_parse_past_its_deadline_is_killed_and_counted() -> None:
 async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The regression test for the wedge, stated as what a chemist experiences.
+    """A parse past its deadline frees its slot for the next upload.
 
-    One slot, one upload that will not finish inside its deadline, and then an ordinary small file.
-    Before `ingest/documents/isolate.py` the slot was held until the parse finished — so the second
-    upload waited `attachment_parse_queue_seconds` and came back as a retryable 503 about a file
-    that parses in milliseconds. Driven against that arrangement this test fails with
-    `AttachmentUnavailable`, which is the shape of the production failure: uploads refused by a pod
-    that has capacity on paper.
-
-    Three of the four budgets are set against the fixture's *measured* parse rather than against
-    each other, so that the defect cannot hide behind any of them. The queue wait is shorter than
-    the parse: if it were longer the second upload would simply outwait the wedge. The caller's
-    backstop is shorter than the parse too, and the shipped 5 s is not — with that in place an
-    in-process parse finishes *inside* the backstop and comes back as a success, so the mutation
-    would be caught by the wrong assertion and this test would not be evidence about slots at all.
-
-    **The budgets were transcribed against a ~2.3 s parse, and that parse is no longer 2.3 s.**
-    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` rewrote `_parse_csv` to
-    render row by row, which cut this fixture to **0.36 s** — leaving the 0.2 s deadline below it by
-    1.8x, so whether the parse outran its deadline came down to how fast the runner was. It passed
-    three local full runs and CI on the commit that caused it, then failed CI with
-    `DID NOT RAISE`. Making the fixture slow again is not available: measured, 15x the cell count
-    buys 0.40 s to 0.73 s, because the cost is in the bytes rather than in the cells, and the size
-    that would buy 2.3 s is now refused by `document_parse_memory_bytes`.
-
-    So the deadline is derived from the fixture instead of written down beside it: a quarter of what
-    the parse actually costs *here*, which holds its ratio on a runner of any speed. The floor is
-    the fork round trip, **measured here too rather than written down**, because the *small* upload
-    has to fit inside the same deadline. A fixed floor does not do that job: the constant that stood
-    there refused CI, where this parse costs 0.203 s against the 0.36 s this box sees, so the
-    derived deadline fell to 51 ms while the floor stayed where it was. Measuring both ends makes
-    the comparison scale-free — a faster runner shortens the parse and the fork together, and their
-    ratio is what this test actually depends on — and if the parser ever does get fast enough to
-    squeeze them together this fails saying so rather than going quietly marginal again.
-
-    Growing the fixture is not the way out, and that is measured rather than assumed: at 40 MB of
-    the same CSV the isolated parse is refused by `document_parse_memory_bytes` before the deadline
-    is reached at all, so the test would pass on a memory refusal while claiming to be about time.
+    One slot, one upload that overruns its deadline, then a small file that must be served. The
+    budgets are derived from the fixture's measured parse: the queue wait is shorter than the parse
+    (else the second upload would outwait the wedge), and so is the caller's backstop (else an
+    in-process parse would finish inside it and succeed for the wrong reason). The floor is a
+    measured fork round trip, since the small upload must fit its deadline too. Growing the fixture
+    is not an option: it would be refused by `document_parse_memory_bytes` instead.
     """
     _warm_the_forkserver()
     cost, deadline = _budgets_the_slow_fixture_overruns()
@@ -344,19 +238,9 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
 
     with pytest.raises(AttachmentError):
         await parse_attachment_off_loop("slow.csv", _SLOW_CSV)
-    # **Waited for rather than asserted on the next loop turn, because the slot is not the caller's
-    # to release.** `parse_attachment_off_loop` shields the future precisely so that cancelling the
-    # *caller* cannot fire the release while the thread is still running — its own comment says "the
-    # slot comes back exactly when the thread does" — and when the backstop fires, that thread is
-    # still inside `isolate`, killing the child. Measured from this test's own log: "killed the
-    # reader process for slow.csv after 0.058s". So `await asyncio.sleep(0)` yielded one turn and
-    # then asserted a 58 ms event had already happened; it passed 10 of 10 runs in isolation and
-    # failed inside a full serial suite, which is the signature of a race rather than of a wedge.
-    #
-    # The bound is what keeps this a regression test. The defect it exists for held the slot for the
-    # life of the process — the docstring's own measurement is `in_flight` still at 2 five seconds
-    # after both callers were freed — so five seconds separates "comes back" from "never comes back"
-    # by two orders of magnitude while asserting nothing about scheduling.
+    # Waited for, not asserted on the next loop turn: the shielded thread releases the slot only
+    # after it kills the child, which takes a few tens of milliseconds. Five seconds still separates
+    # "comes back" from "never comes back" by orders of magnitude.
     released = time.monotonic() + 5.0
     while attachments._PARSE_SLOTS.in_flight and time.monotonic() < released:
         await asyncio.sleep(0.01)
@@ -365,14 +249,9 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
         "exists for: a replica with capacity on paper and none in fact"
     )
 
-    # **The second upload gets its own deadline, and that is the whole reason this test is stable.**
-    # One setting was doing two jobs: the slow parse has to *overrun* it and the small file has to
-    # *fit inside* it, which needs the parse to cost many times a fork round trip. On this box that
-    # ratio is ~25 and on the CI runner it is 8.6 (0.258 s against 0.030 s), so a guard demanding
-    # four times one and three times the other could not be satisfied there at all — driven, twice.
-    # Nothing about the subject needs them shared: what is asserted below is that the slot was
-    # *free*, measured against the queue wait, and a slot that is still held sheds the upload no
-    # matter how long its deadline is.
+    # The second upload gets its own deadline: one value cannot both be overrun by the slow parse
+    # and fit the small file on every runner. What is asserted is that the slot was free within the
+    # queue wait, independent of the deadline.
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", cost)
     assert settings.attachment_parse_queue_seconds > 2 * fork, (
         f"the queue wait is {settings.attachment_parse_queue_seconds:.3f}s and a fork round trip "
@@ -391,11 +270,9 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
 async def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other direction, so the test above cannot pass by the cap having quietly stopped working.
+    """The cap still sheds when its slot is genuinely busy.
 
-    A cap that returns every slot immediately would satisfy "the next upload is served" and protect
-    nothing. Here the one slot is held by a parse that is still inside its deadline, and the second
-    upload must still be shed with the retryable refusal.
+    Otherwise a cap that returned every slot immediately would pass the test above.
     """
     _warm_the_forkserver()
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
@@ -417,18 +294,10 @@ async def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
 
 
 def test_local_ipc_is_not_refused_as_egress(tmp_path: Path) -> None:
-    """An `AF_UNIX` address names a path, and a path leaves this host by no route.
+    """An `AF_UNIX` address names a path and is not refused as egress.
 
-    `netguard._host_of` fell through to `host = address` for a non-tuple address, so a unix-socket
-    connect arrived at `_check` as a hostname, failed `is_loopback_host` and was refused — while
-    the same function's docstring said it returned None for exactly this case. Measured: every
-    forkserver connect to `/tmp/pymp-*/listener-*` was logged as "outbound connection … is not on
-    the allowlist" and raised `EgressForbidden`, which is why the isolated parse could not run at
-    all until this was fixed.
-
-    Asserted at both levels — the address reader, and a real `connect` through the armed guard —
-    because the unit half alone would still pass if the guard were later re-plumbed to read the
-    address somewhere else.
+    Asserted on the address reader and on a real `connect` through the armed guard, so re-plumbing
+    the guard cannot bypass the unit half.
     """
     assert netguard._host_of("/tmp/pymp-abc/listener-def") is None
     assert netguard._host_of(b"\x00an-abstract-name") is None
@@ -447,32 +316,13 @@ def test_local_ipc_is_not_refused_as_egress(tmp_path: Path) -> None:
 
 
 def test_a_child_that_stalls_after_its_first_byte_still_frees_the_worker_thread() -> None:
-    """The wedge this module exists to close, re-measured one stage later than it was fixed.
+    """A child that stalls after its first byte still frees the worker thread.
 
-    **The regression.** `reader.poll(timeout)` was the only deadline, and `poll` returning True
-    *consumes* it: `recv` then blocks until the whole pickled message arrives or the pipe reaches
-    EOF, and `join()` had no timeout at all. Nothing killed the child on either path. Driven
-    against the shipped `parse_document_isolated` before this commit, with a 1 s deadline and 15 s
-    of patience:
-
-    | child behaviour                        | worker thread |
-    | writes a truncated message, then stops | **still alive** |
-    | answers correctly, then does not exit  | **still alive** |
-
-    A thread that never ends never releases its parse slot, so at the shipped cap of two such
-    uploads the replica's upload path is down for the life of the process — the exact failure
-    `ingest/documents/isolate.py` was written for, reappearing after the byte that satisfied the
-    only bound. `agent/attachments.py`'s `wait_for` backstop cannot see it, because that wait is
-    `shield`ed: it frees the caller while the thread it stands for runs on.
-
-    **A subprocess, and `tests/parse_stalls.py` says why at length**: the only channel into a
-    `forkserver` child is the server's preload list, and that server is a process-wide singleton
-    another test in this file has already warmed. The probe drives the *shipped* parent code —
-    same function, same worker-thread arrangement `agent/attachments.py` uses — and substitutes
-    only what the child does.
-
-    The third case is the grandchild: `Process.kill()` signals one pid, so a parse that shells out
-    used to leave the grandchild burning CPU after the slot came back.
+    `poll(timeout)` returning True consumes the deadline; `recv` and `join()` must still be bounded
+    and the child killed, or a truncated message or a child that never exits pins the slot forever.
+    `agent/attachments.py`'s backstop cannot see this because its wait is shielded. Driven in a
+    subprocess via `tests/parse_stalls.py`, because a forkserver child can only be changed through
+    the server's preload list. The grandchild case checks the whole process group is killed.
     """
     probe = subprocess.run(
         [sys.executable, "-c", "from tests.parse_stalls import main; main()"],
@@ -503,17 +353,9 @@ def test_a_child_that_stalls_after_its_first_byte_still_frees_the_worker_thread(
 def _workbook_of_shared_strings(references: int, wide: bool) -> bytes:
     r"""A legal `.xlsx` whose text is many times its expanded size, optionally one code point wide.
 
-    Written as raw OOXML rather than through `openpyxl` because the point is a property of the
-    format that `openpyxl` will not produce: a *shared string* is stored once in the archive and
-    referenced from as many cells as the sheet likes, so the text `_parse_xlsx` builds is the
-    length of the string times the number of references while the archive grows by ~30 bytes each.
-    Nothing here is crafted or dishonest — every `file_size` in the central directory is true,
-    which is what `_refuse_a_bomb` reads, and the workbook opens in Excel.
-
-    `wide` adds one more shared string holding a single astral code point, referenced from exactly
-    one cell. Every other character is ASCII. CPython stores a `str` at the width of its widest code
-    point, and `_parse_xlsx` ends in one document-wide `"\\n\\n".join(blocks)`, so that one cell
-    quadruples the whole document.
+    Raw OOXML, because a shared string stored once and referenced from many cells is what makes the
+    extracted text far exceed the archive; every central-directory `file_size` is true. `wide` adds
+    one astral code point, which makes CPython store the whole joined document four bytes per char.
 
     Args:
         references: How many cells point at the long shared string.
@@ -591,22 +433,12 @@ def _declared_expansion(raw: bytes) -> int:
 
 
 def test_a_legal_upload_cannot_spend_more_than_the_parse_budget_declares() -> None:
-    """Every ceiling on a document is a number in the archive; this is the one on the parse.
+    """A legal upload cannot spend more than the parse budget declares.
 
-    The workbook here is legal by every bound upstream of the parse — well under
-    `attachment_max_bytes` on the wire and under `document_max_expanded_bytes` expanded, with a
-    central directory that tells the truth about both. It still asks for two hundred million
-    characters, because a shared string is stored once and read from as many cells as the sheet
-    has. Driven in a 1Gi memory cgroup holding the front door's measured 523 MiB idle pair, two
-    concurrent parses of a workbook of this shape — 222,485 bytes on the wire, 5.9 MiB expanded,
-    96.3 M characters — took the parent process with `SIGKILL`, exit 137: a pod OOMKill, every
-    connected turn lost, from an upload nothing was entitled to refuse.
-
-    What refuses it now is `document_parse_memory_bytes`, enforced by the kernel on the child that
-    does the allocating, so nothing written in the archive can move it. Asserted as a refusal
-    rather than as a memory reading because a memory reading of a process this one does not
-    `waitpid` on is not available here: the parse child belongs to the forkserver, so
-    `RUSAGE_CHILDREN` never sees it. The pod-level number is in
+    This workbook passes every archive bound yet asks for ~200 M characters, enough to OOM-kill the
+    pod under concurrency. `document_parse_memory_bytes` is enforced by the kernel on the parsing
+    child. Asserted as a refusal because the forkserver child is not ours to `waitpid`, so
+    `RUSAGE_CHILDREN` never sees it; the pod-level budget is in
     `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`.
     """
     raw = _workbook_of_shared_strings(200_000, wide=False)
@@ -622,17 +454,10 @@ def test_a_legal_upload_cannot_spend_more_than_the_parse_budget_declares() -> No
 
 
 def test_one_wide_code_point_does_not_multiply_what_a_parse_may_spend() -> None:
-    r"""The same workbook, one astral character apart, and the budget is the same budget.
+    r"""One astral code point does not multiply what a parse may spend.
 
-    `_parse_xlsx` ends in one document-wide `"\\n\\n".join(blocks)`, and CPython stores a `str` at
-    the width of its widest code point — so a single emoji, superscript minus, `Å` or equilibrium
-    arrow in one cell quadruples the whole extracted document. Measured on a real memory cgroup, a
-    legal 1,089,493-byte upload at 63.4 MiB expanded charged the pod 236 MiB pure-ASCII and 500 MiB
-    with one astral character in it, against a chart constant of 3.1 MiB per expanded MiB that
-    predicted 197 for both.
-
-    Both halves are asserted, and the first is why this is not simply "wide documents are refused":
-    the ASCII twin must still parse, or the bound would have been bought by refusing everything.
+    `_parse_xlsx` joins the document into one `str`, stored at the width of its widest code point.
+    The ASCII twin must still parse, so the bound is not bought by refusing everything.
     """
     narrow = _workbook_of_shared_strings(30_000, wide=False)
     wide = _workbook_of_shared_strings(30_000, wide=True)
@@ -649,10 +474,8 @@ def test_one_wide_code_point_does_not_multiply_what_a_parse_may_spend() -> None:
 def _markup_heavy_docx(paragraphs: int, runs: int) -> bytes:
     """A legal Word report whose cost is its markup rather than its text.
 
-    Every word its own styled run, which is what Word itself produces after tracked changes, mixed
-    fonts, a spell-check language pass or a round-trip through another tool. `python-docx` builds an
-    lxml DOM out of that markup, so the cost is in the elements and not in the characters — which is
-    why no ceiling read out of the archive predicts it.
+    Every word its own styled run, as Word produces after tracked changes or mixed fonts. The lxml
+    DOM cost is in elements, which no archive ceiling predicts.
     """
     body = "".join(
         "<w:p><w:pPr><w:jc w:val='both'/></w:pPr>"
@@ -696,21 +519,11 @@ def _markup_heavy_docx(paragraphs: int, runs: int) -> bytes:
 
 
 def test_a_document_stopped_by_the_budget_says_so_even_when_a_c_parser_reported_it() -> None:
-    """The refusal a markup-heavy `.docx` earns, which used to say the document was malformed.
+    """A `.docx` stopped by the budget gets the memory refusal even when lxml reported it.
 
-    **lxml reports its own allocation failure rather than letting CPython raise**, so the
-    `except MemoryError` arm that names this ceiling never fired for the one format that most needs
-    it. Measured on the shipped path before this: a 485,186-byte Word report — 2,000 paragraphs of
-    200 styled runs, 2,979,999 characters of text, legal by every bound upstream — came back as
-    `could not read report.docx: unknown error (<string>, line 0)`. That is not a missing reason, it
-    is a wrong one: it tells a chemist their perfectly good report is broken at line 0, which is
-    worse than the generic wording `too_large_to_read` exists to replace.
-
-    `_at_ceiling` is what renames it, and both arms are asserted because either alone passes on the
-    wrong implementation. A document that is *really* unreadable must keep its own message, or the
-    fix is "call everything a memory problem" — driven, the two populations do not overlap: a
-    parse stopped by the budget fails with 0.1 MiB of its allowance left, and a truncated archive
-    fails with the whole 160 MiB unspent.
+    lxml reports its own allocation failure rather than raising `MemoryError`, so `_at_ceiling`
+    classifies it; otherwise a legal report would be called malformed at line 0. Both arms: a truly
+    unreadable document keeps its own message (it fails with its allowance nearly unspent).
     """
     raw = _markup_heavy_docx(2_000, 200)
     assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
@@ -737,16 +550,11 @@ def test_a_document_stopped_by_the_budget_says_so_even_when_a_c_parser_reported_
 
 
 def test_an_ambient_hard_limit_below_the_budget_is_a_smaller_budget_not_a_dead_parser() -> None:
-    """`setrlimit` cannot raise a maximum, and that used to make every document unreadable.
+    """An ambient hard `RLIMIT_DATA` below the budget becomes a smaller budget, not a dead parser.
 
-    A process tree carrying any hard `RLIMIT_DATA` below `VmData + document_parse_memory_bytes` — a
-    systemd `LimitDATA=`, a container security profile, an operator raising the knob above what the
-    platform allows — made `_bound_allocations` raise `ValueError: not allowed to raise maximum
-    limit`. In `_parse_into` that lands in the broad arm, so **every upload and every share document
-    of every format** came back as "could not be read", with the cause only in a log line.
-
-    Driven in a subprocess, because the limit has to be lowered before the call and a test process
-    that lowers its own hard limit cannot put it back.
+    `setrlimit` cannot raise a maximum, and the resulting `ValueError` would make every document of
+    every format unreadable. Driven in a subprocess because a process cannot restore its lowered
+    hard limit.
     """
     probe = textwrap.dedent(
         """
@@ -774,12 +582,7 @@ def test_an_ambient_hard_limit_below_the_budget_is_a_smaller_budget_not_a_dead_p
 
 
 def _markup_heavy_pptx(slides: int, runs: int) -> bytes:
-    """A legal deck whose cost is its markup, the `.pptx` twin of `_markup_heavy_docx`.
-
-    Every word its own styled run, which is what a deck becomes after a template change or a
-    round-trip through another tool. `python-pptx` builds the same lxml DOM `python-docx` does, so
-    the cost is in the elements rather than in the characters.
-    """
+    """A legal deck whose cost is its markup, the `.pptx` twin of `_markup_heavy_docx`."""
     from pptx import Presentation
     from pptx.util import Inches, Pt
 
@@ -800,19 +603,10 @@ def _markup_heavy_pptx(slides: int, runs: int) -> bytes:
 
 
 def test_a_deck_stopped_by_the_budget_earns_the_same_named_refusal_a_document_does() -> None:
-    """`.pptx` goes through the same lxml layer, and nothing had driven it.
+    """A `.pptx` stopped by the budget earns the same named refusal a `.docx` does.
 
-    `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` fixed the
-    `.docx` case — lxml reports its own allocation failure, so the arms that name this ceiling
-    never fired and a legal report was refused as malformed at line 0 — and left the deck path
-    unverified, with a `BACKLOG.md` row saying so rather than a guess.
-
-    Driven: a 1,552,596-byte deck of 600 slides x 600 styled runs holds 2,821,690 characters,
-    parses unbounded in 4.4 s, and is refused here in 0.5 s **with the memory refusal**, so
-    `_at_ceiling` already covered it. This is what keeps that true rather than incidental.
-
-    Both arms, as for `.docx`: a deck that is really unreadable must keep its own message, or every
-    refusal would pass the first assertion.
+    `python-pptx` uses the same lxml layer. Both arms: a truly unreadable deck keeps its own
+    message.
     """
     raw = _markup_heavy_pptx(600, 600)
     assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
@@ -836,19 +630,12 @@ def test_a_deck_stopped_by_the_budget_earns_the_same_named_refusal_a_document_do
 
 
 def test_a_refusal_is_not_bounded_by_the_ceiling_that_caused_it() -> None:
-    """The reply is released before it is sent, because a `MemoryError` in a handler reaches no arm.
+    """The reply is released from the ceiling before it is sent.
 
-    Python does not route an exception raised inside one `except` clause to a later one, so a
-    `MemoryError` while pickling the refusal onto the pipe escapes `_parse_into` entirely and the
-    caller gets an EOF it can only report as "stopped without answering" — the one failure in that
-    module whose cause is knowable, arriving nameless. The refusal is ~250 characters, so it is
-    unlikely rather than impossible, and "unlikely" is an argument rather than a measurement.
-
-    `_release_allocations` removes the question instead of estimating it: by the time a handler
-    runs the parse is over, the budget's job is done, and the reply gets the room the parse was
-    denied. Asserted on the mechanism — the ceiling is gone once the arm has run — because
-    provoking a real allocation failure inside a handler is not something a test can stage
-    honestly.
+    A `MemoryError` raised inside an `except` clause reaches no later arm, so failing to pickle the
+    refusal would arrive as a nameless EOF. `_release_allocations` lifts the ceiling once the parse
+    is over; asserted on that mechanism, since a real allocation failure in a handler cannot be
+    staged honestly.
     """
     probe = textwrap.dedent(
         """
@@ -884,9 +671,8 @@ def test_a_refusal_is_not_bounded_by_the_ceiling_that_caused_it() -> None:
 def _zip_with_truncated_markup() -> bytes:
     """A structurally valid `.docx` container whose `word/document.xml` stops mid-element.
 
-    This is the unclassified population in its cheapest honest form: the archive opens, its central
-    directory is sound, `_refuse_a_bomb` has nothing to say about it, and the failure happens inside
-    lxml for a reason no caller can name — what an interrupted network copy leaves on a share.
+    The archive opens and `_refuse_a_bomb` has nothing to say; lxml fails for a reason no caller can
+    name, as with an interrupted copy on a share.
     """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as container:
@@ -909,26 +695,13 @@ def _zip_that_declares_too_much() -> bytes:
 
 
 def test_an_unbounded_parse_does_not_blame_the_document_for_what_it_cannot_know() -> None:
-    """`parse_attachment` sets no ceiling, so it cannot report a verdict a ceiling establishes.
+    """An unbounded parse does not blame the document for what it cannot know.
 
-    `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` put
-    `_at_ceiling` in the isolate child, where the ceiling is *known*. The residual is the path that
-    never forks: `cli/backfill_corpus.py` and the format tests call `parse_attachment`, no
-    `RLIMIT_DATA` is set on that process, and a C parser that reports its own allocation failure —
-    lxml does exactly that — arrives as `unknown error (<string>, line 0)`. Indistinguishable from a
-    malformed file, and worded as an accusation against a document that may be perfectly legal.
-
-    The decision is `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`: this path stays
-    in-process, and its refusal states what it cannot establish rather than guessing. The parser's
-    own words are kept, because an operator debugging a share needs them.
-
-    **The input is a structurally valid zip with truncated markup, and it has to be.** The first
-    version of this test passed `b"not a zip at all"`, which never reaches the broad arm at all:
-    `_refuse_a_bomb` refuses it from the central directory, and that is a *classified* fact. So the
-    test asserted the new behaviour while exercising none of it — and, until a review measured it,
-    hid a defect in which the classified refusal grew the caveat. A truncated `word/document.xml` is
-    the population this is actually about: the file is a legal container, and a parse of it fails
-    somewhere inside a C library for a reason this system cannot name.
+    `parse_attachment` (used by `cli/backfill_corpus.py` and format tests) sets no ceiling, so an
+    unknown C-parser failure may be memory or malformation; its refusal says so and keeps the
+    parser's words for operators (`D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`). The
+    input must be a valid zip with truncated markup: a non-zip is refused by `_refuse_a_bomb`, a
+    classified fact that never reaches this arm.
     """
     with pytest.raises(UnclassifiedParseError) as refused:
         parse_attachment("report.docx", _zip_with_truncated_markup())
@@ -951,18 +724,10 @@ def test_an_unbounded_parse_does_not_blame_the_document_for_what_it_cannot_know(
 
 
 def test_a_classified_refusal_is_not_buried_under_a_caveat_about_memory() -> None:
-    """The caveat belongs to the unclassified population only, and burying the rest is the same bug.
+    """A classified refusal is not buried under a caveat about memory.
 
-    An unsupported format, a container that is not a zip and a scanned PDF are statements about the
-    document that hold whether or not a ceiling was set. Wrapping them in "we do not know whether
-    this machine had enough memory" would be the same what-do-I-actually-know failure pointed the
-    other way — a refusal that is *less* specific than the thing it knows.
-
-    **Every named population is driven, because naming three and checking one is how the fourth got
-    buried.** The first version of this test listed three and asserted only the unsupported-format
-    arm; the `BadZipFile` arm was meanwhile raising `UnclassifiedParseError`, so "File is not a zip
-    file" arrived followed by a paragraph about memory not being established — about the one thing
-    that was.
+    Unsupported format, not-a-zip and scanned PDF are facts about the document. Every named
+    population is driven, not one representative.
     """
     populations = {
         "unsupported format": (("notes.zzz", b"hello"), "not a supported format"),
@@ -984,19 +749,11 @@ def test_a_classified_refusal_is_not_buried_under_a_caveat_about_memory() -> Non
 
 
 def test_only_the_unknown_failures_carry_the_type_the_caveat_keys_on() -> None:
-    """`UnclassifiedParseError` marks the population, so no caller reads a message to guess.
+    """Only the unknown failures carry `UnclassifiedParseError`, the type the caveat keys on.
 
-    This is the half that keeps the decision from rotting: the distinction is in the *type*, and a
-    caller that sniffed "unknown error" out of a string would break on the next lxml release.
-
-    **The derivation is over `except` handlers, not over `raise` statements, and the difference is
-    the whole guard.** Counting `raise UnclassifiedParseError(...)` nodes and asserting a number is
-    what the first version did, and a review showed it passes unchanged when a *third* broad arm is
-    added that raises the base class — the exact regression the docstring claimed it prevented. So
-    this walks the module for every broad handler anywhere in it (bare `except`, `except Exception`,
-    `except BaseException`) and requires each one to raise this type, and requires that no *narrow*
-    handler does. A third broad arm is then covered or red, and a classified arm that reaches for
-    the unclassified type — which is how `zipfile.BadZipFile` got the memory caveat — is red too.
+    Callers branch on the type, never on message text. Derived over `except` handlers: every broad
+    handler (bare, `Exception`, `BaseException`) must raise this type and no narrow handler may, so
+    a new broad arm or a misclassified narrow one is red.
     """
     import ast
 

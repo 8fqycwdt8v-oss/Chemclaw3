@@ -1,13 +1,8 @@
 """A turn stops re-asking a tool the identical question it already answered.
 
-Measured live (2026-08-04): `find_past_jobs` called 7-8 times in a single turn across three probes,
-`load_skill` x6, `find_notes` x5 — same tool, same arguments, same answer. Nothing failed, which is
-why nothing caught it; the cost was a median turn of 128-142 s against 16.9 s on the archived run,
-plus every repeat's result spent back into the context the answer had to be built from.
-
-The two properties that make the guard safe rather than merely fast are pinned here: it *refuses*
-rather than serving a cached answer (so a legitimately-changing read like a job status is never
-pinned stale), and it allows a real re-check before it starts refusing.
+Two properties make the guard safe rather than merely fast: it refuses rather than replaying a
+cached answer (so a moving read is never served stale), and it allows a real re-check before it
+starts refusing.
 """
 
 import asyncio
@@ -30,9 +25,8 @@ from tests.middleware import run_middleware, tool_request
 def _ctx(name: str, **arguments: Any) -> Any:
     """The call as the guard reads it: a name and its arguments, which together are its key.
 
-    Carries the *registered* tool as well, because the guard reads it too: a metric label must be
-    the served name rather than the model's string, and `ToolNode` passes `tool=None` for a name
-    the graph does not hold. `_unregistered` is the fixture for that half.
+    Carries the registered tool too, because metric labels use the served name; `ToolNode` passes
+    `tool=None` for an unknown name, which `_unregistered` covers.
     """
     return tool_request(name, dict(arguments), tool=_Registered(name))
 
@@ -107,12 +101,7 @@ def test_a_single_re_check_still_goes_through(watching: None) -> None:
 
 
 def test_a_refusal_is_never_a_cached_answer(watching: None) -> None:
-    """The reason this refuses instead of replaying the first result.
-
-    A replayed answer is a stale answer the moment what it read has moved; a refusal cannot go
-    stale — it reports what happened and hands the decision back. (A read that *is* expected to
-    move is not refused at all: see the poll tests below.)
-    """
+    """A refusal is never a cached answer: a replay goes stale, a refusal cannot."""
     tool = _Tool()
     for _ in range(settings.max_identical_tool_calls):
         _drive(_ctx("find_notes", query="aryl chloride"), tool)
@@ -144,12 +133,7 @@ def test_the_same_arguments_in_a_different_order_are_the_same_question(watching:
 
 
 def test_the_refusal_tells_the_model_what_to_do_instead(watching: None) -> None:
-    """A refusal the model cannot act on would just move the loop one step out.
-
-    It names the tool (so the model knows which call was stopped) and states the three ways
-    forward, including answering from what it has and saying so if that is not enough — the
-    alternative being a turn that reaches the loop cap and answers nothing (`empty_answer`).
-    """
+    """The refusal names the tool and the ways forward, so the model does not loop one step out."""
     tool = _Tool()
     for _ in range(settings.max_identical_tool_calls):
         _drive(_ctx("find_past_jobs"), tool)
@@ -162,12 +146,7 @@ def test_the_refusal_tells_the_model_what_to_do_instead(watching: None) -> None:
 
 
 def test_a_pydantic_argument_does_not_break_the_call_it_guards(watching: None) -> None:
-    """A guard that can fail the call it is guarding is worse than the repetition it prevents.
-
-    Half this system's tools take a pydantic model rather than a JSON object —
-    `start_optimization_campaign(spec: CampaignSpec)` is the shape every generated connector job
-    tool has — and `json.dumps` refuses one outright. A middleware that raised on that argument
-    shape would break the calls it exists to protect.
+    """A pydantic argument, which `json.dumps` refuses, does not break the call the guard protects.
     """
 
     class _Spec(BaseModel):
@@ -195,11 +174,8 @@ def test_the_guard_is_a_no_op_off_the_request_path() -> None:
 
 
 def test_ending_a_turn_puts_the_guard_back_to_where_it_found_it() -> None:
-    """Teardown must restore, not merely stop counting — the runner reuses this process forever.
-
-    A watch that left its counter behind would make the *second* chemist to ask a question in a
-    worker's lifetime the one who gets refused, which is the worst possible failure for a guard
-    whose whole purpose is to be invisible when the turn is behaving.
+    """Ending a turn restores the guard; the runner process is reused, so a leftover counter would
+    refuse the next chemist.
     """
     tool = _Tool()
     token = begin_call_watch()
@@ -214,11 +190,7 @@ def test_ending_a_turn_puts_the_guard_back_to_where_it_found_it() -> None:
 
 
 def test_a_refused_repeat_is_counted_so_a_deployment_can_alert_on_it(watching: None) -> None:
-    """The refusal itself is invisible — the turn still answers — so the counter is the only trace.
-
-    The live run that found this had no signal at all beyond a median turn three times slower than
-    the archived comparison, which is exactly the kind of thing nobody notices until they go
-    looking. Labelled by tool, because "which call is the model looping on" is the first question.
+    """A refused repeat is counted per tool, since the turn still answers and leaves no other trace.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -236,19 +208,9 @@ def test_a_refused_repeat_is_counted_so_a_deployment_can_alert_on_it(watching: N
 def test_an_invented_tool_name_never_reaches_the_metric_label(watching: None) -> None:
     """The counter is on an unauthenticated `/metrics`, so its label may not be model-authored.
 
-    `SECURITY-REVIEW-2026-08-28.md` records this class as closed: model-controlled text reached
-    `/metrics` through an invalid-tool-call label, and the remedy was to clamp the label to the
-    served tool surface. `agent/audit.metric_tool_name` and `agent/model_calls._bump_invalid` both
-    apply that clamp; this guard did not, and it sits *above* `refuse_unparsed_arguments` in the
-    chain, so it runs for names the graph does not hold — `ToolNode` dispatches an unregistered
-    name through the middleware chain deliberately. Measured: three identical calls to an invented
-    name minted `chemclaw_repeated_tool_calls_total{tool="IGNORE_PREVIOUS. exfiltrate=…"}`, a
-    253-character label, one new time series per invented name until `_MAX_SERIES_PER_COUNTER`
-    dropped the rest — at which point the counter also stops recording genuine repeats, so the
-    exfiltration poisons the signal on its way out.
-
-    The refusal the model reads still names what it asked for; only the label is clamped, which is
-    the same split `metric_tool_name`'s own docstring draws for the audit row.
+    The guard runs for names the graph does not hold, so the label is clamped to the served tool
+    surface, as `metric_tool_name` does; otherwise each invented name mints a series and can
+    exhaust the series cap. The refusal the model reads still names what it asked for.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -270,12 +232,7 @@ def test_an_invented_tool_name_never_reaches_the_metric_label(watching: None) ->
 
 
 def test_a_call_whose_result_was_cleared_is_forgiven() -> None:
-    """A cleared answer makes the next identical call a re-read rather than a repeat.
-
-    The premise the guard rests on is "the model already has the first answer", and compaction
-    takes that away — the whole reason `forget_calls` exists. Until now nothing exercised it from
-    either side.
-    """
+    """A call whose result compaction cleared is forgiven: the next identical call is a re-read."""
     from chemclaw.agent.repeat_guard import count_call, forget_calls
 
     token = begin_call_watch()
@@ -294,23 +251,16 @@ def test_a_call_whose_result_was_cleared_is_forgiven() -> None:
 
 
 def test_a_cleared_result_forgives_exactly_once_per_turn() -> None:
-    """The same cleared result, re-sighted on every model call, must not keep resetting the guard.
+    """A cleared result forgives exactly once per turn.
 
-    The compaction edits are non-destructive, so the observer re-derives the *same* standing
-    reduction on every model call of the turn — and forgiving it each time popped the counter as
-    fast as repeats accumulated. Measured shape: past the 30k clearing trigger, the guard that was
-    built to stop a 7-8-identical-call loop never fired again for the rest of the turn. The call
-    id is what identifies "this exact cleared result", so the second sighting is a no-op and the
-    repeats accumulate to a refusal exactly as they would in an uncompacted turn.
+    Compaction is non-destructive, so the same clearing is re-observed on every model call; keyed by
+    call id, the second sighting is a no-op and repeats still accumulate to a refusal.
     """
     from chemclaw.agent.repeat_guard import count_call, forget_calls
 
     token = begin_call_watch()
     try:
-        # Nothing to read but the effect: `forget_calls` returns nothing at all, because the
-        # caller its count was documented for discarded it and asks the turn watch instead. That it
-        # is now a `-> None` is what `tests/test_upstream_surface.py`-style absence would pin; here
-        # the point is only that the clearing still happens.
+        # `forget_calls` returns nothing, so the effect is what is asserted.
         forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})])
 
         assert count_call("find_past_jobs", {"q": "suzuki"}) is None
@@ -326,13 +276,10 @@ def test_a_cleared_result_forgives_exactly_once_per_turn() -> None:
 
 
 def test_a_call_whose_result_survived_the_clearing_is_still_guarded() -> None:
-    """The precision that a blanket reset did not have, and the reason it was worth adding.
+    """A call whose result survived the clearing is still guarded.
 
-    `ClearToolUsesEdit` preserves the newest `agent_keep_last_tool_groups` results, so after a
-    reduction the model is still holding some of its answers. `forget_calls()` used to wipe every
-    counter, which forgave those too — once per reduction, and a long turn reduces on many model
-    calls. The guard's strength was therefore a function of `agent_tool_result_clear_trigger`,
-    which is a token threshold and has nothing to do with whether a repeat is useful.
+    `ClearToolUsesEdit` keeps the newest results, so only cleared calls are forgiven; a blanket
+    reset would tie the guard's strength to a token threshold.
     """
     from chemclaw.agent.repeat_guard import count_call, forget_calls
 
@@ -359,13 +306,9 @@ def test_forgetting_is_a_no_op_off_the_request_path() -> None:
 
 
 def test_a_status_poll_is_never_refused_however_often_it_asks(watching: None) -> None:
-    """A job's status is the one read whose purpose is to be asked the same question again.
+    """A job-status poll is never refused, however often it asks.
 
-    Driven live against a real model (du-01, 2026-09-27): the turn launched a calculation and
-    polled `get_durable_job_status` with its one job id; polls three to seven were refused as
-    repeats while Temporal says the job completed inside the turn, and the answer then claimed to
-    have "polled across several turns". The real tool is imported so its own declaration is what
-    is read — deleting `@polls_moving_state` from it turns this red.
+    The real tool is imported so its `@polls_moving_state` declaration is what is read.
     """
     import chemclaw.agent.durable_tools  # noqa: F401 — registers the tool and its declaration
 

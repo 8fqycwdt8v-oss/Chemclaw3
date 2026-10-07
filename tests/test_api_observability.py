@@ -1,15 +1,9 @@
 """What the front door records about a request, and what a turn records about itself.
 
-Every assertion here is about an *observation* rather than about an answer: the access log line,
-the RED metrics, the correlation id on the wire, the refusals that used to be silent, and the turn
-record `turn_costs.completed` collapsed into a boolean. The reason they are worth pinning is the
-same in every case — each of these was measured absent before it was written, so the failure mode
-is not "wrong value" but "nothing at all", which no test asserting on a response body can see.
-
-Driven through the real app (`tests.test_service._app`) rather than by calling the middleware
-directly, because the two defects this closes were both about *where* something sits in a stack: a
-route template is readable only once the router below has run, and a 500 carries the security
-headers only if the frame that answers it is inside the one that stamps them.
+Each assertion is about an observation (access log, RED metrics, correlation id, refusals, the
+turn record), where the failure mode is "nothing at all", which no body assertion sees. Driven
+through the real app (`tests.test_service._app`), because placement in the middleware stack is
+what decides the route template and the 500's headers.
 """
 
 import asyncio
@@ -74,17 +68,9 @@ async def _drain(turn: DetachableTurn, *, behind_every: int) -> int:
 def test_a_turn_that_fills_the_queue_still_ends_its_stream(count: int) -> None:
     """The reader terminates even when the queue was full at the moment `_DONE` was offered.
 
-    `_pump` blocks on `await put` once the queue fills, so its last blocking put returns with the
-    queue full again — and the `finally` one line later offers `_DONE` through `put_nowait`, which
-    `_attached_or_discard` drops. Before `_next_event` the reader then awaited a marker that did
-    not exist, with the pump task already finished and the queue drained: measured as a permanent
-    hang at 256 and 512 events (and at 257/513 with a differently-timed reader — the trigger is the
-    queue's state at the last put, not one arithmetic residue). Nothing sends on such a connection,
-    so the SSE send timeout never fires and the ping keeps succeeding; it holds a slot against
-    `--limit-concurrency` for the pod's lifetime.
-
-    Bounded by `asyncio.wait_for` rather than by the suite's global timeout, so a regression fails
-    as this assertion rather than as a run that never finishes.
+    `_pump`'s `finally` offers `_DONE` via `put_nowait`, which is dropped on a full queue, so the
+    reader must also end on the pump task's state. Otherwise the connection hangs forever, holding a
+    `--limit-concurrency` slot. Bounded by `asyncio.wait_for` so a regression fails here.
     """
 
     async def _run() -> int:
@@ -97,10 +83,7 @@ def test_a_turn_that_fills_the_queue_still_ends_its_stream(count: int) -> None:
 def test_the_pump_delivers_every_event_before_the_stream_ends() -> None:
     """Ending on the pump's *state* must not truncate: everything queued is drained first.
 
-    The fix races `queue.get()` against the pump task, so the failure mode it could have
-    introduced is the opposite of the one it closes — noticing the task finished and returning
-    while events are still queued. A reader that never yields to the loop until the pump is long
-    done is the sharpest form of that case.
+    A reader that never yields until the pump is long done is the sharpest form of that case.
     """
 
     async def _run() -> int:
@@ -124,9 +107,8 @@ def test_a_served_request_emits_one_access_record_with_the_route_template(
 ) -> None:
     """One `http.request` record per request, carrying the template and not the raw path.
 
-    The raw path is attacker-controlled: it is a metric-cardinality bomb and a redaction cost (a
-    115 KB request line stalled a pod for 21 s with the logging lock held). The template is bounded
-    by the route table, which is a source constant.
+    The raw path is attacker-controlled (cardinality and redaction cost); the template is bounded by
+    the route table.
     """
     with caplog.at_level(logging.INFO, logger="chemclaw.api.middleware"):
         caplog.clear()
@@ -185,19 +167,9 @@ def test_requests_and_duration_are_counted_by_route_and_status_class(client: Tes
 def test_the_route_status_series_stay_inside_the_registry_cap() -> None:
     """The label set is bounded by the route table, and the bound is *checked* rather than assumed.
 
-    Past `core/metrics._MAX_SERIES_PER_COUNTER` a new series is refused, counted on
-    `chemclaw_metric_series_dropped_total` and said once — loud, but the metric undercounts from
-    then on. `route` is the FastAPI template plus one fixed `<unmatched>`, so nothing a caller sends
-    can grow this; only a new route can.
-
-    **Measured, across 158 front-door tests: 35 series, and no route produced more than three
-    status classes** (`2xx`, `4xx`, `5xx` — no route in this app redirects, and 1xx never reaches
-    an ASGI `http.response.start`). Three per route is therefore the honest worst case, and the
-    arithmetic is asserted against the constant rather than written out in prose: this docstring
-    used to spell the cap and the margin as numbers, and both went stale in the same commit that
-    raised the cap — it still said the margin was one route when the constant had doubled. The
-    route that would make the counter start dropping series turns this red, and the fix is to raise
-    the cap in `core/metrics.py`, not to loosen this test.
+    Past `core/metrics._MAX_SERIES_PER_COUNTER` new series are dropped. `route` is the template or
+    `<unmatched>`, with at most three status classes per route, so the arithmetic is asserted
+    against the constant. If a new route turns this red, raise the cap in `core/metrics.py`.
     """
     from fastapi.routing import APIRoute
 
@@ -260,16 +232,10 @@ def test_a_validation_failure_is_logged_and_counted(
 def test_a_non_finite_number_is_a_422_rather_than_a_500(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """`NaN` is a literal `json.loads` accepts and `json.dumps` refuses — so the 422 raised.
+    """A non-finite number is a 422 rather than a 500.
 
-    Measured before `_json_safe`: a body carrying `NaN` in a float field was answered **500 "The
-    request could not be completed due to an internal error"**, because the offending value rode
-    into the response as pydantic's verbatim `input` and `JSONResponse.render` raised inside the
-    handler. The counter and the WARNING had already booked a 422 nobody was ever sent — an
-    observability record of a response that did not happen, which is worse than no record.
-
-    Asserted for `nan` and both infinities, because all three are `json.loads` literals and all
-    three are refused by `json.dumps`; only the first was found by hand.
+    `NaN` is a literal `json.loads` accepts and `json.dumps` refuses, so echoing it as pydantic's
+    `input` would raise inside the 422 handler. Asserted for `nan` and both infinities.
     """
     for literal, name in (("NaN", "nan"), ("Infinity", "inf"), ("-Infinity", "-inf")):
         before = METRICS.value("chemclaw_request_validation_failures_total")
@@ -288,11 +254,8 @@ def test_a_non_finite_number_is_a_422_rather_than_a_500(
 def test_the_sanitiser_names_what_it_stopped_at_rather_than_walking_to_the_stack_floor() -> None:
     """Driven directly, because through a route the clip bounds the depth before the walk starts.
 
-    That is the honest statement of what this floor is for: `input` past `_MAX_LOGGED_CHARS`
-    characters is already a string by the time `_json_safe` sees it, and a nested container costs
-    two characters a level — so nothing a caller posts reaches here through `input`. It floors the
-    keys the clip does not cover, and it is set *at* the clip rather than below it so that a
-    caller's legitimate 25-deep, 51-character list is still shown to them rather than replaced.
+    `input` past `_MAX_LOGGED_CHARS` is already a string, so this floor covers the keys the clip
+    does not; it is set at the clip so a legitimate deep, short list is still shown.
     """
     depth = _MAX_ERROR_DEPTH + 5
     nested: Any = 1.0
@@ -328,11 +291,10 @@ def _exploding_app() -> FastAPI:
 def test_an_unhandled_error_answers_json_with_the_correlation_id_and_the_headers(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Starlette's default 500 is served *above* every user middleware, so it had neither.
+    """An unhandled error answers JSON with the correlation id and the security headers.
 
-    Both halves matter: a chemist gets an id to quote, and the browser security headers are on the
-    one response that used to lack them. The exception detail stays server-side, in a record that
-    carries the same id.
+    Starlette's default 500 is served above every user middleware. The exception detail stays
+    server-side, in a record carrying the same id.
     """
     client = TestClient(_exploding_app(), raise_server_exceptions=False)
     with caplog.at_level(logging.ERROR, logger="chemclaw.api.middleware"):
@@ -390,13 +352,10 @@ def test_an_unknown_session_records_the_refusal_it_will_not_disclose(
 def test_a_missing_bearer_token_is_counted_apart_from_an_invalid_one(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The invalid-token path logged; the missing-header path did neither, which hid a whole class.
+    """A missing bearer token is counted apart from an invalid one.
 
-    "A client is misconfigured and sending no Authorization header at all" and "a healthy service
-    nobody is failing against" produced identical evidence, and only the first is something an
-    operator can fix. The reasons are a closed three-value set, so the counter is alertable as a
-    *rate* while the line stays at INFO — an unauthenticated probe of a public endpoint is ordinary
-    internet traffic.
+    A client sending no Authorization header is fixable and must be visible. The reasons are a
+    closed set, so the counter is alertable while the line stays at INFO.
     """
     monkeypatch.setattr(settings, "entra_required", True)
     before = METRICS.value("chemclaw_auth_failures_total")
@@ -421,11 +380,9 @@ def test_a_missing_bearer_token_is_counted_apart_from_an_invalid_one(
 def test_an_oversized_body_leaves_a_log_line_as_well_as_a_count(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """`BodySizeLimit` answers *above* the access log, so its 413 appeared in no line anywhere.
+    """`BodySizeLimit` answers above the access log, so it logs its 413 itself.
 
-    An operator watching `chemclaw_requests_too_large_total` rise had a rate and nothing to look
-    at. The line names the limit and deliberately not the path — a request line is
-    attacker-controlled, and the redaction filter is where that becomes a pod stall.
+    The line names the limit, never the attacker-controlled path.
     """
     monkeypatch.setattr(settings, "service_max_request_bytes", 512)
     before = METRICS.value("chemclaw_requests_too_large_total")
@@ -445,18 +402,9 @@ def test_the_413_carries_the_browser_security_headers_like_every_other_response(
 ) -> None:
     """A 413 is a client-facing response, so it carries what every other one carries.
 
-    `add_middleware` inserts at position 0, so installing observability → security headers → body
-    cap → CORS left the runtime stack outermost-first as CORS, `BodySizeLimit`, `_SecurityHeaders`,
-    `_RequestObservability`. `BodySizeLimit` answers its 413 *above* the header stamper and never
-    calls down, so a client-facing JSON error was served with no CSP, no `nosniff`, no
-    `X-Frame-Options` and no HSTS — while `_add_security_headers`' own docstring says it sets them
-    "on every response (including static files and errors)". The cap now sits *inside* the stamper
-    and outside the access log, which is where the argument for its position always put it.
-
-    **The correlation id is deliberately still absent**, and that is not the same defect: the 413
-    is refused before the body is read and is counted by `chemclaw_requests_too_large_total` and
-    logged where it is refused, which `_RequestObservability` argues for in as many words. Asserted
-    here so a later reading of "every response gets one" does not turn a decision into a bug.
+    `add_middleware` inserts at position 0, so the body cap must be installed to sit inside the
+    security-header stamper and outside the access log. The correlation id is deliberately absent:
+    the 413 is refused before the body is read and is counted and logged where it is refused.
     """
     monkeypatch.setattr(settings, "service_max_request_bytes", 512)
     client = TestClient(_app(_FakeAgent()))
@@ -481,13 +429,9 @@ def test_the_413_carries_the_browser_security_headers_like_every_other_response(
 def test_a_cors_preflight_is_answered_above_every_middleware_that_stamps_a_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`CORSMiddleware` is outermost, so an `OPTIONS` reaches neither stamper — measured, not read.
+    """`CORSMiddleware` is outermost, so an `OPTIONS` preflight reaches neither stamper.
 
-    `create_app`'s ordering comment claimed for a while that the preflight "now passes back through
-    the stamper on the way out", which is the opposite of what being outermost means: the preflight
-    is answered before anything below it runs. `_add_security_headers` states the true version and
-    argues it is harmless — nothing is rendered from a preflight — so what is pinned here is the
-    fact, in the one place a future reader can check it against a claim.
+    Pinned as fact: nothing is rendered from a preflight, so this is harmless.
     """
     monkeypatch.setattr(settings, "service_cors_origins", "https://ui.example.com")
     client = TestClient(_app(_FakeAgent()))
@@ -545,11 +489,9 @@ def test_every_outcome_is_reachable_and_none_is_invented() -> None:
     """
 
     async def _produced() -> set[str]:
-        # Still on a loop, though `timed_out` no longer reads the clock here: the flag is sampled
-        # in `run_turn`'s `except` clause at the instant the cancellation lands, because settling
-        # runs after the rollback and a Stop at `deadline − ε` behind a slow teardown used to
-        # cross the deadline while being torn down. `tests/test_api_review_turn_record.py` is where
-        # that instant is pinned; this asserts only that the enum is closed in both directions.
+        # `timed_out` is sampled in `run_turn`'s `except` clause when the cancellation lands, not
+        # here; `tests/test_api_review_turn_record.py` pins that instant. This asserts the enum is
+        # closed.
         return {
             _settle_outcome(_ledger(answered=True, answer_parts=["ok"])),
             _settle_outcome(_ledger(answer_parts=["partial"], loop_capped=True, answered=True)),
@@ -566,10 +508,8 @@ def test_every_outcome_is_reachable_and_none_is_invented() -> None:
 def test_the_turn_record_separates_a_tool_failure_from_a_governance_refusal() -> None:
     """A refused call is the control working; a failed call is a step that broke.
 
-    Folding them together reports a correctly-gated turn as a broken one — the exact mistake
-    `ToolFailedEvent.reason` was added to prevent, and the reason the ledger gets two columns
-    rather than one. The classification is not re-derived here: `reason` is set once, from the
-    exception *class*, by `agent/audit.refusal_reason`, and carried out on the signal.
+    Two ledger columns. `reason` is set once, from the exception class, by
+    `agent/audit.refusal_reason`, and carried on the signal.
     """
     ledger = _ledger()
     for event in (
@@ -589,16 +529,9 @@ def test_the_turn_record_separates_a_tool_failure_from_a_governance_refusal() ->
 def test_every_gate_the_audit_trail_classifies_can_be_said_on_the_wire() -> None:
     """`refusal_reason`'s table and `ToolFailedEvent.reason` are one vocabulary, not two.
 
-    This is the property that made the old shape wrong rather than merely narrow. `refusal_reason`
-    has named five gates since it was written; the wire said `plan_gate` and nothing else, so the
-    other four reached every surface as an ordinary fault — a dry run the chemist themselves asked
-    for, a role denial, a write a narrowed agent never had, and a repeat the guard stopped, each
-    rendered exactly like an unreachable pod.
-
-    Asserted in both directions and derived from the table rather than transcribed, so a sixth gate
-    fails here instead of silently reporting itself as a database outage. `RefusalReason` has one
-    definition (`core/turn_signals`) that both sides import, which is what makes this a check on
-    the *table* rather than on two copies of a list.
+    Every gate the audit trail classifies must be sayable on the wire, or it reaches every surface
+    as an ordinary fault. Derived from the table in both directions; `RefusalReason` has one
+    definition in `core/turn_signals`.
     """
     from typing import get_args
 
@@ -616,10 +549,8 @@ def test_every_gate_the_audit_trail_classifies_can_be_said_on_the_wire() -> None
 def test_a_refusal_is_classified_from_the_exception_not_from_its_wording() -> None:
     """The gate's verdict survives someone rewording the sentence a chemist reads.
 
-    The predecessor matched `signal.message` against the literal `"PlanNotApprovedError:"`, so the
-    classification depended on a *string* that `failure_detail` truncates to 300 characters and
-    that any editor may reword. Here the same refusal is classified with its message replaced by
-    text naming no class at all: what is read is the exception.
+    The refusal is classified with its message replaced by text naming no class: the exception is
+    what is read.
     """
     from chemclaw.agent.audit import refusal_reason
     from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal
@@ -635,9 +566,7 @@ def test_a_refusal_is_classified_from_the_exception_not_from_its_wording() -> No
 def test_time_to_first_token_is_the_first_token_not_the_last() -> None:
     """TTFT is the number a chemist experiences; `duration_seconds` is the whole turn.
 
-    A turn that spent 40 s on tools and then streamed instantly and one that stalled 40 s before
-    its first word were the same sample under the only measurement that existed. `None` — no token
-    at all — is kept as a distinct fact rather than collapsed to zero.
+    `None` (no token at all) is kept distinct from zero.
     """
     ledger = _ledger()
     assert ledger.ttft_seconds is None
@@ -662,12 +591,8 @@ def test_a_silent_turn_is_named_rather_than_billed_as_an_answer() -> None:
 def test_a_wall_clock_kill_is_told_apart_from_a_stop() -> None:
     """Both arrive as one `CancelledError`; only the caller's deadline separates them.
 
-    The caller cannot tell the turn afterwards — its own `except TimeoutError` runs after the cost
-    row is booked — so the deadline is passed in and compared against the same loop clock the
-    timeout schedules itself on. **Where that comparison is taken is the whole of it**: it is
-    sampled in the `except` clause beside `cancelled = True` and read here, because settling runs
-    after the rollback and a Stop delivered just short of the deadline crossed it while being torn
-    down. `tests/test_api_review_turn_record.py` pins the instant; this pins the pair.
+    The deadline is passed in and compared on the loop clock, sampled in the `except` clause beside
+    `cancelled = True`. `tests/test_api_review_turn_record.py` pins the instant; this pins the pair.
     """
 
     async def _run() -> tuple[str, str]:
@@ -686,9 +611,7 @@ def test_a_wall_clock_kill_is_told_apart_from_a_stop() -> None:
 def test_the_turn_runs_under_the_request_s_correlation_id(client: TestClient) -> None:
     """One event, one id — the header a chemist quotes must find the turn's rows.
 
-    `run_turn` minted its own unconditionally, so the id on the wire and the id keying
-    `turn_costs`/`audit_events`/`session_messages` were two different strings for one turn. The
-    pump task copies the request's context, so the ambient id inside the turn *is* the request's.
+    The pump task copies the request's context, so the turn's ambient id is the request's.
     """
     session_id = client.post("/sessions", json={}).json()["session_id"]
     with client.stream("POST", f"/sessions/{session_id}/messages", json={"message": "hi"}) as r:
@@ -739,19 +662,11 @@ def test_a_turn_writes_one_started_and_one_finished_record(
 
 
 def test_the_answer_phase_runs_inside_the_turn_span(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The turn span used to end before the turn did, and the verifier's judge was the casualty.
+    """The answer phase runs inside the turn span.
 
-    The span was pushed onto the `AsyncExitStack`, which closes when the model stream is exhausted
-    — so the loop-cap and empty-answer guards, the plan-approval read, `build_answer_event` (a
-    *second LLM call* under `verifier_enabled`), the transcript write, the audit flush and the
-    `yield` where a client disconnect lands all ran outside it. Measured against `HEAD` with an
-    in-memory exporter and a span opened where the judge runs: `same trace id: False`, `parent is
-    the turn: False` — an orphan root trace per turn, with the shipped chart's
-    `OTEL_LLM_SPANS=true`. After: one trace, the judge a child of `chemclaw.turn`.
-
-    Also the two attributes P14 named. `correlation.id` is the key `audit_events`, `turn_costs`
-    and `session_messages` are joined on and was the one attribute absent, so a trace and the rows
-    describing the same turn could be matched only by timestamp.
+    Guards, plan-approval read, `build_answer_event` (a second LLM call under `verifier_enabled`),
+    transcript write and audit flush must all be children of `chemclaw.turn`, not orphan traces. The
+    span also carries `correlation.id`, the key the turn's rows are joined on.
     """
     from opentelemetry import trace as otel_trace
     from opentelemetry.sdk.trace import TracerProvider
@@ -818,23 +733,11 @@ def _silent_turn(**fields: Any) -> str:
 
 
 def test_a_gate_refusal_is_not_reported_to_the_chemist_as_a_failure() -> None:
-    """A refusal is the control working, and the first version of this sentence called it a fault.
+    """A gate refusal is not reported to the chemist as a failure.
 
-    `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` exists to stop
-    exactly this, and `core/turn_cost.TurnCost.tool_refusals`' own comment says a refusal is "the
-    control working, which must not be read as a failure". The first version of this sentence added
-    the two together and printed the sum as "N tool call(s) failed", so a dry run the chemist
-    themselves switched on reported three failures — while `Chemclaw3_ui`'s trace header, built
-    from the same events, read `3 refusals`.
-
-    Both of those citations were wrong when this test was written, and both were checked before
-    being corrected: the comment is on `TurnCost`, not on `_TurnLedger` (which carries none), and
-    `TracePanel.troubleLabel` renders `` `${held} refusal${held === 1 ? '' : 's'}` `` and omits the
-    failure clause entirely when `problems === 0` — so `0 failures / 3 held` was a string nobody
-    could see, quoted from a file nobody had read.
-
-    The remedy differs too, and that is the point of separating them: a fault is something to read,
-    a refusal is something to approve.
+    Per `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` and
+    `core/turn_cost.TurnCost.tool_refusals`: a fault is something to read, a refusal something to
+    approve, so the message counts them separately (as `Chemclaw3_ui`'s trace header does).
     """
     message = _silent_turn(called=["find_notes"] * 3, tool_refusals=3)
     assert "3 refused by a gate" in message
@@ -863,10 +766,7 @@ def test_a_turn_where_nothing_failed_still_gets_the_narrower_question_advice() -
 def test_a_refused_call_is_not_reported_as_a_call_that_ran() -> None:
     """`called_tools` counts calls *announced*, so printing it as "ran" double-counts a refusal.
 
-    A dry run in which the chemist's three calls were all held read "3 tool call(s) ran, 3 refused
-    by a gate" — six intents where there were three, and three bodies said to have executed that a
-    gate stopped before the body. The total is the attempts; the failures and refusals are subsets
-    of it, and the wording now says so.
+    The total is attempts; failures and refusals are subsets of it, and the wording says so.
     """
     message = _silent_turn(called=["find_notes"] * 3, tool_refusals=3)
     assert "3 tool call(s) attempted, 3 refused by a gate" in message
@@ -874,12 +774,10 @@ def test_a_refused_call_is_not_reported_as_a_call_that_ran() -> None:
 
 
 def test_a_turn_that_wrote_nothing_is_counted_on_the_empty_answer_metric() -> None:
-    """The counter, behaviourally — it had only a name-presence check in the metric inventory.
+    """The empty-answer counter, behaviourally.
 
-    A name in `core/metrics.py` proves the series is declared, never that anything increments it,
-    and this repository has twice found a control whose only evidence was its own declaration. The
-    negative half is the one that would actually rot: a guard that fired on every turn would still
-    satisfy a "the counter moved" assertion.
+    A declared metric name proves nothing increments it. The negative half matters most: a guard
+    firing on every turn would satisfy "the counter moved".
     """
     from chemclaw.agent.session import TurnSession
     from chemclaw.api.runner import _empty_answer_event
@@ -900,12 +798,9 @@ def test_a_turn_that_wrote_nothing_is_counted_on_the_empty_answer_metric() -> No
 
 
 def test_an_answer_of_nothing_but_whitespace_is_still_an_empty_answer() -> None:
-    """`.strip()` is what makes that true, and nothing asserted it.
+    """An answer of nothing but whitespace is still an empty answer.
 
-    A model that streams a newline, or a lone space, produces `answer_text` that is truthy and
-    empty to a reader — the exact silent failure this guard exists for, arriving through the one
-    input that would slip past a bare truthiness test. `Chemclaw3_ui` renders it as an answer
-    bubble with nothing in it.
+    A lone newline is truthy but empty to a reader; `.strip()` catches it.
     """
     from chemclaw.agent.session import TurnSession
     from chemclaw.api.runner import _empty_answer_event
@@ -925,12 +820,7 @@ def test_an_answer_of_nothing_but_whitespace_is_still_an_empty_answer() -> None:
 
 
 def test_the_sentence_does_not_read_as_two_sentences_with_a_stray_bracket() -> None:
-    """The session id closes the sentence rather than trailing it after a full stop.
-
-    Cosmetic and user-facing: the first version ended the remedy with a period and then appended
-    `(session …)`, so every empty-answer message a chemist saw finished `… to start from. (session
-    abc).` — which reads as a fragment.
-    """
+    """The session id closes the sentence rather than trailing it after a full stop."""
     for message in (
         _silent_turn(called=["find_notes"], tool_failures=1),
         _silent_turn(called=["find_notes"]),

@@ -1,16 +1,10 @@
-"""Costing a mounted share before crawling it, and draining it — `cli/sync_share.py`.
+"""Costing a mounted share before crawling it, and draining it: `cli/sync_share.py`.
 
-The crawl/parse/chunk/embed loop underneath belongs to `tests/test_document_share.py` and is not
-re-tested here. What is tested is the command's own layer, which nothing else covers: resolving a
-share out of the *enabled* data sources and refusing everything else by name, the dry-run cost
-estimate, the drain loop that walks a share larger than one pass, the pass-size guard whose absence
-once swept a whole source, and the merged report `prune_share` is handed as its evidence.
-
-Real throughout. The share is a directory of real files, the source is attached the way an operator
-attaches one — a `datasource.yaml` folder plus the name in `CHEMCLAW_DATA_SOURCES` — and the index
-is `InMemoryDocumentIndex`, the reference implementation the sync tests run the same loop against.
-The command resolves the Postgres backend for itself, so that one call is redirected and nothing
-else is; every number asserted below is produced by the real crawl over the real tree.
+The crawl loop belongs to `tests/test_document_share.py`. Tested here is the command's layer:
+resolving a share from the enabled data sources, the dry-run estimate, the drain loop over a
+share larger than one pass, the pass-size guard, and the merged report handed to `prune_share`.
+The share is real files attached as an operator would, and the index is `InMemoryDocumentIndex`;
+only the backend lookup is redirected.
 """
 
 import asyncio
@@ -104,11 +98,9 @@ def _write_manifest(directory: Path, name: str, mount: Path) -> None:
 
 @pytest.fixture(autouse=True)
 def _fresh_discovery() -> Iterator[None]:
-    """Drop the discovery cache around every test here, as `tests/test_datasource_seam.py` does.
+    """Drop the discovery cache around every test here.
 
-    `discovered()` is `@cache`d for production, where the layout is fixed for the process's life.
-    These tests move `data_sources_dir`, and a cached entry would answer for the wrong directory —
-    silently, by returning a plausible set of sources.
+    `discovered()` is cached, and these tests move `data_sources_dir`.
     """
     registry.forget_discovered()
     yield
@@ -119,10 +111,8 @@ def _fresh_discovery() -> Iterator[None]:
 def share(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A real mounted share, attached and enabled. Returns the mount.
 
-    The shipped source directory stays on the discovery path behind the temporary one, so the
-    sources this repository ships — `sharedrive` among them — are *discovered* here while only
-    this one is *enabled*. That is the distinction the resolver has to make (D-018), and it cannot
-    be tested against a directory holding nothing else.
+    The shipped sources stay on the discovery path, so they are discovered but not enabled; that is
+    the distinction the resolver has to make.
     """
     mount = tmp_path / "mount"
     _build_share(mount)
@@ -137,12 +127,9 @@ def share(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def index(monkeypatch: pytest.MonkeyPatch) -> InMemoryDocumentIndex:
-    """Redirect the single production dependency the command resolves for itself.
+    """Redirect `default_document_index()` to the in-memory reference backend.
 
-    `_drain` calls `default_document_index()`, which is Postgres under the default config. The
-    in-memory index is the reference backend `tests/test_document_share.py` drives the identical
-    loop against, so what runs below is the real drain with its storage swapped — not a simulation
-    of one.
+    The drain below is the real one with its storage swapped.
     """
     backend = InMemoryDocumentIndex()
     monkeypatch.setattr(cli, "default_document_index", lambda: backend)
@@ -160,11 +147,10 @@ def test_the_share_is_found_through_the_enabled_data_sources(share: Path) -> Non
 
 
 def test_a_share_that_is_shipped_but_not_enabled_is_refused(share: Path) -> None:
-    """Discovery is not enablement, and `sharedrive` points at `/mnt/sharedrive`.
+    """A share that is shipped but not enabled is refused.
 
-    The shipped manifest is on the discovery path in every one of these tests, so resolving by
-    *discovered* name rather than by enabled name would have this command crawl a mount no
-    deployment asked for. The refusal names what is actually enabled instead.
+    Resolving by discovered name would crawl a mount no deployment asked for; the refusal names what
+    is enabled.
     """
     with pytest.raises(DocumentShareError) as refusal:
         cli._resolve("sharedrive")
@@ -213,12 +199,10 @@ def test_an_unresolvable_share_exits_two_and_prints_to_stderr(
 def test_a_dry_run_costs_the_share_without_reading_a_file_or_touching_the_index(
     share: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The command's reason to exist: know the bill before paying it.
+    """A dry run costs the share without reading a file or touching the index.
 
-    Two controls, because "reads nothing" is a claim about behaviour. `broken.pdf` is a candidate
-    whose bytes are not a PDF, so it is counted here and would raise on any path that opened it;
-    and `default_document_index` is replaced by a call that refuses, so a dry run that reached the
-    database — the thing this flag exists to avoid — fails instead of passing quietly.
+    `broken.pdf` is not a PDF and would raise if opened, and `default_document_index` is replaced by
+    a call that refuses.
     """
 
     def refuse() -> DocumentIndex:
@@ -255,11 +239,9 @@ def test_the_estimate_is_a_range_anchored_on_this_binding_s_chunk_size(share: Pa
 
 
 def test_a_walk_that_stopped_short_says_the_share_is_larger_than_the_pass(share: Path) -> None:
-    """The number an operator would otherwise read as the size of the share.
+    """A walk that stopped short says the share is larger than the pass.
 
-    The dry run walks at most `_DRY_RUN_LIMIT` entries, so on a big share `candidates:` is a floor
-    rather than a total, and the line saying so is the difference between an estimate and a wrong
-    answer.
+    The dry run walks at most `_DRY_RUN_LIMIT` entries, so `candidates:` is then a floor.
     """
     binding = load_binding(_binding(share))
     stopped = cli._estimate(binding, SyncReport(source=SOURCE, scanned=1, has_more=True))
@@ -275,11 +257,10 @@ def test_a_walk_that_stopped_short_says_the_share_is_larger_than_the_pass(share:
 def test_a_pass_of_zero_documents_is_refused_before_anything_runs(
     share: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The incident this guard is: `--limit 0` scanned nothing and swept the whole source.
+    """A pass of zero documents is refused before anything runs.
 
-    A pass that examines no file still reports `has_more`, and the sweep that follows a drain used
-    to read that as "the share is empty". `prune_share` refuses it now too, on the merged report;
-    this is the outer half, which stops the run from being started at all.
+    A pass examining no file still reports `has_more`, and a sweep after it would read the share as
+    empty. `prune_share` refuses too; this stops the run from starting.
     """
     with pytest.raises(SystemExit) as exit_code:
         cli.main([SOURCE, "--limit", "0"])
@@ -295,11 +276,9 @@ def test_a_pass_of_zero_documents_is_refused_before_anything_runs(
 def test_the_drain_walks_a_share_larger_than_one_pass_and_counts_each_entry_once(
     share: Path, index: InMemoryDocumentIndex, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Four candidates, one per pass: the loop must resume rather than restart.
+    """Four candidates, one per pass: the loop resumes rather than restarts.
 
-    A drain that dropped the cursor would re-examine the same head of the walk forever, and the
-    skip tallies are what make that visible — every counter here is the whole share's, counted
-    exactly once, which only holds if each pass started where the last one stopped.
+    Every counter covers the whole share exactly once only if each pass starts where the last ended.
     """
     code = cli.main([SOURCE, "--limit", "1"])
     report = json.loads(capsys.readouterr().out)
@@ -358,11 +337,10 @@ def test_a_deleted_file_is_swept_once_the_drain_has_seen_the_whole_share(
 def test_a_drain_whose_root_vanished_prunes_nothing(
     share: Path, index: InMemoryDocumentIndex, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An unreachable share and an empty one look identical from here.
+    """A drain whose root vanished prunes nothing.
 
-    The evidence `prune_share` refuses on is the drain's *merged* report, which is this command's
-    to assemble — the durable workflow caught a bad drain and the CLI did not, so the two now hand
-    over the same object rather than each deriving a boolean from it.
+    An unreachable share and an empty one look identical, so `prune_share` decides on the drain's
+    merged report, the same object the durable workflow hands over.
     """
     cli.main([SOURCE])
     capsys.readouterr()
@@ -383,14 +361,8 @@ def test_a_drain_that_cannot_advance_stops_instead_of_looping_forever(
 ) -> None:
     """A pass that returns the cursor it was given is a wedge, and the loop breaks on it.
 
-    **The one substituted dependency in this file, and it is substituted because a real crawl
-    cannot produce this.** `crawl_share` only sets its cursor on an entry it examined past `after`,
-    so a non-advancing pass is unreachable from any directory tree — which is exactly why the guard
-    would otherwise be unfalsifiable. The stub therefore fails the test after a handful of calls,
-    so removing the guard reports a failure instead of hanging until the suite's timeout.
-
-    What it must also do is refuse to sweep: the drain stopped early, so this run is not evidence
-    that anything is gone. The rows from the real drain above are what would be deleted.
+    A real crawl cannot produce this, so the crawl is stubbed and fails the test after a few calls
+    rather than hanging. The stopped drain must also refuse to sweep.
     """
     cli.main([SOURCE])
     passes = 0
@@ -426,12 +398,9 @@ def test_the_drain_refreshes_every_stale_vector_however_small_the_batch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """One run of the command leaves no chunk behind on a superseded model.
+    """One run of the command refreshes every stale vector, however small the batch.
 
-    The pass is bounded — it has to be, since it runs against the whole corpus — so the command
-    loops it until it reports no more. Pinned to a batch of one here, which is what makes a single
-    pass visibly insufficient: three chunks are stale and a drain that ran the pass once would
-    leave two of them comparable to nothing else in the index.
+    With a batch of one and three stale chunks, a single pass would visibly leave two behind.
     """
     cli.main([SOURCE])
     capsys.readouterr()
@@ -454,12 +423,9 @@ def test_the_drain_leaves_another_share_s_cutting_alone(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Syncing this share is a statement about this share's rows, and the index is shared.
+    """The drain leaves chunks cut under another share's boundaries alone.
 
-    A chunk cut under another share's boundaries is either that share's business or about to be
-    re-cut by its own crawl; refreshing it here is an embedding call paid for and then discarded.
-    So the drain scopes the pass to the cutting its own binding declares, and the foreign row below
-    is still on its old configuration afterwards.
+    The index is shared; the pass is scoped to the cutting this share's binding declares.
     """
     foreign_chunking = "9999:1"
     asyncio.run(

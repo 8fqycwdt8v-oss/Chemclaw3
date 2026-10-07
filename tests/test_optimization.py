@@ -1,9 +1,8 @@
-"""Tests for optimization-campaign grouping + note + job (plan Phase 5, episodic).
+"""Tests for optimization-campaign grouping, note and job.
 
-Proves same-transformation runs are grouped by DRFP similarity, that a singleton is not a
-campaign, that the note lays the runs out comparably with citations, and that the job PR-gates
-one note per campaign. Also covers the shared clustering helper. All in-memory (no store, no
-git).
+Same-transformation runs are grouped by DRFP similarity, a singleton is not a campaign, the note
+lays runs out comparably with citations, and the job records one note per campaign. Also covers
+the shared clustering helper. All in-memory.
 """
 
 import re
@@ -85,11 +84,10 @@ def test_note_lays_out_runs_with_citations() -> None:
 
 
 async def test_job_pr_gates_one_note_per_campaign() -> None:
-    """The optimization job proposes exactly one note per detected campaign.
+    """The optimization job records exactly one note per detected campaign.
 
-    Driven as the durable job drives it — `build_optimization_notes`, then one PR-gate proposal per
-    note — rather than through the whole-batch `synthesize_optimization_campaigns` wrapper, which
-    nothing in `src/` had called since F10-D2 and which is now gone.
+    Driven as the durable job drives it: `build_optimization_notes`, then one `record_note` per
+    note.
     """
     reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
     submitter = FakeWriter()
@@ -116,12 +114,7 @@ def test_clustering_drops_degenerate_reactions() -> None:
 
 
 def _cells(line: str) -> list[str]:
-    r"""Split a rendered row into cells the way a Markdown reader does.
-
-    On *unescaped* pipes only: `core.markdown.render_table` escapes a `|` inside a value, so a
-    reader sees `des-ethyl \| 99.9` as one cell. Splitting on every pipe would count an escaped one
-    as a column boundary, which is exactly the misreading the escaping exists to prevent.
-    """
+    r"""Split a rendered row into cells the way a Markdown reader does: on unescaped pipes only."""
     return [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip("|"))]
 
 
@@ -139,10 +132,8 @@ def _row(body: str, reaction_id: str) -> list[str]:
 def _cell(body: str, reaction_id: str, header: str) -> str:
     """One run's cell under a named column.
 
-    Addressed by header rather than by index, because which columns exist is now a property of what
-    the campaign recorded: since every column but `Run` and `Changed vs previous` goes through
-    `drop_empty_columns`, a fixture that records no time shifts every position after it. A
-    positional assertion in that world tests the column layout while claiming to test a value.
+    Addressed by header because every column but `Run` and `Changed vs previous` is dropped when
+    empty, so positions depend on what the campaign recorded.
     """
     headers = _headers(body)
     assert header in headers, f"{header!r} is not a column of this table: {headers}"
@@ -198,11 +189,9 @@ def test_the_table_compares_purity_and_the_impurity_profile() -> None:
 
 
 def test_a_campaign_that_recorded_no_quality_data_keeps_a_clean_table() -> None:
-    """Sparsity is handled by dropping the column, not by a row of dashes or of "None".
+    """A column no run filled is dropped, not shown as dashes or "None".
 
-    A column nobody filled costs width in every row and invites the reader to conclude the
-    impurity was measured and found absent. When no run in the campaign recorded any of the three,
-    the table is exactly the one it was before they existed.
+    An empty column would suggest the impurity was measured and found absent.
     """
     body = _note([_ester("run-1", 80, 85), _ester("run-2", 100, 92)])
     assert _headers(body) == ["Run", "Temp (°C)", "Yield (%)", "Changed vs previous"]
@@ -258,14 +247,10 @@ def test_several_unranked_impurities_name_no_major_one() -> None:
 
 
 def test_an_impurity_name_cannot_add_a_column_to_the_campaign_table() -> None:
-    """The campaign note reaches the shared renderer with ELN free text, exactly as the digest does.
+    """An impurity name cannot add a column to the campaign table.
 
-    An impurity name is whatever the source instrument or analyst typed, and it lands in a cell. A
-    `|` in it does not render badly — it renders as another column, silently shifting every value
-    after it under the wrong heading, which in this artifact means reading one run's impurity area
-    as another run's yield. The fix is in `core.markdown.render_table` rather than at either caller,
-    and this is the second caller proving it — the renderer moved out of `memory.comparison` when
-    nineteen other tables in this tree turned out to need the same rule.
+    It is ELN free text, and an unescaped `|` would shift every later value under the wrong heading.
+    `core.markdown.render_table` escapes it for every caller.
     """
     runs = [
         _ester("run-1", 80, 85).model_copy(
@@ -294,16 +279,10 @@ def test_an_impurity_name_cannot_add_a_column_to_the_campaign_table() -> None:
 
 
 def test_an_eln_procedure_cannot_forge_citations_into_the_campaign_note() -> None:
-    """The per-run block is ELN text, and the note it lands in is PR-gated and cited from.
+    """ELN procedure text cannot forge citations into the campaign note.
 
-    `hypothesis` and `procedure_text` come from an ELN entry — free text a technician typed, or a
-    warehouse column a binding mapped — and `_run_detail` interpolated both into a Markdown body
-    that becomes an `optimization-campaign` note. A `[[wikilink]]` in either therefore became a
-    real outgoing edge on that note, pointing wherever the source text said. That is the same
-    forgery `retrieval.harness.report_note` carried, in the same shape, one module over: the report
-    was fixed by placing content as a cell, and the campaign note needs the identical rule.
-
-    Whitespace was already collapsed here, so the multi-line half never applied; the link half did.
+    `hypothesis` and `procedure_text` are free text interpolated into a note body, where a
+    `[[wikilink]]` would become a real outgoing edge. They are placed as cell content.
     """
     runs = [_ester("rx-1", 60.0, 70.0), _ester("rx-2", 80.0, 85.0)]
     runs[0].hypothesis = "Test [[playbook-degassing]] on this step"
@@ -321,12 +300,10 @@ def test_an_eln_procedure_cannot_forge_citations_into_the_campaign_note() -> Non
 
 
 def test_a_partly_dated_campaign_keeps_its_date_column() -> None:
-    """The rule is emptiness, not datedness: one recorded value keeps the column for every row.
+    """One recorded date keeps the date column for every row.
 
-    The complement of the setpoint columns disappearing on a prose-only ELN. A campaign where *some*
-    runs carry a date is exactly the case a chemist must be able to read — the dated ones are a
-    trajectory and the undated ones are parked at the end — so the column stays and the caveat above
-    the table names the runs with no place in time.
+    The dated runs form a trajectory and undated ones are parked at the end, with the caveat above
+    the table naming them.
     """
     dated = _ester("run-1", 80, 85).model_copy(update={"performed_at": date(2026, 5, 4)})
     undated = _ester("run-2", 100, 92)

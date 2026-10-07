@@ -1,15 +1,10 @@
-"""The per-turn runner's answer-verification wiring (plan F10-B2), driven with a fake agent.
+"""The per-turn runner's answer-verification wiring, driven with a fake agent.
 
-Proves the runner stamps the verifier's confidence + unsupported claims on the final `AnswerEvent`
-when verification is on, emits today's plain answer when it is off, and never lets a verifier
-failure sink the turn. The verifier is faked in those tests (it has its own offline tests) so no
-model runs.
-
-It is *not* faked in the grounding tests further down, and that is deliberate: what they prove is
-which evidence the runner hands the verifier — the turn's own tool results rather than the graph
-on disk — which a fake verifier cannot show. Beside them sit the two other per-turn honesty
-checks the same assembly point owns: the ungrounded-parameter scan, and the durable subsystem's
-reachability probe that lets the model plan against the surface it will actually get.
+The runner stamps the verifier's confidence and unsupported claims on the final `AnswerEvent`
+when verification is on, emits a plain answer when off, and never lets a verifier failure sink
+the turn. The grounding tests use the real verifier, because they prove which evidence the
+runner hands it: the turn's own tool results, not the graph on disk. The ungrounded-parameter
+scan and the durable-subsystem probe are covered here too.
 """
 
 import asyncio
@@ -56,9 +51,7 @@ class _FakeAgent(ScriptedTurn):
 def _run_turn(message: str = "q") -> list[Any]:
     """One turn's events on whichever engine is configured, with no connectors.
 
-    `connectors=[]` is stated rather than defaulted for the reason every other driver in the suite
-    states it — six hosts that are not running — and, on the graph engine, because the runner hands
-    the list straight to the graph builder and the default is the other engine's representation.
+    `connectors=[]` is explicit because the runner hands the list straight to the graph builder.
     """
     agent = _FakeAgent()
 
@@ -163,9 +156,7 @@ class _JobLaunchingAgent(ScriptedTurn):
 def _events(agent: ScriptedTurn, session: TurnSession | None = None) -> list[Any]:
     """One turn's events for `agent`, on whichever engine is configured (see `_run_turn`).
 
-    `session` is injectable because a fake that plans has to write into the *same* session object
-    the runner reads its todo list from — building one here and another in the test would leave
-    the plan somewhere nothing looks.
+    `session` is injectable so a planning fake writes into the session the runner reads.
     """
     turn_session = session if session is not None else TurnSession(session_id="s-jobs")
 
@@ -217,10 +208,7 @@ def test_classic_agent_emits_no_plan(monkeypatch: pytest.MonkeyPatch) -> None:
 class _PlanClearingAgent(ScriptedTurn):
     """Plans, launches a job, and clears its todo list in the resume — the topic-change shape.
 
-    MAF's own todo instructions tell the model to clear the list when the chemist changes their
-    mind, so an emptied plan is ordinary behaviour rather than a corrupted state. What made it
-    interesting is *where* the emptying lands: after the mid-turn resume, at the runner's second
-    `PlanEvent` site.
+    An emptied plan is ordinary behaviour; it lands at the runner's second `PlanEvent` site.
     """
 
     def __init__(self, session: TurnSession) -> None:
@@ -240,11 +228,8 @@ class _PlanClearingAgent(ScriptedTurn):
 class _CappedLoopAgent(ScriptedTurn):
     """An agent whose loop still wanted another iteration when it stopped — a capped turn.
 
-    Calls `record_loop_cap`, which is what the loop cap calls when it fires, rather than
-    poking
-    the contextvar: what the runner then reads is what a genuinely capped loop leaves behind. That
-    the real cap calls it is pinned in `tests/test_langgraph_stream.py`; this is the front-door
-    half — the turn says so.
+    Calls `record_loop_cap`, as the real cap does (pinned in `tests/test_langgraph_stream.py`);
+    this is the front-door half.
     """
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:
@@ -253,12 +238,7 @@ class _CappedLoopAgent(ScriptedTurn):
 
 
 def test_a_capped_turn_reports_the_runaway_guard_before_its_partial_answer() -> None:
-    """The cap stops being silent: one `loop_cap_reached` error, and the answer still goes out.
-
-    Both halves matter. Without the event a capped turn is indistinguishable from a finished one —
-    the silence that forced `runaway_rate` onto a residue proxy and left production with nothing to
-    alert on. Without the answer the turn would lose the work the capped iterations did do.
-    """
+    """A capped turn emits one `loop_cap_reached` error, and its partial answer still goes out."""
     events = _events(_CappedLoopAgent())
     errors = [e for e in events if isinstance(e, ErrorEvent)]
     assert [e.code for e in errors] == ["loop_cap_reached"]
@@ -272,9 +252,8 @@ def test_a_capped_turn_reports_the_runaway_guard_before_its_partial_answer() -> 
 class _CappedSpendAgent(ScriptedTurn):
     """A turn whose spend guard fired, marked the way a real one marks it.
 
-    The same shape as `_CappedLoopAgent` above and for the same reason: the guard itself is proven
-    on a compiled graph in `tests/test_spend_cap.py`, and what is unproven until here is the
-    *front door* — that the runner reads the mark and turns it into something a chemist sees.
+    The guard is proven on a compiled graph in `tests/test_spend_cap.py`; this covers the runner
+    turning the mark into something a chemist sees.
     """
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:
@@ -283,21 +262,10 @@ class _CappedSpendAgent(ScriptedTurn):
 
 
 def test_a_turn_stopped_by_its_budget_says_so_before_its_partial_answer() -> None:
-    """The spend cap stops being silent at the front door — the half nothing covered.
+    """A turn stopped by its budget says so, with the token count, before its partial answer.
 
-    **This is the test whose absence let the whole runner half be deleted without a murmur.**
-    Neutering `_spend_cap_event` — the error event, the token count in its message,
-    `ledger.spend_capped`, the counter — left 229 tests green across every file that mentions
-    spend: `tests/test_spend_cap.py` never goes through `run_turn`, and
-    `tests/test_api_observability.py` calls `_settle_outcome` on a ledger it built by hand. So the
-    guard's own machinery was proven and its only user-visible consequence was asserted in prose.
-
-    The loop cap has had this test since it was written (`_CappedLoopAgent` above); the spend cap
-    inherited that module's whole design and not its coverage.
-
-    The number is asserted because it is the actionable half: "the turn stopped" and "the turn
-    stopped after 1,234,567 tokens against your 1,000,000 budget" are different messages, and only
-    the second lets a chemist tell a request that was too big from a ceiling that is too low.
+    `tests/test_spend_cap.py` never goes through `run_turn`, so this is the only test of the
+    user-visible half. The number lets a chemist tell a too-big request from a too-low ceiling.
     """
     events = _events(_CappedSpendAgent())
     errors = [e for e in events if isinstance(e, ErrorEvent)]
@@ -339,11 +307,8 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
     answer = _answer(_run_turn())
     assert answer.text == "Yield was 90% [[reaction-a]]."
     assert answer.confidence is None
-    # A check that was configured on and *crashed* must not read as one that ran and passed.
-    # It used to leave `review_required` False and `unsupported_claims` empty — byte-for-byte
-    # the event a clean verdict produces — so a verification outage was invisible to the
-    # surface and to the reviewer. The turn is still returned, which is what "never a sunk
-    # turn" meant and still means.
+    # A verifier that was on and crashed must not read as one that ran and passed; the turn is still
+    # returned.
     assert answer.review_required is True
     assert answer.unsupported_claims == ["verification did not run"]
 
@@ -351,31 +316,9 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
 def test_every_method_the_trace_offers_is_one_the_shipped_turn_calls() -> None:
     """No method of `ToolCallTrace` may have its only caller in this suite.
 
-    The absence this pins is a whole reassembler. `feed`, its `_names`/`_fragments` buffers and the
-    `flush` the runner drained after every stream were written for the previous engine's streamed
-    content shape; LangGraph hands a finished tool call over, so `api/graph_stream.py` called
-    `issued`/`returned` directly and nothing in `src/` had called `feed` since. Measured on a real
-    turn with a real tool call: **0** calls to `feed` and one `flush` returning `[]` — 130 lines
-    whose only caller was a helper in this suite, under a module docstring naming `feed` as the
-    place the one write happens.
-
-    Written as a rule rather than as `not hasattr(ToolCallTrace, "feed")` because the defect is the
-    *class* and not the name: a method a turn stops calling is announced by its own tests
-    continuing to pass. Whoever adds a provider that streams argument fragments adds the caller in
-    the same change.
-
-    **The `__mutmut_` filter is what lets `make mutants` start at all, and its absence stopped the
-    whole run.** `api/runner_trace.py` is in `[tool.mutmut].source_paths`, so inside `mutants/` this
-    class carries mutmut's scaffolding beside its real methods — `xǁToolCallTraceǁissued__mutmut_3`
-    and 44 more. Those names pass the `_` filter above, no module under `api/` calls them (nothing
-    could), and this test therefore failed in the *stats* phase that runs before a single mutant is
-    tested: `failed to collect stats. runner returned 1`, in 27 seconds. Driven on `origin/main`
-    with no other change, so the weekly backstop was covering **nothing** while reading as
-    configured.
-
-    They are not methods the class offers; they are a harness's rewriting of the ones it does, and
-    the subject here is the shipped surface. `D-2026-09-22-a-mutation-backstop-that-cannot-start`
-    carries the finding.
+    A rule rather than a named absence, because a method a turn stops calling is otherwise hidden by
+    its own tests still passing. Names containing `__mutmut_` are mutmut's scaffolding inside
+    `mutants/`, not shipped methods, and are filtered so `make mutants` can start.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     api = (src / "api").rglob("*.py")
@@ -397,12 +340,10 @@ def test_every_method_the_trace_offers_is_one_the_shipped_turn_calls() -> None:
 
 
 def test_a_result_event_carries_the_values_the_preview_cuts_off() -> None:
-    """The trace reads ids *and* figures off the whole result, and only the preview is truncated.
+    """The trace reads ids and figures off the whole result; only the preview is truncated.
 
-    Built from what `ich_impurity_limit` really returned rather than from a shaped string: the six
-    ICH PDEs sit past character 200 of that result, and a live judge with only the preview called
-    every one of them invented. `numbers` is what lets a scorer disagree with it. The payload is a
-    recording — see `tests/recorded_tool_results.py` for why that is now the honest form.
+    Built from a recorded `ich_impurity_limit` result whose PDEs sit past the preview cut (see
+    `tests/recorded_tool_results.py`).
     """
     from tests.recorded_tool_results import RECORDED_ICH_LIMITS
 
@@ -421,12 +362,7 @@ def test_a_result_event_carries_the_values_the_preview_cuts_off() -> None:
 def test_a_result_with_more_values_than_the_wire_allows_is_capped_and_says_so(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A bounded field that truncates silently reads as completeness — the defect, one field over.
-
-    The cap is an order of magnitude above the largest real result (49 values, a full
-    electronic-properties calculation), so this drives it deliberately. What matters is that the
-    drop is announced: a consumer told to trust the list would otherwise be trusting a short one.
-    """
+    """A result with more values than the wire allows is capped, and the drop is announced."""
     flood = ", ".join(str(n + 0.5) for n in range(settings.stream_max_result_numbers + 50))
     trace = runner_trace.ToolCallTrace()
     trace.issued("f1", "dump_table", "{}")
@@ -440,17 +376,9 @@ def test_a_result_with_more_values_than_the_wire_allows_is_capped_and_says_so(
 class _CitingAgent(ScriptedTurn):
     """Answers with a citation, optionally after a tool that returned it.
 
-    `tool_result` is the whole point: it is what makes the citation grounded *in this turn*, which
-    is a different question from whether the note exists.
-
-    **`graph_factory` is overridden rather than inherited**, and that is the escape hatch
-    `ScriptedTurn` is designed to leave open: the shared double replays *text*, and what this test
-    needs is a turn that really calls a tool and really gets a result back, because the grounding
-    gate reads `ToolCallTrace.outputs`. On the graph engine a tool result cannot be narrated into
-    existence — the tool node has to run — so this builds the graph directly, with one tool that
-    returns the scripted result. The tool is deliberately named for a note lookup and not
-    `find_notes`: the registry already advertises that name, and two tools sharing one name is a
-    graph that would not compile.
+    `tool_result` grounds the citation in this turn. `graph_factory` is overridden to compile a
+    graph with one real tool, because the grounding gate reads `ToolCallTrace.outputs`; the tool is
+    not named `find_notes`, which the registry already advertises.
     """
 
     def __init__(self, answer: str, *, tool_result: str | None = None) -> None:
@@ -458,12 +386,7 @@ class _CitingAgent(ScriptedTurn):
         self._tool_result = tool_result
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:
-        """The answer, and only the answer — the tool is each engine's own business.
-
-        A tool result cannot be narrated into existence — it is a tool node that ran, which is why
-        `graph_factory` below compiles one. Keeping the script to the prose is what lets the no-tool
-        case — a citation the turn never retrieved — share this class with the tool-calling one.
-        """
+        """The answer only; keeping the script to prose lets the no-tool case share this class."""
         yield self._answer
 
     def graph_factory(self, **build_kwargs: Any) -> Any:
@@ -492,11 +415,8 @@ class _CitingAgent(ScriptedTurn):
 def _offline_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verification on, judge unreachable — so the offline citation gate produces the verdict.
 
-    `build_answer_event` verifies only when `verifier_enabled`, and that same flag is what routes
-    `verify_answer` to the LLM judge, so the deterministic gate cannot be reached through the
-    runner without a judge that does not answer. Which is the realistic shape anyway: no model
-    endpoint is configured in a test process, and the documented behaviour is that an unreachable
-    judge degrades to the offline check rather than leaving the answer unscored.
+    `verifier_enabled` also routes to the LLM judge, and an unreachable judge degrades to the
+    offline check.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
@@ -524,14 +444,10 @@ def _verified_answer(agent: ScriptedTurn) -> AnswerEvent:
 def test_a_citation_the_turn_never_retrieved_is_unsupported_though_the_note_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The verifier scores against what the turn saw, never against what happens to be on disk.
+    """A citation the turn never retrieved is unsupported, though the note exists on disk.
 
-    `compound-thf` is a real note in this repo's graph and the turn calls no tool at all, so the
-    naive implementation — re-resolving the answer's citations from `knowledge_path` — gives the
-    *wrong* answer here: it certifies a citation the turn never obtained, at confidence 1.0 and
-    `review_required=False`. That is exactly the case the gate exists for, and re-retrieval made
-    it unfailable, because `known` meant "note ids that exist" rather than "note ids this turn
-    saw". `evals.live._score_citations` has scored it the correct way from the start.
+    The verifier scores against what the turn saw; re-resolving from `knowledge_path` would certify
+    it.
     """
     assert (settings.knowledge_path / "compound" / "compound-thf.md").exists(), (
         "the fixture depends on this note being real — a naive implementation must pass it"
@@ -561,13 +477,8 @@ def test_the_same_citation_is_supported_when_a_tool_in_the_turn_returned_it(
         )
     )
     assert answer.confidence == 1.0
-    # `_offline_verification` is "verification on, judge unreachable", so this verdict came
-    # from the citation gate standing in for the judge. It scores *resolvability* — do the
-    # wikilinks name chunks this turn retrieved — not the *faithfulness* the judge scores,
-    # and measured it is the more generous of the two: the same cited-but-contradicted
-    # answer scores 1.0/supported degraded against 0.0/unsupported judged. A substitute
-    # check cannot clear the gate on behalf of the check that did not run. What this test
-    # still proves is the thing it was written for: the citation resolved, confidence 1.0.
+    # The citation gate stood in for the judge; it checks resolvability, not faithfulness, so it
+    # cannot clear review on the judge's behalf. The citation still resolved at confidence 1.0.
     assert answer.verified_by == "citation-gate"
     assert answer.review_required is True
 
@@ -577,13 +488,7 @@ def test_a_tool_result_grounds_the_answer_past_the_uis_preview_budget(
 ) -> None:
     """Grounding reads the whole tool result; only the wire carries the 200-character preview.
 
-    A `gather_evidence` result is ~20,000 characters over ~40 chunks, so scoring against
-    `ToolResultEvent.preview` would call 39 of its 40 citations fabricated. The budget is right
-    for the UI trace and wrong for a grounding check, so the two read different things.
-
-    The cited note deliberately does *not* exist on disk, so the tool result is the only thing
-    that can ground it: an implementation that re-resolved from the graph, and one that read the
-    truncated preview, both call this answer fabricated.
+    The cited note does not exist on disk, so only the full tool result can ground it.
     """
     note_id = "reaction-only-this-turn-saw-it"
     assert not list(settings.knowledge_path.rglob(f"{note_id}.md")), "the note must not exist"
@@ -594,13 +499,8 @@ def test_a_tool_result_grounds_the_answer_past_the_uis_preview_budget(
         _CitingAgent(f"The solvent was screened [[{note_id}]].", tool_result=buried)
     )
     assert answer.confidence == 1.0
-    # `_offline_verification` is "verification on, judge unreachable", so this verdict came
-    # from the citation gate standing in for the judge. It scores *resolvability* — do the
-    # wikilinks name chunks this turn retrieved — not the *faithfulness* the judge scores,
-    # and measured it is the more generous of the two: the same cited-but-contradicted
-    # answer scores 1.0/supported degraded against 0.0/unsupported judged. A substitute
-    # check cannot clear the gate on behalf of the check that did not run. What this test
-    # still proves is the thing it was written for: the citation resolved, confidence 1.0.
+    # The citation gate stood in for the judge; it checks resolvability, not faithfulness, so it
+    # cannot clear review on the judge's behalf. The citation still resolved at confidence 1.0.
     assert answer.verified_by == "citation-gate"
     assert answer.review_required is True
 
@@ -611,12 +511,10 @@ _METHOD_ANSWER = "Use a Kinetex C18 column at 1.0 mL/min with detection at 254 n
 def test_an_ungrounded_method_parameter_marks_the_answer_for_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gate the live run asked for: a branded method no tool in the turn produced is flagged.
+    """An ungrounded branded method parameter marks the answer for review.
 
-    Verification stays off here, so `review_required` can only have come from the shape scan — the
-    two checks are independent knobs and either one may raise the flag. The matched text rides on
-    `unsupported_claims`, because "this answer wants a look" without saying at what is not
-    something a reviewer can act on.
+    Verification is off, so the mark can only come from the shape scan; the matched text rides on
+    `unsupported_claims`.
     """
     monkeypatch.setattr(settings, "verifier_enabled", False)
     monkeypatch.setattr(settings, "answer_shape_gate_enabled", True)
@@ -633,15 +531,7 @@ def test_an_ungrounded_method_parameter_marks_the_answer_for_review(
 def test_the_shape_gate_turned_off_marks_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deployment that turns the gate off gets no mark from it, on the same answer that trips it.
-
-    **This asserted that off was the shipped default, and the default is now on** — the gate is
-    paired with `answer_review_max_rounds`, so a mark leads to a revision and, failing that, to a
-    person, which is the trade `core/config/llm.py` argues. The heuristic's over-firing is
-    unchanged and still pinned in `tests/test_verifier.py`. What survives the flip is the half that
-    is about the code: the knob really does turn the scan off, asserted against the very answer the
-    arm above shows it marking, so "off" cannot quietly become "on with nothing to say".
-    """
+    """With the shape gate turned off, the same answer that trips it gets no mark."""
     monkeypatch.setattr(settings, "verifier_enabled", False)
     monkeypatch.setattr(settings, "answer_shape_gate_enabled", False)
     answer = _verified_answer(_CitingAgent(_METHOD_ANSWER))
@@ -685,12 +575,10 @@ def _turn_events(**overrides: Any) -> list[Any]:
 def test_a_durable_outage_is_announced_before_the_first_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The model must meet the outage in its context, not in a tool failure halfway through.
+    """A durable outage is announced before the first token, in the event connectors use.
 
-    Every long or expensive capability is a workflow, so an unreachable broker removes all of them
-    at once — and in the 190-probe live run 0 of 7 durable launchers ran while the model read the
-    failures as its own bad input and re-asked for parameters it already had. Announced first, in
-    the same event connectors use, because a surface does the same thing with either name.
+    An unreachable broker removes every durable capability at once; the model must know before it
+    plans.
     """
 
     async def _unreachable() -> Any:
@@ -719,11 +607,9 @@ def test_a_reachable_broker_announces_nothing(monkeypatch: pytest.MonkeyPatch) -
 def test_a_broker_that_answers_the_health_rpc_falsely_is_degraded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`connect` succeeding is not reachability: the client is cached for the process's life.
+    """A broker that fails the health RPC is degraded although `connect` succeeds.
 
-    Once one turn has connected, every later turn gets that cached handle back instantly — so a
-    broker that has since died would look reachable forever if the probe stopped at `connect`.
-    The health RPC is what actually goes to the wire each turn.
+    The client is cached for the process's life, so only the health RPC reaches the wire per turn.
     """
 
     async def _reachable() -> Any:
@@ -761,17 +647,9 @@ class _SilentAgent(ScriptedTurn):
 
 
 def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> None:
-    """The silent death, made loud.
+    """A turn that writes nothing says so with an `ErrorEvent` instead of answering emptily.
 
-    Measured on 2026-08-04 with the harness *off*: a turn made 29 tool calls over 197 s, never
-    reached the capability the question needed, and ended with an empty `AnswerEvent`. No error, no
-    tokens — nothing a user could read, retry or report. The existing guard covers only the harness
-    loop cap (`loop_cap_reached`), so this path had none at all, and `evals.live` scores exactly
-    this shape as `failed_loudly=False` because it is the worst outcome a turn can have: a user
-    cannot retry what never said it went wrong.
-
-    The assertion is on the `ErrorEvent`, not on the answer text: the system genuinely had nothing
-    to say, and inventing prose to fill the gap would be the other, worse failure.
+    Inventing prose to fill the gap would be worse.
     """
     events = _events(_SilentAgent())
 
@@ -780,11 +658,8 @@ def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> No
     assert errors[0].code == "empty_answer"
     assert errors[0].retryable is True, "a narrower question can succeed; this is not terminal"
 
-    # **And no answer beside it.** `events.py` names `loop_cap_reached` as the only error that
-    # shares its turn with an answer; this branch used to fall through to `build_answer_event("")`
-    # and yield an `AnswerEvent` whose text is empty — which the reference page renders as an empty
-    # assistant bubble, so the turn looked answered rather than failed. Under `verifier_enabled` it
-    # also spent a judge call grading `""`.
+    # And no `AnswerEvent` beside it: an empty answer renders as an answered turn, and only
+    # `loop_cap_reached` shares its turn with an answer.
     assert not [e for e in events if isinstance(e, AnswerEvent)], (
         "a turn that produced nothing also claimed an answer; the error and the empty bubble "
         "tell a chemist two different things about the same turn"
@@ -792,16 +667,9 @@ def test_a_turn_that_writes_nothing_says_so_instead_of_answering_emptily() -> No
 
 
 def test_the_transcript_stores_what_the_agent_did_not_only_what_it_said() -> None:
-    """The turn's tool exchanges reach `session_messages`, or the reload contract is empty forever.
+    """The turn's tool exchanges reach `session_messages`, so a reload shows what the agent did.
 
-    `api/schemas._transcript` projects `tool_calls` and each call's `result_ref` out of the stored
-    rows. Writing only the question and the answer therefore made both permanently empty — not
-    degraded, *empty* — so on reload everything the agent did was gone and a stored result whose
-    bytes were sitting in `tool_result_blobs` had no handle to fetch it by. The live SSE stream
-    showed all of it, which is exactly what made the loss easy to miss.
-
-    Asserted on the stored rows rather than on the route, because the route was never the defect:
-    it reads what is there correctly, and there was nothing there.
+    Asserted on the stored rows, since the transcript route reads them correctly.
     """
 
     class _Recorder:
@@ -848,13 +716,8 @@ def test_the_transcript_stores_what_the_agent_did_not_only_what_it_said() -> Non
 def _plan_gated(monkeypatch: pytest.MonkeyPatch, titles: list[str] | None, approved: bool) -> None:
     """Arrange a `plan_only` turn whose session proposes `titles` under a given decision state.
 
-    The plan and the decision are faked at the runner's own imports — the same seam the
-    verification tests above use — because what is under test is the emission rule, not the
-    checkpointer read or the approval store, which have their own tests.
-
-    The fake answers `session_plan`'s shape — whole steps, declaration included — because that is
-    what the identity is taken over
-    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`).
+    Faked at the runner's imports, since the emission rule is under test. The fake returns whole
+    steps, declarations included, because the plan identity is taken over them.
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
@@ -874,13 +737,7 @@ def _plan_gated(monkeypatch: pytest.MonkeyPatch, titles: list[str] | None, appro
 def test_a_gated_turn_holding_an_unapproved_plan_asks_for_the_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The event the reference surface's approval card mounts on, finally produced.
-
-    `ApprovalRequestEvent` documented the empty `approval_id` as the plan-approval shape and the
-    card renders on exactly it — but nothing emitted one, so under `plan_only` a chemist saw the
-    plan and the gate's refusal with no way to act on either. Before the answer, because the
-    answer is the turn's final event.
-    """
+    """A gated turn holding an unapproved plan emits `ApprovalRequestEvent` before the answer."""
     _plan_gated(monkeypatch, ["compute the pKa", "propose a note"], approved=False)
     events = _run_turn()
     prompts = [e for e in events if isinstance(e, ApprovalRequestEvent)]
@@ -925,19 +782,10 @@ def test_an_unreadable_plan_stays_silent_rather_than_failing_the_turn(
 def test_an_approval_that_authorizes_no_tool_is_still_an_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A read-only plan's approval must not re-ask forever — the `None`-vs-empty rule, as an effect.
+    """An approval that authorizes no tool is still an approval, so the card is not re-asked.
 
-    `approval_stands` is `await approved_scope(...) is not None`, and the comparison is the control:
-    `frozenset()` means *somebody approved a plan that declared no state-changing tool*, which is a
-    real and common decision, while `None` means nobody has decided. A truthiness test
-    (`bool(await approved_scope(...))`) collapses them, and the visible consequence is here rather
-    than in the gate — the card is re-emitted on every turn of a plan the chemist has already
-    approved, which is the one thing an approval prompt must never do.
-
-    **Deliberately *not* stubbing `approval_stands`**, which every other case in this block does.
-    That stub is why the rule was docstring-only: collapsing the comparison left the whole suite
-    green, because its one caller was patched away two functions up. This drives the real predicate
-    against the real store, so the assertion is about the chain rather than about the emission rule.
+    `frozenset()` means approved with no state-changing tool; `None` means undecided. The real
+    `approval_stands` and store are driven, since stubbing them hid a truthiness collapse.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     plan_approval_store.cache_clear()
@@ -987,36 +835,13 @@ class _CappedAndSilentAgent(ScriptedTurn):
     ("cap", "code"), [("spend", "spend_cap_reached"), ("loop", "loop_cap_reached")]
 )
 def test_a_capped_turn_that_wrote_nothing_says_so_once(cap: str, code: str) -> None:
-    """One event, one counter, and a message that does not promise an answer that is not there.
+    """A capped turn that wrote nothing emits one event, moves one counter, and promises nothing
+    below.
 
-    **Driven through `run_turn` at the shipped cap, because the defect is the *sequence* of two
-    events and neither helper has one.** Measured 2026-09-19 with
-    `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS=1` against the live mock gateway, and reproduced here:
-
-        error {"code":"spend_cap_reached","retryable":false,
-               "message":"… so the answer below is partial (session …)"}
-        error {"code":"empty_answer","retryable":true,
-               "message":"… Nothing was written, so there is nothing below to read …"}
-        chemclaw_turn_spend_caps_total 2.0
-        chemclaw_turn_empty_answers_total 2.0
-
-    Three things wrong in that, all asserted below:
-
-    - **two errors about one silence, with opposite `retryable` flags**, which a surface cannot
-      reconcile — `Chemclaw3_ui` branches on exactly that field;
-    - **`chemclaw_turn_empty_answers_total` moved**, firing `ChemclawTurnsAnsweringEmpty` at
-      `for: 0m`, whose own description and runbook entry both said "No error counter moves" and sent
-      the operator after "a model that emitted only tool calls" — naming neither the cap nor the
-      counter that identifies it;
-    - **the cap's message said "so the answer below is partial"** with nothing below it.
-
-    Parametrized over both caps rather than only the spend one: the two events are one sentence with
-    one number swapped, `events.py` names both as the errors that share a turn with an answer, and a
-    fix applied to one of them is the shape `tasks/lessons.md` calls a rule written twice.
-
-    The turn's own outcome is unchanged and is asserted in `tests/test_api_observability.py`; what
-    is asserted here is that `chemclaw_turns_finished_total` — the series
-    `ChemclawTurnsHittingACap` reads — is what carries it, rather than the emptiness counter.
+    Driven through `run_turn` because the defect is a sequence of two events: the cap error and an
+    `empty_answer` error with opposite `retryable` flags, the empty-answer counter moving, and a cap
+    message saying "the answer below is partial". Parametrized over both caps, which share one
+    sentence. The turn's outcome is carried by `chemclaw_turns_finished_total`.
     """
     empties = METRICS.value("chemclaw_turn_empty_answers_total")
     events = _events(_CappedAndSilentAgent(cap))
@@ -1043,13 +868,7 @@ def test_a_capped_turn_that_wrote_nothing_says_so_once(cap: str, code: str) -> N
 
 
 def test_a_capped_turn_that_did_write_still_calls_its_answer_partial() -> None:
-    """The other side of the same boundary — the wording is conditional, not replaced.
-
-    Without this, a fix that simply reworded both cap messages to "nothing below to read" would pass
-    the test above while telling every chemist whose capped turn *did* produce a partial answer that
-    there was nothing to read. `Chemclaw3_ui`'s `PARTIAL_ANSWER_CODES` renders that answer as
-    partial, so the sentence and the surface have to agree.
-    """
+    """A capped turn that did write still calls its answer partial; the wording is conditional."""
     events = _events(_CappedSpendAgent())
     errors = [event for event in events if isinstance(event, ErrorEvent)]
     assert [error.code for error in errors] == ["spend_cap_reached"]

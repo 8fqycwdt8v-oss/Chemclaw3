@@ -1,16 +1,8 @@
-"""`chemclaw explain` answers "why was this run?" from the join.
+"""`chemclaw explain` answers "why was this run?" by joining the transcript and the audit trail.
 
-The join is the two columns added by D-2026-07-31-the-audit-chain-is-versioned.
-
-The columns are the mechanism; this is the claim. A test that only asserted the columns exist would
-pass while the question stayed unanswerable, which is the failure mode this whole line of work is
-about — so these drive the renderer with the shapes a real trail contains: a turn whose transcript
-survived, a durable job that stated its reason, and a turn whose words were compacted away while
-its tool calls remained.
-
-`_render` is separated from the fetch precisely so this runs with no database, which matters
-because the Postgres-backed tests skip in an offline sandbox and a reconstruction tool that is only
-exercised in CI is one nobody has actually read the output of.
+Drives the renderer with the shapes a real trail contains: a turn whose transcript survived, a
+durable job that stated its reason, and a turn whose words were compacted away while its tool
+calls remained. `_render` is separated from the fetch so this runs with no database.
 """
 
 import pytest
@@ -55,13 +47,7 @@ def _report(
 
 
 def test_a_tool_call_is_printed_under_the_question_that_caused_it() -> None:
-    """The whole point: the words and the tool calls appear together, keyed by the turn.
-
-    Before D-2026-07-31-the-audit-chain-is-versioned
-    these lived in two tables with no key between them, so this report could not have
-    been written at all — the audit row knew its correlation id and nothing knew which conversation
-    that id belonged to.
-    """
+    """A tool call is printed under the question that caused it, keyed by the turn."""
     report = _report(
         order=["c-1"],
         turns={"c-1": [("user", "is 2-MeTHF a sane swap for THF here?")]},
@@ -88,14 +74,11 @@ def test_a_durable_job_prints_the_reason_its_launcher_had_to_state() -> None:
 
 
 def test_a_turn_whose_words_were_compacted_away_is_still_shown() -> None:
-    """The honest case, documenting a remaining limit.
+    """A turn whose words were compacted away is still shown.
 
-    The limit belongs to D-2026-07-31-the-audit-chain-is-versioned.
-
-    Retention prunes message rows by age, and a turn that ran its tools and then failed never
-    writes a transcript row at all — so the trail can outlive the conversation it points at.
-    Dropping such a turn would hide exactly the evidence an auditor needs; saying the transcript
-    is gone is the truthful rendering.
+    Retention prunes messages by age, and a turn that failed after its tools never writes a
+    transcript row, so the trail can outlive the conversation. Saying the transcript is gone is the
+    truthful rendering.
     """
     report = _report(order=[], calls={"c-3": [ToolCall("expand_note", "ok", "", 5.0, "u-1", "")]})
     assert "expand_note" in report
@@ -103,11 +86,9 @@ def test_a_turn_whose_words_were_compacted_away_is_still_shown() -> None:
 
 
 def test_an_empty_session_says_so_rather_than_printing_nothing() -> None:
-    """Silence reads as a broken tool; an explicit statement reads as an answer.
+    """An empty session says so rather than printing nothing.
 
-    The line names `turn_costs` too, because that table is now a fourth source of turns rather
-    than only an annotation on the other three — so "nothing recorded" has to mean nothing in
-    four places, not three.
+    The line names `turn_costs` too, since it is a fourth source of turns.
     """
     assert "no messages, tool calls, jobs or turn records" in _report(order=[])
 
@@ -125,24 +106,18 @@ def test_a_failed_tool_call_is_not_hidden() -> None:
 
 
 def test_pre_join_rows_are_labelled_rather_than_silently_grouped() -> None:
-    """Rows written before the migration carry an empty correlation id and must not look attributed.
+    """Rows written before the join columns existed are labelled rather than silently grouped.
 
-    Collapsing them into an unlabelled group would present unrelated turns as one conversation —
-    inventing a relationship the data does not support, which is the failure the migration
-    deliberately avoided by not backfilling.
+    Grouping unrelated turns would invent a relationship the data does not support.
     """
     report = _report(order=[""], turns={"": [("user", "an older turn")]})
     assert "unattributed" in report
 
 
 def test_both_stored_shapes_are_read_because_the_table_holds_both() -> None:
-    """The defect this pins: the CLI read the legacy shape only, so every current row was blank.
+    """Both stored message shapes are read, because the table holds both.
 
-    `session_messages` holds two serializations — the framework layer 1 was first built on wrote
-    one, LangChain writes the other, and M6's conversion pass is resumable — so an audit
-    reconstruction that knows one of them silently shows an empty conversation for exactly the
-    sessions still in use. Asserted from both sides, because reading only the *new* shape would be
-    the same bug pointed at the archive.
+    Reading only one shape silently shows an empty conversation for the sessions in the other.
     """
     assert _speaker(legacy_text("user", "hello")) == ("user", "hello")
     assert _speaker(message_to_dict(HumanMessage(content="hello")), LANGCHAIN_SHAPE) == (
@@ -167,17 +142,11 @@ def test_a_message_shape_this_tool_did_not_write_does_not_crash_it() -> None:
 
 
 def test_a_row_the_store_could_only_recover_is_not_attributed_to_a_speaker() -> None:
-    """A reconstruction must not print a guess as the record.
+    """A row the store could only recover is not attributed to a speaker.
 
-    `message_from_row` never raises — the read path is deliberately forgiving, because one
-    unreadable historical row must not cost a chemist the whole conversation — so what comes back
-    for a row it could not convert is prose under a speaker *guessed* from whichever label the row
-    happens to carry. For the transcript route that is the right answer. Here it is not: this
-    report is evidence, and a guessed speaker printed beside a real one is indistinguishable from
-    it. The store marks what it recovered; this asserts the marker is read.
-
-    The `except` below it stays for a payload that cannot even be rendered, which is why this is
-    asserted through `_speaker` rather than by reading the branch.
+    `message_from_row` never raises and recovers prose under a guessed speaker, which is right for
+    the transcript route but not for evidence. The store marks what it recovered and `_speaker`
+    reads the marker; the `except` remains for a payload that cannot be rendered at all.
     """
     recovered, _ = _speaker({"role": "assistant", "contents": ["not a content part"]})
     assert recovered == "unknown", "a recovered row was attributed to a speaker nobody established"
@@ -187,15 +156,10 @@ def test_a_row_the_store_could_only_recover_is_not_attributed_to_a_speaker() -> 
 
 
 def test_a_turn_with_both_a_tool_call_and_a_job_is_rendered_once() -> None:
-    """The routine post-retention case, rendered twice — one occurrence read as two.
+    """A turn with both a tool call and a job, and no transcript, is rendered once.
 
-    `shown` de-duplicated `(*calls, *jobs)` against the transcript's `order` and never against
-    itself, so a turn present in *both* key sequences and absent from the transcript appeared
-    twice: same header, same job line, same tool line. That is not a corner — `_render`'s own
-    docstring says the trail routinely outlives the words it points at, because `durable/retention`
-    prunes `session_messages` by age and an abandoned turn never writes a transcript row at all. A
-    reviewer asking "why was this run?" on a session older than the message-retention window was
-    shown one durable job and one tool call as two separate occurrences.
+    The routine post-retention case: de-duplication must cover the turn keys of calls and jobs
+    together, not only against the transcript's order.
     """
     correlation = "turn-1"
     report = _report(
@@ -208,17 +172,11 @@ def test_a_turn_with_both_a_tool_call_and_a_job_is_rendered_once() -> None:
 
 
 def test_an_unrenderable_row_shows_its_repr_instead_of_reading_as_an_absent_transcript() -> None:
-    """The `("unknown", <repr>)` fallback this function documents was unreachable in practice.
+    """An unrenderable row shows its repr instead of reading as an absent transcript.
 
-    `_speaker`'s docstring promises "an unreadable payload renders as its repr under an `unknown`
-    role rather than raising" — the promise that matters after the blank-transcript defect
-    `CLAUDE.md` records. But `message_from_row` catches internally and returns a *degraded* message
-    rather than raising, so the `except` arm is dead for a dict payload; a payload with no
-    recoverable prose came back as an empty message and `explain` dropped the row with `if text:`.
-    The turn then rendered "transcript: absent (compacted, pruned, or rolled back)" — a specific,
-    and wrong, explanation of a row that is on disk and merely unreadable.
-
-    The column is bare `jsonb`, so a shape neither reader recognises is exactly what this is for.
+    `message_from_row` returns a degraded message rather than raising, so an empty one must still be
+    rendered under `unknown` rather than dropped and explained as compacted or pruned. The column is
+    bare `jsonb`, so unrecognised shapes are expected.
     """
     role, text = _speaker({"nope": 1}, None)
     assert role == "unknown"
@@ -232,16 +190,10 @@ def test_an_unrenderable_row_shows_its_repr_instead_of_reading_as_an_absent_tran
 
 
 def test_a_helpers_call_is_marked_as_the_helpers_and_the_chemists_own_is_not() -> None:
-    """A helper's row says which graph made it; the caller's rows read exactly as before.
+    """A helper's call is marked as the helper's; the chemist's own read as before.
 
-    `audit_events.agent` had no producer until
-    `D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail`, so this report showed a helper's
-    tool calls — made on a model-authored brief the chemist never saw — as the chemist's own acts,
-    indistinguishable from the ones they asked for. The column having a value is not enough on its
-    own: an attribution the one operator tool cannot show is the same gap one layer down.
-
-    The empty case is asserted beside it, because "empty means the agent you were talking to" is a
-    convention the renderer has to keep silent about or every line grows a clause that says nothing.
+    A helper acts on a brief the chemist never saw, so its calls must not read as the chemist's.
+    Empty `agent` means the agent the chemist talked to and adds nothing to the line.
     """
     report = _report(
         order=["c-1"],
@@ -259,13 +211,9 @@ def test_a_helpers_call_is_marked_as_the_helpers_and_the_chemists_own_is_not() -
 def test_an_empty_report_says_why_it_is_empty_rather_than_only_that_it_is(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The three reasons a reconstruction is empty, and only one of them is "nothing happened".
+    """An empty report says why it is empty.
 
-    `explain <a session that just ran a tool>` and `explain <an id that never existed>` printed the
-    identical line. That is the *symptom* of the trail being log-only on the shipped
-    configuration — under `session_store="memory"` the two really are the same state — but the
-    report said nothing about which state it was in, so the reader could not tell a typo from a
-    deployment that records nothing from a session that was pruned.
+    A typo'd id, a deployment that records nothing, and a pruned session must be distinguishable.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     assert "CHEMCLAW_SESSION_STORE=memory" in _report(order=[])
@@ -289,16 +237,9 @@ def test_a_session_with_rows_is_not_given_an_explanation_it_does_not_need() -> N
 
 
 def test_a_capped_turn_stops_reading_as_a_clean_one() -> None:
-    """The reconstruction of a capped turn was byte-identical to a complete one.
+    """A capped turn does not read as a clean one.
 
-    Measured on a live database with two sessions differing only in the assistant's own sentence:
-
-        CLEAN       turn_costs: ('cc9738df…', 'answered',    True, None, False)
-        LOOP-CAPPED turn_costs: ('7b62ed3a…', 'loop_capped', True, None, False)
-
-    The fact was durable on exactly the key this report groups by, and `explain` ran four SELECTs
-    of which none was this one — while the front door's own wire had already told a live client
-    `event: error … "code":"loop_cap_reached"`.
+    The outcome is stored in `turn_costs` on the key this report groups by, so the report reads it.
     """
     clean = _report(
         order=["c-1"],
@@ -319,12 +260,10 @@ def test_a_capped_turn_stops_reading_as_a_clean_one() -> None:
 
 
 def test_the_endings_line_names_every_stored_qualifier_it_has() -> None:
-    """The four columns beyond `outcome` that say something about the answer, not its price.
+    """The endings line names every stored qualifier it has.
 
-    `compacted` and `context_unreducible` (migration 069), `answer_confidence` and
-    `review_required` (082-083), plus `completed` and `error_code` (060). Asserted together
-    because rendering only `outcome` would satisfy the test above and still hide, for instance,
-    that the answer was produced from a thread the policy could not fit in the window.
+    `compacted`, `context_unreducible`, `answer_confidence`, `review_required`, `completed` and
+    `error_code` beside `outcome`, so e.g. an answer from an unfittable thread is visible.
     """
     line = TurnEnd(
         outcome="errored",
@@ -348,12 +287,10 @@ def test_the_endings_line_names_every_stored_qualifier_it_has() -> None:
 
 
 def test_a_cancelled_turn_is_a_turn_rather_than_three_guesses() -> None:
-    """A turn that wrote only a cost row fell through to `_why_nothing`.
+    """A cancelled turn is shown as a turn rather than three guesses.
 
-    On a cancelled turn the report printed "retention has pruned it, its turns were abandoned…, or
-    it never took a turn" while `turn_costs` held `abandoned` on exactly the key this function
-    groups by. A stored fact must not be rendered as a guess, so the ledger is a *fourth source of
-    turns* here and not merely an annotation on the other three.
+    A turn that wrote only a cost row is recorded in `turn_costs`, so the ledger is a fourth source
+    of turns and a stored fact is not rendered as a guess.
     """
     report = _report(known=True, ends={"c-9": TurnEnd(outcome="abandoned", completed=False)})
 
@@ -364,12 +301,10 @@ def test_a_cancelled_turn_is_a_turn_rather_than_three_guesses() -> None:
 
 
 def test_a_tool_result_does_not_render_as_something_somebody_said() -> None:
-    """One call was rendered twice, and the first rendering read as speech.
+    """A tool result does not render as something somebody said.
 
-    A `ToolMessage` is a row in `session_messages` like any other, so `message_role` called it
-    `tool` and it printed `tool: {'flags': [...]}` directly above the audit trail's own
-    `tool screen_hazards [ok, 42 ms, …]` for the same call. The body is still printed — the audit
-    row records that a call happened and never what it returned — but as a result, not a speaker.
+    The body is printed, since the audit row never records what a call returned, but as a result
+    beside the call, not as a speaker.
     """
     report = _report(
         order=["c-1"],
@@ -386,16 +321,11 @@ def test_a_tool_result_does_not_render_as_something_somebody_said() -> None:
 
 
 def test_a_database_that_answers_and_refuses_is_told_apart_from_one_that_does_not() -> None:
-    """The predicate behind `main`'s promise, which held for `ConnectionError` and nothing else.
+    """A database that answers and refuses is told apart from one that does not answer.
 
-    Measured before the fix:
-
-        === unmigrated / wrong schema ===  EXIT=1, 29 stderr lines, psycopg.errors.UndefinedTable
-        === database unreachable       ===  EXIT=1, 4 lines, "cannot read the audit trail: …"
-
-    `core/db` maps only `psycopg.OperationalError` onto `ConnectionError`, and a schema mismatch is
-    a `ProgrammingError`. Duck-typed on the driver's own `sqlstate`/`diag` pair because
-    `chemclaw.cli` may not import `psycopg` (`tests/test_third_party_layering.py`).
+    A schema mismatch is a `ProgrammingError`, not a `ConnectionError`. Duck-typed on the driver's
+    `sqlstate`/`diag` pair because `chemclaw.cli` may not import `psycopg`
+    (`tests/test_third_party_layering.py`).
     """
     import psycopg
 
@@ -409,17 +339,10 @@ def test_a_database_that_answers_and_refuses_is_told_apart_from_one_that_does_no
 
 
 def test_an_errored_turn_says_why_its_transcript_is_absent_rather_than_guessing() -> None:
-    """Three named causes, all wrong, printed one line above the ledger that held the right one.
+    """An errored turn says why its transcript is absent rather than guessing.
 
-    A turn that errors or is abandoned before its transcript row is written is by far the
-    commonest way to reach the absent branch — and it rendered `transcript: absent (compacted,
-    pruned, or rolled back)` directly above its own `ended: errored`. An operator following the
-    display investigates compaction, retention and a rollback, and finds all three healthy.
-
-    `endings` is already in scope on exactly the key this loop iterates, so the fact is one lookup
-    away. The same string was corrected once before for the *unreadable-row* case (this module's
-    docstring records it); the absent-row case kept the wrong leads. A stored fact must not be
-    rendered as a guess, which is the rule the `endings` source exists for.
+    `endings` already holds the outcome on the same key, so an errored or abandoned turn says so
+    instead of pointing at compaction, retention or a rollback.
     """
     errored = _report(order=["c-1"], turns={}, ends={"c-1": TurnEnd(outcome="errored")})
 

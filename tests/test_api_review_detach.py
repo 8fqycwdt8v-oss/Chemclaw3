@@ -1,10 +1,8 @@
-"""The detachable turn's three quiet defects: a dead control, and a swallowed cancellation.
+"""The detachable turn: pump failures are retrieved and logged, and `stop` propagates its own
+cancel.
 
-`api/detach.py` is where a client's connection stops being the turn's lifeline, so everything in it
-runs on a path nobody is watching by construction. That is exactly the condition under which a
-control can stop working without anybody noticing, and one had: `_note_pump_failure` was documented
-as the thing that keeps a raised pump from being reported by asyncio at garbage-collection time
-"under no session and no correlation id", and it had never once been called.
+`api/detach.py` runs on a path nobody watches once a client detaches, so a control there can stop
+working unnoticed; these tests drive `_note_pump_failure` and `stop` directly.
 """
 
 import asyncio
@@ -56,17 +54,11 @@ async def _slow_then_raise() -> AsyncIterator[dict[str, str]]:
 def test_a_pump_that_raises_is_logged_and_its_exception_retrieved(
     caplog: pytest.LogCaptureFixture, events_before_the_raise: int
 ) -> None:
-    """Measured across eight raise scenarios before this: **0 log records, 0 calls**.
+    """A pump that raises is logged and its exception retrieved.
 
-    And in all eight `task._log_traceback` was still `True` — asyncio's own flag for "I will print
-    `Task exception was never retrieved` when this is collected", which is the outcome
-    `_note_pump_failure`'s docstring says it prevents. The cause was placement: it was called on
-    one branch of `_next_event`, and a raising pump cannot reach that branch, because `_pump`'s
-    `finally` offers `_DONE` first and the parked reader wakes with the marker one line earlier.
-
-    `_log_traceback` is a private attribute and is asserted deliberately: it is the only thing that
-    distinguishes "retrieved" from "logged by us and *also* shouted about at GC", and the shout is
-    the half a reader of the log never sees.
+    The retrieval must not live on a reader branch: `_pump`'s `finally` offers `_DONE` first, so a
+    reader never reaches it. `task._log_traceback` is private but asserted, because it is the only
+    thing that distinguishes "retrieved" from "also printed at GC".
     """
 
     async def _run() -> "asyncio.Task[None]":
@@ -112,11 +104,9 @@ def test_a_clean_pump_and_a_stopped_one_say_nothing(caplog: pytest.LogCaptureFix
 
 
 def test_a_detached_turn_that_raises_is_still_retrieved() -> None:
-    """The case that rules out both reader-side placements the review offered.
+    """A detached turn that raises is still retrieved.
 
-    A detached turn has no reader: `events()` has already returned and `_next_event` will never be
-    called again. If the retrieval lived on either, this failure would be reported by nobody —
-    the same hole one level along.
+    It has no reader, so retrieval on any reader-side path would report nothing.
     """
 
     async def _run() -> "asyncio.Task[None]":
@@ -147,9 +137,8 @@ def test_a_detached_turn_that_raises_is_still_retrieved() -> None:
 async def _swallows_cancel() -> AsyncIterator[dict[str, str]]:
     """A source that absorbs the stop and lets the pump end *normally*.
 
-    That is what makes the two cancellations distinguishable in fact rather than only in the code:
-    the pump task finishes with a result, so `self._task.cancelled()` is `False` and a
-    `CancelledError` arriving at `await self._task` can only be the caller's own.
+    The pump then finishes with a result, so a `CancelledError` at `await self._task` can only be
+    the caller's own.
     """
     try:
         await asyncio.sleep(3600)
@@ -159,19 +148,12 @@ async def _swallows_cancel() -> AsyncIterator[dict[str, str]]:
 
 
 def test_stop_re_raises_a_cancellation_addressed_to_its_own_caller() -> None:
-    """`except CancelledError: pass` cannot tell the awaited task's cancel from its own.
+    """`stop` re-raises a cancellation addressed to its own caller.
 
-    The stop route's handler is an ordinary task: a client that gives up on the stop request, or a
-    pod draining, cancels *it* while it waits on the turn. Swallowing that returns a 200 to nobody
-    and leaves a task that was asked to stop running as though it had not been — asyncio's rule is
-    that a cancellation addressed to a frame propagates out of it.
-
-    **The ordering here is the test, so it is spelled out.** A done callback registered *before*
-    `stop()` awaits runs before the awaiting task's own `__wakeup`, so the cancel lands while the
-    stopper is still suspended on an already-finished task. `Task.cancel()` then returns `False`
-    (the pump is done), the stopper is marked `_must_cancel`, and the `CancelledError` is delivered
-    at `await self._task` — from the caller, on a turn that was never cancelled. Timing this with
-    sleeps instead would be a race dressed as a test.
+    A client abandoning the stop request, or a draining pod, cancels the stop handler; swallowing it
+    would break asyncio's rule that a cancellation propagates. A done callback registered before
+    `stop()` awaits delivers the cancel while the stopper waits on an already-finished task, so the
+    ordering is deterministic without sleeps.
     """
 
     async def _run() -> "asyncio.Task[None]":

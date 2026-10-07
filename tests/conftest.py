@@ -1,27 +1,9 @@
 """Shared pytest fixtures and test fakes.
 
-`FakeWriter` is the one note-write test double: every test that exercises a
-"record a note" path imports it (`from tests.conftest import FakeWriter`)
-instead of redefining an identical fake per file (DRY).
-
-`_fresh_derived_tool_sets` clears the two `@cache`d authorization sets derived from the connector
-and template registries around every test; see its docstring for why that has to be autouse rather
-than a per-file convention, and for why the registries themselves are no longer cleared here.
-
-`_free_port` is the one "ask the OS for an unused loopback port" helper, shared by every test
-that starts a real server instead of being redefined per file (Rule of Three).
-
-`client` and `log_field` are the same rule applied to the front-door suites: the fixture that
-builds the app with a fake agent, and the one-line reader for an `extra=` field on a captured
-record, were byte-identical in `test_api_observability.py` and `test_api_review_logging.py`.
-
-`pytest_collection_modifyitems` owns both wall-clock-cap adjustments: the `thread` timeout method
-for Temporal-backed modules, and `PYTEST_TIMEOUT_SCALE`, which is the one knob that relaxes *every*
-cap — including the per-test markers, which no command-line flag can reach.
-
-`pytest_terminal_summary` owns the qualifications a run's headline number needs: which failures
-were wall-clock timeouts, and how many tests an unreachable Postgres, an unstartable Temporal test
-server, or an absent `helm` binary took away.
+`FakeWriter` is the one note-write test double. `_fresh_derived_tool_sets` and its siblings clear
+process-level caches around every test. `_free_port`, `client` and `log_field` are shared helpers.
+`pytest_collection_modifyitems` adjusts wall-clock caps (the `thread` method for Temporal modules,
+and `PYTEST_TIMEOUT_SCALE`). `pytest_terminal_summary` reports timeouts and what the run skipped.
 """
 
 import asyncio
@@ -56,23 +38,9 @@ pytest_plugins = ["pytester"]
 def anyio_backend() -> str:
     """Pin anyio's pytest plugin to asyncio, which is the only loop anything here runs on.
 
-    `anyio_mode = "auto"` in `pyproject.toml` is what makes an `async def test_*` run at all; this
-    fixture decides *how*. The plugin ships its own `anyio_backend`, parametrized over every
-    installed backend, so without this override an async test is an id with an `[asyncio]` suffix
-    today — four files already carried one — and a second, failing `[trio]` arm the day anything
-    pulls trio into the closure. Nothing here is trio-compatible: psycopg, the Temporal client and
-    the LangGraph checkpointer are all asyncio, so that second arm would never be a signal about
-    this system.
-
-    **It is the same teardown `asyncio.run` gives, which is the property the durable layer needs.**
-    The asyncio backend's `TestRunner` is an `asyncio.Runner`, and the plugin takes its lease
-    inside `pytest_pyfunc_call` and drops it there, so each test still gets a fresh loop that is
-    cancelled, `shutdown_asyncgens`-ed and closed on the way out. `core/db.py` caches its pools
-    *per event loop* and sweeps the ones whose loop has ended
-    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`); a plugin that reused one loop
-    across the session, or left it open, would quietly defeat both. Driven against a real database
-    before the conversion: two tests that open a pool and abandon it get two distinct, closed
-    loops and the session ends in under a second.
+    Without this the plugin parametrizes over every installed backend, adding a failing `[trio]` arm
+    if trio is ever installed. Each test still gets a fresh loop that is closed on teardown, which
+    `core/db.py`'s per-loop pool cache relies on.
     """
     return "asyncio"
 
@@ -85,12 +53,7 @@ def _free_port() -> int:
 
 
 def log_field(record: logging.LogRecord, name: str) -> Any:
-    """One `extra=` field off a captured record — `getattr`, because a `LogRecord` has no schema.
-
-    Named for what it reads rather than `_field`, because a shared helper is called from files
-    that have their own `_`-private names and a leading underscore here would claim the opposite
-    of what a conftest is.
-    """
+    """One `extra=` field off a captured record — `getattr`, because a `LogRecord` has no schema."""
     return getattr(record, name)
 
 
@@ -98,14 +61,9 @@ def log_field(record: logging.LogRecord, name: str) -> Any:
 def client() -> TestClient:
     """The front door with a fake agent — the same seam every other front-door test uses.
 
-    Here rather than per file because two suites held a byte-identical copy. A file that wants a
-    differently-built client still defines its own `client` fixture and pytest's nearest-wins
-    resolution gives it that one, which is how `test_api_shedding.py`, `test_jobs_api.py`,
-    `test_protocol_routes.py` and `test_tool_results.py` keep theirs.
-
-    `tests.test_service` is imported inside the body on purpose: pytest imports this conftest
-    before collecting anything, so a module-scope import here would make every run — `pytest
-    tests/test_bo.py` included — pay for the front-door module and its whole dependency tree.
+    A file can define its own `client` fixture to override this one. `tests.test_service` is
+    imported inside the body so collecting unrelated files does not pay for the front-door import
+    tree.
     """
     from tests.test_service import _app, _FakeAgent
 
@@ -125,34 +83,21 @@ class FakeWriter:
         return WriteOutcome(reference=f"commit://{len(self.writes)}")
 
 
-# Every `Settings` field naming a Postgres database this suite would otherwise write to. Each
-# configured one is redirected into the isolation schema below, and
-# `tests/test_suite_isolation.py` fails if a fourth `*_dsn` field appears and is not listed here.
-# An allowlist somebody has to extend is the point: the two that were listed by hand were the two
-# somebody thought of, and the third — `postgres_migration_dsn`, which is what `migrate()` and
-# `apply_grants()` actually resolve — escaped for as long as it went unnamed.
 #: Connections per Postgres pool in each xdist worker (see `isolated_postgres_schema`).
 _XDIST_POOL = 8
 
+# Every `Settings` field naming a Postgres database this suite would otherwise write to; each is
+# redirected into the isolation schema. `tests/test_suite_isolation.py` fails if a new `*_dsn` field
+# is not listed here.
 _ISOLATED_DSN_SETTINGS = ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn")
 
 
 def redirect_dsns_to_test_schema(patch: pytest.MonkeyPatch) -> None:
     """Point every configured Postgres DSN setting at `tests.pg.TEST_SCHEMA`.
 
-    A loop over a named list rather than a line per setting, because a line per setting is what
-    produced the escape: `postgres_dsn` and `session_store_dsn` each got one and
-    `postgres_migration_dsn` — added later, for the split-principal posture
-    `D-2026-08-05-append-only-by-grant-not-by-contract` describes — got none. `migrate()` resolves
-    `postgres_migration_dsn or postgres_dsn`, so with one configured, `migrated_db_or_skip`
-    migrated somewhere else entirely, the isolation schema stayed **empty**, and every store fell
-    through the search_path's second entry to `public`. Measured before the fix, with the
-    migration DSN naming a second schema: `isolation schema: 0 tables / migration target: 44`, and
-    an "isolated" connection then counting `public`'s live `note_index` rows. It does not fail —
-    it passes, on the deployment's own data, which the suite truncates.
-
-    An empty setting is left alone: both optional ones fall back to `postgres_dsn`, which is
-    already redirected, so rewriting `""` would invent a target rather than isolate one.
+    A loop over a named list so no DSN setting escapes isolation (an unredirected migration DSN
+    would leave the schema empty and fall through to `public`). An empty setting is left alone: it
+    falls back to `postgres_dsn`, which is already redirected.
     """
     for name in _ISOLATED_DSN_SETTINGS:
         configured = str(getattr(settings, name))
@@ -164,19 +109,10 @@ def redirect_dsns_to_test_schema(patch: pytest.MonkeyPatch) -> None:
 def isolated_postgres_schema() -> Iterator[None]:
     """Point every Postgres-backed test at a dedicated schema, and drop it afterwards.
 
-    Session-scoped and autouse so it is impossible to opt out of by forgetting a fixture: the
-    destructive tests (`test_vector_index` truncates `note_index`) would otherwise run against
-    whatever database the developer's `.env` points at. Redirecting the DSN settings is enough to
-    isolate every store, because they all resolve their own connection from one — see `tests/pg.py`
-    and `redirect_dsns_to_test_schema`, which owns the list.
-
-    The schema itself is created with the *unredirected* runtime DSN. Under a split-principal
-    configuration whose migrator cannot create in a schema the runtime role owns, the migration
-    then fails loudly instead of landing outside — which is the whole point: a run that cannot be
-    isolated must stop, not quietly proceed against the real one.
-
-    A missing database is not an error here: the per-test `migrated_db_or_skip` already turns
-    that into a skip, so this yields untouched and lets it report the reason.
+    Session-scoped and autouse so destructive tests can never run against the developer's database.
+    The schema is created with the unredirected runtime DSN, so a configuration that cannot be
+    isolated fails loudly. A missing database is not an error here; `migrated_db_or_skip` reports it
+    per test.
     """
     base_dsn = settings.postgres_dsn
     try:
@@ -202,38 +138,11 @@ def isolated_postgres_schema() -> Iterator[None]:
 def _fresh_derived_tool_sets() -> Iterator[None]:
     """Clear the two `@cache`d authorization sets derived from the discovery registries, per test.
 
-    `chemclaw.agent.authz.side_effecting_tools` and `knowledge_read_tools` are `@cache`d on *no
-    arguments* while their real input is the enabled connector and template manifests, so a test
-    that repoints `connectors_dir` at a `tmp_path` bundle leaves the next test's write gates
-    reading the old deployment's classification and its turn record counting the old one's
-    searches. Autouse for the reason every cache-clearing fixture here is: "remember to clear the
-    cache" as a per-file convention is something each new test file has to rediscover, and the
-    failure it produces lands in a *different* file, order-dependent. It is cheap — measured at
-    0.018 ms and 0.005 ms to re-derive against warm registries, because both are a pass over
-    manifests already parsed.
-
-    **The three discovery registries themselves are deliberately no longer cleared here.**
-    `connectors.registry.discovered`, `templates.registry.discovered` and
-    `ingest.sources.registry.discovered` were `@cache`d on nothing for the same reason, and this
-    fixture was the defence: clear them around all 5,747 tests so the ~21 files that repoint a
-    directory cannot poison the rest. Clearing is O(1); the *re-discovery* it forced is not —
-    measured at 48 ms, 32 ms and 32 ms a time. They are now keyed on the directory tuple they
-    actually read, so a repointed `tmp_path` is a different cache entry and the poisoning it was
-    protecting against cannot happen. `forget_discovered()` is the seam for the narrower case a
-    key cannot see: new manifests written into a directory the registry has already discovered.
-    It is a named function rather than `discovered.cache_clear`, which is what it was for a few
-    hours — an attribute assigned onto a function object is invisible to `mypy`, so that spelling
-    needed one suppression at the definition and produced an error at every one of its 35 call
-    sites.
-
-    **The claim that removes an order-dependence is checked by running in two orders.** Deleting a
-    fixture that ran on every test is only safe if nothing was relying on it, and the one way that
-    fails is ordering — so it was measured rather than argued: the 39 test files that touch any of
-    `connectors_dir`, `templates_dir`, `data_sources_dir`, `cache_clear` or `discovered()` were run
-    forward and reversed, **1,136 passed both ways**. That is evidence about those files and not
-    about the suite, which runs in one fixed order and has never had its order shaken out —
-    `pytest-randomly` is not installed here, and installing it is a separate decision with its own
-    cost.
+    `side_effecting_tools` and `knowledge_read_tools` are cached on no arguments while their real
+    input is the enabled manifests, so a test that repoints `connectors_dir` would leak into the
+    next. Autouse because a per-file convention gets forgotten and fails order-dependently
+    elsewhere; it is cheap. The discovery registries themselves are keyed on their directories and
+    need no clearing (`forget_discovered()` covers new manifests in an already-read directory).
     """
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
@@ -246,12 +155,8 @@ def _fresh_derived_tool_sets() -> Iterator[None]:
 def _fresh_connector_reachability() -> Iterator[None]:
     """Forget the per-process connector reachability verdicts around every test.
 
-    `chemclaw.connectors.reachability` is what stops a turn dialling a connector this process just
-    found unreachable (`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`), and it is
-    module state for the same reason the pools and discovery caches are: it belongs to the process,
-    not to a request. In a test session that is exactly the hazard the two fixtures above exist for
-    — one test's dark connector would silently stop the *next* test's open from dialling at all, and
-    the failure would be order-dependent.
+    Otherwise one test's unreachable connector would stop the next test from dialling it,
+    order-dependently.
     """
     _forget_reachability()
     yield
@@ -262,14 +167,8 @@ def _fresh_connector_reachability() -> Iterator[None]:
 def _fresh_attached_connections() -> Iterator[None]:
     """Forget the process-lived warehouse connections and vector store around every test.
 
-    Both are memoised in production for the reason their protocols already assume: neither has a
-    `close`, and the data-source seam builds a retrieve half per `gather_evidence` call, so a store
-    or a session built per call is one nothing can ever dispose. A remembered handle is exactly
-    wrong in a test session, though — `warehouse_fake.prime()` installs a new fake per test, and a
-    cached connection would serve every later test the *first* test's rows.
-
-    Autouse for `_fresh_derived_tool_sets`'s reason: "clear the cache" as a per-file convention is
-    something each new test file has to rediscover, and the failure it produces is order-dependent.
+    Both are memoised in production; in tests a cached connection would serve every later test the
+    first test's `warehouse_fake.prime()` rows.
     """
     _forget_warehouses()
     _forget_vector_store()
@@ -282,17 +181,10 @@ def _fresh_attached_connections() -> Iterator[None]:
 def loopback_dev_posture(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run tests in the loopback dev posture, so the fail-closed boot guards admit them.
 
-    Three guards, three postures, and each is *stated* here rather than inferred from the suite's
-    circumstances. The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2);
-    tests drive the app entirely in-process (TestClient — no socket is ever bound), so they use the
-    loopback bind. And every process that makes model calls refuses a loopback `llm_base_url`
-    unless the posture is declared (`core/llm_gateway`) — the suite's gateway is
-    `chemclaw.cli.mock_llm`'s shipped default address, which is exactly that case, so it declares
-    it. And a Temporal worker refuses to boot with sign-in off unless that is declared
-    (`durable/serve.refuse_unauthenticated_worker`) — the suite runs with `entra_required` off, so
-    it declares that too. Each guard's own refuse/opt-in/boot behaviour is proven explicitly —
-    `test_auth.py` for the first, `tests/test_llm_gateway_guard.py` for the second,
-    `tests/test_worker_posture.py` for the third — by overriding these per test.
+    Declares the three postures the boot guards require: a loopback front-door bind, a declared
+    loopback `llm_base_url` (the mock gateway), and an unauthenticated Temporal worker. Each guard's
+    refusal is tested in `test_auth.py`, `test_llm_gateway_guard.py` and `test_worker_posture.py` by
+    overriding these per test.
     """
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
     monkeypatch.setattr(settings, "llm_allow_loopback_gateway", True)
@@ -302,20 +194,8 @@ def loopback_dev_posture(monkeypatch: pytest.MonkeyPatch) -> None:
 def timeout_scale() -> float:
     """How much slack every per-test wall-clock cap gets on this machine (default 1.0).
 
-    Not a `Settings` field, for the reason `tests/pg.py` gives for `TEST_SCHEMA`: `core/config/` is
-    the operator-facing deployment surface and its parity test requires every field to appear in
-    `.env.example`. How loaded the machine running the tests is has nothing to do with a
-    deployment.
-
-    **And therefore not spelled `CHEMCLAW_*` either, which it was until this rename.** The prefix
-    is the claim that a key comes from that one config, and prose-contract rule 7 enforces exactly
-    that over the operator corpus — so the old name passed only by being documented where the rule
-    does not look. Measured: one sentence about it added to `README.md`, the natural place to tell
-    a person how to run the suite on a loaded machine, and `make prose-validate` failed with
-    "names CHEMCLAW_TEST_TIMEOUT_SCALE, which is not a Settings field". It is a pytest knob; it now
-    says so, and the runbook may name it.
-
-    Read per call rather than at import so a test can set it and see the effect.
+    Not a `Settings` field and not `CHEMCLAW_*`-prefixed: machine load is not deployment
+    configuration. Read per call so a test can set it.
     """
     raw = os.environ.get("PYTEST_TIMEOUT_SCALE", "1")
     try:
@@ -339,29 +219,10 @@ def _base_timeout(config: pytest.Config) -> float:
 def _apply_timeout_scale(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Multiply every item's effective wall-clock cap by `PYTEST_TIMEOUT_SCALE`.
 
-    **Why a scale and not larger constants.** A `@pytest.mark.timeout(90)` marker overrides
-    `--timeout` and `PYTEST_TIMEOUT`, so the tests with the *tightest* caps are exactly the ones a
-    loaded machine cannot relax — the inverse of what is wanted. That is not hypothetical: this
-    repository's own hardening campaign recorded two `test_pka.py` tests as pre-existing numerical
-    failures on unchanged `main` and briefed six agents to ignore them, when both were
-    `Timeout (>180.0s) from pytest-timeout` and their assertions had never run. Given
-    `--timeout=0` on the same tree and the same box, the pair passed in 1071 s. Hours of work went
-    against a false baseline, and a suite that reports red under load teaches its readers to
-    discount red.
-
-    Raising the constants instead was considered and rejected: the observed single-test runtime
-    under five concurrent agents was ~6x the cap, and that multiplier is a property of the machine,
-    not of the test. A constant chosen for a loaded box is no cap at all on an idle one, which
-    throws away what these markers are for — naming a spiking optimizer early rather than letting
-    it eat the file's whole budget (`test_bo_predict.py`, `test_bo_constraints.py` both say so).
-    Scaling keeps every cap's *ratio* to the work and moves them together.
-
-    An explicit marker is written onto every item rather than adjusting the session default,
-    because the session default is not what a marked item is held to. Prepended (`append=False`)
-    so it becomes the closest marker, and any `method=`/`func_only=` the existing marker carried is
-    copied onto the replacement — `_get_item_settings` reads them all off the *one* closest marker,
-    so dropping them would silently return a Temporal module to the `signal` method that cannot
-    reach it.
+    A `timeout` marker overrides `--timeout`, so only a scale can relax the tightest caps on a
+    loaded machine while keeping each cap's ratio to its work. An explicit marker is prepended to
+    every item so it is the closest one, copying any `method=`/`func_only=` from the marker it
+    replaces — dropping them would return a Temporal module to the `signal` method.
     """
     scale = timeout_scale()
     if scale == 1.0:
@@ -385,31 +246,11 @@ _ENV_STARTERS = ("start_env_or_skip", "start_local_env_or_skip")
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Give Temporal-backed tests a `thread`-method timeout, because `signal` cannot reach them.
 
-    `pyproject.toml` sets `timeout_method = signal` deliberately: it fails the one hung test and
-    lets the session continue, rather than `os._exit`-ing everything after it. That reasoning holds
-    for pure-Python hangs and is useless here. `signal` raises from a SIGALRM handler, and the
-    interpreter only runs handlers between bytecodes — a test blocked inside `temporalio`'s Rust
-    core (PyO3) never gets back to run it, so the cap silently does nothing.
-
-    Measured: a workflow submitted to a queue whose worker had not registered it hung
-    `test_bo_knowledge.py` for **28 minutes** past a 600 s cap, until the GitHub job timeout killed
-    the run — no test name, no traceback, and `main` red on every commit since the gates were
-    enabled. The `thread` method fires from a watchdog thread, so it works regardless of what the
-    main thread is stuck in, and it dumps every thread's traceback before exiting.
-
-    Losing "the session continues" costs nothing in this case: a hang that burns the whole job
-    stops everything after it anyway. This trades a silent 30-minute cancellation for a named
-    failure in three minutes.
-
-    Selected by module rather than by marker so a new Temporal test is covered the day it is
-    written: importing one of `tests/temporal_env.py`'s starters is what makes a module able to
-    hang this way. **Both** of them — the real-time `start_local_env_or_skip` was added for the
-    tests that drive terminate, eviction and an unserved queue, and those are precisely the ones
-    that can wait forever on a broker, so a check naming only the time-skipping starter would have
-    left the newest hang-capable module uncovered.
-
-    `PYTEST_TIMEOUT_SCALE` is applied last, after that marker exists, so the scaled replacement
-    can carry `method="thread"` forward.
+    The `signal` method raises from a SIGALRM handler, which never runs while a test is blocked
+    inside `temporalio`'s Rust core, so a hang would outlive its cap. The `thread` method fires from
+    a watchdog thread and dumps tracebacks. Modules are selected by importing either starter from
+    `tests/temporal_env.py`, so a new Temporal test is covered automatically. `PYTEST_TIMEOUT_SCALE`
+    is applied afterwards and carries `method="thread"` forward.
     """
     for item in items:
         module = getattr(item, "module", None)
@@ -425,20 +266,10 @@ _POSTGRES_SKIP = "Postgres unavailable"
 
 
 def _report_postgres_skips(terminalreporter: TerminalReporter) -> None:
-    """Say how many tests the unreachable database took away, because prose kept getting it wrong.
+    """Say how many tests the unreachable database took away.
 
-    A run with no Postgres skips the whole durable layer — the session store, the note-proposal
-    tables, retention, the outbox — and still prints a green line, which reads as "the suite
-    passed" and means "the suite mostly did not run". `CLAUDE.md` warns about exactly this and
-    stated the size of it as a number, which went stale by ~38% in the direction that understates
-    the risk. **The number that replaced it is not written here either, and the first version of
-    this docstring wrote it down anyway** — it named the figure measured on the day the counter
-    was added, and a later review measuring the gated files alone found more than twice that,
-    which is this docstring committing the mistake it was added to describe. A count in prose
-    describes the suite on the day someone counted; the line printed below is measured by the run
-    that is reporting it, which is the rule
-    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` reached for the eight other counts
-    that were wrong.
+    A run with no Postgres skips the whole durable layer and still prints a green line. The count is
+    measured by the run itself rather than written in prose, where it goes stale.
     """
     skipped = [
         report
@@ -458,24 +289,11 @@ def _report_postgres_skips(terminalreporter: TerminalReporter) -> None:
 def _report_public_schema_shadowing(terminalreporter: TerminalReporter) -> None:
     """Say when a green run was green because *this* database has already run the agent.
 
-    The isolation DSN is `search_path=<test schema>,public` — `public` second, because the
-    `vector` extension is installed once per database and the type has to stay resolvable
-    (`tests/pg.py::schema_dsn`). That fallthrough is what keeps the suite runnable; it is also a
-    way for a test to pass on evidence the runner will not have.
-
-    The tables it can happen with are exactly the ones **no migration creates**:
-    `AsyncPostgresSaver.setup()` and `AsyncPostgresStore.setup()` make them the first time the
-    agent runs, so a dev database that has held a conversation has them in `public` and CI's
-    throwaway container never does. A test that reads `checkpoints` unqualified without creating
-    it therefore passes locally and fails on the runner, on identical code — measured, three of
-    `tests/test_api_sessions.py`'s delete tests did exactly that, and the local run that cleared
-    them reported 5422 passed. `tests/pg.py::create_checkpoint_tables` is the fix for a test that
-    needs them; this section is what makes their *absence* in CI visible from a dev run.
-
-    Reported rather than enforced, and reported as a qualification rather than a failure: having
-    run the agent against your own database is not a mistake, and dropping the tables would break
-    the next `make chat`. What is a mistake is reading a green line as evidence about a database
-    that has never run it — the same misreading `_report_postgres_skips` exists for.
+    The isolation DSN falls through to `public`, and the checkpointer/store tables no migration
+    creates exist there once a dev database has run the agent, but never in CI. A test reading them
+    unqualified passes locally and fails in CI; this makes that visible. Reported, not enforced:
+    having run the agent locally is not a mistake (`tests/pg.py::create_checkpoint_tables` is the
+    fix for a test that needs the tables).
     """
     from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
     from chemclaw.agent.scratchpad import STORE_TABLES
@@ -512,25 +330,9 @@ _HELM_SKIP = "helm is not installed"
 def _report_helm_skips(terminalreporter: TerminalReporter) -> None:
     """Say how many rendered-chart tests an absent `helm` binary took away.
 
-    `helm` is not a Python dependency, so a plain `uv sync` never installs it, and the tests gated
-    on `shutil.which("helm")` skip silently and still print a green line — the same failure
-    `_report_postgres_skips` exists for, on a second dependency that had no such warning. A local
-    run that skips them is not evidence about the rendered chart, only about its static YAML.
-    Install it: https://helm.sh/docs/intro/install/.
-
-    **How many that is, the epilogue counts; this docstring does not, and the first version of it
-    did.** It said 33, over a set that measures **59** with `helm` off `PATH` — a number inherited
-    from a `BACKLOG.md` row rather than measured, which is the failure
-    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` names, committed inside the change
-    that added the counter whose whole job is to make the count unnecessary.
-
-    **And it is a sandbox warning, not a CI one.** The same first version said these tests "skipped
-    silently on every run" in CI and that five HIGH chart defects survived "because nobody had
-    rendered the chart". `D-2026-09-04-a-review-of-a-review-finds-the-fixes` had already corrected
-    that a day earlier: `ubuntu-latest` ships Helm, so the `check` job has been rendering the chart
-    throughout, and those defects survived because the tests rendered **one** set of values. The
-    `Install Helm` step in that job is still worth having — it pins what was drifting with the
-    runner image — but it did not turn a dead gate on.
+    `helm` is not a Python dependency, so tests gated on `shutil.which("helm")` skip silently. A run
+    that skips them is evidence only about the chart's static YAML. CI installs Helm, so this is a
+    local-sandbox warning. Install: https://helm.sh/docs/intro/install/.
     """
     skipped = [
         report
@@ -550,18 +352,9 @@ def _report_helm_skips(terminalreporter: TerminalReporter) -> None:
 def _report_slow_fork_skips(terminalreporter: TerminalReporter) -> None:
     """Say when a box's own process-creation cost took the parse-deadline tests away.
 
-    The fourth thing a green line can be silent about, and the only one that is a property of the
-    *machine* rather than of a missing dependency. `tests/test_parse_isolation.py` derives its
-    budgets from what the fixture costs to parse here, with a floor of one fork round trip — below
-    that the child is killed before it reads a byte and the test is about process creation. In this
-    remote sandbox a fork round trip measured a **0.165 s median against the CI runner's 0.030 s**,
-    so the floor has no room and three tests cannot express the scenario at all.
-
-    Reported rather than left to `-ra`, because the thing that made this worth a section is that it
-    used to be a *failure*: a red gate for a machine property is what teaches everybody to re-run,
-    and a silent skip of the wedge regression is what the wedge got shipped behind the first time.
-    Matched on the marker the test module spells, imported rather than restated, the way
-    `_report_sibling_skips` matches `tests/siblings.SIBLING_SKIP`.
+    `tests/test_parse_isolation.py` floors its budgets at one fork round trip; on a slow-forking
+    machine the floor leaves no room, so those tests skip. Matched on the marker that module
+    defines.
     """
     from tests.test_parse_isolation import _SLOW_FIXTURE_SKIP
 
@@ -587,18 +380,11 @@ _TEMPORAL_SKIP = "Temporal test server unavailable"
 
 
 def _report_temporal_skips(terminalreporter: TerminalReporter) -> None:
-    """The same warning for the other backend a green line can be silent about.
+    """The same warning for the Temporal test server.
 
-    `start_env_or_skip` downloads the time-skipping server's binary on first use, so a
-    network-restricted sandbox skips every test that drives a *real workflow* — the durable BO
-    campaign and its resumption, the connector-job wrapper, the report fan-out — and prints green.
-    That is the `_report_postgres_skips` failure exactly, on a second backend that had no such
-    warning: the Postgres half of this file exists because a count in prose went stale by 38%,
-    while the Temporal half of the same risk was reported by nothing at all.
-
-    It matters most for the tests that are hardest to replace: a workflow's sequencing, its
-    idempotency keys and its continue-as-new can only be observed against a server, so a suite that
-    skips them silently is not evidence about durability in the one place durability lives.
+    `start_env_or_skip` downloads the server binary on first use, so a network-restricted sandbox
+    skips every test that drives a real workflow and still prints green — and workflow sequencing,
+    idempotency and continue-as-new can only be observed against a server.
     """
     skipped = [
         report
@@ -619,23 +405,9 @@ def _report_temporal_skips(terminalreporter: TerminalReporter) -> None:
 def _report_sibling_skips(terminalreporter: TerminalReporter) -> None:
     """Say plainly that the cross-repository checks did not run, and what that leaves unchecked.
 
-    One more thing a green line can be silent about, and the one with the largest consequence
-    behind it. `tests/test_context_floor.py` bounds the half of the request prefix served out of
-    `Chemclaw3-mcp` — the half `SERVED_ELSEWHERE_ALLOWANCE` stands in for, which `PREFIX_BOUND` is
-    built from, which `core/config/agent.py` derives **both** compaction defaults from — and
-    `tests/test_sibling_manifest_agreement.py` compares the declarations the two repositories hold
-    of one surface. Without a checkout of that repository every one of them skips.
-
-    **Two sentences in `tests/test_context_floor.py` claimed this reporter existed before it
-    did.** `grep` for a sibling in this module found nothing, while both said in the present tense
-    that the epilogue counted the skip — a claim about a control, which is the class of sentence
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about. Correcting the
-    prose was the alternative and it was the worse one: `-ra` does print the skip, in a list this
-    file's other three reporters exist because nobody reads. So the sentence was made true
-    instead.
-
-    Matched on `tests/siblings.SIBLING_SKIP`, imported rather than restated, because the marker is
-    the one thing this reporter and those skips must agree about.
+    Without a `Chemclaw3-mcp` checkout, `tests/test_context_floor.py` (which bounds the half of the
+    request prefix behind both compaction defaults) and `tests/test_sibling_manifest_agreement.py`
+    skip. Matched on `tests/siblings.SIBLING_SKIP`.
     """
     from tests.siblings import SIBLING_SKIP
 
@@ -670,12 +442,8 @@ def pytest_runtest_makereport(
 ) -> Generator[None, pytest.TestReport, pytest.TestReport]:
     """Fail a cross-repository check that skipped where its sibling was provisioned to be read.
 
-    The epilogue above is the right answer where a sibling is optional, and the wrong one where it
-    is not: `SERVED_ELSEWHERE_ALLOWANCE` stood breached while every CI run printed that block and
-    went green, because the schema measurement needs the fleet's built environment and CI had only
-    its checkout. CI now builds both, so there a sibling skip can only mean a precondition broke —
-    a path, a dependency the fleet added, a bundle that no longer imports — and it is reported as
-    the failure it is. Matched on `tests/siblings.SIBLING_SKIP`, the marker every such skip carries.
+    CI builds the sibling's environment, so a sibling skip there means a precondition broke and is
+    reported as a failure. Matched on `tests/siblings.SIBLING_SKIP`.
     """
     report = yield
     if not report.skipped or os.environ.get(SIBLINGS_REQUIRED) != "1":
@@ -694,19 +462,9 @@ def pytest_runtest_makereport(
 def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     """Say plainly which failures were timeouts, and how much of the suite never ran.
 
-    Every section is about the same misreading: a run's headline number is believed without the
-    things that qualify it. A timed-out test proves nothing about the assertions it never
-    reached, and a skipped Postgres, Temporal or helm test proves nothing at all — see
-    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips`,
-    `_report_sibling_skips` and `_report_slow_fork_skips`.
-
-    `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
-    short summary was read as a numerical failure by two separate reviewers of this repository, and
-    the mistake propagated into a campaign's baseline. The difference matters more than its
-    wording suggests: a timed-out test proves *nothing* about the assertions it never reached, so
-    it is not evidence either way, whereas a failed assertion is a finding.
-
-    Printed as its own section, after the short summary, naming the knob that fixes it.
+    A timed-out test proves nothing about assertions it never reached, unlike a failed assertion,
+    and a skipped Postgres, Temporal, helm, sibling or slow-fork test proves nothing at all. Printed
+    after the short summary, naming the knob that fixes it.
     """
     _report_postgres_skips(terminalreporter)
     _report_temporal_skips(terminalreporter)

@@ -1,19 +1,8 @@
-"""The canonical record carries when it happened and what came out (gaps KNW-1, KNW-2).
+"""The canonical record carries when a reaction happened and what came out.
 
-Two absences in `OrdReaction` that the agent's own instructions contradicted:
-
-- **No date.** The largest note class in the system had no time axis, so reaction evidence could
-  not be recency-ranked, F10-G2's bi-temporal `valid_from`/`valid_to` had nothing to be populated
-  from for reactions, and `chemclaw.memory.chains` had no fallback ordering for a cyclic chain.
-- **No purity or impurities.** `_INSTRUCTIONS` tells the agent its job includes answering about
-  "yield, purity, impurities" while the schema carried `yield_percent` alone — so every purity
-  question could only ever be answered "the data is silent", with the chemist unable to tell a data
-  gap from a capability gap. For late-stage *process* development, impurity control is usually the
-  whole point.
-
-These tests pin the fields, both adapters that populate them, the note they render into, and — most
-importantly — that none of it leaks into structure (the reaction SMILES and every fingerprint must
-be unchanged, because purity is an outcome, not a structure).
+`OrdReaction` has a date (for recency ranking, bi-temporal validity and chain ordering) and purity
+and impurities (late-stage process questions). Pinned: the fields, both adapters, the rendered
+note, and that none of it changes structure — reaction SMILES and fingerprints stay identical.
 """
 
 import json
@@ -109,13 +98,10 @@ def test_a_reaction_without_impurities_renders_no_empty_section() -> None:
 
 
 def test_json_adapter_maps_date_purity_and_impurities(tmp_path: Path) -> None:
-    """The free-text ELN source populates all three (gap KNW-1/KNW-2 end to end).
+    """The free-text ELN source populates date, purity and impurities end to end.
 
-    Through `DatedIngest`, because the date is the seam's rather than the adapter's: this export
-    carries no experiment date, so the adapter states none and the wrapper fills in the entry's own
-    timestamp *with* the `date_source="entry"` that says where it came from. Mapping it in the
-    adapter put the right value under a claim nothing downstream could tell from a chemist-entered
-    date — see `ingest/eln/json_adapter.py::JsonExportAdapter._build`.
+    Through `DatedIngest`: this export has no experiment date, so the wrapper fills in the entry
+    timestamp with `date_source="entry"`, distinguishable from a chemist-entered date.
     """
     entry = {
         "id": "e-1",

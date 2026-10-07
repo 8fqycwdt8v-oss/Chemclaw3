@@ -1,13 +1,7 @@
 """The commitment mirror: a unit of committed work, and the join only this system can make.
 
-Measured 2026-08-29: nine of the then-nineteen `manager` bucket-C probes needed one object the
-schema did not have. Eighty-odd migrations in, and `project` was still a nullable text tag on
-`reaction_records` — a facet on a row, not an entity. (The probe corpus has been rebucketed since;
-the denominator is a fact about that commit, not a figure anyone maintains.)
-
-The properties asserted here are the ones that keep this a *mirror* rather than a second plan: it
-converges on the source's snapshot rather than accumulating, it reports its own staleness, it never
-infers a field the export did not state, and it has no write path back.
+Asserted: the mirror converges on the source's snapshot rather than accumulating, reports its own
+staleness, never infers a field the export did not state, and has no write path back.
 """
 
 import asyncio
@@ -65,11 +59,9 @@ def _commitment(external_id: str, **kwargs: object) -> Commitment:
 
 
 async def test_re_reading_a_snapshot_converges_rather_than_accumulating() -> None:
-    """The upsert is keyed on `(source, external_id)`, which is what makes a full re-read free.
+    """Re-reading a snapshot converges rather than accumulating.
 
-    A portfolio extract is a snapshot, not a change feed, so the sync re-reads it whole. If that
-    duplicated, the mirror would grow a copy of the programme on every pass and every count over it
-    would be wrong in a way no single row reveals.
+    The upsert is keyed on `(source, external_id)`, so a full re-read of a snapshot export is free.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -81,23 +73,11 @@ async def test_re_reading_a_snapshot_converges_rather_than_accumulating() -> Non
 
 
 async def test_a_snapshot_source_converges_downward_when_a_commitment_is_withdrawn() -> None:
-    """Converging only *upward* is not converging, and this is the half the upsert cannot do.
+    """A snapshot source converges downward when a commitment is withdrawn.
 
-    A portfolio export is a snapshot, and the way a snapshot says "this is no longer committed" is
-    by not containing the row any more — a milestone descoped, a study cancelled, a deliverable
-    moved to another programme. The upsert is keyed on `(source, external_id)`, so it can add and
-    it can amend, and it has no way at all to remove: the withdrawn row kept a live state and
-    `outstanding()` kept returning it, for the life of the deployment.
-
-    Worse than merely stale, because the staleness is invisible in exactly the reading built to
-    reveal it. `outstanding()` reports `max(observed_at)` over the rows it returns, so the withdrawn
-    row travels in a list stamped with the *refreshed* rows' freshness — a manager reads a current
-    mirror that contains work nobody is doing, which is the one failure this table's whole
-    `observed_at` discipline exists to prevent.
-
-    Mark-and-sweep, marked by the activity's own start time: everything the snapshot restated is
-    newer than that, so what is older is what the source stopped saying. Guarded by the adapter
-    declaring itself a snapshot, because the sweep is only sound where the fetch is a whole picture.
+    A snapshot says "withdrawn" by omitting the row, which an upsert cannot express, and a stale row
+    would travel under the refreshed rows' `observed_at`. Mark-and-sweep: rows not restated since
+    the pass's mark are removed, only for adapters that declare themselves snapshots.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -139,10 +119,8 @@ async def _mirror_pass(
 ) -> commitment_sync.CommitmentSyncResult:
     """Run one `mirror_commitments_activity` over `export`, with the broker's clock as given.
 
-    `broker_clock` is what the *Temporal server* would report as this attempt's `started_time`.
-    It is a parameter rather than a fixed value because the mark must not be read from it: two
-    machines' clocks are what a deployment has, and a test that hands the activity one clock for
-    both halves cannot see a mark and a stamp drifting apart.
+    `broker_clock` is the Temporal server's `started_time`; it is a parameter so a test can skew it
+    and show the mark is not read from it.
     """
     from temporalio.testing import ActivityEnvironment
 
@@ -160,32 +138,17 @@ async def _mirror_pass(
     return result
 
 
-# What a worker pod's view of "now" may differ from the mirror database's by. Deliberately far
-# larger than one pass takes, because the failure is a *comparison* between two clocks and the
-# smallest skew that triggers it is the length of a fetch — measured, a quarter of a second was
-# already enough to empty the mirror.
+# How far a worker's "now" may differ from the mirror database's; far larger than one pass, since
+# any skew longer than a fetch would trigger the failure.
 _BROKER_CLOCK_SKEW = timedelta(minutes=5)
 
 
 async def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_the_broker() -> None:
-    """One clock decides both halves of the mark-and-sweep, or the sweep decides nothing.
+    """The pass marks from the database that stamps the rows, not from the broker.
 
-    `observed_at` is stamped by Postgres (`now()` in the upsert). The mark used to be
-    `activity.info().started_time`, which the **Temporal server** stamps — a different machine from
-    the database in every real deployment, and from the worker in most. The sweep deletes this
-    source's rows `observed_at < marked_at`, so the moment the broker's clock leads Postgres' by
-    more than a fetch takes, the pass deletes every row it has just mirrored: measured against real
-    Postgres at a 0.25 s skew, `mirrored=3, withdrawn=3` and an empty mirror, every pass, while
-    `CommitmentSyncResult` reported a healthy sync. These rows exist nowhere else this system can
-    reach.
-
-    Both directions are asserted because both are the same defect. A broker clock that *lags*
-    marks before the rows the previous pass wrote, so nothing is ever swept and the mirror silently
-    stops converging downward — the failure mark-and-sweep was added to fix.
-
-    A tolerance would not be a fix: it keeps two clocks and guesses the gap. What is asserted here
-    is therefore that the broker's clock does not reach the outcome at all, which is why the skew
-    is handed in rather than the two being forced equal.
+    `observed_at` is Postgres `now()`, so the mark must be too: a leading broker clock sweeps every
+    row just mirrored, a lagging one never sweeps. Both directions asserted; the skew is handed in
+    to show the broker's clock does not reach the outcome at all.
     """
     await migrated_db_or_skip()
 
@@ -222,22 +185,11 @@ async def test_the_pass_marks_from_the_database_that_stamps_the_rows_not_from_th
 
 
 async def test_an_export_that_answers_with_nothing_does_not_empty_the_mirror() -> None:
-    """The sweep's second guard, and it is the one that decides which mistake this feature makes.
+    """An export that answers with nothing does not empty the mirror.
 
-    A snapshot export returning zero rows is two things at once: a programme with nothing committed
-    left, and a broken export — a credential that expired, a share that unmounted, a query whose
-    filter now matches nothing. The two are indistinguishable from here and they do not cost the
-    same. Keeping a row too long is visible in the mirror and corrected by the next good pass;
-    deleting the mirror wholesale is unrecoverable, because these rows exist in this table and in a
-    source that has stopped mentioning them and nowhere else this system can reach.
-
-    So an empty answer sweeps nothing, and a source that genuinely empties converges on the pass
-    after it reports its first remaining row. Only the `snapshot` half of that condition was
-    asserted: measured, deleting `commitments and` from it took a snapshot source's whole mirror
-    (`withdrawn=2`, rows `[]`) with every commitment test still green.
-
-    Driven through the activity rather than through `sweep_withdrawn`, because the guard *is* the
-    call site — `sweep_withdrawn` asked nothing about the answer and still does not.
+    Zero rows may be an empty programme or a broken export; deleting the mirror is unrecoverable
+    while keeping a row too long self-corrects. Driven through the activity, because the guard is at
+    the call site, not in `sweep_withdrawn`.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -260,19 +212,11 @@ async def test_an_export_that_answers_with_nothing_does_not_empty_the_mirror() -
 
 
 def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> None:
-    """The sweep is wired to the claim, not to the shape of one answer.
+    """The pass sweeps only where the adapter promises a whole picture.
 
-    Both adapters below return the same list. The difference is the promise: one declares
-    `snapshot`, so an absent row means withdrawn and the pass removes it; the other does not, so an
-    absent row means unchanged and the pass must remove nothing. Without that distinction this
-    would delete an incremental source's whole mirror on its first quiet pass — which is a worse
-    defect than the one being fixed, since these rows exist nowhere else this system can reach.
-
-    Driven through the activity rather than through `sweep_withdrawn`, because the property is the
-    wiring: a pass that never reached `sweep_withdrawn` and a pass that swept nothing look the same
-    from outside. The harness supplies no `started_time` here — the mark is the database's, and
-    `ActivityEnvironment`'s epoch default reaching the outcome is exactly what the test above
-    forbids.
+    Both adapters return the same list; only the `snapshot` one has absent rows removed. Driven
+    through the activity because the property is the wiring. No `started_time` is supplied: the mark
+    is the database's.
     """
 
     async def _run() -> None:
@@ -303,22 +247,11 @@ def test_the_pass_sweeps_only_where_the_adapter_promises_a_whole_picture() -> No
 
 
 def test_the_shipped_adapter_takes_its_completeness_promise_from_the_manifest() -> None:
-    """The sweep above is wired to a claim; this is what lets a site make that claim.
+    """The shipped adapter takes its `snapshot` promise from the manifest.
 
-    `snapshot` was a hard-coded class attribute, so the destructive sweep the test above exercises
-    was unreachable for the one adapter that ships. It could not be a setting either: whether an
-    export is complete every pass is a property of *one site's* export tool — whether it writes the
-    directory atomically — so two sources sharing a process-wide field would have to agree about
-    something they have no reason to agree about.
-
-    It is a manifest key, and the seam already carried it: `registry._build_half` calls
-    `factory(**manifest.config)`, so the constructor's signature *is* the config schema. That is the
-    D-120 property being exercised rather than described — a new source is a manifest folder with
-    **zero** core edits, and this key cost none.
-
-    Both directions, because the default is the load-bearing half: a manifest that says nothing
-    must keep today's behaviour exactly, or this change silently arms a destructive sweep on every
-    deployment that already runs this adapter.
+    Completeness is a property of one site's export, so it is a manifest key passed through
+    `factory(**manifest.config)` (D-120), not a process-wide setting. Both directions: a manifest
+    that says nothing keeps the non-sweeping default.
     """
     default = json_commitment_export(name="probe")
     assert default.snapshot is False, (
@@ -340,11 +273,9 @@ def test_the_shipped_adapter_takes_its_completeness_promise_from_the_manifest() 
 
 
 async def test_the_reading_reports_when_the_mirror_was_last_refreshed() -> None:
-    """A mirror's characteristic failure is staleness, not error.
+    """The reading reports when the mirror was last refreshed.
 
-    The export stops running, the numbers keep answering, and a manager acts on last month's
-    picture. So freshness is a field on the answer rather than something a reader has to think to
-    ask for — the same argument `operations.Coverage` makes about a window.
+    A mirror's characteristic failure is staleness, so freshness is a field on every answer.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -457,11 +388,9 @@ def test_a_source_may_declare_the_commitments_half_alone() -> None:
 
 
 def test_the_mirror_has_no_write_path_back() -> None:
-    """An absence pinned: mirroring a milestone in does not confer the ability to move one.
+    """The mirror has no write path back.
 
-    `ingest/sources/README.md` states the rule for the two corpus halves — a source "cannot acquire
-    a write path by declaring one" — and the third half inherits it. Moving a milestone belongs to
-    the system that owns it, and would be an effect rather than a tool.
+    A source cannot acquire a write path; moving a milestone belongs to the system that owns it.
     """
     protocol = (SRC / "ingest" / "commitments" / "adapter.py").read_text(encoding="utf-8")
     for verb in ("def update", "def push", "def write", "def create"):
@@ -474,12 +403,9 @@ def test_the_mirror_has_no_write_path_back() -> None:
 
 
 def test_one_unreadable_file_costs_that_file_and_not_the_pass(tmp_path: Path) -> None:
-    """Reject-and-continue was written for a *row* and the file was left to raise.
+    """One unreadable file costs that file and not the pass.
 
-    A truncated export — a partial write, a failed extract — aborted `fetch_commitments` before
-    every file sorting after it was read, the activity failed, the cursor never advanced, and the
-    mirror froze on last week's snapshot while `review_commitments` kept answering from it. One bad
-    file must cost that file.
+    Otherwise the cursor never advances and the mirror freezes on an old snapshot.
     """
     (tmp_path / "a-good.json").write_text(
         json.dumps([{"external_id": "M-1", "title": "one", "kind": "milestone"}]), encoding="utf-8"
@@ -501,19 +427,11 @@ def test_one_unreadable_file_costs_that_file_and_not_the_pass(tmp_path: Path) ->
 def test_a_missing_export_directory_is_reported_rather_than_read_as_an_empty_portfolio(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A wrong path and a genuinely empty portfolio were byte-identical, and one is a defect.
+    """A missing export directory is reported rather than read as an empty portfolio.
 
-    The adapter found no files, the sync reported success with nothing mirrored, `mirror_freshness`
-    stayed NULL, and `review_commitments` reads NULL as "nothing was ever mirrored" — so a mistyped
-    `CHEMCLAW_COMMITMENT_EXPORT_DIR` reached a project leader as a truthful empty portfolio.
-    Shipping a `data/commitments/` directory only fixes the default, and the knob exists precisely
-    so a deployment can point elsewhere.
-
-    **And it is counted, not only logged.** A WARNING with no counter is visible to a person already
-    reading the log of the pod they already suspect, which is nobody: this failure lasts as long as
-    the misconfiguration and its entire symptom is silence. That is the `deliver_redaction` shape
-    one seam over — the sibling this was extracted from — so it goes on
-    `chemclaw_degraded_total{subsystem="commitment_mirror"}`, which is alerted.
+    A mistyped `CHEMCLAW_COMMITMENT_EXPORT_DIR` would otherwise look like a truthful empty
+    portfolio. It is counted on `chemclaw_degraded_total{subsystem="commitment_mirror"}`, which is
+    alerted, not only logged.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -553,16 +471,10 @@ def _degraded_count(subsystem: str) -> float:
 def test_an_export_directory_that_exists_and_holds_nothing_is_reported_too(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The existence check covered the mistyped half of a mistyped knob, and no more.
+    """An export directory that exists and holds no `*.json` is reported too.
 
-    A directory that exists and holds no `*.json` — the wrong subdirectory, a mount that came up
-    empty, an export written as `.jsonl` — returned `[]` with no counter and no log line at all,
-    which is byte-identical to the silence the missing-path branch was added to end: the sync
-    succeeds, nothing is mirrored, `mirror_freshness` stays NULL, and `review_commitments` presents
-    that to a project leader as a truthful empty portfolio.
-
-    Same `commitment_mirror` subsystem as the missing path, deliberately: both mean "nothing was
-    mirrored and the pointer to the export is why", which is one alert and one operator action.
+    Same `commitment_mirror` subsystem as the missing path: both mean the pointer to the export is
+    wrong, one alert and one operator action.
     """
     before = _degraded_count("commitment_mirror")
     empty = tmp_path / "mounted-but-empty"
@@ -582,13 +494,10 @@ def test_an_export_directory_that_exists_and_holds_nothing_is_reported_too(
 def test_unreadable_files_and_rejected_rows_are_counted_not_only_logged(
     tmp_path: Path,
 ) -> None:
-    """An empty export and an export that parsed to nothing are different facts.
+    """Unreadable files and rejected rows are counted, not only logged.
 
-    Both totals had a `logger.warning` and no series, which is the `deliver_redaction` shape: a
-    warning nobody alerts on is visible only to a person already reading the log of the pod they
-    already suspect. And the two failures need different operator actions — one is the pointer to
-    the export, the other is the export itself — so they get different subsystems rather than a
-    message an alert cannot read.
+    They need a different operator action from a wrong export path, so they get a different
+    subsystem.
     """
     before_export = _degraded_count("commitment_export")
     before_mirror = _degraded_count("commitment_mirror")
@@ -612,12 +521,10 @@ def test_unreadable_files_and_rejected_rows_are_counted_not_only_logged(
 
 
 def test_the_commitment_cursor_does_not_share_a_row_with_the_eln_sync() -> None:
-    """`sync_cursors` is keyed on the source name alone, and nothing forbids both halves.
+    """The commitment cursor does not share a row with the ELN sync.
 
-    A manifest may declare `ingest:` and `commitments:` — the model requires *at least* one — and
-    the mirror stores wall-clock now. The next ELN sync would load that and fetch only entries newer
-    than it, silently skipping every unread entry: the exact failure `ingest/eln/cursor.py` argues
-    cannot happen, under an assumption of one writer per source.
+    `sync_cursors` is keyed on source name, and one manifest may declare both `ingest:` and
+    `commitments:`; a shared row would make the ELN sync skip unread entries.
     """
     source = inspect.getsource(commitment_sync)
     assert 'f"{source}:commitments"' in source, (
@@ -627,24 +534,11 @@ def test_the_commitment_cursor_does_not_share_a_row_with_the_eln_sync() -> None:
 
 
 def test_cancelling_a_mirror_stops_it_instead_of_skipping_the_source_in_flight() -> None:
-    """A cancel must end the run, and the skip-one-source clause is exactly where that can be lost.
+    """Cancelling a mirror stops it instead of skipping the source in flight.
 
-    `eln_sync.py` already carries this guard and the measurement behind it; this loop is the other
-    reject-and-continue drain and it shipped with a *wider* catch and none. Temporal delivers a
-    workflow cancellation to the awaiting `execute_activity` as an `ActivityError` whose cause is
-    `temporalio.exceptions.CancelledError` — the same exception the clause catches to drop one
-    broken export. Absorbed, `cancel` becomes "book whichever source is in flight as a zero-result
-    failure and carry on": measured before the fix, the run mirrored the remaining source after the
-    cancel and ended COMPLETED, so an operator cancelling a mirror got no cancellation, no failure,
-    and a report that reads as a healthy pass with one broken source.
-
-    Driven on the **real-time** server for `start_local_env_or_skip`'s reason: this is a wall-clock
-    event reaching a run that is still going, and time skipping would fast-forward the in-flight
-    activity instead of letting the cancel arrive during it.
-
-    Asserted on the run's *status*, because the failure being pinned is a run that ends
-    successfully, and on the source *after* the cancelled one, because the harm is the work that
-    happened after the cancel rather than the exception that did not.
+    A workflow cancel reaches `execute_activity` as an `ActivityError` caused by `CancelledError`,
+    which the per-source catch must re-raise. Driven on the real-time server so the cancel arrives
+    during the activity. Asserted on the run status and on the source after the cancelled one.
     """
     import contextlib
     from typing import Any
@@ -706,15 +600,10 @@ def test_cancelling_a_mirror_stops_it_instead_of_skipping_the_source_in_flight()
 
 
 async def test_a_page_of_the_portfolio_says_how_much_of_it_is_a_page() -> None:
-    """40 outstanding, 25 returned, and the answer used to say only "the outstanding commitments".
+    """A page of the portfolio says how much of it is a page.
 
-    The cost is a portfolio-risk answer: "which programmes are at risk" built over the 25 soonest
-    deadlines and presented as the whole book. The tool's docstring reasons carefully that an empty
-    list has two meanings and distinguishes them — and was blind to the count ambiguity beside it,
-    which is the same class one field over.
-
-    `limit_applied` is the other half: `outstanding` clamps to 200, so a caller asking for 1,000
-    silently got 200 and could not tell that from a programme with 200 commitments.
+    Otherwise a risk answer built over the soonest deadlines reads as the whole book.
+    `limit_applied` exposes the 200-row clamp on `outstanding`.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -740,11 +629,10 @@ async def test_a_page_of_the_portfolio_says_how_much_of_it_is_a_page() -> None:
 
 
 async def test_the_review_tool_says_which_of_its_two_silences_is_biting() -> None:
-    """`review_commitments` carried the mirror caveat in prose only, and the count in nothing.
+    """`review_commitments` says which of its two silences applies.
 
-    Both are now on the payload: the empty-versus-never-mirrored distinction its docstring already
-    argued for, and the page-versus-population one it did not. A `computed_field`, so it survives
-    `model_dump()` — the lesson `FingerprintSearch.verdict` records.
+    Empty versus never-mirrored, and page versus population, are on the payload as a
+    `computed_field`, so they survive `model_dump()`.
     """
     await migrated_db_or_skip()
     await _clean()

@@ -1,9 +1,8 @@
 """Bindings: a value an artefact takes verbatim from a stored tool result, with its provenance.
 
-`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`. The pure half — the RFC 6901
-pointer and the shape a `$bind` may take where — runs anywhere; everything that reads the session's
-stored results runs against a real database (`tests/pg.py`), because the session-scoped link join
-is the authorization and a double would only prove the double consistent with itself.
+The pure half (the RFC 6901 pointer, and the shapes a `$bind` may take where) runs anywhere;
+reading the session's stored results runs against a real database (`tests/pg.py`), because the
+session-scoped link join is the authorization.
 """
 
 import asyncio
@@ -400,10 +399,10 @@ def test_a_swept_result_reads_null_with_a_reason_and_the_rest_still_reads(stored
 def test_a_revision_carrying_a_swept_binding_unchanged_is_accepted_and_reads_null(
     stored: str,
 ) -> None:
-    """One expired cell must not block every whole-spec revision.
+    """A revision carrying a swept binding unchanged is accepted and reads `null`.
 
-    A binding copied unchanged from the parent is kept, reading `null` with `ok: false` — even at a
-    position (a structure property) a writer may not put a literal `null` in. A *new* binding to the
+    One expired cell must not block every whole-spec revision. A binding copied from the parent
+    reads `null` with `ok: false`, even where a literal `null` is not allowed; a new binding to the
     swept ref is refused naming that cause, and a ref the session never held is refused as such.
     """
     _, ref = _sweepable(stored)

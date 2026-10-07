@@ -1,12 +1,8 @@
 """Draining a bulk reaction corpus out of a warehouse and into the label index.
 
-The whole path is exercised offline against a fake driver — the same way the warehouse ELN shipped
-and was proved before any tenant existed. What that buys is that when the real Pistachio table
-arrives, the only thing that has to be right is the column names in one YAML file.
-
-The property this file is really about is the *absence* of an ingest half. Five paths in this tree
-assume an ingest source is one site's ELN, and each breaks on a corpus of this size; the last test
-here is the assertion that keeps them out of its way.
+Runs offline against a fake driver, so a real table only needs correct column names in one YAML
+file. The corpus must never become an ingest source: ingest paths assume one site's ELN and do
+not scale to a corpus of this size.
 """
 
 import asyncio
@@ -130,27 +126,17 @@ async def test_the_drain_pages_by_keyset_and_records_what_it_reads() -> None:
 async def test_a_field_the_source_supplied_and_the_drain_cannot_read_is_counted(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A NULL nobody counted, in a report whose own field description says "Counted, never silent".
+    """A field the source supplied but `_number` cannot read is counted, not silently NULLed.
 
-    `_number` correctly refuses to coerce an unreadable value to zero — zero is a real temperature
-    and a real yield — and then lost it with no counter of any kind. Measured over eleven realistic
-    corpus cells, eight became `NULL`: `'60 °C'`, `'60C'`, `'333 K'`, `'60-65'`, `'rt'`, `'reflux'`,
-    `''` and `'1,20'`. `search.py`'s facets filter on `temperature_c`, so a precedent search for a
-    temperature window silently excludes every row whose column was written with a unit, and
-    `CorpusCoverage`'s verdict is about *labelling* coverage rather than field coverage, so nothing
-    in the answer says so. A site can declare a `transform:`, which is why this is a missing counter
-    and not a weak parser.
-
-    The blank cell is deliberately **not** counted: an empty column is the source recording nothing,
-    and putting the ordinary case in this counter would make it useless for the thing it is for.
+    Facet search filters on these columns, so an unread unit-bearing cell (`'60 °C'`, `'rt'`)
+    would silently drop rows from a precedent search. A blank cell is the source recording nothing
+    and is deliberately not counted.
     """
     import logging
 
     binding = dict(_BINDING)
-    # No `transform:` on this field, which is where the silence lives: a declared `number`
-    # transform *raises* `TransformError` on an unreadable cell and takes the whole batch with it
-    # (loud, and non-retryable), while a plainly-bound column leaves `_number`'s own `float()` as
-    # the only parser — and that one answered `None` and said nothing.
+    # No `transform:` here: a declared transform raises on an unreadable cell, so the silent case
+    # is a plainly bound column parsed only by `_number`.
     binding["temperature_c"] = {"path": "root.TEMP"}
     rows = _rows()[:2]
     rows[0]["TEMP"] = "60 °C"
@@ -172,12 +158,7 @@ async def test_a_field_the_source_supplied_and_the_drain_cannot_read_is_counted(
 
 
 async def test_a_blank_date_is_the_source_recording_nothing_and_is_not_counted() -> None:
-    """`_date` holds `_number`'s blank-is-absent rule rather than counting an undated row.
-
-    `iso_date` turns `''` into None, and the raw `''` is not None, so an undated row in a text-typed
-    export was counted as a value the drain failed to read — every such row a WARNING telling the
-    site to declare a transform it already had. A garbled date is still counted.
-    """
+    """A blank date is absent, not unreadable, so it is not counted; a garbled date still is."""
     rows = _rows()[:2]
     rows[0]["PUBLICATION_DATE"] = "   "
     rows[1]["PUBLICATION_DATE"] = ""
@@ -191,13 +172,10 @@ async def test_a_blank_date_is_the_source_recording_nothing_and_is_not_counted()
 async def test_the_corpus_page_runs_its_patterns_under_one_page_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The per-cell `regex` bound does not compose, so the drain has to open the page's own.
+    """The corpus page runs its transform patterns under one page-wide regex budget.
 
-    `_record` runs a site's transforms on every bound field of up to `corpus_page_size` rows, and
-    with no `pattern_budget()` open `_cell_budget` handed every cell the whole per-cell timeout:
-    a slow-but-completing pattern was minutes of synchronous CPU the activity could only time out
-    on, with the retry reading the identical page. A page budget too small for even an honest
-    pattern is what shows the bound is in force — before the fix this page drained cleanly.
+    The per-cell bound does not compose across a page; a budget too small for an honest pattern
+    shows the page bound is in force.
     """
     from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError
 
@@ -262,10 +240,7 @@ async def test_a_label_the_corpus_carries_is_recorded_and_marked_as_the_corpus_c
     assert rows["p3"].named_reaction is None
     assert rows["p3"].method is None
     assert rows["p3"].labeller_version is None
-    # And it is `None`, not the string "None". `as_text` is `str()` for everything, so a NULL
-    # column reached the model as a four-character name until this test caught it — after
-    # which every unclassified patent reaction would have been counted in frequency tables as
-    # a named reaction called "None".
+    # A NULL column is `None`, not the string "None", which would count as a named reaction.
     assert rows["p3"].rxno_id is None
 
 
@@ -297,14 +272,8 @@ def test_the_shipped_pistachio_manifest_binds_and_declares_what_it_carries() -> 
 def test_one_source_carries_both_seams_onto_the_same_table() -> None:
     """A corpus and a vector index are two questions of one table, not two sources.
 
-    `vector:` ranks by embedding similarity — "find me reactions that read like this one" — and
-    cannot answer *which ligand*, *as what* or *under what conditions*, because those are
-    properties of the recipe and an embedding is not a queryable decomposition of it. `corpus:` is
-    drained into the label index, which can.
-
-    They share a connection and nothing else, and the source declares exactly one `retrieve:`
-    callable — which is why `corpus_sources()` reads the manifest rather than asking what the built
-    retrieve half is an instance of. This is the assertion that keeps that true.
+    `vector:` ranks by similarity; `corpus:` is drained into the queryable label index. They share
+    a connection only, and the source declares exactly one `retrieve:` callable.
     """
     binding = load_binding(discovered()["pistachio"].config["binding"])
     assert binding.vector is not None
@@ -315,12 +284,8 @@ def test_one_source_carries_both_seams_onto_the_same_table() -> None:
 def test_a_reaction_corpus_never_becomes_an_ingest_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The assertion that keeps `read_corpus` and the O(n²) clustering away from this corpus.
-
-    `durable/memory_jobs.py::read_corpus` fetches *every* reaction from every active ingest half
-    into the worker heap, and `memory/similarity.cluster_by_similarity` is O(n²) over the result.
-    Pistachio declares no ingest half, so neither is ever reached — and this is what makes that a
-    checked property rather than a comment somebody could delete.
+    """A reaction corpus declares no ingest half, so `read_corpus` and O(n²) clustering never see
+    it.
     """
     monkeypatch.setattr(settings, "data_sources", "graph,pistachio")
     assert "pistachio" not in active_ingest_source_names()
@@ -352,14 +317,10 @@ def _load_seq_warehouse() -> KeysetWarehouse:
 
 
 async def test_a_null_in_the_pagination_column_never_becomes_the_string_none() -> None:
-    """`as_text` is `str()`, so a NULL cursor value resumed the next page at `> 'None'`.
+    """A NULL pagination value never becomes the string "None" as the next page's cursor.
 
-    The identical defect `_field` documents and fixes, on the line that decides where the next page
-    starts. `"None"` is truthy, so the `or key` fallback never fired either, and the following
-    statement asked the warehouse for every key sorting *above* those six characters — silently
-    dropping `A100` and `B200`, which on a release keyed by digits or early letters is most of it.
-    A cursor that cannot advance holds its position instead, which is what makes the workflow's
-    "no cursor advance" guard fire and name the mis-declared `order_by`.
+    That would resume at `> 'None'` and silently skip keys sorting below it; a cursor that cannot
+    advance holds its position so the "no cursor advance" guard fires.
     """
     index, warehouse = InMemoryLabelIndex(), _load_seq_warehouse()
     binding = CorpusBinding.model_validate(_LOAD_SEQ_BINDING)
@@ -376,13 +337,7 @@ async def test_a_null_in_the_pagination_column_never_becomes_the_string_none() -
 
 
 async def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
-    """A row with no key is skipped as a precedent — the drain must still get past it.
-
-    The cursor was only written for rows that *had* a key, so a keyless row at the end of a page
-    left it where it was, and the next page returned that same row: a drain wedged permanently by a
-    row it was never going to record. Advancing is read from the pagination column alone, which is
-    the only column the resume predicate compares.
-    """
+    """The cursor advances past a keyless row the drain skips, or the drain wedges on it forever."""
     rows = _load_seq_rows()
     rows[1]["REACTION_ID"] = None  # the row `_record` refuses for want of a key
     index = InMemoryLabelIndex()
@@ -396,14 +351,9 @@ async def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
 
 
 async def test_every_recorded_reaction_is_fingerprinted_under_its_source_and_id() -> None:
-    """The half that did not exist: a bulk source becomes searchable by transformation.
+    """Every recorded reaction is fingerprinted under its `(source, id)` pair.
 
-    `record_for_reaction` had exactly one caller in the tree — the ELN path — so a corpus drained
-    into `reaction_species` and `corpus_molecules` could be searched for *a molecule* and never for
-    *a reaction*. The key is the `(source, id)` pair, the same shape
-    `D-2026-08-27-a-fingerprint-is-keyed-by-its-source` gave `reaction_fingerprints`: it is what
-    lets a hit join to `reaction_labels` and what keeps two sources sharing an entry id from
-    collapsing onto one row.
+    The pair joins a hit to `reaction_labels` and keeps two sources sharing an id apart.
     """
     index = InMemoryLabelIndex()
     reactions = InMemoryFingerprintStore()
@@ -424,15 +374,10 @@ async def test_every_recorded_reaction_is_fingerprinted_under_its_source_and_id(
 
 
 async def test_the_indexed_reaction_drops_its_agents_so_a_solvent_swap_cannot_dominate() -> None:
-    """The label the bits are taken over is `reactants>>products`, never the three-part form.
+    """The indexed label is `reactants>>products`, never the three-part form.
 
-    `DrfpEncoder` folds the agent slot onto the reactants, so keeping it would encode the solvent
-    as part of the transformation — the effect measured on the ELN path at 0.82 for one coupling in
-    THF against the same coupling in 2-MeTHF, and 1.00 once excluded. It is also what makes
-    `reaction_definition()`'s own `agents-excluded` token true of these rows.
-
-    Asserted on the *stored label* rather than on the bits, because that is the string a reader
-    sees and the one a future change would silently widen.
+    DRFP folds agents onto reactants, so a solvent swap would dominate similarity. Asserted on the
+    stored label, the string a future change would silently widen.
     """
     index = InMemoryLabelIndex()
     reactions = InMemoryFingerprintStore()
@@ -449,13 +394,7 @@ async def test_the_indexed_reaction_drops_its_agents_so_a_solvent_swap_cannot_do
 
 
 async def test_a_reaction_with_no_fingerprint_is_counted_rather_than_failing_the_page() -> None:
-    """A degenerate transformation loses similarity, never the page beside it.
-
-    The same asymmetry `CorpusMolecules.add_many` documents for structures: a bulk extract's
-    fiftieth row may be unusable, and refusing the page over it would lose every good precedent
-    with it. The reaction row is written either way and still answers every facet query, so the
-    count is what keeps the loss visible instead of implied.
-    """
+    """A reaction with no fingerprint is counted, and the rest of the page is still written."""
     rows = _rows()
     # Identical on both sides: DRFP's symmetric difference is empty, so there are no features
     # to fold and `drfp_bitstring` refuses rather than storing meaningless bits.
@@ -493,19 +432,10 @@ async def test_the_drain_without_a_reaction_store_writes_no_fingerprints_and_sti
 
 @pytest.mark.anyio
 async def test_corpus_reactions_is_searchable_with_no_search_code_of_its_own() -> None:
-    """The payoff for giving the table the columns `reaction_fingerprints` has.
+    """`corpus_reactions` is searchable through the table-parameterised fingerprint store.
 
-    `PostgresFingerprintStore` is table-parameterised, so pointing it at `corpus_reactions` buys
-    Tanimoto ranking over the HNSW index without a line of new SQL — the property `corpus_molecules`
-    was built for, applied to the other half. Driven against the real database rather than the
-    in-memory double, because the thing under test is the migration and the index, and both of
-    those are exactly what a doubled store cannot exercise.
-
-    **Two sources hold the same reaction id here, and that is the point of writing it this way.**
-    An earlier version wrote `id="pistachio:s1"` with no source — a leftover from the draft that
-    composed the key into one string — so it exercised neither the `(source, id)` primary key nor
-    the `source` column the hit has to carry for `Facet.reaction_keys` to narrow on it. Ranking two
-    same-id rows from different sources is what proves the key is the pair.
+    Driven against the real database because the migration and the HNSW index are under test. Two
+    sources hold the same reaction id, proving the primary key is the `(source, id)` pair.
     """
     await migrated_db_or_skip()
     store = corpus_reactions()
@@ -523,10 +453,8 @@ async def test_corpus_reactions_is_searchable_with_no_search_code_of_its_own() -
     assert (hits.hits[0].source, hits.hits[0].id) == ("pistachio", "s1")
     assert hits.hits[0].similarity == pytest.approx(1.0)
 
-    # The collision the pair key exists to prevent: both rows survive, told apart by source.
-    # Asserted over `all_records` rather than over the hits, because the esterification is
-    # legitimately below the similarity floor — a ranking that filtered it out would prove the
-    # threshold works, not that the second row exists.
+    # Both same-id rows survive, told apart by source; read via `all_records` because the
+    # esterification is legitimately below the similarity floor.
     stored = {(r.source, r.id) for r in await store.all_records() if r.id == "s1"}
     assert stored == {("pistachio", "s1"), ("other-corpus", "s1")}
 
@@ -534,14 +462,10 @@ async def test_corpus_reactions_is_searchable_with_no_search_code_of_its_own() -
 def test_an_unparseable_species_is_still_fingerprinted_which_is_why_only_one_error_is_caught() -> (
     None
 ):
-    """The measurement behind `_collect_fingerprint` catching `FingerprintInputError` alone.
+    """Why `_collect_fingerprint` catches `FingerprintInputError` alone.
 
-    The molecule and reaction halves fail differently and the asymmetry is not obvious:
-    `standard_smiles` returns a string RDKit cannot parse *unchanged*, so DRFP shingles it and
-    yields bits, while `ecfp_bitstring` on the same string raises. Pinned here because the drain's
-    exception handling is written to that fact — catching `InvalidSmilesError` beside it would be a
-    guard for a case that cannot occur, and a later change to `standard_smiles` should turn this red
-    rather than leave a silently unreachable branch.
+    `standard_smiles` returns unparseable input unchanged, so DRFP still yields bits while ECFP
+    raises. A change to `standard_smiles` should turn this red rather than leave a dead branch.
     """
 
     async def _run() -> None:
@@ -570,9 +494,7 @@ def test_an_unparseable_species_is_still_fingerprinted_which_is_why_only_one_err
 def _outcomes(source: str) -> set[str]:
     """Every `outcome` this source rendered a series for.
 
-    The partition is a claim about the whole label set, so asserting it needs the set: a check that
-    one unwanted word is absent passes for every *other* unwanted word, which is how a third
-    outcome got past the first version of the test below.
+    The partition is a claim about the whole label set, so the whole set is asserted.
     """
     found = set()
     for line in METRICS.render().splitlines():
@@ -585,12 +507,7 @@ def _outcomes(source: str) -> set[str]:
 
 
 def _series(name: str, **labels: str) -> float:
-    """One labelled series' value, read out of the rendered exposition.
-
-    Read from the text rather than from a private dict, for the reason
-    `tests/test_datapath_observability.py` states about the same read: the exposition *is* the
-    contract with Prometheus, and a series that renders wrong is a series nobody can alert on
-    however right the in-memory number is.
+    """One labelled series' value, read from the rendered exposition, the contract with Prometheus.
     """
     wanted = [f'{label}="{value}"' for label, value in labels.items()]
     for line in METRICS.render().splitlines():
@@ -601,16 +518,10 @@ def _series(name: str, **labels: str) -> float:
 
 
 def _baseline(name: str, **labels: str) -> float:
-    """The same reading taken *before* the drain under test, with absence read as zero.
+    """The same reading taken before the drain under test, with absence read as zero.
 
-    A counter nothing has observed yet is genuinely absent from the exposition, so `_series`
-    raising on it is right after an act and wrong before one. Both tests below used to assert the
-    *absolute* reading of a process-wide monotonic counter, which holds exactly once: driven a
-    second time in one process — two `pytest.main` sessions, the shape a repeated or re-entrant run
-    takes — `test_the_drain_books_the_rows_it_read...` and
-    `test_the_series_are_per_source...` both failed, having doubled. They pass in CI because the
-    file is collected once, and a test that only passes on the first pass is asserting the
-    registry's history rather than this drain's arithmetic.
+    Counters are process-wide and monotonic, so tests assert deltas; absolute readings fail on a
+    second run in the same process.
     """
     try:
         return _series(name, **labels)
@@ -619,17 +530,10 @@ def _baseline(name: str, **labels: str) -> float:
 
 
 async def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() -> None:
-    """The corpus drain was the one ingest pass emitting nothing, so a healthy feed read flat.
+    """The drain books the rows it read, and `ingested` and `rejected` partition them.
 
-    Driven over the page that holds *both* populations — one row recorded, one refused for want of
-    a product — because a page of only good rows cannot tell a partition from a coincidence. The
-    two series must sum to `read`: `_record`'s verdict is binary, so a third population appearing
-    here would mean a row was counted twice or not at all.
-
-    `rejected`, not `skipped`, and the vocabulary is the assertion: in
-    `ingest/documents/sync.py::_record_pass`'s split a row reached and not turnable into a record is
-    `rejected`, while `skipped` is one the pass deliberately passed over. The corpus has no second
-    population, so a `skipped` series here would be a claim about a population that does not exist.
+    The page holds one good and one refused row so a partition cannot be a coincidence. `rejected`
+    is a reached row that could not become a record; there is no `skipped` population here.
     """
     source = "pistachio-metrics-partition"
 
@@ -649,21 +553,13 @@ async def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_the
     # Both pages, so the totals are the whole four-row release rather than the second page.
     assert (ingested, rejected) == (3.0, 1.0)
     assert ingested + rejected == float(first.read + page.read)
-    # **The label set, not the absence of one word.** Written as `outcome="skipped"` not
-    # appearing, this survived the exact mutation `_drained`'s docstring argues against —
-    # adding `unfingerprintable` as a third outcome keeps `ingested + rejected == read` true
-    # and mints no `skipped`, so 18 tests passed while a recorded row sat in two series.
+    # The full label set, not the absence of one word: a third outcome would keep the sum true
+    # while counting a row in two series.
     assert _outcomes(source) == {"ingested", "rejected"}
 
 
 async def test_a_page_that_read_nothing_still_books_a_zero() -> None:
-    """A silent series has to mean the drain did not run, which needs a healthy empty page to book.
-
-    `drain_corpus` returns early when the page is empty, and that return is the one a scheduled
-    feeder hits every time a source is exhausted. If it booked nothing, "no series" would mean
-    either "the corpus is drained" or "the workflow has not fired since Tuesday" — the same silence
-    the document sync's four early returns were changed for.
-    """
+    """An empty page still books a zero, so a missing series means the drain did not run."""
     source = "pistachio-metrics-empty"
 
     report = await drain_corpus(
@@ -678,11 +574,7 @@ async def test_a_page_that_read_nothing_still_books_a_zero() -> None:
 def test_the_series_are_per_source_which_is_what_the_aggregated_outcome_cannot_say() -> None:
     """Two corpora drained in one run are two label sets, not one sum.
 
-    `ReactionCorpusWorkflow` accumulates `CorpusSyncState`'s counters across every source it
-    drains and returns a single `CorpusReport`, which carries no `source` field — so
-    `CorpusSyncOutcome` is one number for the whole run whatever its docstring says. The counter is
-    booked inside `drain_corpus`, which is called once per source per page and is handed the name,
-    so the per-source answer exists on the metric without any change to that model.
+    `CorpusReport` carries no source, but `drain_corpus` is called per source, so the metric can.
     """
 
     async def _run() -> None:

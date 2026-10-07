@@ -1,20 +1,9 @@
-"""The shared `to_thread` pool is sized for what a turn can *fan out to*, not for what it is.
+"""The shared `to_thread` pool is sized for what a turn can fan out to, not for what it is.
 
-`core/executor.py` exists because `asyncio.to_thread` is one pool per process and this system
-spends it on four unrelated things at once — token validation on every request, the retrieval and
-knowledge-graph legs, embeddings, attachment parses. Its own docstring records the measurement that
-motivated it, and `tests/test_concurrency_claims.py` holds the two claims that came out of it: a
-short call must not queue behind a full admission cap, and the installed pool must be wider than
-the caps that can fill it.
-
-**This file is about the number those two tests take as given.** Both compute
-`service_max_concurrent_turns + attachment_max_concurrent_parses` — the value `api/app.py` passes —
-and then prove the pool is wider than *that*. Neither could see that the number is not the ceiling:
-an admitted turn may run `agent_max_parallel_tool_calls` tool calls at once, and several of the
-tools a turn reaches offload, so the caps admit `turns x parallel + parses` simultaneous offloads
-and the pool was sized for `turns + parses`. A test that saturates with the sum and then asserts
-the sum fits is self-consistent whatever the real fan-out is; the counterfactual below is what makes
-the difference visible.
+One pool serves token validation, retrieval, embeddings and attachment parses. An admitted turn
+may run `agent_max_parallel_tool_calls` offloading tool calls at once, so the caps admit
+`turns x parallel + parses` offloads. `tests/test_concurrency_claims.py` takes the reservation as
+given; this file checks the reservation itself, with a counterfactual at the narrower width.
 """
 
 import asyncio
@@ -27,11 +16,8 @@ import pytest
 from chemclaw.core.config import settings
 from chemclaw.core.executor import front_door_reserved, install_default_executor
 
-#: How long any wait in this file may take before it is a failure rather than a wait. Nothing here
-#: is *measured* against it: every wait below ends on an event the code under test produces, and
-#: this only bounds how long a broken pool — one that never starts an offload, or never runs the
-#: short call — can hang the suite. It sits far from the passing case (milliseconds) on purpose,
-#: which is lesson 59's rule: a deadline separates two outcomes, not two speeds.
+#: A backstop, not a measurement: every wait ends on an event the code produces, and this only
+#: bounds how long a broken pool can hang the suite. Far from the passing case on purpose.
 _BACKSTOP_SECONDS = 30.0
 
 
@@ -51,36 +37,18 @@ class _Saturation:
 def _short_call_under_fan_out(*, pool_reserved: int, offloads: int) -> _Saturation:
     """Fill a pool sized for `pool_reserved` with `offloads` parses, then submit one tiny call.
 
-    The tiny call stands in for `api/auth.py`'s `await asyncio.to_thread(validate_token, ...)`,
-    which every authenticated request makes. What is returned is not how long it waited but
-    **whether it could run at all while every offload was still in flight** — the property the
-    pool's width decides, observed rather than inferred from a clock.
+    The tiny call stands in for `api/auth.py`'s token validation. What is returned is whether it
+    could run while every offload was still in flight, observed rather than timed: a clock measured
+    a race with the event loop's scheduling, not the pool's width.
 
-    **Why not a clock, which is what this used to be.** It timed the short call and asserted the
-    narrow arm waited more than half a block, and CI kept sampling the narrow arm at **1.1 ms** —
-    most recently on PR #469 and on `main` run 36247322939, green on rerun. The offloads ended on a
-    wall-clock deadline, while the short call was submitted whenever the event loop next got the GIL
-    back from twenty-odd threads contending for it — so what the arm measured was a race between the
-    fan-out draining and the loop being scheduled, which the pool's width does not decide. Measured
-    in the gate container (8 cores, the old width, 98 offloads, twelve runs per arm): the lag from
-    "the pool is saturated" to "the short call is submitted" was **81-416 ms** idle and
-    **570-1,462 ms** with twelve CPU-spinning processes beside it, the queue in front of the call
-    fell from **52-72** items to as few as **12**, and the call's wait from ~0.9-1.3 s to
-    **197 ms**. A runner loaded further than that reaches an empty queue, and 1.1 ms is what an
-    empty queue looks like. Best-of-five, then the median, then a start semaphore each narrowed
-    the race and none removed it, because each still read the answer off elapsed time.
+    Every offload holds its thread on a gate. The short call is submitted while the held count is
+    the whole truth about the pool:
 
-    **So every offload now holds its thread on a gate, not on a sleep.** Nothing finishes until the
-    gate opens, the count of held threads is read from the loop without borrowing one, and the short
-    call is submitted while that count is the whole truth about the pool. Then:
+    - if the fan-out holds every thread, the short call runs only after the gate opens and reports
+      it open;
+    - if a thread is free, the short call is awaited before the gate opens and reports it shut.
 
-    - if the fan-out holds **every** thread, the short call cannot run until the gate opens — it
-      reports the gate open when it finally does, which is its own record of having queued;
-    - if a thread is **free**, the short call is awaited *before* the gate opens, so it can only
-      complete by running beside the held fan-out, and it reports the gate still shut.
-
-    Both outcomes are decided by the width and by nothing about the machine's speed. The only
-    timing left is `_BACKSTOP_SECONDS`, which a correct run never approaches.
+    Only `_BACKSTOP_SECONDS` remains as timing, which a correct run never approaches.
     """
 
     async def scenario() -> _Saturation:
@@ -126,11 +94,9 @@ def _short_call_under_fan_out(*, pool_reserved: int, offloads: int) -> _Saturati
 
 
 def test_the_front_door_reserves_for_the_fan_out_a_permit_licenses() -> None:
-    """A turn permit is a licence to run `agent_max_parallel_tool_calls` offloads, not one.
+    """A turn permit licenses `agent_max_parallel_tool_calls` offloads, not one.
 
-    Asserted as the relation rather than as today's numbers: the three settings all move, and a
-    transcribed 98 would be stale the first time a cap is tuned — which is the drift the whole
-    `core/executor.py` docstring is written against.
+    Asserted as the relation, since the three settings all move.
     """
     expected = (
         settings.service_max_concurrent_turns * settings.agent_max_parallel_tool_calls
@@ -147,18 +113,11 @@ def test_the_front_door_reserves_for_the_fan_out_a_permit_licenses() -> None:
 
 
 def test_a_short_call_queues_at_the_old_width_and_does_not_at_this_one() -> None:
-    """The counterfactual, because the width only matters against the load it was wrong about.
+    """A short call queues at the old width and does not at this one.
 
-    Both arms run the *same* fan-out — what the front door's own caps admit — and differ only in
-    how wide the pool installed under it is. The first arm is the shipped sizing and is what a
-    token validation waited behind; the second is `front_door_reserved()`.
-
-    Asserted as the property rather than as a duration (`_short_call_under_fan_out` says why the
-    duration kept lying): at the old width the fan-out holds every thread and the short call runs
-    only once it lets go; at this width the fan-out leaves threads free and the short call runs
-    beside it. Measured on a 4-core sandbox at 96 offloads of 200 ms, the difference used to be
-    762.7 ms against 123.2 ms worst case — which is what the queueing costs, and what this now
-    proves happens rather than how long it takes.
+    Both arms run the same fan-out the front door's caps admit and differ only in pool width. At the
+    old width the fan-out holds every thread; at `front_door_reserved()` threads stay free and the
+    short call runs beside it. Asserted as the property, not a duration.
     """
     offloads = front_door_reserved()
     old_width = settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses
@@ -183,11 +142,9 @@ def test_a_short_call_queues_at_the_old_width_and_does_not_at_this_one() -> None
 
 
 def test_the_installed_pool_is_the_reserved_width_plus_the_headroom() -> None:
-    """The headroom is what a short call actually lands in, so it must survive the fan-out term.
+    """The installed pool is the reserved width plus the headroom.
 
-    Pinned here as well as in `tests/test_concurrency_claims.py` because that file asserts it
-    against the sum: if a future change made `reserved` mean something the headroom is folded
-    into, the property would be lost where it is now stated.
+    The headroom is what a short call lands in, so it must stay outside the fan-out term.
     """
 
     async def install() -> int:
@@ -199,11 +156,9 @@ def test_the_installed_pool_is_the_reserved_width_plus_the_headroom() -> None:
 
 
 def test_a_cap_change_moves_the_reservation_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The number is read from settings at call time, not frozen at import.
+    """The reservation is read from settings at call time, not frozen at import.
 
-    An operator raising `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` must widen the pool with it — that
-    is the whole reason the reservation is derived from the caps rather than written down, and a
-    module-level constant would silently keep the old width.
+    Raising `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` must widen the pool with it.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns", 3)
     monkeypatch.setattr(settings, "agent_max_parallel_tool_calls", 5)

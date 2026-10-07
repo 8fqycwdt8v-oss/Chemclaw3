@@ -1,9 +1,8 @@
 """The organisation's skills: read by every turn, written by no turn, revertible by an admin.
 
-`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` puts this tier behind the privileged
-role because it acts on everybody, and
-`D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert` owes it the rollback property
-`skills/` gets from being git-resident. These are those two claims driven rather than restated.
+The tier sits behind the privileged role because it acts on everybody
+(`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`), and keeps versions so a bad
+skill can be reverted without a git commit.
 """
 
 import asyncio
@@ -94,12 +93,10 @@ def test_one_organisation_skill_reaches_every_chemists_turn(store: InMemoryStore
 
 
 def test_the_tier_needs_a_store_and_not_an_actor(store: InMemoryStore) -> None:
-    """Mounted for a turn with no ambient identity, unlike the two per-actor routes beside it.
+    """The tier is mounted for a turn with no ambient identity.
 
-    The organisation's judgment belongs to nobody, so there is no namespace to derive from an actor
-    and no reason to withhold it from a turn that has none. `agent/scratchpad.py` mounts it outside
-    the `and actor` branch precisely so this is true, and an absence is not a decision until
-    something asserts it.
+    The organisation's judgment belongs to nobody, so `agent/scratchpad.py` mounts it outside the
+    `and actor` branch.
     """
     from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT
     from chemclaw.agent.scratchpad import MEMORY_ROOT
@@ -119,9 +116,8 @@ def test_the_tier_needs_a_store_and_not_an_actor(store: InMemoryStore) -> None:
 def test_no_turn_may_write_the_organisations_tier(store: InMemoryStore) -> None:
     """`SkillsReadOnlyRefusal` on all eight write verbs, sync and async alike.
 
-    Eight rather than four because `StoreBackend`'s async verbs are native rather than `to_thread`
-    wrappers — the asymmetry the personal tier was caught by, where three async holes sat beside one
-    working refusal and a spot check passed.
+    `StoreBackend`'s async verbs are native rather than `to_thread` wrappers, so each must be
+    checked.
     """
     backend = _backend(store)
 
@@ -147,14 +143,10 @@ def test_no_turn_may_write_the_organisations_tier(store: InMemoryStore) -> None:
 def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(
     store: InMemoryStore,
 ) -> None:
-    """Derived from the surface, not from a written list, because the write half grows.
+    """Every method this tier exposes is either a read or a refusal, derived from the surface.
 
-    The same derivation `tests/test_local_skills.py` runs over the other stored tier, and for its
-    reason: deepagents 0.7 added `delete` to the protocol and the reviewed tree inherited a working
-    one until a derived test caught it. Both tiers now share
-    `agent/skill_store.PermittedStoreBackend`, so this is the second reader of one surface rather
-    than a second list to keep in step — but it is run twice on purpose, because what each tier
-    *inherits* is what a turn can reach and a subclass could diverge.
+    Upstream can add write verbs (deepagents added `delete`), so the set is derived, not listed. Run
+    for each tier sharing `PermittedStoreBackend` because a subclass could diverge.
     """
     from deepagents.backends import StoreBackend
     from deepagents.backends.protocol import BackendProtocol
@@ -210,13 +202,10 @@ def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(
 
 
 def test_a_profile_that_narrows_to_nothing_reaches_no_body(store: InMemoryStore) -> None:
-    """The gate is at the backend, not only in the prompt — the hole this tier shipped without.
+    """A profile that narrows to nothing reaches no body.
 
-    `docs/planning/BACKLOG.md` recorded the personal tier narrowed in the prompt alone: `ls`
-    returned the names and `read_file` returned the bodies to a profile that advertised none. A
-    tier acting on *everyone* with the same gap would make the `skills-removed.yaml` control arm
-    meaningless for every deployment that published one, so this drives the predicate rather than
-    the listing.
+    The gate is at the backend, not only in the prompt, so `ls` and `read_file` honour it too;
+    otherwise a `skills-removed.yaml` control arm would be meaningless.
     """
     asyncio.run(save_org_skill(store, "house-workup", _BODY, activated_by="admin-oid"))
     backend = org_skills_backend(store, lambda _name: False)
@@ -267,11 +256,9 @@ def test_the_row_cap_is_refused_rather_than_evicted(store: InMemoryStore) -> Non
 def test_a_bad_org_skill_is_one_call_away_from_the_bytes_that_stood_before(
     store: InMemoryStore,
 ) -> None:
-    """The rollback property `skills/` gets from git, driven on the tier that has no commits.
+    """A bad org skill is reverted to the exact bytes that stood before.
 
-    **Byte-identity is the assertion that matters.** A test checking only that the name resolves
-    after a revert passes on a re-authoring — an administrator retyping last week's text — which is
-    precisely what the version namespace exists to make unnecessary.
+    Byte identity is the assertion: name resolution alone would pass on a re-authored copy.
     """
     good = _body("house-workup", "the one that worked")
     bad = _body("house-workup", "the one that did not")
@@ -330,11 +317,10 @@ def test_retiring_an_org_skill_leaves_its_history(store: InMemoryStore) -> None:
 
 
 def test_the_version_history_is_evicted_rather_than_refused(store: InMemoryStore) -> None:
-    """A cap on history must never stop a fix being published — the opposite of the row cap.
+    """Version history is evicted rather than refused, so a fix can always be published.
 
-    Oldest-activated goes, which is `scratchpad.BoundedStoreBackend`'s tiebreak taken for its
-    reason: it is the only ordering the store carries, and the version anybody reverts to is a
-    recent one.
+    Oldest-activated goes first: the only ordering the store carries, and reverts target recent
+    versions.
     """
     original = settings.agent_org_skill_versions_max
     settings.agent_org_skill_versions_max = 2
@@ -355,11 +341,10 @@ def test_the_version_history_is_evicted_rather_than_refused(store: InMemoryStore
 
 
 def test_a_personal_skill_may_not_take_an_organisation_name(store: InMemoryStore) -> None:
-    """Refused in the writer, so both doors into the personal tier have it.
+    """A personal skill may not take an organisation skill's name.
 
-    A personal skill by a name the organisation publishes would never act — `_skills_middleware`
-    puts `/org` after `/mine` and upstream resolves a collision last-source-wins — so writing one is
-    writing judgment that silently does nothing.
+    `/org` resolves after `/mine` and the last source wins, so such a skill would silently never
+    act. Refused in the writer so both routes into the personal tier enforce it.
     """
     asyncio.run(save_org_skill(store, "house-workup", _BODY, activated_by="admin-oid"))
 
@@ -371,11 +356,9 @@ def test_a_personal_skill_may_not_take_an_organisation_name(store: InMemoryStore
 def test_an_organisation_skill_may_take_a_name_a_chemist_already_uses(
     store: InMemoryStore,
 ) -> None:
-    """The asymmetry stated in the other direction, and the collision resolved the stated way.
+    """An organisation skill may take a name a chemist already uses, and it wins.
 
-    An administrator cannot see one person's private vocabulary and must not be blocked by it, so
-    the publication succeeds — and because the order is ascending review depth, it is the
-    organisation's body a turn is handed.
+    An administrator cannot see private names and must not be blocked by them.
     """
     mine = _body("house-workup", "what I do")
     theirs = _body("house-workup", "what we all do")
@@ -437,12 +420,7 @@ def test_the_namespaces_do_not_collide(store: InMemoryStore) -> None:
 
 
 def test_a_key_that_names_no_skill_lists_as_nothing_in_either_tier(store: InMemoryStore) -> None:
-    """Both listings go through one strict parse, so `/SKILL.md` is not a skill named `""`.
-
-    The two tiers each sliced `key[1:-len("/SKILL.md")]` off anything ending in the suffix, so a
-    body at `/SKILL.md` listed as an empty name — a row a route shows and no route can address —
-    while `stored_skill_tools` already refused the same key. One parse now answers for all three.
-    """
+    """Both listings use one strict parse, so a body at `/SKILL.md` is not a skill named `""`."""
     from chemclaw.agent.local_skills import list_local_skills, local_skills_namespace
 
     for namespace in (org_skills_namespace(), local_skills_namespace("alice-oid")):

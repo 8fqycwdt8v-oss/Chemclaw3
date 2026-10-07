@@ -1,13 +1,11 @@
 """The `geometry` artefact kind and the calc-artifact download behind its `source`.
 
-What is pinned: an XYZ block is held to the layout every program writes (count, comment, one
-`El x y z` per atom, known elements, finite coordinates) and to `exhibit_max_atoms` on a write; a
-`source` must name a stored calculation artifact when it is written, by the agent and over REST,
-and an evicted one reads as a missing file rather than a broken artefact; the spec is served with
-absent optionals absent; the export is the XYZ text either way; the diff names whole fields; and
-`GET /calc-artifacts/content` serves the stored bytes under the stored type to any signed-in caller,
-404 for nothing there and 413 above the cap, judged before the read. The Postgres arm proves the
-widened kind constraint (`116_exhibit_geometry_kind.sql`) admits the kind.
+Pinned: an XYZ block follows the standard layout (count, comment, one `El x y z` per atom, known
+elements, finite coordinates) and `exhibit_max_atoms`; a `source` must name a stored calculation
+artifact when written, and an evicted one reads as a missing file; absent optionals stay absent;
+the export is the XYZ text; the diff names whole fields; and `GET /calc-artifacts/content` serves
+stored bytes to any signed-in caller, 404 for nothing and 413 above the cap, judged before the
+read. The Postgres arm proves `116_exhibit_geometry_kind.sql` admits the kind.
 """
 
 import json
@@ -450,11 +448,11 @@ async def test_a_cited_ensemble_or_an_artifact_over_the_download_cap_is_refused(
 async def test_a_structure_cited_must_be_one_this_conversation_was_shown(
     turn: str, structures: InMemoryStructureStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Session scope: an id a calculation here reported is citable; one from elsewhere is not.
+    """A cited structure must be one this conversation was shown.
 
-    `D-2026-10-03-a-cited-structure-is-one-this-conversation-was-shown`. A mention in the agent's
-    own text handed back (a helper's report) is not a report; a revision carrying the cited id
-    forward is accepted without asking again.
+    An id a calculation here reported is citable; one from elsewhere, or only mentioned in the
+    agent's own text, is not. A revision carrying the cited id forward is accepted without asking
+    again.
     """
     from chemclaw.agent.exhibit_tools import revise_exhibit
     from chemclaw.api.tool_results import store_tool_result
@@ -510,11 +508,10 @@ async def test_a_referenced_geometry_reaches_the_turn_note_as_its_address(
 async def test_a_cited_block_over_the_atom_cap_is_refused_on_its_count_line(
     calc_store: InMemoryArtifactStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The count line decides an over-cap block before the rest of the text is split and checked.
+    """A cited block over the atom cap is refused on its count line.
 
-    A cited artifact may be megabytes; refusing it on its atom count after splitting and checking
-    every line spent exactly what the cap is there to save. The refusal names the declared count,
-    which only the first-line read can produce — the whole-block check names the lines it found.
+    Checked before the rest of the text is split, since a cited artifact may be megabytes. The
+    refusal names the declared count, which only the first-line read can produce.
     """
     monkeypatch.setattr(settings, "exhibit_max_atoms", 500)
     big = "100000\nensemble\n" + "C 0 0 0\n" * 20_000

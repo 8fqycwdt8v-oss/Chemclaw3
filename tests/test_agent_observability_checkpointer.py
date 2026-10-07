@@ -1,15 +1,9 @@
-"""A checkpointer outage told the chemist not to retry, and moved no counter at all.
+"""A checkpointer outage is reported as retryable storage trouble, and counted.
 
-The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. `api/runner._classify` decides what a
-person is told from the exception's *type*, and it tests `ConnectionError` and `TimeoutError`.
-`core/db.connection()` translates a pool failure into `ConnectionError` for exactly that reason —
-and the checkpointer runs on its own autocommit pool, deliberately (three measured reasons in
-`agent/checkpointer.py`), which bypasses that translation.
-
-So the one Postgres pool that is not `core/db`'s was the one whose outage produced
-`("internal", False)`: "internal error, do not retry", about the most retryable failure this system
-has. Nothing counted a checkpoint write failure either, and mid-turn that is silent loss of the
-turn's state.
+Decision: `D-2026-08-27-a-refusal-is-not-a-crash`. `api/runner._classify` decides what a person is
+told from the exception type (`ConnectionError`/`TimeoutError`); the checkpointer runs on its own
+pool, bypassing `core/db`'s translation, so `SchemaStampedSaver` translates outages itself and
+counts failed checkpoint writes.
 """
 
 import asyncio
@@ -31,9 +25,8 @@ from chemclaw.core.metrics import METRICS
 def test_the_measurement_that_makes_the_translation_necessary() -> None:
     """`PoolTimeout` is neither of the two types the front door's classifier tests.
 
-    Pinned rather than described, because the whole fix rests on it: if psycopg ever made
-    `PoolTimeout` a `TimeoutError`, the translation would be redundant and this test is where that
-    is noticed instead of the code quietly doing something twice.
+    Pinned because the translation rests on it; if psycopg changes this, the translation is
+    redundant.
     """
     assert not issubclass(psycopg_pool.PoolTimeout, ConnectionError)
     assert not issubclass(psycopg_pool.PoolTimeout, TimeoutError)
@@ -48,10 +41,8 @@ def test_a_failed_checkpoint_write_is_counted_and_retryable(
 ) -> None:
     """The translation, the count, and the answer a chemist ends up with.
 
-    Driven end to end through `_classify` — which this workstream does not edit — because the
-    property that matters is not "a different exception type is raised", it is "the person is told
-    to try again". The saver is constructed with no pool: `aput` is patched at the superclass, so
-    nothing here needs a database to prove what happens when one is unreachable.
+    Driven end to end through `_classify`, because the property is "the person is told to retry".
+    `aput` is patched at the superclass, so no database is needed.
     """
     before = METRICS.value("chemclaw_degraded_total")
 
@@ -88,9 +79,7 @@ async def test_a_working_write_still_stamps_the_channels_and_counts_nothing(
 ) -> None:
     """The guard is a `try` around the existing write, not a change to what it writes.
 
-    `SchemaStampedSaver`'s reason to exist is the channel stamp (`agent/checkpointer.py`), and a
-    guard that quietly stopped stamping would break every mid-turn resume in the fleet without
-    failing anything else.
+    The channel stamp is the saver's reason to exist; losing it would break every mid-turn resume.
     """
     before = METRICS.value("chemclaw_degraded_total")
     seen: list[CheckpointMetadata] = []
@@ -116,15 +105,11 @@ async def test_a_working_write_still_stamps_the_channels_and_counts_nothing(
 def test_a_missing_table_is_not_translated_into_retry_forever(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The catch was `psycopg.Error`, which is two levels wider than the failure it exists for.
+    """A missing table is not translated into retry-forever.
 
-    `core/db.py` catches `OperationalError` at connect and `(PoolTimeout, PoolClosed)` at checkout,
-    and says why a broader test is wrong: "a broad `OperationalError` test first would collapse all
-    of them". `psycopg.Error` takes in `ProgrammingError`, `DataError` and every `IntegrityError`
-    besides — so a pod started against a database where LangGraph's checkpoint tables were never
-    created raised `UndefinedTable`, which became `ConnectionError`, which the front door
-    classified `("storage_unavailable", retryable=True)`: the chemist was told to retry forever a
-    failure that retrying cannot fix.
+    Only pool and connection failures are translated (as in `core/db.py`). A `ProgrammingError` such
+    as `UndefinedTable` must not become a retryable `storage_unavailable`, since retrying cannot fix
+    it.
     """
     assert not issubclass(psycopg.errors.UndefinedTable, psycopg.OperationalError), (
         "the premise of this case: a missing table is a ProgrammingError, not an outage"
@@ -154,15 +139,10 @@ def test_a_missing_table_is_not_translated_into_retry_forever(
 def test_every_statement_on_this_pool_translates_its_outage_not_only_the_write(
     statement: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The translation covered `aput` alone, and the other three run on the same pool.
+    """Every statement on this pool translates its outage, not only the write.
 
-    A `PoolTimeout` on `aget_tuple` is the **load** at the start of a turn, where saturation is at
-    least as likely as at write time, and it reached the front door untranslated: `("internal",
-    False)` — do not retry — about a wait. `aput_writes` and `alist` are the same pool and the same
-    silence.
-
-    Parametrised rather than written three times because the property is "every statement", and a
-    test naming two of three would have been green for the same reason the code was wrong.
+    A `PoolTimeout` on `aget_tuple` (the load at turn start) is as likely as at write time.
+    Parametrised because the property is "every statement".
     """
 
     async def _pool_is_saturated(*_args: Any, **_kwargs: Any) -> Any:

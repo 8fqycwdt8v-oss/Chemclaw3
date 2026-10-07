@@ -1,16 +1,8 @@
 """A parse-child probe that reports the no-egress posture it was *given*, importing nothing.
 
-**Its own module, and that is the entire reason it exists.** `forkserver` pickles a `Process`
-target by reference, so the child imports the module the target lives in — and while this probe
-lived in `tests/test_parse_isolation.py`, that import pulled `chemclaw.core.config` and armed the
-egress guard **in the child, for this probe only**. The test then passed with `isolate._PRELOAD`
-emptied: it proved that importing a module which arms the guard arms the guard, and said nothing
-about the chain it claimed to be testing.
-
-This module imports `socket` and `sys` and nothing else, and reads `chemclaw.core.netguard` out of
-`sys.modules` rather than importing it. Absent means the forkserver never imported it, which is
-precisely the regression the probe exists to catch — and the connect below then goes out unguarded
-and says so.
+Its own module because `forkserver` imports the target's module in the child: a probe living in a
+module that imports `chemclaw.core.config` would arm the guard itself and prove nothing. It reads
+`chemclaw.core.netguard` from `sys.modules`; absent means the forkserver never armed it.
 """
 
 import socket

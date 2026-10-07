@@ -1,29 +1,10 @@
 """One turn's model behaviour, written once and injected where a real graph would go.
 
-**Why this module exists.** `run_turn` once took a built agent object *and* a `graph_factory` and
-used exactly one of them, and sixteen test files were written when only the first existed — so they
-handed `run_turn` a fake agent and let `graph_factory` keep its production default, the real
-`build_langgraph_agent`, which needs a live model credential. Measured on 2026-08-11: selecting the
-graph engine with nothing else changed turned 67 of those tests into `RuntimeError:
-ANTHROPIC_API_KEY is not set`, and left the stall-and-cancel cases waiting on an agent that was
-never run. The asymmetry was the whole finding: one seam was injectable and the other effectively
-was not. That argument outlived the engine it was made about — `graph_factory` is now the only seam
-a turn can be driven through, so it has to stay one.
-
-**What it replaces, and why not the alternatives.** Two cheaper shapes were rejected:
-
-- *A conftest default that swaps `build_langgraph_agent` for a scripted graph.* It would turn the
-  failures green without re-pointing anything: the graph would answer with whatever the default
-  script said, which has no relation to the behaviour each test was written to pin. Tests that
-  pass for a reason unrelated to their assertion are worse than tests that fail.
-- *A `graph_factory=` written out at each of the ~40 call sites.* That is forty chances to build a
-  graph slightly differently, and it leaves each test's model behaviour stated twice — free to
-  drift apart. `tests/fakes.py` records what that costs: twenty hand-written update fakes drifted
-  until the runner's approval branch was covered by none of them.
-
-So a turn's behaviour is written **once**, as an async generator of streamed pieces, and this class
-renders it into a real compiled graph over a model that replays them. A test asserts on the events
-`run_turn` yields, which is the contract, rather than on a shape it invented for a fake.
+`graph_factory` is the seam a turn is driven through. A turn's behaviour is written once, as an
+async generator of streamed pieces, and `ScriptedTurn` renders it into a real compiled graph over
+a model that replays them. Tests assert on the events `run_turn` yields, which is the contract.
+A conftest-wide default script or a per-call-site factory would each let a test pass for reasons
+unrelated to its assertion.
 """
 
 from abc import ABC, abstractmethod
@@ -37,19 +18,11 @@ from langchain_core.outputs import ChatGenerationChunk, ChatResult
 
 
 class Chunk:
-    """One streamed fragment of the model's reply, in terms both engines can render.
+    """One streamed fragment of the model's reply: text plus the usage it reports.
 
-    `text` is what reaches `TokenEvent`; the token counts are what reach the turn's usage ledger.
-    They are one object rather than two streams because a provider reports usage *on* a chunk, and
-    a test that could only say "some text" or "some usage" could not pin the ordering between them
-    — which is precisely what the cancellation suite asserts about an abandoned turn.
-
-    Input and output are separate because the ledger prices them separately (`TurnUsage`), and both
-    engines report both; collapsing them into one total would make the cost-row assertions
-    untestable on either.
-
-    A bare `str` is accepted anywhere a `Chunk` is, meaning "this text, no usage reported": most
-    fakes never mention tokens, and making them say `Chunk(text=...)` would bury the few that do.
+    One object so a test can pin the ordering of text and usage, which the cancellation suite relies
+    on. Input and output tokens are separate because the ledger prices them separately. A bare `str`
+    is accepted anywhere a `Chunk` is, meaning "this text, no usage reported".
     """
 
     __slots__ = ("text", "input_tokens", "output_tokens")
@@ -75,39 +48,27 @@ def _chunk(piece: Piece) -> Chunk:
 
 
 class ScriptedTurn(ABC):
-    """A turn's model behaviour, exposed as both engines' injection points.
+    """A turn's model behaviour, exposed as the engine's injection point.
 
     Subclass and implement `stream`; the base supplies `graph_factory`, which is what
-    `run_turn(graph_factory=…)` calls. It briefly had a second face, for the other engine's
-    injection point, so one test body could cover both without a branch in it. That face went with
-    the engine; what it bought — the behaviour stated once — is why this one exists.
+    `run_turn(graph_factory=…)` calls.
     """
 
     @abstractmethod
     def stream(self, message: str) -> AsyncIterator[Piece]:
         """This turn's reply to `message`, as the pieces the model streams.
 
-        Implemented as an `async def` generator, so anything a real turn does between chunks — set
-        an `asyncio.Event`, record a turn signal, block forever, raise — is written the way it
-        would be written for either engine. `message` is passed because a resume drives this a
-        second time with the framed job results, and some tests assert on what arrived.
+        An `async def` generator, so a test can do anything between chunks (set an event, block,
+        raise). `message` is passed because a resume drives this again with the framed job results.
         """
 
     def graph_factory(self, **build_kwargs: Any) -> Any:
         """The graph face: the real agent, compiled over a model that replays the same pieces.
 
-        A *real* `build_langgraph_agent` rather than a stand-in for a compiled graph, because the
-        thing under test is the runner driving an engine — middlewares, tool node and
-        `chemclaw.api.graph_stream` included. Only the model is faked, which is the one component a
-        test cannot have.
-
-        `build_kwargs` is whatever `run_turn` passes (profile, actor, correlation id, the turn's
-        connectors, the checkpointer, its audit sink), forwarded untouched so the graph a test
-        drives is the graph production builds. The audit sink is the one thing overridden: a test
-        process has no database, and a durable sink would reach for one on every tool call. The
-        runner now passes its own (`default_audit_sink()`, so it can flush the batching sink at
-        turn end); under the test settings that resolves to a `NullAuditSink`, and this override
-        keeps the graph on a null sink even for a test that flips `session_store`.
+        A real `build_langgraph_agent`, so middlewares, the tool node and
+        `chemclaw.api.graph_stream` are all under test; only the model is faked. `build_kwargs` from
+        `run_turn` is forwarded untouched, except the audit sink, which is forced to a null sink
+        because a test process has no database.
         """
         from chemclaw.agent.audit import NullAuditSink
         from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -119,19 +80,10 @@ class ScriptedTurn(ABC):
 def _usage_chunk(usage: Chunk) -> AIMessageChunk:
     """The reply's terminal frame: no content, carrying what the whole call reported.
 
-    **This is the shape the wire has, and the fake used to have another one.** Every chunk carried
-    its own `usage_metadata`, which no OpenAI-compatible endpoint produces: `stream_usage=True` maps
-    to `stream_options.include_usage`, and that delivers one `usage` block on the *final* frame —
-    `chemclaw.cli.mock_llm._chat_stream` says so in as many words, and the three purpose-built
-    gateways the 2026-09-06 front-door review drove agreed. The difference was not cosmetic. It was
-    load-bearing under `tests/test_turn_cancellation.py`, whose whole subject is a turn torn down
-    *before* the reply finished: on the per-chunk shape such a turn had already metered tokens, so
-    the assertion that it books them passed, and on a real gateway it books nothing at all. A fake
-    that meters earlier than any provider can is a fake that hides exactly the accounting hole the
-    test in front of it exists to find.
-
-    No `input_token_details`, deliberately: this fake reports no caching, so `graph_usage_tokens`
-    subtracts nothing and the split it produces is the split the chunk stated.
+    OpenAI-compatible endpoints deliver usage once, on the final frame
+    (`stream_options.include_usage`), so a turn torn down before the reply finishes books nothing —
+    the property `tests/test_turn_cancellation.py` depends on. No `input_token_details`: this fake
+    reports no caching.
     """
     return AIMessageChunk(
         content="",
@@ -146,10 +98,8 @@ def _usage_chunk(usage: Chunk) -> AIMessageChunk:
 class _ReplayingChatModel(BaseChatModel):
     """A chat model whose single reply is a `ScriptedTurn`'s pieces, streamed.
 
-    Private to this module: it exists only to give `ScriptedTurn.graph_factory` something to
-    compile, and a test that wants a *scripted* model (a fixed sequence of tool calls and answers)
-    wants `tests.fakes_langgraph.ScriptedChatModel` instead. The difference is which end holds the
-    control flow — there, the script; here, the test's own generator.
+    Private: it exists for `ScriptedTurn.graph_factory`. A fixed script of tool calls and answers
+    wants `tests.fakes_langgraph.ScriptedChatModel` instead.
     """
 
     turn: Any
@@ -162,9 +112,7 @@ class _ReplayingChatModel(BaseChatModel):
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         """Accept the binding the agent's model node always performs and keep replaying.
 
-        `create_agent` binds on every request, and `BaseChatModel.bind_tools` raises
-        `NotImplementedError` — so without this the graph cannot be driven at all, faked model or
-        not.
+        `create_agent` binds on every request, and `BaseChatModel.bind_tools` raises.
         """
         return self
 
@@ -177,11 +125,8 @@ class _ReplayingChatModel(BaseChatModel):
     ) -> AsyncIterator[ChatGenerationChunk]:
         """Replay the turn's pieces as this reply's chunks, then the usage frame the wire sends.
 
-        The counts a `Chunk` declares are *summed* rather than reported where they were written:
-        a test still says which piece cost what — which is how a turn's spend stays readable beside
-        the text that caused it — while the reply on the wire meters where a gateway meters it, at
-        the end. A turn abandoned before that frame therefore meters nothing here, exactly as it
-        does in production, which is the property `_usage_chunk` was written for.
+        Each `Chunk`'s counts are summed into the final frame, so a turn abandoned before it meters
+        nothing, as in production.
         """
         total = Chunk()
         async for piece in self.turn.stream(_last_human_text(messages)):
@@ -201,10 +146,7 @@ class _ReplayingChatModel(BaseChatModel):
     ) -> ChatResult:
         """Refuse the non-streaming path, which nothing in a turn takes.
 
-        `BaseChatModel` requires it; `ainvoke` routes through `_astream` because this class
-        overrides it, and a turn is always streamed. Raising says so rather than quietly returning
-        an empty reply, which is how a stream-shape regression would otherwise look like a model
-        that had nothing to say.
+        Raising, rather than returning an empty reply, makes a stream-shape regression visible.
         """
         raise NotImplementedError("a scripted turn is streamed; `run_turn` never invokes it whole")
 
@@ -212,9 +154,8 @@ class _ReplayingChatModel(BaseChatModel):
 def _last_human_text(messages: Sequence[BaseMessage]) -> str:
     """The user message this reply answers — the same string `run_turn` was handed.
 
-    Read off the end rather than the start because the graph's message list opens with the system
-    prompt and, on a resume, carries the whole first half of the turn before the framed job
-    results.
+    Read off the end: the list opens with the system prompt and, on a resume, carries the first half
+    of the turn.
     """
     for message in reversed(messages):
         if message.type == "human":

@@ -1,22 +1,10 @@
-"""The statistical mechanics that stayed here, checked against measured values — no server needed.
+"""The statistical mechanics in `science/calc/thermo.py`, checked against measured values.
 
-`science/calc/thermo.py` is the half of thermochemistry that did *not* move to `Chemclaw3-mcp`: the
-second derivatives cost minutes and are a cached primitive over there, while turning them into a
-free energy is a page of partition functions costing milliseconds and depending on a temperature the
-Hessian never saw. That split is only worth anything if the arithmetic came through it intact, and
-"intact" here has a stronger meaning than "the code compiles": these numbers are compared against
-experiment.
-
-**The Hessians are recorded, not synthesized.** `tests/fixtures/calc_hessians.json` holds real
-`compute_hessian` payloads for water, CO2 and H2, taken from the live calculation server on
-2026-08-16 and stored exactly as they crossed the wire — base64 `.npy`, dipole derivatives and all.
-That is what lets this file assert measured standard entropies with no quantum chemistry program
-installed, and it also pins the *transport*: a change to the encoding on either side turns these
-red rather than silently producing a spectrum of zeros.
-
-The reference entropies are NIST standard molar entropies at 298.15 K, 1 atm, in cal/(mol K):
-water 45.10, CO2 51.06, H2 31.23. The agreement below is to a few hundredths, which is the same
-agreement this arithmetic had before the split.
+The Hessian is a cached remote primitive; turning it into a free energy happens here.
+`tests/fixtures/calc_hessians.json` holds real `compute_hessian` payloads for water, CO2 and H2 as
+they crossed the wire (base64 `.npy`), which pins the transport encoding too. Reference entropies
+are NIST standard molar entropies at 298.15 K, 1 atm, in cal/(mol K): water 45.10, CO2 51.06,
+H2 31.23.
 """
 
 import json
@@ -69,12 +57,10 @@ _MEASURED = (
 def test_the_rrho_arithmetic_reproduces_a_measured_standard_entropy(
     name: str, sigma: int, reference: float
 ) -> None:
-    """The claim the split rests on: the numbers did not change when the Hessian moved away.
+    """RRHO over a real Hessian reproduces the NIST standard entropy.
 
-    A translational, rotational and vibrational partition function over a real Hessian, against the
-    NIST value. CO2 and H2 also exercise the linear-rotor branch, which is where this module's one
-    historical arithmetic bug lived — a factor of 2 in the linear partition function that no
-    `calc_version` could ever have moved, and the reason `CALCULATION_EPOCH` exists.
+    CO2 and H2 exercise the linear-rotor branch, whose partition function is easy to get wrong by a
+    factor of 2.
     """
     structure, hessian = _recorded(name)
     result = thermochemistry_from_hessian(ThermoSettings(symmetry_number=sigma), structure, hessian)
@@ -83,11 +69,10 @@ def test_the_rrho_arithmetic_reproduces_a_measured_standard_entropy(
 
 
 def test_the_symmetry_number_shifts_the_entropy_by_exactly_r_ln_sigma() -> None:
-    """Sigma is an input, not a guess, and this is the size of getting it wrong.
+    """Sigma shifts the entropy by exactly R ln sigma.
 
-    It does not cancel across a balanced reaction unless both sides carry the same symmetry, which
-    for the chemistry worth computing they do not — every hydrogenation consumes H2. That is why a
-    reaction with any species' sigma unstated withholds its free energy instead of reporting one.
+    It does not cancel across a reaction unless both sides share symmetry, which is why a reaction
+    with any species' sigma unstated withholds its free energy.
     """
     structure, hessian = _recorded("water")
     at_one = thermochemistry_from_hessian(ThermoSettings(), structure, hessian)
@@ -99,9 +84,8 @@ def test_the_symmetry_number_shifts_the_entropy_by_exactly_r_ln_sigma() -> None:
 def test_a_bent_and_a_linear_molecule_get_different_mode_counts() -> None:
     """3N-6 against 3N-5, decided by the moments of inertia rather than by a structural guess.
 
-    Filtering the raw rotations by singular value instead does not work: an optimized "linear"
-    molecule is bent by a fraction of a degree, so its null rotation has a small but perfectly
-    ordinary singular value and survives the cut — measured on CO2, which lost a real mode that way.
+    Filtering rotations by singular value fails: an optimized "linear" molecule is slightly bent, so
+    a null rotation survives the cut and a real mode is lost.
     """
     water = thermochemistry_from_hessian(ThermoSettings(), *_recorded("water"))
     carbon_dioxide = thermochemistry_from_hessian(ThermoSettings(), *_recorded("carbon_dioxide"))
@@ -223,11 +207,8 @@ def test_degeneracy_multiplies_the_population() -> None:
 def test_truncation_keeps_the_ensembles_own_account_of_itself() -> None:
     """Truncation keeps the ensemble's own account of itself.
 
-    "Here are the 2 that matter out of 3" must not become a claim that there were 2.
-
-    `total_found`, the populations and the conformational entropy are properties of the *whole*
-    ensemble; only the returned list is cut. This is what makes asking for a wider view of a cached
-    search free rather than a second CREST run.
+    `total_found`, populations and conformational entropy describe the whole ensemble; only the
+    returned list is cut, so a wider view of a cached search needs no second CREST run.
     """
     full = ensemble_from_members(
         _ensemble((1, 1, 1)),
@@ -251,11 +232,10 @@ def test_truncation_keeps_the_ensembles_own_account_of_itself() -> None:
 
 
 def test_the_populations_depend_on_the_temperature_the_search_never_saw() -> None:
-    """Why the weighting stayed here: it is the part a second question actually changes.
+    """Populations depend on a temperature the search never saw.
 
-    A hotter ensemble is flatter. If this were baked into the cached payload, asking the same
-    molecule at another temperature would cost a second search — the most expensive single
-    calculation in the system — instead of a cache hit and a millisecond.
+    A hotter ensemble is flatter; weighting here keeps another temperature a cache hit rather than a
+    second search.
     """
     cold = ensemble_from_members(
         _ensemble((1, 1, 1)), smiles="O", search="conformers", temperature_k=200.0, max_members=10
@@ -282,11 +262,8 @@ def test_an_empty_ensemble_is_refused_rather_than_weighted() -> None:
 def _standard_state_correction_kcal(temperature_k: float) -> float:
     """RT ln(RT c0 / P0) in kcal/mol, derived here from CODATA and nothing in `src/`.
 
-    The gas-phase standard state is 1 atm and the solution one a chemist means by "ΔG in THF" is
-    1 mol/L. For an ideal gas G(P) = G°(P°) + RT ln(P/P°), and the pressure of one mole per litre
-    is c0·R·T — so moving one mole of species between the two states costs exactly this, whatever
-    the molecule weighs. The reference number this file asserts against is written out rather than
-    imported so that a defect in the code under test cannot also produce the expectation.
+    The cost of moving one mole from the 1 atm gas standard state to 1 mol/L, independent of mass.
+    Written out rather than imported so a defect in the code cannot also produce the expectation.
     """
     gas_constant = 8.314462618  # J/(mol K), CODATA
     standard_pressure = 101325.0  # Pa, 1 atm
@@ -296,13 +273,10 @@ def _standard_state_correction_kcal(temperature_k: float) -> float:
 
 
 def test_a_solution_phase_free_energy_is_quoted_at_the_one_molar_standard_state() -> None:
-    """A solution ΔG at the *gas* standard state is wrong by 1.894 kcal/mol per mole of species.
+    """A solution ΔG is quoted at the 1 mol/L standard state, not the gas one.
 
-    The whole difference lives in the volume factor of the translational partition function, so it
-    is exactly RT ln(RT c0/P0) per species and independent of the mass — which is what makes it
-    cancel for Δn = 0 and dominate for a dissociation or an association. The electronic energy came
-    back from an ALPB implicit-solvent SCF, so the phase is not a caller's preference: the Hessian
-    payload says which medium it was taken in, and that is what decides the reference state.
+    The difference is RT ln(RT c0/P0) per species, independent of mass. The Hessian payload names
+    the medium it was taken in, and that decides the reference state.
     """
     structure, gas = _recorded("water")
     in_solution = gas.model_copy(update={"solvent": "thf"})
@@ -340,17 +314,11 @@ def test_a_gas_phase_hessian_is_unmoved_by_the_solution_correction() -> None:
 
 
 def test_a_frequency_set_taken_off_a_stationary_point_says_so() -> None:
-    """The silent half of "not a minimum": no imaginary mode, and a meaningless zero-point energy.
+    """A frequency set taken off a stationary point says so.
 
-    `_vibrational` sums over **positive** wavenumbers only, so the small spurious modes a
-    non-stationary geometry produces are dropped rather than flagged, and the ZPE that comes out is
-    quietly too low. Nothing in the frequencies shows it — which is why the calculation server
-    reports the gradient it already had beside every Hessian, and why dropping that field on this
-    side left the failure with no witness at all.
-
-    Driven off water's recorded minimum, so the only thing that changes between the two results is
-    the gradient: same matrix, same modes, same ZPE — and one of them is a claim about a minimum
-    while the other is not.
+    `_vibrational` sums positive wavenumbers only, so a non-stationary geometry gives no imaginary
+    mode and a quietly low ZPE; the server's gradient is the only witness. Same recorded water
+    Hessian twice, differing only in the gradient.
     """
     structure, hessian = _recorded("water")
     unrelaxed = hessian.model_copy(update={"max_gradient_hartree_per_angstrom": 0.05})
@@ -363,11 +331,10 @@ def test_a_frequency_set_taken_off_a_stationary_point_says_so() -> None:
 
 
 def test_a_backend_that_reports_no_gradient_leaves_stationarity_unassessed() -> None:
-    """`None` is not `False`: the `xtb` binary sends no gradient, and silence is not evidence.
+    """`None` is not `False`: a backend that sends no gradient leaves stationarity unassessed.
 
-    The recorded fixtures predate the field entirely, which is the same case a `calculation_results`
-    row written before the server returned it presents. Both must fall back to the verdict the
-    frequencies alone support, rather than degrading a real minimum into a suspect one.
+    Older cache rows lack the field too; both fall back to the verdict the frequencies alone
+    support.
     """
     structure, hessian = _recorded("water")
     assert hessian.max_gradient_hartree_per_angstrom is None
@@ -379,13 +346,10 @@ def test_a_backend_that_reports_no_gradient_leaves_stationarity_unassessed() -> 
 
 
 def test_the_hartree_conversion_is_shared_with_the_unit_registry_not_copied() -> None:
-    """One definition, asserted by identity — because a *copy* is what equal values also give.
+    """The hartree conversion is the unit registry's object, not a copy.
 
-    `627.5094740631` was written out three times in this tree: here, in `core/units.py` (as a
-    2625.4996 kJ/mol registry factor that derived to 627.509464627, 1.5e-08 relative low) and in
-    `publish/properties.py`. Equal-value assertions cannot tell a shared constant from a lucky
-    copy, and a copy is precisely what drifted. `from chemclaw.core.units import HARTREE_TO_KCAL`
-    binds the same object; a re-typed literal is a different one, which is what this checks.
+    Asserted by identity, because equal values cannot tell a shared constant from a re-typed
+    literal.
     """
     assert thermo.HARTREE_TO_KCAL is units.HARTREE_TO_KCAL
 
@@ -393,33 +357,19 @@ def test_the_hartree_conversion_is_shared_with_the_unit_registry_not_copied() ->
 def test_the_gas_constant_is_derived_once_rather_than_written_twice() -> None:
     """`_GAS_CONSTANT` and `_GAS_CONSTANT_CAL` are the same constant in two units, so one derives.
 
-    They were two literals, and only one of them was truncated: `8.314462618` against
-    `1.987204258640832`, which is the *untruncated* R/4.184. They disagreed at rel 1.8e-11 — far
-    below anything a chemist sees, and exactly the shape that becomes a real number the day
-    somebody rounds one of them differently. R is `k_B · N_A` with both factors exact under SI-2019,
-    so there is a definition to derive from rather than a value to retype.
+    R is `k_B · N_A`, both exact under SI-2019, so it is derived rather than retyped.
     """
     assert thermo._GAS_CONSTANT == thermo._BOLTZMANN * thermo._AVOGADRO
     assert thermo._GAS_CONSTANT_CAL * units.JOULE_PER_CALORIE == thermo._GAS_CONSTANT
 
 
 def test_the_qrrho_cutoff_is_the_one_xtb_uses_and_the_choice_is_worth_a_kcal() -> None:
-    """The damping frequency is a *choice*, and the suite could not see it at all.
+    """The qRRHO damping frequency is xtb's 50 cm^-1, and the choice is worth about a kcal.
 
-    Every measured check in this file is water, CO2 or H2 — none of which has a mode anywhere near
-    the damping region — so the cutoff could have been set to any number without turning a single
-    assertion red. This is the test that makes it a decision rather than a leftover.
-
-    `50 cm^-1` is `xtb`'s own `--sthr` default, and the Hessians this arithmetic runs on come from
-    GFN2-xTB: a chemist cross-checking against a plain `xtb --ohess` on the same geometry gets the
-    same free energy. The shipped `25` matched neither that nor Grimme 2012's published
-    `w0 = 100 cm^-1`, while the comment beside it claimed to be both.
-
-    The second half is the cost, measured rather than asserted in prose: eight low modes of an
-    ordinary flexible drug-sized molecule, and the ~1.1 kcal/mol that separates 25 from 50 on the
-    entropy term. It does not cancel across a reaction that changes flexibility, and the results
-    this tier reports carry a 3.0 kcal/mol uncertainty — so this is a third of the error bar, not
-    a rounding difference.
+    `50 cm^-1` is xtb's `--sthr` default, so a plain `xtb --ohess` on the same geometry gives the
+    same free energy. The second half shows the cost: on a flexible drug-sized molecule the cutoff
+    moves the entropy term by ~1 kcal/mol, a third of the tier's error bar. None of the measured
+    molecules above has a mode in the damping region, so only this test sees the choice.
     """
     assert settings.xtb_rrho_cutoff_cm == 50.0
 
@@ -438,17 +388,10 @@ def test_the_qrrho_cutoff_is_the_one_xtb_uses_and_the_choice_is_worth_a_kcal() -
 
 
 def test_the_two_spellings_of_the_hartree_in_this_module_agree() -> None:
-    """A guard, not a fix: `_HARTREE_J` and `HARTREE_TO_KCAL` are one constant in two units.
+    """`_HARTREE_J` and `HARTREE_TO_KCAL` are one constant in two units, and must agree.
 
-    They are both correct today — 4.3597447222071e-18 J is the CODATA primary datum and
-    627.5094740631 kcal/mol is CODATA's own conversion of it, agreeing to rel 7e-14 — and they are
-    *not* derived from each other, because deriving one would need N_A in `core.units`, which is a
-    second copy of a constant introduced to remove the second copy of another. So the relation is
-    asserted instead of enforced: this is what turns red if either is retyped from a different
-    table.
-
-    Nothing in this repository joined them before, which is exactly how three copies of the
-    kcal/mol figure managed to disagree without a test noticing.
+    They are not derived from each other (that would need N_A in `core.units`), so the relation is
+    asserted: this turns red if either is retyped from a different table.
     """
     from_si = thermo._HARTREE_J * thermo._AVOGADRO / (units.JOULE_PER_CALORIE * 1000.0)
     assert from_si == pytest.approx(units.HARTREE_TO_KCAL, rel=1e-12)
@@ -474,29 +417,19 @@ _XTB_WAVENUMBERS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 667.0, 667.1, 2593.0]
 def test_an_intensity_is_paired_by_wavenumber_rather_than_by_position() -> None:
     """The agreeing case: the three real intensities pair with the three real modes.
 
-    **This one passes against the old arithmetic too, and that is not a defect in it.** Where the
-    two sides agree on how many modes are external, counting reaches the same answer by a different
-    route — `9 - 3` drops the same six rows the wavenumbers mark. It pins the common case so a
-    future rewrite cannot quietly stop pairing at all; the two tests below are the guards, and both
-    were watched failing with the wavenumber branch disabled and the signature left intact.
+    Counting and wavenumber pairing agree here; this pins the common case. The two tests below are
+    the guards for disagreement.
     """
     paired = thermo._align_intensities(np.asarray(_XTB_ROWS), 3, _co2_at(0.0), _XTB_WAVENUMBERS)
     assert list(paired) == [68.71118, 0.00429, 1046.64228]
 
 
 def test_a_disagreement_about_how_many_modes_are_external_fails_loudly() -> None:
-    """The check the old docstring promised and the old arithmetic could not perform.
+    """A disagreement about how many modes are external fails loudly.
 
-    How many modes are external is a judgement about the molecule, and the two sides make it by
-    different criteria — xtb tests unmassed inertia against an absolute threshold, `_is_linear`
-    tests mass-weighted moments against a relative one. Measured against xtb 6.7.1 over a real
-    O-C-O bend they agree at 180.0 and 175.0 degrees and disagree at **179.0**, where xtb projects
-    out six of nine and this projection expects four.
-
-    Counting cannot see that: `9 - 4 = 5` is neither negative nor odd-looking, so the old code
-    returned five entries beginning with one of xtb's own zeros and every band shifted by one —
-    the 2593 cm^-1 stretch reported against the band below it, silently, on the geometry a scan
-    point looks like.
+    xtb and `_is_linear` judge linearity by different criteria and disagree near 179 degrees for
+    O-C-O. Counting cannot see that and would shift every intensity by one band silently; pairing by
+    wavenumber detects it.
     """
     with pytest.raises(ValueError, match="would shift every band"):
         thermo._align_intensities(np.asarray(_XTB_ROWS), 4, _co2_at(0.02), _XTB_WAVENUMBERS)
@@ -515,17 +448,10 @@ def test_a_wavenumber_list_that_does_not_match_the_intensities_is_refused() -> N
 
 
 def test_an_unpairable_spectrum_costs_the_bands_and_not_the_free_energy() -> None:
-    """The alignment refusal was raised out of the whole calculation, and it is about one field.
+    """An unpairable spectrum costs the IR bands, not the free energy.
 
-    Not one term of the partition function reads an IR intensity: they feed the spectrum and nothing
-    else. But `_align_intensities` raised into `thermochemistry_from_hessian`, so a geometry inside
-    the ~2.3-degree window where the two sides disagree about linearity — `_LINEAR_INERTIA_RATIO`
-    calls CO2 linear to about 177.7 degrees while xtb says non-linear at 179.0 — returned **no** G,
-    H, S or `is_minimum` at all. Driven on this payload before the fix: `ValueError`, and every one
-    of those numbers was correct.
-
-    So the refusal moved to the field it is about. The message is unchanged and still reaches a
-    reader; what changed is that it no longer discards the rest of the result.
+    No partition-function term reads an IR intensity, so the alignment refusal applies to the bands
+    field only; G, H, S and `is_minimum` are still returned.
     """
     structure, recorded = _recorded("carbon_dioxide")
     hessian = recorded.model_copy(
@@ -556,10 +482,8 @@ def test_a_pairable_spectrum_still_reports_its_intensities_and_no_reason() -> No
     which is the shape of the defect being fixed rather than the fix.
     """
     structure, recorded = _recorded("carbon_dioxide")
-    # The agreeing payload, built from this projection's *own* wavenumbers rather than transcribed:
-    # `_XTB_WAVENUMBERS` was recorded at 179 degrees, where xtb projects out six of nine, and the
-    # whole point of the test above is that this side finds four. Deriving the list here is what
-    # makes "the two sides agree" the premise rather than a number that could silently stop holding.
+    # The agreeing payload, built from this projection's own wavenumbers so that "the two sides
+    # agree" is the premise rather than a transcribed number.
     bands = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, recorded)
     external = 9 - len(bands.modes)
     wavenumbers = [0.0] * external + [mode.wavenumber_cm for mode in bands.modes]

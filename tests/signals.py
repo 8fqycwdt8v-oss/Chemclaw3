@@ -1,15 +1,9 @@
 """Capture the out-of-band signals a piece of code publishes, by running it inside a real graph.
 
-`chemclaw.core.turn_signals` publishes through `get_stream_writer()`, which resolves the writer off
-LangGraph's ambient runnable config. There is no buffer to inspect any more — a test that wants to
-know what a tool announced has to be somewhere a writer exists.
-
-**A real one-node graph rather than a patched `get_stream_writer`.** Patching would make every test
-here pass against a `record_*` that never reached a writer at all, which is the failure the port
-could actually introduce: the publish call is guarded (`RuntimeError` → drop) precisely so a tool
-can run in a Temporal activity, and a guard that swallows everything looks identical to one that
-swallows nothing. Driving a real graph proves the writer resolves where a tool actually runs, which
-is the claim the whole mechanism rests on, and it costs one `StateGraph` per call.
+`chemclaw.core.turn_signals` publishes through `get_stream_writer()`, resolved from LangGraph's
+ambient config. A real one-node graph, not a patched writer, proves the writer resolves where a
+tool runs; the publish call swallows `RuntimeError`, so a patch could hide a signal that never
+reached a writer.
 """
 
 from collections.abc import Awaitable, Callable
@@ -30,17 +24,13 @@ class _State(TypedDict):
 async def collect_signals(body: Callable[[], Awaitable[Any]]) -> tuple[Any, list[Signal]]:
     """Run `body` inside a graph node and return `(its result, the signals it published)`.
 
-    Returns the result too, because most callers assert on both — what the tool returned to the
-    model *and* what it announced to the chemist are two different halves of the same contract, and
-    the point of several of these tests is that they disagree (a job id goes to the model, a
-    `JobStartedEvent` goes to the surface).
+    Both, because what a tool returns to the model and what it announces to the chemist are two
+    halves of one contract and often differ (a job id vs. a `JobStartedEvent`).
     """
     captured: list[Any] = []
 
-    # `state`/`config` by name, not `_state`/`_config`: LangGraph types a node as a Protocol whose
-    # `__call__` declares those parameter names, and a Protocol match is name-sensitive for
-    # positional-or-keyword parameters — so the conventional underscore prefix for an unused
-    # argument makes the callable stop matching and `add_node` reports no overload.
+    # `state`/`config` by name: LangGraph's node Protocol is name-sensitive, so underscore-prefixed
+    # names stop `add_node` from matching an overload.
     async def _node(state: _State, config: RunnableConfig) -> dict[str, Any]:
         captured.append(await body())
         return {"done": True}

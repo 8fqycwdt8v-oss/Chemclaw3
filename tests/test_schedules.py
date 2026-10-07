@@ -1,9 +1,8 @@
 """The Schedule plan covers every periodic background job at its configured cadence.
 
-Pure tests (no Temporal server): `planned_schedules()` is the source of truth for what
-`make schedules-apply` maintains, so a dropped job or a wrong interval is caught here.
-The apply/prune behavior is proven against a recording fake of the client's Schedule
-surface, since a live Temporal server is unavailable offline.
+Pure tests: `planned_schedules()` is the source of truth for `make schedules-apply`. Apply and
+prune run against a recording fake of the client's Schedule surface; the outcome tests at the
+end need a live broker.
 """
 
 import asyncio
@@ -100,35 +99,12 @@ class _FakeTemporal:
 
 
 def test_plan_covers_all_periodic_jobs() -> None:
-    """What a plain reaction corpus earns by default, each planned exactly once.
+    """The jobs a plain reaction corpus earns by default, each planned exactly once.
 
-    Two of the three ask one question between them: an ingest source writes ELN entries, and every
-    entry it writes needs labelling.
-
-    The third is the digest, and it is here rather than gated because
-    `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep` made
-    `digest_enabled` default `True`. `watch_for` writes a subscription and tells the chemist they
-    will be told; with no `digest` Schedule nothing ever evaluates that row, and nothing anywhere
-    said so. A deployment may still turn it off, and `tests/test_digest.py`'s
-    `test_a_watch_says_so_when_nothing_will_evaluate_it` is what holds the tool honest when it
-    does; with no subscribers the run is one indexed read.
-
-    The fourth is the check-in, on by the same argument one step further along.
-    `durable/awaiting.py` re-notifies `asked_of` and writes to the *requester* exactly once, on
-    expiry — so at
-    `awaiting_max_days = 90` a chemist can hear nothing about their own suspended campaign for
-    three months and then hear it failed. It shipped off because the sweep wrote to a mailbox with
-    no
-    reader and grew without bound; `GET /check-ins` is the reader, and the sweep now supersedes a
-    requester's unread notice instead of adding to it, so both halves of that objection are spent.
-    A deployment may still turn it off, and `tests/test_check_in.py`'s
-    `test_the_schedule_is_planned_only_when_a_deployment_asks` drives both arms.
-
-    The fifth is the orphaned-wait sweep, and it has no setting at all: any deployment can raise a
-    wait, and a row whose run was terminated sits unanswerable in an inbox whatever anybody
-    configured (`D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
-
-    Everything else in this file is gated on a setting or a second declaration.
+    Ingest and labelling go together. The digest is on by default so a `watch_for` subscription is
+    evaluated. The check-in is on by default so a requester hears about a suspended campaign before
+    it expires. The orphaned-wait sweep has no setting, since any deployment can raise a wait.
+    Everything else is gated on a setting or a second declaration.
     """
     plan = planned_schedules()
     assert {p.workflow for p in plan} == {
@@ -153,15 +129,9 @@ def test_the_digest_schedule_is_dropped_when_a_deployment_turns_digests_off() ->
 
 
 def test_no_scheduled_job_opens_a_pull_request() -> None:
-    """The rule D-2026-08-25 turns on: knowledge never arrives on a timer.
+    """No scheduled job writes knowledge: knowledge never arrives on a timer.
 
-    The three memory-synthesis workflows proposed PR-gated notes hourly with nobody having asked.
-    They still exist and still do their work — they are started on demand now — so the assertion
-    that matters is about the *plan*, not about whether the workflows are gone.
-
-    Asserted over whatever `planned_schedules()` returns rather than against a fixed list, so a
-    Schedule added later for a job that proposes notes fails here instead of quietly restoring the
-    behaviour this removed.
+    Asserted over whatever `planned_schedules()` returns, so a later note-writing Schedule fails.
     """
     proposing = {
         CampaignSynthesisWorkflow,
@@ -188,11 +158,9 @@ def test_drift_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyPat
 
 
 def test_reindex_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The derived note index gets a Schedule only where a hybrid leg reads it (gap SCH-2).
+    """The note index gets a reindex Schedule only where a hybrid leg reads it.
 
-    Before this existed, `note_index` was refreshed only by a manual `make reindex`, so hybrid
-    retrieval served whatever the last human run captured — ranked confidently beside live graph
-    hits, because RRF fusion carries no staleness signal.
+    RRF fusion carries no staleness signal, so an unrefreshed index ranks stale hits confidently.
     """
     monkeypatch.setattr(settings, "note_reindex_enabled", False)
     assert NoteReindexWorkflow not in {p.workflow for p in planned_schedules()}
@@ -208,11 +176,9 @@ def test_reindex_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyP
 def test_document_sync_schedule_is_added_only_when_a_share_is_mounted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A crawl is planned only where an enabled source actually carries a share to crawl.
+    """A crawl is planned only where an enabled source carries a share to crawl.
 
-    Asked of the enabled sources rather than of a `document_sync_enabled` flag beside them:
-    `CHEMCLAW_DATA_SOURCES` is the enable switch (D-018), and a second setting could only restate
-    it or contradict it.
+    `CHEMCLAW_DATA_SOURCES` is the enable switch; a second flag could only contradict it.
     """
     from chemclaw.durable import schedules as schedules_module
     from chemclaw.durable.document_sync import DocumentShareSyncWorkflow
@@ -232,29 +198,10 @@ def test_document_sync_schedule_is_added_only_when_a_share_is_mounted(
 def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every plannable id is registered in the prune namespace, else prune could miss it.
 
-    **With every conditional job actually turned on**, which is what makes this an assertion rather
-    than a formality. It used to enable `eval_drift_enabled` alone, so nine of the eleven
-    conditional jobs were off by default and the subset held vacuously — and `result-publish`
-    duly slipped through unregistered. `OWNED_SCHEDULE_IDS` is the only thing authorising `_prune`
-    to delete a Schedule, so an unregistered planned id is a Schedule that survives every
-    subsequent `helm upgrade` after the deployment turns its feature off, and keeps firing.
-
-    **It then held vacuously a second time, on the one registry this list forgot.** The floor was
-    `>= 11` and this test enabled eleven jobs, so `commitment-mirror` — planned from
-    `active_commitment_sources()`, never patched here — sat outside the namespace unnoticed for
-    exactly as long as `result-publish` had. The floor is now the *whole* plan rather than a
-    number chosen to pass: every job in this file is conditional, so `planned` and the count below
-    move together, and adding a job without enabling it here fails on the count before it can fail
-    silently in a deployment.
-
-    **And it happened a third time, which is why the paragraph above is not the end of the story.**
-    `check_in_enabled` was never patched here, so while it defaulted off `agent-check-in` was absent
-    from `planned` and this test never compared it against the namespace at all — the count said 12
-    and read as complete. It was registered, so nothing shipped broken; what was broken is this
-    test's claim to be exhaustive. The count catches a job *added* without being enabled here, and
-    does not catch one that was already conditional when the list was written. Patch the flag, do
-    not rely on its default: a default is a deployment's decision and this assertion is about the
-    namespace.
+    `OWNED_SCHEDULE_IDS` is what authorises `_prune` to delete a Schedule, so an unregistered id
+    keeps firing after its feature is turned off. Every conditional job is enabled here explicitly
+    (never by relying on a default), and the count is the whole plan, so a job added without being
+    enabled here fails.
     """
     from chemclaw.durable import schedules as schedules_module
 
@@ -318,13 +265,9 @@ def test_intervals_come_from_config() -> None:
 
 
 def test_every_schedule_skips_an_overrunning_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Overlap is SKIP, not the default BUFFER_ONE (gap SCH-3).
+    """Overlap is SKIP, not the default BUFFER_ONE.
 
-    Every scheduled job here is a full re-scan or a full reindex, so a run that overruns its
-    interval must finish rather than have the next fire queue behind it. Buffering would let a slow
-    corpus scan accumulate a backlog it can never drain — and the buffered run is redundant anyway,
-    because the next fire re-scans everything. The ELN sync is cursored, so a skipped fire loses
-    nothing either.
+    Every job re-scans or is cursored, so a buffered run is redundant and could build a backlog.
     """
     for job in planned_schedules():
         schedule = _build_schedule(job)
@@ -333,26 +276,11 @@ def test_every_schedule_skips_an_overrunning_run(monkeypatch: pytest.MonkeyPatch
 
 
 def test_every_schedule_bounds_one_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A scheduled run has a ceiling, and it is the *per-run* one, not the chain-wide one.
+    """A scheduled run has a ceiling, and it is the per-run one, not the chain-wide one.
 
-    The pair with the test above is the point: `SKIP` is right, and it is exactly what turns a run
-    that never ends into a job family that silently stops running — every subsequent fire is
-    skipped, and a skipped fire is an error nowhere. The ceiling is what makes that state a failed
-    run instead.
-
-    **Which knob carries it decides whether a drain can finish at all.** `execution_timeout` is
-    Temporal's WorkflowExecutionTimeout: it spans the whole `continue_as_new` chain, and a continued
-    run cannot extend it (the continue-as-new command carries a run timeout and a task timeout and
-    no execution timeout). Four of these jobs drain by continuing as new — `corpus_sync`,
-    `document_sync`, `label_sync`, `eln_sync` — so a chain-wide ceiling kills a first load of a
-    multi-million-row corpus mid-drain rather than bounding the page it is on. Measured against a
-    live broker with the timeouts this function actually builds, on a workflow that sleeps a second
-    and continues as new ten times under a five-second ceiling: `execution_timeout` failed the chain
-    at 5.64 s, `run_timeout` completed it in 12.38 s.
-
-    The absence is asserted beside the presence because it is the whole invariant, and because the
-    time-skipping test server **cannot** tell the two knobs apart — measured, the same ten-page
-    chain completes under either — so a behavioural test on that server would be a vacuous green.
+    With SKIP, a run that never ends silently stops the family, so `run_timeout` makes it a failed
+    run. `execution_timeout` spans the whole `continue_as_new` chain and would kill a long drain
+    mid-way. The absence is asserted because the time-skipping server cannot tell the knobs apart.
     """
     for job in planned_schedules():
         action = _build_schedule(job).action
@@ -404,13 +332,9 @@ def test_retention_schedule_is_added_only_when_a_policy_is_stated(
 def test_retention_needs_a_window_and_not_only_the_boolean(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The policy is the windows; the boolean alone produced a job that swept nothing.
+    """Retention is scheduled only with a non-zero window, not on the boolean alone.
 
-    The condition lived in two files and they disagreed: `retention_enabled` turned the *Schedule*
-    on, `retention_*_days > 0` turned the *work* on, and all four windows default to 0. An operator
-    who did the documented thing got a job firing on its cadence forever, reporting
-    `skipped: [... (retention disabled)]` for every table, and showing perfectly healthy in
-    `describe_schedules`. Asking for both here makes "on but inert" unrepresentable.
+    Otherwise the job fires forever, sweeps nothing and looks healthy.
     """
     monkeypatch.setattr(settings, "retention_enabled", True)
     monkeypatch.setattr(settings, "retention_session_events_days", 0)
@@ -427,10 +351,7 @@ def test_retention_needs_a_window_and_not_only_the_boolean(
 def test_every_retention_window_turns_the_sweep_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each `retention_*_days` window alone schedules the sweep, and the set is the sweep's own.
 
-    The predicate listed four windows while the sweep mapped six, so a release whose only window
-    was `retention_session_exhibits_days` (or `retention_result_publications_days`) stated a policy
-    that nothing ever applied. Driven one window at a time, and held against `_window_days`' map so
-    a seventh window counts here with no edit.
+    Held against `_window_days`, so a new window counts here with no edit.
     """
     from chemclaw.durable.retention import _PRUNABLE, _window_days
     from chemclaw.durable.schedules import retention_window_fields
@@ -455,11 +376,9 @@ def test_every_retention_window_turns_the_sweep_on(monkeypatch: pytest.MonkeyPat
 def test_artefact_pushes_expire_whether_or_not_a_retention_policy_is_stated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Wherever a push can be written the prune is planned, retention off and every window 0.
+    """Artefact-push pruning is planned wherever a push can be written, regardless of retention.
 
-    `exhibit_push_retention_hours` is not 0-disabled because a notification queue nobody bounds is
-    not a policy anybody chose — and it was applied only by the retention sweep, which a default
-    deployment never schedules, so it pruned nothing.
+    An unbounded notification queue is not a policy anyone chose.
     """
     from chemclaw.durable.retention import ExhibitPushPruneWorkflow
     from chemclaw.durable.schedules import retention_window_fields
@@ -482,12 +401,7 @@ def test_artefact_pushes_expire_whether_or_not_a_retention_policy_is_stated(
 def test_the_eln_sync_is_planned_only_where_there_is_an_eln_to_sync(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one periodic job that was planned unconditionally, asked the same question as its peers.
-
-    With no ingest source configured — the default — this was an hourly Schedule firing a workflow
-    whose first act is to enumerate zero sources and merge an empty list. `document-sync` already
-    asks the registry rather than a second setting; so does this now.
-    """
+    """The ELN sync is planned only where an ingest source is configured."""
     from chemclaw.durable import schedules as schedules_module
 
     monkeypatch.setattr(schedules_module, "active_ingest_source_names", list)
@@ -502,16 +416,10 @@ def test_the_eln_sync_is_planned_only_where_there_is_an_eln_to_sync(
 def test_the_labelling_drain_is_planned_wherever_there_is_a_corpus_to_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gate that decided whether this feature ran at all, and got the question wrong.
+    """The labelling drain is planned wherever there are reactions to label.
 
-    It used to be `if label_policies():` — some enabled source declaring a `labels:` block. Exactly
-    one source in this tree declares one and it ships disabled, so on a stock deployment this
-    Schedule was never created and no ELN reaction was ever labelled by anything. A block says what
-    a source already *carries*; what earns the Schedule is having reactions at all.
-
-    Both halves are asserted, because the original concern is still real: a deployment with neither
-    an ingest source nor a corpus binding would otherwise ask the labelling server for its version
-    every hour and then label nothing.
+    Not gated on a `labels:` block, which only says what a source carries. With neither an ingest
+    source nor a corpus binding, it is not planned.
     """
     from chemclaw.durable import schedules as schedules_module
 
@@ -530,16 +438,10 @@ def test_the_labelling_drain_is_planned_wherever_there_is_a_corpus_to_label(
 
 
 def test_a_re_apply_does_not_resume_a_schedule_an_operator_paused() -> None:
-    """A reconcile restates this repository's spec; it must not undo an operator's hand.
+    """A re-apply does not resume a Schedule an operator paused.
 
-    `_build_schedule` returns a fresh `Schedule` whose `state` defaults to `paused=False`, and the
-    chart runs the applier as a `post-install,post-upgrade` hook — so pausing `document-sync`
-    because a share is broken, or `retention` during an incident, survived exactly until the next
-    unrelated `helm upgrade`, silently. Measured against a live Temporal server before the fix:
-    pause → `True`, re-apply → `False`.
-
-    Asserted on the update callback rather than through the fake client, because the callback *is*
-    the fix: it is handed the live description and used to ignore it.
+    The applier runs on every `helm upgrade`; asserted on the update callback, which must keep the
+    live description's paused state.
     """
     job = PlannedSchedule("document-sync", NoteReindexWorkflow, timedelta(minutes=30))
     paused = ScheduleState(note="operator paused: share is broken", paused=True)
@@ -592,9 +494,7 @@ def test_schedule_health_reports_a_planned_job_that_was_never_created() -> None:
 def _recent(workflow_id: str, when: datetime) -> SimpleNamespace:
     """One `ScheduleActionResult`-shaped fake: when the fire started and what it started.
 
-    The `action` half is not decoration — `_last_outcome` reads `workflow_id` off it to recover
-    the run status `ScheduleInfo` does not carry, so a fake without it models a `recent_actions`
-    entry Temporal never returns.
+    `_last_outcome` reads `workflow_id` off `action` to recover the run status.
     """
     return SimpleNamespace(
         started_at=when,
@@ -626,13 +526,10 @@ def _health_client(
         def get_workflow_handle(
             self, workflow_id: str, *, run_id: str | None = None
         ) -> _WorkflowHandle:
-            # `run_id` is accepted and ignored on purpose. `_last_outcome` describes by workflow id
-            # alone, and addressing the chain's head instead (`first_execution_run_id`) is the
-            # regression that would report a killed drain as `CONTINUED_AS_NEW`. This fake models
-            # no chain — every fake run is its own head — so it *cannot* tell the two apart, and a
-            # fake that refused the kwarg would fail such a mutation on a `TypeError` swallowed
-            # into "unknown", which reads as coverage and is not. The guard is
-            # `test_a_chains_own_outcome_is_reported_and_not_its_heads`, against a live broker.
+            # `run_id` is accepted and ignored: this fake models no chain, so it cannot distinguish
+            # the chain's head from its tail.
+            # `test_a_chains_own_outcome_is_reported_and_not_its_heads` guards that against a live
+            # broker.
             return _WorkflowHandle()
 
     return cast(Client, _Client())
@@ -669,15 +566,9 @@ def test_schedule_health_surfaces_overlap_skips_and_the_last_run() -> None:
 
 
 def test_a_run_that_can_no_longer_be_described_degrades_to_unknown() -> None:
-    """A run outside its retention window does not describe, and must not end the sweep.
+    """A run that can no longer be described degrades to unknown, with the reason in `note`.
 
-    `describe_schedules` reports every planned job from one `gather`; an exception raised while
-    recovering one job's outcome would take every other job with it, which is the opposite of what
-    a health probe is for. The reason belongs in `note`, where an operator reads it.
-
-    How many that is is asserted below rather than written here: the plan grows, and a count in a
-    docstring is a claim about the commit that wrote it (this one said eleven over a plan of
-    twelve).
+    One job's lookup failure must not take every other job's report with it.
     """
 
     def _gone() -> object:
@@ -699,12 +590,7 @@ def test_a_run_that_can_no_longer_be_described_degrades_to_unknown() -> None:
 
 
 def test_a_run_still_in_flight_is_not_reported_as_an_outcome() -> None:
-    """A running fire has no outcome, and `running_now` already says one is in flight.
-
-    The in-flight set comes from `ScheduleInfo.running_actions`, so excluding it costs no lookup —
-    which is what keeps this surface at exactly one extra `describe` per schedule with no lookback
-    window to tune.
-    """
+    """A run still in flight is not reported as an outcome; `running_now` already says so."""
     started = datetime(2026, 7, 25, 6, 0, tzinfo=UTC)
     running = ScheduleActionExecutionStartWorkflow(
         workflow_id="only-scheduled-now", first_execution_run_id="run-1"
@@ -735,9 +621,7 @@ def test_a_run_still_in_flight_is_not_reported_as_an_outcome() -> None:
 
 # --- The killed-run signature, against a live broker -------------------------------------------
 #
-# Time skipping is the wrong instrument here for the reason `start_local_env_or_skip` records: this
-# is a test about wall-clock schedule fires and a run killed by its own `run_timeout`, and under
-# time skipping the server fast-forwards whenever every worker is idle.
+# These tests depend on wall-clock fires and `run_timeout`, which time skipping fast-forwards.
 
 
 @workflow.defn(name="ScheduleHealthProbeCompletes")
@@ -772,19 +656,11 @@ async def _until(check: Callable[[], Awaitable[bool]], what: str, seconds: float
 
 
 def test_a_schedule_whose_every_run_is_killed_is_not_reported_as_a_healthy_one() -> None:
-    """The whole point of `last_outcome`, proven in both directions against a live broker.
+    """A schedule whose every run is killed is not reported as a healthy one.
 
-    `schedule_run_timeout_seconds` ended the wedge where an overrunning run skipped every
-    subsequent fire — but it moved the failure onto a surface that said nothing: with the ceiling,
-    a schedule whose every run is killed reports `runs_total` climbing, `last_run` advancing,
-    `running_now` 0 and `skipped_overlap` 0, which is what a healthy job reports. This asserts
-    **both** halves, because the second is what makes the first worth having: every field the
-    surface carried before is equal between the two schedules, and only `last_outcome` separates
-    `COMPLETED` from `TIMED_OUT`.
-
-    Both schedules are paused before the reading is taken, so the comparison is not a race against
-    the next fire — a pause stops new fires and keeps `recent_actions`, and it applies to both
-    jobs equally, so it cannot be the thing that distinguishes them.
+    Every other field is equal between a healthy and a killed schedule; only `last_outcome`
+    separates `COMPLETED` from `TIMED_OUT`. Both are paused before reading, so the comparison is
+    not a race.
     """
 
     async def _run() -> tuple[ScheduleHealth, ScheduleHealth]:
@@ -851,11 +727,8 @@ def test_a_schedule_whose_every_run_is_killed_is_not_reported_as_a_healthy_one()
 
 # --- What "the newest finished run" means, and what a chain's outcome is ------------------------
 #
-# Both properties below are asserted against a live broker rather than against the fake above, and
-# for the same reason in each case: what makes them true is Temporal's behaviour, not this
-# repository's. `recent_actions` being oldest-first is the broker's contract, and a chain's head
-# reading `CONTINUED_AS_NEW` while its tail is dead is the broker's behaviour too. A fake
-# encodes whatever its author believed about both.
+# Both are Temporal's behaviour, not this repository's, so they are asserted against a live
+# broker rather than a fake.
 
 
 # Flipped by the mixed-outcome test between two fires of one schedule. A Schedule fires one fixed
@@ -898,19 +771,8 @@ def _started_workflow_id(action: object) -> str:
 def test_the_newest_finished_run_is_the_one_reported() -> None:
     """A schedule whose newest run failed must not report the last good one.
 
-    `_last_outcome` reads `finished[-1]`, and `recent_actions` is oldest-first, so `[-1]` is the
-    newest — but nothing asserted it. Every other fixture in this file is outcome-homogeneous, so
-    `finished[-1]` -> `finished[0]` passed all 23 of them while turning the field into a report of
-    the last *good* run. That is exactly the healthy-looking dead job `last_outcome` exists to end:
-    a job that has just started dying goes on reporting `COMPLETED`.
-
-    Driven against a live broker because the ordering the index depends on is Temporal's property
-    and not this repository's — a fake asserts whatever its author assumed. So the run order is
-    asserted here too, beside the outcomes: oldest fire `COMPLETED`, newest `FAILED`, `started_at`
-    ascending.
-
-    The cue is flipped only once the first fire is *observed complete*, never merely started, so
-    the mixed corpus this test needs cannot collapse back into a homogeneous one on a slow poll.
+    `recent_actions` is oldest-first, so `finished[-1]` is the newest; the order is asserted beside
+    the outcomes. The cue flips only once the first fire is observed complete.
     """
 
     async def _run() -> tuple[ScheduleHealth, list[str], list[datetime]]:
@@ -986,15 +848,8 @@ def test_the_newest_finished_run_is_the_one_reported() -> None:
 def test_a_chains_own_outcome_is_reported_and_not_its_heads() -> None:
     """A `continue_as_new` chain reports what happened to the chain, not to its first run.
 
-    Four of the scheduled jobs drain by continuing as new, and a chain shares one workflow id — so
-    `_last_outcome` describes by that id alone, which answers with the chain's *tail*. The obvious
-    field on the recorded action, `first_execution_run_id`, addresses the *head*, which reads
-    `CONTINUED_AS_NEW` no matter how the chain ended: a killed drain would report as normal.
-
-    Both readings are taken here, so the assertion fails for the semantic reason if the lookup ever
-    starts naming a run. The unit tests above cannot do this — their fake models no chain, so the
-    two addresses are the same run — which is what left this, the ADR's headline finding, guarded
-    by nothing but a `TypeError` on a fake's signature.
+    Describing by workflow id answers with the chain's tail; `first_execution_run_id` names the
+    head, which reads `CONTINUED_AS_NEW` however the chain ended. Both readings are taken here.
     """
 
     async def _run() -> tuple[ScheduleHealth, str]:

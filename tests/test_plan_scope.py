@@ -1,17 +1,9 @@
 """A plan approval authorizes the tools its steps declared, and nothing else.
 
-`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`. The defect these tests exist
-for was driven, not argued: with a standing approval for the one-line, read-only plan
-`["look up the melting point of aspirin"]`, **every** name in `authz.side_effecting_tools()`
-executed — every knowledge-graph write, every durable launcher, every enabled bundle's
-state-changing surface, nothing refused. D-137 made the decision durable and D-167 made it bind an
-act rather than latch onto a session; neither bounded what the act could be.
-
-`test_the_surface_a_read_only_plans_approval_reaches` is that measurement, now as a ratchet: it
-drives the whole of `side_effecting_tools()` through the gate under an approval for a plan that
-declared nothing, and requires **every one** to be refused. That is the assertion the figure in
-`infra/sql/095_plan_approval_scope.sql` and `agent/plan_scope.py` delegates to, and why neither of
-them writes a count.
+`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`.
+`test_the_surface_a_read_only_plans_approval_reaches` is the ratchet: under an approval for a plan
+that declared nothing, every name in `authz.side_effecting_tools()` must be refused. The migration
+and `agent/plan_scope.py` cite this test rather than stating a count.
 """
 
 import asyncio
@@ -45,9 +37,8 @@ _READ_ONLY_PLAN = ["look up the melting point of aspirin"]
 def approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanApprovalStore]:
     """The real factory's in-memory store, obtained the way every caller obtains it.
 
-    The same fixture `tests/test_plan_gate.py` uses and for the same reason: the sharing between
-    the gate that reads and the decision surface that writes is part of what is under test, so a
-    patched-in double would pass even if the factory's cache were removed.
+    As in `tests/test_plan_gate.py`: the sharing between reader and writer is under test, so a
+    patched-in double would hide a broken cache.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     factory = store_module.plan_approval_store
@@ -61,11 +52,8 @@ def approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanApprovalS
 async def _approve(
     store: InMemoryPlanApprovalStore, session_id: str, steps: list[dict[str, Any]]
 ) -> None:
-    """Record a human approval of `steps`, scoped the way the two decision surfaces scope it.
-
-    `declared_scope` rather than a literal set, so this drives the same derivation
-    `api/routes/plan.py` and `cli/chat.py` record with: a test that passed its own scope would
-    prove the gate reads the column and nothing about what the column ever gets.
+    """Record a human approval of `steps`, scoped with `declared_scope` as both decision surfaces
+    do.
     """
     plan_hash = plan_identity(steps)
     assert plan_hash is not None
@@ -80,9 +68,7 @@ async def _ran(
 ) -> bool:
     """Drive one call through the gate under `steps`; True when the tool body ran.
 
-    `arguments` defaults to empty because for all but two tools the name settles whether the gate
-    applies. The exceptions are `authz.memory_write_verbs()`, where the *path* decides, and passing
-    them is the only way to drive that half.
+    `arguments` matter only for `authz.memory_write_verbs()`, where the path decides gatedness.
     """
     ran = False
 
@@ -110,11 +96,8 @@ def _step(content: str, *tools: str) -> dict[str, Any]:
 def _plan(*steps: dict[str, Any]) -> list[ScopedTodo]:
     """`_step` output as the `ScopedTodo` list the argument schema takes.
 
-    One cast, stated once, rather than a `# type: ignore` per call site — and the ignores were the
-    wrong tool twice over: mypy raises `arg-type` when the list is a variable and `list-item` when
-    it is a literal, so four call sites needed two codes for one conceptual mismatch, and CI caught
-    the two that guessed wrong. The mismatch itself is real and narrow: `_step` returns the loose
-    dict `write_todos` is actually called with, which is the shape these tests want to drive.
+    One cast here instead of per-call-site ignores: `_step` returns the loose dict `write_todos` is
+    actually called with, which is what these tests drive.
     """
     return cast(list[ScopedTodo], list(steps))
 
@@ -122,11 +105,10 @@ def _plan(*steps: dict[str, Any]) -> list[ScopedTodo]:
 def test_an_approval_for_one_tool_does_not_authorize_another(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
-    """The effect assertion: approve a plan naming A, watch B refused in the same session.
+    """An approval for a plan naming tool A refuses tool B in the same session.
 
-    Not "the scope column is populated" — that is a shape, and a shape assertion is what
-    `tasks/lessons.md` records surviving mutation. One session, one live approval, two calls, and
-    the difference between them is the declaration the human read.
+    An effect assertion: one live approval, two calls, differing only in the declaration the human
+    read.
     """
 
     async def _run() -> tuple[bool, bool]:
@@ -147,12 +129,9 @@ def test_an_approval_for_one_tool_does_not_authorize_another(
 def test_the_surface_a_read_only_plans_approval_reaches(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
-    """The live repro, as a ratchet over the whole side-effecting surface.
+    """An approval of a read-only plan reaches none of the side-effecting surface.
 
-    Before this decision, an approval of this exact plan permitted every one of these names. The
-    assertion is over `side_effecting_tools()` itself rather than a list, so a bundle enabled next
-    year is covered the day it is enabled — and no number appears here or in the prose that cites
-    this test.
+    Iterates `side_effecting_tools()` itself, so a bundle enabled later is covered the day it is.
     """
 
     async def _run() -> list[str]:
@@ -172,21 +151,11 @@ def test_the_surface_a_read_only_plans_approval_reaches(
 def test_the_gate_also_reaches_the_half_of_the_surface_a_name_cannot_enumerate(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
-    """The ratchet above walks `side_effecting_tools()`, and that is not the whole gated surface.
+    """The gate also reaches calls whose gatedness depends on their arguments.
 
-    `authz.side_effecting_call` is the union of two halves: the names a gate can enumerate, and the
-    calls whose gatedness is a function of their *arguments*. `memory_write_verbs()` is the second
-    half — one name serving two roots, `/scratch/` dying with the turn and `/memories/` outliving
-    the deployment — so the tools whose classification is hardest are precisely the ones the
-    enumeration walks past.
-
-    Measured before this existed: both verbs are outside the 49-name surface, and
-    `side_effecting_call(verb, {"file_path": "/memories/x.md"})` is `True` for each. So the gate did
-    refuse them and **nothing held that it would** — which is the shape `CLAUDE.md` names as a claim
-    that a control exists. The backlog row that found it named one verb; there are two.
-
-    Derived from `authz` and `scratchpad` rather than listing either name, for the reason the
-    ratchet above gives about bundles: a third argument-driven verb is covered the day it is added.
+    `authz.side_effecting_call` covers named tools plus `memory_write_verbs()`, where `/memories/`
+    writes outlive the deployment and `/scratch/` writes die with the turn. Derived from `authz` and
+    `scratchpad`, so a new argument-driven verb is covered when added.
     """
 
     async def _run() -> tuple[list[str], list[str]]:
@@ -225,20 +194,11 @@ def test_the_gate_also_reaches_the_half_of_the_surface_a_name_cannot_enumerate(
 
 
 def test_a_plan_is_bounded_in_both_directions_at_argument_validation() -> None:
-    """An unpriced write a model can repeat, refused where the model can read why.
+    """A plan is bounded in steps and in tools per step at argument validation.
 
-    Both halves were unbounded and each sizes something that outlives the call. Measured on the
-    shipped schema before this: **50,000** ten-character names in one step validated, and
-    `plan_gate.out_of_scope_refusal` built a **600,192-character** sentence out of the union —
-    bounded to 60,000 by `agent/tool_authz._refusal_message` before the model reads it, and
-    unbounded everywhere before that (the exception, the log, the audit row). **20,000 steps
-    validated too**, which is the half the backlog row that found this did not name.
-
-    Not an escalation: the scope only ever *narrows* what a call may do, and a name no tool answers
-    to is refused by `enforce_tool_authz` regardless.
-
-    Both numbers are read off `settings` rather than written here, so the assertion is that the
-    bound *binds* rather than that it is 32 — a deployment that raises either is still tested.
+    Both sizes outlive the call (the refusal sentence, logs, the audit row). The scope only narrows,
+    so this is not an escalation. Bounds are read from `settings`, so the assertion is that they
+    bind, whatever a deployment sets.
     """
     over_steps = _plan(*(_step("x") for _ in range(settings.plan_max_steps + 1)))
     with pytest.raises(ValidationError, match=r"at most \d+ are accepted"):
@@ -250,12 +210,10 @@ def test_a_plan_is_bounded_in_both_directions_at_argument_validation() -> None:
 
 
 def test_the_refusal_names_the_step_so_the_model_can_split_the_plan() -> None:
-    """Refused at argument validation is the whole point, and a message it cannot act on wastes it.
+    """The refusal names the step and says to split the plan.
 
-    The alternative designs both fail here rather than in principle: a bound in the `TypedDict`
-    could only carry a literal (its annotations are evaluated at class definition, so no setting
-    reaches it) and pydantic's own `too_long` message names neither the step nor what to do about
-    it. So the assertion is on the two things a model needs — *which* step, and the instruction.
+    A `TypedDict` bound could only be a literal and pydantic's `too_long` names neither; the model
+    needs which step and what to do.
     """
     wide = _step("x", *[f"tool-{i}" for i in range(settings.plan_max_tools_per_step + 1)])
     with pytest.raises(ValidationError) as raised:
@@ -266,12 +224,9 @@ def test_the_refusal_names_the_step_so_the_model_can_split_the_plan() -> None:
 
 
 def test_an_ordinary_plan_is_nowhere_near_either_bound() -> None:
-    """The half that decides whether these defaults are a control or an obstacle.
+    """An ordinary plan is far below both bounds.
 
-    A step declares nought to a handful of tools and a plan a person approves runs to a handful of
-    steps, so the bounds have to be far enough above real use that nobody meets them. Asserted as
-    the *ratio* rather than by accepting one plan, because "an eight-step plan validates" would
-    stay true at a bound of nine.
+    Asserted as a ratio, since "an eight-step plan validates" would also pass at a bound of nine.
     """
     ordinary = _plan(*(_step(f"step {i}", "gather_evidence", "expand_note") for i in range(8)))
     assert ScopedWriteTodosInput(todos=ordinary).todos
@@ -284,19 +239,8 @@ def test_widening_a_step_after_approval_does_not_widen_the_approval(
 ) -> None:
     """The model cannot grant itself a tool by editing its own declaration.
 
-    **Two independent reasons, and this test used to assert the weaker one as its precondition.**
-    The gate reads the recorded scope and never the live one, so a widened declaration gains nothing
-    even where the approval still stands — and since
-    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` the approval no
-    longer stands either: the identity covers each step's declaration, so the widened plan is a
-    different plan with no decision against it at all.
-
-    The precondition therefore runs the other way now. It asserted that widening leaves the identity
-    *unchanged* — which was true, and was the hole: the decision route's 409 freshness guard read
-    that same identity, so a rewrite made between the chemist reading the card and posting their
-    decision was stamped as what they had approved
-    (`tests/test_plan_scope.py::test_a_rewrite_that_widens_a_declaration_does_not_pass_the_freshness_guard`
-    drives it). The effect assertion is untouched, and is what this test is for.
+    The gate reads the recorded scope, never the live one, and the identity covers each step's
+    declaration, so a widened plan is a different plan with no decision against it.
     """
 
     async def _run() -> bool:
@@ -317,11 +261,9 @@ def test_widening_a_step_after_approval_does_not_widen_the_approval(
 
 
 def test_a_refusal_outside_the_scope_names_what_was_approved() -> None:
-    """The two refusals are different sentences because they have different remedies.
+    """An out-of-scope refusal says what was approved, distinct from "not approved yet".
 
-    A chemist reading "has not been approved yet" while the plan is visibly approved would
-    reasonably conclude the gate was broken. `out_of_scope_refusal` says what the approval covers
-    and what to do instead, and this is what stops the two collapsing into one message.
+    The two have different remedies, and the second would read as a broken gate on an approved plan.
     """
     from chemclaw.agent.plan_gate import out_of_scope_refusal, plan_approval_refusal
 
@@ -334,13 +276,10 @@ def test_a_refusal_outside_the_scope_names_what_was_approved() -> None:
 
 
 def test_a_plan_step_cannot_be_written_without_declaring_its_tools() -> None:
-    """The decision on "a step declares no tools": the schema makes the omission unrepresentable.
+    """A plan step cannot be written without declaring its tools.
 
-    The alternative designs both fail. An optional field with a fall-through bounds nothing until
-    the model volunteers to be bounded; an optional field that refuses when absent turns the first
-    omission into what looks, to the chemist, like an authorization decision about a plan they have
-    approved. Required makes it a tool-argument error the model reads and retries, which is the
-    ordinary loop and not a security surface at all.
+    Required in the schema, so an omission is a tool-argument error the model retries, rather than
+    an unbounded step or a confusing authorization refusal.
     """
     schema = ScopedTodoListMiddleware().tools[0].args_schema
     # The tool advertises a pydantic model, which is what makes the omission a *validation* error
@@ -353,12 +292,10 @@ def test_a_plan_step_cannot_be_written_without_declaring_its_tools() -> None:
 
 
 def test_the_scoped_plan_tool_is_still_the_one_the_gate_and_the_harness_know() -> None:
-    """Everything that reads the plan reads it by name; widening the schema must not move any name.
+    """The scoped plan tool keeps the name and channel the gate and harness use.
 
-    `plan_gate._PLAN_WRITE_TOOL`, `chemclaw_agent.harness_tool_names` and the `todos` channel all
-    spell this out by hand. A subclass that renamed the tool or wrote a different channel would
-    disable the gate's batch rule silently, which is the failure mode `tests/test_upstream_surface`
-    exists for one level up.
+    `plan_gate._PLAN_WRITE_TOOL`, `chemclaw_agent.harness_tool_names` and the `todos` channel spell
+    them by hand; a rename would silently disable the gate's batch rule.
     """
     middleware = ScopedTodoListMiddleware()
     assert [tool.name for tool in middleware.tools] == ["write_todos"]
@@ -366,12 +303,7 @@ def test_the_scoped_plan_tool_is_still_the_one_the_gate_and_the_harness_know() -
 
 
 def test_an_unreadable_declaration_narrows_rather_than_widens() -> None:
-    """`declared_scope` fails closed, because it is what a call is checked *against*.
-
-    A `tools` that is a bare string, a number, or absent contributes nothing — so a malformed plan
-    authorizes less, never more. The opposite direction would make a malformed `write_todos` a way
-    to be granted everything.
-    """
+    """`declared_scope` fails closed: a malformed `tools` contributes nothing."""
     assert declared_scope([{"content": "a", "tools": "record_knowledge_note"}]) == frozenset()
     assert declared_scope([{"content": "a", "tools": 7}]) == frozenset()
     assert declared_scope([{"content": "a"}]) == frozenset()
@@ -379,15 +311,10 @@ def test_an_unreadable_declaration_narrows_rather_than_widens() -> None:
 
 
 def test_the_durable_backend_round_trips_a_scope_and_defaults_a_legacy_row_to_none() -> None:
-    """The shipped backend is Postgres, and the in-memory mirror proves nothing about the SQL.
+    """The Postgres backend round-trips a scope and reads a legacy row as the empty set.
 
-    Two things only a real database can answer, and both decide whether the control holds on a
-    deployment: that `plan_approvals.scope` survives the write and the read, and that a row written
-    *without* one — every approval recorded before
-    `infra/sql/095_plan_approval_scope.sql` ran — comes back as the empty set rather than as NULL.
-    The migration's `DEFAULT '{}'` is what makes the second true, and it is the direction of that
-    default that is the decision: an approval an upgrade found in flight authorizes nothing and is
-    asked for again, rather than standing as a permanent authorization for everything.
+    The migration's `DEFAULT '{}'` means an approval in flight across the upgrade authorizes nothing
+    and is asked for again, rather than authorizing everything.
     """
 
     async def _run() -> tuple[frozenset[str] | None, frozenset[str] | None]:
@@ -425,16 +352,10 @@ def test_the_durable_backend_round_trips_a_scope_and_defaults_a_legacy_row_to_no
 def test_the_decision_route_records_what_the_plan_declared(
     monkeypatch: pytest.MonkeyPatch, approvals: InMemoryPlanApprovalStore
 ) -> None:
-    """`POST /sessions/{id}/plan/decision` stamps the scope; the gate reads only what it stamps.
+    """`POST /sessions/{id}/plan/decision` stamps the plan's declared scope.
 
-    The other half of the control. The gate could be perfect and the front door could still record
-    an approval that authorizes nothing (every call refused, the feature dead) or everything (the
-    defect back, with the column present and meaningless). So this drives the real route against a
-    plan whose steps declare, and asserts the row.
-
-    It also asserts the same plan comes back with its declaration on `GET .../plan`: the person is
-    being asked to approve the scope, so a surface that showed only the steps would be collecting a
-    yes to something it had not displayed.
+    The gate reads only what the route stamps, so a wrong stamp disables the feature or reopens the
+    defect. `GET .../plan` also returns the declaration, since the person is approving the scope.
     """
     from fastapi.testclient import TestClient
 
@@ -478,27 +399,11 @@ def test_the_decision_route_records_what_the_plan_declared(
 def test_the_stream_and_the_route_name_the_same_scope_for_one_plan(
     monkeypatch: pytest.MonkeyPatch, approvals: InMemoryPlanApprovalStore
 ) -> None:
-    """A plan card rendered from the stream must see what approving it would authorize.
+    """The stream's `plan` event and the route name the same scope for one plan.
 
-    The test above asserts `GET .../plan` carries the scope. That route is the one a client built
-    on D-167 never calls: `plan_hash` was put on the **stream** precisely so a surface could answer
-    the plan it had just rendered without a second round trip that races the agent's next revision
-    — and `scope` was added to the **fetch** only. So the disclosure this ADR requires
-    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`: *"a surface that rendered
-    the steps alone would be collecting a yes to something it had not displayed"*) held on a route
-    nobody had a reason to call, and the companion UI's card returns early once it holds the hash
-    and the steps. Driven before the fix: `scope` on the route, absent from the `plan` event.
-
-    **It is asserted as an equality between the two surfaces rather than as a field being present**,
-    because presence is the weaker claim by exactly the margin that matters. A stream that carried
-    a `scope` recomputed from a different reading of the plan — the rendered checkbox lines rather
-    than the steps, the step in progress rather than the union, a stale `todos` — would satisfy
-    "the field is there" while showing a chemist an authorization the gate does not enforce. That is
-    the same trap `plan_hash` already walked into once and is asserted against in
-    `tests/test_langgraph_stream.py`, one field over.
-
-    Both halves are driven for real: the front door's own route through `TestClient`, and the stream
-    emitter through `graph_stream._from_update` over the state update a node actually produces.
+    Clients answer the plan they rendered from the stream, so the stream must carry the scope too.
+    Asserted as equality, not presence, so a scope computed from a different reading of the plan
+    fails. Driven through the real route and `graph_stream._from_update`.
     """
     import asyncio as _asyncio
 
@@ -560,26 +465,12 @@ def test_the_stream_and_the_route_name_the_same_scope_for_one_plan(
 def test_a_rewrite_that_widens_a_declaration_does_not_pass_the_freshness_guard(
     monkeypatch: pytest.MonkeyPatch, approvals: InMemoryPlanApprovalStore
 ) -> None:
-    """The approval-time widening window, driven through the real route.
+    """A rewrite that widens a declaration does not pass the decision route's freshness guard.
 
-    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`. Stamping the
-    scope at decide time (above) stops a rewrite widening an approval that has already been given.
-    It does nothing about a rewrite made *while the decision card is open*, because the scope the
-    route stamps is read off the **live** plan once the posted hash has matched — and the hash
-    matched, since the identity covered step text only. So: show a plan declaring nothing, keep
-    every step's text, widen its `tools`, and the chemist's own hash still satisfies the 409 guard.
-
-    Measured on the pre-fix code through this exact sequence: shown scope `[]`, rewritten scope
-    `['record_knowledge_note', 'watch_for']`, identity unchanged, **204**, and the row came back
-    authorizing both. No concurrency is involved — an unapproved plan is not a hold, so any
-    follow-up message takes a turn while the card is open, and `out_of_scope_refusal` tells the
-    model in as many words to rewrite the plan so a step declares the tool it wants.
-
-    The assertion is the route's answer and the absence of a row, not the hash: a hash comparison
-    here would be a second copy of `plan_identity`'s rule, which is the vacuous shape
-    `tasks/lessons.md` records. What makes it non-vacuous is that nothing in this test computes an
-    identity at all — it posts the one the server rendered on the card, and asks what the server
-    does with it.
+    A plan can be rewritten while its decision card is open (`out_of_scope_refusal` tells the model
+    to do exactly that). Because the identity covers each step's declaration, the hash the card
+    showed no longer matches and the route refuses. The test computes no identity itself; it posts
+    the one the server rendered.
     """
     from fastapi.testclient import TestClient
 
@@ -625,21 +516,11 @@ def test_a_rewrite_that_widens_a_declaration_does_not_pass_the_freshness_guard(
 
 
 def test_the_plans_identity_moves_with_its_declaration_and_not_with_its_progress() -> None:
-    """The two sensitivities the identity has to have, asserted directly and in one place.
+    """The plan's identity moves with its declaration and not with its progress.
 
-    **Sensitive to the declaration**, or the decision route's freshness guard cannot see a widening
-    rewrite — the hole
-    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` closes, driven
-    through the route above. **Insensitive to `status`**, or the canonical "tick the completed step,
-    run the next one" batch revokes its own approval and an approved multi-step plan livelocks
-    against the repeat guard (`tests/test_plan_gate.py` drives that half as an effect).
-
-    It replaces a test in `tests/test_langgraph_agent.py` that claimed both engines hashed a plan to
-    one identity, which survived this whole change green and could not have failed it: its assertion
-    was
-    `plan_identity([t["content"] for t in todos]) == plan_identity(titles)` over `todos` built from
-    `titles` one line above — a value compared with itself, and about a second engine that no longer
-    exists. That is the vacuous shape `tasks/lessons.md` records.
+    Sensitive to the declaration, or the freshness guard misses a widening rewrite; insensitive to
+    `status`, or ticking a step revokes its own approval (`tests/test_plan_gate.py` drives that
+    effect).
     """
     narrow = [_step("write up what we know", "record_knowledge_note")]
     widened = [_step("write up what we know", "record_knowledge_note", "watch_for")]

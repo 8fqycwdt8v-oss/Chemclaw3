@@ -1,18 +1,11 @@
-"""F8-T1: a prediction says how sure it is, where that came from, and whether to trust it at all.
+"""A prediction says how sure it is, where that came from, and whether to trust it at all.
 
-The row: `implementation-tickets.md` specified a `science/calc/uncertainty.py` module with
-`value + uncertainty + in_domain + method`; none of it existed, so `predict_solubility` on a
-molecule ESOL cannot describe returned a confident number with a training-set RMSE attached and
-nothing machine-readable said otherwise.
-
-The tests below hold three claims that are easy to state and easy to get subtly wrong:
+Three claims are held:
 
 - **"unknown" is not "fine".** `in_domain=None` must never read as trustworthy.
-- **The domain check refuses rather than widens.** An out-of-domain prediction does not get a bigger
-  error bar; it gets a flag, because extrapolating a linear fit leaves the distribution its
-  residuals were drawn from.
-- **Where the uncertainty came from is part of the claim.** Two numbers rendered identically say
-  different things, so `method` has to reach the rendering rather than stopping at the model.
+- **The domain check refuses rather than widens.** An out-of-domain prediction gets a flag, not a
+  bigger error bar, because extrapolating a linear fit leaves the residuals' distribution.
+- **Where the uncertainty came from is part of the claim**, so `method` reaches the rendering.
 """
 
 import ast
@@ -28,12 +21,7 @@ from tests.calc_server_fake import FAKE_VERSION, FakeCalcServer, install
 
 
 def test_an_unknown_domain_is_not_a_trustworthy_one() -> None:
-    """`None` means nobody checked, and nobody-checked must not read as fine.
-
-    The whole reason `in_domain` is three-valued: a calculator with no declared domain has not
-    cleared its prediction, and a consumer that treats a missing answer as an affirmative one is
-    the bug the third value exists to expose.
-    """
+    """`None` means nobody checked, and nobody-checked must not read as fine."""
     unknown = Estimate(value=1.0, unit="log10(mol/L)", uncertainty=0.75, method="reported")
     assert unknown.in_domain is None
     assert unknown.trustworthy is False
@@ -43,18 +31,11 @@ def test_an_unknown_domain_is_not_a_trustworthy_one() -> None:
 
 
 def test_no_structural_domain_check_is_reimplemented_here() -> None:
-    """An absence test, because the harm this deletion fixes is a belief rather than a number.
+    """No structural domain check is reimplemented here.
 
-    The structural screen runs where the prediction runs — `Chemclaw3-mcp`'s `servers/calc` engine,
-    called from its `solubility.py` — and `SolubilityResult.estimate` arrives over the wire already
-    carrying the verdict. A line-for-line duplicate lived here with no caller in `src/`, kept green
-    by tests that called it directly, so a reviewer asking "does this system refuse an ESOL
-    prediction on a ferrocene?" would read the local copy and conclude the control was here. It was
-    not; the two could drift and this suite could never notice.
-
-    Fails whoever re-adds it without a caller, the same way
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` fails a re-added
-    attribution with no producer.
+    The screen runs in `Chemclaw3-mcp`'s `servers/calc`, and `SolubilityResult.estimate` arrives
+    already carrying the verdict. A local copy with no caller would mislead a reviewer about where
+    the control lives and could drift unnoticed.
     """
     import chemclaw.science.calc.uncertainty as module
 
@@ -66,18 +47,11 @@ def test_no_structural_domain_check_is_reimplemented_here() -> None:
 
 
 async def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The row's own example, end to end — and the half of it this repository still owns.
+    """An out-of-domain flag survives the calculation cache.
 
-    The ESOL prediction itself is the calculation server's since
-    `D-2026-08-16-the-physics-leaves-the-cache-stays`, but the *flag reaching a chemist* is not: it
-    travels as a field of a payload this side stores and validates back. That is exactly where it
-    was lost once before — `SolubilityResult` gained `estimate`, no version moved, and every row
-    already on disk validated back with `estimate=None`, which `Estimate.render` spells as
-    "applicability not assessed". A salt the calculator refuses to speak about came back looking
-    merely unchecked, forever, because `durable/retention.py` never prunes `calculation_results`.
-
-    So the assertion is on the *served* copy, not the fresh one: an out-of-domain estimate that
-    does not survive a cache hit is the same defect through a shorter route.
+    The flag travels as a field of a payload this side stores and validates back, so the assertion
+    is on the served copy: an old row validating back with `estimate=None` would render as
+    "applicability not assessed" for a prediction the calculator refused.
     """
     salt_payload = {
         "calc_version": FAKE_VERSION,
@@ -110,12 +84,10 @@ async def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.Monk
 
 
 def test_the_trust_rides_on_the_value_line_because_the_excerpt_truncates() -> None:
-    """`render` is one fragment, not a stanza, and that is a constraint rather than a preference.
+    """The trust statement rides on the value line, because the excerpt truncates.
 
-    `chemclaw.retrieval.retrievers._excerpt` is a blind character prefix of the note body. A trust
-    statement placed below the value is therefore cut from precisely the notes with the most prose
-    and kept in the short ones that needed it least — so the rendering has to be inline, and a
-    newline in it would silently reintroduce the separation.
+    `retrievers._excerpt` is a blind character prefix of the note body, so a trust statement on a
+    later line would be cut from exactly the longest notes; a newline would reintroduce that.
     """
     rendered = Estimate(value=-154.75, unit="Hartree", method="none", in_domain=True).render(
         fmt=".6f"
@@ -125,12 +97,9 @@ def test_the_trust_rides_on_the_value_line_because_the_excerpt_truncates() -> No
 
 
 def test_an_unassessed_domain_says_so_rather_than_reading_as_a_pass() -> None:
-    """The rendering must not let silence do the work of an affirmative answer.
+    """An unassessed domain says so rather than reading as a pass.
 
-    In-domain renders no domain remark — so a bare line means the check ran and passed. That is
-    only safe because the other two states are spelled out; if `None` were also silent, a reader
-    could not tell an unasked question from an answered one, which is the whole reason `in_domain`
-    has three values rather than two.
+    In-domain renders no remark, which is safe only because the other two states are spelled out.
     """
     unknown = Estimate(value=1.0, unit="log10(mol/L)", uncertainty=0.75, method="reported")
     assert "applicability not assessed" in unknown.render()
@@ -180,12 +149,9 @@ def test_a_missing_uncertainty_renders_no_plus_minus_at_all() -> None:
 
 
 def _identifiers_used_in(path: Path) -> set[str]:
-    """Every name a module actually *uses* — imports, reads, attribute accesses.
+    """Every name a module actually uses: imports, reads, attribute accesses.
 
-    Parsed rather than grepped, for the reason `Chemclaw3-mcp`'s egress scan is: a comment naming
-    a deleted function reads as a reference to text and as nothing at all to a parser. Measured —
-    the first draft of the guard below matched `core/config/calculators.py`'s own prose about the
-    deletion and reported the re-added function as wired.
+    Parsed rather than grepped, so a comment naming a deleted function does not count as a use.
     """
     tree = ast.parse(path.read_text("utf-8"))
     used: set[str] = set()
@@ -200,21 +166,11 @@ def _identifiers_used_in(path: Path) -> set[str]:
 
 
 def test_no_conformal_interval_is_re_added_without_a_reader() -> None:
-    """A split-conformal interval may come back — wired. Unwired, it fails here.
+    """A split-conformal interval may come back only wired; an unwired re-add fails here.
 
-    `conformal_uncertainty` and the two `calibration_conformal_*` settings were deleted for having
-    no caller and no reader, and `D-2026-08-27-an-interval-is-only-honest-where-it-was-calibrated`
-    declines the wiring on three measurements: the ledger holds zero reconciled residuals and its
-    only producer is a chemist typing one measurement in at a time; at the 20 samples that were
-    argued for the estimate is the 19th of 20 absolute residuals, >25% off the truth in 23.8% of
-    runs; and a 90% half-width is not the 1-sigma `predicted_uncertainty` means, so at matching
-    semantics it converges on the `Calibration.rmse` `calculator_trust` already reports.
-
-    So this does **not** forbid the re-add — the ADR names the trigger that would justify one. It
-    forbids the *half* re-add that keeps happening: a function nothing calls, or an operator-facing
-    knob nothing reads, either of which is a claim that a control exists. Same shape as
-    `test_no_structural_domain_check_is_reimplemented_here` above and as
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`.
+    The interval and its settings were removed for having no caller and no reader, and the ADR names
+    what would justify re-adding them. This forbids the half re-add: a function nothing calls or a
+    knob nothing reads, either of which claims a control that does not exist.
     """
     import chemclaw.science.calc.uncertainty as module
     from chemclaw.core.config import settings

@@ -1,18 +1,8 @@
-"""Every validator entrypoint answers its command line, rather than quietly ignoring it.
+"""Every validator entrypoint answers its command line rather than quietly ignoring it.
 
-Six modules under `chemclaw.cli` are CI gates whose whole job is refusing a declaration that does
-not match reality. Four of them — skills, connectors, templates, prose — took no arguments at all
-and *accepted* anything on the command line, which is a validator with the failure mode it exists
-to prevent: an operator who has just mounted a private skills or connector directory and runs
-`python -m chemclaw.cli.validate_skills /mnt/skills` was told "SKILL.md validation passed." about
-the configured corpus, having never looked at the one they named. Proven before the fix: the exact
-directory that fails through `CHEMCLAW_SKILLS_DIR` passed as an argument. `validate_kg` read
-`sys.argv[1]` directly, so `--help` was interpreted as a notes directory.
-
-The directory stays an environment variable rather than becoming a second positional, because every
-one of these is a `PATH`-style list (`CHEMCLAW_SKILLS_DIR`, `CHEMCLAW_CONNECTORS_DIR`,
-`CHEMCLAW_TEMPLATES_DIR`) and one knob with two spellings is how the two spellings drift. What the
-argument gets is a refusal that names the variable to set instead.
+A validator that accepts a directory argument and validates the configured corpus instead reports
+success about something it never looked at. The directory stays an environment variable (each is
+a `PATH`-style list), so a positional argument is refused with a message naming the variable.
 """
 
 from pathlib import Path
@@ -61,22 +51,16 @@ def test_the_graph_validator_still_takes_the_notes_directory_it_documents(tmp_pa
 # --------------------------------------------------------------------------------------------
 # A gate that is green while checking nothing.
 #
-# Every one of these validators was watched refusing the thing it names. What none of the three
-# below refused was the state where there is nothing to name: an empty corpus, an empty manifest
-# directory, a path that is not a directory at all. `CHEMCLAW_NOTE_REPO_DIR`,
-# `CHEMCLAW_RESULT_SINKS_DIR` and `CHEMCLAW_DELIVERY_CHANNELS_DIR` are all operator overrides, so
-# a typo in one turned its gate off behind a success line — which is the `map_to_hpc_identity`
-# shape this repository names in four other places, and which four sibling validators already
-# refuse in these same words.
+# An empty corpus, an empty manifest directory or a path that is not a directory is refused, since
+# these directories are operator overrides and a typo would otherwise turn the gate off.
 # --------------------------------------------------------------------------------------------
 
 
 def test_the_graph_validator_refuses_a_corpus_with_no_notes_in_it(tmp_path: Path) -> None:
-    """An empty notes directory is a gate that checked nothing, not a graph that is valid.
+    """An empty notes directory is a gate that checked nothing, not a valid graph.
 
-    This is the only check on `[[reaction-*]]` citations: since D-2026-08-25 `dangling_links`
-    ignores that namespace on purpose because it cannot see the record store. A fresh clone, the
-    wrong branch, or a PVC mounted after its directory was created reaches exactly this state.
+    This is the only check on `[[reaction-*]]` citations, which `dangling_links` deliberately
+    ignores.
     """
     from chemclaw.cli.validate_kg import main
 
@@ -95,12 +79,9 @@ def test_the_graph_validator_refuses_a_notes_path_that_is_not_a_directory(tmp_pa
 def test_the_sink_validator_refuses_a_directory_with_no_manifests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Zero discovered manifests is the state `problems()`' own docstring argues against.
+    """Zero discovered manifests is refused rather than reported as a pass.
 
-    That docstring records moving rules 2 and 3 from the *enabled* set to the *discovered* set,
-    because iterating the enabled set "resolved zero drivers, bound zero config blocks and checked
-    zero `*_env` names … a gate that could only fail on rule 1, which by construction was empty
-    too." Zero discovered manifests reproduces that state exactly, one level out.
+    Rules 2 and 3 iterate the discovered set, so an empty set would check nothing.
     """
     from chemclaw.cli.validate_sinks import problems
     from chemclaw.core.config import settings
@@ -131,13 +112,10 @@ def test_the_channel_validator_refuses_a_directory_with_no_manifests(
 def test_a_malformed_manifest_is_a_problem_line_not_a_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The two newest manifest gates raised where the two older ones report.
+    """A malformed manifest is a problem line and exit 1, not a traceback.
 
-    `validate_connectors` and `validate_datasources` both answer unreadable YAML with
-    `- <path>: unreadable or malformed …` and exit 1. `validate_sinks` let `ResultSinkError` out,
-    and `validate_channels` let the bare `yaml.YAMLError` out — `deliver.registry._load` reads and
-    parses without wrapping either, unlike `publish.registry._load`. The exit code was already 1
-    in both cases; what an operator could act on was not.
+    Matches `validate_connectors` and `validate_datasources`; `deliver.registry._load` does not wrap
+    `yaml.YAMLError` itself.
     """
     from chemclaw.cli.validate_channels import problems as channel_problems
     from chemclaw.cli.validate_sinks import problems as sink_problems

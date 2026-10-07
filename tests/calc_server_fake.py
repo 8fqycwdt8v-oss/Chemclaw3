@@ -1,27 +1,12 @@
 """A stand-in for `Chemclaw3-mcp`'s `calc` server, so this suite proves wiring without physics.
 
-`D-2026-08-16-the-physics-leaves-the-cache-stays` moved every engine out of this repository. What
-is left here is the cache, the composition and the ledger, and all three are testable *without* a
-quantum chemistry program — but not without something on the other end of `calc_session`. This is
-that something.
+It answers the same shapes and counts every call: "was this recomputed?" is a question about call
+counts (D-011). Returned numbers are placeholders, never asserted as chemistry.
 
-**It answers the same shapes and counts every call**, which is what the surviving tests are about:
-"was this recomputed?" is a question about call counts and nothing else (D-011), and "did the
-composite ask for the right parts?" is a question about which tools were called with what. The
-numbers it returns are arithmetic placeholders and are never asserted on as chemistry — the one
-place real physics is asserted is `tests/test_calc_thermo.py`, which runs the RRHO arithmetic over
-Hessians *recorded from the live server* and checks them against measured entropies.
-
-**Keys are derived the way the server derives them**, from the same inputs: `structure_id` (or the
-canonical SMILES) plus the parameters that move the answer. Two properties that were measured
-against the running server are reproduced deliberately, because a fake that got them wrong would
-make the tests pass on a design that fails in production:
-
-- **A Fukui key does not name the mode.** All three modes on phenol derive one key, so a cache hit
-  can serve the wrong ranking unless the caller re-ranks (`SiteReactivityResult.ranked_for`).
-- **A relaxation key does not name who asked.** `optimize_geometry` and `relax_structure` derive
-  the same `xtb.opt` key while returning different payloads, which is why this repository only ever
-  caches the full result.
+Keys are derived as the server derives them, including two properties a composite must handle: a
+Fukui key does not name the mode (callers re-rank via `SiteReactivityResult.ranked_for`), and
+`optimize_geometry` and `relax_structure` share one `xtb.opt` key while returning different
+payloads (so only the full result is cached).
 """
 
 import math
@@ -38,12 +23,9 @@ from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.structures import InMemoryStructureStore
 
-# A version string carrying **both** key delimiters, because a real one does: `esol-delaney@2004`
-# carries the `@` and `cal-0.28733:-29.3116` carries the `:`. A client that split the flat
-# `type@version:input:params` form would reassemble a key that matches nothing, forever.
-# The conceptual-DFT panel every Fukui payload carries. Internally consistent — eta = IP - EA,
-# S = 1/eta, omega = mu^2/2eta — because a reader that checks one against the others must not find
-# the fake disagreeing with arithmetic the real server keeps.
+# The version carries both key delimiters (`@` and `:`), as real ones do, so a client that splits
+# the flat key form is caught. The conceptual-DFT panel is internally consistent (eta = IP - EA,
+# S = 1/eta, omega = mu^2/2eta).
 _FAKE_PANEL: dict[str, float] = {
     "ionization_potential_ev": 13.5,
     "electron_affinity_ev": 3.0,
@@ -55,40 +37,22 @@ _FAKE_PANEL: dict[str, float] = {
 
 FAKE_VERSION = "GFN2-xTB+fake@1/cal-0.28733:-29.3116"
 
-# Which cache type each compute tool answers under, and which of its arguments enter `params`. The
-# *subject* — a `structure` or a `smiles` — is never in this tuple: it is hashed into `input_hash`,
-# and a molecule's canonical form is what makes two spellings one row. An argument missing from a
-# tuple is one the answer does not depend on, which is exactly the property the composites rely on:
-# `predict_site_reactivity` has an empty tuple because a Fukui calculation does not depend on the
-# mode, and `scan_point` carries `atoms` and `value` because a constrained point does.
+# Which cache type each compute tool answers under, and which arguments enter `params`. The subject
+# (`structure` or `smiles`) is hashed into `input_hash`, never listed here; an argument absent from
+# a tuple is one the answer does not depend on.
 _KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
     "compute_xtb_energy": ("xtb.sp", ("charge",)),
     "compute_electronic_properties": ("xtb.properties", ("solvent",)),
-    # The same calculation asked at a *named* geometry rather than at one embedded from a SMILES,
-    # so it answers under the same `calc_type` with the same params — the subject is what differs,
-    # and the subject is `input_hash`. Reproduced here because it is the property the
-    # cheap-search-then-careful-optimization chain rests on: relaxing a conformer and then asking
-    # for its properties must reach the entry that conformer's own address names.
+    # The same calculation at a named geometry: same `calc_type` and params, different subject, so a
+    # relaxed conformer's properties land on the entry its own address names.
     "compute_properties_at": ("xtb.properties", ("solvent",)),
     "predict_site_reactivity": ("xtb.fukui", ()),
-    # The geometry-taking twin, under the same `calc_type` — one row serves a Fukui computed from
-    # a SMILES and one computed at the identical geometry. `mode` and `top_n` stay out of the key
-    # on both: the server computes all three indices from three single points and sorts on the way
-    # out, so keying on `mode` would make a cache *hit* authoritative about an ordering it never
-    # chose, which is what `ranked_for` exists to prevent.
-    #
-    # **`solvent` is in the key here and absent from the twin, and that is not an inconsistency.**
-    # `predict_site_reactivity(smiles, mode, top_n)` takes no solvent at all, while
-    # `compute_fukui_at(structure, mode, solvent, top_n)` does, and the server keys it —
-    # `identity._fukui_at` builds `XtbSpec(task="fukui", solvent=_solvent(arguments))`. The two
-    # tools shared one entry here and only one of them fitted it, so a Fukui set computed in water
-    # and one in the gas phase collided in tests while production correctly recomputed.
+    # Same `calc_type` as the SMILES twin; `mode` and `top_n` stay out of the key because the server
+    # computes all indices and sorts on the way out. `solvent` is keyed here (the server keys it)
+    # but the SMILES twin takes no solvent.
     "compute_fukui_at": ("xtb.fukui", ("solvent",)),
-    # The three SMILES-in tools this repository proxies through `connectors/calc/server/tools.py`
-    # but composes nothing from. They were missing here, so `calculation_key` for any of them was
-    # refused by the fake as "not a compute tool on this server" while the real server answers.
-    # The three rows are *measured* against `Chemclaw3-mcp`'s engine/identity.py, not guessed —
-    # `tests/test_calc_fake_identity.py` is what re-measures them.
+    # SMILES-in tools proxied but not composed from; `tests/test_calc_fake_identity.py` checks these
+    # rows against the real server's identity module.
     "compute_atomic_descriptors": ("xtb.atomic", ("solvent",)),
     "compute_surface_potential": ("xtb.surface", ("solvent",)),
     "optimize_geometry": ("xtb.opt", ("solvent",)),
@@ -110,10 +74,8 @@ _UNKEYED = frozenset({"predict_logd", "embed_structure", "combine_structures"})
 def embed(smiles: str, multiplicity: int = 1) -> dict[str, Any]:
     """A real ETKDG geometry for `smiles`, in the `Structure` shape the server returns.
 
-    Real rather than synthetic because a `structure_id` is a hash of coordinates and half of every
-    downstream key: a fake that returned the same three atoms for every molecule would make two
-    different species share a relaxation entry, which is the one failure a cache test must be able
-    to see.
+    Real because a `structure_id` hashes coordinates: identical fake geometries would make two
+    species share a relaxation entry.
     """
     canonical = require_canonical_smiles(smiles)
     mol = Chem.AddHs(Chem.MolFromSmiles(canonical))
@@ -131,20 +93,9 @@ def embed(smiles: str, multiplicity: int = 1) -> dict[str, Any]:
 def ionised(structure: dict[str, Any], search: str) -> dict[str, Any]:
     """What a protonation search returns: a *different species* from the one it was given.
 
-    Reproduced here because getting it wrong is what shipped. Driven against crest 3.0.2, a
-    `--deprotonate` run returns one atom fewer at charge -1 and a `--protonate` run one atom more at
-    charge +1 — and the parser that fed them into this repository reused the input's element list
-    and the input's charge, so the deprotomer search had never once returned an ensemble and the
-    protomer search would have relaxed a cation at charge 0. A fake that hands back the neutral
-    molecule for every search cannot see either.
-
-    The electron count is untouched by both, because a proton is a nucleus without electrons — which
-    is why the multiplicity carries over and `Structure` accepts the result.
-
-    The label is *derived* from the input SMILES here, where the real server perceives it from the
-    returned geometry. The composite depends on a label and a shifted charge arriving, not on how
-    they were obtained, and perceiving bond orders from a nudged ETKDG geometry with an atom taken
-    out of it would be testing RDKit rather than this repository.
+    `--deprotonate` returns one atom fewer at charge -1 and `--protonate` one more at charge +1; the
+    electron count is unchanged, so the multiplicity carries over. The label is derived from the
+    input SMILES here, where the real server perceives it from the geometry.
     """
     if search not in ("protomers", "deprotomers"):
         return structure
@@ -192,17 +143,10 @@ def harmonic_hessian(
 ) -> dict[str, Any]:
     """A well-formed Hessian payload for `structure`, optionally carrying one negative eigenvalue.
 
-    Not physics: a diagonal matrix whose spectrum is chosen, base64-encoded exactly as the server
-    encodes a real one. `imaginary=True` is how the saddle-point refinement loop is driven — the
-    escape it performs is a property of this repository (the key of a thermochemistry would name
-    the geometry the loop settles on, which is why it was never shipped), so it has to be
-    exercisable without a real saddle point.
-
-    `max_gradient` defaults to a *converged* value, because every geometry this fake is asked about
-    came out of its own `relax_structure`. It is a parameter because the second silent failure —
-    a frequency set taken at a geometry that is not a stationary point, whose zero-point energy is
-    quietly too low and whose modes show nothing wrong — has to be drivable too. `None` reproduces
-    the `xtb` binary backend, which reports no gradient beside its Hessian.
+    A diagonal matrix with a chosen spectrum, base64-encoded as the server encodes one.
+    `imaginary=True` drives the saddle-point escape loop. `max_gradient` defaults to a converged
+    value; a large one drives the non-stationary-geometry check, and `None` reproduces the `xtb`
+    binary backend, which reports no gradient.
     """
     import base64
     import io
@@ -210,10 +154,8 @@ def harmonic_hessian(
     size = 3 * len(structure["elements"])
     diagonal = np.full(size, 0.5)
     if imaginary:
-        # One negative eigenvalue, the same magnitude as the rest: it comes out at about
-        # -64 cm^-1, which is above `xtb_imaginary_threshold_cm` and so counts as a real imaginary
-        # mode. Its zero-point term is ~0.09 kcal/mol, small enough that dropping it from the RRHO
-        # sum does not by itself invert a barrier.
+        # About -64 cm^-1: above `xtb_imaginary_threshold_cm`, so a real imaginary mode, with a
+        # zero-point term small enough not to invert a barrier by itself.
         diagonal[0] = -0.5
     matrix = np.diag(diagonal)
 
@@ -240,10 +182,8 @@ def harmonic_hessian(
 def _nudged(structure: dict[str, Any], index: int) -> dict[str, Any]:
     """The same molecule at a slightly different geometry — one ensemble member.
 
-    Displaces every atom along x by `index/100` Angstrom, which is two orders of magnitude above the
-    rounding `Structure` applies, so each member has its own `structure_id` and therefore its own
-    cache entry. Index 0 is returned unchanged, so the lowest member is still the input geometry and
-    the existing tests that follow it through a composite are unaffected.
+    Displaces every atom along x by `index/100` Angstrom, above `Structure`'s rounding, so each
+    member has its own `structure_id`. Index 0 is the input unchanged.
     """
     if index == 0:
         return structure
@@ -255,9 +195,7 @@ def _nudged(structure: dict[str, Any], index: int) -> dict[str, Any]:
 
 
 # A three-well torsional potential in Hartree, shaped like n-butane's: minima at 60, 180 and 300
-# degrees, the anti well (180) about 1 kcal/mol below the two gauche wells, and a barrier of about
-# 2.5 kcal/mol between them. The numbers are placeholders; the *shape* is what the profile
-# composite is tested against, because a flat or monotonic surface has no rotamers to find.
+# degrees, anti about 1 kcal/mol below gauche, barriers about 2.5 kcal/mol.
 _BARRIER_HARTREE = 0.004
 _GAUCHE_HARTREE = 0.0016
 _WELLS = (60.0, 180.0, 300.0)
@@ -281,15 +219,9 @@ def torsional_surface_energy(
 ) -> float:
     """This surface's energy for a geometry, in Hartree — the one definition all three tools use.
 
-    `scan_point`, `relax_structure` and `compute_hessian` must agree about what a geometry is worth,
-    or a composite that compares two of them compares two different surfaces. They did not: the
-    Hessian payload reported `-1.0 * atom_count` for *every* geometry, so a free-energy barrier
-    computed as `G(pass) - G(well)` lost its electronic term entirely and came out negative — an
-    artefact of this fake that looked exactly like a defect in the composite.
-
-    `shift` is the caller's `solvent_shifts` entry, passed in rather than looked up here so this
-    stays a pure function of the surface. Omitting it made the agreement hold only in the gas
-    phase, which is the kind of "true except when configured" invariant that is worse than none.
+    `scan_point`, `relax_structure` and `compute_hessian` must agree, or a composite comparing two
+    of them compares different surfaces. `shift` is the caller's `solvent_shifts` entry, so the
+    agreement holds in every medium.
     """
     angle = dihedral_of(structure, atoms)
     relaxed = _RELAXATION_HARTREE if _near_a_well(angle) else 0.0
@@ -318,9 +250,7 @@ def with_dihedral(
 ) -> dict[str, Any]:
     """`structure` with that dihedral driven to `degrees`, moving the attached fragment with it.
 
-    Real geometry manipulation rather than a recorded number, because the composite reads the angle
-    back off the coordinates: a fake that reported a dihedral it had not actually set would let a
-    released well keep the constrained geometry and still look correct.
+    Real geometry manipulation, because the composite reads the angle back off the coordinates.
     """
     conformer = _conformer(structure)
     rdMolTransforms.SetDihedralDeg(conformer, *atoms, degrees)
@@ -370,26 +300,15 @@ class FakeCalcServer:
     ) -> None:
         """Start with no calls recorded.
 
-        `saddle_first` makes the first Hessian carry an imaginary frequency and every later one a
-        minimum, which is the sequence `relax_to_minimum`'s escape needs to be visible.
+        `saddle_first` makes the first Hessian carry an imaginary frequency and later ones minima,
+        which `relax_to_minimum`'s escape needs.
 
-        `torsion` turns on a **one-dimensional torsional potential** over those four atoms: a
-        constrained point actually sets the dihedral and reports `_TORSIONAL` at it, and an
-        unconstrained relaxation actually settles into the nearest of its three wells. Nothing else
-        here models a potential energy surface at all, and this one does for a reason rather than
-        for realism — the rotational profile's whole claim is that releasing a scan point's
-        constraint moves it to a different geometry with a different energy. A fake whose relaxation
-        returns its input unchanged cannot express that claim being false.
+        `torsion` enables a one-dimensional torsional potential over four atoms: a constrained point
+        sets the dihedral, and an unconstrained relaxation settles into the nearest well, so a
+        rotational profile's release step is observable.
 
-        `solvent_shifts` maps `(smiles, solvent)` to a shift in Hartree added to that species'
-        relaxed energy in that medium, so a fan-out over solvents can be made to *reorder* rather
-        than only to shift. Without it every medium returns the same energy — the fake's energy is
-        a function of atom count alone — and `dominance_changes`, the one finding a solvent screen
-        over species exists to report, could never be observed.
-
-        The two arrived on branches that did not know about each other and reach the same
-        conclusion: a fake that cannot express the failure is not evidence
-        (`D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire`).
+        `solvent_shifts` maps `(smiles, solvent)` to a Hartree shift on that species' relaxed
+        energy, so a solvent fan-out can reorder species and `dominance_changes` can be observed.
         """
         self.calls: list[tuple[str, dict[str, Any]]] = []
         # The read bound each session was opened with, in order — `None` where the caller took the
@@ -399,10 +318,8 @@ class FakeCalcServer:
         self._torsion = torsion
         self._solvent_shifts = dict(solvent_shifts or {})
         self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
-        # Where the composites' geometries land once `install` has wired it in. On the fake rather
-        # than built by `install`, so a test can read it back — resolving an id a result reported
-        # is how "the handle the agent is shown is the handle it can pass back" gets checked
-        # against the real code path instead of against a stub.
+        # Where composites' geometries land once `install` wires it in; a test resolves reported ids
+        # here through the real code path.
         self.structures = InMemoryStructureStore()
 
     def count(self, tool: str) -> int:
@@ -419,11 +336,9 @@ class FakeCalcServer:
         try:
             return _Result(self._answer(name, arguments))
         except ValueError as error:
-            # The wire's own shape for a refused call: FastMCP's `Tool.run` raises
-            # `ToolError(f"Error executing tool {name}: {e}")` and `_make_error_result` sends
-            # `str(e)` as one plain text block. Not JSON, and the prefix is not decoration — the
-            # client tells a full pod and a broken server from a domain refusal by a marker at the
-            # *head* of this string (`core/mcp_session.server_marked`).
+            # The wire's shape for a refused call: one plain text block with FastMCP's prefix, which
+            # the client reads to tell a domain refusal from a full pod or broken server
+            # (`core/mcp_session.server_marked`).
             return _Result(f"Error executing tool {name}: {error}", is_error=True)
 
     def _answer(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -459,11 +374,8 @@ class FakeCalcServer:
             "input_hash": stable_hash(inputs),
             "params_hash": stable_hash(params),
         }
-        # `structure_id` for the calculations that run on a geometry, exactly as the real server
-        # reports it — it is the server's authoritative answer to "which geometry is this about",
-        # and it is what `calculation_results.structure_id` records so a stored row can be found by
-        # the conformer a chemist picked (D-2026-08-21). Absent for a molecule-keyed calculator,
-        # which is about a compound and not about any particular geometry of it.
+        # `structure_id` for geometry-based calculations, as the real server reports it; absent for
+        # a molecule-keyed calculator.
         return {
             "tool": tool,
             "calc_version": FAKE_VERSION,
@@ -499,11 +411,9 @@ class FakeCalcServer:
             settled = _nearest_well(dihedral_of(structure, self._torsion))
             structure = with_dihedral(structure, self._torsion, settled)
             result = self._optimization(structure, arguments.get("solvent"))
-            # **A released well sits below the constrained point it came from**, by more than the
-            # torsional term alone: letting go of the dihedral lets every *other* coordinate relax
-            # too. Without this the fake's release lowered nothing, so the composite's barrier
-            # arithmetic could mix the constrained and released energy zeros and no test could see
-            # it — measured on the live GFN2 server as 0.118 kcal/mol on n-butane.
+            # A released well sits below its constrained point by more than the torsional term,
+            # because the other coordinates relax too; this keeps constrained and released energy
+            # zeros distinguishable.
             result["energy_hartree"] += torsional_energy(settled) - _RELAXATION_HARTREE
             return result
         return self._optimization(structure, arguments.get("solvent"))
@@ -545,12 +455,8 @@ class FakeCalcServer:
     def _compute_hessian(self, arguments: dict[str, Any]) -> dict[str, Any]:
         saddle = self._saddle_first and self.count("compute_hessian") == 1
         if self._torsion is not None and not saddle:
-            # **A geometry at a torsional maximum really is a first-order saddle**, so when this
-            # server is modelling a torsional surface it says so. Without this the pass Hessian
-            # reported zero imaginary modes, `_free_energy_barrier` took its "not a saddle" exit on
-            # every call, and the whole `thorough` free-energy path was unreachable from the suite
-            # — which is how it came to add a molecule's entire absolute thermal correction to an
-            # electronic barrier and report 70 kcal/mol with nothing red.
+            # A torsional maximum is a first-order saddle, so the pass Hessian reports one imaginary
+            # mode and the free-energy barrier path is reachable.
             saddle = not _near_a_well(dihedral_of(arguments["structure"], self._torsion))
             payload = harmonic_hessian(arguments["structure"], imaginary=saddle)
             # The energy *this surface* gives that geometry, so a free energy computed from this
@@ -585,16 +491,9 @@ class FakeCalcServer:
             "solvent": arguments.get("solvent"),
             "search": search,
             "effort": arguments.get("effort", "quick"),
-            # Three members, degeneracies 1/2/1: enough for a degeneracy-weighted population to
-            # differ visibly from an unweighted one, which is the arithmetic that stayed here.
-            #
-            # **Each member is a distinct geometry**, nudged along x by a hundredth of an Angstrom.
-            # They shared one structure until a refinement composite needed them not to: refining
-            # an ensemble is one optimization and one Hessian *per member*, and three members at one
-            # address collapse to a single cache entry — so a fake with identical members reports
-            # three refinements as one call and every fan-out test passes on work that never
-            # happened. The displacement is above `_GEOMETRY_DECIMALS`, so the three addresses
-            # genuinely differ.
+            # Three members, degeneracies 1/2/1, so weighted and unweighted populations differ. Each
+            # member is a distinct geometry (above `_GEOMETRY_DECIMALS`), so a per-member refinement
+            # is three cache entries, not one.
             "members": [
                 {
                     "energy_hartree": -1.0 * len(structure["elements"]) - shift,
@@ -665,15 +564,9 @@ class FakeCalcServer:
         canonical = require_canonical_smiles(arguments["smiles"])
         molecule = Chem.AddHs(Chem.MolFromSmiles(canonical))
         atoms = list(molecule.GetAtoms())
-        # f_minus descends with the index and f_plus ascends, so the two modes rank the atoms in
-        # opposite orders — which makes a mis-served ranking visible rather than coincidental.
-        #
-        # **`f_zero` varies per atom and `nudge` moves it per geometry**, and both matter. It is
-        # the field an ensemble average actually reports (`compose._DEFAULT_FUKUI_MODE` is
-        # "radical"), and it used to be the constant 0.5 for every atom of every conformer — so
-        # `test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool` was comparing 0.5 to
-        # 0.5 and could not have failed. `nudge` is what makes two conformers rank their atoms
-        # differently, which is the whole premise of averaging over an ensemble.
+        # f_minus descends and f_plus ascends with the index, so the two modes rank atoms in
+        # opposite orders. `f_zero` varies per atom and `nudge` per geometry, so conformers rank
+        # differently and an ensemble average is meaningful.
         sites = [
             {
                 "index": atom.GetIdx(),
@@ -701,12 +594,8 @@ class FakeCalcServer:
             }
             for atom in atoms
         ]
-        # **Ranked most-susceptible first and truncated, because that is the contract the real
-        # server keeps** (`SiteReactivityResult`: "ordered most-susceptible first by the index named
-        # in `ranked_by`, and truncated to the most susceptible `len(sites)` of `total_atoms`").
-        # The fake used to return them in atom-index order and whole, which is the shape in which
-        # pairing conformers by list position happens to be correct — so the fake could not express
-        # the defect that shipped.
+        # Ranked most-susceptible first and truncated, the real server's `SiteReactivityResult`
+        # contract, so pairing conformers by list position is wrong here as it is in production.
         sites.sort(key=lambda site: -float(site["f_minus"]))
         sites = sites[: int(arguments.get("top_n") or len(sites))]
         return {
@@ -726,11 +615,8 @@ class FakeCalcServer:
     def _compute_fukui_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """The geometry-taking twin of the Fukui ranking, answering about *this* geometry.
 
-        **Geometry-dependent, which is the entire point of the tool.** This used to delegate on the
-        SMILES alone, so every conformer of one molecule came back byte-identical — and an ensemble
-        average over identical members cannot show a mispairing, a reordering or a truncation. The
-        `BACKLOG.md` row this tool closed was written to ask how often the top-ranked site *moves*
-        between geometries; a fake that holds it still answers "never" by construction.
+        Geometry-dependent, so conformers of one molecule differ and an ensemble average can show a
+        mispairing, reordering or truncation.
         """
         structure = arguments["structure"]
         identifier = _structure_id(structure)
@@ -746,11 +632,8 @@ class FakeCalcServer:
     def _compute_properties_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """The geometry-taking twin, answering about the structure's own molecule.
 
-        **The dipole depends on the geometry**, which the SMILES-in twin cannot express and which a
-        Boltzmann average is entirely about. A fake whose property is the same at every conformer
-        makes an ensemble average equal to its own mean by construction, so the spread is zero and a
-        test over it passes whatever the weighting does. The dependence is the crudest thing that
-        works — the first atom's x coordinate — because the number is never asserted as chemistry.
+        The dipole depends on the geometry (the first atom's x coordinate), so a Boltzmann average
+        has a non-zero spread and its weighting is testable.
         """
         structure = arguments["structure"]
         answer = self._compute_electronic_properties({"smiles": structure["smiles"], **arguments})
@@ -776,13 +659,10 @@ class FakeCalcServer:
             "lumo_ev": 1.0 + len(atoms) / 100,
             "gap_ev": 11.0 + len(atoms) / 50,
             "dipole_debye": 1.5 + len(atoms) / 100,
-            # Varied *per molecule*, not just per atom: BoFire refuses a descriptor column with
-            # no variation across categories, which is a real property of a featurized campaign —
-            # a descriptor that is the same for every option tells the surrogate nothing.
-            # `wiberg_valence` and `free_valence` vary per atom rather than being constants, for
-            # the same reason the charges do: a fake that holds a field still cannot express a
-            # reader that mixes atoms up. `free_valence` is None for sulfur, which is what the real
-            # server reports for an element with more than one normal valence.
+            # Varied per molecule and per atom: BoFire refuses a descriptor column with no
+            # variation, and a constant field cannot reveal a reader that mixes atoms up.
+            # `free_valence` is None for sulfur, as the real server reports for multi-valent
+            # elements.
             "atom_charges": [
                 {
                     "index": atom.GetIdx(),
@@ -834,16 +714,9 @@ _STRUCTURE_STORE_CALLERS = (
 def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalcServer:
     """Make every `calc_session()` yield `server` and every geometry go to `server.structures`.
 
-    Patched at `connectors.calc.remote`, the one module that opens a session — so the tool path,
-    the composites, the durable activities and the BO calculator bindings all reach this fake
-    through their real call chains rather than through a stub of their own.
-
-    **The geometry store is part of "no socket is opened anywhere".** Every composite persists the
-    geometries it receives (D-2026-08-21-a-geometry-is-an-address-not-a-payload), so without this
-    an offline composite test reaches Postgres — which is exactly the shape of dependency this
-    fake exists to remove, and the failure a sandbox with no database would see. Installing one
-    in-memory store shared by all three callers also makes the round trip testable: a test can
-    relax a molecule and then resolve the id the result reported, through the real code path.
+    Patched at `connectors.calc.remote`, the one module that opens a session, so tools, composites,
+    activities and BO bindings reach the fake through their real call chains. The in-memory geometry
+    store keeps composite tests off Postgres and lets a test resolve a reported id.
     """
 
     @asynccontextmanager

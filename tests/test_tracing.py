@@ -1,19 +1,8 @@
-"""Spans that exist, and the propagation that was the real finding.
+"""Turn, tool and connector spans, and W3C trace propagation across the connector boundary.
 
-`configure_telemetry` called MAF's `configure_otel_providers` and that was the whole tracing story:
-the LLM client's own spans and nothing else. A trace showed model calls with no parent — no turn to
-hang them from, no tool call around them — and nothing at all from a connector, because each
-connector process started an unrelated trace. `deploy/README.md` meanwhile claimed spans cover a
-turn and a job and that dashboards track loop iterations, none of which existed.
-
-The propagation is the half worth naming. `core/call_identity.py` sends a *custom*
-`X-Chemclaw-Correlation` header, and that header is the tell: it exists because the standard one was
-not being sent. A correlation id joins log lines after the fact, by grep; `traceparent` joins spans,
-live, so a connector's work appears inside the turn that asked for it.
-
-Driven against a real in-memory OTel SDK rather than a mock. The failure mode being tested is
-whether a *parent-child relationship* forms across a header boundary, and a mock that records calls
-would assert that this module invoked an API, not that the trace joined up.
+A correlation id joins log lines after the fact; `traceparent` makes a connector's spans children
+of the turn that asked for them. Driven against a real in-memory OTel SDK, because the thing under
+test is whether a parent-child relationship forms across a header boundary.
 """
 
 from collections.abc import Iterator
@@ -71,11 +60,10 @@ def test_a_nested_span_is_a_child_not_a_second_root(spans: object) -> None:
 
 
 def test_tracing_off_is_a_no_op_rather_than_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Off is the default, and it runs per tool call on the loop that serves every SSE stream.
+    """Tracing off is the default and must be a no-op rather than a failure.
 
-    So the cost when disabled has to be a boolean read and the block has to execute unchanged —
-    a tracing helper that raises or swallows the body when the collector is absent would be worse
-    than no tracing.
+    It runs per tool call on the loop serving every SSE stream, so the disabled cost is a boolean
+    read and the body executes unchanged.
     """
     from chemclaw.core.tracing import start_span, trace_headers
 
@@ -90,11 +78,10 @@ def test_tracing_off_is_a_no_op_rather_than_a_failure(monkeypatch: pytest.Monkey
 def test_a_connector_call_carries_the_standard_header_as_well_as_the_custom_one(
     spans: object,
 ) -> None:
-    """The finding: a custom correlation header existed *because* `traceparent` did not.
+    """A connector call carries `traceparent` as well as the custom correlation header.
 
-    Both are sent, and they are not redundant. The correlation id is what `audit_events` is keyed
-    on and survives where no collector is configured; `traceparent` is what makes a connector's
-    spans children of this turn rather than an orphan trace.
+    The correlation id keys `audit_events` and works without a collector; `traceparent` joins the
+    connector's spans to this turn.
     """
     from chemclaw.core.call_identity import (
         HEADER_CORRELATION,
@@ -151,11 +138,9 @@ def test_an_absent_traceparent_is_not_an_error(spans: object) -> None:
 
 
 def test_both_boundaries_are_actually_instrumented() -> None:
-    """The wiring, which is the claim the docs made and the code did not support.
+    """Both boundaries call the tracing helpers.
 
-    Asserted on the source because exercising a real turn needs a model and a connector needs a
-    server; what can be wrong offline is that the helper exists and nothing calls it, which is the
-    state this row is about.
+    Asserted on the source, since a real turn needs a model and a connector needs a server.
     """
     import inspect
     import re
@@ -166,12 +151,10 @@ def test_both_boundaries_are_actually_instrumented() -> None:
     from chemclaw.core import call_identity
 
     def _opens(module: object, name: str) -> bool:
-        """Whether `module` calls `start_span` with `name` — across a line break.
+        """Whether `module` calls `start_span` with `name`, across a line break.
 
-        Matched as a *call* spanning whitespace rather than as one literal string, because the
-        formatter wraps a long `start_span(...)` and an assertion that only knows the one-line form
-        fails on correct code. The same too-narrow-check family as the two entries in
-        `tasks/lessons.md`, caught here by the test failing on a change I had just made.
+        Matched as a call spanning whitespace, since the formatter may wrap a long
+        `start_span(...)`.
         """
         source = inspect.getsource(module)  # type: ignore[arg-type]
         return re.search(rf'start_span\(\s*"{re.escape(name)}"', source) is not None
@@ -185,13 +168,10 @@ def test_both_boundaries_are_actually_instrumented() -> None:
 
 
 async def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
-    """Driven through `run_turn` itself, because "the call exists" is not "the span is entered".
+    """A real turn exports a turn span.
 
-    Found by a mutation: replacing `stack.enter_context(...)` with a plain assignment builds the
-    context manager, never enters it, exports nothing — and passed the source check
-    above, which can only see that the call is written. A `with`-less context manager is a
-    plausible refactor and a silent loss of every turn span, so the boundary is exercised for real
-    with a fake agent rather than asserted about.
+    The source check above cannot tell a context manager created from one entered, so the boundary
+    is exercised through `run_turn` with a fake agent.
     """
     from collections.abc import AsyncIterator
 
@@ -218,14 +198,10 @@ async def test_a_real_turn_exports_a_turn_span(spans: object) -> None:
 def test_a_failure_description_carries_no_content_while_the_flag_is_off(
     spans: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The exception channel is content, and `otel_include_sensitive_data` did not govern it.
+    """A failure description carries no content while `otel_include_sensitive_data` is off.
 
-    Measured before the fix, with a real exporter and the flag at its shipped default: the span's
-    status description and the SDK's own `exception` event both carried the message verbatim, and
-    the stacktrace with it. `_warn_about_sensitive_data` tells an operator the opposite — "no
-    first-party span carries turn content" — so the one signal saying the channel is clean was the
-    signal that was wrong. A span is not a `logging.LogRecord`, so `SecretRedactingFilter` never
-    saw any of it.
+    The span status description and the SDK's `exception` event are content channels too, and
+    `SecretRedactingFilter` never sees spans.
     """
     from chemclaw.core.tracing import start_span
 
@@ -253,11 +229,10 @@ def test_a_failure_description_carries_no_content_while_the_flag_is_off(
 def test_a_credential_never_reaches_a_span_even_with_content_allowed(
     spans: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 401 body echoed back by an upstream is how a bearer reaches an exception message.
+    """A credential never reaches a span, even with content allowed.
 
-    `otel_include_sensitive_data` is a decision about *turn content* — a chemist's question and the
-    model's answer. It is not a decision to export this process's own credentials, so the value
-    inventory `core/logging` already holds applies on both settings of the flag.
+    The flag governs turn content, not this process's credentials, which an upstream can echo back
+    in a 401 body; the `core/logging` value inventory applies either way.
     """
     from chemclaw.core.tracing import start_span
 

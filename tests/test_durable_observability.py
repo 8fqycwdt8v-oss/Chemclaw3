@@ -1,20 +1,9 @@
-"""What the durable tier says about itself — measured, because the answer used to be "nothing".
+"""What the durable tier says about itself: logs, metrics and job records for every outcome.
 
-The measurement this file pins down was taken against a live broker on 2026-08-27: one
-`ConnectorJobWorkflow` run twice, once succeeding and once failing on a `ValueError`. The
-successful job emitted **zero** log records. The failed job emitted zero first-party records and
-moved no metric. `job_records` held one row for two jobs — the failed one had none. The only output
-either run produced was two `temporalio` SDK warnings.
-
-So each test here asserts one half of that being false now, and every one of them is written to run
-**without a broker**: an interceptor is an object with one method, a workflow's failure record is a
-pure function of its input, and the cache's three branches are reachable from a fake store. That
-matters because the property being protected is not "this works on a good day" — it is "a change
-that silences the durable tier turns a test red", and a test that needs Temporal running is a test
-that skips exactly where it is needed.
-
-The two facts that genuinely need Postgres (the `state` / `failure_reason` columns round-tripping)
-say so through `tests/pg.py::migrated_db_or_skip`, which the run's own epilogue counts.
+Each test runs without a broker where it can (an interceptor is an object with one method, a
+failure record is a pure function of its input, the cache's branches are reachable from a fake
+store), so a change that silences the durable tier turns a test red instead of skipping. Facts that
+need Postgres or a live broker say so through `tests/pg.py` and the Temporal fixtures.
 """
 
 import asyncio
@@ -105,11 +94,9 @@ _JOB = ConnectorJobInput(
 
 
 def _input(fn: Any, args: list[Any]) -> ExecuteActivityInput:
-    """The SDK's own interceptor input, so what is exercised is the production signature.
+    """The SDK's own interceptor input, so the production signature is exercised.
 
-    A hand-rolled stand-in would type-check as `Any` and would keep passing if upstream renamed the
-    field the walk reads — which is the coupling `tests/test_upstream_surface.py` exists to make
-    loud rather than silent.
+    A hand-rolled stand-in would keep passing if upstream renamed the field the walk reads.
     """
     return ExecuteActivityInput(fn=fn, args=args, executor=None, headers={})
 
@@ -117,9 +104,8 @@ def _input(fn: Any, args: list[Any]) -> ExecuteActivityInput:
 def _env_for(activity_type: str) -> ActivityEnvironment:
     """An activity context whose `activity.info()` names `activity_type`.
 
-    `ActivityEnvironment`'s stock info reports `activity_type="unknown"`, and the whole point of
-    `chemclaw_activity_failures_total{activity=...}` is that an operator can see *which* activity
-    is failing — so the label has to be asserted against a real name.
+    The stock info reports `"unknown"`, and the failure counter's `activity` label must be asserted
+    against a real name.
     """
     env = ActivityEnvironment()
     env.info = dataclasses.replace(env.info, activity_type=activity_type)
@@ -151,11 +137,10 @@ class _Terminal(ActivityInboundInterceptor):
 
 
 def test_an_activity_runs_under_the_ids_its_own_argument_carries() -> None:
-    """`set_current_correlation_id` had exactly one caller in the tree: the front door.
+    """A worker's log lines carry the ids the activity's argument carries.
 
-    So every log line every worker wrote rendered `correlation_id="-" actor="-" session_id="-"`,
-    while `deploy/README.md` told an operator to join on those fields. The ids were never missing —
-    they ride in the activity's argument — and nothing bound them.
+    The ids ride in the argument; the interceptor is what binds them, so an operator can join on
+    them.
     """
     seen: dict[str, Any] = {}
 
@@ -217,17 +202,10 @@ def test_a_nested_identity_is_read_one_level_down() -> None:
 
 
 def test_the_real_template_step_inputs_are_the_shape_the_walk_reads() -> None:
-    """The nested-identity walk is asserted above against a stand-in class; this asserts the models.
+    """The real template step inputs satisfy the nested-identity walk.
 
-    Both matter and neither substitutes for the other. The test above pins the *walk* — that a
-    nested `identity` is read one level down — and it would keep passing if `StepIdentity` renamed
-    `correlation_id` tomorrow, because it declares its own shape. This one pins the *contract*:
-    that the three step inputs a real template run carries actually satisfy that walk.
-
-    It is the assertion that lets `template_activities._acting_as` be described as redundant on a
-    worker rather than merely believed to be, and it is what would go red if the two ever drifted —
-    which is the only way the tree ends up with two producers that disagree instead of two that
-    cannot.
+    The test above pins the walk against a stand-in class; this one pins the contract against the
+    models, so a renamed field in `StepIdentity` turns it red.
     """
     identity = StepIdentity(
         actor="chemist-1",
@@ -294,24 +272,12 @@ def test_an_activity_logs_a_start_and_a_finish_with_its_temporal_coordinates(
 def test_an_activity_whose_identity_is_a_bare_argument_is_attributed_too(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Four activities take identity as plain strings, and their own records were anonymous.
+    """An activity taking identity as plain string arguments is attributed too.
 
-    `_models` skips `str` outright — deliberately, so a model-authored payload can never supply an
-    identity — and four activities in this tree carry theirs beside such a payload rather than
-    inside a model: `connectors/calc/activities.py::run_xtb_calculation`,
-    `connectors/bo/activities.py::record_campaign_run`,
-    `durable/memory_jobs.py::publish_memory_note_activity` and
-    `durable/report_workflow.py::propose_report`. None is rescued by the model walk, so both
-    interceptor records rendered `actor=- correlation_id=-` for the fleet's longest-running
-    activity while its own dispatch ran fully attributed — and `deploy/README.md` tells an operator
-    to grep those fields.
-
-    The names come from the activity function's **signature**, which is first-party Python, so the
-    property `test_a_model_authored_payload_cannot_supply_an_identity` pins is untouched: `spec`
-    is not one of the four names, and a payload cannot rename the parameter it is bound to.
-
-    Asserted through `ContextFilter`, because the record's own `extra` never carried these and the
-    filter is what an operator's log lines actually go through.
+    `_models` skips `str` so a model-authored payload can never supply an identity; activities that
+    carry identity beside such a payload are attributed from the function's signature, which a
+    payload cannot rename. Asserted through `ContextFilter`, which is what an operator's log lines
+    go through.
     """
 
     @activity.defn(name="flat")
@@ -376,9 +342,8 @@ def test_a_failed_attempt_is_counted_and_logged_and_still_propagates() -> None:
 def test_an_activity_cancelled_by_a_drain_is_counted_as_one() -> None:
     """A cancellation is attributed to the drain only while one is running.
 
-    `durable/serve.py`'s docstring names the cost — work redelivered and therefore paid for
-    twice — and nothing measured it. Counted only *during* a drain, because a cancellation
-    outside one is an ordinary cancelled turn, which nobody is paying for twice.
+    A drain redelivers work, which is paid for twice; a cancellation outside one is an ordinary
+    turn.
     """
 
     async def _cancelled() -> str:
@@ -481,18 +446,10 @@ async def test_a_finished_job_moves_a_counter_and_a_duration_in_both_outcomes() 
 
 
 def test_no_workflow_body_can_write_the_in_flight_reading() -> None:
-    """The gauge has no writer a workflow body could call — an absence test, deliberately.
+    """The in-flight gauge has no writer a workflow body could call.
 
-    `chemclaw_jobs_in_flight` used to be a process-local `set` that `ConnectorJobWorkflow.run`
-    added itself to and discarded in its `finally`, on the stated ground that neither call needed
-    an `is_replaying` guard "because this is a statement about the present". Driven against a live
-    broker it was wrong in three directions and raised in a fourth (see `durable/job_metrics.py`),
-    because a workflow execution is not "in" a process at all between tasks.
-
-    So this fails whoever restores that shape: the module exposes a *reader* and a *refresher* that
-    takes a client, and nothing a workflow body can reach. The same guard
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` left behind for
-    `audit_events.agent`, for the same reason — a claim with no honest producer.
+    A workflow execution is not "in" a process between tasks, so a body-maintained reading is wrong
+    under terminate and eviction. The module exposes a reader and a client-driven refresher only.
     """
     import chemclaw.durable.job_metrics as job_metrics
 
@@ -512,10 +469,8 @@ def test_no_workflow_body_can_write_the_in_flight_reading() -> None:
 async def test_a_failed_run_round_trips_through_postgres() -> None:
     """The columns exist and carry the two facts back — the half only a database can prove."""
     await migrated_db_or_skip()
-    # A connector name no other test's filter can match. `job_records` is not truncated
-    # between tests, and `test_job_record_postgres.py` asserts an *exact* listing for
-    # `connector="calc"` — so a row this file leaves behind under a shared name is a failure
-    # in somebody else's test, which is the worst kind to debug.
+    # A connector name no other test's filter matches: `job_records` is not truncated between tests,
+    # and other tests assert exact listings per connector.
     record = failed_job_record(
         "pg-job-failed",
         _JOB.model_copy(update={"connector": "durable-observability-probe"}),
@@ -555,13 +510,8 @@ def test_the_sdk_metrics_runtime_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> N
     assert "runtime" not in connect_options()
 
     monkeypatch.setattr("chemclaw.core.temporal_client._RUNTIME", None)
-    # **Port 0, not a fixed one.** This used to name 39100 and leave the listener behind: a
-    # `Runtime` owns a Rust-side socket with no `close`, `monkeypatch` restores only the module
-    # attribute, and the exporter is released on GC rather than deterministically. Re-entering the
-    # test in one process — or anything else reaching for 39100 — then met
-    # `ValueError: Failed starting Prometheus exporter: Address already in use`, which is finding
-    # 7's fault reproduced by the test written to check finding 7's feature. Port 0 asks the
-    # kernel for a free one every time, which is the only form of this that cannot collide.
+    # Port 0 asks the kernel for a free port: a `Runtime`'s exporter socket has no `close` and is
+    # released only on GC, so a fixed port collides on re-entry.
     monkeypatch.setattr(settings, "temporal_metrics_port", 9111)
     monkeypatch.setattr(settings, "temporal_metrics_host", "127.0.0.1")
     # The setting stays non-zero because zero is what *disables* the exporter, and the branch under
@@ -586,11 +536,7 @@ def test_a_metrics_port_that_cannot_be_bound_degrades_instead_of_failing_the_cli
 ) -> None:
     """A busy metrics port is a missing exposition, not an unreachable broker.
 
-    Measured on 2026-08-28 with 127.0.0.1:9111 already held: `Runtime(...)` raised
-    `ValueError: Failed starting Prometheus exporter: Address already in use` from inside
-    `connect_options()`, and `connect()`'s `except Exception` reported it as "the durable execution
-    backend (Temporal) is unreachable … This is an infrastructure outage" — for a broker that was
-    up and answering. SDK metrics are optional; the worker is not.
+    SDK metrics are optional; the worker is not, so the client still connects.
     """
     with socket.socket() as held:
         held.bind(("127.0.0.1", 0))
@@ -622,12 +568,8 @@ def _key(name: str) -> CalculationKey:
 def test_the_cache_separates_a_hit_a_miss_and_a_shared_computation() -> None:
     """The cache separates a hit, a miss, and a single-flighted share.
 
-    `was_cached` reached one per-job field and never a number, so the largest cost lever in
-    the system was observable only under DEBUG on the hottest read there is.
-
-    Three outcomes, not two: a `shared` miss reports `was_cached=True` to its caller, so on the
-    boolean it was indistinguishable from a hit — and it is the single-flight working, which is
-    exactly what anyone asking "is the cache earning its keep" wants separated.
+    A `shared` miss reports `was_cached=True` to its caller, so only a separate outcome shows the
+    single-flight working.
     """
     metrics = Metrics()
     store = InMemoryStore()
@@ -656,13 +598,9 @@ def test_the_cache_separates_a_hit_a_miss_and_a_shared_computation() -> None:
     assert 'chemclaw_calc_cache_total{outcome="miss"} 1' in rendered
     assert 'chemclaw_calc_cache_total{outcome="shared"} 1' in rendered
     assert 'chemclaw_calc_cache_total{outcome="hit"} 1' in rendered
-    # **And what the two avoided computations were worth**, which nothing counted until
-    # 2026-09-06. A count answers "how often did the cache answer" and cannot answer "is it
-    # earning its keep": a thousand avoided millisecond lookups and one avoided nineteen-minute
-    # CREST search move it by 1,000 and 1. `compute_seconds` was on the row, selected on every hit
-    # (`postgres_store._SELECT`) and thrown away. Asserted as a bound rather than a figure —
-    # `_slow` sleeps 0.05 s and a loaded machine can only overshoot — and as *twice* it, because
-    # the `shared` waiter saved a whole computation exactly as the later hit did.
+    # The seconds saved: a count cannot tell a thousand avoided lookups from one avoided hour-long
+    # search. Asserted as a lower bound (a loaded machine only overshoots) and as twice `_slow`'s
+    # sleep, because the shared waiter saved a whole computation as the later hit did.
     saved = metrics.value("chemclaw_calc_cache_seconds_saved_total")
     assert saved >= 0.10, (
         f"two avoided computations of ~0.05 s each credited {saved:.4f} s — a cache hit is "
@@ -679,13 +617,8 @@ def test_the_cache_separates_a_hit_a_miss_and_a_shared_computation() -> None:
 def _using(metrics: Metrics) -> Iterator[Metrics]:
     """Point both registry readers at a fresh `Metrics` for the body of a test.
 
-    The process registry is a module singleton, so asserting on it directly would make every test
-    in this file order-dependent.
-
-    **Two patch points, not one**, and the difference is what a gauge is: a counter goes through
-    `record_metric`'s swallow, while a gauge is *bound* onto the registry object directly
-    (`METRICS.bind_gauge`) — which is exactly what stops a gauge drifting from its source, and
-    exactly why patching only the bridge would leave the gauge on the process registry.
+    The process registry is a module singleton. Two patch points: a counter goes through
+    `record_metric`, while a gauge is bound onto the registry object directly.
     """
     with (
         mock.patch("chemclaw.core.metrics_bridge.METRICS", metrics),
@@ -694,15 +627,8 @@ def _using(metrics: Metrics) -> Iterator[Metrics]:
         yield metrics
 
 
-# --------------------------------------------------------------------------------------------
-# 2026-08-28 — the durable-tier review: what only a running broker could show
-# --------------------------------------------------------------------------------------------
-#
-# Every test below drives a real `ConnectorJobWorkflow` against a **real-time** dev server, because
-# each of the four defects they pin is a wall-clock worker event that no in-process stand-in
-# reproduced: the previous suite called `job_running`/`job_ended` directly and never drove a
-# workflow, which is exactly why a gauge that was wrong in three directions and raised in a fourth
-# passed for as long as it existed.
+# Tests against a real-time dev server: each defect below is a wall-clock worker event that no
+# in-process stand-in reproduces.
 
 
 _CHILD_QUEUE_NOBODY_SERVES = "connector-nobody-serves-this"
@@ -711,9 +637,8 @@ _CHILD_QUEUE_NOBODY_SERVES = "connector-nobody-serves-this"
 def _hanging_job(**overrides: Any) -> ConnectorJobInput:
     """A job whose child is started on a queue no worker polls, so the parent stays RUNNING.
 
-    A child that is *scheduled and never picked up* is the cheapest honest way to hold a parent
-    open for as long as a test needs, and it needs no second workflow class: the wrapper is doing
-    exactly what it does while a CREST search runs.
+    The cheapest honest way to hold a parent open, and exactly what the wrapper does during a long
+    search.
     """
     return _JOB.model_copy(
         update={"task_queue": _CHILD_QUEUE_NOBODY_SERVES, "workflow": "NeverServed", **overrides}
@@ -738,13 +663,9 @@ async def _core_worker(client: Any, **kwargs: Any) -> Any:
 
 
 def test_the_in_flight_gauge_survives_terminate_and_eviction() -> None:
-    """The reading is the broker's, so the two events that broke the old one leave it correct.
+    """The in-flight reading is the broker's, so terminate and eviction leave it correct.
 
-    Measured on 2026-08-28 against a live broker, with the reading kept by the workflow body:
-    a terminate left `chemclaw_jobs_in_flight` at `1.0` for the life of the process (a termination
-    never resumes workflow code, so the `finally` never ran), and an eviction — the shipped
-    `max_cached_workflows=0` posture — read `0.0` while the workflow was still `RUNNING`, which is
-    the reading it must not give for exactly the long idle parents it exists to count.
+    A terminated workflow never runs its `finally`, and an evicted one is still RUNNING.
     """
 
     async def _run() -> list[float]:
@@ -774,12 +695,9 @@ def test_the_in_flight_gauge_survives_terminate_and_eviction() -> None:
 
 
 def test_a_status_poll_with_no_wait_does_not_block_on_a_running_job() -> None:
-    """`wait_seconds=0` is the front door's normal path, and it used to be an unbounded long-poll.
+    """`wait_seconds=0`, the front door's normal path, returns promptly for a running job.
 
-    `api/routes/jobs.py` passes nothing, so `job_status` fell through to `failed_job_reason`, whose
-    `handle.result()` is a history read on a *closed* execution and Temporal's long-poll on a
-    running one. Measured live: `job_status(wait_seconds=0)` blocked for over 15 s on a RUNNING
-    workflow and would have blocked for the life of the job.
+    `handle.result()` long-polls a running execution, so it must not be reached without a wait.
     """
     from chemclaw.agent import durable_tools
 
@@ -841,14 +759,9 @@ class _CancelProbeChild:
 def test_a_cancelled_job_is_listed_as_cancelled_not_failed() -> None:
     """The registry listing and the job's own status agree on a run stopped by a person.
 
-    Measured on the kind cluster: `DELETE /jobs/{id}` on a running campaign took both runs to
-    CANCELED and `GET /jobs/{id}` answered `cancelled`, while `GET /jobs` — read from
-    `job_records` — listed the same run as `failed`, because `failed_job_record` hard-coded the
-    state. Once Temporal's history ages out the record is the only answer left, so it has to say
-    what the broker said.
-
-    Driven against a real dev server: the cancellation is delivered into the parked child await
-    exactly as `cancel_durable_job` delivers it, and the record is whatever the wrapper writes.
+    Once Temporal's history ages out the record is the only answer left, so it must record
+    `cancelled` as the broker did. Driven against a real dev server, delivering the cancellation as
+    `cancel_durable_job` does.
     """
     from chemclaw.agent import durable_tools
 
@@ -907,23 +820,9 @@ def test_a_failed_job_reaches_its_session_even_with_the_record_queue_unserved(
 ) -> None:
     """The failure record is bounded, so it cannot hold a dead job open ahead of the push-back.
 
-    `_record_run` carried `start_to_close_timeout` alone, which only starts once a worker has
-    *picked the task up*. Measured on 2026-08-28 against a live broker with the background queue
-    unserved: a failed connector job was still RUNNING after 150 s, parked on `record_job`, having
-    never reached `_notify_failure` — so the one message telling the chemist their job died sat
-    behind an unbounded wait. `durable/notify.py` documents and measures the identical defect on
-    the very next step.
-
-    **The bound is now a `schedule_to_start_timeout`, and this test is why it is not core's hour.**
-    The doubling it replaced was 60 s of *total* budget, most of it spent on a queue this call does
-    not control, so under ordinary load the record was simply lost
-    (`tests/test_pushback_under_queue_pressure.py` drives that half). Splitting the wait from the
-    work fixes the loss; taking `queue_wait_timeout()` for the wait would have re-broken *this*
-    invariant, an hour at a time. `light_write_queue_wait_timeout` is the one that has to satisfy
-    both, and this run is the half that keeps it small.
-
-    The budgets are shortened so the test measures the *bound* rather than waiting out the shipped
-    one; with none of them, the run does not end at all.
+    The record step carries a `schedule_to_start_timeout`, so an unserved queue cannot delay the
+    failure notice indefinitely. Budgets are shortened so the test measures the bound rather than
+    waiting out the shipped one.
     """
     from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
 
@@ -963,11 +862,10 @@ def test_a_failed_job_reaches_its_session_even_with_the_record_queue_unserved(
 
 
 def test_a_worker_runs_exactly_one_tracing_interceptor() -> None:
-    """A `Worker` prepends the client's interceptors, so adding ours twice traced everything twice.
+    """A worker runs exactly one tracing interceptor.
 
-    Measured on 2026-08-28: `['TracingInterceptor', 'ChemclawWorkerInterceptor',
-    'TracingInterceptor']`. The old test asserted only what `worker_interceptors()` *returns*,
-    which is the half that was never wrong.
+    A `Worker` prepends the client's interceptors, so adding ours again would trace everything
+    twice.
     """
 
     async def _run() -> list[str]:
@@ -1020,20 +918,10 @@ async def _until_not_running(handle: Any, timeout: float = 20.0) -> Any:
 
 
 async def test_a_failure_record_never_erases_a_finished_run_s_result() -> None:
-    """The durable copy of a finished run survives the bookkeeping of the step that failed after it.
+    """A failure record never erases a finished run's result.
 
-    Measured on 2026-08-28 against a live database, writing a failure record over the completed row
-    for one job id:
-    `{'summary': 'dG = -12.3 kJ/mol', 'result': {...}, 'note_id': 'note-1',
-    'calc_refs': ['k1', 'k2'], 'state': 'completed'}` became
-    `{'summary': '', 'result': {}, 'note_id': '', 'calc_refs': [], 'state': 'failed'}`. The upsert
-    refreshed every mutable column from `EXCLUDED`, and `failed_job_record` supplies none of the
-    five that say what a run produced — so the science of a finished run was destroyed by the
-    record of a step that failed afterwards.
-
-    Reachable independently of the workflow's own guard: `record_job`'s docstring names the case
-    where the upsert commits and the activity then overruns its timeout, which leaves a row behind
-    while the workflow believes there is none.
+    `failed_job_record` supplies none of the columns that hold what a run produced, so the upsert
+    must keep them. Reachable when `record_job` commits and the activity then overruns its timeout.
     """
     await migrated_db_or_skip()
     probe = _JOB.model_copy(update={"connector": "durable-observability-probe"})
@@ -1073,17 +961,10 @@ async def test_a_failure_record_never_erases_a_finished_run_s_result() -> None:
 
 
 def test_a_run_that_fails_after_recording_is_not_recorded_a_second_time() -> None:
-    """One run, one `chemclaw_jobs_finished_total` and one duration sample — either way it ended.
+    """One run, one `chemclaw_jobs_finished_total` and one duration sample, however it ended.
 
-    `_finish` writes the completed record and *then* awaits three best-effort steps, which swallow
-    `ActivityError` and nothing else. Anything else out of them — a `CancelledError` (a cancelled
-    workflow was confirmed live to run its cleanup after one), a `ValidationError` — reached the
-    `except BaseException` clause, which wrote a second record under the same job id: measured,
-    `outcome="completed"` *and* `outcome="failed"` both at 1 for one run, and 2 observations on
-    `chemclaw_job_duration_seconds`.
-
-    Driven unsandboxed so the best-effort step can be made to raise the way a real one does; what
-    is under test is the wrapper's own bookkeeping, not the sandbox.
+    A best-effort step raising something other than `ActivityError` after the completed record must
+    not write a second, failed record. Driven unsandboxed so that step can raise as a real one does.
     """
     recorded: list[JobRecord] = []
 
@@ -1139,14 +1020,10 @@ def test_a_run_that_fails_after_recording_is_not_recorded_a_second_time() -> Non
 
 
 def test_a_cancelled_activity_is_not_an_activity_failure() -> None:
-    """A graceful drain is not a retry storm, and the alert that reads this series says it is.
+    """A cancelled activity is not an activity failure.
 
-    `chemclaw_activity_failures_total` was incremented for every `BaseException`, which the clause
-    catches so the ambient context is unwound however an activity ends —
-    `asyncio.CancelledError` included. A drain of eight activities therefore booked eight activity
-    failures and `cancel_durable_job` booked one, while
-    `deploy/helm/chemclaw/templates/prometheusrule.yaml`'s `ChemclawActivityRetryStorm` reads the
-    series and asserts "Every attempt of this activity is failing".
+    A drain cancels activities, and `ChemclawActivityRetryStorm` reads the failure series as "every
+    attempt is failing".
     """
 
     @activity.defn(name="slow")
@@ -1175,23 +1052,11 @@ def test_a_cancelled_activity_is_not_an_activity_failure() -> None:
 
 
 def test_a_failure_before_the_activity_leaks_no_count() -> None:
-    """The `finally` covers the statements that bound what it unbinds — the half that is visible.
+    """A failure before the activity body leaks no in-flight count.
 
-    The three `set_current_*` calls, the in-flight increment and the start line used to run
-    *above* the `try`, while the `finally`'s own comment claimed the contextvars were unbound
-    "unconditionally". A `log_event` that raised therefore leaked all three tokens and one
-    increment permanently.
-
-    **What this test can see is the increment, and it used to claim the tokens too.** It asserted
-    `get_current_actor() is None` after `asyncio.run(...)` returned, which is a different context:
-    measured on this tree, a contextvar set inside `ActivityEnvironment.run` does not escape it at
-    all (`(None, None)` for a probe reading before and after), so those three lines were true by
-    construction and would have passed against the leaking code. That is the shape
-    `D-2026-08-28-a-gate-that-cannot-fire-and-a-rate-with-no-denominator` deleted one file over in
-    `tests/test_calc_jobs.py`, and this repository's rule for a check that cannot fail is that it
-    does not stay. They are gone rather than rewritten because the harness isolates by design;
-    `activities_in_flight()` is module state, survives the run, and is what actually goes red —
-    measured against the pre-fix ordering: `assert 1 == 0`.
+    The `finally` must cover the statements whose effects it undoes. Asserted on
+    `activities_in_flight()`, which is module state; contextvars set inside
+    `ActivityEnvironment.run` never escape it, so asserting them would pass by construction.
     """
 
     @activity.defn(name="never-reached")
@@ -1208,12 +1073,10 @@ def test_a_failure_before_the_activity_leaks_no_count() -> None:
 
 
 def test_a_failure_reason_is_bounded_before_it_reaches_a_column_and_a_turn() -> None:
-    """`str(cause)` has no length, and four stores downstream of it have no cap either.
+    """A failure reason is bounded before it reaches a column and a model turn.
 
-    The string is written to a TEXT column, carried in the `job_failed` push-back payload, hashed
-    into that event's dedupe key through `json.dumps`, stored in `session_events`, and read back
-    into a `DurableJobStatus.summary` that lands in a model turn. `publish_results.py` already caps
-    the analogous field at 500.
+    `str(cause)` has no length, and the column, the push-back payload, its dedupe key and the status
+    summary downstream have no cap either.
     """
     reason = failure_reason(ValueError("x" * 5000))
     assert len(reason) == 500
@@ -1221,14 +1084,10 @@ def test_a_failure_reason_is_bounded_before_it_reaches_a_column_and_a_turn() -> 
 
 
 def test_a_transport_fault_is_not_a_job_s_failure_reason() -> None:
-    """A broker rolling during a poll used to become the run's own explanation.
+    """A transport fault during a poll is not the job's failure reason.
 
-    `failed_job_reason` carried an `except Exception` beneath its `WorkflowFailureError` clause, on
-    the belief that a cancelled, terminated or timed-out run "reaches the client as its own
-    exception type". `temporalio.client._workflow` raises `WorkflowFailureError` for all four bad
-    endings, differing only in the `cause` the clause above already walks — so the broad clause
-    caught nothing it was written for and one thing it was not, and `GET /jobs/{id}` answered
-    `status="failed", summary="<gRPC UNAVAILABLE …>"` about a healthy run.
+    Temporal raises `WorkflowFailureError` for every bad ending, so a broad clause beneath it
+    catches only transport errors, which say nothing about the run.
     """
 
     class _Handle:
@@ -1240,17 +1099,11 @@ def test_a_transport_fault_is_not_a_job_s_failure_reason() -> None:
 
 
 def test_the_job_duration_histogram_brackets_the_job_ceiling() -> None:
-    """A p95 that saturates at 900 s cannot describe a job budgeted in hours.
+    """The job duration histogram brackets the job ceiling.
 
-    `chemclaw_job_duration_seconds` was bound to `_TOOL_BUCKETS`, whose top finite boundary is 900,
-    while `connector_job_timeout_seconds` is hours and `xtb_job_timeout_seconds` is 15,000.
     `histogram_quantile` returns the highest finite boundary rather than interpolating into `+Inf`,
-    so the quantile pinned at exactly 900 s as jobs got expensive — verbatim the defect
-    `_TURN_BUCKETS` was split off to fix one tier up.
-
-    Asserted against the setting rather than against the boundaries, which is what caught the
-    ceiling's move to 25,200 s: the old top boundary was 21,600, so the histogram would have
-    saturated below the budget it exists to describe.
+    so a top bucket below the timeout saturates the p95. Asserted against the setting, not the
+    buckets.
     """
     buckets = _HISTOGRAM_BUCKETS["chemclaw_job_duration_seconds"]
     ceiling = settings.connector_job_timeout_seconds
@@ -1294,27 +1147,11 @@ def test_a_result_the_broker_would_refuse_is_a_counted_failing_activity(
 ) -> None:
     """A result over the broker's blob limit fails the activity, on the record, in every consumer.
 
-    **Driven against a real broker, because the defect is what happens *after* the interceptor
-    returns and no fake has that half.** `self.next.execute_activity` hands the result to the
-    worker's task handler, which converts it and calls `RespondActivityTaskCompleted` outside this
-    module's `try` — so every first-party report ran on the wrong side of the refusal. Measured on
-    2026-09-19 against the live broker, with the pre-check removed:
-
-    - a 3,000,000-byte result (over the server's 2 MiB `limit.blobSize.error`, under the 4 MiB gRPC
-      frame) failed the workflow while `activity.finished … completed` had already been logged and
-      `chemclaw_activity_failures_total` held **no sample at all**;
-    - a 6,000,000-byte result (over the gRPC frame) retried for ever against a
-      `ResourceExhausted` the SDK reports as a *network* error, and the workflow was still
-      `RUNNING` two minutes later.
-
-    So the three things asserted here are the three that did not move: the counter the
-    `ChemclawActivityRetryStorm` alert reads (**by `activity` label**, which is how that alert
-    groups), the `outcome` on the line an operator greps, and the workflow reaching a terminal
-    failure rather than hanging — which is what lets the job record write its own outcome.
-
-    The under-ceiling arm is not decoration: a check that refused every result would satisfy the
-    three assertions above on its own, and the counter staying absent for a result the broker keeps
-    is what says this is a ceiling rather than a ban.
+    Driven against a real broker: the SDK completes the activity outside the interceptor's `try`, so
+    without a pre-check the refusal happens after every first-party report. Asserted: the failure
+    counter by `activity` label (how `ChemclawActivityRetryStorm` groups), the logged `outcome`, and
+    the workflow reaching a terminal failure. The under-ceiling arm shows this is a ceiling, not a
+    ban.
     """
     ceiling = settings.activity_result_max_bytes
     # Over the *server's* limit as well as ours, so "the broker would refuse it" is a fact about
@@ -1400,13 +1237,9 @@ def test_a_result_the_broker_would_refuse_is_a_counted_failing_activity(
         "before the pre-check, which is the sentence that sent an operator looking for a network "
         "fault"
     )
-    # **Exactly one, which is the non-retryable half.** `BAD_DATA_RETRY` allows
-    # `activity_max_attempts` (5 as shipped), and the result is a deterministic function of the
-    # arguments — so a second `failed` line here would mean `ActivityResultTooLarge` is missing
-    # from `durable/publish._BAD_DATA_TYPES` and the refusal burns the whole retry budget
-    # re-serializing the identical bytes. The `ApplicationError.non_retryable` flag cannot say
-    # this: it reports what the *raiser* asked for, and the classification is the policy's,
-    # applied by the server. The attempt count is where the policy is observable.
+    # Exactly one attempt: the result is deterministic, so `ActivityResultTooLarge` must be in
+    # `durable/publish._BAD_DATA_TYPES` or the retry budget is burnt re-serializing the same bytes.
+    # The attempt count is where the server-applied policy is observable.
     assert outcomes.count("completed") == 1, (
         f"the kept result's line should still say completed, got {outcomes}"
     )

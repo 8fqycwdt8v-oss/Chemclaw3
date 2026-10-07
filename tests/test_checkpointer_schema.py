@@ -1,18 +1,10 @@
 """A checkpoint outlives the build that wrote it, so it says which channels wrote it.
 
-The failure being guarded is LangGraph's, documented in `agent/checkpointer.py`: an old checkpoint
-is restored into channels built from the *current* state schema, a channel the checkpoint never held
-stays empty, and a node that indexes it raises a bare `KeyError` naming the field. The first two
-tests here are that failure, *measured* — including the two controls that say which half of a schema
-change actually causes it, because the intuitive answer (a removed field) is the wrong one and a
-guard aimed at it would refuse threads that resume perfectly well.
-
-Everything after them is the guard. The Postgres ones drive a real graph over the real
-`SchemaStampedSaver`, for the reason `tests/test_plan_state.py` gives for its own real checkpointer:
-the property under test is what happens when a *stored* checkpoint meets a *new* build, and a fake
-saver would only prove a dict comparison. The "new build" is the one thing that cannot be staged
-literally, so it is staged the way a deploy stages it — the module's declared channel set is a
-different value than the one the checkpoint was written with.
+LangGraph restores an old checkpoint into channels built from the current schema; a channel the
+checkpoint never held stays empty and a node that indexes it raises a bare `KeyError`. The first
+tests demonstrate that failure, with controls showing it is the added channel (not a removed one)
+that causes it. The rest test the guard: Postgres tests drive a real graph over the real
+`SchemaStampedSaver`, staging a "new build" by changing the module's declared channel set.
 """
 
 import asyncio
@@ -72,9 +64,9 @@ def _graph(schema: Any, node: Any, saver: Any) -> Any:
 def _suspending_graph(schema: Any, writer: Any, gate: Any, saver: Any) -> Any:
     """A two-node turn that suspends between them — `writer` runs, then `gate` interrupts.
 
-    The shape matters: resuming this runs `gate` again and **not** `writer`, so a channel `writer`
-    would have written is genuinely absent. That is the only place a resumed turn differs from a
-    fresh one, and therefore the only place a moved channel can strand a thread.
+    Resuming runs `gate` again but not `writer`, so a channel `writer` would have written is
+    genuinely
+    absent: the only place a moved channel can strand a thread.
     """
     graph = StateGraph(schema)
     graph.add_node("writer", writer)
@@ -108,16 +100,10 @@ async def _new_gate(state: _NewState) -> dict[str, Any]:
 
 
 def test_a_moved_channel_strands_a_turn_resumed_inside_the_graph() -> None:
-    """The failure the guard exists for, measured — no Postgres and no guard involved.
+    """A moved channel strands a turn resumed inside the graph (no Postgres, no guard).
 
-    An `InMemorySaver` is the right saver here precisely because this is not about durability: it
-    is about what LangGraph does when `channel_values` from one schema are restored into channels
-    built from another. What comes out is `KeyError: 'todos'` — raised inside the node, naming a
-    field and nothing else: not the thread, not the schema change, not a remedy.
-
-    The control below it is what makes this evidence rather than a demonstration: the *same* new
-    build, on a thread of its own, answers. So the checkpoint is what the failure depends on, which
-    is the claim the whole stamp rests on.
+    The result is a bare `KeyError: 'todos'` naming only a field. The control — the same new build
+    on a fresh thread — answers, so the failure depends on the checkpoint.
     """
     saver = InMemorySaver()
     config = {"configurable": {"thread_id": "sess-renamed-field"}}
@@ -150,15 +136,10 @@ def test_a_moved_channel_strands_a_turn_resumed_inside_the_graph() -> None:
 
 
 def test_it_is_the_added_half_of_a_rename_that_raises_and_not_the_removed_half() -> None:
-    """Which direction of a schema change to refuse — measured, because it is counter-intuitive.
+    """It is the added half of a rename that raises, not the removed half.
 
-    A *removed* channel cannot strand anything: nothing declares it any more, so nothing indexes
-    it, and the thread resumes with the removed value simply ignored. A channel this build declares
-    that the checkpoint never held is the one that raises. A rename is both at once, and this says
-    which half did it.
-
-    Without this, the obvious guard — refuse whenever the channel set differs — would end in-flight
-    sessions on a deploy that only *drops* a field, which is measured here to be safe.
+    A removed channel is simply ignored on resume, so refusing whenever the channel set differs
+    would end sessions on a deploy that only drops a field.
     """
 
     class _Dropped(TypedDict):
@@ -189,14 +170,11 @@ def test_it_is_the_added_half_of_a_rename_that_raises_and_not_the_removed_half()
 
 
 def test_notrequired_does_not_make_an_added_channel_safe() -> None:
-    """Why the stamp cannot narrow itself to *required* channels and skip the optional ones.
+    """`NotRequired` does not make an added channel safe.
 
-    `NotRequired` says how the graph's input may be spelled; it says nothing about whether a node
-    indexes the channel. Both halves are measured here: the same added optional channel raises when
-    a resumed node indexes it and resumes when the node reads it with `.get()`. So what decides a
-    refusal is how the channel is *read*, never how it is declared — the measurement
-    `checkpointer.channels_read_without_default` is built on, and the reason it reads the source
-    rather than the annotation.
+    The same optional channel raises when a resumed node indexes it and resumes when it is read with
+    `.get()`. What decides a refusal is how a channel is read, which is why
+    `checkpointer.channels_read_without_default` reads the source rather than the annotation.
     """
 
     class _Optional(TypedDict):
@@ -242,21 +220,12 @@ def test_notrequired_does_not_make_an_added_channel_safe() -> None:
 
 
 def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s() -> None:
-    """A dependency bump must not be able to move the stamp — the guard's own worst failure mode.
+    """The stamp covers this repository's channels, not the upstream base's.
 
-    `ChemclawState` inherits part of its state from langchain's `PlanningState`, and a `TypedDict`
-    merges those into `__annotations__`, so the naive reading reports both sets as one. A stamp over
-    that union would refuse **every in-flight thread in the fleet** the next time langchain adds or
-    renames one of its own channels — the guard bricking the sessions it exists to protect, on a
-    change nobody associated with turn state. No count is written here or in the module: two
-    sentences in `agent/checkpointer.py` said "six" over a state that had grown to eight, and the
-    test below is what makes the set checkable instead.
-
-    Both halves are asserted: that the derived set excludes everything the upstream base declares
-    (which survives a first-party field being added, so it does not need editing for one), and that
-    it still contains the fields this repository declares today. The first also fails loudly if the
-    derivation itself ever stops working — `__orig_bases__` is only populated while the base is
-    generic — which turns that into a red build instead of a fleet-wide refusal.
+    `ChemclawState` inherits from langchain's `PlanningState`; stamping the union would refuse every
+    in-flight thread whenever langchain changes its own channels. Asserted: the derived set excludes
+    everything the base declares and still contains today's first-party fields. The first also fails
+    if the `__orig_bases__` derivation stops working.
     """
     upstream = set(get_type_hints(PlanningState, include_extras=True))
     declared = set(ckpt.FIRST_PARTY_CHANNELS)
@@ -270,21 +239,10 @@ def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s
         "nothing"
     )
     assert declared < set(get_type_hints(ChemclawState, include_extras=True))
-    # **The named channel is a restorable one, and it has to be.** This asserted `loop_capped`
-    # while the stamp covered every first-party name, including five `UntrackedValue` channels no
-    # checkpoint can hold — so the guard refused the next ordinary turn of every live session each
-    # time a per-turn counter was added, and pre-empted nothing, because a channel absent from
-    # every build's checkpoint cannot be missing from one build's relative to another's.
-    # `_first_party_channels` now excludes them; the exclusion itself is asserted here.
-    #
-    # **And this assertion cannot fail for `ChemclawState` by construction, which is worth saying
-    # rather than leaving to read as stronger than it is.** Both tuples come from one walk of
-    # `_own_channels` partitioned by one predicate, so for the shipped state class they are disjoint
-    # whatever `_is_untracked` answers. What it does catch is a mutation of `_untracked_channels`
-    # itself — dropping the `if` there reds it — so it is a guard on the *derivation* staying a
-    # partition, not on the membership being right. The membership is
-    # `test_a_channel_declared_with_the_untracked_class_is_not_stamped` below, which drives a state
-    # class this file declares and therefore has two independent answers to compare.
+    # Untracked channels are never checkpointed, so they are excluded from the stamp. This assertion
+    # guards the derivation staying a partition (dropping the `if` in `_untracked_channels` reds
+    # it); membership is tested by
+    # `test_a_channel_declared_with_the_untracked_class_is_not_stamped`.
     assert declared.isdisjoint(ckpt.UNTRACKED_CHANNELS), (
         f"the stamp covers untracked channels {sorted(declared & set(ckpt.UNTRACKED_CHANNELS))}, "
         "which no checkpoint holds — so adding one would refuse every live thread and prevent "
@@ -293,28 +251,17 @@ def test_the_stamp_covers_this_repository_s_channels_and_not_the_upstream_base_s
 
 
 def test_the_declared_channels_partition_the_state() -> None:
-    """What this repository declares and what the base declares are exactly the state, and disjoint.
+    """The declared channels partition the state, disjointly.
 
-    The assertion a prose count was standing in for. `agent/checkpointer.py` twice said the state
-    holds six channels, and by the time a reviewer counted them it held eight — both sentences
-    written by sessions that were not editing the file that had grown. A number in prose is a claim
-    about a commit (`D-2026-09-03`); a partition is a claim a test can hold, so the numbers are
-    deleted and this stands in their place.
-
-    It fails in both directions that matter. A first-party channel the derivation drops leaves a
-    name in neither half, which is a channel `FIRST_PARTY_CHANNELS` will not stamp and a resume will
-    not refuse; a base channel it picks up leaves a name in both, which is the fleet-wide refusal on
-    a dependency bump that `..._and_not_the_upstream_base_s` guards from the other side.
+    A first-party channel the derivation drops lands in neither half (unstamped, never refused); a
+    base channel it picks up lands in both (a fleet-wide refusal on a dependency bump).
     """
     upstream = set(get_type_hints(PlanningState, include_extras=True))
     declared = set(ckpt.FIRST_PARTY_CHANNELS)
     untracked = set(ckpt.UNTRACKED_CHANNELS)
     whole = set(get_type_hints(ChemclawState, include_extras=True))
-    # **Three parts rather than two, because one first-party part is deliberately unstamped.**
-    # `UntrackedValue` channels are never written to a checkpoint, so stamping them refused every
-    # live session whenever a per-turn counter was added and could pre-empt nothing. They are still
-    # asserted to be *somewhere*: a channel the derivation drops by accident lands in none of the
-    # three and fails here exactly as it did when there were two.
+    # Three parts, because untracked first-party channels are deliberately unstamped; a channel
+    # dropped by accident still lands in none of them and fails here.
     first_party = declared | untracked
 
     assert first_party | upstream == whole, (
@@ -360,24 +307,12 @@ def test_a_channel_added_to_the_upstream_base_does_not_move_the_stamp() -> None:
 
 
 def test_adding_a_per_turn_counter_does_not_move_the_stamp() -> None:
-    """A channel no checkpoint can hold is not a channel a resume can be missing.
+    """Adding a per-turn counter does not move the stamp.
 
-    **This is the defect, staged as the change that caused it.** The stamp is the set of names the
-    *writing* build declared, and the load refuses when any name the *current* build declares is
-    absent from it. While the derivation covered every first-party name, five of the six it returned
-    were `UntrackedValue` subclasses — `TurnTotal`, `TurnFlag` — whose declarations in
-    `agent/state.py` each say in so many words that the channel is never written to a checkpoint. So
-    adding a per-turn counter, which this repository does routinely and which cannot affect a
-    restore, refused the **next ordinary turn** of every live Postgres-backed session; and it
-    pre-empted nothing, because a channel absent from every build's checkpoints cannot be missing
-    from one build's relative to another's. At the build before `active_agent` existed, *all four*
-    stamped names were of that kind, so the stamp could not have pre-empted anything at all.
-
-    Three mutations, not one, because a guard whose only failing mutation is the one it was written
-    for is a regression test for a fixed bug (`tasks/lessons.md` rule 66). The first is the
-    defect; the second is a *reword* of it — a different untracked shape, so a guard keyed on the
-    class name rather than on the base would pass it; the third is the case that must still move the
-    stamp, which is what stops the fix from being "never refuse anything".
+    `UntrackedValue` channels (`TurnTotal`, `TurnFlag`) are never checkpointed, so they cannot be
+    missing on resume; stamping them would refuse every live session's next turn whenever a counter
+    is added. Three mutations: the original case, a different untracked shape (so a guard keyed on
+    the class name fails), and a tracked channel that must still move the stamp.
     """
     response = TypeVar("response")
 
@@ -420,9 +355,8 @@ def test_adding_a_per_turn_counter_does_not_move_the_stamp() -> None:
 def test_the_stamp_moves_when_this_repository_s_own_channels_do() -> None:
     """The counter-property: a stamp that never moves refuses nothing.
 
-    Computed over a stand-in extending the real state rather than by editing `ChemclawState`, so
-    what is pinned is the derivation and not today's fields. Declaration order must not move it,
-    or a diff that changes no channel would refuse threads.
+    Computed over a stand-in extending the real state, so the derivation is pinned rather than
+    today's fields. Declaration order must not move it.
     """
 
     class _Added(ChemclawState):
@@ -446,9 +380,8 @@ def test_the_stamp_moves_when_this_repository_s_own_channels_do() -> None:
 def _reader_tree(source: str) -> Path:
     """A one-module source tree for `checkpointer.channels_read_without_default` to read.
 
-    What a deploy changes is two things at once — the channels the build declares and the modules
-    that read them — so a staged "new build" patches both: `FIRST_PARTY_CHANNELS` for the first and
-    `SOURCE_ROOT` for the second.
+    A staged "new build" patches both `FIRST_PARTY_CHANNELS` (what is declared) and `SOURCE_ROOT`
+    (what reads it).
     """
     root = Path(tempfile.mkdtemp(prefix="chemclaw-reader-"))
     (root / "reader.py").write_text(source, encoding="utf-8")
@@ -475,13 +408,10 @@ def _turn(saver: Any, thread_id: str, message: str) -> Any:
 
 
 def test_a_thread_that_never_held_a_channel_this_build_declares_is_refused_by_name() -> None:
-    """The redeploy case: a stored checkpoint, a build that has since declared a new channel.
+    """A thread that never held a channel this build declares is refused by name.
 
-    Asserted through a *second turn on the same thread*, which is where the damage would land in
-    production — the first turn is what leaves the checkpoint behind. The exception type is the
-    finding (a caller can tell this apart from an outage, which `KeyError: 'todos'` does not
-    support), and the message is checked for the three facts an operator needs to act: which
-    session, which channel it is missing, and what to do about it.
+    Asserted on a second turn of the same thread. The exception type lets a caller tell it from an
+    outage, and the message names the session, the missing channel and the remedy.
     """
 
     async def _run() -> Exception:
@@ -508,24 +438,11 @@ def test_a_thread_that_never_held_a_channel_this_build_declares_is_refused_by_na
 
 
 def test_a_channel_this_build_no_longer_declares_does_not_refuse_the_thread() -> None:
-    """A dropped field is measured harmless above, so the guard must not end sessions over one.
+    """A channel this build no longer declares does not refuse the thread.
 
-    Staged as the deploy stages it: the thread was stamped with channels the *writing* build
-    declared, and the build reading it declares one fewer. The assertion is on the accumulated
-    `messages` channel, because that is what proves the checkpoint was *restored* rather than
-    quietly skipped.
-
-    **The staging is written both ways round, because slicing the live tuple degenerated.** This
-    patched `FIRST_PARTY_CHANNELS[:-1]`, and the fix that excluded every untracked channel left the
-    stamp as the 1-tuple `('active_agent',)` — so `[:-1]` is `()`, and the scenario silently stopped
-    being "declares one fewer" and became "declares none at all", which is the trivial case where
-    `missing` is empty for any stamp whatsoever. It still caught a symmetric-comparison defect, so
-    it was not vacuous, but nothing in it said the drop it staged had disappeared.
-
-    So the *writing* build is the one given the extra channel now, which is the direction a deploy
-    actually moves: the thread is stamped with `(…, 'retired_channel')` and the reading build
-    declares only what ships today. That is a genuine one-fewer regardless of how many channels the
-    stamp holds, and it stays real if `FIRST_PARTY_CHANNELS` ever shrinks to nothing at all.
+    The writing build is given an extra `retired_channel`, so the reading build genuinely declares
+    one fewer however many channels ship. Asserted on the accumulated `messages`, proving the
+    checkpoint was restored rather than skipped.
     """
     retired = (*ckpt.FIRST_PARTY_CHANNELS, "retired_channel")
 
@@ -554,12 +471,9 @@ def test_a_channel_this_build_no_longer_declares_does_not_refuse_the_thread() ->
 
 
 def test_a_thread_written_under_this_schema_still_resumes() -> None:
-    """The counter-example: a guard that refuses everything is not a guard.
+    """A thread written under this schema still resumes.
 
-    Two turns on one thread under one build, which is every turn a real deployment takes. The
-    assertion is on the accumulated `messages` channel rather than on "it did not raise", because
-    that is what proves the *checkpoint was restored* — a saver that quietly returned `None` on
-    every read would also not raise.
+    Asserted on the accumulated `messages`, because a saver returning `None` would also not raise.
     """
 
     async def _run() -> list[str]:
@@ -600,9 +514,8 @@ async def _rewrite_stamp(thread_id: str, stamp: str | None) -> int:
 def _resume_with_stamp(thread_id: str, stamp: str | None) -> list[str]:
     """Take a turn, force the thread's stamp to `stamp`, then take another under a wider build.
 
-    The widened `FIRST_PARTY_CHANNELS` is what makes the result decisive: a stamp this build could
-    read would be missing that channel and refuse, so resuming proves the stamp was treated as
-    absent rather than as a match.
+    The widened build would refuse a readable stamp, so resuming proves the stamp was treated as
+    absent.
     """
 
     async def _run() -> list[str]:
@@ -625,21 +538,18 @@ def _resume_with_stamp(thread_id: str, stamp: str | None) -> list[str]:
 
 
 def test_a_checkpoint_from_before_the_guard_resumes_rather_than_being_refused() -> None:
-    """Every live session at the deploy that introduces the stamp has an unstamped checkpoint.
+    """A checkpoint from before the guard resumes rather than being refused.
 
-    Refusing those would brick every conversation in the deployment on the way *in* — the exact
-    outcome the guard exists to prevent, caused by the guard. So an absent stamp is not a mismatch,
-    and this is the test that keeps it that way.
+    Refusing unstamped checkpoints would end every live conversation at the deploy that introduced
+    the stamp.
     """
     assert _resume_with_stamp("sess-pre-guard", None) == ["q1", "answered", "q2", "answered"]
 
 
 def test_a_stamp_this_build_cannot_read_is_treated_as_absent() -> None:
-    """The first version of this guard stamped a twelve-character schema hash, not a channel list.
+    """A stamp this build cannot read (an older schema-hash format) is treated as absent.
 
-    A rolling deploy runs both builds at once, so both directions matter and both are handled the
-    same way — by treating anything that is not a list of names as no stamp at all. The value below
-    is the real fingerprint that build wrote for today's `ChemclawState`.
+    A rolling deploy runs both builds at once. The value is a real fingerprint of that older format.
     """
     assert _resume_with_stamp("sess-legacy-stamp", "bf5b523b8e62") == [
         "q1",
@@ -650,14 +560,11 @@ def test_a_stamp_this_build_cannot_read_is_treated_as_absent() -> None:
 
 
 def test_each_read_is_classified_and_anything_unrecognised_counts_as_an_index() -> None:
-    """The derivation, shape by shape — and the fail-closed arm is the half that matters.
+    """Each read is classified, and anything unrecognised counts as an index.
 
-    Each safe shape is paired with the unsafe one next to it, because a classifier that answered
-    "safe" for everything would pass every safe row and switch the guard off. The unrecognised
-    shapes are the reason this is a derivation rather than a grep for `state["`: a name held in a
-    tuple, handed to `itemgetter` or bound to a variable that is then used as a key reads the
-    channel as surely as an index does, and a classifier that let those through is the bare
-    `KeyError` the refusal exists to pre-empt.
+    Each safe shape is paired with its unsafe neighbour, so a classifier answering "safe" for
+    everything fails. A name in a tuple, passed to `itemgetter` or bound to a variable used as a key
+    reads the channel as surely as an index, so unknown shapes fail closed.
     """
     safe = {
         "get": 'state.get("c")',
@@ -708,11 +615,10 @@ def test_a_tree_the_derivation_cannot_read_refuses_rather_than_resumes() -> None
 
 
 def test_the_shipped_tree_reads_every_restorable_channel_with_a_default() -> None:
-    """`active_agent`, the live instance the row was about, is derived tolerant — not declared so.
+    """`active_agent` is derived as tolerant-read, not declared so.
 
-    If a reader starts indexing it this fails, and that is the right outcome to *look at*, not to
-    fix by editing this assertion: the channel would then be refused on a stamp that lacks it,
-    which is correct, and this sentence is what should change.
+    If a reader starts indexing it, this fails; that is correct behaviour to review, not an
+    assertion to edit.
     """
     assert ckpt.FIRST_PARTY_CHANNELS == ("active_agent",)
     assert ckpt.channels_read_without_default(ckpt.FIRST_PARTY_CHANNELS) == frozenset()
@@ -726,12 +632,10 @@ def test_the_shipped_tree_reads_every_restorable_channel_with_a_default() -> Non
 def test_adding_a_channel_drains_live_sessions_only_when_something_indexes_it(
     reader: str, refused: bool
 ) -> None:
-    """The row's two cases, on a real Postgres thread: one deploy, two ways of reading the addition.
+    """Adding a channel drains live sessions only when something indexes it.
 
-    Turn one runs under today's build; turn two under a build that declares `retrieved_notes` and
-    reads it as `reader` does. Read with a default, the session's next turn is an ordinary turn —
-    asserted on the accumulated `messages`, because that is what proves the checkpoint was restored
-    rather than skipped. Indexed, it is refused by name, which is the behaviour the guard keeps.
+    Turn two runs under a build declaring `retrieved_notes`: read with a default it resumes
+    (asserted on accumulated `messages`); indexed, it is refused by name.
     """
     thread_id = f"sess-added-{'indexed' if refused else 'defaulted'}"
 
@@ -782,16 +686,11 @@ async def _gate_that_reads_by_itemgetter(state: _Widened) -> dict[str, Any]:
 
 
 def test_a_read_the_classifier_does_not_know_is_refused_rather_than_a_key_error() -> None:
-    """The failure the derivation must never produce: a bare `KeyError` from inside a resumed node.
+    """A read the classifier does not know is refused at load, not raised as a `KeyError`.
 
-    A turn suspended by `interrupt()` under the old build is resumed under one whose re-entered node
-    reads the new channel through `itemgetter` — not an index, and not a `.get`, so a classifier
-    that only looked for `state["…"]` would call it safe. The derivation reads that node's *own
-    source*, and the resume is refused by name at the load, before any node runs.
-
-    The control is the same resume with the derivation pointed at a reader that uses a default —
-    what a mis-derivation would conclude — and it is the bare `KeyError`. That arm is what makes the
-    first evidence: it proves the resume really reaches a node that indexes the absent channel.
+    The re-entered node reads the new channel through `itemgetter`. The control points the
+    derivation at a defaulting reader and gets the bare `KeyError`, proving the resume reaches the
+    indexing node.
     """
     node_source = inspect.getsource(_gate_that_reads_by_itemgetter)
 
@@ -831,13 +730,10 @@ def test_a_read_the_classifier_does_not_know_is_refused_rather_than_a_key_error(
 
 
 def test_a_session_stamped_before_active_agent_existed_resumes() -> None:
-    """The upgrade case: every live session at the deploy that introduced `active_agent`.
+    """A session stamped before `active_agent` existed resumes.
 
-    Their stamps name only the channels of the build before it — the four spend/loop counters that
-    build still stamped — so `active_agent` is missing from every one, and the guard refused the
-    next ordinary turn of each with "Start a new session", **peer mesh off or on**. Its one reader
-    takes it with `.get()` and falls back to the root, so the `KeyError` the refusal pre-empts
-    cannot happen; the derivation reads that off the source and the load now resumes.
+    Its one reader uses `.get()` with a fallback to the root, so the derivation treats it as
+    tolerant and the load resumes, peer mesh off or on.
     """
     thread_id = "sess-pre-active-agent"
     stamp = ["billed_tokens", "loop_capped", "model_calls", "spend_capped"]
@@ -869,10 +765,8 @@ def test_a_session_stamped_before_active_agent_existed_resumes() -> None:
 async def _delete_blobs(thread_id: str) -> int:
     """Delete a thread's `checkpoint_blobs`, leaving its `checkpoints` rows standing.
 
-    The state `durable/retention.py` produced when a live turn landed between two of its DELETEs,
-    reached here by the shortest route rather than by re-staging the race — the race is measured in
-    `tests/test_retention.py`, and what this file is about is what the *reader* does with the row
-    it leaves behind, whichever route made it.
+    The state a retention race can leave (that race is tested in `tests/test_retention.py`); this
+    file tests what the reader does with it.
     """
     async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
         await cur.execute("DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
@@ -882,16 +776,10 @@ async def _delete_blobs(thread_id: str) -> int:
 
 
 def test_a_thread_that_has_lost_its_blobs_is_refused_rather_than_read_as_empty() -> None:
-    """The measured failure: `checkpoints` present, `checkpoint_blobs` gone, and no complaint.
+    """A thread that has lost its blobs is refused rather than read as empty.
 
-    Before the value stamp this resumed silently — `aget_state` returned an empty log, no
-    exception, no log line, and the next turn answered as a brand-new conversation on a thread the
-    chemist believed they were continuing. That is verbatim what `agent/checkpointer.py`'s module
-    docstring calls worse than no answer.
-
-    Asserted through a *second turn on the same thread*, because that is where the damage lands: the
-    first turn is what leaves the rows behind. The message is checked for the two facts an operator
-    needs — which session, and which channel is gone.
+    Otherwise the next turn silently answers as a brand-new conversation. Asserted on a second turn;
+    the message names the session and the missing channel.
     """
 
     async def _run() -> Exception:
@@ -913,17 +801,11 @@ def test_a_thread_that_has_lost_its_blobs_is_refused_rather_than_read_as_empty()
 
 
 def test_the_value_stamp_does_not_refuse_a_healthy_thread() -> None:
-    """The control that decided the *shape* of the guard, not merely that it has a counter-example.
+    """The value stamp does not refuse a healthy thread.
 
-    The obvious signal is `channel_versions` minus what loaded, and it is wrong: a channel is
-    consumed by the step that reads it, which bumps its version and writes no blob, so a healthy
-    checkpoint routinely names channels holding no value. Measured on a healthy three-turn thread,
-    that comparison flagged **every** checkpoint — a guard built on it would refuse every thread in
-    the fleet on the deploy that introduced it.
-
-    So this asserts both halves: that a healthy thread resumes, *and* that it is a thread the naive
-    signal would have refused. Without the second half the test passes against a guard that is
-    wrong for the reason this one was written to avoid.
+    `channel_versions` minus what loaded is the wrong signal: a consumed channel bumps its version
+    and writes no blob, so healthy checkpoints routinely name empty channels. Asserted: a healthy
+    thread resumes and is one the naive signal would have refused.
     """
 
     async def _run() -> tuple[list[str], list[str]]:
@@ -951,13 +833,10 @@ def test_the_value_stamp_does_not_refuse_a_healthy_thread() -> None:
 
 
 def test_a_checkpoint_written_before_the_value_stamp_resumes() -> None:
-    """An unstamped checkpoint passes, for the reason the channel stamp's unstamped case does.
+    """A checkpoint written before the value stamp resumes.
 
-    Every live session at the deploy that introduces this stamp has checkpoints without it, and a
-    rolling deploy keeps writing them from the older pod for the length of the rollout. Staged by
-    removing the key from the stored row and then removing the *blobs* too: a thread that has lost
-    everything the guard looks for still resumes, which is the only way to prove the guard read the
-    absent stamp rather than getting lucky.
+    Rolling deploys keep writing unstamped checkpoints. The key and the blobs are both removed, so
+    resuming proves the guard read the absent stamp rather than getting lucky.
     """
 
     async def _run() -> list[str]:
@@ -986,26 +865,12 @@ def test_a_checkpoint_written_before_the_value_stamp_resumes() -> None:
 
 
 def test_concurrent_first_turns_get_one_migrated_saver() -> None:
-    """A cold start with traffic must not hand a turn a saver whose migrations have not run.
+    """Concurrent first turns get one migrated saver.
 
-    `checkpointer()` published `_saver` *before* awaiting `setup()`, and `_checkpoint_pool()`
-    published `_pool` before awaiting `open()`. Both are check-then-await-then-act, so a second turn
-    arriving inside either await saw a non-`None` global and got an unusable object — `relation
-    "checkpoints" does not exist`. That is not a rare interleaving: `api/runner._turn_checkpointer`
-    is awaited once per turn and the shipped chart runs two replicas, so every deploy under load is
-    the window.
-
-    **`setup()` is slowed here, and that is what gives the test power rather than luck.** Two
-    earlier versions — gather ten `checkpointer()` calls, then gather ten first turns — both passed
-    against the unfixed code, because at real speed the migrations happen to finish inside the first
-    task's slice. What the defect needs is a *second caller inside the first one's await*, so the
-    await is made wide enough to observe instead of being raced for. Measured against the unfixed
-    body, three of four tasks received the saver with `setup()` still unfinished; with the lock, all
-    four wait for it.
-
-    The flag is the assertion because it is the property that matters: what a turn gets back is a
-    checkpointer whose tables exist. Saver identity is checked too — two savers would mean two
-    `setup()` runs and two pools for one process.
+    `_saver` and `_pool` must not be published before `setup()`/`open()` complete, or a second
+    caller inside the await gets a saver without tables. `setup()` is slowed so a second caller
+    lands inside the first one's await; at real speed the race is rarely hit. Saver identity is
+    checked too (one `setup()`, one pool).
     """
     migrated: dict[str, bool] = {"done": False}
     original = ckpt.SchemaStampedSaver.setup
@@ -1043,12 +908,9 @@ def test_concurrent_first_turns_get_one_migrated_saver() -> None:
 def test_strict_serde_blocks_import_by_name_deserialization() -> None:
     """The checkpoint serializer refuses to run a `module:callable` named in a stored blob.
 
-    `AsyncPostgresSaver` with no `serde=` builds a permissive `JsonPlusSerializer` whose msgpack
-    ext hook runs `getattr(import_module(mod), attr)(*args)` on values taken straight from the
-    stored bytes — arbitrary code execution on the resume of a poisoned `checkpoint_blobs` row,
-    reachable from the app credential's own INSERT+DELETE grant. `_strict_serde` pins the hook to
-    `SAFE_MSGPACK_TYPES`; a poisoned type is blocked (returns a degraded value, never executes)
-    while every legitimate channel still round-trips.
+    The default `JsonPlusSerializer` msgpack hook imports and calls names from stored bytes, so a
+    poisoned `checkpoint_blobs` row is code execution on resume. `_strict_serde` pins the hook to
+    `SAFE_MSGPACK_TYPES`: a poisoned type is blocked while every legitimate channel round-trips.
     """
     import ormsgpack
     from langchain_core.messages import AIMessage, HumanMessage
@@ -1077,9 +939,7 @@ def test_strict_serde_blocks_import_by_name_deserialization() -> None:
 def test_upstream_default_serde_is_still_permissive() -> None:
     """Pin the upstream default this workaround exists for, so a fix upstream turns this red.
 
-    If langgraph-checkpoint ever makes the msgpack ext hook strict by default, `_strict_serde`
-    becomes redundant and this assertion fails, prompting its removal — the `test_upstream_surface`
-    pattern for a shape upstream never promised.
+    If the msgpack hook becomes strict by default, `_strict_serde` is redundant and can be removed.
     """
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -1087,37 +947,13 @@ def test_upstream_default_serde_is_still_permissive() -> None:
 
 
 def test_a_channel_declared_with_the_untracked_class_is_not_stamped() -> None:
-    """The one untracked spelling `_is_untracked` missed, which is the one its origin uses.
+    """A channel declared with the untracked class, rather than an instance, is not stamped.
 
-    **`isinstance(bound, UntrackedValue)` is a test on a channel *instance*, and upstream declares
-    its own untracked channel with the *class*.** `ModelCallLimitMiddleware` writes
-    `run_model_call_count: NotRequired[Annotated[int, UntrackedValue, PrivateStateAttr]]`, and
-    `agent/state.py` quotes that line verbatim as where this repository's shape comes from —
-    LangGraph resolves a bare channel class in an annotation by constructing it, so the two
-    spellings mean the same thing.
-
-    Driven before the fix, with one channel added in exactly that spelling: it landed in
-    `FIRST_PARTY_CHANNELS` rather than in `UNTRACKED_CHANNELS`, and the next ordinary turn of a
-    session written by the previous build was refused against a real Postgres —
-    `refusing turn state for session sess-a5-probe: it never held state channel(s) probe_counter`,
-    `CheckpointSchemaMismatch: … Start a new session`. The fleet-wide refusal the whole derivation
-    exists to close, live again, with all 19 tests in this file green, through the one shape
-    `_is_untracked`'s own docstring promised was covered ("read off the annotation rather than off a
-    list of class names, so a sixth untracked channel shape is covered the day it is written").
-
-    Both directions, and the second is the reason this is not just a repeat of the sibling test
-    above: a predicate widened to "any class in the metadata" would also swallow a *restorable*
-    channel declared by class, so `LastValue` in the same position must still be stamped.
-
-    Four class-form spellings rather than one, because three one-token narrowings of the predicate
-    were watched passing against fewer:
-
-    - the **bare class** (`UntrackedValue`), which is upstream's own;
-    - a **subclass as a class** (`TurnTotal`, not `TurnTotal(int)`), which `bound is UntrackedValue`
-      admits and which is how this repository's own channels would read if anybody dropped the call;
-    - the marker **beside another** and **after** it, because upstream's declaration carries
-      `PrivateStateAttr` in the same `Annotated` and the order of two markers is arbitrary — a
-      predicate reading `__metadata__[0]` passes every spelling that happens to put it first.
+    Upstream declares its own untracked channel as `Annotated[int, UntrackedValue, ...]` and
+    LangGraph constructs a bare class, so both spellings mean the same. Both directions: a
+    restorable `LastValue` declared by class must still be stamped. Four class-form spellings,
+    because narrower predicates pass fewer: the bare class, a subclass as a class, and the marker
+    beside and after another marker (order in `Annotated` is arbitrary).
     """
     response = TypeVar("response")
 

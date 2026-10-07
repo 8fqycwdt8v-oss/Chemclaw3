@@ -1,13 +1,8 @@
-"""Repeated queries are embedded once (STO-12).
+"""Repeated queries are embedded once.
 
-The audit's finding on "tool result caching" was mostly that it is *not* a gap — every calculator
-already routes through `run_cached`, and the RDKit chem tools are cheaper than the Postgres round
-trip a cache would add. One genuine repetition survived that review: `embed_texts` re-embedded the
-same query on every retrieval, and under a real provider that is a network round trip on the
-interactive path, paid by all three graph-backed retrievers per query.
-
-The cache's one hazard is serving a vector the current model would not produce, which is why the
-configuration is part of the key and why that is the first thing asserted here.
+Under a real provider an embedding is a network round trip on the interactive path. The cache's
+one hazard is serving a vector the current model would not produce, so the configuration is part
+of the key, and that is asserted first.
 """
 
 import pytest
@@ -78,11 +73,10 @@ def test_a_batch_naming_one_text_twice_embeds_it_once(monkeypatch: pytest.Monkey
 def test_changing_the_model_does_not_serve_the_old_models_vectors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The hazard the calculation cache learned the hard way, avoided by construction (D-011).
+    """Changing the model does not serve the old model's vectors.
 
-    A vector is only reusable for the configuration that produced it. Serving one model's
-    embeddings after a switch would corrupt every similarity comparison silently — nothing would
-    error, the numbers would simply stop meaning anything.
+    A vector is reusable only for the configuration that produced it; anything else corrupts
+    similarity silently.
     """
     calls: list[str] = []
 
@@ -146,12 +140,10 @@ def test_an_empty_batch_is_not_a_cache_lookup() -> None:
 def test_a_batch_larger_than_the_bound_still_returns_every_vector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The trim may evict a key this very call inserted; the caller still gets its vector.
+    """A batch larger than the bound still returns every vector.
 
-    The deterministic half of the concurrency defect below, and the one worth pinning hardest
-    because it needs no threads to state: the answer is assembled from what the call holds, not
-    re-read from `_CACHE` after the trim has run. `reindex_notes` embeds one text per note in a
-    single batch, so any corpus larger than `embedding_cache_size` takes this path.
+    The trim may evict a key this call inserted, so the answer is assembled from what the call
+    holds, not re-read from `_CACHE`. `reindex_notes` embeds the whole corpus in one batch.
     """
     monkeypatch.setattr(settings, "embedding_cache_size", 4)
     texts = [f"text-{index}" for index in range(20)]
@@ -168,36 +160,15 @@ def test_a_batch_larger_than_the_bound_still_returns_every_vector(
 
 @pytest.mark.timeout(600)
 def test_concurrent_batches_do_not_race_on_the_cache() -> None:
-    """`_CACHE` is reached from several threads, and was a plain dict with no lock.
+    """Concurrent batches do not race on the cache.
 
-    **Its own timeout, because the global 180 s cap fails it under `make cov` and nowhere else.**
-    The workload is deliberately large — 8 threads x 600 texts against a 2,048-entry cache — and
-    coverage tracing multiplies a tight 4,800-iteration loop by roughly thirty: measured on this
-    machine, 4.8 s bare and 132-216 s traced. Every observed run under 180 s passed and every run
-    over it failed, which is the cap and not the race. That made the whole gate red on a
-    sufficiently loaded machine while `pytest tests/test_embedding_cache.py` stayed green, so the
-    failure looked like a flake in the thing this test is about. 600 s is ~2.8x the slowest run
-    seen; shrinking the batch instead would have narrowed the race window the docstring below
-    explains was chosen to be wide.
+    Retrieval embeds through `asyncio.to_thread`, so concurrent turns share the cache from several
+    threads. Without the lock, a trim evicts a key between another thread's insert and read
+    (`KeyError`), or two trims mutate the dict together (`RuntimeError`). The workload is large and
+    overlapping to widen the race window.
 
-    **It is a loose cap on an untraced run, and `conftest.timeout_scale`'s docstring is the
-    standing objection to that** — a constant chosen for the slow condition is no cap at all in the
-    fast one, which throws away what these markers are for. Accepted here because the two runtimes
-    differ by ~30x rather than the ~6x a loaded machine costs, so no single constant is tight in
-    both, and because what this cap has to catch is a *hang* — a deadlock on `_CACHE_LOCK` never
-    finishes, at either speed. `PYTEST_TIMEOUT_SCALE` is not the lever: it relaxes every cap in the
-    suite for a condition that only slows the tight loops.
-
-    Every retrieval runs its embedding through `asyncio.to_thread`, so concurrent turns land on the
-    default executor together. Two races followed and both are reproduced by this shape at the
-    shipped `embedding_cache_size` of 2048: a trim evicting a key between another thread's insert
-    and its read (`KeyError`, naming nothing, on the interactive path), and two trims mutating the
-    dict together (`RuntimeError: dictionary changed size during iteration`).
-
-    Measured on the pre-fix tree with these parameters: 6 of 6 trials failed, 1-3 of the 8 threads
-    each time. A race test cannot promise to fail every run, so this is written to make the window
-    as wide as the real workload does rather than to be a coin flip — batches that overlap, and a
-    total well past the bound.
+    The 600 s timeout covers coverage tracing, which slows this loop about thirty-fold; what the cap
+    must catch is a deadlock on `_CACHE_LOCK`, which never finishes at either speed.
     """
     import concurrent.futures
 

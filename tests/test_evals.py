@@ -1,9 +1,8 @@
-"""Behavioral tests for the evaluation & metric layer (plan Phase 2b).
+"""Behavioral tests for the evaluation and metric layer.
 
-They prove the acceptance criteria of CHECKMATE 2b: metrics are pure and
-config-thresholded, the harness runs reproducibly over the versioned case-set and
-renders a citable report, and the tool-utility A/B surfaces at least one task where
-tooling does *not* help (the selective-steering evidence, F8/F9).
+Metrics are pure and config-thresholded, the harness runs reproducibly over the versioned case-set
+and renders a citable report, and the tool-utility A/B surfaces at least one task where tooling
+does not help.
 """
 
 import math
@@ -97,11 +96,9 @@ def test_seed_metrics_are_registered() -> None:
 def test_harness_runs_over_versioned_case_set_and_gates() -> None:
     """The harness scores the real chemistry case-set reproducibly and flags the failing case."""
     cases = load_eval_cases(settings.eval_case_dir)
-    # Named positively rather than filtered as "everything that is not retrieval-*". The negative
-    # form made this a catch-all: the retrieval gold cases have their own corpus fixture in
-    # test_retrieval_eval.py, and the autonomy cases have their own transcripts, so each new family
-    # had to remember to exclude itself from a test about chemistry or break its exact-equality
-    # assertion below. One list, used for both the membership check and the filter.
+    # Named positively rather than as "everything not retrieval-*": other case families have their
+    # own fixtures, and a negative filter would make each new family break the exact-equality
+    # assertion below. One list serves both the membership check and the filter.
     chemistry = {
         "bo-regret-reizman",
         "green-esterification",
@@ -190,12 +187,10 @@ def test_cli_exits_nonzero_on_unloadable_case_set(
 def test_cli_reports_failing_gate_but_exits_zero(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A failing gated metric is reported, not an exit code — gating is the tests' job.
+    """A failing gated metric is reported, not turned into an exit code, without `--strict`.
 
-    The versioned case-set deliberately contains a gate-failing demonstration case
-    (pharma-solvent-heavy), so the CLI must render its FAIL loudly while exiting 0;
-    which cases must pass/fail is pinned by this suite, and only an unloadable or
-    unscorable case-set exits non-zero.
+    The case-set contains a deliberately gate-failing demonstration case, so the CLI renders its
+    FAIL while exiting 0; only an unloadable or unscorable case-set exits non-zero.
     """
     monkeypatch.setattr(
         sys,
@@ -315,16 +310,10 @@ def test_sub_epsilon_delta_is_no_effect(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_strict_mode_gates_on_a_regression_and_not_on_a_demonstration() -> None:
-    """`ci.yml` called `make eval` "the scientific quality gates" while it could not fail.
+    """`--strict` gates on a regression and not on a demonstration.
 
-    Not an oversight in the CLI: two shipped cases exist to *demonstrate* a gate firing — a
-    solvent-heavy step that must exceed the PMI limit, a query whose literal match must miss — so a
-    command treating every failure as a regression would have been red from the day they were
-    written, and the only way to keep them from failing it was for it never to fail at all. The
-    real gate was a pinned assertion in this file, which meant a reader trusted the wrong step.
-
-    `expect_pass` is what makes the name true: it separates "this failed" from "this was supposed
-    to fail", so `--strict` can gate on the difference.
+    Some shipped cases exist to demonstrate a gate firing. `expect_pass` separates "this failed"
+    from "this was supposed to fail", so `make eval-strict` can fail on the difference.
     """
     from chemclaw.evals.harness import main
 
@@ -342,13 +331,10 @@ def test_strict_mode_gates_on_a_regression_and_not_on_a_demonstration() -> None:
 def test_strict_mode_fails_when_a_declared_demonstration_stops_demonstrating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`expect_pass: false` is an assertion, not a mute — the half `regressions()` could not see.
+    """`--strict` fails when a declared demonstration stops demonstrating.
 
-    `regressions()` only ever detects *failures*, and suppresses them per case, so a gate that
-    quietly stops firing removes a by-design failure and leaves the command green. Measured on the
-    shipped set: raising `eval_efactor_max`/`eval_pmi_max` to 1000 took `pharma-solvent-heavy` out
-    of the failure set — failed 4 → 2, regressions 0, **exit 0** — so the entire green-chemistry
-    gate went inert with no signal, and both pinned assertions in this file still held.
+    `expect_pass: false` is an assertion, not a mute: a gate that quietly stops firing (e.g. a
+    raised PMI limit) removes the by-design failure and would otherwise leave the command green.
     """
     from chemclaw.evals.harness import main
 
@@ -363,17 +349,11 @@ def test_strict_mode_fails_when_a_declared_demonstration_stops_demonstrating(
 
 
 def test_every_gated_metric_has_a_case_that_makes_it_fail() -> None:
-    """A gate nothing has ever been observed to fail is a gate that cannot fail.
+    """Every gated metric has a case that makes it fail.
 
-    `inert_demonstrations` asks the question per *case*, so it structurally cannot see a **metric**
-    with no demonstration behind it at all — such a metric is scored only over cases written to
-    pass. Measured on the shipped set the day this was written, two of six gated metrics were in
-    that position: `runaway_rate` and `prediction_error` had never once reported a failure, and a
-    version of either that returned a constant "perfect" left `make eval-strict` green and
-    `baseline.json` untouched. Both mutations were run; both exited 0 before this check and 1 after.
-
-    The assertion is over the shipped case-set rather than a fixture, because the claim is about
-    what CI actually scores.
+    The per-case check cannot see a metric scored only over cases written to pass; such a metric
+    could return a constant "perfect" and stay green. Asserted over the shipped case-set, since the
+    claim is about what CI scores.
     """
     cases = load_eval_cases(settings.eval_case_dir)
     report = run_eval(cases, "v1")
@@ -390,14 +370,10 @@ def test_every_gated_metric_has_a_case_that_makes_it_fail() -> None:
 def test_strict_mode_fails_when_a_gated_metric_stops_measuring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The mutation the check exists for: a metric that answers "perfect" whatever it is given.
+    """`--strict` fails when a gated metric stops measuring.
 
-    Driven through the registry rather than by editing a case, so what is broken is the *metric* —
-    the case-set is untouched and every input it carries is still the shipped one. Before this
-    check, the shipped `--strict` returned 0 here: the demonstration case simply left the failure
-    set and nothing reported the loss. Both halves fire now, and the report names the metric as
-    well as the case, because a reader seeing only "this case stopped failing" would look at the
-    case.
+    A metric patched to answer "perfect" through the registry leaves the case-set untouched. The
+    report names the metric as well as the case, so a reader looks at the right one.
     """
     from chemclaw.evals import metric as metric_module
     from chemclaw.evals.harness import main
@@ -420,17 +396,11 @@ def test_strict_mode_fails_when_a_gated_metric_stops_measuring(
 def test_a_gated_metric_whose_cases_are_all_gone_is_still_owed_a_demonstration(
     tmp_path: Path,
 ) -> None:
-    """The hole the check had: a gate becomes *invisible* rather than unfireable.
+    """A gated metric whose cases are all gone is still owed a demonstration.
 
-    `gated` used to be derived from the run's own results, so a metric no case scores contributes
-    no row and was simply not in the set — the one arrangement this check exists to catch is the
-    one that removes its input. Driven on the shipped set: moving both `runaway_rate` cases out of
-    `data/evals/cases/` left `make eval-strict` at **exit 0**, while `make eval-baseline-check`
-    said "Worsened: runaway_rate (0.25 → absent)" — and the documented response to a case-set
-    change is to re-record the baseline, which erases the only control that saw it.
-
-    A deletion is the realistic shape rather than a contrived one: a case-set change bumps
-    `EVAL_CASE_SET_VERSION`, which is exactly when the baseline is re-recorded.
+    If `gated` were derived from the run's results, deleting a metric's cases would remove it from
+    the check entirely. A case-set change is also when the baseline is re-recorded, which would
+    erase the only other signal.
     """
     dropped = "runaway_rate"
     for case in Path(settings.eval_case_dir).glob("*.md"):
@@ -451,13 +421,11 @@ def test_a_gated_metric_whose_cases_are_all_gone_is_still_owed_a_demonstration(
 
 
 def test_every_scored_metrics_gatedness_is_the_one_it_declares() -> None:
-    """The registry flag and the verdicts must agree — otherwise it is a second declaration.
+    """Every scored metric's gatedness is the one it declares.
 
-    `gated=True` at registration is what makes an absent metric visible, and a flag nothing
-    reconciles against behaviour is the shape this repository keeps finding in its own prose. So
-    every metric the shipped case-set actually scores is checked both ways: one that returns a
-    verdict must be declared gated, and one that never does must not be. A metric no case scores is
-    outside what a run can say anything about, which is the whole reason the declaration exists.
+    The registry flag is what makes an absent metric visible, so it is reconciled with behaviour
+    both
+    ways: a metric returning a verdict must be declared gated, and one that never does must not be.
     """
     report = run_eval(load_eval_cases(settings.eval_case_dir), "v1")
     observed: dict[str, bool] = {}
@@ -476,11 +444,9 @@ def test_every_scored_metrics_gatedness_is_the_one_it_declares() -> None:
 
 
 def test_an_ungated_metric_owes_the_set_no_demonstration() -> None:
-    """The other direction, so the check cannot be satisfied by gating nothing.
+    """An ungated metric owes the set no demonstration.
 
-    `turn_cost_ratio`, `bo_regret` and the three set metrics report a number rather than a verdict
-    (`passed is None`); there is no threshold to demonstrate and demanding a failing case for them
-    would be demanding a failure of something that cannot fail.
+    Metrics reporting a number rather than a verdict (`passed is None`) have no threshold to fail.
     """
     report = run_eval(load_eval_cases(settings.eval_case_dir), "v1")
     ungated = {r.result_metric for r in report.results if r.passed is None}
@@ -492,18 +458,12 @@ def test_an_ungated_metric_owes_the_set_no_demonstration() -> None:
 def test_strict_mode_reads_the_unfireable_check_and_not_only_the_inert_one(
     tmp_path: Path,
 ) -> None:
-    """`--strict` exits 1 for an unfireable gate *alone*, with the other two clauses empty.
+    """`--strict` exits 1 for an unfireable gate alone, with the other two clauses empty.
 
-    Written because the mutation that removes ``or report.gates_no_demonstration_can_fire()``
-    from `main` survived every other test in this file. The reason is worth stating: the
-    registry-substitution test above drives `main(["--strict"])` through a monkeypatched metric,
-    which *also* stops `solubility-out-of-domain` failing — so `inert_demonstrations` is non-empty
-    and the exit code it asserts is produced by a clause the test is not about.
-
-    Here the case-set is the shipped one with every `expect_pass: false` case removed, which is a
-    case-set nothing declares a demonstration in. `regressions()` and `inert_demonstrations()` are
-    therefore both empty by construction (asserted, not assumed), every gated metric is unfireable,
-    and the only clause that can produce a 1 is the one under test.
+    The registry-substitution test above also makes a demonstration case stop failing, so its exit
+    code comes from a different clause. Here every `expect_pass: false` case is removed, so
+    `regressions()` and `inert_demonstrations()` are empty (asserted) and only the clause under test
+    can produce the 1.
     """
     for case in Path(settings.eval_case_dir).glob("*.md"):
         if "expect_pass: false" not in case.read_text(encoding="utf-8"):

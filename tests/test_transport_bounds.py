@@ -1,23 +1,9 @@
 """Every process that serves HTTP bounds a connection before a route can refuse it.
 
-`D-2026-08-01-a-cheap-request-is-still-a-request` established three transport bounds — a
-concurrency ceiling, an idle keep-alive timeout and a header-size ceiling — and
-`deploy/entrypoint.sh` passes all three as uvicorn flags. `tests/test_deploy_chart.py::
-test_the_front_door_is_launched_with_transport_bounds` pins them, **to that shell case**.
-
-**Measured on 2026-09-11: three of the four processes that serve HTTP passed none of them.**
-`api/mcp_face.py`, `connectors/server_entry.py` — which is *every* `connector-*` pod — and
-`core/worker_http.py` call uvicorn themselves and ran at its defaults: unlimited concurrency, a
-5 s keep-alive and a 16 KiB header ceiling. `deploy/README.md` gave the reason and the reason was
-false: it said the settings are ones "the app can impose on itself" cannot, which is true of an
-ASGI application and false of `uvicorn.run()` and `uvicorn.Config()`, both of which take all three
-as keyword arguments at all three call sites.
-
-**This guard is a partition, not a list, which is the only shape that catches the fifth process.**
-The defect was never that someone chose to leave a server unbounded — it was that a server was
-added and the question was not asked. So the assertion is over every `uvicorn.run`/`uvicorn.Config`
-call site the tree contains: each either applies `transport_bounds` or is named below with a reason.
-A sixth launcher added next year fails this the day it lands.
+The bounds are a concurrency ceiling, an idle keep-alive timeout and a header-size ceiling, all
+of which `uvicorn.run()`/`uvicorn.Config()` accept. The guard is a partition over every such call
+site in the tree: each applies `transport_bounds` or is named below with a reason, so a new
+launcher fails the day it lands.
 """
 
 from __future__ import annotations
@@ -32,12 +18,9 @@ from chemclaw.core.config import settings
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
-#: Launchers that deliberately do not bound, with the reason each is not a deployment surface.
-#:
-#: Both halves of a register, on the rule `D-2026-09-11` took from wave 15: an entry is checked for
-#: staleness (the file still launches uvicorn) *and* for being spent (it is actually unbounded).
-#: A row that outlives its launcher, or that sits on a server somebody has since bounded, is an
-#: exemption nobody is using and goes.
+#: Launchers that deliberately do not bound, each with the reason it is not a deployment surface.
+#: Each entry is checked for staleness (the file still launches uvicorn) and for being spent (it is
+#: actually unbounded).
 _NOT_A_DEPLOYMENT_SURFACE = {
     "chemclaw/cli/mock_llm.py": (
         "the credential-free mock gateway for the live lane and the storm; it binds loopback, "
@@ -73,9 +56,7 @@ def _launch_sites() -> dict[str, list[ast.Call]]:
 def _applies_bounds(call: ast.Call) -> bool:
     """Whether this call spreads `transport_bounds(...)` into its keywords.
 
-    A `**` keyword has `arg is None`. Matching the *call* rather than the resulting keys is the
-    point: the keys are what `transport_bounds` decides, and a site that spelled them out by hand
-    would be a second copy of the decision, which is the thing this module exists to prevent.
+    Matches the call rather than the keys, so a site spelling the keys out by hand does not count.
     """
     return any(
         kw.arg is None
@@ -135,13 +116,10 @@ def test_no_exemption_sits_on_a_server_that_is_already_bounded() -> None:
 
 
 def test_the_probe_surface_keeps_its_keep_alive_and_header_bounds() -> None:
-    """`concurrency=False` narrows one bound and must not quietly drop the other two.
+    """`concurrency=False` drops only the concurrency bound on the probe surface.
 
-    `core/worker_http.py` answers the two kubelet probes, and a liveness probe *refused* because a
-    concurrency limit is full restarts a pod that is merely busy — so that one bound is withheld
-    there on purpose. The other two are not about capacity: an idle socket and an oversized header
-    are hazards whatever the surface serves, and an argument for dropping the first reads exactly
-    like an argument for dropping all three.
+    A liveness probe refused by a full concurrency limit restarts a merely busy pod, so that bound
+    is withheld; idle sockets and oversized headers are hazards on any surface.
     """
     narrowed = transport_bounds(concurrency=False)
     assert "limit_concurrency" not in narrowed

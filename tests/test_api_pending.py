@@ -1,15 +1,9 @@
 """The answer route: who may settle a held-open question.
 
-**This file is the control.** A Temporal signal is unsigned, so `AwaitAnswerWorkflow` treats
-`answered_by` as attribution and never as authorization
-(`D-2026-08-28-roles-do-not-cross-the-durable-boundary-unsigned`). The decision about who may answer
-therefore lives entirely on this side of the wire, and if these tests do not hold it, nothing does —
-the workflow will accept any signal that reaches the broker.
-
-The four refusals are separated deliberately, because they are four different facts: 404 no such
-request, 403 not yours to answer, 409 already decided, 503 the answer was not delivered. Collapsing
-any two of them would tell a caller to retry something that will never succeed, or to give up on
-something that would.
+A Temporal signal is unsigned, so `AwaitAnswerWorkflow` treats `answered_by` as attribution, not
+authorization (`D-2026-08-28-roles-do-not-cross-the-durable-boundary-unsigned`); who may answer is
+decided only here. The four refusals are distinct facts: 404 no such request, 403 not yours, 409
+already decided, 503 not delivered.
 """
 
 import asyncio
@@ -114,13 +108,9 @@ def test_routing_decides_who_may_answer_and_the_requester_is_not_automatic() -> 
 
 
 def test_the_requester_can_never_approve_their_own_irreversible_change() -> None:
-    """Separation of duties, asserted against the routing that used to defeat it.
+    """Separation of duties: the requester can never approve their own irreversible change.
 
-    The seam shipped raising every approval with `asked_of` unset, which took the "anyone
-    authenticated" branch and let the requester sign off their own unrecoverable change. Both halves
-    are pinned: an unrouted approval no longer admits its requester, and neither does one routed to
-    a group the requester belongs to — because routing a control to a team the requester is on is
-    exactly how a separation-of-duties rule gets quietly lost again.
+    Neither an unrouted approval nor one routed to a group the requester belongs to admits them.
     """
     assert _may_answer(_ALICE, _routed("", kind="approval", requested_by="u-alice")) is False
     assert _may_answer(_ALICE, _routed("qc-team", kind="approval", requested_by="u-alice")) is False
@@ -153,9 +143,8 @@ def test_answering_a_request_routed_to_somebody_else_is_refused() -> None:
 async def test_answering_an_unknown_request_is_a_404_and_not_a_403() -> None:
     """A request that does not exist is a different fact from one that is not yours.
 
-    Kept apart on purpose: this route lists nothing a caller could enumerate — `GET /pending` only
-    ever returns what is routed to them — so there is no id to probe for, and telling a caller
-    plainly that nothing is there is better than making them guess at a permission problem.
+    `GET /pending` lists only what is routed to the caller, so there is nothing to enumerate and a
+    plain 404 is safe.
     """
     await migrated_db_or_skip()
 
@@ -185,9 +174,8 @@ async def test_answering_a_decided_request_is_a_409() -> None:
 def test_an_undeliverable_answer_is_a_503_and_settles_nothing() -> None:
     """With no broker reachable, the route reports 503 and the request stays open.
 
-    The ordering is the decision: the store is *not* written first. A row reading `answered` with
-    nothing released would leave the campaign waiting forever while the inbox looked clean, which is
-    strictly worse than a failed request the caller can retry.
+    The store is not written first: an `answered` row with nothing released would strand the
+    campaign behind a clean inbox.
     """
 
     async def _run() -> None:
@@ -225,11 +213,8 @@ async def test_the_inbox_returns_what_is_waiting_on_the_caller() -> None:
 async def test_the_inbox_does_not_list_what_the_answer_route_would_refuse() -> None:
     """A row a caller cannot act on is worse than no row: the two read one predicate.
 
-    `_routing_identities` widens the store query to the caller's whole routing surface, and the
-    store knows nothing about separation of duties — so an `approval` Alice raised and routed to a
-    group Alice belongs to matched her inbox query, and the 403 arrived only when she clicked it.
-    Driven through both routes rather than through `_may_answer` alone, because the defect was that
-    the two disagreed and only the pair can show they now agree.
+    The inbox query widens to the caller's groups, so it must apply the same separation-of-duties
+    rule as the answer route. Driven through both routes, since agreement is the property.
     """
     await migrated_db_or_skip()
     await _open("api-pending-self", asked_of="qc-team", kind="approval", requested_by="u-carol")
@@ -266,12 +251,10 @@ def test_both_routes_are_behind_the_authentication_gate(path: str) -> None:
 
 
 async def test_the_inbox_says_it_is_a_page_rather_than_the_whole_inbox() -> None:
-    """`GET /pending` bounded its answer and the response could not express that.
+    """The inbox says it is a page rather than the whole inbox.
 
-    `PendingRequestsOut`'s own docstring reasoned that `count` is a page length and not a total —
-    honest to a code reader, and invisible on the wire, so a client with 35 waiting rows rendered
-    the first 20 as the whole inbox. That is how a raised question ages out unanswered: it never
-    appeared in anybody's list.
+    `count` is a page length, so the response must say more rows exist or a question can age out
+    unseen.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:

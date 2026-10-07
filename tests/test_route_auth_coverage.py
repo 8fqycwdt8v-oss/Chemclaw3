@@ -1,31 +1,10 @@
-"""Prove the front door's one authorization gate is on every route, not merely convention (H1).
+"""Prove the front door's one authorization gate is on every route, not merely convention.
 
-Before `chemclaw.api.deps.CurrentUser` existed, all twenty authenticated routes wrote
-`principal: Principal = Depends(require_principal)` verbatim — a convention a 24th route (or a
-21st) could silently forget. Forgetting it skips both authentication *and* the per-principal rate
-budget in one stroke, because `_within_budget` lives inside `require_principal`
-(`chemclaw.api.auth`).
-
-This test makes that convention an assertion: it walks the built app's `APIRoute`s, resolves each
-one's dependency tree, and requires `require_principal` to be present somewhere in it — unless the
-route's `(path, method)` is in `_PROBE_ALLOWLIST`. The allowlist is what the health/metrics probes'
-own docstrings already claim in prose; here it is the enforced declaration of what is
-*intentionally* open, and adding a route to it is a change a reviewer will see in a diff.
-
-**Why the dependency tree, not source text.** Grepping `app.py` for `Depends(require_principal)`
-would pass a route that spells the same dependency a different way (a wrapped/renamed callable)
-and would not survive `app.py` splitting into per-domain `APIRouter`s (R3.1) the way this does — a
-route registered on a sub-router still resolves to the same `require_principal` object once it is
-included into the app, so this test needs no changes when routes move modules. It would also be
-fooled by a parameter that is merely *named* `principal` without depending on `require_principal`
-at all; walking `route.dependant` cannot be, because it resolves the actual callable FastAPI will
-invoke, not a name.
-
-**Why not middleware.** `tests/test_request_limits.py` (`test_the_probes_are_never_limited`) already
-establishes that `/healthz`, `/readyz` and `/metrics` must stay reachable with no dependency at all,
-and that the rate limit inside `require_principal` must not become an app-level gate that would also
-throttle them. This test enforces the same shape from the other side: everything *else* must go
-through that one dependency, without turning it into middleware that would catch the probes too.
+Forgetting `require_principal` skips both authentication and the per-principal rate budget. The
+test walks each `APIRoute`'s resolved dependency tree, so a renamed wrapper or a sub-router
+still counts and a parameter merely named `principal` does not. `_PROBE_ALLOWLIST` declares what
+is intentionally open; the gate is a dependency rather than middleware so probes stay
+unthrottled.
 """
 
 from collections.abc import Iterable
@@ -41,14 +20,11 @@ from chemclaw.api.app import create_app
 from chemclaw.api.auth import require_principal
 from chemclaw.core.config import settings
 
-# The declaration of what is intentionally reachable with no authenticated principal at all.
-# `(path, method)` rather than path alone, so a future route that reuses a path for a new method
-# (unlikely here, but cheap to be exact about) is not accidentally waved through.
+# What is intentionally reachable with no authenticated principal, keyed by `(path, method)`.
 #
 # - GET /healthz: liveness — a kubelet cannot present a bearer token.
 # - GET /readyz: readiness — same reason, and it must answer before an agent/tenant exists.
-# - GET /metrics: a Prometheus scrape happens before and independently of user identity; the
-#   exposition itself carries no session, user or turn content (D-152's label allowlist).
+# - GET /metrics: a Prometheus scrape has no identity, and the exposition carries no user content.
 _PROBE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("/healthz", "GET"),
@@ -58,29 +34,14 @@ _PROBE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-# The other surface: routes FastAPI serves that are *not* `APIRoute`s and therefore carry no
-# `dependant` for `require_principal` to sit in. They cannot be gated, so the only safe statement
-# about them is that there is exactly one and we know what it is.
-#
-# This declaration exists because excluding them silently is how `/openapi.json` stayed
-# unauthenticated: `openapi_url` defaults to a plain `Route`, the sweep below skipped it for the
-# perfectly true reason that it has no dependency tree, and the full route/parameter/model surface
-# was readable by anyone who could reach the pod. `create_app` still passes `openapi_url=None` and
-# serves the document from an `APIRoute` of its own instead
-# (`D-2026-09-07-a-contract-check-that-cannot-reach-the-contract`), so the schema is inside the
-# sweep rather than beside it; this declaration is what stops FastAPI's plain `Route` — or any
-# other ungatable route — from coming back unnoticed.
+# Served routes that are not `APIRoute`s and so cannot carry `require_principal`; the only safe
+# statement is that there is exactly one and we know what it is. This stops a plain `Route`, such
+# as FastAPI's default `/openapi.json`, from appearing unnoticed.
 _UNGATABLE_SURFACE: frozenset[tuple[str, str]] = frozenset({("Mount", "")})
 
 
 def _api_routes(app: FastAPI) -> Iterable[APIRoute]:
-    """Every `APIRoute` the app declares — skips anything with no dependency tree to inspect.
-
-    Non-`APIRoute` entries (`Route`, `Mount`) carry no `dependant` FastAPI could gate, so this
-    filter excludes them for free rather than by name. What they are is pinned separately by
-    `test_the_ungatable_surface_is_exactly_the_static_mount`; excluding them here without pinning
-    them there is precisely the gap that left `/openapi.json` open.
-    """
+    """Every `APIRoute` the app declares; non-`APIRoute` entries are pinned separately."""
     for route in app.routes:
         if isinstance(route, APIRoute):
             yield route
@@ -98,11 +59,8 @@ def _ungatable_surface(app: FastAPI) -> set[tuple[str, str]]:
 def _requires_principal(dependant: Dependant) -> bool:
     """Whether `require_principal` appears anywhere in `dependant`'s dependency tree.
 
-    Recursive, not a single-level scan: a dependency of a dependency (or, after R3.1, a
-    router-level dependency threaded onto a sub-router) must count too. Identity (`is`), not name
-    or signature — the whole point is to resolve the callable FastAPI will actually invoke, which
-    a parameter merely *named* `principal` does not change and a differently-named wrapper around
-    the same function would still satisfy.
+    Recursive, so nested and router-level dependencies count; compared by identity, so only the
+    callable FastAPI invokes matters.
     """
     for sub in dependant.dependencies:
         if sub.call is require_principal or _requires_principal(sub):
@@ -157,40 +115,23 @@ def test_every_route_outside_the_probe_allowlist_requires_a_principal() -> None:
 
 
 def test_the_probe_allowlist_names_exactly_the_open_routes() -> None:
-    """The other half of the same guarantee: nothing *outside* the allowlist is actually open.
+    """The allowlist names exactly the routes that resolve with no `require_principal`.
 
-    Without this, `_PROBE_ALLOWLIST` could grow to cover a real gap and the test above would still
-    pass — this pins the allowlist to exactly the routes that resolve with no `require_principal`
-    in their tree, so widening it silently is itself a failure.
+    Otherwise the allowlist could silently grow to cover a real gap.
     """
     assert set(_unauthenticated_routes(_built_app())) == set(_PROBE_ALLOWLIST)
 
 
 def test_the_ungatable_surface_is_exactly_the_static_mount() -> None:
-    """Nothing but the static UI mount may be served outside the gateable route set.
-
-    The sweep above can only speak for routes that *have* a dependency tree. This speaks for the
-    rest: if a future change re-enables `openapi_url`, mounts a second sub-app, or adds a bare
-    `Route`, that entry appears here and this fails with its name — rather than being skipped for
-    the true-but-insufficient reason that it has nothing to gate.
-    """
+    """Nothing but the static UI mount may be served outside the gateable route set."""
     assert _ungatable_surface(_built_app()) == set(_UNGATABLE_SURFACE)
 
 
 def test_an_enforced_app_has_no_ungatable_surface_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
     """Under `entra_required` the static mount is gone, so every served route has a gate.
 
-    The mount above is the one thing the dependency sweep cannot speak for, and for the whole life
-    of this file the honest statement about it was "there is exactly one and we know what it is".
-    That was as far as it could go while the bundled UI was served in every posture — and it was
-    serving a chat client that sends no `Authorization` header (measured: the string does not occur
-    in `api/static/app.js`) and subscribes to job push-back with a native `EventSource`, which
-    cannot carry one. It could never work with identity on; it could only be a permanently broken
-    page on the public host, competing for `/` with the front end that does authenticate.
-
-    `create_app` now mounts it only when identity is off, which turns the statement above into a
-    stronger one: in the posture a deployment actually runs, the ungatable surface is empty and
-    every route FastAPI serves resolves through `require_principal`.
+    The bundled UI sends no `Authorization` header, so `create_app` mounts it only when identity is
+    off.
     """
     assert _ungatable_surface(_enforced_app(monkeypatch)) == set()
 
@@ -214,16 +155,8 @@ def test_the_bundled_ui_is_reachable_in_dev_and_absent_under_enforcement(
 def test_the_openapi_schema_is_served_through_the_one_gate() -> None:
     """`/openapi.json` is an `APIRoute` behind `require_principal` — served, and inside the sweep.
 
-    It was closed outright between `D-2026-08-06-the-caller-chooses-the-kid-not-the-workload` and
-    `D-2026-09-07-a-contract-check-that-cannot-reach-the-contract`, on the stated ground that
-    nothing consumed it. Something does: `Chemclaw3_ui/scripts/check-openapi.mjs` fetches this
-    document and diffs the BFF whitelist against the routes it publishes — measured against the
-    running service, that check exited 1 on a 404 and had therefore never run.
-
-    Two assertions, and the second is the one that keeps the original decision's invariant. The
-    document is fetchable, *and* the route resolving it carries the gate — so it is now covered by
-    the sweep at the top of this file rather than sitting beside it as a plain `Route` no
-    dependency could reach, which is the shape that made it unauthenticated in the first place.
+    The UI's contract check fetches it. Both the document being fetchable and its route carrying
+    the gate are asserted.
     """
     app = _built_app()
     assert ("/openapi.json", "GET") not in _unauthenticated_routes(app), (
@@ -238,26 +171,15 @@ def test_the_openapi_schema_is_served_through_the_one_gate() -> None:
 def test_the_openapi_schema_is_refused_without_a_token_under_enforcement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The half that matters: in the posture the chart ships, an anonymous caller gets nothing.
-
-    The original defect was that the full route, parameter and model surface was readable by anyone
-    who could reach the pod. Serving the document again re-opens exactly that question, so it is
-    answered over the wire in the enforced posture rather than by reading a dependency tree — 401,
-    the same answer every other route gives an unauthenticated caller.
-    """
+    """In the enforced posture, an anonymous request for the OpenAPI schema gets 401."""
     with TestClient(_enforced_app(monkeypatch)) as client:
         assert client.get("/openapi.json").status_code == 401
 
 
 def test_mutation_proof_re_enabling_the_openapi_route_fails_the_surface_check() -> None:
-    """Prove the surface check catches the exact regression it was written for.
+    """Re-registering a plain schema route the way FastAPI would fails the surface check.
 
-    Re-registers the schema route the way FastAPI would if `openapi_url` were set again; the check
-    must name it. Without this, the assertion above is a test that has never been seen to fail.
-
-    Still the regression it always was, and serving the schema from an `APIRoute` is why: the two
-    shapes answer the same path and only one of them can be gated, so "`/openapi.json` responds"
-    is not the property worth asserting — "no plain `Route` serves it" is.
+    The property is "no plain `Route` serves it", since only the `APIRoute` form can be gated.
     """
     app = _built_app()
 

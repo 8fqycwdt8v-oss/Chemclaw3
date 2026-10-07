@@ -1,13 +1,9 @@
 """An unloading page's stop waits for a reload (`D-2026-10-03-an-unload-stop-waits-for-a-reload`).
 
-Defect D5, found by a real-browser run on kind: a reload mid-turn sent the page's unload stop, the
-turn was cancelled, and the reloaded page waited 630 s for an answer that never came. A browser
-cannot tell a reload from a close at unload time, so `POST …/turn/stop?reason=unload` is deferred
-for `service_turn_unload_grace_seconds` and the sender reattaching (`GET …/turn/stream`) cancels it.
-
-Driven at the routes, over a real uvicorn server on loopback (`tests.test_detach._Served`): "the
-sender's stream dropped and then a stop arrived" cannot be expressed through `TestClient`. The
-window's own bounds — one per stop, a cap per turn — are pinned on `DetachableTurn` directly.
+A browser cannot tell a reload from a close at unload time, so `POST …/turn/stop?reason=unload`
+is deferred for `service_turn_unload_grace_seconds` and the sender reattaching cancels it. Driven
+over a real uvicorn server, since a dropped stream followed by a stop cannot be expressed through
+`TestClient`; the window's bounds are pinned on `DetachableTurn` directly.
 """
 
 import asyncio
@@ -141,11 +137,10 @@ def test_a_reload_inside_the_window_reattaches_and_the_turn_answers(
 def test_a_reload_that_reattaches_before_the_unload_stop_arrives_keeps_the_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other order: the reloaded page's watch lands first, the old page's keepalive stop later.
+    """The reloaded page's watch lands first and the old page's stop arrives later.
 
-    `resume` then has nothing to cancel, and the stop that arrives next would kill the turn the
-    reloaded page is watching — D5 again, on a race the queued path (withdraw, then stop) makes
-    likely. The window's expiry reads who is watching.
+    `resume` has nothing to cancel, so the window's expiry must check who is watching rather than
+    kill the turn the reloaded page is following.
     """
     monkeypatch.setattr(settings, "service_turn_unload_grace_seconds", 0.5)
     agent = _Ledger()

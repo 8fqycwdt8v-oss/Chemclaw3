@@ -1,9 +1,7 @@
-"""Behavioral tests for the Reizman Suzuki reaction benchmark (plan step 1d.3).
+"""Behavioral tests for the Reizman Suzuki reaction benchmark.
 
-Proves the real dataset wires into our BO layer: the surrogate learns the data,
-the problem has the expected mixed variables, and a BoFire campaign over it finds
-a high-yield region (beats the dataset median) — reaction-condition optimization
-end to end.
+The real dataset wires into the BO layer: the surrogate learns the data, the problem has the
+expected mixed variables, and a BoFire campaign beats the dataset median yield.
 """
 
 import asyncio
@@ -46,23 +44,8 @@ def test_surrogate_learns_the_data() -> None:
 def test_bo_campaign_finds_high_yield() -> None:
     """A BoFire campaign over the surrogate beats the dataset's median yield.
 
-    **Slow, and measured to be slow rather than hung** — the distinction
-    `test_bo_knowledge.py::test_campaign_publishes_recommendation_to_graph` draws, where the same
-    reasoning was applied without measuring and kept `main` red over what turned out to be a real
-    hang. This one fits six rounds of a real BoTorch GP over the Reizman benchmark and burns CPU
-    the whole way: `pytest tests/test_reizman.py::test_bo_campaign_finds_high_yield --timeout=0`
-    measured **279 s** on an idle box and 213 s on a loaded one, against the 180 s global cap. So it
-    fails the gate on wall clock, and it did — this was the one red test in the full run that opened
-    this branch.
-
-    `pyproject.toml`'s comment justified that 180 s cap by naming *this* test as the slowest at
-    "~37s", which was stale by 7.5x; the marker is here and the claim is corrected there, because a
-    cap justified by a number nobody re-derives is the failure this repository keeps finding in its
-    own prose.
-
-    600 s rather than a tighter number: the scale factor `tests/conftest.py::timeout_scale` applies
-    to markers, so a slower CI runner is handled by scaling rather than by a value chosen with no
-    headroom, and the point of the cap is to name a *hang*, which this is not.
+    Slow but not hung: six rounds of a real BoTorch GP take minutes of CPU, beyond the global
+    timeout. The 600 s marker is scaled by `tests/conftest.py::timeout_scale` on slower runners.
     """
     problem, objective = load_benchmark()
     median_yield = float(load_dataset()["yld"].median())

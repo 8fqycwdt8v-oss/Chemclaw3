@@ -1,16 +1,9 @@
 """How many Postgres pools each `CHEMCLAW_COMPONENT` role opens, measured on the real roots.
 
-This is the number `pg_fleet_pools` multiplies and `chemclaw.fleetPools` renders, and until
-2026-09-05 nothing measured it: `Settings` computed `pooled_processes × pg_pool_max_size`, which
-charged a front-door process 16 connections for the 48 it opens, and the shipped chart declared 136
-against a real floor of 208. A *process* is not a pool — `core/db` keys a pool on
-`(loop, dsn, libpq options, requested max_size)` and a process may also register a foreign one — so
-the only honest way
-to know the multiplier is to drive each role's composition root and count what it holds.
-
-Postgres-backed and skipped offline (`tests/pg.py`), because a pool that never opens is a pool this
-file cannot see. Everything asserted here is a *ceiling* on connections, so `pool.max_size` is the
-right reading rather than how many connections happen to be live.
+This is the multiplier `pg_fleet_pools` uses and `chemclaw.fleetPools` renders. A process is not a
+pool: `core/db` keys a pool on `(loop, dsn, libpq options, requested max_size)`, so each role's
+composition root is driven and its pools counted. Postgres-backed (`tests/pg.py`); `max_size` is
+read because everything here is a ceiling.
 """
 
 import asyncio
@@ -48,9 +41,7 @@ def _front_door_ceiling() -> int:
 def _modules_containing(*needles: str) -> set[str]:
     """Every `src/chemclaw` module whose source contains any of `needles`, package-relative.
 
-    A source scan rather than an import graph on purpose: what a reviewer adding a pool actually
-    writes is one of these strings, and the assertion should fail on the edit rather than on
-    whichever call path a test happened to drive.
+    A source scan, so the assertion fails on the edit a reviewer makes rather than on a driven path.
     """
     package = Path(db.__file__).parent.parent
     return {
@@ -68,17 +59,11 @@ async def _touch_stores() -> None:
 
 
 def test_a_front_door_process_holds_three_pools(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Driven through `create_app`'s own lifespan, a `/readyz` request and a turn's checkpointer.
+    """A front-door process holds three pools.
 
-    The composition root, not a reconstruction of it: `tests/test_db_pool.py` already asserts that
-    the *gauge* sums three hand-built pools, and that test passed throughout the period when the
-    startup guard believed a front door held one. What was missing was a measurement of the real
-    process, which is what makes `POOLS_PER_FRONT_DOOR` in `tests/test_deploy_chart.py` a fact
-    rather than a guess.
-
-    `session_store="postgres"` because that is what the chart ships and what makes the checkpointer
-    exist; under `"memory"` a front door holds two and the chart over-declares, which is the safe
-    direction.
+    Driven through `create_app`'s lifespan, a `/readyz` request and a turn's checkpointer: the real
+    composition root, which makes `POOLS_PER_FRONT_DOOR` in `tests/test_deploy_chart.py` a
+    measurement. `session_store="postgres"` as the chart ships; under `"memory"` it holds two.
     """
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
@@ -121,17 +106,8 @@ def test_a_front_door_process_holds_three_pools(monkeypatch: pytest.MonkeyPatch)
 def test_a_worker_process_holds_one_pool() -> None:
     """Every Temporal worker pools once: one DSN, one statement timeout, no checkpointer.
 
-    Driven through `db.pooling()` — the context `durable/serve.py::serve_worker` enters — because
-    that is the one tail every worker runs through, core's `background-worker` and each bundle's
-    `connector-worker-<name>` alike. Both chart roles are therefore this one measurement; a
-    parametrization over their names would run the same code twice and read as coverage it is not.
-
-    **What driving the tail cannot see, asserted separately below.** A second pool opened inside
-    `serve_worker` itself — spelled as a second DSN rather than a second statement timeout — is
-    invisible here, because this drives the shared context and not that function: measured, such a
-    mutation doubled every worker pod's Postgres spend with this test green, while its sibling
-    `test_a_connector_server_holds_one_pool` drives a real root and caught the same change. The
-    module scan is the cheap half of the difference.
+    Driven through `db.pooling()`, the context `serve_worker` enters for every worker role. A second
+    pool opened inside `serve_worker` itself is invisible here, so the module scan below covers it.
     """
 
     async def _run() -> int:
@@ -155,11 +131,9 @@ def test_a_worker_process_holds_one_pool() -> None:
 
 
 def test_a_connector_server_holds_one_pool() -> None:
-    """`connectors/server.py`'s lifespan, which the mcp-face reuses verbatim.
+    """A connector server holds one pool; the mcp-face reuses the same lifespan.
 
-    Both roles are the same composition root — `create_face_app` calls `connector_app` — so one
-    measurement covers the two chart terms. Neither serves a database readiness probe and neither
-    takes a turn.
+    `create_face_app` calls `connector_app`, so one measurement covers both chart terms.
     """
 
     async def _run() -> int:
@@ -168,10 +142,8 @@ def test_a_connector_server_holds_one_pool() -> None:
 
         from chemclaw.connectors.server import connector_app
 
-        # A fresh `FastMCP` rather than an imported bundle's module-level `app`, because
-        # `StreamableHTTPSessionManager.run()` refuses a second call on one instance and four other
-        # test files run `molfp`'s. Importing it passed this file alone and failed the suite — an
-        # order dependence in the test, not in the composition root, which is the same either way.
+        # A fresh `FastMCP`: `StreamableHTTPSessionManager.run()` refuses a second call on one
+        # instance, and other test files run the bundles' module-level apps.
         app = connector_app(FastMCP("probe-fleet-pools"), name="probe")
         async with app.router.lifespan_context(app):
             await _touch_stores()
@@ -181,17 +153,12 @@ def test_a_connector_server_holds_one_pool() -> None:
 
 
 def test_the_readiness_probe_is_the_only_call_site_that_mints_a_second_pool() -> None:
-    """A new non-default statement timeout is a new pool, everywhere its role runs.
+    """The readiness probe is the only call site that mints a second pool.
 
-    `core/db` keys a pool on `(dsn, options)` and `options` carries only the statement timeout, so
-    every call site that passes `statement_timeout_seconds=` explicitly costs its process a whole
-    `pg_pool_max_size` for the life of the process. That is a fleet-budget change made by a keyword
-    argument, and nothing said so — this is what says so. A second such call site in the front door
-    makes it four pools, and `POOLS_PER_FRONT_DOOR` plus `chemclaw.fleetPools` have to move with it.
-
-    Read off the source rather than the call graph because that is what a reviewer adding one would
-    change, and because the point is to fail on the *addition*, not on a path a test happened to
-    drive.
+    `options` carries only the statement timeout, so each call site passing
+    `statement_timeout_seconds=` costs its process a whole `pg_pool_max_size`. Another such site in
+    the front door means four pools, and `POOLS_PER_FRONT_DOOR` and `chemclaw.fleetPools` must move.
+    Read off the source so it fails on the addition.
     """
     assert _modules_containing("statement_timeout_seconds=", "pool_max_size=") == {
         "core/db.py",
@@ -208,17 +175,12 @@ def test_the_readiness_probe_is_the_only_call_site_that_mints_a_second_pool() ->
 
 
 def test_only_the_front_door_reaches_the_checkpointers_pool() -> None:
-    """The third pool belongs to a turn, and no worker or connector server takes one.
+    """Only the front door reaches the checkpointer's pool.
 
-    This is the reason every role but the front door counts as one, and it is a property of who
-    *imports* `agent/checkpointer.py`'s pool-opening entry points rather than of anything a probe
-    can drive: a worker that gained a turn would open the pool the first time an activity ran, long
-    after any startup measurement. `api/` is the front door (and `cli/chat.py` is the local chat,
-    which the chart does not pod); a `durable/`, `connectors/` or `ingest/` module appearing here
-    makes that role three pools too.
-
-    `durable/retention.py` imports `CHECKPOINT_TABLES` — a tuple of table names, no pool — which is
-    why the scan names the two functions that build one rather than the module.
+    A worker that gained a turn would open it only when an activity ran, after any startup
+    measurement, so this checks who imports the pool-opening functions. `api/` is the front door and
+    `cli/chat.py` the local chat. `durable/retention.py` imports only `CHECKPOINT_TABLES`, which is
+    why the scan names the two functions rather than the module.
     """
     openers = _modules_containing(
         "import checkpointer", "import memory_store", "process_checkpointer"
@@ -230,18 +192,11 @@ def test_only_the_front_door_reaches_the_checkpointers_pool() -> None:
 
 
 def test_the_readiness_probes_pool_is_one_connection_wide(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The narrow pool is real, and it is narrow on both ends.
+    """The readiness probe's pool is one connection wide on both ends.
 
-    `Settings.fleet_connections_per_server` charges one connection per front-door replica for this
-    pool. That is a claim about `api/routes/ops.py`, made in `core/config`, and nothing but this
-    connects the two: if the route stopped asking for a size the budget would under-declare every
-    front door by `pg_pool_max_size - 1` and no other test would notice.
-
-    `min_size` is asserted with it because psycopg refuses `min_size > max_size`, and
-    `pg_pool_min_size` defaults to 2. Raised inside `_pool_for` that lands on the request path, is
-    not a `psycopg.Error`, and `_probe_database` does not catch it — `/readyz` would 500 rather
-    than answer. One warm connection is also what the probe wants: measured, a cold pool pays a
-    14.6 ms handshake on its first checkout against 2.1 ms warm.
+    `Settings.fleet_connections_per_server` charges one connection per front door for it. `min_size`
+    is asserted too: psycopg refuses `min_size > max_size`, and that error on the request path would
+    make `/readyz` 500. One warm connection also avoids a cold handshake.
     """
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
@@ -275,14 +230,10 @@ def test_the_readiness_probes_pool_is_one_connection_wide(monkeypatch: pytest.Mo
 async def test_the_readiness_probe_never_holds_two_connections_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One connection is enough only because `_shared_probe` collapses every concurrent caller.
+    """The readiness probe never holds two connections at once.
 
-    This is the measurement the size rests on, and it is asserted as a *peak* rather than a count:
-    how many probes a fixed number of requests produces depends on how the loop batches them, so a
-    faster machine would read as a regression. What must hold is that two probes never overlap —
-    which is a property of the single-flight, not of the cache window, so the window is off here.
-    Left unasserted, a future edit that dropped the single-flight would turn `pool_max_size=1` into
-    a self-inflicted `pg_pool_timeout_seconds` wait on an unauthenticated route.
+    One connection suffices only because `_shared_probe` collapses concurrent callers. Asserted as a
+    peak (no two probes overlap), with the cache window off, since a count depends on loop batching.
     """
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
@@ -337,26 +288,18 @@ async def test_the_readiness_probe_never_holds_two_connections_at_once(
 def test_a_split_session_store_adds_one_pool_to_every_role(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The `+1` that `Settings.fleet_connections_per_server` puts on the second server.
+    """A split session store adds one pool to every role.
 
-    `core/db` keys a pool on the DSN *string*, so pointing the session layer anywhere else splits
-    every key that resolves `session_store_dsn or postgres_dsn`. A second string over the same
-    database is the whole condition and keeps the probe connectable; what it cannot show is the
-    second *server*, which is why the ceiling for one is declared rather than derived.
-
-    The front door goes to four because its `/readyz` and checkpointer pools move to the session
-    DSN while the stores' session pool is new — the arithmetic in `core/config` says the primary
-    keeps one full pool per pooled process, and this is what makes that a measurement.
+    `core/db` keys pools on the DSN string, so a session DSN distinct from `postgres_dsn` splits
+    every key resolving `session_store_dsn or postgres_dsn`. The front door goes to four: `/readyz`
+    and the checkpointer move to the session DSN and the stores' session pool is new.
     """
     from psycopg import conninfo
 
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
-    # A second *endpoint*, not just a second string. `application_name` is enough to mint a second
-    # pool and deliberately not enough here: the placement assertion compares the address
-    # `pg_endpoint` says each pool dials, and two spellings of one host compare equal — measured,
-    # `/readyz` probing `postgres_dsn` instead of the session DSN passed unnoticed under that
-    # fixture. The loopback aliases are the one pair that differs by address and still connects.
+    # A second endpoint, not just a second string: the placement assertion compares the address
+    # `pg_endpoint` reports, and the loopback aliases differ by address while still connecting.
     host = str(conninfo.conninfo_to_dict(settings.postgres_dsn).get("host") or "").lower()
     if host not in {"localhost", "127.0.0.1"}:
         pytest.skip(f"needs a loopback postgres_dsn to spell twice; this one dials {host!r}")
@@ -400,10 +343,8 @@ def test_a_split_session_store_adds_one_pool_to_every_role(
         return front, await _worker(), placement
 
     front_door, worker, placement = asyncio.run(_run())
-    # **Where each pool dials, not just how many there are.** Counting alone passes when `/readyz`
-    # probes `postgres_dsn` instead of the session DSN — measured, 4 pools either way, while the
-    # split arithmetic charges 33 connections to the wrong server. `fleet_connections_per_server`
-    # is a statement about placement, so this has to be one too.
+    # Where each pool dials, not just how many there are: counting alone passes when `/readyz`
+    # probes the wrong DSN.
     session = pg_endpoint(settings.session_store_dsn)
     assert sorted(placement) == sorted(
         [(pg_endpoint(settings.postgres_dsn), settings.pg_pool_max_size)]
@@ -447,13 +388,10 @@ def _forget_identities() -> Iterator[None]:
 def test_two_spellings_of_one_server_read_as_two_until_a_borrow_says_otherwise(
     _forget_identities: None,
 ) -> None:
-    """The fallback is today's behaviour exactly, which is what makes the measurement safe to add.
+    """Two spellings of one server read as two until a borrow says otherwise.
 
-    `same_server` may never be *less* able to tell two DSNs apart than the string comparison it
-    replaces: before any borrow it has nothing measured, so it must answer precisely what
-    `pg_endpoint` answers. Asserted in both directions here — the loopback pair reads as two, and a
-    DSN compared with itself reads as one — so a regression in either shows up as this test rather
-    than as a connection ceiling nobody checked.
+    Before any borrow `same_server` must answer exactly what `pg_endpoint` answers. Both directions:
+    the loopback pair reads as two, and a DSN compared with itself as one.
     """
     here, there = _one_spelling_each_way()
     assert pg_endpoint(here) != pg_endpoint(there)
@@ -464,12 +402,10 @@ def test_two_spellings_of_one_server_read_as_two_until_a_borrow_says_otherwise(
 def test_a_borrow_teaches_the_gauge_that_two_spellings_are_one_server(
     _forget_identities: None,
 ) -> None:
-    """Driven against the real server, because the whole point is that it is measured.
+    """A borrow teaches the gauge that two spellings are one server.
 
-    `localhost` and `127.0.0.1` are one box; `pg_endpoint` compares strings and calls them two, so
-    a deployment that spelled its two DSNs this way had its connections charged to two ceilings
-    with the real total checked by nothing. One borrow against each spelling is enough: the
-    identity is read once per endpoint and kept.
+    Driven against the real server: `localhost` and `127.0.0.1` are one box. The identity is read
+    once per endpoint and kept.
     """
     here, there = _one_spelling_each_way()
 
@@ -492,13 +428,10 @@ def test_a_borrow_teaches_the_gauge_that_two_spellings_are_one_server(
 def test_a_split_the_measurement_disproves_stops_carving_the_fleet_in_two(
     monkeypatch: pytest.MonkeyPatch, _forget_identities: None
 ) -> None:
-    """The defect itself: a phantom split charges two ceilings and checks the real total nowhere.
+    """A split the measurement disproves stops carving the fleet in two.
 
-    Measured on this pair before the fix, with 32 connections held across two pools: the whole 32
-    was charged to a "second server" that does not exist. `fleet_connections_per_server` decided
-    there were two from the two DSN *strings*, at import, with no database to ask — so the
-    correction has to happen where a borrow has already answered, and the honest carve-out for a
-    disproved split is zero. That restores the single summed expression the split gauge regressed.
+    `fleet_connections_per_server` decides from the DSN strings at import; once a borrow shows one
+    server, the second server's carve-out is zero.
     """
     here, there = _one_spelling_each_way()
     monkeypatch.setattr(settings, "session_store", "postgres")
@@ -524,12 +457,11 @@ def test_a_split_the_measurement_disproves_stops_carving_the_fleet_in_two(
 def test_an_unreadable_identity_is_attempted_once_and_then_left_alone(
     _forget_identities: None,
 ) -> None:
-    """A role without the grant must not pay a failing query on every borrow, for ever.
+    """An unreadable server identity is attempted once and then left alone.
 
-    The failure path matters more than it looks: this runs on the hot borrow path, and a
-    `pg_control_system()` that raises — a fork without it, a role without the grant — would
-    otherwise add a round trip and an exception to every single connection checkout. One attempt,
-    one warning, then the string comparison for good.
+    This runs on the borrow path, so a failing `pg_control_system()` (no grant, or a fork without
+    it) must not cost a round trip on every checkout: one attempt, one warning, then string
+    comparison.
     """
 
     class _Boom:

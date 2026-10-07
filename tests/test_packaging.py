@@ -1,21 +1,8 @@
-"""What is type-checked, what ships, and what coverage measures are one rule (D-117, D-148).
+"""What is type-checked, what ships and what coverage measures are one rule (D-148).
 
-Three places used to name the first-party packages by hand — `make type`, the wheel's `packages`,
-and coverage's `source` — and all three had silently drifted:
-
-- `make type` omitted `service` and `sources`; they were type-checked only *transitively*, because
-  `tests/` imported them, so deleting an importing test would have dropped a package from the gate
-  with no signal at all.
-- The wheel and coverage lists both omitted `connectors` (37 modules — the entire capability
-  surface) and `templates`. The wheel omission was the serious one: `pyproject.toml` stated the
-  invariant it was violating ("a non-editable `pip install` of the wheel must ship all of them or
-  the `chemclaw` command and its imports break"), and nothing checked it.
-
-D-148 removed the class of bug rather than detecting it: there is one package, `src/chemclaw`, so
-there is no list to keep in sync and nothing that can be omitted from it. What is left to check is
-that the three declarations still say that one thing, and that the `src/` layout stays honest — no
-top-level import package may reappear beside `src/`, because that is exactly how the eighteen
-accumulated.
+There is one package, `src/chemclaw`, so no list of packages can drift. What is checked is that
+`make type`, the wheel and coverage still name that one thing, and that no top-level import
+package reappears beside `src/`.
 """
 
 import re
@@ -53,11 +40,10 @@ def test_there_is_exactly_one_first_party_package() -> None:
 
 
 def test_no_import_package_has_reappeared_beside_src() -> None:
-    """A top-level `__init__.py` outside `src/` is the eighteen-package layout growing back.
+    """No top-level `__init__.py` outside `src/`.
 
-    It is also a real hazard rather than a style point: a directory importable from the repository
-    root shadows the installed package for anything started there, so the code under test would
-    stop being the code that ships. `tests` and `examples` are the two deliberate exceptions.
+    A directory importable from the repository root shadows the installed package, so tests would no
+    longer exercise what ships. `tests` and `examples` are the deliberate exceptions.
     """
     stray = sorted(
         entry.name
@@ -124,12 +110,8 @@ def _locked_packages() -> list[dict[str, Any]]:
 def test_linux_installs_the_cpu_build_of_torch() -> None:
     """The lock gives Linux the CPU torch, not the CUDA build PyPI defaults to there.
 
-    torch is a runtime dependency (bofire[optimization] -> botorch), and on linux/x86_64 PyPI's
-    default wheel is the CUDA build. It put `nvidia-*`, `triton` and a CUDA libtorch, ~4.7 GB, into
-    a CPU-only image. `[tool.uv.sources]` routes torch to the PyTorch CPU index on Linux. This reads
-    the *lock*, because the lock decides what `uv sync --frozen` installs in `deploy/Containerfile`:
-    a source that stopped applying (for example, torch no longer declared directly, the only case
-    uv honours a source for) would show up here as a PyPI torch for Linux.
+    torch comes in via bofire[optimization]; `[tool.uv.sources]` routes it to the PyTorch CPU index
+    on Linux. Reads the lock because that is what `uv sync --frozen` installs in the image.
     """
     torches = [pkg for pkg in _locked_packages() if pkg["name"] == "torch"]
     linux = [
@@ -157,11 +139,10 @@ def test_linux_installs_the_cpu_build_of_torch() -> None:
 
 
 def test_nothing_in_the_lock_installs_a_gpu_runtime() -> None:
-    """No package in the closure pulls a CUDA/NCCL/Triton runtime on any platform that installs it.
+    """No package in the closure pulls a CUDA/NCCL/Triton runtime on any platform.
 
-    Two edges carried one: torch's (closed by the CPU index above) and xgboost's
-    `nvidia-nccl-cu12` on Linux (~400 MB, closed by `override-dependencies`). A new dependency that
-    brings a third one fails here, not in an image someone has to `kind load`.
+    torch is closed by the CPU index and xgboost's `nvidia-nccl-cu12` by `override-dependencies`; a
+    new dependency bringing one fails here rather than in an image.
     """
     edges = [
         f"{pkg['name']} {pkg['version']} -> {dep['name']} ({dep.get('marker', 'always')})"

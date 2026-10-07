@@ -1,15 +1,9 @@
 """The six routes that are the whole of an administrator's control over the organisation's skills.
 
-`tests/test_org_skills.py` drives the tier — the mount, the refusal, the version history. This
-drives the surface: who may change it, who may see it, and that a refusal is recorded rather than
-only answered.
-
-**The read/write split is the file's subject.** `D-2026-09-05-the-gate-follows-behaviour-not-
-knowledge` §3 makes inspectability the condition a skills tier holds its exemption under, and this
-one is in the prompt of every turn every chemist takes — so the three reads must be open to any
-authenticated caller and the three writes must not be. Both halves are asserted here, because
-either one alone is a different system: open writes would be no gate, and closed reads would be a
-behaviour change nobody it acts on can see.
+The read/write split is the subject: this tier is in every chemist's prompt, so its three reads
+are open to any authenticated caller (inspectability is the condition of its exemption,
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) and its three writes need the privileged
+role. Refusals are recorded, not only answered. `tests/test_org_skills.py` drives the tier itself.
 """
 
 import logging
@@ -45,9 +39,7 @@ def _no_connectors(profile: str | None = None) -> list[object]:
 def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryStore:
     """A real `BaseStore` in place of the deployment's `AsyncPostgresStore`.
 
-    Patched at `turn_store` rather than by configuring Postgres, for
-    `tests/test_api_local_skills.py`'s reason: what these tests are about is the routes' behaviour
-    over a store that answers.
+    Patched at `turn_store`: these tests are about the routes over a store that answers.
     """
     backing = InMemoryStore()
 
@@ -62,9 +54,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryStore:
 def enforced(monkeypatch: pytest.MonkeyPatch) -> None:
     """Identity enforced and a privileged role named — the shape a deployment runs.
 
-    Without this `_is_reviewer` returns True for everybody, because dev has no real roles and is
-    open exactly as `authorize_tool` is. A role test that ran in dev mode would assert nothing, so
-    the two write-refusal tests turn it on rather than inheriting it.
+    In dev mode `_is_reviewer` is True for everybody, so a role test without this asserts nothing.
     """
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "entra_privileged_roles", "chemclaw.reviewer")
@@ -135,15 +125,10 @@ def test_a_chemist_without_the_role_may_not_change_the_organisations_skills(
 def test_a_refusal_is_recorded_and_not_only_answered(
     app: FastAPI, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The half `api/routes/protocols.py` exists as the precedent for.
+    """A refusal is recorded and not only answered.
 
-    `deps.record_refusal`'s own docstring records that five raise sites wrote zero log lines and
-    zero metrics, so a scan was indistinguishable from ordinary traffic. A 403 nobody can count is
-    the same gap on the newest gate.
-
-    The log record is read as well as the counter, because the counter alone does not say *which*
-    resource was refused — and the source literal is the thing that keeps
-    `chemclaw_authz_refusals_total` from growing a series out of anything a caller sends.
+    The log record names which resource was refused; the counter's source literal keeps
+    `chemclaw_authz_refusals_total` from minting series from caller input.
     """
     before = METRICS.value("chemclaw_authz_refusals_total")
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.deps"):
@@ -212,9 +197,8 @@ def test_retiring_leaves_the_history_and_stays_reversible(app: FastAPI) -> None:
 def test_a_document_that_is_not_a_skill_is_refused(app: FastAPI) -> None:
     """The admission rules are the tier's, so this door has all four of them.
 
-    `validated_skill` exists because two doors into the personal tier disagreed about what a skill
-    is and the one that skipped the checks wrote all three bodies the other refused. A third door
-    that re-implemented them would be the same defect with a longer fuse.
+    Every door into a skills tier goes through `validated_skill`, so no door can disagree about what
+    a skill is.
     """
     admin = _as(app, _ADMIN)
 
@@ -247,9 +231,7 @@ def test_the_tier_answers_unavailable_rather_than_empty(
 ) -> None:
     """503, not `[]`.
 
-    A confident empty answer about a mechanism that is not running is the failure
-    `api/routes/skills.py` records having had to delete twice from the UI: "this organisation keeps
-    no skills" and "this deployment cannot keep any" are different facts.
+    "This organisation keeps no skills" and "this deployment cannot keep any" are different facts.
     """
 
     async def _none() -> Any:

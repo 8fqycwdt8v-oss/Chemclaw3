@@ -1,19 +1,12 @@
-"""`make connector-validate` — the CI gate, tested for the failures it exists to catch.
+"""`make connector-validate`, tested for the failures it exists to catch.
 
-A validator with no test is a validator nobody knows still works: it passes on the shipped bundles
-either because it is correct or because it stopped checking, and those look identical from the
-outside. So each test here asserts one *rejection*, against a manifest built in the test rather than
-a shipped one — the shipped bundles are covered by the gate itself being green.
+Each test asserts one rejection against a manifest built in the test, since a validator passing
+on the shipped bundles cannot be told from one that stopped checking. The checks are the ones no
+per-file schema can make:
 
-The checks below are the ones no per-file schema can make, which is the whole reason the script
-exists on top of pydantic's own validation:
-
-- a job that cannot be *built* (an unresolvable `params_model`), because that failure would
-  otherwise surface the first time a chemist called the tool;
-- an `inline_wait_seconds` at or beyond the turn timeout, which needs the deployment's config and so
-  is invisible to the manifest that declares it;
-- a `connector_urls` key that names a non-existent bundle, silently falling back to the manifest's
-  dev-loopback default which is unreachable in a cluster.
+- a job that cannot be built (an unresolvable `params_model`);
+- an `inline_wait_seconds` at or beyond the deployment's turn timeout;
+- a `connector_urls` key naming no bundle, which would fall back to an unreachable dev default.
 """
 
 from unittest import mock
@@ -56,11 +49,9 @@ def test_a_job_that_cannot_be_built_is_reported_not_deferred_to_run_time() -> No
 
 
 def test_an_inline_wait_beyond_the_turn_timeout_is_refused() -> None:
-    """The check the manifest cannot make itself, because the turn timeout is the deployment's.
+    """An inline wait at or beyond the turn timeout is refused.
 
-    A wait at or past `service_turn_timeout_seconds` is a job whose fast path can never win: the
-    turn is killed before the wait returns, so *every* call looks like a timeout instead of like
-    the deferral it should have been — a bug that only shows up under load, in production.
+    The turn would be killed before the wait returns, so every call would look like a timeout.
     """
     problems = _job_problems(_manifest(inline_wait_seconds=settings.service_turn_timeout_seconds))
     assert any("turn timeout" in problem for problem in problems)
@@ -98,11 +89,9 @@ def test_a_nonpositive_wait_is_refused_by_the_manifest_itself(budget: int) -> No
 
 
 def test_a_connector_urls_key_that_names_no_bundle_is_reported() -> None:
-    """A typo'd URL override is silently ignored, falling back to an unreachable dev default.
+    """A `connector_urls` key that names no bundle is reported.
 
-    The symptom (a WARNING plus degraded /readyz) is indistinguishable from a transient outage,
-    so this validator forces misconfigured keys to surface as a configuration error in CI rather
-    than as an infrastructure problem in production.
+    Its runtime symptom looks like a transient outage, so it must surface as a configuration error.
     """
     discovered_names = {"calc", "qm", "bo"}
     with mock.patch("chemclaw.cli.validate_connectors.settings") as mock_settings:
@@ -131,18 +120,10 @@ def test_empty_connector_urls_is_accepted() -> None:
 
 
 def test_a_served_tool_the_manifest_never_declares_is_reported() -> None:
-    """The one rule that reads the running server rather than the YAML.
+    """A served tool the manifest never declares is reported.
 
-    Every other check here reads the manifest, which is exactly why an undeclared tool was
-    invisible to all of them: `_check_classification` validates the `tools` allow-list against
-    `state_changing`/`read_only`, so a tool on none of the three lists violates nothing they can
-    see. `molfp` and `rxnfp` each served an `index_*` write tool in that state, and because a
-    connector authenticates nothing by design, an anonymous MCP handshake against the real app
-    wrote a row into `molecule_fingerprints` — the table the report path cites as lab precedent.
-
-    Built here rather than asserted against a shipped bundle, for this file's stated reason: the
-    shipped tree is now clean, so a test that only checked it would pass forever whether or not the
-    rule still existed.
+    This rule reads the running server; a tool on none of the manifest lists violates nothing the
+    YAML checks can see, and an undeclared tool is reachable without appearing in review.
     """
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
@@ -169,13 +150,10 @@ def test_a_served_tool_the_manifest_never_declares_is_reported() -> None:
 
 
 def test_a_bundle_serving_exactly_what_it_declares_is_accepted() -> None:
-    """The positive half, and the reason the rule compares against `tools` specifically.
+    """A bundle serving exactly what it declares is accepted.
 
-    `_check_classification` refuses a manifest that classifies a tool it does not serve, so
-    `state_changing` and `read_only` are constrained to be subsets of `tools`: the schema has no
-    way to say "served but not agent-facing". The comment that justified the old gap — "the server
-    still exposes it, for the ingestion path" — described a state the manifest cannot express,
-    which is why a comment was the only place it was ever written.
+    `state_changing` and `read_only` must be subsets of `tools`, so the schema cannot express
+    "served but not agent-facing"; the comparison is therefore against `tools`.
     """
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
@@ -194,11 +172,9 @@ def test_a_bundle_serving_exactly_what_it_declares_is_accepted() -> None:
 
 
 def test_the_manifest_cannot_classify_a_tool_it_does_not_serve() -> None:
-    """Pins the constraint the rule above rests on, so it cannot be relaxed unnoticed.
+    """The manifest cannot classify a tool it does not serve.
 
-    If `state_changing` were ever allowed to name a tool outside `tools`, "declared" would stop
-    meaning "on the agent's allow-list" and `_served_tool_problems` would silently start permitting
-    an undeclared MCP surface again.
+    Pins the constraint the served-tool rule rests on.
     """
     with pytest.raises(ValueError, match="does not serve"):
         ConnectorManifest.model_validate(
@@ -223,12 +199,10 @@ def test_a_job_only_bundle_with_no_server_module_is_not_a_violation() -> None:
 
 
 def test_a_bundle_whose_server_module_is_broken_is_reported_not_skipped() -> None:
-    """A *transitive* import failure must not read as "this bundle serves nothing".
+    """A transitive import failure is reported, not read as "this bundle serves nothing".
 
-    Catching bare `ModuleNotFoundError` meant a missing rdkit — or any renamed dependency — made the
-    one rule that reads the running server pass vacuously, for exactly the bundle most likely to be
-    misbuilt. And any other import-time exception escaped `validate_connectors()` entirely, so CI
-    printed a traceback instead of a problem.
+    Otherwise a missing dependency would make the rule pass vacuously, and other import-time
+    exceptions would escape as a traceback.
     """
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
@@ -245,14 +219,9 @@ def test_a_bundle_whose_server_module_is_broken_is_reported_not_skipped() -> Non
 
 
 def test_a_server_module_with_no_server_object_is_reported_not_skipped() -> None:
-    """The same vacuous pass one layer down: the module imports and defines no `server`.
+    """A server module with no `server` object is reported, not skipped.
 
-    `getattr(module, "server", None) or return []` treated that exactly like `qm`'s "this bundle
-    has no MCP surface", and the two are not the same event. The rule's whole job is to ask the
-    running server what it serves; with no `server` object there is nothing to ask, so it reported
-    no problems while checking nothing. All six bundles with an endpoint define
-    `server = FastMCP(...)`, which means the only way into this state is a rename — the change the
-    rule most needs to survive.
+    That is a rename, not a bundle without an MCP surface; skipping it would check nothing.
     """
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
@@ -264,16 +233,10 @@ def test_a_server_module_with_no_server_object_is_reported_not_skipped() -> None
 
 
 def test_a_declared_tool_the_server_does_not_serve_is_reported() -> None:
-    """The other half of "the two must agree exactly" — the half that was never computed.
+    """A declared tool the server does not serve is reported.
 
-    `_served_tool_problems` reported `served - declared` and stopped there, while its own docstring
-    stated the rule as an equality. A *phantom* tool — named under `tools:` and classified, served
-    by nothing — therefore passed this gate, and then passed the other three as well: `tools:` is
-    what feeds `available_tool_names()`, the single set `skill-validate`, `template-validate` and
-    `prose-validate` all resolve names through. So a rename that lands in a bundle's
-    `connectors/<name>/server/tools.py` and not in its `connector.yaml` is green in CI, and
-    advertises a capability that answers "unknown tool" the first time a chemist reaches it — the
-    "fails at step four after spending compute" this family exists to prevent.
+    `tools:` feeds `available_tool_names()`, which the skill, template and prose validators resolve
+    through, so a phantom tool would pass every gate and fail at call time.
     """
     from chemclaw.cli.validate_connectors import _served_tool_problems
 
@@ -305,14 +268,10 @@ def test_a_declared_tool_the_server_does_not_serve_is_reported() -> None:
 
 
 def test_a_declared_but_unserved_tool_is_unverifiable_for_a_bundle_we_do_not_run() -> None:
-    """What the fix above does *not* cover, made visible instead of silent.
+    """A declared tool is unverifiable for a bundle this repository does not run.
 
-    `chem` and `safety` declare an endpoint and ship no `server/` here — their capability is
-    `Chemclaw3-mcp`'s (D-2026-08-09). Nothing offline can ask those servers what they serve, so the
-    declared→served direction is unverifiable for them, and reporting every declared tool as a
-    phantom would fail the gate on two correct manifests. They are reported as *unverified* rather
-    than as problems, the same shape `validate_templates.unchecked_arguments` uses for the argument
-    check's identical blind spot.
+    A bundle with an endpoint and no local `server/` cannot be asked offline what it serves, so its
+    tools are reported as unverified rather than as problems.
     """
     from chemclaw.cli.validate_connectors import _served_tool_problems, unverified_tool_surfaces
     from chemclaw.connectors.registry import discovered
@@ -322,15 +281,8 @@ def test_a_declared_but_unserved_tool_is_unverifiable_for_a_bundle_we_do_not_run
     absent.name = "chemclaw.connectors.probe.server.tools"
     with mock.patch("chemclaw.connectors.registry.importlib.import_module", side_effect=absent):
         assert _served_tool_problems(manifest) == []
-    # **The shipped set is derived, not typed out.** This assertion named `chem` and `safety`
-    # because those were the two declared-not-run bundles the day it was written, so wiring a
-    # third (`rxnpredict`) turned a correct manifest into a red gate. That is the same defect
-    # `tests/test_deploy_chart.py`'s all-disabled arm carried, one file over and found in the same
-    # change — a test that enumerates a set the tree owns stops testing its property and starts
-    # testing its own vintage.
-    #
-    # The property is: a bundle is unverifiable here exactly when it declares an endpoint and
-    # ships no `server/` package for anything to ask.
+    # Derived rather than typed out: a bundle is unverifiable here exactly when it declares an
+    # endpoint and ships no `server/` package.
     expected = {
         name
         for name, (bundle, manifest) in discovered().items()

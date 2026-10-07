@@ -1,10 +1,9 @@
-"""Eval drift detection (plan F10-F2): aggregation, the noise band, and the committed baseline.
+"""Eval drift detection: aggregation, the noise band, and the committed baseline.
 
-The pure logic (aggregate → compare vs baseline → alert only past epsilon) is tested directly, plus
-the drift activity's real I/O path (load the committed case-set + baseline) offline — calling the
-activity function directly, since a Temporal activity is a plain async function. A guard test pins
-the committed `evals/baseline.json` still matches the current case-set, so a metric change without a
-baseline refresh trips here (in CI) rather than as a silent false alert in production.
+Tests the pure logic (aggregate → compare vs baseline → alert only past epsilon) and the drift
+activity's real I/O path, called directly since an activity is a plain async function. A guard
+pins that `evals/baseline.json` matches the current case-set, so a metric change without a
+baseline refresh fails in CI rather than as a false alert in production.
 """
 
 import asyncio
@@ -142,12 +141,9 @@ def test_no_drift_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
 def test_the_live_retriever_metrics_are_under_drift_detection() -> None:
     """`retrieval_recall`/`retrieval_precision` must be in the baseline, or they have no signal.
 
-    `detect_drift` iterates the *baseline*, not the run, so a metric missing from `baseline.json`
-    is not weakly covered — it is uncovered. These two are the only metrics that run a live
-    retriever, and `retrieval_recall` is the gated one, so their absence meant the system's core
-    quality signal could regress silently. It did: collapsing both to 0.0 produced no alert.
-
-    Asserted by name rather than by count so adding an unrelated metric cannot satisfy it.
+    `detect_drift` iterates the baseline, not the run, so a metric missing from it is uncovered.
+    These are the only metrics running a live retriever. Asserted by name so an unrelated metric
+    cannot satisfy it.
     """
     baseline = load_baseline(settings.eval_baseline_path)
     assert {"retrieval_recall", "retrieval_precision"} <= baseline.metrics.keys()

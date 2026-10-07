@@ -1,18 +1,12 @@
 """An index-ranked warehouse source: rank in the store, resolve the keys in the warehouse.
 
-The path Pistachio takes, and the reason it exists is arithmetic rather than taste. The scanned path
-evaluates a similarity function per row, which is right for an ELN and a full scan of the corpus for
-anything at patent scale. So the vectors move to a vector index and the relation is queried only to
-turn the winning keys into text — the same division `ingest/documents/external_index.py` makes
-between a store and a catalogue, with Databricks SQL standing in for Postgres.
-
-Three properties carry that split, and each of them is a silent wrong answer when it breaks:
+At patent scale a per-row similarity scan is a full corpus scan, so vectors live in an index and
+the relation only turns winning keys into text. Three properties carry the split, each a silent
+wrong answer when broken:
 
 * the **store's ordering** is the ranking, and the resolve query has none of its own;
-* **eligibility reaches the index before its top-k**, because filtering afterwards makes a narrow
-  filter over a wide corpus return nothing at all; and
-* a scope too large to send is **refused rather than truncated**, because a cut eligibility set is a
-  wrong answer that reads as a thin corpus.
+* **eligibility reaches the index before its top-k**, or a narrow filter returns nothing; and
+* a scope too large to send is **refused rather than truncated**.
 """
 
 from typing import Any
@@ -58,11 +52,9 @@ def _rows() -> dict[str, list[dict[str, Any]]]:
 async def _store_ranked(query: str, *ids: str) -> InMemoryVectorStore:
     """A store whose points rank in the order given, nearest first, for this exact query.
 
-    Built from the query's own embedding rather than from hand-written coordinates: the retriever
-    embeds the query with the configured provider, so a two-element fixture is not even the right
-    width. Each successive point gets a larger alternating perturbation, which lowers its cosine
-    monotonically while keeping it comfortably positive — so the expected order is a property of the
-    construction rather than of whatever the hash embedder happened to produce.
+    Built from the query's own embedding, with each successive point given a larger alternating
+    perturbation, so the expected order is a property of the construction rather than of the
+    embedder.
     """
     base = embed_texts([query])[0]
     store = InMemoryVectorStore()
@@ -152,12 +144,7 @@ async def test_a_key_the_relation_no_longer_holds_is_dropped_not_guessed_at() ->
 async def test_an_unfiltered_search_costs_no_scope_query() -> None:
     """`None` means the whole index and must cost nothing extra — one statement, not two.
 
-    **This is also the optimisation the `where:` fix must not lose**: a binding with no `where:`
-    and nothing to filter on is still one round trip. That sentence had a test of its own further
-    down this file, byte-identical to this one in setup, call and assertion. Driven — forcing the
-    scope branch by replacing the "no truthy filter" early return with `if False:` — reddened each
-    of them alone, so the second proved nothing this one does not. The reasoning was worth keeping;
-    the second call was not.
+    This also covers a binding with no `where:` and nothing to filter on: still one round trip.
     """
     retriever = _retriever(await _store_ranked("ester formation", "RX-1"))
     await retriever.retrieve("ester formation", {})
@@ -184,11 +171,8 @@ async def test_a_filtered_search_sends_its_eligibility_before_the_top_k() -> Non
 async def test_an_empty_filter_value_is_not_a_filter() -> None:
     """`tag=""` is what a model passes for an optional string it has nothing to say about.
 
-    `gather_evidence` puts `tag` in `filters` whenever it is not `None`, and this asked whether the
-    key was *present* while `sql.vector_predicates` asks whether it is *truthy* — so an empty tag
-    took the scope branch and built a scope query with no predicate in it, enumerating the whole
-    relation. On a corpus large enough to be index-ranked that exceeds the cap and the whole leg
-    fails, telling the operator to narrow a filter the query never carried.
+    An empty value must not take the scope branch: a scope query with no predicate enumerates the
+    whole relation, exceeds the cap and fails the leg.
     """
     retriever = _retriever(
         await _store_ranked("ester formation", "RX-1"), filter_columns={"tag": "PROJECT_CODE"}
@@ -232,18 +216,9 @@ async def test_an_empty_eligibility_set_returns_nothing_without_asking_the_store
 async def test_a_binding_where_is_enforced_with_no_query_filter_and_costs_no_scope() -> None:
     """`where:` says which rows are *ever* eligible; a query that filters nothing cannot waive it.
 
-    Two regressions in one test, because the fix for the first caused the second.
-
-    *The original:* `_eligible_keys` decided "is this search filtered" from the query's keys, so a
-    binding carrying `index:` and `where:` restricted the corpus when the model happened to pass a
-    date and did not when it did not.
-
-    *The overcorrection:* making `where:` count as "filtered" ran a scope query on every search —
-    and a `where:` over a corpus large enough to need an index exceeds
-    `vector_store_max_scope_keys` by construction, so the source answered **nothing at all** for
-    every query. Strictly worse than the bug it fixed.
-
-    `where:` is enforced at the resolve, which is keyed to `top_k` rows and needs no enumeration.
+    It must be enforced even when the query carries no filter, yet must not trigger a scope query:
+    a `where:` over an index-sized corpus would exceed `vector_store_max_scope_keys` and answer
+    nothing. So `where:` is enforced at the resolve, which is keyed to `top_k` rows.
     """
     retriever = _retriever(
         await _store_ranked("ester formation", "RX-1", "RX-2"), where="STATUS = 'GRANTED'"
@@ -277,12 +252,10 @@ async def test_a_broad_where_does_not_starve_an_unfiltered_query() -> None:
 async def test_the_scope_cap_message_reaches_a_default_level_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The message names the operator's lever, at WARNING, on the way out.
+    """The scope-cap message names the operator's lever, at WARNING, on the way out.
 
-    Without this the one actionable sentence sat at DEBUG while a broad filter read to the agent as
-    an empty corpus. The refusal itself now leaves this leg rather than becoming `[]`, so the
-    "reads as an empty corpus" half is closed at both ends: the sweep reports the source as failed,
-    and the log says which knob turns it back on.
+    The refusal leaves this leg, so the sweep reports the source as failed and the log names the
+    knob.
     """
     import logging
 

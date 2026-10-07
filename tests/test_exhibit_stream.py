@@ -1,9 +1,8 @@
 """An artefact write is announced after its call's result, and a chemist's edit is told once.
 
 The stream half drives a scripted turn through the real compiled graph and `graph_events`, because
-the ordering is a property of how LangGraph delivers a tool body's custom signal (during the tools
-node) against the node's own update (after it) — a unit test of the mapping function could not see
-it. The note half drives `exhibit_turn_note` across three turns against the store the turn reads.
+the ordering depends on how LangGraph delivers a tool body's custom signal against the tools node's
+update. The note half drives `exhibit_turn_note` across three turns against the store.
 """
 
 import asyncio
@@ -89,9 +88,8 @@ def _memory(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_exhibit_event_follows_the_result_of_the_call_that_wrote_it() -> None:
     """`tool_call` → `tool_result` → `exhibit`, as the contract orders them, then the answer.
 
-    The signal is raised inside the tool body and so reaches the stream *before* the tools node's
-    update; without the hold it would sit between the call and its result, which is where a
-    `question` sits — right for a question, wrong for an announcement the pane opens on.
+    The signal is raised inside the tool body and reaches the stream before the tools node's update;
+    it is held so it does not land between the call and its result.
     """
     session = uuid4().hex
     events = _drive(
@@ -231,9 +229,8 @@ async def test_an_edit_that_does_not_fit_is_named_and_stays_unseen(
 ) -> None:
     """A notice is shown whole or named: only what the model saw whole is marked told.
 
-    Two chemist edits against a budget that holds one. The second is not cut in the middle (which
-    would mark half a diff as told); it is named by id with the way to read it, left out of `told`,
-    and announced in full on the next turn once the first is marked.
+    Two chemist edits against a budget that holds one: the second is named by id with how to read
+    it, left out of `told`, and announced in full on the next turn.
     """
     session = uuid4().hex
     first, second = await _agent_table(session), await _agent_table(session)
@@ -313,12 +310,11 @@ class _Recording(ScriptedChatModel):
 
 
 async def test_the_listing_rides_on_each_request_and_never_enters_the_thread() -> None:
-    """State on the instructions, per call — the checkpointed thread holds none of it.
+    """The listing rides on each request and never enters the checkpointed thread.
 
-    Two model calls in one turn, with the agent's own `create_exhibit` between them: the first
-    request's instructions list nothing (there was nothing), the second lists the artefact the
-    first call made — the listing is read per request, not per turn — and the thread the
-    checkpointer stores afterwards mentions the listing nowhere.
+    Two model calls in one turn with a `create_exhibit` between them: the second request lists the
+    new artefact (read per request, not per turn), and the stored thread mentions the listing
+    nowhere.
     """
     session = uuid4().hex
     _SEEN.clear()
