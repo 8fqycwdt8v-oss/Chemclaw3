@@ -130,10 +130,10 @@ async def compose_workflow(
 
     **A durable job step is allowed and will not run until a person approves this workflow.** Say so
     when you hand the name back: its owner approves it where they are — `/approve-workflow` at a
-    terminal, the workflow screen on the front door — and it covers the steps exactly as they stand,
-    so composing it again needs approving again. Two jobs that do not read each other are fine; one
-    that waits for another will not fit, because a job's budget is most of the whole run's — split
-    that into two workflows.
+    terminal, the workflow screen on the front door — and it covers the steps exactly as they
+    stand, so composing it again needs approving again. Two jobs that do
+    not read each other are fine; one that waits for another will not fit, because a job's budget is
+    most of the whole run's — split that into two workflows.
 
     Refer to values with `${inputs.<name>}` and to an earlier step with `${steps.<id>.result}`. A
     step naming no earlier step runs at the same time as its neighbours, so do not chain steps that

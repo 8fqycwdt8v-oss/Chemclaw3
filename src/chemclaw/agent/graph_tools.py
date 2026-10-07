@@ -87,9 +87,16 @@ class NoteRef(BaseModel):
 class NeighborRef(NoteRef):
     """A neighbouring note, plus the typed edges that connect it to the note being expanded.
 
-    Direction is kept in two fields because "A supersedes B" and "B supersedes A" are opposite
-    claims. Both are empty for a neighbour not directly linked, or linked only by an untyped
-    `[[wikilink]]` (`cites`).
+    **Direction is kept, and that is the whole point of two fields rather than one.** "A supersedes
+    B" and "B supersedes A" are opposite claims about which note is the current answer, and
+    `contradicts`, `precursor-of` and `computed-from` are the same shape. Flattening them into one
+    list of relation names would hand the model a set of edges it could read either way round.
+
+    Both lists are empty for a neighbour that is not *directly* linked — at `hops=2` most are not —
+    and for one linked only by a bare `[[wikilink]]`, whose relation is `cites` and which carries no
+    claim worth reporting. An empty pair therefore means "adjacent in the neighbourhood, nothing
+    asserted about how", which is exactly what the untyped view said before D-134 gave edges types
+    and nothing read them.
     """
 
     # Relations asserted by the expanded note about this neighbour, and by it about the note; sorted

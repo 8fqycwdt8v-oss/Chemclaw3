@@ -45,9 +45,17 @@ _Truncation = Literal["count", "chars"] | None
 class EvidenceSweepWithRefusals(EvidenceSweep):
     """A sweep, plus the records an ingest source offered and this system refused.
 
-    A chunk is evidence cited to a note; a refusal is a fact about data that is *not* there. The
-    type keeps them apart so a refused record can never read as a hit. A subclass rather than a
-    wider `EvidenceSweep`, because a rejection comes from no retriever.
+    **The two halves are different kinds of statement and the type keeps them apart.** A chunk is
+    evidence, cited to a note a reader can expand; a refusal is a fact about data that is *not*
+    there, and the corpus holds nothing to cite for it. Folding a rejection into `chunks` — as a
+    retriever returning `EvidenceChunk`s would have — is exactly the confusion this whole ledger
+    exists to prevent: the well logged at 119.43% is the one entry of the seeded corpus that can
+    never arrive, and reporting its refusal as a hit would hand a chemist a yield the system
+    refused to believe.
+
+    Subclassing rather than widening `EvidenceSweep` because `retrieval/` is the source-agnostic
+    retriever contract and a rejection comes from no retriever. The composition belongs to the tool
+    that answers the chemist's question, which is here.
     """
 
     # Refusals whose id or reason matches the question. The field name matters: a pydantic tool

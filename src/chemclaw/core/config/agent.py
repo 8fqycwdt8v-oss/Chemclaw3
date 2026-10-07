@@ -18,10 +18,11 @@ HarnessAutonomy = Literal["plan_only", "execute"]
 
 
 class AgentSettings(BaseSettings):
-    """How `build_langgraph_agent` compiles one turn's graph.
+    """The conversational agent: model, skills, capabilities, compaction, harness.
 
-    Which skills and connectors attach, how context is compacted and spend capped, and whether the
-    plan/execute harness wraps it.
+    Grouped because everything here shapes how `build_langgraph_agent` compiles one turn's graph —
+    which model orchestrates, which skills and MCP capability servers attach, how the conversation
+    context is compacted, and whether the autonomous plan/execute harness (Phase F1) wraps it.
     """
 
     # HMAC key for the `<retrieved-note-...>` envelope tag marking retrieved content as data

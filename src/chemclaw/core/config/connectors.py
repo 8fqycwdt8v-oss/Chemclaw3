@@ -15,8 +15,11 @@ from chemclaw.core.config.shipped import _shipped
 class ConnectorSettings(BaseSettings):
     """The connector seam: which capability bundles this deployment runs, and how it reaches them.
 
-    A connector is the one mechanism for adding any capability: MCP tools, durable jobs, and the
-    skills and agent profiles that come with them.
+    Its own section because a connector is the one mechanism for adding *any* capability — the
+    MCP tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills
+    and agent profiles that come with them (`connectors/`,
+    `docs/archive/plans/connector-plan.md`). It replaces the old `mcp_servers` list, which could
+    only describe the first of those four.
     """
 
     # OS-pathsep list of directories holding bundles (any subdirectory with `connector.yaml`); read

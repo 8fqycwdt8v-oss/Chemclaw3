@@ -9,7 +9,12 @@ from pydantic_settings import BaseSettings
 
 
 class ReportSettings(BaseSettings):
-    """Durable fan-out: a report's per-section budget and the child-workflow concurrency bound."""
+    """The report harness (plan Phase 5b) and sub-agent fan-out (F10-D).
+
+    Grouped because both knobs govern durable fan-out work: a report's per-section activity
+    budget and the concurrency bound on child workflows (report sections, memory-synthesis
+    groups).
+    """
 
     # Per-section retrieval budget for the durable development-report workflow — one section is one
     # activity, so a long report resumes section by section after a worker restart.

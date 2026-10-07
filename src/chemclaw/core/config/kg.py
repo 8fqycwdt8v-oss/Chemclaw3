@@ -13,10 +13,16 @@ from pydantic_settings import BaseSettings
 
 
 class KgSettings(BaseSettings):
-    """The one Git-backed note repository and its query bounds.
+    """The Markdown knowledge graph and the git-backed note writer behind it (plan Phase 2).
 
-    Where notes live and how `chemclaw.kg.git_writer.GitNoteWriter` commits them onto the base
-    branch and pushes. Notes land directly, carrying `created_by: agent`.
+    Grouped because these knobs describe the one Git-backed note repository: where notes live and
+    how `chemclaw.kg.git_writer.GitNoteWriter` commits them onto its base branch and pushes.
+
+    **These four git knobs no longer describe a review gate.**
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` ended the branch-per-note PR gate:
+    knowledge is written straight into the graph carrying `created_by: agent`, and corrected rather
+    than pre-approved. What survives is the same clone, the same base branch and the same remote —
+    a note now lands on that branch instead of on `note/<id>` beside it.
     """
 
     # Directory of note files the indexer reads; retrieval traverses their [[wikilinks]].

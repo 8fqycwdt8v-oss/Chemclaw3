@@ -9,10 +9,12 @@ from pydantic_settings import BaseSettings
 
 
 class BoSettings(BaseSettings):
-    """How a Bayesian-optimization campaign runs durably.
+    """Durable BoFire BO campaigns (plan step 1d.4).
 
-    Per-round budget and heartbeat, the reproducibility seed, the round and evaluation ceilings a
-    spec is refused above, and the bounds on enumerating a model-supplied decision space.
+    Grouped because these knobs shape one thing: how a Bayesian-optimization campaign runs
+    durably — its per-round activity budget and heartbeat, reproducibility seed, the round and
+    evaluation ceilings a spec is refused above, and the two bounds that keep a model-supplied
+    decision space from costing unbounded CPU and memory to enumerate.
     """
 
     # Start-to-close for one round (BoFire propose + evaluate), which can be slow.

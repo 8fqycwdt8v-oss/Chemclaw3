@@ -11,10 +11,13 @@ from pydantic_settings import BaseSettings
 
 
 class LlmSettings(BaseSettings):
-    """The one OpenAI-compatible gateway and its uses.
+    """The LLM gateway seam (plan Phase F0) plus everything that rides its transport.
 
-    Chat generation, per-task model routing, the LLM-as-judge verifier, answer review, and the
-    embedding path, which reuses the LLM base URL, credential and TLS.
+    Grouped because these knobs configure the one OpenAI-compatible gateway and its uses: chat
+    generation, per-task model routing (F10-E), the LLM-as-judge verifier (F10-B), the live-probe
+    judge, and the embedding path (F10-A) — which reuses the LLM base_url/credential/TLS, so its
+    provider knobs and the validator tying it to `llm_base_url` live here, in the section that
+    owns that link.
     """
 
     # Every model call goes to one OpenAI-compatible gateway; which vendor sits behind it is the

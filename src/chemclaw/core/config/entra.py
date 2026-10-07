@@ -11,10 +11,12 @@ from pydantic_settings import BaseSettings
 
 
 class EntraSettings(BaseSettings):
-    """Azure Entra ID identity and authorization as one contract.
+    """Azure Entra ID identity and authorization (plan Phase F4, F10-C).
 
-    The OIDC fields, derived JWKS/issuer URLs, role/action sets, tool-authz gates, and the validator
-    that rejects a half-configured deployment.
+    Grouped because identity is one coherent contract: the OIDC fields, the derived JWKS/issuer
+    URLs, the parsed role/action sets, the tool-authz gates, the outbound token endpoint, and
+    the enforcement validator that rejects a half-configured deployment — all in one place
+    (kernel review note).
     """
 
     # Front-door auth is OIDC with Entra as IdP: every non-health request carries an Entra JWT

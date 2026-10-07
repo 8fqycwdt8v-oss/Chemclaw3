@@ -21,9 +21,12 @@ from chemclaw.core.errors import ChemclawError
 class Direction(StrEnum):
     """Which way a metric's value has to move to be *better* news.
 
-    The value alone cannot say (0.9 is a good `f1` and a bad `prediction_error`), and ungated
-    metrics have no threshold implying one. Run-to-run comparison (`evals.baseline`) needs it to
-    tell an improvement from a regression.
+    Registered beside the metric because the value alone cannot say: 0.9 is a good `f1` and a bad
+    `prediction_error`, and half the metrics here are ungated (`passed is None`), so the pass
+    threshold — the only other place a direction is implied — does not exist for them. Anything
+    that compares two runs of the same metric (the baseline comparison in `evals.baseline`) needs
+    this to tell an improvement from a regression, and guessing the sign is exactly the
+    silently-wrong-answer failure `bo_regret`'s required `output.direction` already refuses to make.
     """
 
     HIGHER_IS_BETTER = "higher"

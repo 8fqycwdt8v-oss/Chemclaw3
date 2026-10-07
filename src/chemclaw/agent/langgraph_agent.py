@@ -597,9 +597,18 @@ def _compiled_on_first_use(build: Callable[[], Any]) -> Any:
 class ReloadingSkillsState(SkillsState):
     """`SkillsState` with its cached listing moved to a channel the checkpointer cannot restore.
 
-    Upstream's `skills_metadata` is a checkpointed `LastValue`; as `UntrackedValue` it is absent at
-    the start of every run, so upstream's "already loaded" short-circuit never fires. Per turn is a
-    property of the channel, as with `ChemclawState.loop_capped`.
+    One redeclared field, and it is the whole reloading mechanism. Upstream annotates
+    `skills_metadata` with `PrivateStateAttr` only, so it resolves to a checkpointed `LastValue`;
+    `UntrackedValue` is never written to a checkpoint (`checkpoint()` returns `MISSING`), so the
+    key is absent at the start of every run of the graph and upstream's own
+    `if "skills_metadata" in state: return None` short-circuit simply does not fire.
+
+    Measured over three turns on one thread, counting whether the key was already in state when
+    `before_agent` ran: `[False, True, True]` on upstream's channel and `[False, False, False]` on
+    this one.
+
+    The same mechanism `ChemclawState.loop_capped` uses, and for the same reason: "per turn" is a
+    property of the channel, not of a caller who remembers to clear it.
     """
 
     skills_metadata: NotRequired[Annotated[list[SkillMetadata], UntrackedValue, PrivateStateAttr]]

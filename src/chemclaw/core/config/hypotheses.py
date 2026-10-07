@@ -9,10 +9,13 @@ from pydantic_settings import BaseSettings
 
 
 class HypothesisSettings(BaseSettings):
-    """Bounds on a hypothesis tournament: how wide the field is and how much judging it buys.
+    """Bounds on a hypothesis tournament — how wide the field is and how much judging it buys.
 
-    The field size sets both generator calls and comparisons (Swiss pairing runs `field/2 ·
-    ceil(log2(field))`); `hypotheses/pairing.comparisons_for` states the number before a run.
+    Grouped because every knob here prices one durable job: the field size decides the number of
+    generator calls, and it decides the comparison count too, since Swiss pairing runs
+    `field/2 · ceil(log2(field))` of them. A deployment raising `hypothesis_max_field` is buying
+    more than it may expect, which is why `hypotheses/pairing.comparisons_for` exists to state the
+    number before a run starts.
     """
 
     # Independent framings a question is attacked from, one generator call each; drafted per

@@ -9,9 +9,11 @@ from pydantic_settings import BaseSettings
 
 
 class ElnSettings(BaseSettings):
-    """One ingestion pipeline: exports, sync batching/overlap/heartbeat and schedule cadence.
+    """ELN ingestion (plan Phase 4): the export adapters and the durable sync loop.
 
-    ELN-specific format lives only in the adapter, never in config.
+    Grouped because these knobs shape one ingestion pipeline: where the JSON/ORD exports land,
+    how the cursor-driven sync batches/overlaps/heartbeats, and how often its Temporal Schedule
+    fires. ELN-specific format lives only in the adapter, never in config (G6).
     """
 
     # Directory the JSON-export adapter reads; the sync timeout bounds one batch of

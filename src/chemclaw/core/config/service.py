@@ -13,10 +13,11 @@ from chemclaw.core.config.dsn import DatabaseDsn
 
 
 class ServiceSettings(BaseSettings):
-    """The front-door run service: the one ASGI trust boundary.
+    """The front-door run service (plan Phase F2/F3): binding, limits, sessions, budgets.
 
-    How the server binds, what a request may cost (size, concurrency, wall clock, tokens), and how
-    durable sessions and job push-back reach the browser.
+    Grouped because these knobs all guard the one ASGI trust boundary: how the server binds,
+    what a request may cost (size, concurrency, wall-clock, token budgets), and how durable
+    sessions + job push-back reach the browser.
     """
 
     # The ASGI service that runs the agent for a chemist: builds the agent, opens the turn's MCP

@@ -15,10 +15,15 @@ from chemclaw.core.config.shipped import _shipped
 
 
 class SourcesSettings(BaseSettings):
-    """The `DataSource` seam: where sources are discovered, and which are active.
+    """The generic `DataSource` seam (plan F7): where sources are discovered, and which are active.
 
-    Adding a source is one `datasource.yaml` folder and one name here, with zero core edits. As with
-    connectors, discovery is not enablement: a deployment runs the subset it has validated.
+    Its own section because the seam is deliberately source-agnostic — adding a source (first live
+    one: a warehouse ELN connector) is one `datasource.yaml` folder and one name here, zero core
+    edits — so it belongs to neither the ELN section nor the retrieval section alone.
+
+    Two tokens, exactly mirroring the connector seam: a *discovery* path and an *enablement* list.
+    Discovery is not enablement (D-018) — the repo ships every source, a deployment runs the subset
+    it has validated.
     """
 
     # OS-pathsep list of directories holding `datasource.yaml` folders; read via

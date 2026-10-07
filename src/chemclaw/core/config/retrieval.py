@@ -12,10 +12,13 @@ from pydantic_settings import BaseSettings
 
 
 class RetrievalSettings(BaseSettings):
-    """How evidence reaches the agent.
+    """Evidence retrieval (plan F10-A + the gather_evidence sweep budgets).
 
-    Hybrid retriever bounds and fusion, the sweep's caps and ranking, the note-excerpt budget, the
-    parsed-graph cache and pgvector recall knobs. Embedding provider knobs live in the LLM section.
+    Grouped because these knobs tune how evidence reaches the agent: the hybrid (dense/lexical)
+    retrievers' bounds and fusion mode, the sweep's chunk cap and rank-before-truncate scoring,
+    the shared note-excerpt budget, and the parsed-graph cache. The embedding *provider* knobs
+    live in the LLM section (they ride the LLM transport); these are the retrieval-behavior
+    knobs.
     """
 
     # Dense and lexical retrievers are entry points into graph traversal (the git graph stays the

@@ -12,10 +12,12 @@ from pydantic_settings import BaseSettings
 
 
 class ObservabilitySettings(BaseSettings):
-    """The process-wide "what happened" knobs.
+    """Logging, the tool-audit trail, and OpenTelemetry export.
 
-    Verbosity, the audit-record shape and the off-by-default OTel pipeline, applied once per process
-    by `chemclaw.core.logging.configure_logging` at each entrypoint.
+    Grouped because these are the process-wide "what happened" knobs: one config-driven switch
+    for verbosity so an admin can raise it to DEBUG for troubleshooting without touching code,
+    the audit-record shape, and the (off-by-default) OTel pipeline. Applied once per process by
+    `chemclaw.core.logging.configure_logging`, called at each worker's entrypoint.
     """
 
     # The format carries the timestamp, level, and logger name every diagnosis needs.

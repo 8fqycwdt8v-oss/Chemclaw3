@@ -9,10 +9,11 @@ from pydantic_settings import BaseSettings
 
 
 class MemorySettings(BaseSettings):
-    """The memory layers: playbook and campaign synthesis, and the stores they write.
+    """The memory layers (plan Phase 5): playbook and campaign synthesis.
 
-    The similarity thresholds define what the semantic and episodic layers may claim ("same
-    transformation" vs "related chemistry").
+    Grouped because these thresholds define what the semantic/episodic layers may claim ("same
+    transformation" vs "related chemistry"), plus the synthesis jobs' timeout and Schedule
+    cadence.
     """
 
     # DRFP similarity floor for distilling a playbook (reactions must also recur across >=2

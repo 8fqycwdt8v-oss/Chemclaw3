@@ -96,9 +96,18 @@ class LastPeer(LastValue[str]):
 class ChemclawState(PlanningState):
     """The graph state Chemclaw adds on top of the plan the todo middleware maintains.
 
-    The turn-level fields deliberately omit `PrivateStateAttr`, which would strip them from what
-    `ainvoke` returns; once a value is out of the checkpoint, the return is the only place to read
-    it (e.g. `loop_cap.loop_capped(state)`).
+    Fields arrive with the phase that reads one — a declared field nothing consults is the same
+    stub as a function nothing calls, and reads as coverage while proving nothing.
+
+    **The field does not carry `PrivateStateAttr`**, and that is deliberate rather than an omission
+    from the upstream declaration it otherwise copies. `PrivateStateAttr` is
+    `OmitFromSchema(input=True, output=True)`, so it would strip the field from what `ainvoke`
+    *returns* — and once the value is out of the checkpoint, the return is the only place left to
+    read it. `loop_cap.loop_capped(state)` is that reader: it takes "the turn's final graph state",
+    which callers get from `ainvoke`, and hiding the field from the output would leave it with
+    nothing to read — a capped turn unreportable again, which is the defect `agent/loop_cap.py`
+    exists to fix. Upstream's own `run_model_call_count` does carry `PrivateStateAttr` and is
+    therefore unreadable by the time anyone asks, which is why neither field below delegates to it.
     """
 
     # How many model calls this turn has *authorised* — the runaway guard's counter

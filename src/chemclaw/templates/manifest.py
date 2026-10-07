@@ -62,8 +62,9 @@ class _Step(BaseModel):
 class ToolStep(_Step):
     """Call one tool on the agent's surface — in-process or a connector's — with resolved arguments.
 
-    The result is whatever the tool returned. A whole-string reference in `arguments` preserves the
-    referenced value's type.
+    The step's result is whatever the tool returned. `arguments` values may contain references; a
+    whole-string reference preserves the referenced value's type, so passing a list to a tool that
+    wants a list works without a stringly-typed detour.
     """
 
     kind: Literal["tool"] = "tool"
@@ -74,8 +75,10 @@ class ToolStep(_Step):
 class JobStep(_Step):
     """Run a connector's durable job and *await* its result.
 
-    Unlike a `tool` step naming a job launcher, which returns a job id, this runs the job as a child
-    workflow so a template can sequence long work as one durable unit.
+    The difference from a `tool` step that names a job launcher: that returns a job id and finishes,
+    which is right in a chat turn (the agent must not block) and useless inside a workflow that
+    exists precisely to wait. Here the run is a child workflow, so a template can sequence long work
+    — compute, then reason about the result — as one durable, resumable unit.
     """
 
     kind: Literal["job"] = "job"
@@ -86,14 +89,20 @@ class JobStep(_Step):
 class AgentStep(_Step):
     """Run one agent turn with a rendered prompt; the result is its answer text.
 
-    The sequence is fixed, the reasoning inside a step is not. `profile` picks which configured
-    agent runs it.
+    This is what keeps a template *agentic* rather than a shell script: the sequence is fixed, the
+    reasoning inside a step is not. `profile` picks which configured agent runs it, so a step can be
+    deliberately narrow — a summarizing step has no business holding the durable-job launchers.
 
-    The step is read-only unless `write_tools` names writes. A human-authored template is the
-    pre-approved plan and bypasses the plan gate, so `durable.template_activities.step_profile`
-    removes every undeclared side-effecting tool before the graph is built. Naming a read tool is
-    rejected by `make template-validate`, so the list cannot become an allow-list for the whole
-    surface.
+    **The step is read-only unless it says otherwise, and `write_tools` is how it says so.** A
+    template is not gated by the plan gate — a template *is* the pre-approved plan, human-authored,
+    git-committed, reviewed, and uncreatable at run time — so the discretion the plan gate would
+    have removed has to be removed by the file instead. The narrowing is applied by
+    `chemclaw.durable.template_activities.step_profile`, which subtracts every side-effecting tool
+    the step did not name from the profile's advertised surface *before the graph is built*, so an
+    undeclared write is not a call that gets refused, it is a tool the step's agent never held.
+
+    A read tool needs no entry — declaring one is rejected by `make template-validate`, because a
+    list that accepts reads is an allow-list for the whole surface wearing a write-list's name.
     """
 
     kind: Literal["agent"] = "agent"

@@ -223,10 +223,13 @@ class Settings(
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 
-    Field names map to `CHEMCLAW_<FIELD>` environment variables (e.g. `CHEMCLAW_TEMPORAL_ADDRESS`).
-    Defaults target the local `docker-compose` stack, so a fresh checkout runs with no `.env`.
-    Composed from the per-domain section mixins; this `model_config` (prefix, `.env`,
-    `extra="forbid"`) governs them all.
+    Field names map to `CHEMCLAW_<FIELD>` environment variables (e.g.
+    `CHEMCLAW_TEMPORAL_ADDRESS`). Defaults target the local `docker-compose` dev stack so a
+    fresh checkout runs without any `.env` present.
+
+    Composed from the per-domain section mixins, one module each in this package; every field
+    stays a flat attribute with its original env name, and this `model_config` (prefix,
+    `.env`, `extra="forbid"`) governs them all.
     """
 
     model_config = SettingsConfigDict(

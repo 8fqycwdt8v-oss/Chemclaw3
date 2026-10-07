@@ -387,10 +387,17 @@ class TemporalWindow(BaseModel):
 
 
 class Relation(TemporalWindow):
-    """One typed edge to another note, optionally scoped in time and confidence.
+    """One typed edge to another note, optionally scoped in time and confidence (STO-8/STO-9).
 
-    The frontmatter form of a `[[rel:target]]` body link, and the only place per-edge metadata can
-    live. Validity on the edge lets a relation stop holding while both notes remain current.
+    Two ways to write an edge exist because they serve different authors. A `[[rel:target]]` in
+    the body is what a person writing prose reaches for; this frontmatter form is what a machine
+    emits and the only place per-edge metadata can live.
+
+    **Validity belongs on the edge, not only on the note.** `Note.valid_from`/`valid_to` can say
+    that a *fact* stopped being true; nothing could say that a *relation* did — that this catalyst
+    was used for that transformation until the process changed, while both notes remain perfectly
+    current. Bi-temporal edges with invalidation rather than deletion are how Graphiti/Zep model
+    exactly this, and the node half was already here.
     """
 
     rel: str = Field(min_length=1)
@@ -451,12 +458,23 @@ class ProcessConditions(BaseModel):
 class Note(TemporalWindow):
     """One knowledge-graph note: its frontmatter metadata plus its Markdown body.
 
-    `created_by` is the provenance line that lets a chemist tell agent-written knowledge (readable
-    without prior review) from curated knowledge. `actor` is the person on whose behalf an agent
-    wrote it, stamped by `record_note`; absent means not recorded, never guessed. `confidence` and
-    `valid_from`/`valid_to` let a query weigh and time-scope evidence.
+    `created_by` is the provenance line, and since
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` it is the *whole* of it: an
+    `agent`-authored note is readable the moment it is written, with nobody reviewing it first, so
+    this field and the citations beside it are what lets a chemist tell machine-written knowledge
+    from curated knowledge at the point of use. `confidence` (0–1) and `valid_from`/`valid_to` let
+    a later query weigh and time-scope evidence.
 
-    Frozen, because the graph indexer shares cached instances with every reader.
+    `actor` is the other half of who wrote it (`core/authorship.py`,
+    `D-2026-09-27-an-author-is-a-person-and-an-agent`): the person on whose behalf an agent wrote
+    the note, stamped by `record_note` from the turn's or job's identity. Absent means *not
+    recorded* — every note written before it existed, and every note written where no person is
+    bound — and is never filled in by guessing. `authorship` reads the two together, so a note
+    answers the question in the shape an audit row and a transcript message do.
+
+    Frozen: a note is an immutable value object. The graph indexer caches parsed notes and
+    hands the same instances to every reader (KM-14); immutability makes that sharing safe —
+    no caller can mutate a cached note and corrupt it for the next query.
     """
 
     id: str = Field(min_length=1)

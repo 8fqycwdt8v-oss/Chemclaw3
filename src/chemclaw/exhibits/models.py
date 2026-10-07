@@ -100,8 +100,8 @@ class Binding(_Spec):
 class RowsFrom(_Spec):
     """A whole table bound to one array in a stored result, one row per element.
 
-    `columns` maps a column key to a pointer relative to each element; a missing field gives an
-    empty cell.
+    `columns` maps a column key to a pointer *relative to each element*; an element that lacks it
+    gives an empty cell, because a list of records with an optional field is the ordinary case.
     """
 
     result: str = Field(pattern=RESULT_TARGET)
@@ -289,8 +289,9 @@ def _absent(value: object) -> bool:
 class GeometrySource(_Spec):
     """A calculation by-product a geometry is read from: `science.calc.artifacts.ArtifactRef`'s key.
 
-    The two fields that address a stored artifact, spelled `<calc_key>#<name>` like `fetch_artifact`
-    and a note's `artifact_refs`. Existence is checked at write time (`exhibits.sources`).
+    Only the two fields that address a stored artifact — which calculation, and the file's role —
+    so the reference is the one `fetch_artifact` and a note's `artifact_refs` already spell as
+    `<calc_key>#<name>`. Whether it exists is checked when it is written (`exhibits.sources`).
     """
 
     calc_key: str = Field(min_length=1)
@@ -309,10 +310,14 @@ STRUCTURE_ID = r"^st_[0-9a-f]{16}$"
 class GeometrySpec(_Spec):
     """One 3D structure: inline XYZ, a stored calculation artifact, or a stored structure.
 
-    Exactly one of `xyz`, `source` and `structure_id`. `structure_id` is what the agent holds
-    (calculation results name geometries by it); it is resolved to XYZ on read
-    (`exhibits.sources.resolved_geometry`) while the revision keeps the address. `highlight_atoms`
-    are 0-based atom indices, checked against the atom count. `energy_hartree` is a display label.
+    Exactly one of `xyz`, `source` and `structure_id`. `structure_id` is what the agent holds —
+    every calculation result names its geometry by it and none hands the model coordinates — and
+    is resolved to XYZ from the structure store when the artefact is read
+    (`exhibits.sources.resolved_geometry`), so a reader is served `xyz` and the stored revision
+    keeps the address. `highlight_atoms` are **0-based** indices into the atom lines, held inside
+    the inline block's atom count here and inside a cited one's when it is written
+    (`exhibits.sources.require_source_stored`). `energy_hartree` is a label the viewer shows, not a
+    figure anything here computes.
     """
 
     kind: Literal["geometry"]
@@ -348,9 +353,10 @@ class GeometrySpec(_Spec):
 class HtmlSpec(_Spec):
     """A page the model wrote, rendered only inside the UI's sandbox origin, never by this server.
 
-    Stored and exported as text, never served as `text/html`; it runs in an opaque-origin iframe
-    with `connect-src 'none'`. `height` is the frame's initial CSS height, which the frame may
-    report back.
+    The backend stores and exports it as text and never serves it as `text/html`
+    (`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`); the
+    page runs in an opaque-origin iframe on a separate origin with `connect-src 'none'`. `height` is
+    the frame's initial height in CSS pixels, which the frame may report back.
     """
 
     kind: Literal["html"]
@@ -623,13 +629,15 @@ class ExhibitBinding(BaseModel):
 class ExhibitView(ExhibitHeader):
     """One revision of an artefact: its header, the revision's own record, and its spec.
 
-    `spec` is what a renderer shows (bindings resolved); `raw_spec` is the revision as stored, with
-    `bindings` naming each. The store fills both alike; `exhibits.bindings.resolved_view` resolves
-    them for a reader.
+    `spec` is what a renderer shows — every binding replaced by its value — and `raw_spec` the
+    revision as stored, bindings and all, with `bindings` naming each. For a spec with no binding
+    the two specs are one and `bindings` is empty. The store fills `spec` and `raw_spec` alike;
+    `exhibits.bindings.resolved_view` is what turns the one into the other for a reader.
 
-    `unverified_figures` lists numerals an agent revision states that no tool in this session
-    returned — unchecked, not wrong. Empty for a human revision, where nothing was checked, and
-    never includes a bound value.
+    `unverified_figures` lists the numerals an agent-authored revision states that no tool in this
+    session returned — *unchecked*, not wrong: the figure may be the chemist's own, or arithmetic,
+    or a value the grounding scan could not see. Empty for a human revision and wherever nothing
+    was checked. A bound value is never one: it is the tool's own.
     """
 
     revision: int

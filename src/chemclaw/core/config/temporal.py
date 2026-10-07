@@ -11,9 +11,11 @@ from pydantic_settings import BaseSettings
 
 
 class TemporalSettings(BaseSettings):
-    """How the app reaches and uses the one Temporal cluster.
+    """Temporal — durable execution of long scientific jobs (plan Phase 1).
 
-    Endpoint, transport security, the core task queue, timeouts, retry bounds and worker sizing.
+    Grouped because everything here shapes how the app reaches and uses the one Temporal cluster:
+    the frontend endpoint, transport security, the two task queues from the architecture, and
+    the shared activity retry bound.
     """
 
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.

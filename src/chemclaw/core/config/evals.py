@@ -9,9 +9,11 @@ from pydantic_settings import BaseSettings
 
 
 class EvalSettings(BaseSettings):
-    """The evaluation and metric layer: case sets, gates, A/B noise floor, drift and live probes.
+    """The evaluation & metric layer (plan Phase 2b, F10-F2).
 
-    A metric's pass/fail threshold is config, never hardcoded.
+    Grouped because a metric's pass/fail threshold is config, never hardcoded (G3): the case-set
+    locations, the green-chemistry gates, the A/B noise floor, the drift job, and the
+    retrieval-quality gate all live here.
     """
 
     # Versioned eval case-set. Not under `knowledge_dir`: a case is an evaluation payload, not a

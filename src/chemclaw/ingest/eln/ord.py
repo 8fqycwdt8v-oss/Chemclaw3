@@ -95,10 +95,17 @@ class Component(_Charged):
 class UnstructuredComponent(_Charged):
     """A species the source **names** and gives no structure for — carried as named, never drawn.
 
-    What is left when `ord_adapter`'s exact routes to a structure (SMILES, InChI, known reagent
-    name) all fail but the source still named the species. `name` is the source's text verbatim, and
-    no code path may turn it into a structure: a guess would propagate into fingerprints and
-    citations. A reaction carrying one is `RecordTier.CITATION_ONLY`.
+    The real case is the Perera flow-Suzuki screen (*Science* 2018, 359, 429), whose source
+    spreadsheet publishes the second coupling partner only as the paper's own shorthand
+    (`2a, Boronic Acid`) and the product only as a phrase. `ord_adapter` tries every exact route to
+    a structure first (SMILES, InChI, a known reagent name); this is what is left when none
+    resolves and the source still said *something* about the species.
+
+    `name` is the source's text verbatim. It is not a structure, it is not resolved later, and no
+    code path may turn it into one: a guessed structure would propagate into a fingerprint index, a
+    similarity hit and a note citing it, which is exactly what refusing these records used to
+    protect. A reaction carrying one is `RecordTier.CITATION_ONLY`
+    (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
     """
 
     name: str = Field(min_length=1)
@@ -107,12 +114,14 @@ class UnstructuredComponent(_Charged):
 class RecordTier(StrEnum):
     """Which evidence tier a transcribed reaction belongs to.
 
-    `STRUCTURED` — every species has a structure: fingerprinted, labelled and reachable by structure
-    and similarity search.
+    `STRUCTURED` — every species has a structure: the reaction is fingerprinted, labelled and
+    reachable by structure and similarity search, as every record was before this tier existed.
 
-    `CITATION_ONLY` — at least one species is an `UnstructuredComponent`. Stored and citable for
-    what it states, excluded from every structure and similarity search, since any fingerprint would
-    describe a reaction nobody ran.
+    `CITATION_ONLY` — at least one species is named without a structure
+    (`UnstructuredComponent`). The record is stored and citable for what it *does* state — a yield,
+    a base, a ligand, a temperature — and is excluded from every structure and similarity search,
+    because any fingerprint of it would describe a reaction nobody ran: the one with the unnamed
+    species left out.
     """
 
     STRUCTURED = "structured"
@@ -131,8 +140,10 @@ class StructureNotGiven(ChemclawError):
 class StepKind(StrEnum):
     """The kind of action a procedure step performs (a coarse subset of ORD's actions).
 
-    Deliberately small; the verbatim instruction is always kept on the step, so a coarse label loses
-    nothing.
+    Deliberately small: it labels a preserved instruction so the graph and metrics can
+    reason about *what happens when* (an addition vs. a workup vs. a purification) without
+    reproducing ORD's full `ReactionWorkup`/`ReactionConditions` type space. The verbatim
+    instruction is always kept on the step, so a coarse label never loses information.
     """
 
     ADDITION = "addition"  # charge/add/dissolve a species into the vessel
@@ -166,11 +177,17 @@ DateSource = Literal["stated", "entry"]
 
 
 class OutcomeClass(StrEnum):
-    """How an experiment turned out.
+    """How an experiment turned out (gap KNW-3).
 
-    Failures do not recur across projects, so without an explicit marker the most valuable negative
-    knowledge is lost. `INCONCLUSIVE` is distinct from `FAILURE`: an aborted, mis-charged or
-    unassayed run carries no evidence about the chemistry.
+    Nothing previously marked an experiment as failed, and the distillation is structurally biased
+    against failures: `find_playbook_candidates` distils what *recurs* across projects, and failures
+    do not recur — they get abandoned after one attempt. So "don't try X, we did, it decomposed on
+    scale" — the most valuable and most systematically lost knowledge in process development — had
+    nowhere to live.
+
+    `INCONCLUSIVE` is deliberately distinct from `FAILURE`: a run that was aborted, mis-charged, or
+    never assayed carries no evidence about the chemistry, and collapsing it into "failure" would
+    teach the corpus something untrue.
     """
 
     SUCCESS = "success"

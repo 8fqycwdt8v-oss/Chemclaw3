@@ -21,9 +21,14 @@ VOCABULARY_VERSION = "roles1"
 class SpeciesRole(StrEnum):
     """What one species was doing, at the resolution the precedent questions need.
 
-    `STARTING_MATERIAL` rather than `reactant`, because a reagent is also a reactant in the
-    mass-balance sense and this vocabulary exists to separate them. `UNKNOWN` is a member, not
-    `None`, so "looked and could not decide" differs from "not yet looked" (NULL) in coverage.
+    `STARTING_MATERIAL` rather than `reactant`, because that is the word the question uses ("has
+    this substrate been used as starting material") and because it is not a synonym: a reagent is
+    also a reactant in the mass-balance sense, and the distinction this vocabulary exists to draw
+    is exactly the one `Role.REACTANT` blurs.
+
+    `UNKNOWN` is a member and not `None` so that "the labeller looked and could not decide" stays
+    distinguishable from "nothing has looked yet" — which is the column being NULL. Conflating the
+    two would make an unlabelled corpus and an unclassifiable one report identical coverage.
     """
 
     STARTING_MATERIAL = "starting-material"
@@ -40,9 +45,10 @@ class SpeciesRole(StrEnum):
 class LabelGroup(StrEnum):
     """One derived label a source may already carry, or the enricher may have to derive.
 
-    A group, not a column, because its fields are produced together (`named_reaction`,
-    `reaction_class`, `rxno_id`, `confidence`, `method`), so a policy cannot ask for one without the
-    others.
+    A *group*, not a column, because the fields inside one move together: whatever produced
+    `named_reaction` produced `reaction_class`, `rxno_id`, `confidence` and `method` in the same
+    breath, and a policy that could ask for one without the others would be a policy nothing could
+    honour.
     """
 
     NAMED_REACTION = "named-reaction"

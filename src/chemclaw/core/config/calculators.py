@@ -44,8 +44,16 @@ class PkaCalibration(BaseModel):
 class CalculatorSettings(BaseSettings):
     """How this repository orchestrates, budgets and caches a calculation it no longer runs.
 
-    None of these enters a cache key: the server derives the key from its own settings, so changing
-    anything here invalidates and recomputes nothing.
+    Grouped because these knobs decide what the *orchestration* does: how long a durable job may
+    run, how often it heartbeats, how many points a composed scan takes, where the calculation
+    server is and how long to wait for it.
+
+    **None of them enters a cache key**, and that is the reversal worth stating rather than
+    discovering. They used to: the key was built here, from these values. It is now derived by the
+    server from the server's own settings and transported as four fields, so changing anything here
+    invalidates nothing and recomputes nothing. A knob that a reader believes is "a deliberate
+    recompute" but that no key can see is the most expensive kind of stale comment, which is why
+    this paragraph replaced it.
     """
 
     # Media a solvent screen evaluates at once (`connectors/calc/compose.py`). Default 1: with

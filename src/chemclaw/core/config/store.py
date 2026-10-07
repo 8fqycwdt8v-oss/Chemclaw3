@@ -19,9 +19,10 @@ _SHIPPED_VECTOR_STORES = ("qdrant", "databricks")
 
 
 class StoreSettings(BaseSettings):
-    """Database transport knobs every store connection shares, plus stores built on them.
+    """Postgres/pgvector — fingerprint store (Phase 3) and QM result cache (plan step 1.10).
 
-    One DSN for the app, connect/statement timeouts, pool sizing and the fleet connection budget.
+    Grouped because these are the database-transport knobs every store connection shares: one DSN
+    for the whole app plus the connect/statement timeouts.
     """
 
     # `DatabaseDsn`, not `str`, so the userinfo password is masked in renderings

@@ -11,9 +11,11 @@ from pydantic_settings import BaseSettings
 
 
 class FingerprintSettings(BaseSettings):
-    """Fingerprint definitions and the bounds on the search paths they feed.
+    """Molecule/reaction fingerprint search (plan Phase 3, mcp-molfp/mcp-rxnfp).
 
-    The definition (and so the stored column width) is a deliberate, versioned choice.
+    Grouped because the fingerprint definition (and thus the stored column width) is a
+    deliberate, versioned choice, and the search bounds guard the same SQL/RDKit paths those
+    definitions feed.
     """
 
     # ECFP4 = Morgan radius 2, 2048 bits. The similarity threshold is the Tanimoto floor for a
