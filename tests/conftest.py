@@ -132,7 +132,7 @@ class FakeWriter:
 # somebody thought of, and the third — `postgres_migration_dsn`, which is what `migrate()` and
 # `apply_grants()` actually resolve — escaped for as long as it went unnamed.
 #: Connections per Postgres pool in each xdist worker (see `isolated_postgres_schema`).
-_XDIST_POOL = 4
+_XDIST_POOL = 8
 
 _ISOLATED_DSN_SETTINGS = ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn")
 
