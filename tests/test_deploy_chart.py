@@ -2737,7 +2737,8 @@ def test_the_audit_classifies_what_the_command_said_not_what_a_file_holds(
     assert "Found 2 known vulnerabilities" in result.stdout, (
         "the operator never even saw the finding"
     )
-    recipe = (DEPLOY.parent / "Makefile").read_text().split("deps-audit:")[1].split("\nexplain:")[0]
+    after = (DEPLOY.parent / "Makefile").read_text().split("\ndeps-audit:")[1]
+    recipe = re.split(r"\n[a-z][a-z0-9-]*:", after, maxsplit=1)[0]
     commands = [line for line in recipe.splitlines() if not line.lstrip().startswith(("@#", "#"))]
     assert not any("tee" in line for line in commands), (
         "deps-audit pipes into tee again, so its classification reads a file rather than the "

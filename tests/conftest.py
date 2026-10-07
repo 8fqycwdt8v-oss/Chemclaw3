@@ -131,6 +131,9 @@ class FakeWriter:
 # An allowlist somebody has to extend is the point: the two that were listed by hand were the two
 # somebody thought of, and the third — `postgres_migration_dsn`, which is what `migrate()` and
 # `apply_grants()` actually resolve — escaped for as long as it went unnamed.
+#: Connections per Postgres pool in each xdist worker (see `isolated_postgres_schema`).
+_XDIST_POOL = 4
+
 _ISOLATED_DSN_SETTINGS = ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn")
 
 
@@ -184,6 +187,10 @@ def isolated_postgres_schema() -> Iterator[None]:
 
     patch = pytest.MonkeyPatch()
     redirect_dsns_to_test_schema(patch)
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        # Every xdist worker draws its own pools against one server; a small pool per worker keeps
+        # `-n 4` well inside a stock `max_connections` of 100.
+        patch.setattr(settings, "pg_pool_max_size", min(settings.pg_pool_max_size, _XDIST_POOL))
     try:
         yield
     finally:

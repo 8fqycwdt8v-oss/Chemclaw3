@@ -237,11 +237,13 @@ def test_a_source_path_that_stopped_resolving_fails_the_gate(tmp_path: Path) -> 
 # `SystemExit` in the *stats* phase, before a single mutant is scored, and reads as mutmut being
 # broken rather than as a missing directory.
 #
-# Deliberately absent, and the only one:
+# Deliberately absent:
 _NOT_COPIED: dict[str, str] = {
     # mutmut's own output tree — the destination of every copy above, so copying it into itself
     # would recurse. `make mutants` writes it and `.gitignore` hides it.
     "mutants": "the destination of the copy, not a source for it",
+    # Claude Code's project settings and hooks; no test reads them.
+    ".claude": "editor-harness configuration, read by no test",
 }
 
 

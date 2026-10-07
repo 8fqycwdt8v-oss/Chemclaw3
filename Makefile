@@ -1,76 +1,22 @@
-# Chemclaw developer entrypoints. These are the ONLY invocations to use —
-# CLAUDE.md and CI both go through them, so behavior stays identical everywhere.
-# `uv run` executes inside the project venv without a manual activate step.
+# Chemclaw developer entrypoints. CI, Jenkins and CLAUDE.md all go through these targets.
 
-# Kubernetes API version the rendered chart is validated against. OpenShift 4.16 ships Kubernetes
-# 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
+# Kubernetes version the chart is validated against (OpenShift 4.16 ships 1.29).
 KUBE_VERSION ?= 1.29.0
 
-# The case-set version `eval-baseline-check` declares it is scoring. It must equal the
-# `case_set_version` recorded in `data/evals/baseline.json`, or the check refuses to compare:
-# aggregates over two different case-sets are different quantities, and a delta between them looks
-# like a result while meaning nothing. Bump this together with a `make eval-baseline` refresh
-# whenever the case-set itself changes — the mismatch is the tripwire that says you forgot.
-# Bumped when the case set itself changes, because a baseline is only comparable to the set it was
-# recorded on — `eval-baseline-check` refuses to compare two versions rather than reporting a drift
-# between different quantities. 2026-09-14 added the two demonstration cases that make `runaway_rate`
-# and `prediction_error` gates that can fire (`EvalReport.gates_no_demonstration_can_fire`).
+# Must equal `case_set_version` in data/evals/baseline.json; bump with `make eval-baseline`.
 EVAL_CASE_SET_VERSION ?= live-cost-2026-09-14
 
-# How many pytest worker processes `test` and `cov` run across
-# (`D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`).
-#
-# **0 — serial — because the gate's answer has to mean one thing, and in parallel it does not.**
-# Four workers are genuinely much faster: measured on this 4-core box, `make test` 18:13 -> 09:30 and
-# `make cov` 27:25 -> 12:28, with coverage unchanged at 90.53%. What they are not is *stable*. Over
-# five full parallel runs, `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_`
-# `leaves_the_loop_schedulable` failed in **2** and
-# `tests/test_retention.py::test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing` in
-# **1**; both pass serially, every time. A gate that reds about 40% of the time for a reason that is
-# not a finding is worse than a slow one — the first spurious red teaches everybody to re-run, and
-# then a real red teaches them the same thing.
-#
-# **So this is an opt-in and the plugin stays installed**, because the speedup is real and a local
-# iteration loop is the right place to spend it: `make test PYTEST_WORKERS=4`. When something fails
-# under it, re-run that test serially before believing it — a test that fails only in parallel is
-# evidence about the scheduler.
-#
-# **Not `auto` even when opting in, and the difference is a resource nobody counts.** `-n auto` takes
-# `os.cpu_count()`, and every worker is its own process that draws its own Postgres pool — at
-# `CHEMCLAW_PG_POOL_MAX_SIZE`'s default of 16 that is up to 16 backends per worker against one
-# server, so a 16-core developer box would ask a stock `max_connections` of 100 for four times what
-# it has while a 4-core runner sits inside it.
-PYTEST_WORKERS ?= 0
-# Empty when serial is asked for, so the flag is absent rather than `-n 0` (which xdist reads as
-# "no workers" and then still installs its plugin machinery).
+# pytest-xdist workers for `test` and `cov`; 0 is serial. Not `auto`: each worker draws its own
+# Postgres pools, so tests/conftest.py caps each worker's pool instead.
+PYTEST_WORKERS ?= 4
 PYTEST_XDIST := $(if $(filter-out 0,$(PYTEST_WORKERS)),-n $(PYTEST_WORKERS),)
 
-# The two patterns that classify `deps-audit`'s output. Named here rather than inlined in the
-# recipe so `tests/test_deploy_chart.py` can assert the classification against the same strings
-# the target uses, instead of a second copy that can drift from it. There are no scratch-path
-# variables beside them any more: the recipe classifies what the command *said*, holding it in a
-# shell variable, and writes its one scratch file with `mktemp` (see the target).
-# A real finding. Checked first and never excused, so an advisory whose text mentions a connection
-# failure cannot be read as one.
+# How deps-audit classifies pip-audit output; tests/test_deploy_chart.py asserts against these.
 AUDIT_FOUND := Found [0-9]+ known vulnerabilit
-# The advisory database (or `pip-audit` itself) could not be reached. Both observed forms:
-# `uvx` failing to fetch the tool, and `pip-audit` dying inside `requests`.
 AUDIT_UNREACHABLE := ConnectionError|Failed to fetch|Max retries exceeded|Temporary failure in name resolution|Name or service not known|Network is unreachable
 
-# Turn a rendered chart on stdin into the one `groups:` document `promtool check rules` reads.
-#
-# `promtool` wants a bare rule file; a `PrometheusRule` wraps its groups in `spec:`, and a dashboard
-# hides its queries in a JSON string inside a ConfigMap. Both are unwrapped here so one `promtool`
-# invocation covers every PromQL expression this chart ships — the alerts *and* the panels.
-#
-# Alert rules are passed through whole rather than reduced to their `expr`: `promtool` checks the
-# `for:`/`labels:`/`annotations:` shape too, and a template that emitted a malformed annotation
-# would otherwise pass. Panels have no rule shape, so each becomes a synthetic recording rule whose
-# name carries the dashboard and panel it came from, which is what makes a failure locatable.
-#
-# Inlined as a variable rather than a file under `deploy/`, because `src/` is all the code
-# (`tests/test_repo_map.py::test_no_import_package_sits_beside_data`) and this is a gate's argument,
-# not a program anything imports.
+# Rendered chart on stdin -> one `groups:` document for `promtool check rules` (alerts and
+# dashboard panels). A variable, not a file, because `src/` is all the code.
 export PROMQL_FROM_RENDER
 define PROMQL_FROM_RENDER
 import json, re, sys, yaml
@@ -92,25 +38,29 @@ if not rules:
 yaml.safe_dump({"groups": [{"name": "chart", "rules": rules}]}, sys.stdout, sort_keys=False)
 endef
 
-# Enforce exit-on-error and pipefail for all recipes: a failing command in a pipeline does not
-# pass silently when followed by a successful command. This is critical for the helm-validate
-# target: if `helm template` fails and emits empty output, `kubeconform` would otherwise see no
-# documents, print a clean summary, and exit 0 — masking a broken chart. Without this, CI would
-# report the chart valid when it is not. (.SHELLFLAGS applies to all recipes; assignment is
-# necessary because Make has no built-in way to set them).
+# pipefail: a failed `helm template` must not reach kubeconform as an empty, "valid" render.
 SHELL := bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install architecture-baseline lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase rekey-compounds reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status kind-up kind-down kind-status kind-smoke kind-validate
+.PHONY: help install lint type test cov check ci deps-audit upstream-check architecture-baseline \
+  mutants mutant-results mutant-stats kg-validate eval eval-strict eval-baseline-check \
+  eval-baseline eln-validate skill-validate connector-validate datasource-validate sink-validate \
+  channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
+  db-grants schedules-apply connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
+  kind-smoke synthesize reindex reindex-full share-estimate share-sync rekey-compounds user-erase \
+  sink-schema trajectory-census distill live-infra live-infra-down live-up live-down live-status \
+  live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status live-jobs live-probes \
+  live-ab live-delegation live-plan-gate live-degradation live-turn-cost live-benchmark \
+  live-template-args live-verifier-margin live-data live-storm live-soak live-soak-report \
+  retrieval-arms hypothesis-recovery phoenix-publish explain
 
-help:  ## List every target with its one-line description (the default).
-	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
-	@# written and this list cannot drift from what the Makefile actually offers.
-	@grep -hE '^[a-z][a-z0-9-]*:.*?## ' $(MAKEFILE_LIST) \
-		| sort \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+help:  ## List every target, grouped by section.
+	@awk 'BEGIN {FS = ":.*?## "} /^##@ / {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)} \
+		/^[a-z][a-z0-9-]*:.*?## / {printf "  \033[36m%-26s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+##@ Gate
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -122,74 +72,59 @@ lint:  ## Ruff lint + format check (no writes; use `uv run ruff format` to fix).
 type:  ## Static type check, strict (the whole package, plus examples and tests).
 	uv run mypy src examples tests
 
-test:  ## Run the test suite (serial; `PYTEST_WORKERS=4` for ~2x, see the variable).
+test:  ## Run the test suite (4 xdist workers; `PYTEST_WORKERS=0` for serial).
 	uv run pytest $(PYTEST_XDIST)
 
 cov:  ## Run the test suite with coverage (first-party packages; report missing lines).
 	uv run pytest --cov --cov-report=term-missing $(PYTEST_XDIST)
 
-leak-probe:  ## Drive real turns in one process and report what each one retains (needs `make live-up`).
-	uv run python -m chemclaw.cli.leak_probe $(ARGS)
+check: lint type test  ## The fast inner-loop gate: lint + type + test (no coverage floor).
+
+# deps-audit runs last: a supply-chain finding must not mask a broken test.
+ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate kind-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
+
+deps-audit:  ## Check the locked dependency closure for known vulnerabilities (supply chain).
+	@# Audits the lockfile export, not the venv; classifies output because pip-audit exits 1 for both a
+	@# finding and an unreachable database. Unreachable is tolerated locally and fails in CI.
+	@scratch=$$(mktemp -d); trap 'rm -rf "$$scratch"' EXIT; \
+	uv export --no-hashes --no-dev --format requirements-txt > "$$scratch/requirements.txt"; \
+	report=$$(uvx pip-audit --no-deps --disable-pip -r "$$scratch/requirements.txt" 2>&1) && rc=0 || rc=$$?; \
+	printf '%s\n' "$$report"; \
+	if [ $$rc -ne 0 ]; then \
+	  if grep -qE '$(AUDIT_FOUND)' <<<"$$report"; then exit $$rc; fi; \
+	  if ! grep -qE '$(AUDIT_UNREACHABLE)' <<<"$$report"; then exit $$rc; fi; \
+	  if [ -n "$${CI:-}" ]; then \
+	    echo "deps-audit: the advisory database is unreachable and this is CI — the supply-chain"; \
+	    echo "deps-audit: check cannot be skipped where the network is a given. Failing."; \
+	    exit 1; \
+	  fi; \
+	  echo "deps-audit: SKIPPED - the advisory database is unreachable and CI is unset."; \
+	  echo "deps-audit: the lockfile was NOT audited. Re-run with a network before you push."; \
+	fi
+
+upstream-check:  ## Re-check every upstream shape this repo borrows (run on any langchain/langgraph/deepagents bump).
+	uv run pytest tests/test_upstream_surface.py -q
+	@uv run python -c "import importlib.metadata as m; print('resolved: ' + ', '.join(f\"{p}=={m.version(p)}\" for p in ('langchain','langchain-core','langgraph','langgraph-checkpoint','deepagents','langchain-mcp-adapters')))"
+
+architecture-baseline:  ## Measure the architecture programme's baseline (import, build, prose, sizes) to docs/planning/.
+	uv run python -m chemclaw.cli.architecture_baseline
 
 mutants:  ## Mutation-test the invariant-bearing modules (see [tool.mutmut]; slow, run deliberately).
 	uv run mutmut run $(ARGS)
 
 mutant-results:  ## Show the survivors from the last `make mutants` run.
-	@# `mutmut results` prints nothing when there is no run to report on, and nothing is exactly
-	@# what a clean run looks like — "no survivors" and "nobody has run this" read alike, which is
-	@# the same green-on-no-evidence shape the validators were just fixed for. `mutmut` keeps its
-	@# state in `.mutmut-cache`/`mutants/`, so the absence of both is the question worth asking.
+	@# No run and no survivors print alike, so require evidence of a run first.
 	@test -e .mutmut-cache -o -d mutants || \
 		{ echo 'no mutation run found — run `make mutants` first (this is not "no survivors")'; exit 1; }
 	uv run mutmut results
 
 mutant-stats:  ## Write the last run's per-category counts to mutants/mutmut-cicd-stats.json.
-	@# The machine-readable half of `mutant-results`, and the one the weekly workflow gates on.
-	@# `mutmut results` prints one line per non-killed mutant for a human; this writes the counts,
-	@# so `.github/workflows/mutants.yml` can decide on a number rather than by grepping prose.
 	uv run mutmut export-cicd-stats
 
-check: lint type test  ## The fast inner-loop gate: lint + type + test (no coverage floor).
-
-# `deps-audit` is in this list and in `.github/workflows/ci.yml` for the same reason: it was in
-# neither. It ran only from `image.yml`, which triggers on `main` and on pull requests — so every
-# branch push, and the whole documented pre-push gate, went green against a lockfile with known
-# CVEs, and CLAUDE.md's "a green `make` locally means a green CI" was false for the supply chain
-# alone. Last in the list rather than first: a dependency finding is a real failure but not one
-# that should mask a broken test, and it is the one gate whose fix lives in `uv.lock` rather than
-# in the diff under review.
-ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate kind-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
-
-chat:  ## Chat with the agent from the terminal (admin/testing; needs CHEMCLAW_LLM_BASE_URL up).
-	@# The shipped gateway is `chemclaw.cli.mock_llm` on loopback, and every process that makes model
-	@# calls refuses that unless the posture is stated
-	@# (`core/llm_gateway.refuse_unconfigured_llm_gateway`). Stated here rather than in `.env.example`,
-	@# which ships the code defaults: this target *is* the local-dev lane, and a deployment never runs
-	@# `make`. Harmless when a real gateway is configured — the guard only looks at loopback
-	@# addresses — and an operator's own value wins.
-	CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=$${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY:-true} uv run chemclaw --admin
-
-db-migrate:  ## Apply infra/sql migrations to the configured database.
-	uv run python -m chemclaw.core.migrate
-	@# The stored-message conversion is a second command, not a step inside the first: the kernel
-	@# imports no other subpackage, and the converter lives in layer 1 (tests/test_layering.py).
-	uv run python -m chemclaw.agent.message_migration
-
-db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on every deploy).
-	@# Not part of `db-migrate`: the migrations are applied once per file and tracked, while the
-	@# grants must be re-applied whenever the schema grows or the runtime role appears. Separate
-	@# targets keep that difference visible; the chart's hook Job runs both, in this order.
-	uv run python -m chemclaw.core.grants
-
-schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
-	uv run python -m chemclaw.cli.schedules
+##@ Validators
 
 kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links, citations).
 	uv run python -m chemclaw.cli.validate_kg
-
-synthesize:  ## Start a memory-synthesis job: KIND=campaign|playbook|optimization|observation-promotion [FRESH=1].
-	@test -n "$(KIND)" || { echo "usage: make synthesize KIND=<kind> [FRESH=1]"; exit 64; }
-	uv run python -m chemclaw.cli.synthesize $(KIND) $(if $(filter 1,$(FRESH)),--fresh,)
 
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
 	uv run python -m chemclaw.evals.harness
@@ -201,16 +136,10 @@ eval-baseline-check:  ## Score the case-set against data/evals/baseline.json and
 	uv run python -m chemclaw.evals.harness --case-set-version $(EVAL_CASE_SET_VERSION) --baseline
 
 eval-baseline:  ## Regenerate data/evals/baseline.json from a scoring run (after a reviewed change).
-# The version is passed, and it has to be: `refresh_baseline` defaults to "unversioned" while
-# `eval-baseline-check` asks for $(EVAL_CASE_SET_VERSION), so the two targets used to disagree and a
-# regenerated baseline failed the very check it was regenerated for. Found by running them in
-# sequence, which is what adding a case makes you do.
 	uv run python -m chemclaw.cli.refresh_baseline --case-set-version $(EVAL_CASE_SET_VERSION)
 
 eln-validate:  ## Validate every enabled ingest source's reactions (RDKit structure + mass balance).
-	@# The validator asks the registry what is attached, so the shipped gate has to say which
-	@# sources it covers. Both file-drop adapters, which is what CI has always checked — a
-	@# deployment runs the same command against its own CHEMCLAW_DATA_SOURCES.
+	@# CI checks the two file-drop adapters; a deployment runs this against its own sources.
 	CHEMCLAW_DATA_SOURCES=eln-json,eln-ord uv run python -m chemclaw.ingest.eln.validate
 
 skill-validate:  ## Validate SKILL.md frontmatter (name/description present, name matches dir).
@@ -228,70 +157,19 @@ sink-validate:  ## Validate the result-sink manifests (drivers resolve, config b
 channel-validate:  ## Validate every delivery-channel manifest against its driver's signature.
 	uv run python -m chemclaw.cli.validate_channels
 
-
-sink-schema:  ## Print the DDL + registry seed a results database needs (apply it yourself).
-	uv run python -m chemclaw.cli.sink_schema --all
-
 template-validate:  ## Validate the step templates (steps, references, tools/jobs/profiles named).
 	uv run python -m chemclaw.cli.validate_templates
-
-connectors:  ## Run every enabled local connector's FastAPI app in one dev process.
-	uv run python -m chemclaw.cli.connectors_dev
 
 prose-validate:  ## Check the agent's prose only names tools that exist (gap IDEA-7).
 	uv run python -m chemclaw.cli.validate_prose_contract
 
 helm-validate:  ## Render the Helm chart and validate it against the Kubernetes schemas.
-	@# `-ignore-missing-schemas` is required, not a relaxation of convenience: the chart renders an
-	@# OpenShift `route.openshift.io/v1 Route`, and no JSON schema for it exists in kubeconform's
-	@# defaults or in the datreeio CRDs catalog (both paths return 404). Without the flag this
-	@# target can never pass — which is why it had never been seen to: the only workflow that ran
-	@# it was stranded where GitHub Actions does not read (D-117).
-	@#
-	@# The flag skips a kind rather than failing it, so `tests/test_deploy_chart.py` pins exactly
-	@# which kinds the chart renders. A new unvalidated CRD is then a deliberate edit to that test,
-	@# not something that slips through as "skipped".
+	@# -ignore-missing-schemas: no schema exists for OpenShift's Route; tests/test_deploy_chart.py pins
+	@# the rendered kinds. The second render turns on every off-by-default switch (derived and checked
+	@# by tests/test_deploy_chart.py::test_the_union_render_covers_every_switch_this_chart_ships_off).
 	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v promtool >/dev/null || { echo "promtool not installed - see docs/guides/runbook.md"; exit 1; }
-	@# `--set networkPolicy.allowAnyDestination=true` because the chart refuses to render until a
-	@# release states where its pods may talk (`templates/networkpolicy.yaml`), and
-	@# `--set retention.unboundedGrowthAccepted=true` because it refuses until a release states what
-	@# happens to the durable tables' history (`templates/config.yaml`). A validation render has
-	@# neither destinations nor windows to enumerate, so it takes both escape hatches explicitly —
-	@# the same sentences an operator has to write, which is why the flags are visible here.
-	@#
-	@# `--set temporal.namespace=chemclaw` is the third, and it is not an escape hatch: it is the
-	@# value itself, because there is no safe default for it. The chart used to ship the constant
-	@# `"chemclaw"` against an address naming a *cluster-shared* broker, so two releases landed on
-	@# one namespace, one task queue and one schedule-id space — measured, a peer's `helm upgrade`
-	@# rewrote `eln-sync` to another workflow type and interval and `_prune` deleted its
-	@# `eval-drift` outright. `chemclaw` is what a validation render passes because it reproduces
-	@# the old behaviour exactly; a real release states its own.
-	@#
-	@# Twice, and the second render is the point: every switch this chart ships **off** was
-	@# validated by nobody. `mcpFace.enabled` rendered a Deployment mounting a volume the pod did
-	@# not declare and `monitoring.temporalSdkMetrics.enabled` rendered a container port name one
-	@# character over the Kubernetes limit — both behind flags no gate had ever set, so the first
-	@# thing that saw either was an operator's `helm upgrade`. The union render rather than one per
-	@# flag: the flags are independent, so turning them all on covers each of them and costs one
-	@# kubeconform invocation instead of three. (Neither of those two defects is one kubeconform can
-	@# *see* — both are cross-field invariants no OpenAPI schema expresses. They are caught by
-	@# `tests/test_deploy_chart.py`'s rendered-chart assertions, which walk the same variant set.
-	@# What this arm adds is that a template behind an off-by-default flag is at least rendered and
-	@# schema-checked at all.)
-	@#
-	@# **This list is a literal and the claim above it is not self-maintaining**, which is why
-	@# `tests/test_deploy_chart.py::test_the_union_render_covers_every_switch_this_chart_ships_off`
-	@# derives the real set from `values.yaml` and fails on this line the day a switch is added. It
-	@# shipped covering three of six; `secrets.create` and `mcpFace.route.enabled` were rendered by
-	@# nothing in `tests/`, this file or `.github/`. The two `--set`s after `alertmanager.enabled`
-	@# are its prerequisites, not extra coverage: that template refuses to render with no receivers.
-	@# `mcpFace.ingressNamespaces` is the same kind of prerequisite for `mcpFace.route.enabled`, and
-	@# it was added *by* this render failing: publishing the face with an empty peer list renders a
-	@# Route to an address the chart's own `mcp-face-ingress` policy drops, which the template now
-	@# refuses. That refusal landing here first is the union arm working — it is the only thing in
-	@# the tree that had ever set that switch.
 	@set -e; \
 	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
@@ -302,17 +180,8 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	        -schema-location default -schema-location \
 	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
 	  done
-	@# The externally-hosted connector (D-2026-08-09-a-connector-we-do-not-run), rendered because
-	@# no shipped bundle sets `url` and so the default render above never takes that branch. Every
-	@# other check on it reads the template *text*, which cannot see a `{{- if }}` nesting mistake;
-	@# this is the only place the behaviour itself is exercised. `molfp` is an arbitrary choice —
-	@# any bundle with an `endpoint:` proves the same three things.
-	@# Matched with `case`, never `printf | grep -q` — under this file's `.SHELLFLAGS` (`-o
-	@# pipefail`, line 16) that pipeline reports a *match* as a failure: `grep -q` exits the moment
-	@# it matches, `printf` then dies of EPIPE, and pipefail takes the pipeline's status from it.
-	@# Worse, it is size-dependent, so it passed against a small stub here and failed in CI on the
-	@# real render — the output has to be long enough for grep to leave before printf finishes.
-	@# `case` reads the variable in-process: no subprocess, no pipe, nothing to race.
+	@# An externally hosted connector gets no pods and is dialled at its URL; `case`, not grep -q,
+	@# because grep -q under pipefail reports a match as a failure.
 	@set -e; \
 	  render=$$(helm template chemclaw deploy/helm/chemclaw \
 	    --set networkPolicy.allowAnyDestination=true \
@@ -326,23 +195,8 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  case "$$render" in *chemclaw-connector-rxnfp*) ;; *) \
 	    echo "FAIL: overriding one connector removed another's pods"; exit 1;; esac; \
 	  echo "external-connector render OK: no pods, dialled at the given URL, siblings untouched"
-	@# The PromQL, which nothing checked. `kubeconform` validates that `expr` is a *string*, not
-	@# that the string parses — so a syntax error in a rule is accepted here, accepted by the API
-	@# server, and then rejected by Prometheus at rule-group load, taking the **whole group** with
-	@# it. That failure is silent from the cluster's side: the object exists and is `Valid` by every
-	@# check this repo ran, and the alerts in it simply never evaluate.
-	@#
-	@# Three renders, because a rule behind a flag is a rule nothing else parses: the shipped
-	@# defaults, the one with the Temporal SDK exporter on (the only shape that renders
-	@# `ChemclawWorkerNotPolling`), and one that *states retention windows* rather than accepting
-	@# unbounded growth — `ChemclawRetentionNotSweeping` renders only on that arm, because with the
-	@# growth accepted there is no sweep to be absent, so the two renders above parse every rule in
-	@# the file except that one. It is a separate invocation rather than a third arm of the loop,
-	@# because the chart refuses a release that states *both* postures — which is the guard
-	@# working — so the two arms cannot share a prefix with it.
-	@# The dashboards go through the same check for the same reason at
-	@# one remove — over a hundred panel queries that no other gate reads, where a mistyped one is a
-	@# blank panel rather than an error.
+	@# promtool parses every alert and dashboard query; kubeconform only sees a string. The third render
+	@# states retention windows, the only shape that renders ChemclawRetentionNotSweeping.
 	@set -e; \
 	  work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
 	  printf '%s\n' "$$PROMQL_FROM_RENDER" > "$$work/extract.py"; \
@@ -365,94 +219,72 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
 	  promtool check rules "$$work/rules.yaml"
 
-upstream-check:  ## Re-check every upstream shape this repo borrows (run on any langchain/langgraph/deepagents bump).
-	@# The whole point of `tests/test_upstream_surface.py` is that a dependency bump becomes one
-	@# conversation instead of six surprises, and that only works if somebody runs it *at* the bump.
-	@# It is in the suite too, so this is a shortcut rather than a second gate — but a named target
-	@# is what a bump checklist can point at. Two of its assertions check an *absence* (the MCP call
-	@# timeout, the unreadable run counter), so a failure here can mean "upstream fixed it, go and
-	@# delete our workaround" as easily as "upstream broke us".
-	uv run pytest tests/test_upstream_surface.py -q
-	@uv run python -c "import importlib.metadata as m; print('resolved: ' + ', '.join(f\"{p}=={m.version(p)}\" for p in ('langchain','langchain-core','langgraph','langgraph-checkpoint','deepagents','langchain-mcp-adapters')))"
+kind-validate:  ## Offline: render the chart with deploy/kind/values-kind.yaml + the fleet, schema-check all of it.
+	@# Strict, without -ignore-missing-schemas: a kind cluster has no CRD the default schemas lack.
+	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
+	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
+	@command -v kubectl >/dev/null || { echo "kubectl not installed (render-fleet.sh uses kubectl kustomize)"; exit 1; }
+	helm template chemclaw deploy/helm/chemclaw --namespace chemclaw -f deploy/kind/values-kind.yaml \
+	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
+	helm template chemclaw deploy/helm/chemclaw --namespace chemclaw -f deploy/kind/values-kind.yaml \
+	  -f deploy/kind/values-kind-oidc-mock.yaml \
+	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
+	kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) deploy/kind/manifests
+	@set -e; mcp="$${CHEMCLAW_MCP_REPO:-.sibling/Chemclaw3-mcp}"; \
+	  [ -d "$$mcp/servers" ] || { echo "kind-validate: no Chemclaw3-mcp checkout at $$mcp — set CHEMCLAW_MCP_REPO"; exit 1; }; \
+	  bash deploy/kind/render-fleet.sh "$$mcp" kind \
+	    | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
 
-deps-audit:  ## Check the locked dependency closure for known vulnerabilities (supply chain).
-	@# Against the *lockfile* rather than the environment: the exact versions the image installs,
-	@# not whatever happens to be resolved in a developer's venv. `--no-deps` because the export is
-	@# already the fully-resolved set — re-resolving would audit a different closure than ships.
-	@# `.github/workflows/image.yml` runs exactly this, blocking, so a finding is a red build
-	@# rather than a report nobody opens.
-	@#
-	@# **A found vulnerability and an unreachable advisory database are different events, and
-	@# `pip-audit` gives them the same exit code (1).** So the output is classified rather than the
-	@# status trusted. This target joining `make ci` is what forced the question: `make ci` is the
-	@# documented pre-push gate, a laptop on a train has no network, and failing it there teaches
-	@# people to skip the gate. Measured under `unshare -rn`: `uvx` cannot fetch `pip-audit` itself
-	@# (make error 2) or `pip-audit` runs and dies on `requests.exceptions.ConnectionError` (make
-	@# error 1) — the same 1 a real finding exits with.
-	@#
-	@# The answer is asymmetric on purpose. Offline, unreachable is reported and tolerated: the
-	@# developer keeps a usable gate and loses only the check that has no local answer anyway. In
-	@# CI, where the network is a given, unreachable is a **failure** — a silent skip there is a
-	@# supply-chain hole that reads as a green build forever, which is exactly the shape this
-	@# target was added to close. `CI` is the signal because every runner sets it and nothing else
-	@# has to be kept in sync.
-	@#
-	@# A real finding is never mistaken for an outage: `Found N known vulnerabilities` is checked
-	@# first and fails unconditionally, so a connection string appearing in an advisory's text
-	@# cannot buy an exemption.
-	@#
-	@# **The classified bytes are the ones the command produced, held in a variable.** They used to
-	@# be read back from a log file the run piped into with `tee`, and that is a different question:
-	@# `tee`'s own failure was never examined, so a `tee` that could not write left the greps reading
-	@# whatever was already at that fixed, world-writable path. Measured — a real finding, a genuinely
-	@# failing `tee` (read-only mount), and a stale log holding a connection error — the target
-	@# printed "SKIPPED ... unreachable" and exited 0 on a vulnerable lockfile. Capturing removes the
-	@# whole class: there is no second copy of the output that can disagree with the first. The one
-	@# scratch file left is the export, and it is an `mktemp` rather than a fixed name, because a
-	@# predictable path in a shared /tmp is a symlink someone else can plant.
-	@scratch=$$(mktemp -d); trap 'rm -rf "$$scratch"' EXIT; \
-	uv export --no-hashes --no-dev --format requirements-txt > "$$scratch/requirements.txt"; \
-	report=$$(uvx pip-audit --no-deps --disable-pip -r "$$scratch/requirements.txt" 2>&1) && rc=0 || rc=$$?; \
-	printf '%s\n' "$$report"; \
-	if [ $$rc -ne 0 ]; then \
-	  if grep -qE '$(AUDIT_FOUND)' <<<"$$report"; then exit $$rc; fi; \
-	  if ! grep -qE '$(AUDIT_UNREACHABLE)' <<<"$$report"; then exit $$rc; fi; \
-	  if [ -n "$${CI:-}" ]; then \
-	    echo "deps-audit: the advisory database is unreachable and this is CI — the supply-chain"; \
-	    echo "deps-audit: check cannot be skipped where the network is a given. Failing."; \
-	    exit 1; \
-	  fi; \
-	  echo "deps-audit: SKIPPED - the advisory database is unreachable and CI is unset."; \
-	  echo "deps-audit: the lockfile was NOT audited. Re-run with a network before you push."; \
-	fi
+##@ Dev stack
 
-architecture-baseline:  ## Measure the architecture programme's baseline (import, build, prose, sizes) to docs/planning/.
-	uv run python -m chemclaw.cli.architecture_baseline
+up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
+	docker compose -f infra/docker-compose.yml up -d
 
-explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
-	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }
-	uv run python -m chemclaw.cli.explain $(SESSION)
+down:  ## Stop the local dev stack.
+	docker compose -f infra/docker-compose.yml down
 
-user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. Dry run by default.
-	@test -n "$(ACTOR)" || { echo "usage: make user-erase ACTOR=<entra-oid> [APPLY=1]"; exit 64; }
-	@# `APPLY` is compared to the literal `1`, not tested for non-emptiness. `$(if $(APPLY),...)` is
-	@# a *non-empty* test, so `APPLY=0` and `APPLY=false` both read as true — and this is the one
-	@# irreversible target in the file, where "I explicitly said no" must not commit a deletion.
-	@# Anything other than `1` is a dry run, and an unrecognised value says so rather than guessing.
-	@case "$(APPLY)" in \
-	  ""|1) ;; \
-	  *) echo "user-erase: APPLY=$(APPLY) is not 1 — running as a dry run. Use APPLY=1 to commit." ;; \
-	esac
-	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
+db-migrate:  ## Apply infra/sql migrations to the configured database.
+	uv run python -m chemclaw.core.migrate
+	@# A second command: the kernel imports no other subpackage, and the converter is layer 1.
+	uv run python -m chemclaw.agent.message_migration
 
-rekey-compounds:  ## Carry compound notes and fingerprint rows across a standardization bump [APPLY=1 [DISPOSE=1]]. Preview by default.
-	@# The same `APPLY` rule as `user-erase`: only the literal `1` writes, so `APPLY=0` previews.
-	@# `DISPOSE=1` adds the superseded-generation disposal, which the CLI refuses without `--apply`.
-	@case "$(APPLY)" in \
-	  ""|1) ;; \
-	  *) echo "rekey-compounds: APPLY=$(APPLY) is not 1 — previewing. Use APPLY=1 to write." ;; \
-	esac
-	uv run python -m chemclaw.cli.rekey_compounds $(if $(filter 1,$(APPLY)),--apply,) $(if $(filter 1,$(DISPOSE)),--dispose-superseded,)
+db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on every deploy).
+	@# Separate from db-migrate: migrations apply once, grants re-apply whenever the schema grows.
+	uv run python -m chemclaw.core.grants
+
+schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
+	uv run python -m chemclaw.cli.schedules
+
+connectors:  ## Run every enabled local connector's FastAPI app in one dev process.
+	uv run python -m chemclaw.cli.connectors_dev
+
+chat:  ## Chat with the agent from the terminal (admin/testing; needs CHEMCLAW_LLM_BASE_URL up).
+	@# The local lane's gateway is the loopback mock, which every model-calling process refuses unless allowed.
+	CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=$${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY:-true} uv run chemclaw --admin
+
+phoenix-up:  ## Start Phoenix, the eval lane's trace + experiment backend (UI on :6006).
+	docker compose -f infra/docker-compose.observability.yml up -d
+
+phoenix-down:  ## Stop Phoenix.
+	docker compose -f infra/docker-compose.observability.yml down
+
+kind-up:  ## The whole system on a local kind cluster: production images + chart, then a smoke (deploy/kind/).
+	bash deploy/kind/up.sh up
+
+kind-down:  ## Delete the local kind cluster and everything in it.
+	bash deploy/kind/up.sh down
+
+kind-status:  ## Pods, jobs, the release and the host URLs of the local kind cluster.
+	bash deploy/kind/up.sh status
+
+kind-smoke:  ## Re-run the kind cluster's smoke: /healthz, /readyz, UI, a mock-LLM turn, a durable job.
+	bash deploy/kind/up.sh smoke
+
+##@ Data jobs
+
+synthesize:  ## Start a memory-synthesis job: KIND=campaign|playbook|optimization|observation-promotion [FRESH=1].
+	@test -n "$(KIND)" || { echo "usage: make synthesize KIND=<kind> [FRESH=1]"; exit 64; }
+	uv run python -m chemclaw.cli.synthesize $(KIND) $(if $(filter 1,$(FRESH)),--fresh,)
 
 reindex:  ## Incrementally rebuild the derived note index — only notes changed since last run.
 	uv run python -m chemclaw.retrieval.vector_index
@@ -460,10 +292,6 @@ reindex:  ## Incrementally rebuild the derived note index — only notes changed
 reindex-full:  ## Full note-index rebuild, ignoring stored fingerprints (recovery only).
 	uv run python -m chemclaw.retrieval.vector_index --full
 
-# The `@test -n` guard is the one `explain`, `user-erase` and `synthesize` already carry: a bare
-# invocation expands the variable to nothing, and argparse then reports a missing positional under
-# `make: *** Error 2` rather than saying which variable to set. Same `exit 64` (EX_USAGE) as those
-# three, so the three that guard and the three that did not now answer alike.
 share-estimate:  ## Cost a mounted document share before indexing it (reads nothing). SHARE=<source>
 	@test -n "$(SHARE)" || { echo "usage: make share-estimate SHARE=<source>"; exit 64; }
 	uv run python -m chemclaw.cli.sync_share $(SHARE) --dry-run
@@ -472,31 +300,34 @@ share-sync:  ## Crawl a mounted document share into the document index now. SHAR
 	@test -n "$(SHARE)" || { echo "usage: make share-sync SHARE=<source>"; exit 64; }
 	uv run python -m chemclaw.cli.sync_share $(SHARE)
 
-up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
-	docker compose -f infra/docker-compose.yml up -d
+# APPLY compares to the literal 1, so APPLY=0 or APPLY=false never writes.
+rekey-compounds:  ## Carry compound notes and fingerprint rows across a standardization bump [APPLY=1 [DISPOSE=1]]. Preview by default.
+	@case "$(APPLY)" in \
+	  ""|1) ;; \
+	  *) echo "rekey-compounds: APPLY=$(APPLY) is not 1 — previewing. Use APPLY=1 to write." ;; \
+	esac
+	uv run python -m chemclaw.cli.rekey_compounds $(if $(filter 1,$(APPLY)),--apply,) $(if $(filter 1,$(DISPOSE)),--dispose-superseded,)
 
-down:  ## Stop the local dev stack.
-	docker compose -f infra/docker-compose.yml down
+user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. Dry run by default.
+	@test -n "$(ACTOR)" || { echo "usage: make user-erase ACTOR=<entra-oid> [APPLY=1]"; exit 64; }
+	@case "$(APPLY)" in \
+	  ""|1) ;; \
+	  *) echo "user-erase: APPLY=$(APPLY) is not 1 — running as a dry run. Use APPLY=1 to commit." ;; \
+	esac
+	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
 
-# The eval lane's reader (AG-13). Separate from `up`/`down` because it is opened deliberately to
-# ask a question about a run, not needed to run anything. `phoenix-publish` takes DIR (a transcript
-# directory) and NAME (what the experiment is called), and calls no model — the transcripts are the
-# record and this reads them.
-phoenix-up:  ## Start Phoenix, the eval lane's trace + experiment backend (UI on :6006).
-	docker compose -f infra/docker-compose.observability.yml up -d
+sink-schema:  ## Print the DDL + registry seed a results database needs (apply it yourself).
+	uv run python -m chemclaw.cli.sink_schema --all
 
-phoenix-down:  ## Stop Phoenix.
-	docker compose -f infra/docker-compose.observability.yml down
+trajectory-census:  ## Count recurring tool-call trajectories over the stored sessions (the distiller's trigger).
+	uv run python -m chemclaw.cli.trajectory_census $(ARGS)
 
-phoenix-publish:  ## Publish an archived probe run to Phoenix. DIR=<transcripts> [NAME=<experiment>]
-	@test -n "$(DIR)" || { echo "usage: make phoenix-publish DIR=<transcripts> [NAME=<experiment>]"; exit 64; }
-	uv run python -m chemclaw.cli.phoenix_publish $(DIR) $(if $(NAME),--name $(NAME),)
+distill:  ## Distil recurring trajectories into skill proposals (dry; ARGS="--propose" to file).
+	uv run python -m chemclaw.cli.distill $(ARGS)
 
-# The live lane. Four targets rather than one, because the stages answer different questions and
-# only the last needs a model credential: `live-infra` provides what `make up` provides where there
-# is no Docker daemon, `live-up` starts the six processes the README has always listed by hand,
-# `live-jobs` proves the durable path (Temporal + workers + Postgres, no LLM), and `live-probes`
-# adds the model on top. Run against a deployment, never on a diff — none of these is in `make ci`.
+##@ Live lane
+
+# Run against a running stack, never in `ci`: they need a front door, a broker or a model gateway.
 
 live-infra:  ## Start Postgres/pgvector + Temporal for the live lane (uses Docker when available).
 	bash infra/live/bootstrap.sh up
@@ -522,158 +353,38 @@ live-e2e-full-stack-down:  ## Stop the four-repo pass.
 live-e2e-full-stack-status:  ## Show which four-repo-pass processes are running.
 	bash infra/live/e2e-full-stack/up.sh status
 
-kind-up:  ## The whole system on a local kind cluster: production images + chart, then a smoke (deploy/kind/).
-	bash deploy/kind/up.sh up
-
-kind-down:  ## Delete the local kind cluster and everything in it.
-	bash deploy/kind/up.sh down
-
-kind-status:  ## Pods, jobs, the release and the host URLs of the local kind cluster.
-	bash deploy/kind/up.sh status
-
-kind-smoke:  ## Re-run the kind cluster's smoke: /healthz, /readyz, UI, a mock-LLM turn, a durable job.
-	bash deploy/kind/up.sh smoke
-
-kind-validate:  ## Offline: render the chart with deploy/kind/values-kind.yaml + the fleet, schema-check all of it.
-	@# What a kind bring-up applies, checked without a cluster: the chart under the kind overlay, the
-	@# dependency manifests, and the fleet as `render-fleet.sh` derives it from a `Chemclaw3-mcp`
-	@# checkout (the live lanes' sibling variable, else `.sibling/Chemclaw3-mcp` as CI checks it
-	@# out). Strict and
-	@# without `-ignore-missing-schemas`: a kind cluster has no CRD the default schemas lack, so an
-	@# OpenShift kind leaking into the overlay fails here rather than at `helm install`.
-	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
-	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
-	@command -v kubectl >/dev/null || { echo "kubectl not installed (render-fleet.sh uses kubectl kustomize)"; exit 1; }
-	helm template chemclaw deploy/helm/chemclaw --namespace chemclaw -f deploy/kind/values-kind.yaml \
-	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
-	helm template chemclaw deploy/helm/chemclaw --namespace chemclaw -f deploy/kind/values-kind.yaml \
-	  -f deploy/kind/values-kind-oidc-mock.yaml \
-	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
-	kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) deploy/kind/manifests
-	@set -e; mcp="$${CHEMCLAW_MCP_REPO:-.sibling/Chemclaw3-mcp}"; \
-	  [ -d "$$mcp/servers" ] || { echo "kind-validate: no Chemclaw3-mcp checkout at $$mcp — set CHEMCLAW_MCP_REPO"; exit 1; }; \
-	  bash deploy/kind/render-fleet.sh "$$mcp" kind \
-	    | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
-
 live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + Postgres; no LLM).
 	uv run python -m chemclaw.cli.live_jobs
 
 live-probes:  ## Ask the running front door the live probe set (exit 3 unreached, 2 ungraded).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
 
-.PHONY: retrieval-arms
-retrieval-arms:  ## Score retrieval configurations against the labelled gold set (needs `make up`).
-	uv run python -m chemclaw.cli.retrieval_arms $(ARGS)
-
-# The cost half of what `live-probes` asks. `make eval` scores `turn_cost_ratio` over committed
-# literals, so no change to the agent can move it; this drives a fixed three-turn workload through
-# the running front door, scores the `turn_costs` rows it actually produced with the same metric,
-# and fails on a worsening drift against the recorded case. Live-lane, never `ci`: it needs a front
-# door and a database. `ARGS="--emit"` re-records the case, deliberately, like `make eval-baseline`.
-live-turn-cost:  ## Score `turn_cost_ratio` over turns this system really ran (exit 3 unreached).
-	uv run python -m chemclaw.cli.live_turn_cost $(ARGS)
-
-# The first number in this repository somebody else can also produce. Everything `make eval` gates
-# is first-party; this asks 100 expert-written, keyed ChemBench questions of a running front door
-# and scores them by comparison rather than by a judge. `ARGS="--profile tools-removed"` is the arm
-# that varies only the tools and `ARGS="--profile skills-removed"` the one that varies only the
-# skills; `ARGS="--profile no-tools"` swaps the system prompt as well and so
-# answers a different question (`D-2026-09-14-tools-were-never-the-variable`).
-# Live-lane, never `ci`: it needs a front door and a model gateway, and it is not a gate —
-# a closed-book chemistry score is a property of the deployment's model, not of a commit.
-live-benchmark:  ## Score this system on the vendored ChemBench subset (exit 3 unreached).
-	uv run python -m chemclaw.cli.live_benchmark $(ARGS)
-
-# The half of `template-validate` that needs a session. `make template-validate` reads a tool's
-# parameters out of this tree and cannot answer for a bundle we declare and do not run — seven
-# shipped steps, reported by name as `unchecked_arguments` and unchecked. This opens the real
-# connectors and checks the same arguments against what each running server advertises. Live-lane,
-# never `ci`: `ci` must stay offline, and the row that asked for this proposed `connector-validate`,
-# which is inside `ci` and would have answered `[]` for exactly those bundles.
-# Exit 3 (not 1) means it could not reach something — reported, never counted as checked.
-live-template-args:  ## Check every template's tool arguments against the running connector servers.
-	uv run python -m chemclaw.cli.validate_template_args_live $(ARGS)
-
-live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the threshold (needs a model credential).
-	uv run python -m chemclaw.cli.verifier_margin $(ARGS)
-
-trajectory-census:  ## Count recurring tool-call trajectories over the stored sessions (the distiller's trigger).
-	uv run python -m chemclaw.cli.trajectory_census $(ARGS)
-
-# The consumer that census never had. Mines the same corpus, applies the self-confirmation guard
-# — a trajectory that recurs only where a skill of that name was already acting is not evidence
-# for proposing it — and files what survives into the proposal queue for its owner to decide.
-#
-# **On demand and never on a timer**, the rule `CLAUDE.md` states and the campaign and playbook
-# miners already follow. Dry by default: `ARGS="--propose"` is what writes.
-distill:  ## Distil recurring trajectories into skill proposals (dry; ARGS="--propose" to file).
-	uv run python -m chemclaw.cli.distill $(ARGS)
-
-# The other proposer, and the honest one to read the help for: an accepted profile proposal is a
-# *record* that somebody wants one, because a profile is git-resident and no route can commit.
-propose-profile:  ## Propose an agent profile from observed tool co-occurrence (dry; ARGS="--propose").
-	uv run python -m chemclaw.cli.propose_profile $(ARGS)
-
-# The corpus half of the same question `live-probes` asks of the model: not "did a tool answer"
-# but "is the number in the answer the number in the paper". Checks every published measurement
-# against what actually arrived, value by value. No model, for the reason `live-jobs` gives: a
-# graded answer cannot separate a corpus that never held the data from a model that did not look
-# for it. `ARGS="--corpus-only"` drops the Postgres half and needs no infrastructure at all.
-#
-# **It does not backfill by default, deliberately.** Making the seeded corpus reachable is a
-# once-per-bring-up job that `infra/live/e2e-full-stack/up.sh` starts, and it takes over two hours
-# (a PR-gate proposal costs ~1.8 s and there are 4,251 records). Re-running it on every check would
-# re-walk all of them for no new rows. `ARGS="--backfill"` when you need it back.
-live-data:  ## Check the seeded corpus against the published factor tables, value by value.
-	uv run python -m chemclaw.cli.live_data $(ARGS)
-
-# The two M12 re-validation suites. Separate targets rather than one, because each needs the
-# stack configured a *different* way and no single invocation can hold both: the plan gate needs
-# `CHEMCLAW_HARNESS_AUTONOMY=plan_only`, and the ordering check needs the durable broker
-# deliberately stopped. Each exits non-zero on a failed check or on one it could not take.
-#
-# There was a third, `live-routing`. It measured the specialist team's routing accuracy, and
-# D-2026-08-15 deleted the team, the challenge panel and that measurement together. The target
-# outlived its suite and failed at argparse — `invalid choice: 'routing'` — so it is gone too.
-
-# The measurement that asks what the control arm costs, by asking the same questions twice. The
-# control arm is a *profile*, so it is the front door that needs `data/evals/profiles` on its
-# profile path, not this client — `infra/live/processes.sh` puts it there, and the suite checks the
-# front door accepted the profile before it spends anything, because a run whose control arm
-# quietly fell back to the default agent would produce a report comparing one agent with itself.
-#
-# **It is not yet a tools measurement.** `_AB_BASELINE_PROFILE` is `no-tools`, which swaps the
-# system prompt as well as emptying the tool set, so a delta from this target is a prompt-and-tools
-# delta (`D-2026-09-14-tools-were-never-the-variable`). Re-running it against `tools-removed` is
-# the open row in `docs/planning/BACKLOG.md`.
 live-ab:  ## Ask the probe corpus against the prompt-swapping control arm and compare (real gateway).
 	uv run python -m chemclaw.cli.live_probes --suite ab $(ARGS)
 
-# The delegation experiment's run half (issue #359). Four arms over `data/evals/probes/delegation.
-# yaml`, `MINIMUM_REPEATS` repeats each, one report per arm against the `no-helper` baseline.
-#
-# **Two of the four arms need the front door started a particular way and no flag here can do it**:
-# `helper-routed` needs `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` and `peer` needs
-# `CHEMCLAW_AGENT_PEER_ROSTER` naming another profile, because a helper's model route and a peer
-# roster are read by the process that builds the agent. The suite prints what each arm needs and
-# reports an arm that could not have complied as `undelegated` rather than as a pass.
-#
-# Against `chemclaw.cli.mock_llm --catalogue delegation` this proves the runner and nothing else:
-# the double supplies the decision to delegate, which is the one thing a credential-free lane cannot
-# get from a model. Answering "does delegation pay" needs a gateway.
 live-delegation:  ## The delegation experiment: drive every arm and compare (real gateway).
 	uv run python -m chemclaw.cli.live_probes --suite delegation $(ARGS)
-
-# Needs no gateway and no credential: the judge is simulated, which is what makes the ground truth
-# constructed and the null controllable. It measures the ranking machinery, not a model's judgement.
-hypothesis-recovery:  ## Reproduce the ADR's tournament-recovery table against a null control.
-	uv run python -m chemclaw.cli.hypothesis_recovery $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)
 
 live-degradation:  ## M12: capability_degraded must precede the first token (run with Temporal stopped).
 	uv run python -m chemclaw.cli.live_probes --suite degradation $(ARGS)
+
+live-turn-cost:  ## Score `turn_cost_ratio` over turns this system really ran (exit 3 unreached).
+	uv run python -m chemclaw.cli.live_turn_cost $(ARGS)
+
+live-benchmark:  ## Score this system on the vendored ChemBench subset (exit 3 unreached).
+	uv run python -m chemclaw.cli.live_benchmark $(ARGS)
+
+live-template-args:  ## Check every template's tool arguments against the running connector servers.
+	uv run python -m chemclaw.cli.validate_template_args_live $(ARGS)
+
+live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the threshold (needs a model credential).
+	uv run python -m chemclaw.cli.verifier_margin $(ARGS)
+
+live-data:  ## Check the seeded corpus against the published factor tables, value by value.
+	uv run python -m chemclaw.cli.live_data $(ARGS)
 
 live-storm:  ## Stress, chaos and adversarial pass against the live stack — mock model, no LLM calls.
 	uv run python -m chemclaw.cli.live_storm $(ARGS)
@@ -683,3 +394,19 @@ live-soak:  ## Repeat the storm for hours and fit what drifts; checkpointed, so 
 
 live-soak-report:  ## Fit every series in the soak record so far.
 	bash infra/live/soak.sh report
+
+retrieval-arms:  ## Score retrieval configurations against the labelled gold set (needs `make up`).
+	uv run python -m chemclaw.cli.retrieval_arms $(ARGS)
+
+hypothesis-recovery:  ## Reproduce the ADR's tournament-recovery table against a null control.
+	uv run python -m chemclaw.cli.hypothesis_recovery $(ARGS)
+
+phoenix-publish:  ## Publish an archived probe run to Phoenix. DIR=<transcripts> [NAME=<experiment>]
+	@test -n "$(DIR)" || { echo "usage: make phoenix-publish DIR=<transcripts> [NAME=<experiment>]"; exit 64; }
+	uv run python -m chemclaw.cli.phoenix_publish $(DIR) $(if $(NAME),--name $(NAME),)
+
+##@ Tools
+
+explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
+	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }
+	uv run python -m chemclaw.cli.explain $(SESSION)
