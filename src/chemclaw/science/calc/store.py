@@ -148,7 +148,7 @@ def checked_payload(key: CalculationKey, value: object) -> ResultPayload:
 
     Raises:
         CorruptCacheRow: `value` is not a JSON object, is an empty one, or holds a value the
-        `result` column would reject — each named by the field it sits on.
+            `result` column would reject — each named by the field it sits on.
     """
     if not isinstance(value, dict):
         raise CorruptCacheRow(
@@ -484,7 +484,7 @@ async def cached_compute(
         key: The versioned identity of this calculation.
         compute: Zero-arg coroutine that produces the result on a miss.
         structure_id: The geometry this calculation is about, recorded so the row can be found by
-        it; never used to look up. Empty for a molecule-keyed calculator.
+            it; never used to look up. Empty for a molecule-keyed calculator.
 
     Returns:
         `(result, was_cached)` — `was_cached` is True on a store hit and on a joined in-flight

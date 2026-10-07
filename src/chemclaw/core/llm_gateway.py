@@ -24,9 +24,9 @@ def _gateway_cannot_leave_this_pod() -> bool:
 
     `is_loopback_url`, plus the unspecified address: as a destination it connects to the local host,
     while the shared predicate must keep treating it as non-loopback for binds. Normalised here so
-    the
-    front door's unauthenticated-bind refusal is not weakened. (Addresses are described rather than
-    written as URLs because `tests/test_no_egress.py` scans this file's text for host literals.)
+    the front door's unauthenticated-bind refusal is not weakened. (Addresses are described rather
+    than written as URLs because `tests/test_no_egress.py` scans this file's text for host
+    literals.)
     """
     if is_loopback_url(settings.llm_base_url):
         return True
@@ -43,13 +43,11 @@ def refuse_unconfigured_llm_gateway() -> None:
 
     `llm_base_url` defaults to the local mock (`chemclaw.cli.mock_llm`) so a fresh checkout needs no
     credential; a deployment that forgot to override it should fail at boot, not on a chemist's
-    first
-    question or inside a retry loop. The dev posture is stated explicitly with
+    first question or inside a retry loop. The dev posture is stated explicitly with
     `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY` (set by `make chat`, the live lane and the test suite,
-    never
-    by `.env.example`), so every process kind asks the same question regardless of how it binds. A
-    same-pod gateway sidecar on loopback sets that flag too. An empty URL is already refused by the
-    `Settings` validator. "Loopback" here is `_gateway_cannot_leave_this_pod`.
+    never by `.env.example`), so every process kind asks the same question regardless of how it
+    binds. A same-pod gateway sidecar on loopback sets that flag too. An empty URL is already
+    refused by the `Settings` validator. "Loopback" here is `_gateway_cannot_leave_this_pod`.
 
     Raises:
         RuntimeError: naming the address, why it cannot be right, and the two edits that proceed.

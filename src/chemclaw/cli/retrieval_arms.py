@@ -27,8 +27,8 @@ import yaml
 from chemclaw.core.config import settings
 from chemclaw.evals.probe import Probe, ProbeSet
 
-# : The default arms: the shipped merge, the fusion, and the two remedies `BACKLOG.md` argues about.
-# : Named so one run re-checks each claim.
+#: The default arms: the shipped merge, the fusion, and the two remedies `BACKLOG.md` argues about.
+#: Named so one run re-checks each claim.
 DEFAULT_ARMS: tuple[tuple[str, str, str, str], ...] = (
     ("round-robin, 3 legs (shipped)", "graph,lexical,vector", "graph", ""),
     ("RRF, 3 legs", "graph,lexical,vector", "hybrid", ""),

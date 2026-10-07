@@ -128,7 +128,7 @@ def require_supported_solvents(spec: Any) -> None:
 
     Raises:
         ValueError: One or more named solvents have no ALPB parameters. The message names each,
-        offers the closest supported spellings, and lists the common ones.
+            offers the closest supported spellings, and lists the common ones.
     """
     named: list[str] = list(getattr(spec, "solvents", None) or [])
     single = getattr(spec, "solvent", None)

@@ -103,8 +103,7 @@ async def call_queued_tool(
                 result = await session.call_tool(call.tool, call.arguments)
     except Exception as exc:
         # Any `Exception`: every failure here precedes an answer, and only the attempt count decides
-        # what
-        # happens next.
+        # what happens next.
         final = activity.info().attempt >= settings.queued_tool_fault_attempts
         raise ApplicationError(
             f"{call.tool} could not be sent to {call.connector!r} ({type(exc).__name__}); "

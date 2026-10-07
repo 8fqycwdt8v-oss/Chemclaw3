@@ -34,8 +34,8 @@ from chemclaw.durable.label_sync import LabelSyncOutcome, ReactionLabelWorkflow
 
 logger = logging.getLogger(__name__)
 
-# : A fixed id, so a second bring-up rejoins a running drain instead of racing it on the same rows.
-# : A finished run's id is free again.
+#: A fixed id, so a second bring-up rejoins a running drain instead of racing it on the same rows.
+#: A finished run's id is free again.
 LABEL_DRAIN_ID = "reaction-labels-lane-drain"
 
 # Module-level indirection, so a test swaps the re-key for one over its own stores — the shape

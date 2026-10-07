@@ -59,8 +59,7 @@ class CalcServerError(SubsystemUnavailableError):
     """The calculation server could not be reached, so the calculation never began.
 
     Retryable (a `SubsystemUnavailableError`, absent from `durable/publish.py`'s non-retryable
-    list),
-    unlike a refusal (`CalcToolError`). The message is written for the chemist, because
+    list), unlike a refusal (`CalcToolError`). The message is written for the chemist, because
     `agent/tool_authz.py` hands it to the model verbatim; address and driver text ride on
     `__cause__`.
     """
@@ -78,8 +77,7 @@ class CalcTimeBudgetError(CalcToolError):
     """The calculation server's inline wall clock stopped this calculation before it answered.
 
     Still non-retryable (registered by its own name, since Temporal matches by name): a retry
-    re-runs
-    the same work against the same clock. The distinct name lets a per-item screen record a
+    re-runs the same work against the same clock. The distinct name lets a per-item screen record a
     time-budget stop rather than an input failure, since wall clock depends on load.
     """
 
@@ -90,9 +88,8 @@ class CalcBusyError(AtCapacityError):
     Retryable by construction: `SubsystemUnavailableError`'s hierarchy is asserted absent from
     `_BAD_DATA_TYPES` (`tests/test_publish.py`), so saturation is never failed as bad data. The
     backoff is the activity's (`durable/publish.py::calculation_retry`). The message tells the
-    chemist
-    the molecule is fine and covers both the durable path (automatic retry) and the tool path
-    (none).
+    chemist the molecule is fine and covers both the durable path (automatic retry) and the tool
+    path (none).
     """
 
     server = "calc"
@@ -130,8 +127,8 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
 
     Session mechanics are `core.mcp_session.open_session`'s. This adds the classification: a refused
     credential is bad data (it never fixes itself), an unreachable host is an outage. It is also
-    where
-    backend load is counted, as sessions held, since every remote calculation passes through here.
+    where backend load is counted, as sessions held, since every remote calculation passes through
+    here.
 
     `timeout_seconds` overrides the read bound (default `calc_server_timeout_seconds`) for CREST
     searches, which run minutes to hours; a client bound shorter than the server's wastes the work.
@@ -143,10 +140,8 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             token_env=settings.calc_server_token_env,
             timeout_seconds=timeout_seconds or settings.calc_server_timeout_seconds,
             # The same hook every connector client carries: trace context, correlation id, actor and
-            # session,
-            # plus the origin-strip guard that removes them on a cross-origin redirect (this client
-            # follows
-            # redirects).
+            # session, plus the origin-strip guard that removes them on a cross-origin redirect
+            # (this client follows redirects).
             request_hook=turn_identity_hook(settings.calc_server_url),
         ) as session:
             yield session
@@ -185,8 +180,7 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
         return await invoke(session, tool, arguments)
     except McpAtCapacity as exc:
         # Must precede `McpRequestRefused`, its base class. A full pod is the gate working, so it
-        # gets its
-        # own saturation counter rather than the `degraded` outage series.
+        # gets its own saturation counter rather than the `degraded` outage series.
         record_metric(
             lambda m: m.increment("chemclaw_calc_backend_at_capacity_total", labels={"tool": tool})
         )
@@ -266,8 +260,7 @@ async def remote_key(
 
     `None` when the server reports no derivable key; `cached_remote` treats that as a miswiring. The
     key arrives as its four parts, not the flat string, because a real `calc_version` can contain
-    both
-    `@` and `:`.
+    both `@` and `:`.
     """
     identity = await _identity(session, tool, arguments)
     key = identity.get("key")
@@ -275,8 +268,7 @@ async def remote_key(
         return None
     # `CALCULATION_EPOCH` is folded into `params_hash` here, because these keys are rebuilt field by
     # field rather than through `CalculationKey.build`; bumping it invalidates every `calc` row
-    # without
-    # touching the server's notion of identity.
+    # without touching the server's notion of identity.
     try:
         return KeyedCalculation(
             key=CalculationKey(

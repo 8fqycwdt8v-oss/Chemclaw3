@@ -261,10 +261,8 @@ class DetachableTurn:
         """Log a pump that ended by raising, and retrieve its exception so asyncio stays quiet.
 
         `run_turn` turns every `Exception` into an error event, so anything reaching here was above
-        it. A
-        done callback is the one hook that fires on every ending, reader or not. `CancelledError` is
-        the
-        ordinary stop path and is excluded.
+        it. A done callback is the one hook that fires on every ending, reader or not.
+        `CancelledError` is the ordinary stop path and is excluded.
         """
         if task.cancelled():
             return
@@ -360,7 +358,7 @@ class DetachableTurn:
         """Stop the turn in `grace` seconds unless one of `resumers` reattaches first.
 
         A discarded page stops its turn, but at unload a reload looks like a close, so the stop
-        waits (`D-2026-10-03-an-unload-stop-waits-for-a-reload`).
+        waits.
 
         `True` when a window is pending after this call — new or already pending, whose deadline is
         not moved, so repeating the stop cannot keep a turn alive. `False` when no window may be

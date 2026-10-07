@@ -34,10 +34,8 @@ class XtbJobResult(BaseModel):
     kind: str
     summary: str
     # The calculation keys this job reached, for the envelope to carry and a note to cite. Additive
-    # and
-    # defaulted (as are the members below): this crosses the Temporal wire, so a result decoded from
-    # an
-    # older history simply has none.
+    # and defaulted (as are the members below): this crosses the Temporal wire, so a result decoded
+    # from an older history simply has none.
     calc_refs: list[str] = Field(default_factory=list)
     reaction: ReactionEnergyResult | None = None
     solvents: SolventComparisonResult | None = None
@@ -60,10 +58,9 @@ class XtbJobResult(BaseModel):
 
         The envelope's class name is always `XtbJobResult`, so consumers that want the science (e.g.
         `chemclaw.publish`) must ask this instead. Members are recognised by type (a `BaseModel`;
-        the
-        envelope's own fields are not), so a new result shape is one field and nothing else. Pure,
-        because
-        `CalcJobWorkflow` calls it in workflow code that must replay deterministically.
+        the envelope's own fields are not), so a new result shape is one field and nothing else.
+        Pure, because `CalcJobWorkflow` calls it in workflow code that must replay
+        deterministically.
 
         Raises:
             ValueError: if the envelope carries no member or more than one.

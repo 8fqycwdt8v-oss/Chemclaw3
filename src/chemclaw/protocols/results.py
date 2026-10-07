@@ -47,8 +47,7 @@ class ArmResult(BaseModel):
     arm_id: str = Field(min_length=1)
     outcome: str = Field(min_length=1)
     # Finite, because the store is append-only: a NaN would land permanently and reach a surrogate
-    # as
-    # a measured value.
+    # as a measured value.
     value: float = Field(allow_inf_nan=False)
     # As `core/units` spells it. Carried rather than assumed: a yield in percent and an assay in
     # mg/mL are both numbers, and only one of them is comparable to a specification limit.

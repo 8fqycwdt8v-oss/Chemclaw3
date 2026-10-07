@@ -178,7 +178,6 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
     return list(units.values())
 
 
-
 def _summary(candidate: PlaybookCandidate, reactions: dict[str, OrdReaction]) -> str:
     """What the miner actually found: a recurrence, its projects and a representative reaction.
 

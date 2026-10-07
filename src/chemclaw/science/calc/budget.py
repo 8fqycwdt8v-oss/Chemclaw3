@@ -34,7 +34,7 @@ def estimate_units(species: int, *, level: ReactionLevel = "standard") -> int:
 
     Args:
         species: How many distinct molecules the fan-out covers — tautomers, microstates,
-        stereoisomers, ensemble members, or the parent-and-fragments of each bond in a survey.
+            stereoisomers, ensemble members, or the parent-and-fragments of each bond in a survey.
         level: `quick`, `standard` or `thorough`, as the reaction composites take it.
 
     Returns:
@@ -90,7 +90,7 @@ def require_hessian_affordable(atom_count: int, what: str) -> None:
 
     Raises:
         ValueError: the molecule has more atoms than `calc_hessian_max_atoms` allows. Non-retryable
-        by `durable/publish.py::BAD_DATA_RETRY`.
+            by `durable/publish.py::BAD_DATA_RETRY`.
     """
     ceiling = settings.calc_hessian_max_atoms
     if atom_count <= ceiling:

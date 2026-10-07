@@ -85,8 +85,7 @@ def _fuse_by_corpus(
     for corpus, chunks in zip(corpora, ranked_lists, strict=True):
         grouped.setdefault(corpus, []).append(chunks)
         # Each list's tier, read off its chunks. An empty list is skipped so it cannot pull its
-        # corpus's
-        # mean weight toward neutral.
+        # corpus's mean weight toward neutral.
         tiers.setdefault(corpus, [])
         tiers[corpus].extend({(weights or {}).get(chunk.retriever, 1.0) for chunk in chunks})
     fused_per_corpus = {
@@ -94,14 +93,12 @@ def _fuse_by_corpus(
         for corpus, lists in grouped.items()
     }
     # The cross-corpus stage reuses the same body keyed by corpus name, written into `retriever` on
-    # a
-    # copy: the chunk a caller receives must still name the leg that found it.
+    # a copy: the chunk a caller receives must still name the leg that found it.
     relabelled: list[list[EvidenceChunk]] = []
     corpus_weights: dict[str, float] = {}
     for corpus, chunks in fused_per_corpus.items():
         # `or [1.0]` only for a corpus whose legs all came back empty: it has no chunk to weight,
-        # and this
-        # avoids a `ZeroDivisionError`.
+        # and this avoids a `ZeroDivisionError`.
         weighted = tiers[corpus] or [1.0]
         corpus_weights[corpus] = sum(weighted) / len(weighted)
         relabelled.append([chunk.model_copy(update={"retriever": corpus}) for chunk in chunks])

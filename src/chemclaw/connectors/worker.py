@@ -48,20 +48,16 @@ async def run_bundle_worker(connector: str) -> None:
         # here.
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
         # Unset, temporalio admits 100 concurrent activities, more than the CPU or the Postgres pool
-        # can
-        # serve. A bundle whose activities are long waits (e.g. `calc`) raises it in the chart,
-        # beside the
-        # memory that bounds it.
+        # can serve. A bundle whose activities are long waits (e.g. `calc`) raises it in the chart,
+        # beside the memory that bounds it.
         max_concurrent_activities=settings.worker_max_concurrent_activities,
         # The workflow cache ceiling matters most here: child workflows that core starts
         # (`durable/connector_job.py`, `hypothesis_tournament.py`, `template_activities.py`) run on
-        # the
-        # bundle's queue, so their state is cached in this process.
+        # the bundle's queue, so their state is cached in this process.
         max_cached_workflows=settings.worker_max_cached_workflows,
         # Binds every activity to the turn that asked for it and records it in and out
         # (`durable/interceptor.py`). When span export is on the SDK's OpenTelemetry interceptor
-        # makes a
-        # durable job a child span of the launching turn.
+        # makes a durable job a child span of the launching turn.
         interceptors=worker_interceptors(),
     )
     logger.info("%s connector worker connected: queue=%s %s", connector, queue, describe(queue))

@@ -82,10 +82,8 @@ class _PostgresCursor:
 
         The JSON wrapping is a dialect fact, so it lives in the driver rather than the row builder
         (psycopg cannot adapt a bare `dict`; another driver may want a JSON string). Server
-        programming
-        errors become `WarehouseQueryError` (non-retryable, the fix is DDL); connection failures
-        pass
-        through as retryable.
+        programming errors become `WarehouseQueryError` (non-retryable, the fix is DDL); connection
+        failures pass through as retryable.
         """
         with _mapped_errors():
             await self._cursor.execute(sql, _adapted(params))
@@ -95,10 +93,10 @@ class _PostgresCursor:
 
         The optional half of the cursor seam (`warehouse.driver.BatchingCursor`): optional because a
         `runtime_checkable` check tests member presence, and site-written drivers need not implement
-        it.
-        Adaptation and error mapping are `execute`'s. psycopg wraps the whole set in one implicit
-        transaction even on an autocommit connection, so a failing set leaves none of its rows; the
-        grain of "partial" is a statement, which `SqlResultSink` relies on when it replays a group.
+        it. Adaptation and error mapping are `execute`'s. psycopg wraps the whole set in one
+        implicit transaction even on an autocommit connection, so a failing set leaves none of its
+        rows; the grain of "partial" is a statement, which `SqlResultSink` relies on when it replays
+        a group.
         """
         with _mapped_errors():
             await self._cursor.executemany(sql, [_adapted(params) for params in params_seq])
@@ -137,8 +135,8 @@ class PostgresWarehouse:
         """
         if not 1 <= query_timeout_seconds <= 3600:
             # `statement_timeout=0` means no timeout, so an out-of-range value would disable the
-            # bound. The
-            # driver checks its own keyword because its signature is the binding's schema.
+            # bound. The driver checks its own keyword because its signature is the binding's
+            # schema.
             raise SinkConnectionError(
                 "`query_timeout_seconds` must be between 1 and 3600; "
                 f"got {query_timeout_seconds}, and 0 means no statement timeout at all"
@@ -153,8 +151,7 @@ class PostgresWarehouse:
         options = [f"-c statement_timeout={int(query_timeout_seconds * 1000)}"]
         if schema:
             # Checked because it reaches libpq's `options`, which split on whitespace: a schema
-            # carrying a
-            # space could smuggle a second `-c` setting (such as `statement_timeout=0`).
+            # carrying a space could smuggle a second `-c` setting (such as `statement_timeout=0`).
             check_identifier(schema, "connection schema", error=SinkConnectionError)
             options.append(f"-c search_path={schema}")
         self._options = " ".join(options)
@@ -196,10 +193,8 @@ class PostgresWarehouse:
         """
         if self._conn is None or self._conn.closed:
             # Not passed when the site's `dsn` already sets one: a keyword would silently override
-            # it.
-            # `dict[str, Any]` because `connect()` is overloaded and mypy matches `**kwargs` against
-            # each
-            # overload's positional parameters.
+            # it. `dict[str, Any]` because `connect()` is overloaded and mypy matches `**kwargs`
+            # against each overload's positional parameters.
             timeout: dict[str, Any] = (
                 {}
                 if self._dsn and "connect_timeout" in conninfo_to_dict(self._dsn)
@@ -222,8 +217,7 @@ class PostgresWarehouse:
                     **timeout,
                 )
             # Passed explicitly: psycopg keeps no conninfo attribute, and a parts-built driver has
-            # none until
-            # `make_conninfo` builds it.
+            # none until `make_conninfo` builds it.
             register_connection(self._conn, self._conninfo())
         return self._conn
 
@@ -231,8 +225,7 @@ class PostgresWarehouse:
         """The connection string this driver dials, in libpq's own keyword form.
 
         One spelling for `core/db`'s endpoint comparison whichever way the driver was configured,
-        built
-        through `make_conninfo` so parts are quoted as libpq quotes them.
+        built through `make_conninfo` so parts are quoted as libpq quotes them.
         """
         return self._dsn or make_conninfo(**{k: str(v) for k, v in self._parts.items()})
 
@@ -252,8 +245,7 @@ class PostgresWarehouse:
         """A cursor for one statement, released on exit.
 
         `autocommit` is correct here: every statement is an upsert onto a content-addressed key, so
-        a
-        half-failed batch leaves a partial but correct state the outbox retry completes.
+        a half-failed batch leaves a partial but correct state the outbox retry completes.
         """
         conn = await self._connection()
         async with conn.cursor() as cursor:

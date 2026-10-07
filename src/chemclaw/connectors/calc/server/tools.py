@@ -87,8 +87,7 @@ def _version_of(payload: ResultPayload, tool: str) -> str:
     """The `calc_version` a result was computed under, read off the payload rather than derived.
 
     On a cache hit this is the version that produced the number, which is what the ledger must
-    record.
-    Raises rather than defaulting: an empty version collapses the ledger's unique index
+    record. Raises rather than defaulting: an empty version collapses the ledger's unique index
     `(calc_type, calc_version, input_hash)` and lets one version's prediction overwrite another's.
     """
     version = payload.get("calc_version")
@@ -119,20 +118,16 @@ async def _log_prediction(
     """Record a prediction for later reconciliation against a measurement.
 
     Hooked at the tool layer, where a prediction becomes advice a chemist acts on. The subject key
-    is
-    the canonical SMILES so a measurement of the same molecule meets its prediction. Its
-    `input_hash`
-    is `stable_hash(smiles)`, not the calculation cache's `molecule_hash`; the two tables do not
-    join
-    on that column.
+    is the canonical SMILES so a measurement of the same molecule meets its prediction. Its
+    `input_hash` is `stable_hash(smiles)`, not the calculation cache's `molecule_hash`; the two
+    tables do not join on that column.
     """
     canonical = canonical_smiles(smiles)
     await record_prediction(
         PredictionRecord(
             calc_type=calc_type,
             # Required for the unique index `(calc_type, calc_version, input_hash)`: without it a
-            # calculator
-            # upgrade overwrites the previous version's prediction.
+            # calculator upgrade overwrites the previous version's prediction.
             calc_version=calc_version,
             input_hash=stable_hash(canonical),
             subject=canonical,
@@ -180,13 +175,12 @@ async def report_measurement(
         kept, and repeating the call will not help.
     """
     # `unit` is refused rather than defaulted (explained here, not in the docstring, which is
-    # re-sent on
-    # every model call): defaulting would record "0.5 mg/mL" as log S = 0.5 and skew the trust
-    # ledger.
+    # re-sent on every model call): defaulting would record "0.5 mg/mL" as log S = 0.5 and skew the
+    # trust ledger.
     canonical = canonical_smiles(smiles)
     # Normalised once and used for every later step, lookup and storage alike: predictions are
-    # logged
-    # under lowercase names, so a measurement stored under another spelling would reconcile nothing.
+    # logged under lowercase names, so a measurement stored under another spelling would reconcile
+    # nothing.
     ledger_property = property_name.strip().lower()
     # The ledger's own unit for this property, against which the reported value is checked.
     calibrated = _CALIBRATED.get(ledger_property)
@@ -203,8 +197,8 @@ async def report_measurement(
         # ledger's unit.
         measured_value = reconcile(measured_value, unit, ledger_unit)
     # Row identity is `(property, input_hash, source)`, so the source is what tells a second
-    # measurement
-    # from a correction. The default keeps the historical spelling so older rows stay one source.
+    # measurement from a correction. The default keeps the historical spelling so older rows stay
+    # one source.
     ledger_source = source.strip() or "chemist-reported"
     input_hash = stable_hash(canonical)
     matched = await record_observation(
@@ -244,10 +238,9 @@ def _measurements_on_file(
     """What the ledger now holds for this property of this molecule, in one sentence.
 
     The write is silently destructive in one direction: a value under an existing source replaces
-    it,
-    one under a new source joins it and predictions score against the mean. So the single-source
-    reply
-    names what would overwrite it, and the multi-source reply gives the spread beside the mean.
+    it, one under a new source joins it and predictions score against the mean. So the single-source
+    reply names what would overwrite it, and the multi-source reply gives the spread beside the
+    mean.
     """
     if consensus is None:  # pragma: no cover - the write above just stored a row
         return ""
@@ -298,8 +291,7 @@ class CalculationRecord(BaseModel):
     calc_version: str
     result: dict[str, Any]
     # True when `result` is empty because the payload exceeded `calc_find_max_result_chars`, not
-    # because
-    # nothing was stored. Ask for that calculation directly to see it.
+    # because nothing was stored. Ask for that calculation directly to see it.
     result_omitted: bool = False
     # False only for a row written before epochs were recorded, so it may be one a later correction
     # invalidated. Rows a recorded epoch supersedes are not returned at all
@@ -334,8 +326,7 @@ class CalculationSearch(BaseModel):
     hits_truncated: bool = False
     # Rows matched but not returned because their stored payload is not a result
     # (`science/calc/postgres_store.py::_readable_row`). Usually zero; otherwise a corrupted cache
-    # row
-    # an operator must delete.
+    # row an operator must delete.
     rows_unreadable: int = 0
 
     @computed_field  # type: ignore[prop-decorator]
@@ -344,8 +335,7 @@ class CalculationSearch(BaseModel):
         """The one sentence to read before reporting what the store holds.
 
         A `computed_field` so it is serialized: an incomplete listing must not be read as "nothing
-        else
-        exists".
+        else exists".
         """
         if not self.hits and not self.rows_unreadable:
             return (
@@ -459,10 +449,8 @@ def _record(stored: StoredResult) -> CalculationRecord:
     """Flatten one stored result into the agent-facing record, bounded.
 
     Geometries become addresses first (lossless for a reader, and most of the reduction); only what
-    is
-    still over the ceiling is dropped whole, with `result_omitted` set. The ceiling is measured on
-    the
-    rendered JSON, since characters are what reach the model.
+    is still over the ceiling is dropped whole, with `result_omitted` set. The ceiling is measured
+    on the rendered JSON, since characters are what reach the model.
     """
     projected = without_geometry(stored.result)
     rendered = len(json.dumps(projected, default=str))
@@ -617,8 +605,7 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
         raise ValueError(f"artifact {artifact_ref!r} is no longer stored")
     try:
         # Decoding is the test rather than a media-type table, since the store accepts any
-        # producer-given
-        # name and unknown types fall back to opaque bytes.
+        # producer-given name and unknown types fall back to opaque bytes.
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(
@@ -980,9 +967,8 @@ async def compute_electronic_properties(
         chemist can read, and is free.
     """
     # The SMILES route stays separate from the named-geometry route: it keys on the geometry the
-    # server
-    # embeds, and folding it into `compute_properties_at` would orphan every cached `xtb.properties`
-    # row.
+    # server embeds, and folding it into `compute_properties_at` would orphan every cached
+    # `xtb.properties` row.
     if not structure_id:
         payload, _ = await cached_remote(
             default_store(),
@@ -1139,9 +1125,8 @@ async def predict_site_reactivity(
         default_store(),
         "predict_site_reactivity",
         # Neither `mode` nor `top_n` is sent: the server keys `xtb.fukui` without them and the row
-        # holds
-        # every atom, so `ranked_for` re-ranks and re-slices locally and one row serves every mode
-        # and size.
+        # holds every atom, so `ranked_for` re-ranks and re-slices locally and one row serves every
+        # mode and size.
         {"smiles": smiles},
     )
     result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
@@ -1234,8 +1219,7 @@ async def compute_thermochemistry(
         thermochemistry with the uncertainty to quote alongside it.
     """
     # Composed: remote optimise, remote Hessian, local RRHO. A thermochemistry key would name its
-    # own
-    # output, so its cache economy is entirely the two nested entries.
+    # own output, so its cache economy is entirely the two nested entries.
     structure = await _starting_geometry(smiles, structure_id)
     thermo = ThermoSettings(
         symmetry_number=symmetry_number,

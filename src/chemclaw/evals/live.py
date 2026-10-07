@@ -298,15 +298,14 @@ def _tool_expectation_applies(probe: Probe, outcome: ProbeOutcome) -> bool:
 
     A tool the system under test cannot reach is a deployment fact, not a model miss. Two cases:
 
-    * **Not on the surface** — e.g. a fleet tool bound only where `CHEMCLAW_CONNECTORS_DIR` points
-      at
-      the fleet's `manifests/` (declared on the probe as `needs_bundle`); the surface itself is
-      read.
+    * **Not on the surface** — e.g. a fleet tool bound only where `CHEMCLAW_CONNECTORS_DIR`
+      points at the fleet's `manifests/` (declared on the probe as `needs_bundle`); the surface
+      itself is read.
     * **Bound and degraded** — `capability_degraded` named its connector this turn.
 
-    The surface is read from this process's configuration, so it matches the server only when both
-    are launched with the same `CHEMCLAW_CONNECTORS_DIR` (as `infra/live/e2e-full-stack/up.sh`
-    does).
+    The surface is read from this process's configuration, so it matches the server only when
+    both are launched with the same `CHEMCLAW_CONNECTORS_DIR` (as
+    `infra/live/e2e-full-stack/up.sh` does).
     """
     if probe.needs_bundle is not None and probe.needs_bundle in outcome.degraded:
         return False

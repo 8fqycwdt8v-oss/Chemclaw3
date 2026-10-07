@@ -427,8 +427,8 @@ async def require_principal(request: Request) -> Principal:
         logger.warning("identity provider unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="identity provider unavailable") from exc
     except AuthError as exc:
-        # The specific failure reason (audience/issuer/expiry mismatch) is useful to an operator
-        # but is not disclosed to the caller — log it server-side, return a generic 401 (SEC-7).
+        # The specific failure reason (audience/issuer/expiry mismatch) is logged for the operator,
+        # never disclosed to the caller, who gets a generic 401.
         _count_auth_failure("invalid")
         logger.info("token validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="invalid or expired token") from exc

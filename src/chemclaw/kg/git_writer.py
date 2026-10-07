@@ -735,8 +735,7 @@ class GitNoteWriter:
         return WriteOutcome(reference=commit or self._base, notes=landed)
 
     def _is_a_persons_note(self, note_path: Path) -> bool:
-        """Whether a human's note is already at `note_path`; an unparseable or absent file is not one.
-        """
+        """Whether a human's note is at `note_path`; an unparseable or absent file is not one."""
         if not note_path.exists():
             return False
         try:

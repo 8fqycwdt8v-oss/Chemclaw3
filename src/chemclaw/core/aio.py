@@ -21,8 +21,8 @@ class LoopLocalLock:
     context manager run on one loop, so re-resolving in `__aexit__` is safe.
 
     A plain dict pruned of closed loops on every resolve, not a `WeakKeyDictionary`: a contended
-    lock
-    references its own loop (its key), so a weak mapping would keep exactly those entries alive.
+    lock references its own loop (its key), so a weak mapping would keep exactly those entries
+    alive.
     """
 
     __slots__ = ("_locks", "_name")

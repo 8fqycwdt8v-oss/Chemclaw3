@@ -24,14 +24,11 @@ class EvidenceChunk(BaseModel):
     # sources. Merges go by rank position, and `hybrid.restated_as_position` rewrites this to
     # `1 / (1 + position)` in the merged list so the printed number matches the order; `confidence`
     # carries the note's own confidence. The neutral default keeps a retriever that forgets to set
-    # it
-    # mid-ranking.
+    # it mid-ranking.
     score: float = Field(default=0.5, ge=0.0, le=1.0)
     # Notes this chunk's source note is known or suspected to disagree with (`kg.conflicts`). A
-    # flag,
-    # never a filter: retrieval cannot decide which note is right, and returning both silently reads
-    # as
-    # corroboration. Holds the strongest disagreements, declared first, up to
+    # flag, never a filter: retrieval cannot decide which note is right, and returning both silently
+    # reads as corroboration. Holds the strongest disagreements, declared first, up to
     # `conflict_max_per_note`.
     conflicts_with: list[str] = Field(
         default_factory=list,
@@ -59,21 +56,17 @@ class EvidenceChunk(BaseModel):
     confidence: float | None = None
     # When the source note stopped being valid, or `None` while its window is open. A date-windowed
     # sweep deliberately serves retired notes, and this field says so. Not a filter: the caller
-    # asked
-    # for the period.
+    # asked for the period.
     valid_to: date | None = None
     # Which of the query's terms (`kg.search.query_terms`) this chunk's note actually contains.
     #
     # The graph leg widens to any-term matches and always fills `retrieval_top_k`, so an absent
-    # answer
-    # looks like a present one. Which terms matched (e.g. not the compound name) is what lets the
-    # model
-    # qualify an answer; a count does not discriminate. A separate field because `score` is
-    # overwritten by the merged rank.
+    # answer looks like a present one. Which terms matched (e.g. not the compound name) is what lets
+    # the model qualify an answer; a count does not discriminate. A separate field because `score`
+    # is overwritten by the merged rank.
     #
     # `None` means the source did not report it (legs built from raw document text never tokenise
-    # the
-    # query); an empty list on a note-backed chunk is a real statement.
+    # the query); an empty list on a note-backed chunk is a real statement.
     matched_terms: list[str] | None = Field(
         default=None,
         description=(
@@ -115,8 +108,7 @@ class EvidenceSweep(BaseModel):
     sources_failed: list[str] = Field(default_factory=list)
     # What each source handed to the merge (pre-merge counts), by name, so "found nothing", "not
     # configured" and "declined" are distinguishable. A leg out-competed at the cap still shows its
-    # work
-    # here; the kept-after-merge half is metered by `fanout.record_kept_chunks`.
+    # work here; the kept-after-merge half is metered by `fanout.record_kept_chunks`.
     sources: dict[str, int] = Field(default_factory=dict)
     # How many hits a source discarded at its own bound, before the merge saw them, by name. With
     # `retrieval_top_k` small this is usually the cut that bites, and `truncated_by` cannot see it.
@@ -124,9 +116,8 @@ class EvidenceSweep(BaseModel):
     # index), so unknown is an absence, never a zero.
     sources_truncated: dict[str, int] = Field(default_factory=dict)
     # Sources that declined the question, by name -> the reason they gave (`RetrieverSkip`).
-    # Distinct
-    # from `sources_failed`: a failure is an outage, a skip is a fact about the deployment or the
-    # call.
+    # Distinct from `sources_failed`: a failure is an outage, a skip is a fact about the deployment
+    # or the call.
     sources_skipped: dict[str, str] = Field(default_factory=dict)
 
 

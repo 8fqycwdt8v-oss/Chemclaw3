@@ -80,8 +80,7 @@ class SubjectMember(BaseModel):
     ordinal: int = Field(ge=0)
     role: MemberRole
     # `core.chem.compound_id`, a hash over the standardized SMILES: the join key the knowledge graph
-    # and
-    # fingerprint search already use.
+    # and fingerprint search already use.
     compound_id: str = ""
     smiles: str = ""
     # The geometry, when this member is one. Content-addressed and byte-identical on both sides of
@@ -127,12 +126,9 @@ class Subject(BaseModel):
         """The content address of this subject, excluding solvent, temperature and method.
 
         Each member is identified by its own SMILES first, then `structure_id`, then `compound_id`
-        as a
-        last resort: `compound_id` standardizes, so it would collapse the tautomers and microstates
-        a
-        species distribution enumerates into one subject. Precedence rather than hashing all three,
-        so a
-        member that later gains a `structure_id` stays the same subject.
+        as a last resort: `compound_id` standardizes, so it would collapse the tautomers and
+        microstates a species distribution enumerates into one subject. Precedence rather than
+        hashing all three, so a member that later gains a `structure_id` stays the same subject.
         """
         parts = sorted(
             (
@@ -182,8 +178,7 @@ class Conditions(BaseModel):
         """Resolve an accepted spelling to the one id every query filters on.
 
         An unrecognized name is normalized and kept, not refused (it is still a fact about the run).
-        An
-        empty or whitespace name reads as gas phase.
+        An empty or whitespace name reads as gas phase.
         """
         return canonical_solvent(value)
 
@@ -254,8 +249,7 @@ class PropertyFact(BaseModel):
     # Which member this is about, at member scope. None at calculation scope.
     member_ordinal: int | None = None
     # Exactly one of these three carries the value: `value` (numeric), `value_bool` (`converged`),
-    # or
-    # `value_text` (`site='acid'`).
+    # or `value_text` (`site='acid'`).
     value: float | None = None
     value_bool: bool | None = None
     value_text: str = ""
@@ -263,8 +257,7 @@ class PropertyFact(BaseModel):
     unit: str = ""
     # What the calculator said, before canonicalization, in `unit`; None where the two are the same
     # number. Carried as a pair with `unit` so the canonical column can be rebuilt if a conversion
-    # is
-    # ever found wrong.
+    # is ever found wrong.
     reported_value: float | None = None
     uncertainty: float | None = None
     uncertainty_kind: str = ""  # Estimate.method: reported | propagated | none
@@ -450,9 +443,8 @@ class Publication(BaseModel):
     model_config = _STORABLE
 
     # Empty (the normal case) means "whatever the sink calls this deployment": a record goes to
-    # every
-    # enabled sink, and `dialect.rows_for` substitutes the manifest's `tenant_id`. Non-empty is a
-    # deliberate override.
+    # every enabled sink, and `dialect.rows_for` substitutes the manifest's `tenant_id`. Non-empty
+    # is a deliberate override.
     tenant_id: str = ""
     actor: str = ""
     session_id: str = ""
@@ -460,8 +452,7 @@ class Publication(BaseModel):
     job_id: str = ""
     rationale: str = ""
     # The knowledge-graph note this run produced, or empty (as `job_records.note_id`). Not the ELN
-    # run
-    # that motivated the calculation, which nothing records.
+    # run that motivated the calculation, which nothing records.
     note_id: str = ""
 
 
@@ -477,8 +468,7 @@ class ResultRecord(BaseModel):
 
     # --- identity -------------------------------------------------------------------------
     # The flat cache key `calc_type@calc_version:input_hash:params_hash`, the same string a
-    # knowledge
-    # note cites, so both name the calculation identically.
+    # knowledge note cites, so both name the calculation identically.
     calc_ref: str = Field(min_length=1)
     calc_type: str = Field(min_length=1)
     calc_version: str = ""
@@ -509,8 +499,7 @@ class ResultRecord(BaseModel):
     compute_seconds: float | None = None
     computed_at: datetime | None = None
     # The calculations this one rested on, published as edges because staleness propagation walks
-    # them
-    # in reverse and array columns are not portable.
+    # them in reverse and array columns are not portable.
     depends_on: list[str] = Field(default_factory=list)
     publications: list[Publication] = Field(default_factory=list)
 

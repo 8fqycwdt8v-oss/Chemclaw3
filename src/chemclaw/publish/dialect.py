@@ -54,11 +54,9 @@ def rows_for(
                 {
                     "compound_id": member.compound_id,
                     # The standardized structure the key was derived from, not the species that
-                    # carried it, so every
-                    # tautomer or protonation state upserting this row writes the same value.
-                    # `standard_smiles` is
-                    # lenient (returns the input on parse failure) so a label never costs a finished
-                    # calculation.
+                    # carried it, so every tautomer or protonation state upserting this row writes
+                    # the same value. `standard_smiles` is lenient (returns the input on parse
+                    # failure) so a label never costs a finished calculation.
                     "canonical_smiles": standard_smiles(member.smiles),
                     "first_seen_at": now,
                 }
@@ -71,8 +69,7 @@ def rows_for(
                     "structure_id": member.structure_id,
                     "compound_id": member.compound_id or None,
                     # Never fabricated: where the payload says nothing these stay `None` ("not
-                    # recorded"), never a
-                    # neutral singlet.
+                    # recorded"), never a neutral singlet.
                     "charge": member.charge,
                     "multiplicity": member.multiplicity,
                     "origin_calc_ref": "",
@@ -125,8 +122,7 @@ def rows_for(
                 "value_bool": fact.value_bool,
                 "value_text": fact.value_text or None,
                 # What the calculator said, in `reported_unit`; falls back to the canonical value
-                # for a fact built
-                # without one, where the two are the same number.
+                # for a fact built without one, where the two are the same number.
                 "reported_value": (
                     fact.value if fact.reported_value is None else fact.reported_value
                 ),
@@ -211,10 +207,9 @@ def rows_for(
             }
         ],
         # One row even when the record names no publication (the normal case for primitives),
-        # because a
-        # site's grants and row-level security attach to this table. The tenant is a property of the
-        # writer
-        # and always known; the actor is not part of a calculation's identity and stays empty.
+        # because a site's grants and row-level security attach to this table. The tenant is a
+        # property of the writer and always known; the actor is not part of a calculation's identity
+        # and stays empty.
         "calculation_publication": [
             {
                 "calc_ref": record.calc_ref,
@@ -402,8 +397,7 @@ _BLANKS: dict[str, str] = {
     "origin_calc_ref": "''",
     "compound_id": "''",
     # With a `NULL` blank, `COALESCE(NULLIF(EXCLUDED.charge, NULL), structure.charge)` keeps a
-    # stated
-    # value and leaves the stored one when nothing was stated.
+    # stated value and leaves the stored one when nothing was stated.
     "charge": "NULL",
     "multiplicity": "NULL",
 }
@@ -426,8 +420,8 @@ def upsert_statement(table: str, columns: Sequence[str], placeholder: str = "%s"
     preserve = PRESERVE_ON_BLANK.get(table, ())
     assignments = ", ".join(
         # `NULLIF` collapses both forms of "the writer did not know" (SQL NULL and the builder's
-        # blank), so
-        # either leaves the stored value alone. Only the content-addressed tables want this.
+        # blank), so either leaves the stored value alone. Only the content-addressed tables want
+        # this.
         f"{column} = COALESCE(NULLIF(EXCLUDED.{column}, {_BLANKS[column]}), {table}.{column})"
         if column in preserve
         else f"{column} = EXCLUDED.{column}"

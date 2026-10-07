@@ -25,8 +25,7 @@ def install_default_executor(*, component: str, reserved: int) -> ThreadPoolExec
 
     Call once, before anything offloads (the front door's lifespan, each worker's `serve_worker`).
     Every `asyncio.to_thread` and `run_in_executor(None, ...)` then lands in it; `asyncio.run` shuts
-    it
-    down on exit.
+    it down on exit.
 
     Args:
         component: What this process is (`front-door`, `background-worker`), for the log line.
@@ -56,10 +55,8 @@ def front_door_reserved() -> int:
     `turns x parallel tool calls + parses`: an admitted turn may fan out to
     `agent_max_parallel_tool_calls` concurrent offloads, so summing the caps undersizes the pool.
     `attachment_max_concurrent_parses` already counts offloads and enters as it stands. A parallel
-    cap
-    of 0 means unbounded fan-out, which no finite pool covers, so it is charged as 1 (`max(1,
-    ...)`).
-    Read at call time so a test overriding a cap sees the width change.
+    cap of 0 means unbounded fan-out, which no finite pool covers, so it is charged as 1 (`max(1,
+    ...)`). Read at call time so a test overriding a cap sees the width change.
     """
     return (
         settings.service_max_concurrent_turns * max(1, settings.agent_max_parallel_tool_calls)

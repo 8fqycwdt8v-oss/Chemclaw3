@@ -243,7 +243,8 @@ def _scan_for_matches(
 
     Raises:
         ScanDeadlineExceeded: The deadline passed before every record was examined. A
-        `TimeoutError`, so the caller handles it like `asyncio.wait_for`'s; it carries `reached`.
+            `TimeoutError`, so the caller handles it like `asyncio.wait_for`'s; it carries
+            `reached`.
     """
     max_matches = settings.fingerprint_max_top_k
     index = index_for(records, deadline)
@@ -288,8 +289,8 @@ def _match_record_by_record(
 
     Raises:
         ScanDeadlineExceeded: The deadline passed before every candidate was examined. The same
-        class the indexed path raises; `total` counts every record here, and `because` distinguishes
-        the messages since the remedies differ.
+            class the indexed path raises; `total` counts every record here, and `because`
+            distinguishes the messages since the remedies differ.
     """
     found: list[str] = []
     unreadable = 0

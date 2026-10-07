@@ -207,8 +207,7 @@ class EvidencePack(BaseModel):
         """The calls a gate stopped.
 
         A property rather than a separate section: a refusal is the control operating, part of the
-        work
-        rather than a failure to report apart.
+        work rather than a failure to report apart.
         """
         return [call for call in self.tool_calls if call.outcome == "refused"]
 
@@ -217,8 +216,7 @@ class EvidencePack(BaseModel):
         """The turns whose answer was cut short or flagged: the pack's own headline.
 
         A degraded turn is the record saying its own evidence is partial, so a reader who checks
-        nothing
-        else must be able to check this.
+        nothing else must be able to check this.
         """
         return [turn for turn in self.turns if turn.degraded]
 
@@ -228,8 +226,7 @@ class EvidencePack(BaseModel):
 
         Check before presenting a pack: empty is a statement about the record, not the work.
         `approvals` and `turns` count because an abandoned turn may leave only a `plan_approvals` or
-        a
-        `turn_costs` row.
+        a `turn_costs` row.
         """
         return not (self.tool_calls or self.jobs or self.effects or self.approvals or self.turns)
 
@@ -263,8 +260,7 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
     calls = await _section(
         ToolCall,
         # `detail` is narrowed to refusals in the statement, where the restriction is visible and
-        # cannot
-        # be lost. `ts AS at` because `class_row` binds by name.
+        # cannot be lost. `ts AS at` because `class_row` binds by name.
         "SELECT tool, outcome, actor, ts AS at, latency_ms, "
         "CASE WHEN outcome = 'refused' THEN detail ELSE '' END AS detail "
         "FROM audit_events WHERE session_id = %s ORDER BY ts LIMIT %s",

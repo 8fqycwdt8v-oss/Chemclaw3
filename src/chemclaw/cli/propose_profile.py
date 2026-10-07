@@ -20,8 +20,8 @@ import yaml
 from chemclaw.agent.behaviour_proposals import Proposal, content_hash, default_proposal_store
 from chemclaw.operations.activity import safe_tool_name
 
-# : How many of one chemist's turns a pair of tools must share to count as a cluster. Low, because
-# : the output is a record for a person to judge, not an automatic change.
+#: How many of one chemist's turns a pair of tools must share to count as a cluster. Low, because
+#: the output is a record for a person to judge, not an automatic change.
 MIN_SHARED_TURNS = 3
 
 #: The most tools a proposed profile names. A profile that named everything would be `default`

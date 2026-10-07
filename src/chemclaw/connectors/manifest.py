@@ -24,8 +24,7 @@ from chemclaw.core.manifest_io import MAX_MANIFEST_TEXT_CHARS
 
 # A job parameter's declared type, mapped to an annotation by `connectors.jobs`. Closed on purpose:
 # the generated model becomes the JSON schema the model fills, and every type here is one it can
-# fill
-# correctly.
+# fill correctly.
 JobParamType = Literal["string", "integer", "number", "boolean", "string[]", "number[]", "object"]
 
 
@@ -136,8 +135,7 @@ class HttpEndpoint(BaseModel):
         """Reject a queued tool the endpoint does not serve.
 
         Such a name would queue nothing while looking as if it did. Not tied to the read/write
-        split: cost
-        is a different axis from side effects.
+        split: cost is a different axis from side effects.
         """
         if self.queued is None:
             return self
@@ -156,10 +154,9 @@ class HttpEndpoint(BaseModel):
         """Reject `auth: mode: none` on a URL that is reachable from the network.
 
         Judges the declared URL, not the `connector_urls` override, which points at the operator's
-        own
-        infrastructure and would otherwise flag every in-cluster deployment. What it catches is a
-        manifest
-        naming a foreign host with no credential. `NoAuth` stays the default for stdio and loopback.
+        own infrastructure and would otherwise flag every in-cluster deployment. What it catches is
+        a manifest naming a foreign host with no credential. `NoAuth` stays the default for stdio
+        and loopback.
         """
         if isinstance(self.auth, NoAuth) and not is_loopback_url(self.url):
             raise ValueError(
@@ -211,8 +208,7 @@ def _check_classification(
     """
     served = set(tools)
     # Checked before the partition, whose set comparisons would hide a duplicated name until a
-    # confusing
-    # collision error one layer up.
+    # confusing collision error one layer up.
     if len(tools) != len(served):
         repeated = sorted({name for name in served if tools.count(name) > 1})
         raise ValueError(
@@ -248,8 +244,7 @@ def _check_knowledge_reads(knowledge_read: list[str], read_only: list[str]) -> N
 
     Optional, unlike the classification: an omission only understates `turn_costs.retrieval_calls`
     rather than removing a control. What it refuses is a search over the record that the same
-    endpoint
-    calls state-changing.
+    endpoint calls state-changing.
     """
     unknown = sorted(set(knowledge_read) - set(read_only))
     if unknown:
@@ -346,8 +341,7 @@ class EffectSpec(BaseModel):
         """A compensating effect must name what undoes it, and no other kind may name one.
 
         Both directions are claims: an unnamed compensation cannot be performed, and a compensation
-        on an
-        irreversible effect contradicts it.
+        on an irreversible effect contradicts it.
         """
         if self.reversal == "compensating" and not self.compensation:
             raise ValueError(
@@ -397,15 +391,13 @@ class JobSpec(BaseModel):
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     workflow: str = Field(min_length=1)
     # The first line of the generated tool's docstring; `description` carries the rest. Bounded
-    # because
-    # both go verbatim into the prompt on every call, and an out-of-tree bundle is outside
+    # because both go verbatim into the prompt on every call, and an out-of-tree bundle is outside
     # `tests/test_context_floor.py`'s reach.
     summary: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
     description: str = Field(default="", max_length=MAX_MANIFEST_TEXT_CHARS)
     # Launch arguments, declared one of two ways: `params` for a few flat, closed-type arguments, or
     # `params_model` (`module:Attribute`) for a rich domain object whose existing pydantic model
-    # should
-    # not be re-declared in YAML. Neither means no arguments.
+    # should not be re-declared in YAML. Neither means no arguments.
     params: list[JobParam] = Field(default_factory=list)
     params_model: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
     # A domain precondition checked before any durable work starts: a `module:function` taking the
@@ -414,10 +406,8 @@ class JobSpec(BaseModel):
     # during replay and could fail an in-flight run that was legal when it started.
     precondition: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
     # Whether this deployment can run the job at all: a `module:function` taking nothing and
-    # returning a
-    # reason why not, or `None`. A job with a reason is withheld from the model
-    # (`registry.job_tools`)
-    # and refused on every other launch path (`jobs.prepare_job_launch`).
+    # returning a reason why not, or `None`. A job with a reason is withheld from the model
+    # (`registry.job_tools`) and refused on every other launch path (`jobs.prepare_job_launch`).
     unavailable_reason: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
     expensive: bool = False
     publish_to_graph: bool = False
@@ -425,27 +415,22 @@ class JobSpec(BaseModel):
     # writes are this system's own.
     effect: EffectSpec | None = None
     # How long the launcher waits for the run before handing back a job id instead; unset means
-    # always a
-    # job. Lets one tool serve a seconds-long input inline and a minutes-long one as a job, decided
-    # by
-    # elapsed time rather than a cost prediction that would put chemistry back in core. Keep it well
-    # under `service_turn_timeout_seconds`.
+    # always a job. Lets one tool serve a seconds-long input inline and a minutes-long one as a job,
+    # decided by elapsed time rather than a cost prediction that would put chemistry back in core.
+    # Keep it well under `service_turn_timeout_seconds`.
     inline_wait_seconds: float | None = Field(default=None, gt=0)
     # A ceiling on this job's whole durable run, in seconds, that can only lower the deployment's:
-    # the
-    # effective ceiling is `min(this, connector_job_timeout_seconds)`
+    # the effective ceiling is `min(this, connector_job_timeout_seconds)`
     # (`durable/connector_job.py::child_execution_timeout`), so a bundle can never grant itself more
     # runtime. Unset means the deployment's ceiling.
     #
     # Never set it below the longest activity its workflow runs: core cannot check that, and a
-    # single
-    # attempt would exhaust the ceiling and make retries unreachable.
+    # single attempt would exhaust the ceiling and make retries unreachable.
     timeout_seconds: float | None = Field(default=None, gt=0)
     # Whether this job suspends on a person (`durable/awaiting.py`), so elapsed time is not cost:
     # `child_execution_timeout` then gives it no ceiling. Safe to declare because it describes the
-    # job's
-    # shape rather than buying compute (each activity keeps its own budget), and it requires the
-    # operator's grant (`jobs.require_funded_ceiling`).
+    # job's shape rather than buying compute (each activity keeps its own budget), and it requires
+    # the operator's grant (`jobs.require_funded_ceiling`).
     awaits_answer: bool = False
 
     @model_validator(mode="after")
@@ -453,8 +438,7 @@ class JobSpec(BaseModel):
         """Reject `awaits_answer` beside `timeout_seconds`: the two say opposite things.
 
         Honouring one silently would make the other a key that reads like a control and is not, and
-        which
-        one the author meant is not for a resolver to guess.
+        which one the author meant is not for a resolver to guess.
         """
         if self.awaits_answer and self.timeout_seconds is not None:
             raise ValueError(
@@ -469,8 +453,7 @@ class JobSpec(BaseModel):
         """A job that changes somebody else's system is expensive by declaration, not by choice.
 
         `expensive` puts a job behind `authorize_trigger`. Refused rather than corrected, since the
-        author
-        believed one of the two fields and which one matters.
+        author believed one of the two fields and which one matters.
         """
         if self.effect is not None and not self.expensive:
             raise ValueError(
@@ -534,13 +517,11 @@ class ConnectorManifest(BaseModel):
     note_types: list[str] = Field(default_factory=list)
     relations: list[str] = Field(default_factory=list)
     # Whether an empty `connectors_enabled` turns this bundle on. Declaring a capability and binding
-    # it
-    # are separate decisions: a manifest is read by the validators whether or not a turn binds it,
-    # but
-    # every bound tool's schema is charged on every model call
-    # (`tests/test_context_floor.PREFIX_BOUND`).
-    # A costly optional bundle declares `false` and a deployment that wants it names it in
-    # `CHEMCLAW_CONNECTORS_ENABLED`; `connectors_enabled` remains the single switch.
+    # it are separate decisions: a manifest is read by the validators whether or not a turn binds
+    # it, but every bound tool's schema is charged on every model call
+    # (`tests/test_context_floor.PREFIX_BOUND`). A costly optional bundle declares `false` and a
+    # deployment that wants it names it in `CHEMCLAW_CONNECTORS_ENABLED`; `connectors_enabled`
+    # remains the single switch.
     default_enabled: bool = True
 
     @model_validator(mode="after")
@@ -548,8 +529,7 @@ class ConnectorManifest(BaseModel):
         """Reject a note type or relation that is not a lowercase hyphenated token.
 
         These names become path segments and frontmatter keys, so anything else would produce a note
-        that
-        validates and then cannot be found by the filters keyed on it.
+        that validates and then cannot be found by the filters keyed on it.
         """
         for field, values in (("note_types", self.note_types), ("relations", self.relations)):
             bad = sorted(v for v in values if not re.fullmatch(r"[a-z][a-z0-9-]*", v))
@@ -584,8 +564,7 @@ class ConnectorManifest(BaseModel):
         """A named compensation must be a job this bundle actually declares.
 
         Nothing runs a compensation automatically; the name tells an operator which job undoes this
-        one,
-        so it must resolve. Checked here because a job cannot see its siblings.
+        one, so it must resolve. Checked here because a job cannot see its siblings.
         """
         declared = {job.name for job in self.jobs}
         unresolved = sorted(

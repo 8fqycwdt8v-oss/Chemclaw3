@@ -96,8 +96,8 @@ class ToolUse(BaseModel):
     #: one this reader has not learned yet.
     other: int = 0
     #: Distinct actors seen invoking it: a count, never the ids, and a **lower bound**. The SQL
-    # groups
-    #: by `(tool, outcome)`, so per-group counts cannot be summed and the maximum is taken instead.
+    #: groups by `(tool, outcome)`, so per-group counts cannot be summed and the maximum is taken
+    #: instead.
     distinct_actors: int = 0
     first_used: str = ""
     last_used: str = ""
@@ -118,9 +118,8 @@ class JobRun(BaseModel):
     #: Distinct argument-sets seen in the window — see `failed` for why this is not attempts.
     runs: int = 0
     #: Argument-sets whose **latest** run failed. `job_records` is keyed by argument-set and
-    # upserted,
-    #: so one row is one argument-set carrying only its latest state, not one run; this answers
-    #: "which argument-sets are currently failed", not how many attempts failed.
+    #: upserted, so one row is one argument-set carrying only its latest state, not one run; this
+    #: answers "which argument-sets are currently failed", not how many attempts failed.
     failed: int = 0
     distinct_requesters: int = 0
     #: Runs that recorded a note (`job_records.note_id` is non-empty). The join between a
@@ -240,8 +239,8 @@ def _stamp(value: Any) -> str:
 #: Longest tool name a reading reports; anything longer or not `snake_case` is bucketed under
 #: `_UNRECOGNISED`.
 #:
-#: `audit_events.tool` is the model's raw string, and model output is attacker-influenceable, so
-#: a poisoned document could plant instruction-shaped text in one actor's trail that another's
+#: `audit_events.tool` is the model's raw string, and model output is attacker-influenceable, so a
+#: poisoned document could plant instruction-shaped text in one actor's trail that another's
 #: `review_activity` reads back. The pattern matches every served name (`^[a-z_][a-z0-9_]*$`) and
 #: the length cap sits just above the longest served name, so sentence-shaped strings become a
 #: count. `tests/test_operations.py` holds both ends.
@@ -322,8 +321,7 @@ async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:
         bucket = str(outcome) if str(outcome) in OUTCOMES else "other"
         setattr(use, bucket, getattr(use, bucket) + int(calls))
         # Per-(tool, outcome) distinct counts cannot be summed (one person appears under two
-        # outcomes),
-        # so the maximum is the lower bound.
+        # outcomes), so the maximum is the lower bound.
         actors[safe] = max(actors.get(safe, 0), int(distinct_actors))
         earliest, latest = _stamp(first), _stamp(last)
         if earliest and (not use.first_used or earliest < use.first_used):

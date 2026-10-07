@@ -68,10 +68,8 @@ async def similar_reactions(
     """
     search = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
     # The index knows bits and a label; whether the run still stands is the record store's. A hit
-    # whose
-    # record is missing is still served (unindexed is not withdrawn); a citation-only record, which
-    # can
-    # only be a stale row here, is dropped.
+    # whose record is missing is still served (unindexed is not withdrawn); a citation-only record,
+    # which can only be a stale row here, is dropped.
     withdrawn = await _records.structurally_withheld(
         [(match.source, match.id) for match in search.hits]
     )
@@ -79,8 +77,7 @@ async def similar_reactions(
         update={
             "unsearched": await _records.citation_only(reaction_smiles),
             # The cited id names its source, because fingerprints are keyed by `(source, id)` and a
-            # bare id two
-            # sites hold resolves to neither.
+            # bare id two sites hold resolves to neither.
             "hits": [
                 match.model_copy(update={"id": note_id_for_reaction(match.id, match.source)})
                 for match in search.hits

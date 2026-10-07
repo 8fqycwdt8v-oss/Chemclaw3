@@ -345,9 +345,8 @@ class InMemoryDesignStore:
             },
         )
         # `session_id`, `correlation_id` and `opened_by` belong to the creating write and are not
-        # updated,
-        # matching `_UPSERT_DESIGN`'s `DO UPDATE SET`, so `listing(session_id=...)` agrees across
-        # backends.
+        # updated, matching `_UPSERT_DESIGN`'s `DO UPDATE SET`, so `listing(session_id=...)` agrees
+        # across backends.
         meta.update(
             {
                 "title": design.request.title,
@@ -504,11 +503,9 @@ class PostgresDesignStore:
         """Store the next revision, refusing when `parent_revision` is not the head.
 
         `_SELECT_HEAD`'s `FOR UPDATE` serialises concurrent appends, so the loser reads the moved
-        head
-        and is refused by the `parent_revision` comparison. The `(design_id, revision)` primary-key
-        violation is still translated to the same `RevisionConflict` as a backstop, so a future
-        writer
-        that skips the lock yields a 409, not a 500; no test currently reaches it.
+        head and is refused by the `parent_revision` comparison. The `(design_id, revision)`
+        primary-key violation is still translated to the same `RevisionConflict` as a backstop, so a
+        future writer that skips the lock yields a 409, not a 500; no test currently reaches it.
         """
         require_storable(
             design,
@@ -525,8 +522,7 @@ class PostgresDesignStore:
                 row = await cur.fetchone()
                 head = int(row[0]) if row else 0
                 # `advanced()` on the create too, as the in-memory backend does, so a design's first
-                # status does
-                # not depend on the backend.
+                # status does not depend on the backend.
                 current_status: DesignStatus = advanced(row[1] if row else status, kind)
                 _require_head(design_id, head, parent_revision)
                 revision = DesignRevision(
@@ -673,14 +669,11 @@ class PostgresDesignStore:
         """Move a design's lifecycle status, recording the move against the revision it names.
 
         The header, the head check and the status-event row are written in one transaction. The head
-        is
-        read under `FOR UPDATE` and compared with `expected_revision`, so the recorded revision is
-        the
-        one the approver saw (a colleague saving a new revision while they read is caught without
-        any
-        race). The status read under the same lock is compared with `expected_status`, so of two
-        people deciding from one status exactly one write lands and the other gets `StatusConflict`.
-        Which one wins is the lock queue's choice, not this code's.
+        is read under `FOR UPDATE` and compared with `expected_revision`, so the recorded revision
+        is the one the approver saw (a colleague saving a new revision while they read is caught
+        without any race). The status read under the same lock is compared with `expected_status`,
+        so of two people deciding from one status exactly one write lands and the other gets
+        `StatusConflict`. Which one wins is the lock queue's choice, not this code's.
         """
         require_storable(None, design_id=design_id, actor=actor, reason=reason)
         async with self._connection() as conn:
@@ -697,8 +690,7 @@ class PostgresDesignStore:
                     )
                 require_unmoved(expected_status, head_row[1])
                 # Not a race: `_SELECT_HEAD` locks the header row, which every `append` also takes,
-                # and the
-                # revisions table is append-only.
+                # and the revisions table is append-only.
                 await cur.execute(_SELECT_HEAD_KIND, (design_id, head))
                 kind_row = await cur.fetchone()
                 # Anything not provably `protocol` is treated as `request`, so a missing head row
@@ -740,10 +732,8 @@ class PostgresDesignStore:
         """All four reads in one transaction, at an isolation level that makes that mean something.
 
         READ COMMITTED takes a new snapshot per statement, so the block runs at `REPEATABLE READ`
-        for
-        one snapshot; it is read-only, so no serialization retry is needed. The revision clause
-        matches
-        `read`'s: `revision=0` is not "the head" and returns `None` on both backends.
+        for one snapshot; it is read-only, so no serialization retry is needed. The revision clause
+        matches `read`'s: `revision=0` is not "the head" and returns `None` on both backends.
         """
         clause = "AND revision = %(revision)s " if revision is not None else ""
         async with self._connection() as conn:
@@ -889,9 +879,8 @@ def require_unmoved(expected: DesignStatus, actual: DesignStatus) -> None:
 
 #: The characters no Postgres `text` or `jsonb` column can hold: the C0 controls (NUL above all)
 #: and unpaired UTF-16 surrogates, which `json.loads` produces from a `"\ud800"` escape and
-# pydantic
-#: does not refuse on an unconstrained string. Refusing them in-process keeps both backends
-#: agreeing.
+#: pydantic does not refuse on an unconstrained string. Refusing them in-process keeps both
+#: backends agreeing.
 _UNSTORABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")
 
 

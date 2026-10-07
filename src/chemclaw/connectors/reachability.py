@@ -38,8 +38,7 @@ def recently_unreachable(connector: str) -> bool:
     """Whether this process found `connector` unreachable recently enough to skip dialling it.
 
     A verdict older than `connector_breaker_window_seconds` is not trusted, so recovery never
-    depends
-    on a probe running. `0` disables the breaker.
+    depends on a probe running. `0` disables the breaker.
     """
     window = settings.connector_breaker_window_seconds
     if not window:

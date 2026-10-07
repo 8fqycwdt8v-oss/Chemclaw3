@@ -341,11 +341,9 @@ _ANALYZE_THREADS = "ANALYZE checkpoints"
 # snapshot:
 #
 # 1. `_DELETE_EXPIRED_CHECKPOINTS` re-runs the expiry predicate on the candidates; a thread that
-#    took
-#    a turn meanwhile survives to the next pass. Its `RETURNING` drives the next statement.
+#    took a turn meanwhile survives to the next pass. Its `RETURNING` drives the next statement.
 # 2. `_DELETE_ORPHANED` deletes blobs and writes only for threads with **no** `checkpoints` row
-#    left,
-#    so a racing turn's committed row protects its blobs.
+#    left, so a racing turn's committed row protects its blobs.
 #
 # `aput` writes blobs and checkpoint in one pipelined transaction, so no half-written pair is ever
 # visible. `agent/checkpointer._refuse_if_values_are_missing` guards the read against torn threads

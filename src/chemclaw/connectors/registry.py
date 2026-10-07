@@ -71,10 +71,8 @@ class ConnectorError(ChemclawError):
     """A connector bundle is malformed, or an enabled connector does not exist.
 
     A `ChemclawError` (so a `ValueError`), like other startup configuration errors. Registered by
-    name
-    in `chemclaw.durable.publish._BAD_DATA_TYPES` (Temporal matches by exact name), so a template
-    step
-    naming an unknown job fails on its first attempt.
+    name in `chemclaw.durable.publish._BAD_DATA_TYPES` (Temporal matches by exact name), so a
+    template step naming an unknown job fails on its first attempt.
     """
 
 
@@ -84,8 +82,7 @@ def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
 
     Every directory, not only the winner: a name collision decides which manifest describes the
     capability, not which content exists on disk (see `_bundle_content_dirs`). Sorted by name so
-    tool
-    order (part of the prompt) is identical on every machine; within a name, path order is the
+    tool order (part of the prompt) is identical on every machine; within a name, path order is the
     precedence. Cached on `dirs`; `forget_discovered` clears it.
     """
     found: dict[str, list[Path]] = {}
@@ -104,8 +101,7 @@ def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
 
     First dir wins, like `PATH`, so an operator's private dir can override a shipped bundle. A
     shadowed manifest is never parsed, so an override cannot fail startup over a file the system
-    does
-    not use.
+    does not use.
     """
     return [paths[0] for paths in _bundle_dirs_by_name(dirs).values()]
 
@@ -134,8 +130,7 @@ def _discovered_in(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ConnectorMani
     """Every bundle found under `dirs`, by name, with its directory: validated, cached on `dirs`.
 
     Cached because discovery parses every manifest on disk; keyed on the directories because they
-    are
-    its only input, so a repointed directory is simply a different entry.
+    are its only input, so a repointed directory is simply a different entry.
     """
     return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs(dirs)}
 
@@ -188,10 +183,8 @@ def enabled() -> list[ConnectorManifest]:
 
     An empty `connectors_enabled` means every discovered bundle that declares `default_enabled`. An
     explicit list overrides `default_enabled` rather than being filtered by it, which is how an
-    opt-in
-    bundle becomes reachable. A listed name no bundle provides is a loud error, not a capability
-    that
-    silently stops working.
+    opt-in bundle becomes reachable. A listed name no bundle provides is a loud error, not a
+    capability that silently stops working.
     """
     found = discovered()
     names = settings.connectors_enabled_list
@@ -209,12 +202,10 @@ def server_tools_module(connector: str) -> ModuleType | None:
     """A bundle's `server.tools` module, or `None` when the bundle ships no MCP server at all.
 
     The one definition shared by `make connector-validate` and `make template-validate`. Callers
-    skip
-    endpoint-less bundles, so `None` means an endpoint-declaring bundle with no module here: a
+    skip endpoint-less bundles, so `None` means an endpoint-declaring bundle with no module here: a
     `ModuleNotFoundError` naming the bundle package, its `server` package or the module itself (an
     out-of-tree bundle, or one whose server moved to the fleet). Any other import failure
-    propagates,
-    so a broken dependency cannot make a validator check less and still pass.
+    propagates, so a broken dependency cannot make a validator check less and still pass.
     """
     bundle = f"chemclaw.connectors.{connector}"
     package = f"{bundle}.server"
@@ -231,8 +222,7 @@ def declared_note_types() -> frozenset[str]:
     """Every knowledge-graph note type the enabled bundles declare.
 
     Unioned with core's set by `chemclaw.kg.note.known_note_types`. Enabled bundles only: a note
-    whose
-    type came from a disabled bundle should fail validation.
+    whose type came from a disabled bundle should fail validation.
     """
     return frozenset(name for manifest in enabled() for name in manifest.note_types)
 
@@ -257,8 +247,7 @@ def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
     """The endpoint URL, after any per-deployment override for this connector.
 
     A manifest ships a loopback dev default; `connector_urls` lets Helm point at an in-cluster
-    Service
-    without patching a bundle.
+    Service without patching a bundle.
     """
     return settings.connector_urls.get(connector, endpoint.url)
 
@@ -268,8 +257,8 @@ def request_timeout_seconds(endpoint: Endpoint) -> float:
 
     Both the MCP session's `read_timeout_seconds` and the httpx read timeout derive from it and must
     keep a fixed relationship, so neither reads the manifest itself. Public so a test can compare
-    the
-    same number. A stdio endpoint gets the same default, since a hung subprocess hangs a turn too.
+    the same number. A stdio endpoint gets the same default, since a hung subprocess hangs a turn
+    too.
     """
     if isinstance(endpoint, HttpEndpoint) and endpoint.request_timeout is not None:
         return float(endpoint.request_timeout)
@@ -315,11 +304,9 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
         trust_env=False,
         event_hooks={"request": [turn_identity_hook(_endpoint_url(connector, endpoint))]},
         # Without this httpx applies 5 s to every phase and tears down a slow tool call's stream.
-        # Connect
-        # stays short so a dead host degrades fast. The read bound is looser than the MCP session's
-        # (`_session_kwargs`): when the httpx timeout fires first the answer is lost silently, so
-        # the
-        # session bound, which raises, must win. See `_READ_TIMEOUT_GRACE_SECONDS`.
+        # Connect stays short so a dead host degrades fast. The read bound is looser than the MCP
+        # session's (`_session_kwargs`): when the httpx timeout fires first the answer is lost
+        # silently, so the session bound, which raises, must win. See `_READ_TIMEOUT_GRACE_SECONDS`.
         timeout=httpx.Timeout(
             request_timeout_seconds(endpoint) + _READ_TIMEOUT_GRACE_SECONDS,
             connect=_CONNECT_TIMEOUT_SECONDS,
@@ -348,8 +335,7 @@ def health_url(manifest: ConnectorManifest) -> str | None:
     endpoint_tail, health_tail = endpoint.url[shared:], endpoint.health_url[shared:]
     if not effective.endswith(endpoint_tail):
         # The override does not share the manifest endpoint's suffix, so there is nothing to
-        # re-root;
-        # probing the declared URL may be wrong but is not silently invented.
+        # re-root; probing the declared URL may be wrong but is not silently invented.
         return endpoint.health_url
     return effective.removesuffix(endpoint_tail) + health_tail
 
@@ -368,11 +354,10 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
     """Describe one connector endpoint for the LangGraph engine.
 
     Dispatches on the `Endpoint` union; transports differ only in how the server is reached. The
-    HTTP
-    client is ours, passed through `httpx_client_factory`, so the redirect refusal, identity hook,
-    credential and split timeouts all survive; the library's `timeout`/`auth`/`headers` are not
-    passed. The adapter closes the client it builds. `session_kwargs` is passed on both transports,
-    since it is the only per-request deadline.
+    HTTP client is ours, passed through `httpx_client_factory`, so the redirect refusal, identity
+    hook, credential and split timeouts all survive; the library's `timeout`/`auth`/`headers` are
+    not passed. The adapter closes the client it builds. `session_kwargs` is passed on both
+    transports, since it is the only per-request deadline.
     """
     if isinstance(endpoint, HttpEndpoint):
         return ConnectorSpec(
@@ -389,10 +374,9 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
         )
     if isinstance(endpoint, StdioEndpoint):
         # Refused unless the deployment enables it: `command` executes in the chat process, so a
-        # manifest
-        # written to `connectors_dir` would otherwise be code execution under the identity holding
-        # every
-        # connector token. Checked here, not at parse time, so `StdioEndpoint` stays constructible.
+        # manifest written to `connectors_dir` would otherwise be code execution under the identity
+        # holding every connector token. Checked here, not at parse time, so `StdioEndpoint` stays
+        # constructible.
         if not settings.connector_stdio_enabled:
             raise ConnectorError(
                 f"connector {manifest.name!r} declares `transport: stdio`, which launches "
@@ -417,8 +401,7 @@ def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
     """An `httpx_client_factory` that returns our client, ignoring what the library offers.
 
     `_mcp_connection` sets no headers, timeout or auth, so nothing is dropped; all of it is decided
-    in
-    `connector_http_client`.
+    in `connector_http_client`.
     """
 
     def factory(**_ignored: Any) -> httpx.AsyncClient:
@@ -483,8 +466,7 @@ async def open_connector_specs(
 
     Args:
         stack: The caller's exit stack, which owns tearing the sessions down.
-        specs: This turn's connector specs
-            (`chemclaw.agent.chemclaw_agent.connector_specs`).
+        specs: This turn's connector specs (`chemclaw.agent.chemclaw_agent.connector_specs`).
 
     Returns:
         The tools every reachable connector advertises, and the names of those that did not come up.
@@ -501,8 +483,7 @@ async def open_connector_specs(
             ", ".join(unreachable),
         )
         # One increment per connector, labelled by name (a registry bundle, never a caller's string,
-        # so a
-        # safe label; see `core/metrics._COUNTER_LABELS`).
+        # so a safe label; see `core/metrics._COUNTER_LABELS`).
         for name in unreachable:
             record_metric(partial(_count_unreachable, name))
     return [tool for tools in opened for tool in tools], unreachable
@@ -526,12 +507,10 @@ def _bundle_content_dirs(kind: str, manifests: Iterable[ConnectorManifest]) -> l
     shadowed bundle's judgment.
 
     A union rather than a startup refusal, so a deliberate replacement can still start; judgment
-    about
-    tools the winner does not serve is hidden by `agent.skill_access.ToolScopedSkills`. The
-    manifest's
-    declaration is not the gate: `cli/validate_connectors._bundle_content_problems` already holds
-    declarations and directories equal for every validated bundle. Non-existent paths are never
-    returned.
+    about tools the winner does not serve is hidden by `agent.skill_access.ToolScopedSkills`. The
+    manifest's declaration is not the gate: `cli/validate_connectors._bundle_content_problems`
+    already holds declarations and directories equal for every validated bundle. Non-existent paths
+    are never returned.
     """
     dirs: list[str] = []
     by_name = _bundle_dirs_by_name(tuple(settings.connectors_dirs))
@@ -547,14 +526,12 @@ def _bound_by_this_process() -> dict[str, str]:
     """Every tool name core binds itself, mapped to the phrase naming what it binds it as.
 
     Lets `_declared_tool_names` refuse a connector tool or job that collides with an in-process
-    tool,
-    which would otherwise shadow it or corrupt the plan gate's view of what is state-changing.
+    tool, which would otherwise shadow it or corrupt the plan gate's view of what is state-changing.
 
     Imports the agent (function scope, to avoid a cycle) so the tool registry is populated even in a
     validator process. Generated job launchers are excluded, since this registry registers them
-    itself
-    on every build. Template launcher names are asked of `chemclaw.templates.registry` directly,
-    because they are registered after this check runs.
+    itself on every build. Template launcher names are asked of `chemclaw.templates.registry`
+    directly, because they are registered after this check runs.
     """
     from chemclaw.agent import chemclaw_agent
 
@@ -652,8 +629,7 @@ def state_changing_tool_names() -> list[str]:
 
     Each endpoint's declared `state_changing` subset plus every job (durable work by construction).
     Read by `chemclaw.agent.plan_gate`. Declared by the bundle because core cannot tell a
-    calculation
-    from a lookup by name.
+    calculation from a lookup by name.
     """
     names: set[str] = set()
     for manifest in enabled():
@@ -680,8 +656,7 @@ def find_job(name: str) -> tuple[str, JobSpec]:
     """Resolve a declared job name to its connector and spec, or raise naming the valid ones.
 
     For a template's `job` step. Names are unique across enabled connectors
-    (`_declared_tool_names`),
-    so one name resolves to exactly one job.
+    (`_declared_tool_names`), so one name resolves to exactly one job.
     """
     for manifest in enabled():
         for job in manifest.jobs:
@@ -695,8 +670,7 @@ def endpoint_tool_names(servers: Iterable[str] | None = None) -> list[str]:
     """The MCP tools the enabled connectors' endpoints serve, sorted; `servers` selects bundles.
 
     The half a profile's `mcp_server_names` selects, answered without building connector tools
-    (which
-    would open httpx clients nothing closes).
+    (which would open httpx clients nothing closes).
 
     Args:
         servers: The connector names to include; `None` (the default) means every enabled bundle.
@@ -724,9 +698,8 @@ def declared_connector_tool_names() -> list[str]:
     """Every tool name any discovered bundle declares, enabled or not, sorted.
 
     The validator's answer: a skill, prompt or template naming a tool is a claim about the
-    repository,
-    so it must not be rejected because an opt-in bundle is off on this machine. Deleted tools are
-    still caught.
+    repository, so it must not be rejected because an opt-in bundle is off on this machine. Deleted
+    tools are still caught.
     """
     found = discovered()
     names: set[str] = set()
@@ -741,7 +714,6 @@ def declared_skills_dirs() -> list[str]:
     """The `skills/` directory of every discovered bundle, enabled or not.
 
     The validator's answer (`skills_dirs` is the runtime one): an opt-in bundle's skills must still
-    be
-    validated.
+    be validated.
     """
     return _bundle_content_dirs("skills", [m for _, m in discovered().values()])

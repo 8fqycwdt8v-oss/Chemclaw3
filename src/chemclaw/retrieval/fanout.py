@@ -88,10 +88,8 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     except Exception as exc:
         _record_seconds(name, time.perf_counter() - started)
         # Through `degraded()`, the chokepoint `chemclaw_degraded_total` and
-        # `tests/test_degraded.py`
-        # read. The exception type is in the line (it distinguishes an outage from a missing
-        # driver),
-        # while the failure itself travels to the caller in `failed`.
+        # `tests/test_degraded.py` read. The exception type is in the line (it distinguishes an
+        # outage from a missing driver), while the failure itself travels to the caller in `failed`.
         degraded(
             logger,
             "evidence_source",

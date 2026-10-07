@@ -484,8 +484,7 @@ class FrontDoorState:
 
     @property
     def graph_factory(self) -> Callable[..., Any]:
-        """Builds one turn's compiled graph on the LangGraph engine — called per turn, never cached.
-        """
+        """Build one turn's compiled graph; called per turn, never cached."""
         factory: Callable[..., Any] = self._app.state.graph_factory
         return factory
 
@@ -503,7 +502,7 @@ class FrontDoorState:
 
     @property
     def plan_approvals(self) -> ApprovalStore:
-        """The plan-approval store — the same instance `chemclaw.agent.plan_gate` reads (D-167)."""
+        """The plan-approval store — the same instance `chemclaw.agent.plan_gate` reads."""
         store: ApprovalStore = self._app.state.plan_approvals
         return store
 
@@ -515,7 +514,7 @@ class FrontDoorState:
 
     @property
     def turn_semaphore(self) -> asyncio.Semaphore:
-        """The admission-control permit set capping concurrent turns (AG-15)."""
+        """The admission-control permit set capping concurrent turns."""
         semaphore: asyncio.Semaphore = self._app.state.turn_semaphore
         return semaphore
 

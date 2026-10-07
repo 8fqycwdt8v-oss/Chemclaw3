@@ -94,8 +94,7 @@ _KNOWN_SPECTATORS = rdMolStandardize.FragmentRemover()
 # gets one `compound_id` whether written ionic or neutral. A small, closed table in place of a
 # pKa-shaped rule. Acids the catalogue carries already agree from both spellings; adducts that
 # cannot ionise (H2O2, BH3, I2, CO2) are not listed and stay. Matched after `Cleanup`, which
-# rewrites
-# perchloric acid into a charge-separated form.
+# rewrites perchloric acid into a charge-separated form.
 _IONISABLE_NEUTRAL_ACIDS: dict[str, tuple[str, ...]] = {
     "perchloric acid": ("OCl(=O)(=O)=O",),
     "tetrafluoroboric acid": ("F[B-](F)(F)[FH+]",),
@@ -166,13 +165,11 @@ def _is_organic(fragment: Chem.Mol) -> bool:
     The nitrogen clause also requires three or more heavy neighbours on that carbon.
 
     Not "contains a carbon": that would call carbonate and cyanide organic, collapsing K2CO3,
-    Cs2CO3,
-    Na2CO3 and NaHCO3 into one compound. The nitrogen clause makes urea, guanidine, thiourea and
-    melamine organic, so their salts collapse onto the free base regardless of where a methyl is
+    Cs2CO3, Na2CO3 and NaHCO3 into one compound. The nitrogen clause makes urea, guanidine, thiourea
+    and melamine organic, so their salts collapse onto the free base regardless of where a methyl is
     drawn. The coordination requirement keeps the linear family (cyanide, cyanate, thiocyanate,
     cyanamide) inorganic, so their alkali salts stay distinct. A structural test, so no reagent
-    table
-    needs maintaining.
+    table needs maintaining.
     """
     for atom in fragment.GetAtoms():
         if atom.GetAtomicNum() != 6:
@@ -191,10 +188,8 @@ def _is_organometallic(mol: Chem.Mol) -> bool:
     """Whether the species has a metal-carbon bond, the bond that is the reagent.
 
     An organolithium, Grignard, cuprate or organozinc is defined by its M-C bond; the hydrocarbon
-    left
-    after breaking it is a different substance. Ionic salts of the same metals (sodium benzoate,
-    LDA)
-    have no M-C bond and keep collapsing.
+    left after breaking it is a different substance. Ionic salts of the same metals (sodium
+    benzoate, LDA) have no M-C bond and keep collapsing.
     """
     for bond in mol.GetBonds():
         ends = {bond.GetBeginAtom().GetAtomicNum(), bond.GetEndAtom().GetAtomicNum()}
@@ -209,8 +204,7 @@ def _metal_is_the_compound(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
     Each check reads the stage that still holds its evidence: the cleaned molecule for a reactive
     metal (after `Cleanup` has disconnected it into a separate fragment), and the original for a
     metal-carbon bond (`Cleanup` breaks some M-C bonds, e.g. Al-C, destroying the evidence). It
-    gates
-    neutralization too, because the charges on a metal complex balance its metal.
+    gates neutralization too, because the charges on a metal complex balance its metal.
     """
     if _is_organometallic(original):
         return True  # the M–C bond is the reagent; the hydrocarbon left without it is not
@@ -230,16 +224,13 @@ def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
 
     For an anion, neutralization must add hydrogens; if it removed one (sodium triacetoxyborohydride
     becoming triacetoxyborane) the species is kept as written. Tested on what the transformation
-    did,
-    not on an element list, so it covers anions not yet seen.
+    did, not on an element list, so it covers anions not yet seen.
 
     For a cation (a protonated amine, pyridinium) neutralization legitimately removes a proton, so
-    the
-    cation arm is exempt, but only when no fragment in the string is anionic: the net charge of a
-    mixed string says nothing about the anion inside it. A string carrying both an anion and a
-    cation
-    falls to the net hydrogen count and may be kept charged; keeping a species as written costs a
-    cache miss, while a per-fragment pairing could silently produce a wrong molecule.
+    the cation arm is exempt, but only when no fragment in the string is anionic: the net charge of
+    a mixed string says nothing about the anion inside it. A string carrying both an anion and a
+    cation falls to the net hydrogen count and may be kept charged; keeping a species as written
+    costs a cache miss, while a per-fragment pairing could silently produce a wrong molecule.
     """
     if Chem.GetFormalCharge(before) > 0 and not any(
         Chem.GetFormalCharge(f) < 0 for f in Chem.GetMolFrags(before, asMols=True)
@@ -258,9 +249,8 @@ def _cleaned(mol: Chem.Mol) -> Chem.Mol:
     `Cleanup`'s own disconnector runs after sanitizing, so a cyclopentadienide freed from a metal
     stayed flagged non-aromatic and `Reionize` moved protons across fragments, making `standardize`
     non-idempotent on ferrocenes. Disconnecting first lets `Cleanup`'s `RemoveHs` re-perceive the
-    ring.
-    `Reionize` can still oscillate on a vinyl anion written as one (`[C-]1=CCC=C1`), a spelling the
-    pipeline no longer produces.
+    ring. `Reionize` can still oscillate on a vinyl anion written as one (`[C-]1=CCC=C1`), a
+    spelling the pipeline no longer produces.
     """
     return rdMolStandardize.Cleanup(_METAL_DISCONNECTOR.Disconnect(mol))
 
@@ -269,9 +259,8 @@ def _uncharged(mol: Chem.Mol) -> Chem.Mol:
     """`Uncharger`'s neutral form of `mol`, with its aromaticity re-perceived.
 
     `Uncharger` protonates an aromatic cyclopentadienide but leaves it flagged aromatic, which
-    writes
-    an unparseable SMILES. A sanitized copy is returned, or the unsanitized result if sanitizing
-    fails.
+    writes an unparseable SMILES. A sanitized copy is returned, or the unsanitized result if
+    sanitizing fails.
     """
     uncharged = rdMolStandardize.Uncharger().uncharge(mol)
     copy = Chem.Mol(uncharged)
@@ -286,15 +275,12 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
     """Apply the standardization pipeline to a parsed molecule (see the module docstring).
 
     The number of organic fragments decides the strip: exactly one means a salt, solvate or adduct
-    of
-    that fragment, and each other fragment is judged on its own; two or more name no winner, so the
-    species is kept whole; zero is a wholly inorganic reagent with no parent to keep.
+    of that fragment, and each other fragment is judged on its own; two or more name no winner, so
+    the species is kept whole; zero is a wholly inorganic reagent with no parent to keep.
 
     `Uncharger` runs whenever some fragment is organic (so a co-crystal and its ion-pair spelling
-    still
-    meet), never on a wholly inorganic species (a lone `[OH-]` must not become water), and its
-    result
-    is kept only if `_neutralization_is_protonation` agrees.
+    still meet), never on a wholly inorganic species (a lone `[OH-]` must not become water), and its
+    result is kept only if `_neutralization_is_protonation` agrees.
     """
     cleaned = _cleaned(mol)
     # Atom maps first and unconditionally: every exit below becomes a `compound_id`. Cleared on
@@ -311,12 +297,10 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
         # `FragmentParent` counts hydrogens and could pick ammonium over formate.
         #
         # Each other fragment is discarded only if it is charged (an inorganic ion beside one
-        # organic
-        # fragment is its counterion), a solvent RDKit's list knows, or an ionisable neutral acid
-        # the organic
-        # fragment could be the salt of. Anything else neutral (H2O2, a co-former) keeps the string
-        # whole.
-        # Asked per spectator, so one unrecognised neutral does not preserve the others.
+        # organic fragment is its counterion), a solvent RDKit's list knows, or an ionisable neutral
+        # acid the organic fragment could be the salt of. Anything else neutral (H2O2, a co-former)
+        # keeps the string whole. Asked per spectator, so one unrecognised neutral does not preserve
+        # the others.
         survived = {
             Chem.MolToSmiles(f)
             for f in Chem.GetMolFrags(_KNOWN_SPECTATORS.remove(cleaned), asMols=True)
@@ -333,8 +317,7 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
             and not (salt_former and Chem.MolToSmiles(f) in _IONISABLE_NEUTRAL_SPECTATORS)
         ]
         # Rebuilt from the kept fragments as one sanitized molecule; the common case (everything
-        # else
-        # discarded) is the organic fragment itself.
+        # else discarded) is the organic fragment itself.
         cleaned = (
             organic_fragments[0]
             if len(kept) == 1
@@ -358,9 +341,8 @@ def _oversized(smiles: str, mol: Chem.Mol | None) -> bool:
 
     The one size gate for strict and lenient helpers alike: RDKit's SMILES writer and tautomer
     canonicalizer recurse without bound and SIGSEGV (killing the process) on a large linear
-    molecule.
-    Length is the cheap pre-filter, atom count the real bound (`molecule_max_smiles_length`,
-    `molecule_max_atoms`).
+    molecule. Length is the cheap pre-filter, atom count the real bound
+    (`molecule_max_smiles_length`, `molecule_max_atoms`).
     """
     if len(smiles) > settings.molecule_max_smiles_length:
         return True
@@ -459,10 +441,8 @@ def standard_smiles(smiles: str) -> str:
     """The standardized canonical SMILES, or the input unchanged if it does not parse.
 
     "Is this the same compound?": salts stripped, charges neutralized where possible, one tautomer
-    per
-    set. Use `canonical_smiles` where an anion is genuinely a different thing to compute. Lenient
-    for
-    the same reason as `canonical_smiles`.
+    per set. Use `canonical_smiles` where an anion is genuinely a different thing to compute.
+    Lenient for the same reason as `canonical_smiles`.
     """
     standardized = _standardized(smiles)
     return standardized if standardized is not None else smiles
@@ -485,9 +465,8 @@ def substructure_pattern(query: str) -> Chem.Mol:
     """Compile a substructure query (SMARTS first, then SMILES) or raise `InvalidSmilesError`.
 
     SMARTS first because it is the superset language; the SMILES fallback lets a plain fragment
-    work.
-    A zero-atom pattern is rejected, since it matches everything and would read as a finding. Shared
-    by the fingerprint substructure search and the calibration outlier listing.
+    work. A zero-atom pattern is rejected, since it matches everything and would read as a finding.
+    Shared by the fingerprint substructure search and the calibration outlier listing.
     """
     pattern = Chem.MolFromSmarts(query) or Chem.MolFromSmiles(query)
     if pattern is None:
@@ -512,8 +491,7 @@ def compound_id_of_standard(standard: str) -> str:
 
     For scans over stored, already-standardized structures, where re-standardizing each is too slow.
     Standardization is idempotent on its own output (`tests/test_compound_identity.py`). Anything
-    not
-    known to be standard goes through `compound_id`.
+    not known to be standard goes through `compound_id`.
     """
     return f"compound-{stable_hash(standard, chars=12)}"
 
@@ -526,10 +504,9 @@ def torsion_handle(mol: Chem.Mol, bond: tuple[int, int]) -> str:
     both suites assert.
 
     Atom indices are not names (the same indices pick a different bond once the SMILES is
-    rewritten),
-    so the two atoms are named by canonical symmetry class. The RDKit build is part of the payload,
-    so
-    a handle minted under another build fails to resolve rather than resolving to a different bond.
+    rewritten), so the two atoms are named by canonical symmetry class. The RDKit build is part of
+    the payload, so a handle minted under another build fails to resolve rather than resolving to a
+    different bond.
 
     Args:
         mol: The molecule the bond belongs to.

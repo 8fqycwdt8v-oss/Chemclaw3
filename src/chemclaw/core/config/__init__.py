@@ -96,8 +96,7 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     """The host libpq will dial and the sslmode it will use, read with libpq's own parser.
 
     libpq's parser, because a hand-rolled one disagrees in the plaintext direction: libpq connects
-    to
-    `hostaddr` when set (so `hostaddr or host` is what a TLS decision is about), and resolves a
+    to `hostaddr` when set (so `hostaddr or host` is what a TLS decision is about), and resolves a
     repeated parameter to its last occurrence. An unparseable DSN raises, naming the setting and not
     the DSN (it carries a password), since any "could not tell" answer would read as loopback.
     """
@@ -109,10 +108,8 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
         parts = conninfo.conninfo_to_dict(dsn)
     except ProgrammingError as exc:
         # Not interpolated: libpq quotes the offending token, which can be the whole DSN with its
-        # password,
-        # and this runs before the log redaction filter exists. The type name distinguishes the
-        # failure;
-        # `__cause__` keeps the original for a debugger.
+        # password, and this runs before the log redaction filter exists. The type name
+        # distinguishes the failure; `__cause__` keeps the original for a debugger.
         raise ValueError(
             f"{name} is not a connection string libpq can parse "
             f"({type(exc).__name__}), so nothing can say whether it would connect with TLS. "
@@ -142,8 +139,7 @@ def pg_endpoint(dsn: str) -> tuple[str, str] | None:
 
     A string comparison, so one server spelled two ways reads as two (`tests/test_config.py` pins
     this). Normalising would reimplement libpq's precedence rules, and asking the server is
-    impossible
-    at import time with no event loop. The runtime half, `core/db.same_server`, reads
+    impossible at import time with no event loop. The runtime half, `core/db.same_server`, reads
     `system_identifier` off a live connection and may collapse such a split back to one server.
 
     Imported lazily for the reason `_pg_dial` gives.
@@ -257,8 +253,8 @@ class Settings(
         One definition for two readers that bound each other:
         `_the_job_ceiling_covers_the_activity_it_bounds` and
         `durable/publish.py::connector_queue_wait_timeout`, which derives a queued job's wait
-        headroom from
-        it. On the composed class because the max spans `CalculatorSettings` and `PublishSettings`.
+        headroom from it. On the composed class because the max spans `CalculatorSettings` and
+        `PublishSettings`.
 
         Returns:
             The largest activity budget in seconds and the name of the setting that carries it.
@@ -295,9 +291,8 @@ class Settings(
 
         The decomposition the refusal prints, derived through the same branches as
         `fleet_connections_per_server` so the two always add up. Under a split, the narrow readiness
-        pools
-        move to the session store, so `narrow` is zero. `at_rollout_peak` matches the total being
-        quoted.
+        pools move to the session store, so `narrow` is zero. `at_rollout_peak` matches the total
+        being quoted.
         """
         primary, session = self.fleet_connections_per_server(at_rollout_peak=at_rollout_peak)
         pools, replicas = self.pg_fleet_pools, self.service_fleet_replicas
@@ -313,26 +308,20 @@ class Settings(
         """`(connections on postgres_dsn's server, connections on the split session store's)`.
 
         The one place fleet Postgres spend is added up, as a sum: a front door's `/readyz` pool is
-        one
-        connection wide, so the fleet holds one narrow pool per front-door replica and
+        one connection wide, so the fleet holds one narrow pool per front-door replica and
         `pg_pool_max_size` for every other pool. With a split `session_store_dsn` each pooled
-        process opens
-        one more pool and the readiness and checkpointer pools move to the session store; two DSNs
-        naming
-        one endpoint (or an unparseable one) are summed onto the primary. Both figures are ceilings;
-        `tests/test_fleet_pools.py` pins the per-role pool counts.
+        process opens one more pool and the readiness and checkpointer pools move to the session
+        store; two DSNs naming one endpoint (or an unparseable one) are summed onto the primary.
+        Both figures are ceilings; `tests/test_fleet_pools.py` pins the per-role pool counts.
 
         Args:
             at_rollout_peak: Charge both generations of every surging Deployment, as an upgrade
                 does, instead of the steady state. Uses the chart-rendered peak pool and replica
-                counts
-                together; undeclared, they fall back to the steady pair.
+                counts together; undeclared, they fall back to the steady pair.
         """
         # Narrow pools are one per front door, but only if the declared total can contain them
-        # (three
-        # pools per front door). Otherwise the pair was set by hand and every pool is charged full
-        # width,
-        # the conservative direction.
+        # (three pools per front door). Otherwise the pair was set by hand and every pool is charged
+        # full width, the conservative direction.
         pools, replicas = self.pg_fleet_pools, self.service_fleet_replicas
         if at_rollout_peak and self.pg_fleet_pools_at_rollout_peak:
             pools = self.pg_fleet_pools_at_rollout_peak
@@ -357,32 +346,26 @@ class Settings(
         - **A tool-result clear trigger above the conversation budget**: the lossless edit must fire
           before the window.
         - **A stated autonomy nothing enforces**: `harness_autonomy="plan_only"` with the harness
-          off,
-          refused only under `entra_required`; the opt-out is `harness_autonomy=execute`.
+          off, refused only under `entra_required`; the opt-out is `harness_autonomy=execute`.
         - **`service_uvicorn_workers > 1`**, which breaks per-process guarantees (rate limiter,
-          budget
-          tracker, attachment store, session LRU, metrics scrape). Scale with replicas instead.
+          budget tracker, attachment store, session LRU, metrics scrape). Scale with replicas
+          instead.
         - **A fleet admitting more concurrent turns than its declared ceiling** (replicas x workers
-          x
-          per-process cap).
+          x per-process cap).
         - **A fleet opening more Postgres connections than the server serves**, counted by pools,
-          not
-          processes.
+          not processes.
         - **A fleet dispatching more concurrent calculations than the backend serves** (durable half
-          only;
-          `chemclaw_calc_requests_in_flight` covers the tool path).
+          only; `chemclaw_calc_requests_in_flight` covers the tool path).
         - **A mid-turn resume wait longer than the turn deadline.**
         - **Budgets enabled with every cap at zero** (zero means unlimited).
         - **`embedding_dim` disagreeing with the `vector(N)` column** while anything writes the note
           index, which pgvector would otherwise reject at reindex time.
 
         Fleet checks are inert until the operator declares the corresponding ceiling. Every rule
-        here
-        raises; guards that must only warn live in their own validators.
+        here raises; guards that must only warn live in their own validators.
         """
         # Only when the operator set it; at its default the trigger is clamped instead, so a
-        # small-context
-        # deployment setting only the budget still starts.
+        # small-context deployment setting only the budget still starts.
         if "agent_tool_result_clear_trigger" not in self.model_fields_set:
             self.agent_tool_result_clear_trigger = min(
                 self.agent_tool_result_clear_trigger, self.agent_context_token_budget
@@ -434,8 +417,7 @@ class Settings(
             if self.postgres_migration_dsn:
                 require_pg_tls(self.postgres_migration_dsn, "postgres_migration_dsn")
             # The session layer's own database (transcripts, checkpoints, approvals, cost rows, the
-            # effect
-            # ledger). Empty means "use `postgres_dsn`", already checked above.
+            # effect ledger). Empty means "use `postgres_dsn`", already checked above.
             if self.session_store_dsn:
                 require_pg_tls(self.session_store_dsn, "session_store_dsn")
         if self.service_uvicorn_workers > 1:
@@ -464,8 +446,8 @@ class Settings(
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
         # A waiting message's poll also refreshes its lease (`agent/session_queue`), so a poll at or
-        # above
-        # the lease lapses every ticket between two asks and every queued message ends as withdrawn.
+        # above the lease lapses every ticket between two asks and every queued message ends as
+        # withdrawn.
         if self.service_turn_queue_poll_seconds >= self.service_turn_claim_lease_seconds:
             raise ValueError(
                 f"service_turn_queue_poll_seconds ({self.service_turn_queue_poll_seconds:g}) must "
@@ -498,16 +480,12 @@ class Settings(
                 "service_max_concurrent_turns, or to 0 to disable it deliberately."
             )
         # The socket backstop must exceed what this process's own caps can occupy.
-        # `--limit-concurrency`
-        # (`deploy/entrypoint.sh`) counts every open socket and answers 503 above the app, probes
-        # included,
-        # so reaching it gets a busy pod killed by the kubelet. Turns and streams are added, not
-        # maxed: a
-        # turn holds its sender's stream plus up to `service_turn_max_watchers` followers, and
-        # waiters are
-        # charged per process (`service_max_concurrent_turns` x `service_turn_queue_max`), the bound
-        # the
-        # turn route enforces.
+        # `--limit-concurrency` (`deploy/entrypoint.sh`) counts every open socket and answers 503
+        # above the app, probes included, so reaching it gets a busy pod killed by the kubelet.
+        # Turns and streams are added, not maxed: a turn holds its sender's stream plus up to
+        # `service_turn_max_watchers` followers, and waiters are charged per process
+        # (`service_max_concurrent_turns` x `service_turn_queue_max`), the bound the turn route
+        # enforces.
         per_turn = 1 + self.service_turn_max_watchers
         waiters = self.service_max_concurrent_turns * self.service_turn_queue_max
         occupied = (
@@ -533,15 +511,13 @@ class Settings(
                 "service_max_connections, or lower the stream/turn caps it has to cover."
             )
         # The rollout peak: an upgrade runs both generations, so that is when the fleet holds the
-        # most
-        # connections. Undeclared, this is the steady figure.
+        # most connections. Undeclared, this is the steady figure.
         primary_connections, session_connections = self.fleet_connections_per_server(
             at_rollout_peak=True
         )
         if self.pg_session_fleet_max_connections and not session_connections:
             # Refused: a session-server ceiling with no split session store has no referent.
-            # Declaring a ceiling
-            # can only add a firing condition to the runtime alert.
+            # Declaring a ceiling can only add a firing condition to the runtime alert.
             raise ValueError(
                 "pg_session_fleet_max_connections declares a ceiling for a split session store "
                 "and there is none: session_store_dsn is unset, equal to postgres_dsn, or names "
@@ -553,8 +529,8 @@ class Settings(
         if self.pg_fleet_max_connections and primary_connections > self.pg_fleet_max_connections:
             # Counted by pools, not processes: a front door holds three (stores, `/readyz`'s, the
             # checkpointer's), and the `/readyz` one is a single connection. The breakdown is
-            # printed from the
-            # same terms as the total, so the operator's arithmetic reaches the refused number.
+            # printed from the same terms as the total, so the operator's arithmetic reaches the
+            # refused number.
             narrow, wide = self._fleet_pool_widths(at_rollout_peak=True)
             raise ValueError(
                 f"this deployment may open {primary_connections} Postgres connections on "
@@ -567,8 +543,7 @@ class Settings(
                 "pg_fleet_max_connections if the server's max_connections can serve it."
             )
         # Its own `if`: `postgres.maxConnections: 0` (no primary ceiling) must not silence a
-        # declared session
-        # ceiling.
+        # declared session ceiling.
         if session_connections > self.pg_session_fleet_max_connections > 0:
             raise ValueError(
                 f"this deployment may open {session_connections} Postgres connections on the "
@@ -582,8 +557,7 @@ class Settings(
         if self.calc_backend_max_concurrent_requests:
             # Three factors: a solvent screen fans out inside one activity under
             # `calc_screen_max_parallel`, each branch holding its own `calc_session`. Those are the
-            # only
-            # concurrency sites in `connectors/calc/compose.py`, and they do not nest.
+            # only concurrency sites in `connectors/calc/compose.py`, and they do not nest.
             dispatched = (
                 self.calc_fleet_worker_processes
                 * self.worker_max_concurrent_activities
@@ -611,8 +585,7 @@ class Settings(
             )
         # Each review round adds a model call and a judge call to a turn bounded by
         # `service_turn_timeout_seconds`. Only the judge half has a declared timeout, so refuse when
-        # the
-        # judge calls alone could fill the deadline.
+        # the judge calls alone could fill the deadline.
         if self.answer_review_max_rounds and self.verifier_enabled:
             judging = (self.answer_review_max_rounds + 1) * self.verifier_timeout_seconds
             if judging >= self.service_turn_timeout_seconds:
@@ -691,10 +664,8 @@ class Settings(
 
         With a split, a large share of the fleet's connections land on the session server, which
         `pg_fleet_max_connections` does not cover, and only the operator knows what it will serve.
-        Warned
-        rather than refused because the setting is new and an existing split deployment would
-        otherwise
-        fail on upgrade. The primary's check still raises.
+        Warned rather than refused because the setting is new and an existing split deployment would
+        otherwise fail on upgrade. The primary's check still raises.
         """
         _, session_connections = self.fleet_connections_per_server()
         if session_connections and not self.pg_session_fleet_max_connections:
@@ -721,14 +692,10 @@ class Settings(
         """The same rule as below, on the other parent/child pair that has a ceiling.
 
         A fan-out child's longest work is one report section (`report_section_timeout_seconds`), and
-        its
-        queue wait precedes it, so the ceiling must contain wait plus work. The wait is derived to
-        fit
-        (`durable/publish.py::fan_out_queue_wait_timeout` subtracts this rule's floor from the
-        ceiling);
-        this rule keeps it strictly positive, reserving one activity's overhead. Strictly greater,
-        because
-        equality is the defect.
+        its queue wait precedes it, so the ceiling must contain wait plus work. The wait is derived
+        to fit (`durable/publish.py::fan_out_queue_wait_timeout` subtracts this rule's floor from
+        the ceiling); this rule keeps it strictly positive, reserving one activity's overhead.
+        Strictly greater, because equality is the defect.
         """
         longest, budget = self.longest_fan_out_activity
         needed = longest + self.activity_timeout_seconds
@@ -750,13 +717,10 @@ class Settings(
 
         Four Schedules drain in chunks and `continue_as_new` after `*_max_iterations`
         (`durable/corpus_sync.py`, `document_sync.py`, `label_sync.py`, `eln_sync.py`). A run killed
-        at
-        `schedule_run_timeout_seconds` is a `TIMED_OUT` no code sees, and the jobs without a cursor
-        restart
-        from page one, so a run's budgeted work must fit. Queue wait is deliberately not charged: a
-        run
-        overrunning because nothing claims its activities is what the ceiling exists to kill.
-        `_BOUNDED_DRAINS` supplies the activities-per-iteration term.
+        at `schedule_run_timeout_seconds` is a `TIMED_OUT` no code sees, and the jobs without a
+        cursor restart from page one, so a run's budgeted work must fit. Queue wait is deliberately
+        not charged: a run overrunning because nothing claims its activities is what the ceiling
+        exists to kill. `_BOUNDED_DRAINS` supplies the activities-per-iteration term.
         """
         for iterations_name, budget_name, per_iteration in _BOUNDED_DRAINS:
             iterations: int = getattr(self, iterations_name)
@@ -780,16 +744,14 @@ class Settings(
         """The longest one step of each kind may take, and the words that name the budget.
 
         One definition for two readers: the validator below takes the maximum (one step must fit),
-        and
-        `cli/validate_templates.py` sums over the steps a template file declares. Keyed by the
-        manifest's
-        `kind` values, so a new kind missing here raises `KeyError` rather than counting as free.
+        and `cli/validate_templates.py` sums over the steps a template file declares. Keyed by the
+        manifest's `kind` values, so a new kind missing here raises `KeyError` rather than counting
+        as free.
 
         A `job` step is not an activity: it starts `ConnectorJobWorkflow` under
         `durable/connector_job.wrapper_execution_timeout()`, the child ceiling plus the wrapper's
         post-child headroom (`finish_headroom`). `core` cannot import `durable`, so that sum is
-        restated
-        here, and `tests/test_template_job_step.py` checks it against the live function.
+        restated here, and `tests/test_template_job_step.py` checks it against the live function.
 
         Returns:
             `{kind: (seconds, why)}`, where `why` is phrased to be read inside a refusal.
@@ -818,12 +780,10 @@ class Settings(
         """The same rule again, on the template run and the longest step it has to contain.
 
         `templates/registry.py` runs `TemplateWorkflow` under `template_run_timeout_seconds`; a
-        ceiling at
-        or below the longest step's budget kills the run inside that step with a bare
+        ceiling at or below the longest step's budget kills the run inside that step with a bare
         `WorkflowExecutionTimedOut`, so failure notification never runs and per-step retries are
         unreachable. The longest step is usually a `job` step (see `template_step_ceilings`).
-        Strictly
-        greater, because equality is the defect.
+        Strictly greater, because equality is the defect.
 
         This checks only that one step fits; the N-step bound needs the YAML and lives in
         `agent/template_surface.run_ceiling_problems` (`make template-validate`,
@@ -845,24 +805,19 @@ class Settings(
         """A parent ceiling no larger than its child's longest activity is not a ceiling.
 
         `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an execution
-        timeout
-        (`durable/connector_job.py`); at or below the child's longest activity budget, that activity
-        can
-        never finish and the run ends as a bare `WorkflowExecutionTimedOut`. Strictly greater, by
-        one
-        activity's overhead.
+        timeout (`durable/connector_job.py`); at or below the child's longest activity budget, that
+        activity can never finish and the run ends as a bare `WorkflowExecutionTimedOut`. Strictly
+        greater, by one activity's overhead.
 
         It guarantees one full-length attempt, never two: `connector_queue_wait_timeout` is derived
-        from
-        the same ceiling, so a worst-case attempt (wait plus work) always consumes nearly all of it.
-        Retries
-        remain spendable by attempts that fail quickly, which is what `BAD_DATA_RETRY`'s transient
-        failures do. On the composed class because the ceiling and the budgets live in different
-        sections.
+        from the same ceiling, so a worst-case attempt (wait plus work) always consumes nearly all
+        of it. Retries remain spendable by attempts that fail quickly, which is what
+        `BAD_DATA_RETRY`'s transient failures do. On the composed class because the ceiling and the
+        budgets live in different sections.
         """
         # The max over every activity budget a bundle child can spend, from
-        # `longest_bundle_activity`, the
-        # same number `durable/publish.py` derives the queue wait from.
+        # `longest_bundle_activity`, the same number `durable/publish.py` derives the queue wait
+        # from.
         longest, budget = self.longest_bundle_activity
         needed = longest + self.activity_timeout_seconds
         if self.connector_job_timeout_seconds <= needed:
@@ -882,14 +837,10 @@ class Settings(
         """A heartbeat timeout outside the budget it sits under is a control that does nothing.
 
         `background_activity_heartbeat_timeout_seconds` covers core's long background activities. It
-        must
-        be strictly below the shortest start-to-close budget it sits under: above it the heartbeat
-        can
-        never fire first, and since `durable/heartbeat.py::beating` beats every `timeout / 4`, a
-        large one
-        sends no beat before the budget expires. `result_publish_timeout_seconds` is taken for one
-        sink,
-        its smallest value.
+        must be strictly below the shortest start-to-close budget it sits under: above it the
+        heartbeat can never fire first, and since `durable/heartbeat.py::beating` beats every
+        `timeout / 4`, a large one sends no beat before the budget expires.
+        `result_publish_timeout_seconds` is taken for one sink, its smallest value.
         """
         shortest, budget = min(
             (
@@ -913,12 +864,9 @@ class Settings(
         """The same rule one level down: the activity must outlive its longest single client call.
 
         The xTB activity's longest await is the sampler's `calc_sampling_timeout_seconds`, matched
-        to the
-        server's CREST ceiling. The activity budget must exceed it by `activity_timeout_seconds`
-        (the key
-        probe, embed and cache write around it), so a client timeout surfaces as an error rather
-        than a
-        bare activity timeout.
+        to the server's CREST ceiling. The activity budget must exceed it by
+        `activity_timeout_seconds` (the key probe, embed and cache write around it), so a client
+        timeout surfaces as an error rather than a bare activity timeout.
         """
         needed = self.calc_sampling_timeout_seconds + self.activity_timeout_seconds
         if self.xtb_job_timeout_seconds <= needed:

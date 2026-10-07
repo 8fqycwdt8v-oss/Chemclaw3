@@ -88,9 +88,8 @@ def queued_interceptor(
             )
         except QueueUnavailable:
             # The queue must not take a capability down: nothing was started, so call the server
-            # directly.
-            # Counted, because a broker outage silently making every call direct is the load this
-            # design avoids.
+            # directly. Counted, because a broker outage silently making every call direct is the
+            # load this design avoids.
             logger.warning("queue unreachable; calling %s.%s directly", connector, request.name)
             record_metric(
                 lambda m: m.increment(
@@ -133,8 +132,7 @@ async def dispatch_queued(
             id=queued_workflow_id(connector, tool, arguments),
             task_queue=interactive_queue(connector),
             # An open run under this id is the identical call: join it. A closed one is history, and
-            # a new ask
-            # runs again (cheaply, behind `cached_compute`).
+            # a new ask runs again (cheaply, behind `cached_compute`).
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             memo={
@@ -173,10 +171,8 @@ def _with_wait(result: CallToolResult, connector: str, waited: float | None) -> 
     """`result` with one sentence saying the call waited for a slot, when it did.
 
     The `tool_queued` events reach only the chemist's stream, so without this the model can only
-    guess
-    about the queue. Appended as a separate block so the server's payload stays byte-for-byte
-    intact,
-    and the block starts with its own separator because readers join text blocks with `""`.
+    guess about the queue. Appended as a separate block so the server's payload stays byte-for-byte
+    intact, and the block starts with its own separator because readers join text blocks with `""`.
     """
     if waited is None:
         return result
@@ -204,8 +200,7 @@ async def _wait_reporting(
     """The run's result within `budget` seconds, saying meanwhile whether it waits or runs.
 
     Every `queued_tool_progress_seconds` the run is asked where it is, and a `tool_queued` event
-    goes
-    out when the answer changes, so the card does not read "running" while the call is queued.
+    goes out when the answer changes, so the card does not read "running" while the call is queued.
     Best-effort (`_progress`). Also returns how long the call was seen waiting, or `None` if no tick
     saw it queued.
 
@@ -275,10 +270,9 @@ async def _progress(
 
     `running` once a worker started the activity; `queued` while it is scheduled but not started,
     including between retries. The count is the broker's approximate backlog on the interactive
-    queue,
-    this call included. With no pending activity, `started` decides: after the call was seen running
-    it says nothing, before that it is queued (nothing has picked the run up) with an unknown count.
-    `None` when the broker could not be asked; this must never fail the call.
+    queue, this call included. With no pending activity, `started` decides: after the call was seen
+    running it says nothing, before that it is queued (nothing has picked the run up) with an
+    unknown count. `None` when the broker could not be asked; this must never fail the call.
     """
     try:
         description = await handle.describe(rpc_timeout=timedelta(seconds=rpc_timeout))

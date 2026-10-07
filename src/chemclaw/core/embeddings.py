@@ -49,15 +49,13 @@ def embedding_config_key() -> str:
     A vector is only reusable for the configuration that made it; comparing queries against another
     model's vectors corrupts every similarity silently. The in-process cache and the durable
     `document_chunks.embedding_key` / `note_index.embedding_key` columns all key on this, and a
-    stored
-    vector whose key differs is stale and gets re-embedded.
+    stored vector whose key differs is stale and gets re-embedded.
 
     Shape: `provider:endpoint:dDIM:model`, every slot filled (`ep-none`, `model-none`), with the
     free-form model last so a colon inside it cannot be read as a separator. The endpoint slot is a
     digest of the URL (trailing slash stripped), because a model name is not globally unique and the
     key is persisted per row, where a verbatim URL could leak userinfo. Only `openai_compatible`
-    fills
-    it. Changing this format makes every stored row stale and re-embeds every corpus.
+    fills it. Changing this format makes every stored row stale and re-embeds every corpus.
     """
     endpoint = (
         _endpoint_slot(settings.llm_base_url)
@@ -73,8 +71,7 @@ def _endpoint_slot(base_url: str) -> str:
     """This endpoint's slot in the key, logged once per URL so an operator can map a digest back.
 
     `lru_cache` makes the log line once per URL rather than once per embedded text. Logging the URL
-    is
-    safe because `SecretRedactingFilter` strips userinfo; persisting it is not, hence the digest.
+    is safe because `SecretRedactingFilter` strips userinfo; persisting it is not, hence the digest.
     """
     digest = f"ep-{stable_hash(base_url.rstrip('/'), chars=12)}"
     log.info(
@@ -116,8 +113,7 @@ def embed_texts(texts: list[str], *, cache: bool = True) -> list[list[float]]:
     missing = [text for text, key in zip(texts, keys, strict=True) if key not in holding]
     if missing:
         # Deduplicated so a repeated text costs one embedding. Outside the lock on purpose: this is
-        # a
-        # network round trip, and holding the lock would serialise every turn's retrieval.
+        # a network round trip, and holding the lock would serialise every turn's retrieval.
         unique = list(dict.fromkeys(missing))
         holding.update(
             (_cache_key(text), vector)
@@ -126,21 +122,19 @@ def embed_texts(texts: list[str], *, cache: bool = True) -> list[list[float]]:
     with _CACHE_LOCK:
         _CACHE.update(holding)
         # FIFO, oldest first: LRU would cost a move per hit on the hot path. Evicting a key this
-        # call just
-        # inserted is harmless, since the caller's vector is in `holding`.
+        # call just inserted is harmless, since the caller's vector is in `holding`.
         while len(_CACHE) > size:
             del _CACHE[next(iter(_CACHE))]
     return [holding[key] for key in keys]
 
 
 def _embed_uncached(texts: list[str]) -> list[list[float]]:
-    """Embed `texts` through the configured provider, uncached, and record calls, failures and
-    duration.
+    """Embed `texts` through the configured provider, uncached, and record the call.
 
-    Instrumented here so both providers book metrics (the `hash` path lets tests prove them
-    offline).
-    The unit is one provider call per batch, which is what fails and is retried. A warehouse binding
-    with `vector: {embedding: server}` embeds inside its own SQL and never reaches this function.
+    Counts calls and failures and times them, here so both providers book metrics (the `hash` path
+    lets tests prove them offline). The unit is one provider call per batch, which is what fails and
+    is retried. A warehouse binding with `vector: {embedding: server}` embeds inside its own SQL and
+    never reaches this function.
     """
     started = time.perf_counter()
     try:
@@ -159,8 +153,7 @@ def _embed_uncached(texts: list[str]) -> list[list[float]]:
             )
         )
         # WARNING and re-raise: the caller decides what to do; this line names the embedder,
-        # exception type,
-        # batch size and configuration, which no caller's handler preserves.
+        # exception type, batch size and configuration, which no caller's handler preserves.
         log_event(
             log,
             "embedding.failed",
@@ -186,8 +179,7 @@ def clear_embedding_cache() -> None:
     """Drop every cached vector.
 
     Not a correctness hook (the configuration is in the key); it lets tests that count provider
-    calls
-    start from an empty cache.
+    calls start from an empty cache.
     """
     _CACHE.clear()
 
@@ -224,21 +216,19 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
         settings.llm_tls_ca_bundle,
     )
     # Chunked to `embedding_batch_size` per request so a whole-corpus reindex stays within provider
-    # batch
-    # and token limits.
+    # batch and token limits.
     vectors: list[list[float]] = []
     step = settings.embedding_batch_size
     for start in range(0, len(texts), step):
         chunk = texts[start : start + step]
         response = client.embeddings.create(model=settings.embedding_model, input=chunk)
         # Paired by `index`, never by position: `data` order is not part of the contract and
-        # batching
-        # servers reorder. A permutation would give every text its neighbour's vector undetectably.
+        # batching servers reorder. A permutation would give every text its neighbour's vector
+        # undetectably.
         ordered = sorted(response.data, key=lambda item: item.index)
         if [item.index for item in ordered] != list(range(len(chunk))):
             # Sorting only helps while `index` is a valid permutation; a repeated or missing index
-            # is refused,
-            # because the resulting corruption is invisible once stored.
+            # is refused, because the resulting corruption is invisible once stored.
             raise ValueError(
                 f"the embedding endpoint answered a batch of {len(chunk)} with index values "
                 f"{[item.index for item in ordered]}, which are not that batch's own positions; "
@@ -262,10 +252,9 @@ def _openai_client(
     from openai import OpenAI
 
     # CA pinning and ignoring an ambient proxy come from `gateway_client_kwargs`, the same transport
-    # the
-    # chat client uses. Built unconditionally: passing `None` would let the SDK build a client that
-    # follows `HTTPS_PROXY`. `Any` because `openai` types `http_client` against a different httpx
-    # major.
+    # the chat client uses. Built unconditionally: passing `None` would let the SDK build a client
+    # that follows `HTTPS_PROXY`. `Any` because `openai` types `http_client` against a different
+    # httpx major.
     http_client: Any = httpx.Client(**gateway_client_kwargs(ca_bundle))
     return OpenAI(
         base_url=base_url,

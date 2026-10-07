@@ -47,13 +47,13 @@ WORKLOAD: tuple[str, ...] = (
     f"{BEHAVIOUR_MARKER} Summarise that for a process chemist in two sentences.",
 )
 
-# : Billed token-equivalents the ratio is taken against — a constant of the case, so the recorded
-# : and fresh values are the same quantity.
+#: Billed token-equivalents the ratio is taken against — a constant of the case, so the recorded
+#: and fresh values are the same quantity.
 BASELINE_TOKENS = 1_000_000
 
-# : The fields the emitted case carries: what the turn cost and the correlation id joining it to the
-# : trail. `model_dump()` would also write unmeasured defaults, and `actor`/`session_id` identify a
-# : person and a conversation, which are no part of a cost.
+#: The fields the emitted case carries: what the turn cost and the correlation id joining it to the
+#: trail. `model_dump()` would also write unmeasured defaults, and `actor`/`session_id` identify a
+#: person and a conversation, which are no part of a cost.
 _EMITTED = frozenset(
     {
         "correlation_id",

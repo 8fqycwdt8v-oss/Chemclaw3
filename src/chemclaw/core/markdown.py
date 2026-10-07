@@ -29,9 +29,8 @@ def placeable(text: str) -> str:
 
     A `|` or newline in free text this system does not write (ELN fields, tool results, exception
     messages) would add cells or rows, forging evidence in an artifact read comparatively. The text
-    is
-    preserved: backslash escaped first so escaping the pipe cannot consume one, and whitespace runs
-    collapsed because a cell is one line.
+    is preserved: backslash escaped first so escaping the pipe cannot consume one, and whitespace
+    runs collapsed because a cell is one line.
     """
     return " ".join(text.split()).replace("\\", "\\\\").replace("|", r"\|")
 

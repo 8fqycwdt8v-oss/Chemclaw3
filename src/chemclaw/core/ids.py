@@ -86,8 +86,7 @@ def canonical_text(value: str) -> str:
 
     Only for building an identity, never for storage or display. Ids here are requested by a model
     that re-emits text with arbitrary spacing and case, so a byte-exact key would mint a new report
-    or
-    a new BO campaign with no history for the same question. Apply it to what a model authors, never
-    to what identifies a principal (actors and roles stay byte-exact).
+    or a new BO campaign with no history for the same question. Apply it to what a model authors,
+    never to what identifies a principal (actors and roles stay byte-exact).
     """
     return " ".join(value.split()).casefold()

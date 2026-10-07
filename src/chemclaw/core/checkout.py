@@ -27,8 +27,7 @@ def is_the_processes_own_checkout(repo_dir: str) -> bool:
     """Whether `repo_dir` resolves to the CWD or to the root of this process's own checkout.
 
     Resolved, so every spelling of one directory (trailing slash, `src/..`, absolute, symlink)
-    answers
-    alike. An unresolvable path answers `False`.
+    answers alike. An unresolvable path answers `False`.
     """
     if not repo_dir:
         return False

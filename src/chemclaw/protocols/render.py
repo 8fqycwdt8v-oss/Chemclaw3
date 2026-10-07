@@ -187,10 +187,8 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
         shape = "the structured ask, no procedure yet"
     elif design.is_single_experiment:
         # The design's shape, not the ask's mode. A body with no arms declared is not "1
-        # experiment":
-        # `is_single_experiment` is `<= 1` for the check exemptions it drives, but here a count is
-        # being
-        # reported.
+        # experiment": `is_single_experiment` is `<= 1` for the check exemptions it drives, but here
+        # a count is being reported.
         shape = "1 experiment" if design.distinct_arms else "a procedure with no arms declared"
         # The runs are not lost with the word: a triplicate is one experiment and three arms, and
         # a summary saying only "1 experiment" would hide two of them.
@@ -366,8 +364,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
 
     # The conditions the arms actually run at (`shared_setpoints`), not what the body holds: a value
     # every arm overrides identically would otherwise appear nowhere, and a single arm's override
-    # would
-    # be misreported. Fields the arms disagree about are left to the run sheet.
+    # would be misreported. Fields the arms disagree about are left to the run sheet.
     solo = design.arms[0] if len(design.arms) == 1 else None
     points = shared_setpoints(design)
     stated = [
@@ -439,8 +436,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             "",
             _table(
                 # `Unit` keeps a bare number from reading as an equivalent; the per-level rationale
-                # is the most
-                # useful sentence on a screening plate.
+                # is the most useful sentence on a screening plate.
                 ["Factor", "Kind", "Role", "Unit", "Levels", "Why"],
                 [
                     [

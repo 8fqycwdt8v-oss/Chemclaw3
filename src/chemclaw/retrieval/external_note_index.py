@@ -83,8 +83,7 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         """Delete the catalogue rows first, then the points they addressed.
 
         The reverse of the write order: an orphaned point is invisible and deleted later, while a
-        row
-        whose point is gone would never be re-embedded.
+        row whose point is gone would never be re-embedded.
         """
         gone = await self._retire_absent_ids(keep, built_before=built_before)
         if gone:
@@ -97,9 +96,8 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         """Rank in the store, scoped before the cut; the ids that come back are note ids already.
 
         `within` becomes the store's `groups`, so the scope applies before top-k (filtering after
-        would
-        return nothing for a narrow scope). A zero query vector short-circuits: it has cosine 0 to
-        everything.
+        would return nothing for a narrow scope). A zero query vector short-circuits: it has cosine
+        0 to everything.
         """
         if not any(query_embedding):
             return []

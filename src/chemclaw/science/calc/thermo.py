@@ -516,7 +516,7 @@ def half_life_from_barrier(
     Args:
         barrier_kcal: The free-energy barrier out of the populated well, in kcal/mol.
         temperature_k: The temperature the lifetime is quoted at — the process temperature when the
-        question is racemization during manufacture.
+            question is racemization during manufacture.
         uncertainty_kcal: The method's uncertainty; the configured semiempirical value by default.
 
     Returns:

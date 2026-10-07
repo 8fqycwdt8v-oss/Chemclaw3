@@ -1,10 +1,9 @@
 """One bounded LRU map for every cache keyed by an unbounded identity.
 
-Such keys are session ids, user oids and principals. Shared by the front door's live sessions,
-the budget counters, the rate limiter's buckets and the
-attachment store. `core/metrics.py`'s label-series cap deliberately does not use it: that cap
-refuses new series rather than evicting old ones, since evicting would let an attacker reset real
-counters.
+Such keys are session ids, user oids and principals. Shared by the front door's live sessions, the
+budget counters, the rate limiter's buckets and the attachment store. `core/metrics.py`'s
+label-series cap deliberately does not use it: that cap refuses new series rather than evicting old
+ones, since evicting would let an attacker reset real counters.
 
 Semantics:
 
@@ -44,15 +43,12 @@ class BoundedLru(Generic[K, V]):
         """Create the map with `capacity` (fixed, or a callable read at each eviction pass).
 
         `pinned` says which keys must not be evicted right now. `weight` and `max_weight` are one
-        bound:
-        `weight` measures an entry at each `put`, `max_weight` is the total before
-        least-recently-used
-        entries are evicted. Omit both to bound by entry count alone.
+        bound: `weight` measures an entry at each `put`, `max_weight` is the total before
+        least-recently-used entries are evicted. Omit both to bound by entry count alone.
 
         Raises:
             ValueError: if exactly one of `weight`/`max_weight` is given; either half alone reads as
-            a
-                bound that is not there.
+            a bound that is not there.
         """
         if (weight is None) != (max_weight is None):
             raise ValueError("weight and max_weight are one bound: pass both or neither")
@@ -114,8 +110,7 @@ class BoundedLru(Generic[K, V]):
         """Insert or refresh `key` as most-recently-used, then evict past either bound.
 
         Evicts the least-recently-used entry that is neither pinned nor `key`; when none remains, or
-        no
-        eviction could close the weight breach, the map briefly holds over its bound. Weight is
+        no eviction could close the weight breach, the map briefly holds over its bound. Weight is
         (re-)measured here, so a value mutated in place must be `put` back.
         """
         self._entries[key] = value

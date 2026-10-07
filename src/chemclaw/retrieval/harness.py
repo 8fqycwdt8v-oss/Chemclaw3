@@ -320,13 +320,11 @@ def report_note(report: Report, *, drafted_on: date | None = None) -> Note:
         lines.append(f"## {section.heading} [layer: {section.memory_layer}]\n")
         if section.retrieval_failed and section.evidence:
             # A partially failed section keeps what was retrieved: the marker shows the gap, and the
-            # evidence
-            # renders under it.
+            # evidence renders under it.
             lines.extend(_gap_notices(section, whole=False))
         elif section.retrieval_failed:
             # Nothing was retrieved at all: flagged distinctly from an empty section, so the gap is
-            # visible to
-            # the reader (and re-runnable), never silently absent.
+            # visible to the reader (and re-runnable), never silently absent.
             lines.extend(_gap_notices(section, whole=True))
             continue
         elif not section.supported:
@@ -345,8 +343,7 @@ def report_note(report: Report, *, drafted_on: date | None = None) -> Note:
             lines.append(f"- {_as_evidence(chunk.content)} ({', '.join(provenance)})")
             if chunk.conflicts_with:
                 # Conflicting ids stay plain text (the report warns about them, it does not rest on
-                # them), and are
-                # named as the strongest when there are more, with the count.
+                # them), and are named as the strongest when there are more, with the count.
                 hidden = chunk.conflicts_total - len(chunk.conflicts_with)
                 scope = f" (the {len(chunk.conflicts_with)} strongest of "
                 scope = f"{scope}{chunk.conflicts_total})" if hidden > 0 else ""

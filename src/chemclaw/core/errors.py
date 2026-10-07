@@ -41,8 +41,7 @@ class AtCapacityError(SubsystemUnavailableError):
     Retryable soon: the identical call succeeds once admitted work finishes. A subclass of
     `SubsystemUnavailableError` so every outage retry contract applies, and its own class so
     `connectors/server.py::_sanitize_tool_errors` can prefix `marker` — the fleet's at-capacity
-    format
-    (`core/mcp_session.at_capacity`) — letting callers queue instead of failing.
+    format (`core/mcp_session.at_capacity`) — letting callers queue instead of failing.
     """
 
     #: The server whose slots were full — the `<server>` in `[<server>-at-capacity]`.

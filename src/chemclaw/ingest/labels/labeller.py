@@ -205,9 +205,9 @@ class RxnLabelServer:
         Returns:
             One representation per id the server answered for; a missing id means "not labelled this
             pass". An answer whose species list is neither empty nor the length sent has that list
-            blanked: positional roles would otherwise shift onto the wrong molecules. The rest of
-                the
-            answer (e.g. `mapped_smiles`) is kept, and roles fall back to the source's coarse map.
+            blanked: positional roles would otherwise shift onto the wrong molecules. The rest
+            of the answer (e.g. `mapped_smiles`) is kept, and roles fall back to the source's
+            coarse map.
         """
         sent = {rid: len(species) for rid, _smiles, species in reactions}
         payload = await self._call(

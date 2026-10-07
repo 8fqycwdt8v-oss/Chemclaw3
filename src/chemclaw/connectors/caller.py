@@ -52,8 +52,7 @@ def reset_caller(tokens: CallerTokens) -> None:
     """Unbind the caller bound by the matching `bind_caller`.
 
     Per-call isolation comes from `connectors/server.py::_bind_caller_per_tool_call`, which binds
-    and
-    resets around each tool call; this is the unbinding half of both call sites.
+    and resets around each tool call; this is the unbinding half of both call sites.
     """
     _caller_actor.reset(tokens.actor)  # type: ignore[arg-type]
     _caller_session.reset(tokens.session)  # type: ignore[arg-type]

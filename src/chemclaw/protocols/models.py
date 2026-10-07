@@ -65,8 +65,8 @@ class ProtocolStepKind(StrEnum):
 
     # Deliberately not `ingest.eln.ord.StepKind`: that is the record vocabulary a source may write,
     # and this prescriptive one adds sample, analyse and hold, which the ingest path cannot
-    # interpret.
-    # The shared values are spelled identically so a design transcribed as a run maps across.
+    # interpret. The shared values are spelled identically so a design transcribed as a run maps
+    # across.
     CHARGE = "charge"
     ADDITION = "addition"
     TEMPERATURE = "temperature"
@@ -353,8 +353,7 @@ class ProtocolArm(BaseModel):
     setpoints: Setpoints | None = None
     # No per-arm charge override: an arm varying an amount declares it as a continuous factor. A
     # control that genuinely differs says so in `note`. Controls are excluded from the coverage
-    # check
-    # and rendered apart on the plate.
+    # check and rendered apart on the plate.
     control: Literal["", "positive", "negative", "blank"] = ""
     replicate_of: str = ""
     note: str = ""
@@ -466,9 +465,8 @@ class ExperimentDesign(BaseModel):
         if dangling:
             raise ValueError(f"replicate_of names no arm in this design: {', '.join(dangling)}")
         # A replicate chain must terminate: following each chain to its end catches cycles of any
-        # length,
-        # which would otherwise exempt every arm in the ring from the distinctness and coverage
-        # checks.
+        # length, which would otherwise exempt every arm in the ring from the distinctness and
+        # coverage checks.
         parent = {arm.arm_id: arm.replicate_of for arm in self.arms}
         looped: list[str] = []
         for start in parent:
@@ -489,8 +487,7 @@ class ExperimentDesign(BaseModel):
         # assay noise as the answer.
         by_id = {arm.arm_id: arm for arm in self.arms}
         # Compare the *effective* conditions (`setpoints_for`), the definition
-        # `checks.arms_are_distinct`
-        # uses, so the remedy it prescribes is never refused here.
+        # `checks.arms_are_distinct` uses, so the remedy it prescribes is never refused here.
         differing = [
             arm.arm_id
             for arm in self.arms
@@ -523,10 +520,9 @@ class ExperimentDesign(BaseModel):
         """Whether this is one experiment rather than a screen: one distinct arm and nothing varied.
 
         The one definition for every check. Not `request.mode` (the ask is tied to nothing the
-        design
-        is), and not the raw arm count: a one-arm design with factors is a screen's first round, and
-        an
-        experiment in triplicate (arms carrying `replicate_of`) is still one experiment.
+        design is), and not the raw arm count: a one-arm design with factors is a screen's first
+        round, and an experiment in triplicate (arms carrying `replicate_of`) is still one
+        experiment.
         """
         return len(self.distinct_arms) <= 1 and not self.factors
 
@@ -544,8 +540,8 @@ class ExperimentDesign(BaseModel):
         """Whether the plate checks apply: **either** the shape or the ask says this is one.
 
         The union is deliberate: a many-arm design with a stale `single` ask and a one-arm design
-        whose
-        chemist said `screen` both need plate checks. Exempt only when nothing claims to be a plate.
+        whose chemist said `screen` both need plate checks. Exempt only when nothing claims to be a
+        plate.
         """
         return not self.is_single_experiment or self.request.mode != "single"
 

@@ -29,8 +29,7 @@ async def republish_stored_results(spec: RepublishSpec) -> dict[str, int]:
     """Walk the stored corpus and queue what has not been published. Returns the counts.
 
     Runs on this bundle's own queue: a full scan of two never-pruned tables should not share a
-    worker
-    with small jobs.
+    worker with small jobs.
     """
     # Heartbeat throughout: the scan has no unit boundary to report at, and a killed worker must be
     # noticed before start-to-close lapses.
@@ -44,8 +43,7 @@ async def _walk(spec: RepublishSpec) -> dict[str, int]:
     """The scan itself, so the activity above is nothing but its heartbeat wrapper.
 
     Refuses before scanning when this deployment publishes nowhere, since `enqueue` is then a no-op
-    and
-    the counts would look like an up-to-date corpus. `ResultSinkError` is non-retryable
+    and the counts would look like an up-to-date corpus. `ResultSinkError` is non-retryable
     (`durable/publish._BAD_DATA_TYPES`), so the job fails fast and the chemist reads the reason.
     """
     reason = unpublishable_reason()
@@ -90,15 +88,13 @@ class RepublishResultsWorkflow:
             republish_stored_results,
             spec,
             # Its own budget, strictly inside the parent's ceiling
-            # (`result_republish_timeout_seconds`), so the
-            # retry policy stays reachable.
+            # (`result_republish_timeout_seconds`), so the retry policy stays reachable.
             start_to_close_timeout=timedelta(seconds=settings.result_republish_timeout_seconds),
             heartbeat_timeout=timedelta(
                 seconds=settings.result_republish_heartbeat_timeout_seconds
             ),
             # Bounds the queue wait, so a `connector-results` queue served by no pod fails promptly
-            # rather than
-            # at the parent's ceiling. See `durable/publish.py`.
+            # rather than at the parent's ceiling. See `durable/publish.py`.
             schedule_to_start_timeout=connector_queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )

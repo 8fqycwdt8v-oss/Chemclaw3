@@ -657,10 +657,9 @@ def step_profile(profile: str | None, write_tools: Sequence[str]) -> AgentProfil
 
     - `harness_enabled=False`, for the reasons `run_agent_step` gives.
     - `tool_names = advertised − (side-effecting − declared)`: the read-only default, applied
-      through
-      the profile's own `tool_names` dial, which narrows in-process tools, connector allow-lists and
-      skills together. Starting from `advertised_tool_names` keeps the profile's own narrowing, so
-      this only subtracts.
+      through the profile's own `tool_names` dial, which narrows in-process tools, connector
+      allow-lists and skills together. Starting from `advertised_tool_names` keeps the profile's
+      own narrowing, so this only subtracts.
 
     The classification is `chemclaw.agent.authz.side_effecting_tools()`, shared with the dry-run
     guard and the plan gate. `declared` is intersected, never added, so a step cannot gain a tool

@@ -269,9 +269,8 @@ def _renamed(payload: dict[str, Any], current: str, legacy: str, what: str) -> A
     Only for a pure rename, where the same expression was assigned to a new name:
     `RefinedEnsemble`'s entropy and ensemble correction gained a `refined_` prefix with no change to
     the arithmetic. A rename where the quantity also moved must refuse the row instead. Reachable
-    only
-    through `payload_kind="RefinedEnsemble"`, so the legacy name here is always the refined subset's
-    own value.
+    only through `payload_kind="RefinedEnsemble"`, so the legacy name here is always the refined
+    subset's own value.
     """
     value = payload.get(current)
     if value is not None:
@@ -279,8 +278,7 @@ def _renamed(payload: dict[str, Any], current: str, legacy: str, what: str) -> A
     value = payload.get(legacy)
     if value is not None:
         # A log line rather than a flag: the published value is identical, so only an operator
-        # running a
-        # backfill over a legacy corpus needs to know.
+        # running a backfill over a legacy corpus needs to know.
         logger.warning(
             "publish: %s read from the legacy field %r (now %r) for %r; the arithmetic is "
             "unchanged, only the name",
@@ -351,8 +349,7 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
         _fact("exotherm_threshold", payload.get("exotherm_threshold_kcal"), "kcal/mol"),
         _text("reaction_level", payload.get("level")),
         # Beside `reaction_delta_g`: a free energy is unusable without its reference state (1 mol/L
-        # vs
-        # 1 atm differ by 1.894*dn kcal/mol).
+        # vs 1 atm differ by 1.894*dn kcal/mol).
         _text("standard_state", payload.get("standard_state")),
         _text("conformer_treatment", payload.get("conformer_treatment")),
     )
@@ -432,10 +429,8 @@ def _solvent_screen(
         treatment=payload.get("level") or "",
     )
     # A spread and a winner describe a comparison: over one medium the spread is zero by
-    # construction,
-    # and over a partial screen they are only bounds (a failed medium may be the best). Both are
-    # read
-    # either way so the field guard sees them consumed.
+    # construction, and over a partial screen they are only bounds (a failed medium may be the
+    # best). Both are read either way so the field guard sees them consumed.
     spread, best = payload.get("spread_kcal"), payload.get("best_solvent")
     compared = len(payload.get("effects") or []) >= 2 and not payload.get("failed")
     facts = _kept(
@@ -738,8 +733,7 @@ def _ensemble_property(
     mapped = _AVERAGED_PROPERTIES.get(asked)
     if mapped is None:
         # An unregistered property is refused, not stored under the tool's vocabulary where nobody
-        # could
-        # find it.
+        # could find it.
         raise ProjectionError(
             f"ensemble average of {asked!r} has no registered property; add it to "
             "`_AVERAGED_PROPERTIES` and to `publish.properties`"
@@ -843,8 +837,8 @@ def _species_distribution(
         _text("distribution_kind", payload.get("kind")),
         _text("reaction_level", payload.get("level")),
         # The gap to the runner-up, not the winner's own relative energy (always 0.0 by
-        # construction).
-        # That gap is what the ranking rests on. Absent for a set of one: nothing was ranked.
+        # construction). That gap is what the ranking rests on. Absent for a set of one: nothing was
+        # ranked.
         _fact(
             "species_gap",
             species[1].get("relative_kcal") if len(species) > 1 else None,
@@ -872,8 +866,7 @@ def _bond_survey(
 
     Each bond is a `SiteFact` pair (`atom_j >= 0`), not a scalar per bond, so bond energies stay out
     of the scalar table's index. The weakest bond is also a calculation-scope fact, since "which
-    bond
-    breaks first" is the question the survey answers.
+    bond breaks first" is the question the survey answers.
     """
     smiles = payload.get("smiles")
     if not smiles:
@@ -1037,8 +1030,7 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
         _text("scan_coordinate", x_label),
     )
     # The relaxed minimum geometry as a `produced_structure` fact: the record's own `structure_id`
-    # is
-    # the geometry the calculation ran on.
+    # is the geometry the calculation ran on.
     produced = (payload.get("minimum_structure") or {}).get("structure_id") or ""
     facts = [*facts, *_kept(_text("produced_structure", produced))]
     extra: dict[str, Any] = {"properties": facts, "points": points}
@@ -1102,8 +1094,7 @@ def _rotation(
     uncertainty = payload.get("uncertainty_kcal")
     facts = _kept(
         # The method's uncertainty rides on the barrier, as on a reaction energy; the half-life
-        # below is
-        # exponential in it.
+        # below is exponential in it.
         _fact(
             "rotational_barrier",
             (highest or {}).get("forward_kcal"),
@@ -1220,10 +1211,8 @@ def _thermochemistry(
         _fact("symmetry_number", payload.get("symmetry_number"), ""),
         _fact("mode_count", payload.get("mode_count"), ""),
         # A non-stationary geometry often shows no imaginary mode, and its ZPE is quietly too small,
-        # so
-        # the gradient is the evidence `is_minimum` cannot carry. Reported in Hartree/Angstrom;
-        # `None`
-        # when the backend reported none.
+        # so the gradient is the evidence `is_minimum` cannot carry. Reported in Hartree/Angstrom;
+        # `None` when the backend reported none.
         _fact("max_gradient", payload.get("max_gradient_hartree_per_angstrom"), "hartree/angstrom"),
         _flag("is_minimum", payload.get("is_minimum")),
         # The reference state the entropy and Gibbs terms are quoted at (1 atm gas, 1 mol/L
@@ -1263,8 +1252,7 @@ def _thermochemistry(
         for frequency in (payload.get("imaginary_frequencies_cm") or [])[:1]
     ]
     # Says why the `ir_intensity` series is short: intensities that could not be paired with modes
-    # are
-    # dropped, and a consumer should see the reason.
+    # are dropped, and a consumer should see the reason.
     unpaired = payload.get("spectrum_unavailable")
     flags = (
         [
@@ -1368,8 +1356,7 @@ def _site_reactivity(
         _fact("atom_count", payload.get("total_atoms"), ""),
         _text("fukui_mode", payload.get("mode")),
         # Units on every value. `softness_per_ev` is a reciprocal hardness, so its unit is 1/ev.
-        # Lower
-        # case, matching the registry's spelling (units are matched, not parsed).
+        # Lower case, matching the registry's spelling (units are matched, not parsed).
         _fact("ionization_potential", panel.get("ionization_potential_ev"), "ev"),
         _fact("electron_affinity", panel.get("electron_affinity_ev"), "ev"),
         _fact("chemical_potential", panel.get("chemical_potential_ev"), "ev"),
@@ -1406,8 +1393,7 @@ def _optimization(
         _fact("optimization_steps", payload.get("steps"), ""),
         # None under GFN-FF, which reports no gradient. Reported in Hartree/Angstrom (as
         # `OptimizationResult.max_gradient` holds it), not the canonical Hartree/bohr, so
-        # `to_canonical`
-        # converts it.
+        # `to_canonical` converts it.
         _fact("max_gradient", payload.get("max_gradient"), "hartree/angstrom"),
         _fact("displacement_rms", payload.get("displacement_rms_angstrom"), "angstrom"),
     )
@@ -1595,8 +1581,7 @@ def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
     """A stored DFT energy. The basis set is part of the level, not a condition.
 
     Backfill-only: nothing writes `dft` rows any more, but `calculation_results` is never pruned,
-    and
-    a retired calculator keeps its `calc_type` projector.
+    and a retired calculator keeps its `calc_type` projector.
     """
     smiles = payload.get("molecule_smiles")
     subject = Subject(kind="molecule", members=[_molecule(smiles)], label=smiles or "")
@@ -1756,8 +1741,7 @@ def projector_for(calc_type: str, payload_kind: str = "") -> _Projector | None:
     """The projector for a stored row, or None when nothing here can read it.
 
     `payload_kind` wins when given (exact, where a prefix is an inference). None rather than
-    raising,
-    so a backfill skips rows from retired calculators.
+    raising, so a backfill skips rows from retired calculators.
     """
     if payload_kind and payload_kind in PAYLOAD_PROJECTORS:
         return PAYLOAD_PROJECTORS[payload_kind]
@@ -1838,9 +1822,8 @@ def records_from_solvent_screen(
     """A solvent screen as its comparison **plus** one record per solvent it compared.
 
     Never store an aggregate whose parts are not also stored: the parts are ordinary reaction
-    records
-    at their own conditions, so cross-solvent questions answer over the union of screened and
-    unscreened runs. Each part links to the comparison through `depends_on`.
+    records at their own conditions, so cross-solvent questions answer over the union of screened
+    and unscreened runs. Each part links to the comparison through `depends_on`.
     """
     comparison = project(
         calc_ref=calc_ref,

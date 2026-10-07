@@ -38,10 +38,8 @@ class ResultSink(Protocol):
         """Write `records`, idempotently.
 
         Raises `SinkUnavailableError` when the attempt is worth repeating and `SinkRejectedError`
-        when
-        the content is the problem. Returning normally means every record is durable at the far end;
-        a
-        driver that cannot promise that for a partial batch must raise.
+        when the content is the problem. Returning normally means every record is durable at the far
+        end; a driver that cannot promise that for a partial batch must raise.
         """
         ...
 
@@ -49,7 +47,6 @@ class ResultSink(Protocol):
         """Release whatever the sink is holding. Called after every drain pass.
 
         The drain builds a sink per run, so anything held open must be closed here. Must be safe to
-        call
-        twice, and on a sink that never connected.
+        call twice, and on a sink that never connected.
         """
         ...

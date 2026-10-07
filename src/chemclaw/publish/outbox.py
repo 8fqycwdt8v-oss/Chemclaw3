@@ -305,12 +305,10 @@ def project_payload(
         )
     except Exception:
         # Every exception, not a named set: projectors can raise `KeyError` on rows written by an
-        # older
-        # calculator, and a backfill walk must not abort on one. Nothing a best-effort publish
-        # raises is
-        # worth failing a persisted calculation. Counted apart from publish failures, because a
-        # projector
-        # that raises will raise on every payload of that shape until code changes.
+        # older calculator, and a backfill walk must not abort on one. Nothing a best-effort publish
+        # raises is worth failing a persisted calculation. Counted apart from publish failures,
+        # because a projector that raises will raise on every payload of that shape until code
+        # changes.
         logger.exception("publish: could not project %s (%s)", calc_ref, calc_type)
         record_metric(lambda m: m.increment("chemclaw_result_projection_failures_total"))
         return None
@@ -406,8 +404,7 @@ async def claim(sink: str, limit: int) -> list[ClaimedRow]:
         await conn.commit()
     if reaped:
         # The same counter `mark_failed` books, since it is the same transition, so the dead-letter
-        # rate
-        # covers this cause too.
+        # rate covers this cause too.
         record_metric(lambda m: m.increment("chemclaw_results_dead_lettered_total", reaped))
         log_event(
             logger,

@@ -22,8 +22,7 @@ class _EnvBearerAuth(httpx.Auth):
     """Send `Authorization: Bearer <$env>`, reading the variable per request.
 
     Read at request time so a rotated secret takes effect without a restart. A missing variable
-    raises
-    rather than sending an empty credential, which would surface as an opaque 401.
+    raises rather than sending an empty credential, which would surface as an opaque 401.
     """
 
     def __init__(self, token_env: str, connector: str) -> None:
@@ -58,6 +57,5 @@ def auth_for(auth: ConnectorAuth, connector: str) -> httpx.Auth | None:
     if isinstance(auth, NoAuth):
         return None
     # Not `assert_never`: `ConnectorAuth` is a plain union, and an unhandled variant must fail
-    # loudly
-    # rather than silently send no credential.
+    # loudly rather than silently send no credential.
     raise ValueError(f"connector {connector!r}: unsupported auth mode {type(auth).__name__}")

@@ -168,10 +168,8 @@ def diff_designs(
         old, new = left.get(path), right.get(path)
         if path not in right:
             # An appearing or vanishing path whose value is empty is not a change (an all-default
-            # sub-model
-            # replacing `None` changes nothing a chemist can see). A value changing *to* empty is a
-            # real
-            # deletion and is kept below.
+            # sub-model replacing `None` changes nothing a chemist can see). A value changing *to*
+            # empty is a real deletion and is kept below.
             if _render(old):
                 changes.append(FieldChange(path=path, kind="removed", before=_render(old)))
         elif path not in left:

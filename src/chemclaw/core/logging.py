@@ -47,14 +47,11 @@ def configure_logging() -> None:
     )
     # Filters go on handlers, not loggers: a logger's filter is not consulted for records propagated
     # from children. One filter pair is built and shared, because constructing the redactor reads
-    # the
-    # connector registry and logs its degradation once per startup.
+    # the connector registry and logs its degradation once per startup.
     handlers = _handlers_that_reach_an_output_stream()
     # `ContextFilter` is installed before `SecretRedactingFilter` is constructed: that constructor
-    # may log
-    # `degraded[log_redaction]`, and the format needs `%(correlation_id)s`, which only
-    # `ContextFilter`
-    # supplies. Otherwise the one security degradation line fails to format.
+    # may log `degraded[log_redaction]`, and the format needs `%(correlation_id)s`, which only
+    # `ContextFilter` supplies. Otherwise the one security degradation line fails to format.
     context = ContextFilter()
     for handler in handlers:
         if not any(isinstance(f, ContextFilter) for f in handler.filters):
@@ -62,17 +59,14 @@ def configure_logging() -> None:
     redaction = SecretRedactingFilter()
     for handler in handlers:
         # A non-propagating logger's handlers are not reset by `force=True`, so without this guard
-        # each call
-        # would stack another filter pair on them.
+        # each call would stack another filter pair on them.
         installed = next((f for f in handler.filters if isinstance(f, SecretRedactingFilter)), None)
         if installed is None:
             handler.addFilter(redaction)
             installed = redaction
         # The filter is fail-open, so an unredactable record reaches logging's own stderr error
-        # path; this
-        # makes that path print a redacted copy. Passed `installed` (the filter actually on the
-        # handler), so
-        # both paths share one token inventory across repeated calls.
+        # path; this makes that path print a redacted copy. Passed `installed` (the filter actually
+        # on the handler), so both paths share one token inventory across repeated calls.
         _install_redacting_handle_error(handler, installed)
         if settings.log_json:
             handler.setFormatter(JsonFormatter())
@@ -90,10 +84,8 @@ def log_event(
     """Emit one record that is both readable prose and a queryable row.
 
     `event` is a short dotted literal (`turn.finished`, `job.failed`) that a query starts from; it
-    lands
-    in `fields.event` and, under the `%` format, as the message prefix. `logger` is the caller's so
-    the
-    record says where it happened.
+    lands in `fields.event` and, under the `%` format, as the message prefix. `logger` is the
+    caller's so the record says where it happened.
 
     Args:
         logger: the calling module's logger.
@@ -121,8 +113,8 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
 
     The front door runs `exec uvicorn ... --factory`, and uvicorn gives `uvicorn` a handler with
     `propagate: false`; its `uvicorn.error` logs unhandled exceptions, exactly the records that
-    carry
-    DSNs or auth headers. Sweeping the logger manager covers it without the entrypoint knowing.
+    carry DSNs or auth headers. Sweeping the logger manager covers it without the entrypoint
+    knowing.
 
     The sweep is one-shot at `configure_logging()` time. It reaches uvicorn's loggers only because
     uvicorn configures them before the app factory runs; a library that creates a non-propagating
@@ -130,13 +122,11 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
     """
     handlers: list[logging.Handler] = list(logging.getLogger().handlers)
     # `logging.lastResort` is what a non-propagating logger with no handlers falls back to, so it
-    # gets
-    # the same redaction.
+    # gets the same redaction.
     if logging.lastResort is not None:
         handlers.append(logging.lastResort)
     # Snapshot with a single C-level `list()` copy: other threads may create loggers concurrently,
-    # and
-    # iterating the live view can raise "dictionary changed size during iteration"
+    # and iterating the live view can raise "dictionary changed size during iteration"
     # mid-configuration.
     known = list(logging.root.manager.loggerDict.values())
     for existing in known:
@@ -176,10 +166,9 @@ def _install_redacting_handle_error(
         """Print logging's own diagnostic for `record` with its credentials removed.
 
         Nothing here may raise, since anything escaping surfaces at the caller's log line. The scrub
-        is
-        attempted, any failure drops the arguments, and the delegation sits outside the `try` so it
-        always
-        runs. Token names are read per call so the filter and this path share one inventory.
+        is attempted, any failure drops the arguments, and the delegation sits outside the `try` so
+        it always runs. Token names are read per call so the filter and this path share one
+        inventory.
         """
         msg, args = record.msg, record.args
         try:
@@ -219,8 +208,7 @@ def _install_noop_meter_provider() -> None:
 
     With no meter provider set, the OpenTelemetry API proxies every instrument call and retains each
     proxy forever, so per-turn instrument creation leaks memory without bound. Idempotent by a
-    module
-    flag, because `get_meter_provider()` itself resolves and caches a provider.
+    module flag, because `get_meter_provider()` itself resolves and caches a provider.
     """
     global _NOOP_METERS_INSTALLED
     if _NOOP_METERS_INSTALLED:
@@ -270,11 +258,9 @@ def configure_telemetry() -> None:
     """Install the process's OpenTelemetry span pipeline; install no-op meters when it is off.
 
     Off unless `CHEMCLAW_OTEL_ENABLED=true`. When on, installs a global `TracerProvider` with an
-    OTLP
-    span exporter behind a `BatchSpanProcessor`, so the first-party spans in `core/tracing.py` are
-    exported; span helpers degrade silently to no-ops otherwise, so tests guard this pipeline.
-    Called
-    once per entrypoint, after `configure_logging`; idempotent.
+    OTLP span exporter behind a `BatchSpanProcessor`, so the first-party spans in `core/tracing.py`
+    are exported; span helpers degrade silently to no-ops otherwise, so tests guard this pipeline.
+    Called once per entrypoint, after `configure_logging`; idempotent.
 
     Traces only: metrics are `core/metrics.py`'s Prometheus surface and logs go to stderr. The no-op
     meter provider is installed in both states, since the OTel API leaks proxies without one.

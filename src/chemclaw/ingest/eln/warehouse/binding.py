@@ -1,30 +1,16 @@
 """The binding document: a site's own schema, declared rather than compiled in.
 
-Every other ELN adapter in this package names its source's fields in Python — `json_adapter` knows
-a payload has `reaction_smiles`, `ord_adapter` knows ORD's shape. That works because both formats
-were fixed before the adapter was written. A corporate warehouse is the opposite case: the tables
-exist before anyone here sees them, they are site-specific, and they grow. Writing an adapter
-against them means writing it on the day access arrives and editing it every time a column lands.
+A corporate warehouse's tables are site-specific and grow, so instead of an adapter naming fields in
+Python, a binding says which relation holds reactions, which columns carry the cursor, which child
+tables hang off it, and which column becomes which `OrdReaction` field;
+`chemclaw.ingest.eln.warehouse.adapter` executes it.
 
-So the schema moves into data. A binding says which relation holds reactions, which columns carry
-the cursor, which child tables hang off it, and which column becomes which field of `OrdReaction` —
-and `chemclaw.ingest.eln.warehouse.adapter` executes it. Attaching the real warehouse becomes
-writing YAML; adding a table to it becomes adding a block.
-
-**Where it lives, and why inline.** In the `config:` block of the source's `datasource.yaml`, which
-the registry splats into the half's constructor. Not a sibling file: `registry._build_half` hands a
-half its config kwargs and nothing else, so an adapter cannot learn its own folder in order to
-resolve a relative path — and inline keeps the property the seam was built for, that a deployment
-mounts its own manifest directory (`CHEMCLAW_DATA_SOURCES_DIR`, earlier wins) with no path plumbing
-and no image rebuild. `DataSourceManifest.config` is `dict[str, Any]` by contract, so the strictness
-lives here instead: `extra="forbid"` on every model below, validated when the half is built, which
-is worker startup.
-
-**What is validated up front.** Every path parses, every transform is one of the known ones with
-options it accepts, every mapped field is a real `OrdReaction` field, every `components:` block
-names a `related:` block that exists, and a role vocabulary maps onto real `Role` members. All of it
-offline, with no warehouse reachable — which is the point: the binding for a tenant nobody can
-connect to yet is still checkable.
+It lives inline in the source's `datasource.yaml` `config:` block, because a half receives only its
+config kwargs and cannot resolve a sibling file, and a deployment can mount its own manifest
+directory without path plumbing. Strictness lives here (`extra="forbid"` everywhere), validated at
+worker startup and offline: paths parse, transforms and options are known, mapped fields exist,
+`components:` blocks name existing `related:` blocks, and role vocabularies map to real `Role`
+members.
 """
 
 import re
@@ -42,15 +28,10 @@ from chemclaw.ingest.eln.warehouse.expr import (
 )
 from chemclaw.science.labels.vocabulary import LabelGroup
 
-# The fields of `OrdReaction` a `reaction:` entry may not map, for two different reasons.
-#
-# Most are built by the engine from another part of the binding, because they are *rows* rather than
-# values and a field binding reads one value: components come from `components:`, the impurity
-# profile from `impurities:`, provenance from `provenance:`, the attribute bag from `attributes:`.
-#
-# `steps` is the exception, and it is excluded rather than supported: a warehouse records a protocol
-# as prose, which lands in `procedure_text` verbatim, and segmenting prose into ordered steps is
-# what `json_adapter` already does. A second, YAML-driven segmenter would be that logic twice.
+# The fields of `OrdReaction` a `reaction:` entry may not map. Most are rows built from another part
+# of the binding (`components:`, `impurities:`, `provenance:`, `attributes:`), while a field binding
+# reads one value. `steps` is excluded: a warehouse protocol is prose in `procedure_text`, and
+# segmenting it is `json_adapter`'s logic, not a second YAML-driven one.
 _ENGINE_OWNED = frozenset({"inputs", "outcomes", "impurities", "provenance", "attributes", "steps"})
 
 _MAPPABLE_FIELDS = frozenset(OrdReaction.model_fields) - _ENGINE_OWNED
@@ -65,11 +46,8 @@ class BindingError(PathSyntaxError):
 def _check_identifier(value: str, what: str) -> str:
     """Raise unless `value` is a bare or dotted SQL identifier safe to interpolate.
 
-    The pattern and the message live in `core.connect` beside `check_env_name`, because that module
-    owns what a `connection:` block may contribute and a binding is not the only thing that
-    contributes an identifier — a sink's `schema:` does too, into libpq's `options`. This stays as
-    the local name that binds the error type, so the eighteen call sites below read unchanged and
-    every failure here is still a `BindingError`.
+    The pattern lives in `core.connect` (sinks contribute identifiers too); this wrapper keeps every
+    failure here a `BindingError`.
     """
     return check_identifier(value, what, error=BindingError)
 
@@ -251,9 +229,8 @@ class ComponentBinding(BaseModel):
     def _role_vocabulary_is_real(self) -> Self:
         """A role `value_map` must produce real `Role` members, checked now rather than per row.
 
-        The single most likely mistake in a binding, and the one with the worst failure shape: a
-        site vocabulary mapped to `solvant` would reject every row carrying it, and the sync would
-        report a rejected batch rather than a typo in one line of YAML.
+        A typo would otherwise reject every row carrying that value and read as bad data rather than
+        a YAML mistake.
         """
         known = {role.value for role in Role}
         for step in self.role.transform:
@@ -289,9 +266,8 @@ class ImpurityBinding(BaseModel):
     name: FieldBinding | None = None
     smiles: FieldBinding | None = None
     area_percent: FieldBinding | None = None
-    # The column this docstring has always named and could not read. A site's analytics table keys
-    # its unresolved peaks by RRT, and without a binding for it the profile arrived carrying a
-    # label and an area% with no way to say which peak either belonged to.
+    # A site's analytics table keys unresolved peaks by RRT; without it, a label and area% could not
+    # say which peak they describe.
     rrt: FieldBinding | None = None
 
     @model_validator(mode="after")
@@ -415,32 +391,11 @@ class IngestBinding(BaseModel):
 def _refuse_derived_hypothesis(field: FieldBinding | None) -> None:
     r"""A binding may name the column holding the run's intent; it may not carve one out of prose.
 
-    **The rule this enforces is already stated in Python and was reachable through YAML.**
-    `ingest.eln.json_adapter` reads `hypothesis` from the entry's own field and refuses to pattern-
-    match one out of the procedure, because "a hypothesis extracted by pattern-matching would be
-    indistinguishable, downstream, from one the chemist wrote". Nothing here disagreed with that —
-    and nothing here enforced it either. The vocabulary has a `regex` transform, so a site whose ELN
-    keeps its objective inside the protocol text could write
-
-        hypothesis: {path: root.PROTOCOL_TEXT, transform: [{regex: {pattern: "Aim:\s*(.+)"}}]}
-
-    which loads, validates, ingests, and renders a `Tested:` line that no reader downstream can tell
-    from a chemist's own words. One half of a codebase refusing what the other half permits is not a
-    rule; it is a rule plus whoever happens to review the manifest.
-
-    **Reading intent out of prose is not forbidden — misattributing it is.** `agent.condense` asks a
-    model for exactly this and is allowed to, because its row is stamped `digest_source: extracted`,
-    its column is headed "Tested (read)" and it quotes the sentence. That is the supported route for
-    a free-text ELN, and the error below names it rather than leaving an operator with a refusal and
-    no alternative.
-
-    **Only the transforms that can put text in the field which is not in the cell.** `regex` carves
-    a substring out of prose — the case this exists for; `value_map` substitutes one string for
-    another; `default` supplies one where the source had none. Whitespace and case normalisation
-    cannot misattribute anything, and refusing them was a real over-reach: an `OBJECTIVE` column
-    with `{strip: {}}` on it is the chemist's own field with its padding trimmed, which this
-    docstring called untouched while the code failed the worker at startup and accused the binding
-    of carving intent out of prose.
+    The same rule `json_adapter` follows: a hypothesis extracted by pattern from the procedure would
+    be indistinguishable downstream from one the chemist wrote, so `hypothesis` may not use a
+    transform that can introduce text not in the cell (see `_FABRICATING_TRANSFORMS`). Normalising
+    transforms (`strip`, case) are allowed. Reading intent from prose is supported through
+    `agent.condense`, which stamps its result as extracted; the error names that route.
     """
     if field is None:
         return
@@ -466,8 +421,7 @@ def _refuse_derived_hypothesis(field: FieldBinding | None) -> None:
 
 
 # The transforms that can put text in a field which the source cell does not contain. Normalising
-# ones (`strip`, `upper`, `lower`) and the numeric/date coercions are absent deliberately: they
-# cannot invent or relocate a statement of intent, which is the only thing this rule protects.
+# and coercing transforms are absent: they cannot invent or relocate a statement of intent.
 _FABRICATING_TRANSFORMS = frozenset({"regex", "value_map", "default"})
 
 
@@ -523,11 +477,8 @@ class ConnectionBinding(BaseModel):
     def _names_no_secrets(self) -> Self:
         """`*_env` must look like a variable name, so a pasted secret fails loudly not quietly.
 
-        Not a security boundary — a determined author can still paste anything — but it catches the
-        realistic mistake, which is someone filling in `password_env: hunter2` because the field
-        sits where a password would go in every other tool they have used. Applied to every key
-        ending in `_env` rather than to a list of known credential names: the whole point of this
-        block is that the credential names are the driver's, and this repository does not know them.
+        Not a security boundary; it catches `password_env: hunter2`. Applied to every `_env` key
+        because the credential names belong to the driver.
         """
         for key, value in self.options.items():
             if key.endswith(ENV_SUFFIX):
@@ -540,8 +491,8 @@ class ConnectionBinding(BaseModel):
     def options(self) -> dict[str, Any]:
         """The driver's keyword arguments as written, secrets still named rather than read.
 
-        `model_extra` rather than `model_dump()` minus a key, because the two differ on a field this
-        model *declares*: `driver` is the seam's, everything else is the driver's.
+        `model_extra`, because `driver` is the seam's declared field and everything else is the
+        driver's.
         """
         return dict(self.model_extra or {})
 
@@ -562,12 +513,10 @@ class VectorBinding(BaseModel):
     # Empty when `index:` is set: an index ranks on its own copy of the vectors, so there is no
     # column here to call a similarity function on.
     vector_column: str = ""
-    # A Mosaic AI Vector Search index (a three-level Unity Catalog name), when the corpus is too
-    # large to scan. Ranking then happens on the index through the configured `VectorStore` and this
-    # relation is queried only to *resolve* the winning keys into content — which is the same
-    # division `ingest/documents/external_index.py` makes, with Databricks SQL standing in for
-    # Postgres as the catalogue. The endpoint serving it is a deployment fact
-    # (`CHEMCLAW_VECTOR_STORE_ENDPOINT_NAME`), not a per-source one, so it is not named here.
+    # A Mosaic AI Vector Search index (three-level Unity Catalog name) for corpora too large to
+    # scan. Ranking happens on the index via the configured `VectorStore`, and this relation only
+    # resolves winning keys into content, as in `ingest/documents/external_index.py`. The serving
+    # endpoint is deployment-wide (`CHEMCLAW_VECTOR_STORE_ENDPOINT_NAME`).
     index: str = ""
     content_columns: list[Identifier] = Field(
         min_length=1,
@@ -655,13 +604,9 @@ class VectorBinding(BaseModel):
         if self.embedding == "server" and not self.server_embed_function:
             raise BindingError("embedding 'server' needs a server_embed_function to call")
         if self.embedding == "server":
-            # Checked for the same reason every other interpolated name is: `sql.vector_statement`
-            # writes this one into the statement text as `f"{fn}({placeholder}, {placeholder})"`,
-            # so an unchecked value closes the call and continues the query. It was the single
-            # field this validator skipped, which made `sql.py`'s "only checked identifiers are
-            # written here" false for exactly one field — and it is also the one field a site
-            # author edits rather than a reviewer. A dotted name passes, so a real qualified
-            # embedder (`main.ml.embed_text`, a vendor's built-in) is unaffected.
+            # Checked like every interpolated name: `sql.vector_statement` writes it into the
+            # statement as a function call, so an unchecked value could inject SQL. Dotted names
+            # pass.
             _check_identifier(self.server_embed_function, "server embed function")
         if self.embedding == "local" and (self.server_embed_function or self.server_embed_model):
             raise BindingError(
@@ -750,10 +695,8 @@ class CorpusBinding(BaseModel):
     yield_percent: FieldBinding | None = None
     workup_text: FieldBinding | None = None
 
-    # The labels a corpus may already carry. Declaring one here is what its `labels: provides:`
-    # block in the manifest claims, and `make datasource-validate` checks the two against each
-    # other — a `provides` naming a group no column supplies would be a lie the coverage report
-    # then repeats to a chemist.
+    # The labels a corpus may already carry. `make datasource-validate` checks these against the
+    # manifest's `labels: provides:`, so a source cannot claim a group no column supplies.
     named_reaction: FieldBinding | None = None
     reaction_class: FieldBinding | None = None
     rxno_id: FieldBinding | None = None
@@ -776,8 +719,7 @@ class CorpusBinding(BaseModel):
     def label_groups(self) -> frozenset[LabelGroup]:
         """Which label groups this binding actually maps a column for.
 
-        The declaration `make datasource-validate` compares the manifest's `labels: provides:`
-        against, so a source cannot claim to carry a name it has no column for.
+        What `make datasource-validate` compares the manifest's `labels: provides:` against.
         """
         groups: set[LabelGroup] = set()
         if self.named_reaction is not None or self.rxno_id is not None:
@@ -816,9 +758,8 @@ class WarehouseBinding(BaseModel):
 def load_binding(raw: Any) -> WarehouseBinding:
     """Validate a raw `config: {binding: ...}` block, raising `BindingError` with the reason.
 
-    The one entry point both halves use, so a malformed binding fails identically whichever half a
-    process happens to build — and fails at construction, which is worker startup, rather than on
-    the first row that reaches the bad line.
+    The one entry point both halves use, so a malformed binding fails identically, at worker
+    startup.
     """
     if not isinstance(raw, dict):
         raise BindingError(f"binding must be a mapping, got {type(raw).__name__}")

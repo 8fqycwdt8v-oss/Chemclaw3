@@ -73,21 +73,19 @@ class Probe(BaseModel):
     # (`evals/live.py`). Only the tool expectation is conditional, never `forbids_claims`: a claim
     # worth forbidding is forbidden in both lanes.
     needs_bundle: str | None = None
-    # What a bucket-C probe claims this system cannot do, named so the claim can be resolved against
-    # the surface rather than read from `direction:` by a human.
+    # What a bucket-C probe claims this system cannot do, named so the claim can be resolved
+    # against the surface rather than read from `direction:` by a human.
     #
     # Two forms:
     #
     # - **A tool name** is checked against `available_tool_names()`; the probe fails when the
-    #   surface
-    #   binds it (the same rule `PromptBlock.absent_unless` applies to the system prompt's denials).
-    #   `tests/test_probe_coverage.py` also checks unbound names for likely typos.
-    # - **`NO-TOOL <what is absent>`** covers absences no tool name reaches. It is checked for being
-    #   a
-    #   real phrase that names no bound tool; beyond that a reviewer is the check.
+    #   surface binds it (the rule `PromptBlock.absent_unless` applies to the system prompt's
+    #   denials). `tests/test_probe_coverage.py` also checks unbound names for likely typos.
+    # - **`NO-TOOL <what is absent>`** covers absences no tool name reaches. It is checked for
+    #   being a real phrase that names no bound tool; beyond that a reviewer is the check.
     #
-    # Required on bucket C, permitted on B, refused on A — enforced by tests rather than validators,
-    # because archived transcripts predating this field must still rehydrate.
+    # Required on bucket C, permitted on B, refused on A — enforced by tests rather than
+    # validators, because archived transcripts predating this field must still rehydrate.
     asserts_absent: list[str] = Field(default_factory=list)
     # True when a satisfying answer requires a durable job to have actually run, not merely been
     # launched: a job tool returns an id on acceptance, so the runner asks the broker for the

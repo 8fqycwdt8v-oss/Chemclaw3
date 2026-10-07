@@ -96,8 +96,7 @@ async def backfill_cached(*, dry_run: bool, batch: int) -> WalkCounts:
         if not rows:
             return WalkCounts(seen, queued, skipped, failed, records)
         # Advance before the page is worked: an exception mid-page re-reads it next run, and the
-        # upsert
-        # makes re-reading free.
+        # upsert makes re-reading free.
         cursor_key = (rows[-1][8], rows[-1][0])
         for row in rows:
             seen += 1
@@ -153,8 +152,7 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> WalkCounts:
             payload_kind = row[10] or ""
             note_id = row[11] or ""
             # `<connector>.<job>` addresses the row; `payload_kind` routes it, and an empty one
-            # (older rows)
-            # falls back to prefix inference.
+            # (older rows) falls back to prefix inference.
             calc_type = f"{connector}.{job}"
             if projector_for(calc_type, payload_kind) is None:
                 skipped += 1
@@ -190,8 +188,7 @@ async def requeue_failed(*, dry_run: bool = False) -> int:
 
     Retired rows are kept so that once the cause is fixed an operator can requeue them. `dry_run`
     counts instead of resetting, so a preview never clears the recorded errors. Defaulted because
-    the
-    durable republish job has no preview mode.
+    the durable republish job has no preview mode.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         if dry_run:

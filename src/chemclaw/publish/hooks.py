@@ -90,14 +90,12 @@ async def publish_tool_result(
             payload=payload,
             payload_kind=kind,
             # What was asked for (`calc_ref` is what came back): the raw validated arguments, so an
-            # unstated
-            # default reads as unstated.
+            # unstated default reads as unstated.
             input_hash=stable_hash(arguments),
         )
     except Exception:
         # Guards everything around `enqueue_payload`'s own no-raise promise; the counter keeps a
-        # failure
-        # from being silent.
+        # failure from being silent.
         logger.exception("publish[tool]: could not queue %s from %s.%s", kind, connector, tool)
         record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total"))
         return 0

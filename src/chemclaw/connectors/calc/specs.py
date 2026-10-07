@@ -1,10 +1,9 @@
 """What an xTB job may be asked to do: the request half of this bundle's durable contract.
 
-A leaf module: `connector.yaml`'s `params_model` names these models and `connectors/jobs.py`
-imports them in the chat service's process, so whatever this module imports, the chat service
-imports too (D-118). It imports pydantic and config only; results live in
-`connectors/calc/results.py`. `cli/validate_connectors.py` and
-`tests/test_connector_isolation.py` enforce it.
+A leaf module: `connector.yaml`'s `params_model` names these models and `connectors/jobs.py` imports
+them in the chat service's process, so whatever this module imports, the chat service imports too
+(D-118). It imports pydantic and config only; results live in `connectors/calc/results.py`.
+`cli/validate_connectors.py` and `tests/test_connector_isolation.py` enforce it.
 """
 
 from typing import Annotated, Literal
@@ -131,8 +130,7 @@ class RotationJobSpec(BaseModel):
     level: Literal["quick", "standard", "thorough"] = "quick"
     # A short form of `_STRUCTURE_ID_DESCRIPTION`: this schema is near the per-tool token ceiling
     # `tests/test_context_floor.py` enforces, and the tool description already says where handles
-    # come
-    # from.
+    # come from.
     structure_id: str | None = Field(
         default=None,
         description="A conformer to profile in, as `st_...`; a barrier depends on which one.",
@@ -174,8 +172,7 @@ class MicrostatePkaJobSpec(BaseModel):
     effort: Literal["quick", "normal", "extensive"] = "quick"
 
     # No `structure_id`: this job starts with a conformer search that re-samples whatever it is
-    # handed,
-    # so a starting geometry would control nothing.
+    # handed, so a starting geometry would control nothing.
 
 
 class ComplexJobSpec(BaseModel):

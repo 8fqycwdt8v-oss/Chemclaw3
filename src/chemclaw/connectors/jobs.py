@@ -78,12 +78,11 @@ def resolve_params_model(reference: str) -> type[BaseModel]:
     Lets a job whose input is a rich domain object reuse its validated model instead of re-declaring
     it in YAML. Only the type is imported. The reference is held to
     `CHEMCLAW_MANIFEST_DRIVER_PACKAGES` first, because the import runs module code in the chat
-    process
-    and a manifest is data.
+    process and a manifest is data.
 
     Raises:
-        ConnectorJobError: When the package is not allowed, the module or attribute does not
-            exist, or the attribute is not a pydantic model.
+        ConnectorJobError: When the package is not allowed, the module or attribute does not exist,
+            or the attribute is not a pydantic model.
     """
     check_driver_module(reference, ConnectorJobError, "params_model")
     module_name, _, attribute = reference.partition(":")
@@ -143,8 +142,7 @@ def unavailable_reason(job: JobSpec) -> str | None:
 
     Unlike `precondition`, no argument can change the answer, so the launcher is withheld from the
     model (`registry.job_tools`) rather than offered and refused. Read at call time because it
-    depends
-    on configuration.
+    depends on configuration.
 
     Raises:
         ConnectorJobError: The declared reference does not resolve (see `_resolve_job_hook`).
@@ -265,10 +263,9 @@ def require_funded_ceiling(connector: str, job: JobSpec) -> None:
     `awaits_answer` removes a job's execution ceiling, so a manifest (which is data) could grant
     itself unbounded runtime; the operator must name the job in `connector_jobs_awaiting_answer`.
     Checked in the shared pre-flight (`prepare_job_launch`) so every launcher, including the
-    template
-    job step, is covered; and at launch rather than at tool build, so one bad declaration refuses
-    only
-    its own job instead of the whole tool surface. `make connector-validate` calls it directly.
+    template job step, is covered; and at launch rather than at tool build, so one bad declaration
+    refuses only its own job instead of the whole tool surface. `make connector-validate` calls it
+    directly.
 
     Args:
         connector: The owning connector's name, half of the name the operator grants.
@@ -316,8 +313,7 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
     # First, so an unfunded job is refused before running its precondition (bundle code).
     require_funded_ceiling(connector, job)
     # A template step names its job by string and bypasses `registry.job_tools`' filter, so refuse
-    # here
-    # too, before authorization.
+    # here too, before authorization.
     reason = unavailable_reason(job)
     if reason is not None:
         raise ConnectorJobError(f"{connector}.{job.name} is unavailable here: {reason}")
@@ -337,10 +333,8 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     """Build the agent tool that launches one declared connector job.
 
     The returned coroutine's `__name__` is the job name (also the authorization and profile key),
-    its
-    docstring is the model-facing description, and its single parameter is the params model.
-    Building
-    refuses nothing; `prepare_job_launch` refuses at launch.
+    its docstring is the model-facing description, and its single parameter is the params model.
+    Building refuses nothing; `prepare_job_launch` refuses at launch.
 
     Args:
         connector: The owning connector's name, part of the workflow id and reported in the
@@ -371,8 +365,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         requested_by = require_actor()
         plan_step, plan_hash = get_current_plan_link()
         # `connect()` frames an unreachable broker as a retryable `SubsystemUnavailableError`; do
-        # not
-        # re-wrap it as `ConnectorJobError`, which is registered non-retryable.
+        # not re-wrap it as `ConnectorJobError`, which is registered non-retryable.
         client = await connect()
         try:
             handle = await client.start_workflow(
@@ -390,14 +383,13 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     session_id=get_current_session_id() or "",
                     correlation_id=get_current_correlation_id() or "",
                     # Bound per tool call by `agent.plan_link.stamp_plan_link`; ambient so the model
-                    # cannot author an
-                    # audit join key. Empty off the harness path.
+                    # cannot author an audit join key. Empty off the harness path.
                     plan_step=plan_step,
                     plan_hash=plan_hash,
                     publish_to_graph=job.publish_to_graph,
                     # The job's declared ceiling, or `None`; the worker starting the child clamps it
-                    # to the deployment
-                    # maximum (`durable/connector_job.py::child_execution_timeout`).
+                    # to the deployment maximum
+                    # (`durable/connector_job.py::child_execution_timeout`).
                     timeout_seconds=job.timeout_seconds,
                     # Copied from the manifest because a workflow may not read `connector.yaml` off
                     # disk.
@@ -407,8 +399,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     effect_system=job.effect.system if job.effect else "",
                     effect_reversal=job.effect.reversal if job.effect else "",
                     # Read here, not in the workflow: a config read in workflow code would change
-                    # the scheduled
-                    # approval child on replay.
+                    # the scheduled approval child on replay.
                     effect_approver=settings.effect_approval_role,
                     # Read here for the same replay reason; `open_pending_request_activity` applies
                     # the ceiling.
@@ -422,8 +413,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
             )
         except WorkflowAlreadyStartedError:
             # The identical job is already running or done: idempotency working. A finished run is
-            # rejoined (a
-            # re-ask feels like a cache hit); a running one falls through to its id.
+            # rejoined (a re-ask feels like a cache hit); a running one falls through to its id.
             rejoined = client.get_workflow_handle(workflow_id, result_type=ConnectorJobResult)
             if job.inline_wait_seconds is not None:
                 existing = await _await_briefly(
@@ -432,17 +422,14 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 if existing is not None:
                     return existing
             # Announce only if the server says the run is still going, so a later `job_completed`
-            # can clear it
-            # and the second requester is not left polling by hand.
+            # can clear it and the second requester is not left polling by hand.
             if await _still_running(rejoined):
                 record_job_started(workflow_id, job.name)
             return workflow_id
         except Exception as exc:
             # Any other start failure (no worker registered, an RPC timeout, a serialization error)
-            # must not
-            # reach the model raw. The server may have been reached, so this says only that most
-            # likely
-            # nothing started, and to check before relaunching a job that writes.
+            # must not reach the model raw. The server may have been reached, so this says only that
+            # most likely nothing started, and to check before relaunching a job that writes.
             raise ConnectorJobError(
                 f"the {job.name!r} job could not be confirmed as started ({type(exc).__name__}); "
                 "most likely nothing was queued, but this call cannot promise that either way. "
@@ -450,8 +437,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 "truly did not start, the same call will work once the fault clears."
             ) from exc
         # Counted as soon as `start_workflow` returns, because the inline-answer branch below
-        # returns early.
-        # A rejoined run counts nothing: it starts nothing.
+        # returns early. A rejoined run counts nothing: it starts nothing.
         record_metric(lambda m: m.increment("chemclaw_jobs_started_total"))
         if job.inline_wait_seconds is not None:
             finished = await _await_briefly(handle, job.inline_wait_seconds, job.name, workflow_id)
@@ -481,8 +467,7 @@ async def _still_running(handle: Any) -> bool:
         description = await handle.describe()
     except Exception:
         # Not an error, but a broker that keeps failing `describe()` silently disables rejoin
-        # announcements,
-        # so count it.
+        # announcements, so count it.
         record_metric(lambda m: m.increment("chemclaw_rejoin_describe_failed_total"))
         logger.debug("could not describe rejoined run %s; not announcing it", handle.id)
         return False
@@ -509,8 +494,7 @@ async def failed_job_reason(handle: Any) -> str:
         await handle.result()
     except WorkflowFailureError as exc:
         # `cause` depends on how the run ended; `failure_reason` falls back to the type name when
-        # there is
-        # no message.
+        # there is no message.
         return failure_reason(exc.__cause__ or exc)
     return ""
 
@@ -522,8 +506,7 @@ async def _await_briefly(
 
     `None` means "not finished yet", never "failed": a workflow failure raises `ConnectorJobError`
     with the run's own reason. The guard lives here, the only function that awaits, so both the
-    fresh
-    and the rejoined branch get it.
+    fresh and the rejoined branch get it.
 
     Cancel-safe: `asyncio.wait_for` cancels only the waiter, so an abandoned turn leaves the run to
     complete, cache and push back. The result is validated through `envelope_from_result` (the same
@@ -536,10 +519,8 @@ async def _await_briefly(
         return None
     except WorkflowFailureError as exc:
         # A failure inside the turn must say why, or the model reads it as "proceed". Use
-        # `__cause__`: the
-        # client wraps every failure in a generic `WorkflowFailureError`, and `failure_reason` walks
-        # the
-        # workflow-side frames below it.
+        # `__cause__`: the client wraps every failure in a generic `WorkflowFailureError`, and
+        # `failure_reason` walks the workflow-side frames below it.
         raise ConnectorJobError(
             f"the {job_name!r} job ran and failed: {failure_reason(exc.__cause__ or exc)}"
         ) from exc

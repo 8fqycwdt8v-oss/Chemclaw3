@@ -60,10 +60,9 @@ def is_loopback_host(host: str | None) -> bool:
 
     `localhost` and any literal parsing as a loopback IP (all of `127.0.0.0/8`, `::1`, and the
     spellings `parse_host` covers) qualify. A `.localhost` suffix is not trusted, since names are
-    never
-    resolved. The unspecified address and an empty host are not loopback, because as a bind they
-    mean
-    every interface; `core.llm_gateway` checks `is_unspecified` itself for the destination case.
+    never resolved. The unspecified address and an empty host are not loopback, because as a bind
+    they mean every interface; `core.llm_gateway` checks `is_unspecified` itself for the destination
+    case.
 
     Args:
         host: A bare host — a settings field like `service_host`, or a socket address's first
@@ -104,17 +103,13 @@ def default_ssl_context() -> ssl.SSLContext:
     """The process's one TLS trust store, built once.
 
     httpx builds and loads a fresh `SSLContext` per client, and a turn opens one client per
-    connector;
-    that blocking CPU on the shared event loop stalls every user's stream. `cafile=certifi.where()`
-    matches what httpx's `verify=True` trusts; a bare default context would load the OS store and
-    honour
-    `SSL_CERT_FILE`, changing what the fleet trusts.
+    connector; that blocking CPU on the shared event loop stalls every user's stream.
+    `cafile=certifi.where()` matches what httpx's `verify=True` trusts; a bare default context would
+    load the OS store and honour `SSL_CERT_FILE`, changing what the fleet trusts.
 
     Sharing is safe only because every client writes the same ALPN list (httpcore sets it per
-    connect)
-    and nothing enables HTTP/2; if one does, this must become a per-profile context. A caller
-    needing a
-    different trust decision passes its own `verify=`.
+    connect) and nothing enables HTTP/2; if one does, this must become a per-profile context. A
+    caller needing a different trust decision passes its own `verify=`.
     """
     return ssl.create_default_context(cafile=certifi.where())
 
@@ -148,8 +143,7 @@ def gateway_client_kwargs(ca_bundle: str = "") -> dict[str, Any]:
     import certifi
 
     # Exclusive precedence, as `httpx._config.create_ssl_context` does it. Merging sources would let
-    # one
-    # environment variable add roots to a pinned client (`get_ca_certs()` does not even report a
+    # one environment variable add roots to a pinned client (`get_ca_certs()` does not even report a
     # `capath`), and `cafile=None` would fall through to OpenSSL's default paths and drop certifi.
     cafile: str | None = None
     capath: str | None = None

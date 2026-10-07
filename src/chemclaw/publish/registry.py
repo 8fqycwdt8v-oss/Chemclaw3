@@ -83,8 +83,7 @@ def enabled() -> list[ResultSinkManifest]:
     """The manifests this deployment publishes to, in the order it named them.
 
     An enabled name with no manifest is a startup error: silently not publishing would look
-    identical
-    to having nothing to publish.
+    identical to having nothing to publish.
     """
     available = discovered()
     manifests: list[ResultSinkManifest] = []
@@ -116,8 +115,7 @@ def unpublishable_reason() -> str | None:
     """Why this deployment cannot republish anything, or `None` when a sink is enabled.
 
     Both the `republish_calculations` launcher's `unavailable_reason` and its guard's message, so
-    the
-    two cannot disagree.
+    the two cannot disagree.
     """
     if publishing_enabled():
         return None

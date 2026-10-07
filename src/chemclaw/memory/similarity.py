@@ -24,8 +24,7 @@ def reaction_fingerprints(reactions: list[OrdReaction]) -> dict[str, str]:
     for reaction in reactions:
         try:
             # The transformation, not the record form: a solvent left in the string would make
-            # clustering
-            # ask "same flask?" instead of "same chemistry?".
+            # clustering ask "same flask?" instead of "same chemistry?".
             fingerprints[reaction.reaction_id] = drfp_bitstring(reaction.transformation_smiles())
         except FingerprintError:
             continue
@@ -82,8 +81,7 @@ def cluster_by_similarity(fingerprints: dict[str, str], threshold: float) -> lis
     bits = (flat - ord("0")).reshape(len(ids), widths.pop())
     if bits.max() > 1:
         # Raised in this module's vocabulary: a non-bit character means the index is corrupt, not
-        # the
-        # query.
+        # the query.
         raise FingerprintError("a fingerprint carries a character that is not a bit")
 
     rows = csr_matrix(bits, dtype=np.int32)
@@ -105,9 +103,8 @@ def cluster_by_similarity(fingerprints: dict[str, str], threshold: float) -> lis
         if not linked.any():
             continue
         # The block's new links plus the partition so far, in one graph. Each component maps back to
-        # its
-        # lowest-indexed member (writing indices in reverse so the first wins), which becomes the
-        # representative the next block folds against.
+        # its lowest-indexed member (writing indices in reverse so the first wins), which becomes
+        # the representative the next block folds against.
         edges = coo_matrix(
             (
                 np.ones(int(linked.sum()) + len(ids), dtype=bool),

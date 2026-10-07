@@ -418,7 +418,7 @@ async def record_suggestion(
         calc_refs: The calculation keys the descriptors came from.
         provenance: `(actor, session_id, correlation_id)`, as `connectors.caller` yields it.
         job_id: The durable run that produced this, empty for the inline tool; makes the write
-        idempotent under activity retries.
+            idempotent under activity retries.
     """
     actor, session_id, correlation_id = provenance
     campaign_id = campaign_id_for(problem)

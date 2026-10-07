@@ -88,7 +88,7 @@ _RELAY = "INSERT INTO session_turn_frames (remote_id, frame) VALUES (%s, %s)"
 
 
 class TurnRemotes:
-    """`session_turn_remotes` and `session_turn_frames`, on the session-store database (D-002)."""
+    """`session_turn_remotes` and `session_turn_frames`, on the session-store database."""
 
     def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""

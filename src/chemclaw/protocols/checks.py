@@ -160,8 +160,7 @@ def components_resolve(design: ExperimentDesign) -> ProtocolCheck:
     named_without_structure = [c.name_as_written for c in design.request.components if not c.smiles]
     if named_without_structure:
         # A *failed* warning: only failed checks are listed to a reader, and an unresolved species
-        # is a
-        # finding.
+        # is a finding.
         return _fail(
             "components_resolve",
             "warning",
@@ -390,11 +389,9 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
             problems.append(f"{arm.arm_id} sets undeclared factor(s): {', '.join(unknown)}")
         if arm.control:
             # A control may hold a level outside the factor *space* and may leave factors unset, but
-            # its
-            # level names must still be declared factors: the run sheet builds its columns from
+            # its level names must still be declared factors: the run sheet builds its columns from
             # `design.factors`, so an undeclared name would reach no page. A control that differs
-            # otherwise
-            # says so in `note`.
+            # otherwise says so in `note`.
             continue
         for name, label in arm.levels.items():
             if name in declared and label not in declared[name]:
@@ -746,8 +743,7 @@ def coverage_is_stated(design: ExperimentDesign) -> ProtocolCheck:
     if real >= full:
         return _ok("coverage_is_stated", "note", f"full grid: {real} of {full} combinations")
     # Passing, but the note still reaches the page: a fractional factorial is a deliberate design
-    # and
-    # nothing in `ExperimentDesign` records the confounding statement a failure would ask for.
+    # and nothing in `ExperimentDesign` records the confounding statement a failure would ask for.
     return _ok(
         "coverage_is_stated",
         "note",
@@ -903,8 +899,7 @@ def run_checks(
     so the caller does the lookup and passes what it found. An empty `failures` cannot distinguish
     "nothing bears on it" from "nobody looked", so a caller that skips the lookup publishes a clean
     bill the corpus never gave. Both corpus checks run at both stages; the dispatch is a mapping so
-    a
-    further corpus-fed check needs no edit here.
+    a further corpus-fed check needs no edit here.
     """
     supplied: dict[Callable[..., ProtocolCheck], Sequence[Any]] = {
         no_documented_failure: failures,

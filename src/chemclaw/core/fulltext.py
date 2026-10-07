@@ -23,13 +23,11 @@ _EXCLUSION = "-"
 _WORD = re.compile(r"\d+\.\d+|(?<=[^\W_])-\d+|[^\W_]+", re.UNICODE)
 
 # A `-` immediately before a digit at a token boundary. Postgres keeps such a hyphen as a sign on
-# the
-# lexeme (`-78`), so query `78` misses it and query `-78` is an exclusion; detaching it makes
-# negative
-# quantities searchable. Applied to documents and queries alike so CAS and lot numbers still match.
-# Anchored at a token boundary so an identifier's interior hyphens stay intact: split, `108-24-7`
-# would become three top-level clauses that `TSQUERY_TERMS` then ORs. Trade-off: a query meaning
-# "exclude the number 78" now reads as "find 78".
+# the lexeme (`-78`), so query `78` misses it and query `-78` is an exclusion; detaching it makes
+# negative quantities searchable. Applied to documents and queries alike so CAS and lot numbers
+# still match. Anchored at a token boundary so an identifier's interior hyphens stay intact: split,
+# `108-24-7` would become three top-level clauses that `TSQUERY_TERMS` then ORs. Trade-off: a query
+# meaning "exclude the number 78" now reads as "find 78".
 _SIGN_GLUED_TO_NUMBER = re.compile(r"(?<![^\W_])-(?=\d)")
 
 
@@ -38,8 +36,7 @@ def normalize_search_text(text: str) -> str:
 
     Every backend runs it before deriving anything searchable (Postgres before `to_tsvector` and
     `websearch_to_tsquery`, the reference before tokenising); applied on one side only it would
-    cause
-    the divergence it removes.
+    cause the divergence it removes.
     """
     return _SIGN_GLUED_TO_NUMBER.sub(" ", text)
 

@@ -28,8 +28,7 @@ from chemclaw.core.errors import ChemclawError
 # is not what stops an alias bomb, which is tiny on disk.
 MAX_MANIFEST_BYTES = 1_000_000
 # Several times the deepest shipped manifest. Checked during composition, where PyYAML recurses, so
-# it
-# trips before the C stack does.
+# it trips before the C stack does.
 MAX_MANIFEST_DEPTH = 64
 # The largest shipped manifest is 163 nodes, so ~600x headroom. Counted *expanded* — every alias
 # reference counts again — because that is the number pydantic pays and the number a bomb inflates.
@@ -47,8 +46,7 @@ class _ManifestLoader(yaml.SafeLoader):
     """`SafeLoader` plus a depth bound and a duplicate-key refusal.
 
     Subclassed because neither rule is an option. It must stay a `SafeLoader` so `!!python/` tags
-    are
-    refused.
+    are refused.
     """
 
     def __init__(self, stream: Any) -> None:
@@ -59,8 +57,7 @@ class _ManifestLoader(yaml.SafeLoader):
         """Compose one node, refusing a document nested deeper than `MAX_MANIFEST_DEPTH`.
 
         Checked in the composer because that is PyYAML's recursive step, so the error names the
-        manifest
-        instead of surfacing as `RecursionError`.
+        manifest instead of surfacing as `RecursionError`.
         """
         self._depth += 1
         if self._depth > MAX_MANIFEST_DEPTH:
@@ -80,8 +77,7 @@ class _ManifestLoader(yaml.SafeLoader):
         """Build a mapping, refusing a key that appears twice.
 
         PyYAML is last-wins with no diagnostic; a repeated `state_changing:` would silently discard
-        the
-        first list and fail the plan gate open.
+        the first list and fail the plan gate open.
         """
         seen: set[Any] = set()
         for key_node, _ in node.value:
@@ -134,8 +130,7 @@ def read_manifest(path: Path, error: type[_E]) -> dict[str, Any]:
 
     Checks, in the order a hostile file meets them: size, parse under the depth bound with duplicate
     keys refused, expanded size against `MAX_MANIFEST_NODES`, and a mapping root. Every failure
-    raises
-    the caller's own error type.
+    raises the caller's own error type.
     """
     try:
         size = path.stat().st_size
@@ -171,13 +166,10 @@ def check_driver_module(reference: str, error: type[_E], field: str) -> None:
 
     A manifest is data, yet fields like `params_model`, `precondition`, `ingest`, `retrieve` and
     `driver` are imported and some are called with the manifest's own `config:`; importing an
-    arbitrary
-    module runs its code on the agent-build path. The threat is a manifest arriving on a discovery
-    path
-    outside the installed package (a mounted ConfigMap, a synced repo), so the allow-list is
-    `chemclaw`
-    plus packages an operator adds explicitly. It does not defend against writing code into the
-    installed package itself.
+    arbitrary module runs its code on the agent-build path. The threat is a manifest arriving on a
+    discovery path outside the installed package (a mounted ConfigMap, a synced repo), so the
+    allow-list is `chemclaw` plus packages an operator adds explicitly. It does not defend against
+    writing code into the installed package itself.
     """
     module_name = reference.partition(":")[0]
     top = module_name.partition(".")[0]

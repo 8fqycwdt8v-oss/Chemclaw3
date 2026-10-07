@@ -361,8 +361,8 @@ def _client(base_url: str | None) -> httpx.AsyncClient:
     )
 
 
-# : One stamp per process, computed at import, so all of one run's transcripts and its summary land
-# : in the same directory.
+#: One stamp per process, computed at import, so all of one run's transcripts and its summary land
+#: in the same directory.
 _RUN_STAMP = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
 
 

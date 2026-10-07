@@ -185,9 +185,9 @@ def campaign_progress(
         observations: The runs so far, **in the order performed**; the reading is order-dependent.
         assay_noise: The assay's reproducibility, in the objective's own units. Required.
         window: How many recent evaluations the span statement covers, defaulting to
-        `bo_plateau_window`.
+            `bo_plateau_window`.
         objective: Which objective to read. Optional on a single-objective problem; required on a
-        multi-objective one, where a plateau is per axis.
+            multi-objective one, where a plateau is per axis.
 
     Returns:
         The reading, with a `summary` stating what it does and does not establish.

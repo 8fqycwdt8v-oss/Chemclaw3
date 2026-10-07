@@ -140,11 +140,9 @@ async def _probe_queue(
     """Ask Temporal whether anything is polling this bundle's queue.
 
     The workflow queue, because every declared job registers a workflow, while the activity queue
-    can
-    legitimately be idle. Only a successful response is a verdict (an unpolled queue answers with an
-    empty poller list); every failure is `unknown`. Broad `except` because the sweep must never
-    raise;
-    `CancelledError` is not caught, since a cancelled sweep is not a verdict.
+    can legitimately be idle. Only a successful response is a verdict (an unpolled queue answers
+    with an empty poller list); every failure is `unknown`. Broad `except` because the sweep must
+    never raise; `CancelledError` is not caught, since a cancelled sweep is not a verdict.
     """
     request = DescribeTaskQueueRequest(
         namespace=settings.temporal_namespace,
@@ -201,8 +199,7 @@ async def _probe_queues(targets: list[QueueTarget], budget: float) -> list[Conne
     `budget` bounds the connect and the RPC together, because `/readyz`'s kubelet timeout is derived
     from it. `connect()` caches only successful clients, so a bounded failure does not poison the
     singleton. The budget is an argument because the startup sweep needs a larger one: a cold
-    connect
-    (PEM parsing, mTLS handshake) can otherwise leave too little time for the RPC that tells
+    connect (PEM parsing, mTLS handshake) can otherwise leave too little time for the RPC that tells
     `unpolled` from `unknown`.
     """
     if not targets:
@@ -229,9 +226,8 @@ def _folded(verdicts: list[ConnectorHealth]) -> list[ConnectorHealth]:
     """One row per connector, worst half first, with every half's reason kept.
 
     A bundle with an endpoint and jobs is only as usable as its worse half (`_SEVERITY` orders
-    them).
-    Details are joined, not picked, because the halves name different deployments. A single-half
-    connector folds to itself.
+    them). Details are joined, not picked, because the halves name different deployments. A
+    single-half connector folds to itself.
     """
     halves: dict[str, list[ConnectorHealth]] = {}
     for verdict in verdicts:
@@ -278,8 +274,7 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
             queues.append((manifest.name, bundle_queue(manifest.name), _JOBS_REMEDY))
         if queues_tools(manifest):
             # Queued tool calls wait on their own queue with its own worker, which can be missing
-            # while the rest
-            # is fine.
+            # while the rest is fine.
             queues.append((manifest.name, interactive_queue(manifest.name), _INTERACTIVE_REMEDY))
         if not probe_url and not manifest.jobs and not queues_tools(manifest):
             # Nothing to ask: no endpoint and no durable work, stdio (spawned per turn), or an
@@ -295,10 +290,8 @@ async def check_connectors_at_startup() -> list[ConnectorHealth]:
     """Probe the enabled connectors at startup, logging it and honoring `connectors_required`.
 
     Uses `connector_startup_health_timeout_seconds`, not the poll's budget: this sweep runs once,
-    pays
-    the cold Temporal connect, and its verdict is final for the boot, so it must leave the RPC
-    enough
-    time to tell `unpolled` from `unknown`.
+    pays the cold Temporal connect, and its verdict is final for the boot, so it must leave the RPC
+    enough time to tell `unpolled` from `unknown`.
 
     Returns:
         Every enabled connector's health, for the readiness route and the unhealthy gauge to read.

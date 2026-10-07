@@ -54,8 +54,7 @@ def _leaves(exc: BaseException) -> list[BaseException]:
     """Every non-group exception inside `exc`, flattening nested `BaseExceptionGroup`s.
 
     A `TaskGroup` opens a connector, so failures arrive as (possibly nested) groups whose `str()`
-    says
-    nothing about the cause.
+    says nothing about the cause.
     """
     if isinstance(exc, BaseExceptionGroup):
         return [leaf for member in exc.exceptions for leaf in _leaves(member)]
@@ -113,8 +112,7 @@ def _is_really_cancelled() -> bool:
     """Whether cancellation was requested on the current task, rather than an inner scope.
 
     `Task.cancelling()` counts real `task.cancel()` calls (timeouts, the turn bound, a disconnect);
-    an
-    anyio cancel scope inside the MCP client raises the same exception without touching it.
+    an anyio cancel scope inside the MCP client raises the same exception without touching it.
     """
     task = asyncio.current_task()
     return task is not None and task.cancelling() > 0
@@ -177,15 +175,12 @@ class HeldConnectorSession:
         """Open the session on its own task and return the tools it advertises (`[]` if absent).
 
         Bounded by `connector_open_timeout_seconds`, because the handshake is otherwise bounded only
-        by
-        the session's read timeout, sized for the slowest tool call. Skipped entirely for a host
-        recently
-        found down; the outcome is recorded either way (`connectors.reachability`).
+        by the session's read timeout, sized for the slowest tool call. Skipped entirely for a host
+        recently found down; the outcome is recorded either way (`connectors.reachability`).
         """
         if recently_unreachable(self._spec.name):
             # Not `absorb_connect_failure`: nothing was dialled. `connected` stays False, so the
-            # caller reports
-            # and counts this connector like one that failed.
+            # caller reports and counts this connector like one that failed.
             logger.warning(
                 "connector %s was found unreachable within the last %.0fs; not dialling it this "
                 "turn — its tools are unavailable",
@@ -211,8 +206,7 @@ class HeldConnectorSession:
             return []
         except BaseException:
             # Cancelled while connecting: the holder owns a live cancel scope, so tell it to unwind
-            # on its own
-            # task rather than orphan a task holding an MCP session.
+            # on its own task rather than orphan a task holding an MCP session.
             await self._shut_down()
             raise
         # Both outcomes are recorded, and the healthy one is not an optimisation: it is what lets a
@@ -237,8 +231,7 @@ class HeldConnectorSession:
 
         Bounded so a slow session close cannot hold the turn's exit stack; at the bound `wait_for`
         cancels the holder and waits for that to land. A cancellation of this task (a disconnect,
-        the
-        turn deadline) is re-raised, so the caller's rollback and `asyncio.timeout` still work;
+        the turn deadline) is re-raised, so the caller's rollback and `asyncio.timeout` still work;
         `_is_really_cancelled()` distinguishes it from the holder's own anyio scope unwinding.
         `wait_for`'s own expiry raises `TimeoutError` without touching the cancel count.
         """
@@ -261,15 +254,13 @@ class HeldConnectorSession:
         """Own the session end to end: open it, publish its tools, then wait to be told to stop.
 
         Everything touching the cancel scope happens on this task. The `finally` always sets
-        `_opened`, so
-        a failed connector never leaves the turn waiting on an event nobody sets.
+        `_opened`, so a failed connector never leaves the turn waiting on an event nobody sets.
         """
         try:
             async with create_session(self._spec.connection) as session:
                 handshake = await session.initialize()
                 # A call past `request_timeout` must tell the server to stop, since this session
-                # stays open for the
-                # turn (`core.mcp_session.cancel_on_timeout`).
+                # stays open for the turn (`core.mcp_session.cancel_on_timeout`).
                 cancel_on_timeout(session)
                 self._tools = _stamped(
                     _allowed(
@@ -319,8 +310,7 @@ def _stamped(tools: list[BaseTool], *, connector: str, revision: str) -> list[Ba
 
     `audit_events.revision` names the orchestrator's commit; a remote server's build comes from the
     handshake's `serverInfo{name, version}`, so nothing extra is requested. `"unknown"` is recorded
-    as
-    is (a remote server that cannot name its build); in-process tools carry no stamp. Kept on
+    as is (a remote server that cannot name its build); in-process tools carry no stamp. Kept on
     `BaseTool.metadata`, merged with what the adapter set, so it cannot drift from the tool list.
     """
     served = {"connector": connector, "revision": revision}
@@ -337,17 +327,16 @@ def _neutralise_advertised_text(connector: str, tool: BaseTool) -> None:
     Tool descriptions and schema strings are sent in the `tools` block of every model call, outside
     the result framing (`agent/tool_framing.py`). Two halves are closable in code: forgery (`defang`
     over the description and every schema string, keeping them readable) and budget (a
-    per-description
-    ceiling, `connector_max_tool_description_chars`, cut with a notice and a WARNING).
+    per-description ceiling, `connector_max_tool_description_chars`, cut with a notice and a
+    WARNING).
 
     A description can still carry instructions; it is trusted as far as the connector is (image
     provenance, the `SERVED_BY` revision). Any call it asks for still passes authorization, the plan
     gate, the dry-run guard and the repeat guard.
     """
     # Imported lazily: `agent/tool_framing.py` imports this module for `SERVED_BY`, so a
-    # module-scope
-    # import would be a cycle. `defanged_payload` is the one recursion over every string in a
-    # payload.
+    # module-scope import would be a cycle. `defanged_payload` is the one recursion over every
+    # string in a payload.
     from chemclaw.agent.framing import defang
     from chemclaw.agent.tool_framing import defanged_payload
 
@@ -390,10 +379,8 @@ def _record_schema_cost(connector: str, tools: list[BaseTool]) -> None:
     """Publish what this connector's tool schemas add to every turn's prefix.
 
     Endpoint schemas arrive from a running server, outside `tests/test_context_floor.py`'s ratchet,
-    so
-    they are measured per connector instead; with the ratcheted floor this is a turn's cost before
-    the
-    chemist says anything. Never raises and never blocks a handshake.
+    so they are measured per connector instead; with the ratcheted floor this is a turn's cost
+    before the chemist says anything. Never raises and never blocks a handshake.
     """
     try:
         # Imported lazily: the agent imports this module, so a module-scope import would be a cycle.

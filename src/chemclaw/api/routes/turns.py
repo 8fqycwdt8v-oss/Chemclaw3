@@ -703,14 +703,13 @@ async def stop_turn(
     live: CurrentSession,
     reason: Literal["unload"] | None = None,
 ) -> dict[str, bool]:
-    """Stop the session's running turn — a disconnect only detaches, so this is the one way to cancel
-    work in flight.
+    """Stop the session's running turn — the one way to cancel work in flight.
 
-    Guarded by the session dependency; in a shared session a member stops only their own turn, the
-    owner any. 404 when nothing is running, so a client that raced completion knows which happened.
-    Any replica answers: a turn held elsewhere is authorized here and delivered to its holder as a
-    polled request (`_stop_elsewhere`); 503 if the holder does not answer within
-    `service_turn_relay_lease_seconds`.
+    A disconnect only detaches. Guarded by the session dependency; in a shared session a member
+    stops only their own turn, the owner any. 404 when nothing is running, so a client that raced
+    completion knows which happened. Any replica answers: a turn held elsewhere is authorized here
+    and delivered to its holder as a polled request (`_stop_elsewhere`); 503 if the holder does not
+    answer within `service_turn_relay_lease_seconds`.
 
     `?reason=unload` defers the stop: the page is being discarded and a reload cannot be told from a
     close, so the turn stops only if neither its sender nor the requester reattaches through `GET

@@ -16,7 +16,6 @@ def interactive_queue(connector: str) -> str:
     """The queue a bundle's queued tool calls wait on, apart from its durable jobs.
 
     Separate so a backlog of hour-long jobs never stands between a chemist and a seconds-long
-    answer;
-    polled by `chemclaw.connectors.interactive_worker`.
+    answer; polled by `chemclaw.connectors.interactive_worker`.
     """
     return f"connector-{connector}-interactive"

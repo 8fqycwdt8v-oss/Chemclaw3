@@ -34,18 +34,16 @@ def job_envelope(result: XtbJobResult) -> ConnectorJobResult:
 
     A pure module-level function, so a replay is byte-identical and a test can call exactly what the
     workflow calls. `data` is the domain result (the member, not the `XtbJobResult` wrapper),
-    because
-    `publish` may not import `connectors` to unwrap it. `calc_refs` rides on the envelope's own
-    field.
-    `without_geometry` replaces each geometry with its address, keeping coordinates out of the turn.
+    because `publish` may not import `connectors` to unwrap it. `calc_refs` rides on the envelope's
+    own field. `without_geometry` replaces each geometry with its address, keeping coordinates out
+    of the turn.
     """
     outcome = result.outcome()
     return ConnectorJobResult(
         summary=result.summary,
         calc_refs=result.calc_refs,
         # The result model's name is the only thing that lets `chemclaw.publish` route a composite,
-        # whose
-        # `calc_type` matches no projector prefix.
+        # whose `calc_type` matches no projector prefix.
         payload_kind=type(outcome).__name__,
         # Ship only what the calculation reported, not explicit nulls.
         data=without_geometry(outcome.model_dump(mode="json", exclude_none=True)),
@@ -64,17 +62,14 @@ class CalcJobWorkflow:
         """Execute the calculation; safe to replay and to resume after a worker restart.
 
         Takes the bare spec: the parent `ConnectorJobWorkflow` holds the actor and session and does
-        the
-        audit and push-back on this run's behalf.
+        the audit and push-back on this run's behalf.
         """
         result = await workflow.execute_activity(
             run_xtb_calculation,
             # Actor and correlation id come from the run's memo, set by `ConnectorJobWorkflow`. They
-            # are
-            # arguments, not part of `spec`, because `spec`'s digest is the cache key. The activity
-            # stamps them
-            # on its calls to the calculation server so durable runs are attributed like inline
-            # ones.
+            # are arguments, not part of `spec`, because `spec`'s digest is the cache key. The
+            # activity stamps them on its calls to the calculation server so durable runs are
+            # attributed like inline ones.
             args=[
                 spec,
                 workflow.memo_value("requested_by", settings.service_actor_id),
@@ -82,21 +77,17 @@ class CalcJobWorkflow:
             ],
             start_to_close_timeout=timedelta(seconds=settings.xtb_job_timeout_seconds),
             # `start_to_close` does not bound the queue wait. A real backlog is backpressure and
-            # must pass; this
-            # bounds the other case, no worker serving `connector-calc` at all (see
+            # must pass; this bounds the other case, no worker serving `connector-calc` at all (see
             # `durable/publish.py`).
             schedule_to_start_timeout=connector_queue_wait_timeout(),
             # The activity heartbeats between species and scan points; this timeout is what turns a
-            # dead worker
-            # into a prompt retry instead of waiting out start-to-close.
+            # dead worker into a prompt retry instead of waiting out start-to-close.
             heartbeat_timeout=timedelta(seconds=settings.xtb_job_heartbeat_timeout_seconds),
             # Bad input still fails fast (`BAD_DATA_RETRY`'s type list); the backoff is sized to
-            # wait out a
-            # saturated backend (`CalcBusyError`), which a default-spaced retry would merely spin
-            # against.
+            # wait out a saturated backend (`CalcBusyError`), which a default-spaced retry would
+            # merely spin against.
             retry_policy=calculation_retry(),
         )
         # Applied here, not in the activity, because the activity's return type is pinned by
-        # histories in
-        # flight; `job_envelope` is pure, so replay is unaffected.
+        # histories in flight; `job_envelope` is pure, so replay is unaffected.
         return job_envelope(result)

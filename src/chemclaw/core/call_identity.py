@@ -54,9 +54,8 @@ def turn_headers() -> dict[str, str]:
     """The current turn's identity as connector headers, read from the ambient ContextVars.
 
     Absent context yields an absent header, not an empty one, so a log cannot claim an anonymous
-    user.
-    The dry-run flag is always sent. Nothing from the tool call itself is included: arguments are
-    model-authored and must not enter the transport envelope.
+    user. The dry-run flag is always sent. Nothing from the tool call itself is included: arguments
+    are model-authored and must not enter the transport envelope.
 
     Returns:
         The headers to attach to this connector request.
@@ -74,8 +73,7 @@ def turn_headers() -> dict[str, str]:
         # genuinely no turn, and an empty id in a connector's log would read as one that exists.
         headers[HEADER_CORRELATION] = correlation_id
     # W3C trace context beside the correlation id: the id joins log lines by grep, `traceparent`
-    # joins
-    # spans live. Empty when tracing is off (the default).
+    # joins spans live. Empty when tracing is off (the default).
     headers.update(trace_headers())
     return headers
 
@@ -103,11 +101,9 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
     Registered on the connector's own client so it runs in the task that issues the request (see the
     module docstring). Bound to the endpoint's origin: httpx runs the hook on every redirect hop and
     copies the previous request's headers (dropping only `Authorization`), so on a foreign origin
-    the
-    hook removes every header `turn_headers()` produced. `registry.connector_http_client` refuses
-    redirects anyway, but `core.mcp_session.short_connect_client` (the calc backend's client)
-    follows
-    them, so for it this strip is the only layer.
+    the hook removes every header `turn_headers()` produced. `registry.connector_http_client`
+    refuses redirects anyway, but `core.mcp_session.short_connect_client` (the calc backend's
+    client) follows them, so for it this strip is the only layer.
 
     Args:
         endpoint_url: The connector's effective endpoint URL, the one origin its identity headers

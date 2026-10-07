@@ -298,8 +298,8 @@ def build_turn_graph(
                 connectors=_peer_connectors(connectors, surface),
                 store=store,
                 stored_skills=stored_skills,
-                # Measured identical to `None` and cheaper — see the module docstring. The turn
-                # graph's own checkpointer below is what holds the thread.
+                # Same behaviour as `None` and cheaper; the turn graph's own checkpointer holds the
+                # thread.
                 checkpointer=False,
                 handoffs=handoff_tools(
                     peers,

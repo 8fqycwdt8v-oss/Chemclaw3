@@ -120,8 +120,7 @@ class HttpResultSink:
         """The batch as one versioned document.
 
         `contract_version` is on the envelope as well as each record, so a receiver can route
-        without
-        unpacking.
+        without unpacking.
         """
         return {
             "tenant_id": self._tenant_id,
@@ -150,8 +149,7 @@ class HttpResultSink:
         Without a circuit breaker, latency is the operative signal for a failing destination.
         `outcome` is bounded by construction (`timeout`, `unreachable` or the status *class*); the
         exact code rides as `status`. The histogram is labelled by sink, not outcome, so timeouts
-        stay
-        in the distribution they decide.
+        stay in the distribution they decide.
         """
         record_metric(
             lambda m: m.observe("chemclaw_sink_delivery_seconds", seconds, {"sink": self._name})
@@ -214,10 +212,8 @@ class HttpResultSink:
             return
         if response.status_code < 400:
             # A redirect is a refusal, never a success: the batch did not land where the manifest
-            # addressed
-            # it. Rejected rather than retried (the fix is the `url`) and never followed, since the
-            # records and
-            # the bearer token must not reach an address no manifest named.
+            # addressed it. Rejected rather than retried (the fix is the `url`) and never followed,
+            # since the records and the bearer token must not reach an address no manifest named.
             raise SinkRejectedError(
                 f"result sink {self._name!r} answered {response.status_code} "
                 f"(Location: {response.headers.get('location', '') or 'unset'}); this client does "
@@ -225,8 +221,7 @@ class HttpResultSink:
                 "the final address."
             )
         # The receiver's body explains what was wrong with the content; bounded so an HTML error
-        # page
-        # cannot flood a log line.
+        # page cannot flood a log line.
         raise SinkRejectedError(
             f"result sink {self._name!r} refused the batch with {response.status_code}: "
             f"{response.text[:500]}"

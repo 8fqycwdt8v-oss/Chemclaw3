@@ -75,8 +75,7 @@ class SqlResultSink:
         """Close the held connection and forget the probed schema.
 
         The drain builds a sink per run, so this prevents a connection leak per pass; the column
-        cache
-        goes with it so a newly applied migration is picked up next pass.
+        cache goes with it so a newly applied migration is picked up next pass.
         """
         warehouse = self._warehouse
         self._warehouse = None
@@ -106,10 +105,8 @@ class SqlResultSink:
         if self._columns is not None:
             return self._columns
         # Qualified by the schemas on the search path the writes resolve through, so a same-named
-        # table
-        # elsewhere (an archive, another tenant) cannot answer for the target. Split on commas
-        # because
-        # `schema:` may name several.
+        # table elsewhere (an archive, another tenant) cannot answer for the target. Split on commas
+        # because `schema:` may name several.
         schemas = [part.strip().lower() for part in self._schema.split(",") if part.strip()]
         predicate = (
             " AND LOWER(table_schema) IN ("
@@ -122,8 +119,7 @@ class SqlResultSink:
         async with warehouse.cursor() as cursor:
             await cursor.execute(
                 # `LOWER(table_name)`: engines fold unquoted identifiers differently, and a probe
-                # that matched
-                # nothing would report every table missing.
+                # that matched nothing would report every table missing.
                 "SELECT table_name, column_name FROM information_schema.columns "
                 "WHERE LOWER(table_name) IN ("
                 + ", ".join([warehouse.placeholder] * len(TABLE_ORDER))
@@ -146,8 +142,7 @@ class SqlResultSink:
                 "Run `python -m chemclaw.cli.sink_schema` and apply the printed DDL."
             )
         # Columns that carry a measurement are required, like tables (see
-        # `dialect.REQUIRED_COLUMNS`);
-        # only the rest are omitted on a lag.
+        # `dialect.REQUIRED_COLUMNS`); only the rest are omitted on a lag.
         for table, required in sorted(REQUIRED_COLUMNS.items()):
             absent = sorted(required - found[table])
             if absent:
@@ -164,12 +159,11 @@ class SqlResultSink:
     async def _refuse_an_unseeded_registry(self, warehouse: Warehouse) -> None:
         """Refuse a store whose `property_definition` is empty, before any row is written.
 
-        The DDL in `schema/result-store/` ships no registry rows (those come from `sink_schema
-        --seed`),
-        so an unseeded store accepts every spine row and refuses every fact row, leaving calculation
-        rows with zero facts that read as "produced nothing". Writes are autocommit with no
-        rollback, so
-        the only clean place to refuse is ahead of the first statement.
+        The DDL in `schema/result-store/` ships no registry rows (those come from
+        `sink_schema --seed`), so an unseeded store accepts every spine row and refuses every fact
+        row, leaving calculation rows with zero facts that read as "produced nothing". Writes are
+        autocommit with no rollback, so the only clean place to refuse is ahead of the first
+        statement.
         """
         async with warehouse.cursor() as cursor:
             await cursor.execute("SELECT count(*) AS n FROM property_definition", [])
@@ -210,12 +204,10 @@ class SqlResultSink:
 
         No transaction spans the batch (the Protocol has no transaction control); every write is an
         upsert onto a content-addressed key, so a half-failed batch leaves a partial but correct
-        state
-        the retry completes. Rows are grouped into one statement per `(table, column set)` (see
-        `_batches`) and sent with `execute_many`, so a pass costs a handful of round trips rather
-        than
-        one per row. psycopg makes each group atomic; `tests/test_publish_end_to_end.py` asserts the
-        stored rows match row-at-a-time writes.
+        state the retry completes. Rows are grouped into one statement per `(table, column set)`
+        (see `_batches`) and sent with `execute_many`, so a pass costs a handful of round trips
+        rather than one per row. psycopg makes each group atomic; `tests/test_publish_end_to_end.py`
+        asserts the stored rows match row-at-a-time writes.
         """
         if not records:
             return
@@ -228,8 +220,7 @@ class SqlResultSink:
             raise
         except Exception as exc:
             # Any other connect-time failure is the destination not working: content failures arrive
-            # as
-            # `WarehouseQueryError` or `SinkRejectedError`, and a vendor error such as
+            # as `WarehouseQueryError` or `SinkRejectedError`, and a vendor error such as
             # `psycopg.OperationalError` must be retried, not treated as a poison record.
             raise SinkUnavailableError(f"result sink {self._name!r} is unreachable: {exc}") from exc
 
@@ -247,8 +238,7 @@ class SqlResultSink:
                     await execute_many(cursor, statement, [values for values, _ in rows])
             except WarehouseQueryError as exc:
                 # A batch shares a failure, so it is replayed row by row to name the offending table
-                # and
-                # `calc_ref`. Safe because every statement is an idempotent upsert.
+                # and `calc_ref`. Safe because every statement is an idempotent upsert.
                 await self._row_at_a_time(warehouse, table, statement, rows, exc)
             except Exception as exc:
                 # Same widening as the connect arm: a server that went away stays retryable.
@@ -264,10 +254,9 @@ class SqlResultSink:
         """Every row this batch will write, grouped into the statements that can carry them.
 
         Keyed on `(table, column set)`, which is what `upsert_statement` depends on; the column set
-        is
-        per row because the omission filter is. Table-major across the whole batch in `TABLE_ORDER`
-        (dict insertion order, relied on deliberately), so every parent is written before every
-        child.
+        is per row because the omission filter is. Table-major across the whole batch in
+        `TABLE_ORDER` (dict insertion order, relied on deliberately), so every parent is written
+        before every child.
         """
         batches: dict[tuple[str, tuple[str, ...]], list[tuple[list[Any], str]]] = {}
         for table in TABLE_ORDER:
@@ -275,8 +264,7 @@ class SqlResultSink:
             for calc_ref, rows_by_table in projected:
                 for row in rows_by_table.get(table) or []:
                     # Omit optional columns the site lacks (absent reads as "not recorded");
-                    # required ones were
-                    # refused at the probe.
+                    # required ones were refused at the probe.
                     usable = {key: value for key, value in row.items() if key in known}
                     dropped = set(row) - set(usable)
                     if dropped:

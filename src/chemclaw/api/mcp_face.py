@@ -180,8 +180,8 @@ def main() -> None:
         port=settings.service_port,
         # Ours is already applied above; letting uvicorn install its own would replace it.
         log_config=None,
-        # The three bounds D-2026-08-01 established. This face serves the same kind of traffic the
-        # front door does and ran without them until 2026-09-11 — see `core/asgi.transport_bounds`.
+        # The front door's transport bounds (`core/asgi.transport_bounds`): this face serves the
+        # same kind of traffic.
         **transport_bounds(),
     )
 

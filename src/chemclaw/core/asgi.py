@@ -22,14 +22,11 @@ class BodySizeLimit:
 
     Starlette's multipart parser spools the whole body to memory or disk before a route runs, so a
     route-level size check refuses only after ingesting. This refuses a declared `Content-Length`
-    over
-    the cap without reading a byte, and counts a chunked body as it arrives.
+    over the cap without reading a byte, and counts a chunked body as it arrives.
 
     Pure ASGI, wrapping only `receive`, because `BaseHTTPMiddleware` turns cancelled SSE streams
-    into
-    spurious 500s. `parse_attachment`'s own check stays: it bounds what an attachment may be (422)
-    and
-    has a caller that never passes through here.
+    into spurious 500s. `parse_attachment`'s own check stays: it bounds what an attachment may be
+    (422) and has a caller that never passes through here.
     """
 
     def __init__(self, app: ASGIApp, max_bytes: int) -> None:
@@ -60,8 +57,8 @@ class BodySizeLimit:
                 if received > self._max_bytes:
                     too_large = True
                     # Truncate rather than raise: FastAPI would report an exception here as a
-                    # malformed body (400).
-                    # Ending the stream lets `_send` below give the truthful answer.
+                    # malformed body (400). Ending the stream lets `_send` below give the truthful
+                    # answer.
                     return {"type": "http.request", "body": b"", "more_body": False}
             return message
 
@@ -109,13 +106,11 @@ def transport_bounds(*, concurrency: bool = True) -> dict[str, Any]:
     Concurrency, keep-alive and header-size limits, shared by every process that launches uvicorn
     itself (`api/mcp_face.py`, `connectors/server_entry.py`, `core/worker_http.py`); the front door
     gets the same bounds from `deploy/entrypoint.sh`. In `core` because `api` and `connectors` may
-    not
-    import each other.
+    not import each other.
 
     Args:
         concurrency: Whether to bound simultaneous connections. False for `core/worker_http.py`,
-        which
-            answers the kubelet probes: a liveness probe refused because the limit is full would
+        which answers the kubelet probes: a liveness probe refused because the limit is full would
             restart a pod that is merely busy.
     """
     bounds: dict[str, Any] = {
