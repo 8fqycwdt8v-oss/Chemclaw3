@@ -137,9 +137,7 @@ def test_a_criterion_with_no_limit_on_the_side_the_attribute_is_heading_is_refus
 
 
 def test_too_few_timepoints_are_refused_because_the_band_would_be_infinitely_narrow() -> None:
-    """Two timepoints are refused: zero residual degrees of freedom would give an infinitely narrow
-    band.
-    """
+    """Two timepoints are refused: zero residual freedom gives an infinitely narrow band."""
     criterion = AcceptanceCriterion("imp", maximum=Measurement.of(0.50, "area%"))
     with pytest.raises(StabilityError, match="too few"):
         estimate_trend(_points("area%", [(0, 0.10), (6, 0.20)]), criterion)
@@ -232,8 +230,7 @@ def test_an_in_control_profile_whose_noise_happens_to_fall_is_not_read_as_fallin
 
 
 def test_a_real_drift_towards_an_unspecified_side_is_still_refused() -> None:
-    """A real drift toward an unspecified side is still refused, not answered about the other bound.
-    """
+    """A real drift toward an unspecified side is still refused."""
     with pytest.raises(StabilityError, match="rising.*no maximum"):
         estimate_trend(RISING, AcceptanceCriterion("imp", minimum=Measurement.of(0.01, "area%")))
 
@@ -260,9 +257,7 @@ def test_the_crossing_is_searched_from_the_first_measurement_not_from_time_zero(
 
 
 def test_a_bound_already_past_the_limit_at_the_first_pull_still_supports_no_period() -> None:
-    """A bound already past the limit at the first pull supports no period, and the note names that
-    pull.
-    """
+    """A bound already past the limit at the first pull supports no period, naming that pull."""
     failing = _points("% w/w", [(24, 95.4), (30, 94.4), (36, 94.6)])
     estimate = estimate_trend(
         failing, AcceptanceCriterion("assay", minimum=Measurement.of(95.0, "% w/w"))

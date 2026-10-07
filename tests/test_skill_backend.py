@@ -173,9 +173,7 @@ def test_every_method_the_backend_exposes_is_either_gated_or_refused(tree: str) 
 
 
 def test_grep_forwards_the_arguments_upstream_introspects_for() -> None:
-    """`grep` accepts `max_count` and `context_lines`, since upstream introspects for them to decide
-    where the cap is applied.
-    """
+    """`grep` accepts `max_count` and `context_lines`, which upstream introspects for."""
     accepted = set(inspect.signature(NarrowedSkillsBackend.grep).parameters)
     declared = set(inspect.signature(FilesystemBackend.grep).parameters)
     assert declared <= accepted, (
@@ -211,8 +209,7 @@ def _p(hit: Any) -> str:
 
 
 def test_the_read_tool_is_named_what_the_skills_prompt_tells_the_model_to_call() -> None:
-    """`SKILL_READ_TOOL` matches the `read_file` name deepagents' skills prompt tells the model to
-    use.
+    """`SKILL_READ_TOOL` is the `read_file` name the skills prompt tells the model to use.
 
     Otherwise every skill is advertised and unreadable, which looks like the model declining.
     """
@@ -367,8 +364,7 @@ def _empty_listing(tmp_path: Path) -> str:
 
 
 def test_an_empty_skills_listing_does_not_invite_the_model_to_write_one(tmp_path: Path) -> None:
-    """An empty skills listing does not invite the model to write a skill, which every verb refuses.
-    """
+    """An empty skills listing does not invite the model to write a skill."""
     section = _empty_listing(tmp_path)
     assert "You can create skills" not in section
     assert "read-only to every turn" in section

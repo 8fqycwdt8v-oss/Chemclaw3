@@ -268,8 +268,7 @@ def test_failure_reason_never_returns_an_empty_sentence() -> None:
 
 
 def test_the_two_wire_budgets_are_configuration_rather_than_literals() -> None:
-    """The two wire budgets are configuration, not literals, so they move together with the audit.
-    """
+    """The two wire budgets are configuration, not literals, so they move with the audit."""
     source = (_SRC / "api" / "runner_trace.py").read_text(encoding="utf-8")
     assert "settings.agent_audit_max_arg_chars" in source
     assert "settings.stream_max_result_numbers" in source

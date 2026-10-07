@@ -284,9 +284,7 @@ def test_one_source_carries_both_seams_onto_the_same_table() -> None:
 def test_a_reaction_corpus_never_becomes_an_ingest_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reaction corpus declares no ingest half, so `read_corpus` and O(n²) clustering never see
-    it.
-    """
+    """A reaction corpus has no ingest half, so `read_corpus` and O(n²) clustering skip it."""
     monkeypatch.setattr(settings, "data_sources", "graph,pistachio")
     assert "pistachio" not in active_ingest_source_names()
     assert "pistachio" in {source.name for source in active_retrieve_sources()}
@@ -507,8 +505,7 @@ def _outcomes(source: str) -> set[str]:
 
 
 def _series(name: str, **labels: str) -> float:
-    """One labelled series' value, read from the rendered exposition, the contract with Prometheus.
-    """
+    """One labelled series' value, read from the rendered exposition Prometheus scrapes."""
     wanted = [f'{label}="{value}"' for label, value in labels.items()]
     for line in METRICS.render().splitlines():
         head, _, reading = line.partition("} ")

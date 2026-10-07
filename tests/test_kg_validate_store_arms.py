@@ -1,24 +1,10 @@
 """The two halves of `make kg-validate` that only a database can answer, driven end to end.
 
-**Why this file exists.** Both arms are dead on every CI run, and it is not an oversight that a
-corpus edit would fix. Measured on the shipped tree: `make kg-validate` prints
-*"0 reaction citation(s) and 0 calc_ref(s) verified"*, and the calc half cannot ever be otherwise —
-`tests/test_seed_corpus.py::test_the_seed_corpus_cites_no_calculation_the_store_cannot_back`
-requires it, deliberately, because a seed `calc_ref` is a fabricated key and would fail this very
-gate on every fresh database. The reaction half is the same shape one step out: a committed note
-citing `[[reaction-EXP-1]]` needs a `reaction_records` row, and CI's database holds migrations and
-nothing else.
-
-So the arms owe the suite what `D-2026-09-14-a-gate-nothing-has-failed-is-a-gate-that-cannot-fail`
-makes a gated metric owe the case-set: a case that makes them **fail**, and one that makes them
-pass. The pieces below each arm were already unit-tested — `unresolved_citations` in
-`test_reaction_records.py` and `unresolved_calc_refs` in `test_knowledge_gaps.py` — but nothing
-drove `validate_kg.main` over a note carrying a `calc_ref` at all, in either direction, so the
-whole calc branch of the entrypoint (its `try`, its store construction, its exit code) had never
-executed anywhere.
-
-Real Postgres, because the question these arms ask is "does this row exist" and an in-memory store
-answers a different one. Skips where there is no database, and `tests/conftest.py` counts the skip.
+In CI both arms check nothing: the seed corpus may cite no calculation
+(`tests/test_seed_corpus.py::test_the_seed_corpus_cites_no_calculation_the_store_cannot_back`),
+and CI's database has no `reaction_records`. So each arm gets a case that makes it fail and one
+that makes it pass, through `validate_kg.main` itself. Real Postgres, because the question is
+whether a row exists; skips without a database.
 """
 
 import asyncio
@@ -66,11 +52,10 @@ def _run(corpus: Path, monkeypatch: pytest.MonkeyPatch) -> int:
 def test_the_reaction_arm_fails_on_a_citation_no_record_backs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A typo'd run id is what this arm exists to stop, and nothing had ever driven it stopping one.
+    """The reaction arm fails on a citation no record backs.
 
-    `kg.graph.dangling_links` ignores every `reaction-` target on purpose since D-2026-08-25 — the
-    graph cannot see the store — so this is the only thing between a citation to a run that does
-    not exist and a merge.
+    `kg.graph.dangling_links` ignores `reaction-` targets because the graph cannot see the store, so
+    this arm is the only check on a mistyped run id.
     """
     asyncio.run(migrated_db_or_skip())
     _note_citing_reaction(tmp_path, "arm-no-such-run")
@@ -104,12 +89,10 @@ def test_the_reaction_arm_passes_on_a_citation_a_record_backs(
 def test_the_calc_arm_fails_on_a_ref_no_calculation_produced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The branch of `validate_kg.main` that had never run anywhere.
+    """The calc arm fails on a ref no calculation produced.
 
-    `_calc_ref_shape` checks a key's *form* and concedes in its own comment that existence "is a
-    question only a database can answer". This is where it is answered, and until now the answering
-    was unit-tested one layer down while the entrypoint's own branch — its store construction, its
-    `try`, its contribution to the exit code — was reached by nothing.
+    `_calc_ref_shape` checks only a key's form; existence is answered here, including the
+    entrypoint's store construction, `try` and exit code.
     """
     asyncio.run(migrated_db_or_skip())
     real = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
@@ -139,11 +122,10 @@ def test_the_calc_arm_passes_on_a_ref_the_cache_holds(
 def test_a_corpus_with_no_citations_says_the_store_halves_did_not_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A success line that reads like a whole gate is the failure this gate is named after.
+    """A corpus with no citations says the store halves did not run.
 
-    Not an error — a corpus with no external citations is legitimate — but the reader of a green
-    `make kg-validate` is owed the fact that the half needing a database checked nothing, which is
-    the shipped tree's state on every CI run.
+    Not an error, but a green `make kg-validate` must not read as if the database half checked
+    something.
     """
     directory = tmp_path / "playbook"
     directory.mkdir(parents=True)
@@ -159,13 +141,11 @@ def test_a_corpus_with_no_citations_says_the_store_halves_did_not_run(
 
 
 def test_the_shipped_corpus_still_gives_both_arms_nothing() -> None:
-    """The state this file compensates for, asserted rather than remembered.
+    """The shipped corpus still gives both arms nothing.
 
-    It is not a defect to be fixed by editing the corpus — a seed `calc_ref` is a fabricated key
-    and `test_the_seed_corpus_cites_no_calculation_the_store_cannot_back` forbids one for that
-    reason — so what a reader needs is for the zero to be *stated*, and for the day it stops being
-    zero to be a visible change rather than a quiet one. If this fails because the corpus gained a
-    real citation, delete it: the arms then have input and this file's premise is gone.
+    States the zero so the day it changes is visible. If the corpus gains a real citation, delete
+    this
+    test: the arms then have input.
     """
     from chemclaw.core.config import settings
     from chemclaw.kg.graph import load_notes

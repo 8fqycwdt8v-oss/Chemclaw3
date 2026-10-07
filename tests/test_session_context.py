@@ -32,8 +32,7 @@ _SPEC = JobSpec.model_validate(
 
 
 def test_session_id_does_not_affect_the_job_id() -> None:
-    """Two launches differing only by session share one job id, so identical science is
-    deduplicated.
+    """Two launches differing only by session share one job id, deduplicating the science.
 
     The session travels beside the payload, so each asker is still notified.
     """

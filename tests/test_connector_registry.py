@@ -1,14 +1,8 @@
 """Discovery, enablement and what the agent ends up advertising.
 
-The registry is where folders on disk become agent capability, so these tests are about the two
-things that decide that: which bundles are *found*, and which of those a deployment *enables*.
-The
-distinction is the whole point of the seam (a repo ships every connector; a deployment runs the
-subset it has validated), and it is exactly where a silent failure would be most expensive — an
-enabled name that resolves to nothing looks like a capability that quietly stopped working.
-
-Bundles are written to `tmp_path` and `connectors_dir` is pointed at it, so nothing here depends
-on which connectors the repo happens to ship today.
+A repo ships every connector; a deployment enables the subset it has validated. An enabled name
+that resolves to nothing must be loud. Bundles are written to `tmp_path`, so nothing depends on
+which connectors ship today.
 """
 
 import inspect
@@ -81,11 +75,8 @@ def _http_manifest(name: str, port: int = 9001, tools: str = "search") -> str:
 def _use(monkeypatch: pytest.MonkeyPatch, root: Path, *, enabled_list: str = "") -> None:
     """Point the registry at `root` as its only connectors dir, with the given enable-list.
 
-    Almost every test here calls this exactly once, before its first `discovered()`/`enabled()`
-    call, so no local `cache_clear()` is needed: `tests/conftest.py`'s autouse fixture guarantees
-    the cache is already empty when the test started.
-    `test_every_ambient_name_space_is_refused_to_a_connector` is the exception and says so — it
-    repoints the registry once per ambient name and clears `discovered` itself between arms.
+    `tests/conftest.py` empties the discovery cache before each test.
+    `test_every_ambient_name_space_is_refused_to_a_connector` repoints per arm and clears it itself.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(root))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", enabled_list)
@@ -162,10 +153,8 @@ def test_malformed_yaml_is_a_named_configuration_error(
         discovered()
 
 
-# The opening of `Chemclaw3-mcp`'s `manifests-internal/calc/connector.yaml`, copied verbatim down to
-# the key that matters. A literal rather than an import: the point of the test below is that *this
-# repository* refuses the shape the other one ships, and reading the real file would make the check
-# depend on a sibling checkout that CI does not have.
+# The opening of `Chemclaw3-mcp`'s `manifests-internal/calc/connector.yaml`, verbatim down to the
+# key that matters; a literal, so the test needs no sibling checkout.
 _BACKEND_MANIFEST = """
 mount: backend
 name: calc
@@ -194,24 +183,13 @@ endpoint:
 def test_a_backend_manifest_is_refused_rather_than_partially_adopted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`mount: backend` must fail this loader, because the alternative is a silent amputation.
+    """A `mount: backend` manifest is refused rather than partially adopted.
 
-    `Chemclaw3-mcp` serves the physics behind the `calc` bundle, and its manifest is named `calc`
-    too — deliberately, because that repository requires the directory, the package, the manifest
-    name and the addressing key to be one string. Both trees therefore hold a `calc` manifest, and
-    `_bundle_dirs` resolves a name collision by taking the first directory on the path with no error
-    either way. So an operator who points `CHEMCLAW_CONNECTORS_DIR` at the fleet's manifests is one
-    ordering away from replacing this repository's `calc` with the *backend's* surface: the
-    calculation cache, the calibration ledger, the artifact store and every durable calc job
-    (`report_measurement`, `find_calculations`, `list_artifacts`, `fetch_artifact`,
-    `calculator_trust`, `calculator_outliers`, the solvent screens, the conformer ensembles) simply
-    stop being advertised, and the agent sees a smaller `calc` that answers.
-
-    `mount: backend` is what makes that mechanical instead of trusted, and the mechanism is
-    `ConnectorManifest`'s `extra="forbid"` — a key no model here declares. That refusal is a control
-    of this repository's, and until this test it was evidenced only by an error message somebody had
-    pasted into the other repository's manifest comment. Relaxing `extra="forbid"`, or adding a
-    `mount` field, turns the startup error back into a partial surface that loads.
+    Both repositories hold a `calc` manifest, and `_bundle_dirs` takes the first on the path
+    silently, so the backend's smaller surface could replace this repository's `calc` (cache,
+    ledger, artifacts, durable jobs) with no error. `ConnectorManifest`'s `extra="forbid"` refuses
+    the `mount` key; relaxing it or adding a `mount` field turns the startup error into a partial
+    surface.
     """
     _bundle(tmp_path, "calc", _BACKEND_MANIFEST)
     _use(monkeypatch, tmp_path)
@@ -234,11 +212,8 @@ def test_each_transport_builds_its_matching_maf_tool(
     )
     _use(monkeypatch, tmp_path)
     monkeypatch.setattr("chemclaw.core.config.settings.connector_stdio_enabled", True)
-    # Both transports as specs, which is the one shape now. It used to be two classes — a
-    # `DegradingHttpConnector` and a `DegradingStdioConnector`, distinguished by `isinstance` —
-    # because MAF took a live tool object per transport. `open_connector_specs` opens a session
-    # from a `Connection` mapping, so what a registry builds is a description either way and the
-    # transport shows up in the connection rather than in the type.
+    # Both transports are built as specs; `open_connector_specs` opens a session from a `Connection`
+    # mapping, so the transport shows in the connection rather than the type.
     built = {spec.name: spec for spec in connector_specs()}
     assert built["remote"].connection["transport"] == "streamable_http"
     assert built["local"].connection["transport"] == "stdio"
@@ -262,11 +237,10 @@ def test_connector_urls_override_the_manifest_address(
 def test_the_health_probe_follows_the_address_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The probe must go where the tools go, or readiness reports on the wrong host (D-131).
+    """The health probe follows the address override (D-131).
 
-    The shipped chart always sets `connector_urls`, so before this the front door probed the
-    manifest's loopback dev default in every cluster: every connector read `unreachable` however
-    healthy it was, and `connectors_required: true` would have failed startup outright.
+    The chart always sets `connector_urls`, so probing the manifest's loopback default would report
+    every connector unreachable.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _use(monkeypatch, tmp_path)
@@ -336,12 +310,10 @@ def test_two_connectors_cannot_claim_one_job_name(
 def test_a_job_cannot_take_the_name_of_another_connectors_endpoint_tool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The collision that was live: one name, an MCP tool on one bundle and a job on another.
+    """A job cannot take the name of another connector's endpoint tool.
 
-    `props` served `compare_solvents` (a table lookup) while `calc` declared a durable job of the
-    same name (a semiempirical calculation per species per solvent), and the deployment that brings
-    them together is the documented one. It raised nothing: `connector_tool_names()` is a set union,
-    so 30 declared names came back as 29 and the loser simply was not on the agent's surface.
+    `connector_tool_names()` is a set union, so a collision silently drops one tool from the agent's
+    surface.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="run_thing"))
     _bundle(tmp_path, "beta", f"name: beta\ndescription: two\n{_JOB_BLOCK}")
@@ -363,12 +335,10 @@ def test_one_connector_cannot_declare_a_job_and_a_tool_with_one_name(
 def test_a_connector_endpoint_tool_cannot_claim_an_in_process_tool_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The collision the bundle-versus-bundle check could not see: a bundle against *core*.
+    """A connector endpoint tool cannot claim an in-process tool name.
 
-    `ToolNode` keys by name and `build_langgraph_agent` appends the connector tools *after* the
-    in-process ones, so the connector won: measured, two tools named `find_notes` were bound and
-    every model call to that name was routed over MCP, while the knowledge-graph read was never
-    invoked.
+    `ToolNode` keys by name and connector tools are appended after in-process ones, so the connector
+    would silently win.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="find_notes"))
     _use(monkeypatch, tmp_path)
@@ -379,11 +349,10 @@ def test_a_connector_endpoint_tool_cannot_claim_an_in_process_tool_name(
 def test_a_connector_job_cannot_claim_an_in_process_tool_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The job half, whose consequence is worse: the name re-classifies the *core* tool.
+    """A connector job cannot claim an in-process tool name.
 
-    A job named `find_notes` put a pure knowledge-graph read into `side_effecting_tools()` and
-    `expensive_actions()`, so the plan gate refused it under an unapproved plan and every helper's
-    tool set lost it — while the launcher itself was silently dropped from the agent's surface.
+    The name would put the core tool into `side_effecting_tools()` and `expensive_actions()`,
+    re-classifying it, while the launcher is dropped from the surface.
     """
     _bundle(
         tmp_path,
@@ -399,11 +368,10 @@ def test_a_connector_job_cannot_claim_an_in_process_tool_name(
 def test_a_connector_cannot_claim_an_ambient_tool_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Six of the seven scratchpad verbs are ordinary English words, so this is the likely landing.
+    """A connector cannot claim an ambient tool name.
 
-    `read_file` is a `FilesystemMiddleware` verb rather than a `@tool`, so it is in none of the
-    name spaces the manifest walk can see — and a bundle claiming it shadows this system's own
-    notepad.
+    `read_file` is a `FilesystemMiddleware` verb, not a `@tool`, so the manifest walk cannot see it;
+    a bundle claiming it would shadow the scratchpad.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="read_file"))
     _use(monkeypatch, tmp_path)
@@ -411,17 +379,10 @@ def test_a_connector_cannot_claim_an_ambient_tool_name(
         job_tools()
 
 
-# Each ambient name space beside the reason string `_bound_by_this_process` stamps it with. The
-# reason is transcribed rather than imported for the same argument `Chemclaw3-mcp`'s identity
-# contract makes about header spellings: it is what an operator reads in the refusal, so a test
-# that imported it would agree with a typo. Two of the three appeared nowhere but their own
-# definition before this.
-#
-# **The fourth was accepted outright and is the reason this table is not three.** A bundle
-# declaring `run_bond_strength_survey` passed on every path that loads manifests cold —
-# `make connector-validate`, a fresh pod — because the launchers are registered *after* the
-# collision check runs, and it was refused only in a warm process, where it came back as "an
-# in-process tool": the wrong name space, and so the wrong remedy for whoever read it.
+# Each ambient name space beside the reason string `_bound_by_this_process` stamps it with,
+# transcribed rather than imported, because it is what an operator reads. The launcher name space is
+# included because launchers register after the collision check, so a cold load must still refuse
+# a bundle claiming one, with the right reason.
 _AMBIENT_NAME_SPACES = (
     (skill_tool_names, "a scratchpad file verb"),
     (harness_tool_names, "a plan-harness tool"),
@@ -439,28 +400,12 @@ def test_every_ambient_name_space_is_refused_to_a_connector(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One third of that refusal was guarded by nothing, and the deletion test is how we know.
+    """Every ambient name space is refused to a connector.
 
-    `_bound_by_this_process` unions three ambient name spaces, each stamped with its own reason
-    string. Deleting each `bound.update(...)` line in turn reddened a test for the scratchpad verbs
-    and for the subagent spawner, and reddened **nothing** for `harness_tool_names()`. So a
-    refactor could have silently reopened `write_todos` to a connector, and a connector that
-    claimed it would win `tools_by_name` over the plan harness `agent/plan_gate.py` reads
-    (measured upstream: `ToolNode` assigns `_tools_by_name[tool.name]` last-wins, and the
-    connector's tool is appended after the middleware's).
-
-    **The basis is the three name-source functions, not `_bound_by_this_process`'s return value —
-    and the first version of this docstring got the reason wrong.** It said deriving from the dict
-    under test "would make deleting a line delete the assertion with it". That is false as stated,
-    and `tests/test_tool_framing.py` is the counter-example sitting in the tree: it reads
-    `_bound_by_this_process` too, as the *observation*, while its expectation comes from the name
-    sources — and it does redden on two of the same three deletions. What matters is which side of
-    the comparison the dict is on, not whether it appears. The sources are used here because they
-    are the independent side, which is the same property stated correctly.
-
-    The vacuity assertion is copied from that neighbour, and is not decoration: a first-party
-    narrowing that made a source return nothing would leave this arm green over an empty loop while
-    the name it guards went unclaimed.
+    `_bound_by_this_process` unions several name spaces; each is checked here, including
+    `harness_tool_names()`, since a connector claiming `write_todos` would win `tools_by_name` over
+    the plan harness. The expectation comes from the name-source functions (the independent side),
+    and a vacuity assertion stops an empty source from passing over an empty loop.
     """
     names = sorted(source())
     assert names, f"{source.__name__} yields no name, so this arm asserts nothing"
@@ -486,11 +431,10 @@ def test_every_ambient_name_space_is_refused_to_a_connector(
 def test_a_generated_launcher_is_not_read_back_as_a_collision_on_a_second_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The trap in seeding from the live registry: the launchers register into it themselves.
+    """A generated launcher is not read back as a collision on a second build.
 
-    `build_langgraph_agent` runs once per profile and once per test, and each run registers this
-    bundle's launcher under the very name the next run is about to declare. Reading that back as a
-    first-party claim would make the second build of any deployment with jobs fail.
+    Launchers register into the live registry under the name the next build declares, so the second
+    build must not treat that as a first-party claim.
     """
     _bundle(tmp_path, "alpha", f"name: alpha\ndescription: durable only\n{_JOB_BLOCK}")
     _use(monkeypatch, tmp_path)
@@ -516,11 +460,10 @@ def test_connector_tool_names_spans_endpoints_and_jobs(
 def test_only_declared_and_present_skill_dirs_are_advertised(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A bundled skills dir joins discovery; a declared-but-absent one is a packaging bug.
+    """Only declared and present skill dirs are advertised.
 
-    Returning a non-existent path would fail the *agent* (the skills source raises on a missing dir)
-    for a problem that belongs to `make connector-validate` — so a broken bundle degrades the skill
-    surface, it does not break every turn.
+    A missing declared dir is a packaging problem for `make connector-validate`; it degrades the
+    skill surface rather than breaking every turn.
     """
     with_skills = _bundle(tmp_path, "alpha", _http_manifest("alpha") + "skills:\n  - judgment\n")
     (with_skills / "skills" / "judgment").mkdir(parents=True)
@@ -531,21 +474,12 @@ def test_only_declared_and_present_skill_dirs_are_advertised(
 
 
 def test_forgetting_discovery_forgets_every_cache_this_module_keeps() -> None:
-    """One reset, derived from what the module caches rather than from what somebody remembered.
+    """Forgetting discovery forgets every cache this module keeps.
 
-    `forget_discovered` is the seam for the one case a directory-keyed cache cannot see: manifests
-    written into a directory already walked. It cleared `_discovered_in` alone, because that was the
-    only cache — and adding `_bundle_dirs_by_name` beside it made "clear the caches" a list with two
-    entries and nothing reconciling them. A second cache left out of that function is a reset that
-    half works: the manifests are re-read and the *directory walk* answers from before the write, so
-    a bundle written into a watched directory loads with the old set of content directories. That is
-    a test-isolation helper silently isolating half of what it names, which is the failure
-    `tasks/lessons.md` records against every hand-kept list.
-
-    Derived from `functools.cache`'s own marker — `cache_clear` on a module attribute — so a third
-    cache is covered by the commit that adds it rather than by this test being updated. It is scoped
-    to what this module *defines*, because `default_ssl_context` is imported here and belongs to
-    `core.http`, whose lifetime is a process rather than a test.
+    `forget_discovered` must clear every `functools.cache` the module defines, or a bundle written
+    into a walked directory loads with a stale directory set. Derived from `cache_clear` on module
+    attributes, so a new cache is covered automatically; scoped to what this module defines
+    (`default_ssl_context` belongs to `core.http`).
     """
     from chemclaw.connectors import registry
 
@@ -575,28 +509,10 @@ def test_a_shadowed_bundles_content_is_still_reachable(
 ) -> None:
     """Winning a name collision replaces the tool surface, never the files on disk.
 
-    `Chemclaw3-mcp` ports this repository's `safety` bundle under the **same** name — same three
-    tools, same arguments, deliberately, so that exactly one of the two answers
-    (`CHEMCLAW_CONNECTOR_URLS` is keyed by the name). Its manifest declares no `skills:`, and its
-    own header says the absence is deliberate because a `SKILL.md` is architecture layer 3 *here*,
-    ending: *"Whoever wires this server up must keep that skill reachable."*
-
-    `skills_dirs` derived the directory from the **winning** manifest, and asked that manifest
-    whether the bundle declared skills at all. So in the wiring order both of that repository's own
-    documents publish — `manifests/` first — the answer was no, and
-    `connectors/safety/skills/safety-screening/SKILL.md` was dropped: 132 lines carrying *why an
-    empty result is never "safe"*, which is the judgment `D-2026-08-15-safety-is-a-tool-not-a-gate`
-    deliberately left out of the deterministic table. No error, no warning, no log line. Driven
-    through this registry in both orders before the fix: reachable core-first, unreachable
-    fleet-first, and the only remedy — `CHEMCLAW_SKILLS_DIR` — was named in no wiring document in
-    either repository.
-
-    **Both halves of the defect are driven here, and either alone would have left it live.** The
-    shadowed *directory* has to be read, and the winner's *declaration* must not be the gate: the
-    fleet's manifest declares nothing, so a fix that only widened the directory search would still
-    have skipped the bundle before looking.
-
-    The winner's own content still comes first, because that is the precedence a collision decides.
+    `Chemclaw3-mcp` ports `safety` under the same name and its manifest declares no `skills:`, while
+    `connectors/safety/skills/safety-screening/SKILL.md` lives here. Two things must hold: the
+    shadowed directory is read, and the winner's declaration is not the gate. The winner's own
+    content comes first.
     """
     private = tmp_path / "private"
     shipped = tmp_path / "shipped"
@@ -650,16 +566,10 @@ def test_the_first_connectors_dir_wins_a_name_collision(
 def test_a_bundle_contributes_note_types_without_a_core_edit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A bundle's `note_types:` join the graph vocabulary, and leave with the bundle.
+    """A bundle contributes note types without a core edit.
 
-    **The gap this closes.** `job-result` and `bo-candidate` are minted by the `qm` and `bo`
-    bundles, and both used to be hand-written lines in `chemclaw.kg.note.KNOWN_NOTE_TYPES` — so
-    contributing a note type was the one connector contribution that required editing core, inside
-    the seam whose whole claim is that a capability is a folder (D-118). Everything else a bundle
-    gives (tools, jobs, skills, profiles, its queue, its pods) is declaration-only.
-
-    Scoped to the *enabled* set, not the discovered one: a bundle a deployment does not run
-    contributes no vocabulary either, so a note of its type correctly fails `kg-validate` there.
+    A bundle's `note_types:` join the graph vocabulary (D-118), scoped to the enabled set, so a note
+    of a disabled bundle's type fails `kg-validate`.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha") + "note_types:\n  - assay-result\n")
     _bundle(tmp_path, "beta", _http_manifest("beta") + "note_types:\n  - shelved\n")
@@ -686,12 +596,10 @@ def test_a_bundle_contributes_relations_the_same_way(
 def test_a_malformed_vocabulary_name_is_refused_at_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A name that is not a lowercase hyphenated token cannot enter the vocabulary.
+    """A malformed vocabulary name is refused at load.
 
-    The door opened for extending a closed set must not let through exactly what closing it
-    prevented: a note type becomes a path segment (`knowledge/<type>/<id>.md`), so a name with a
-    slash or a capital would produce a note that validates and is then unfindable by every filter
-    keyed on its type.
+    A note type is a path segment (`knowledge/<type>/<id>.md`), so slashes or capitals would make a
+    note that validates and is then unfindable.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha") + "note_types:\n  - Assay Result\n")
     _use(monkeypatch, tmp_path)
@@ -702,20 +610,9 @@ def test_a_malformed_vocabulary_name_is_refused_at_load(
 def test_a_bundle_with_no_server_package_has_no_server_module() -> None:
     """`server_tools_module` returns `None` for a bundle this repository declares and does not run.
 
-    **This is the case that used to raise, and CI is the only place it showed.** The function
-    distinguishes "no server module" from "the server module is broken underneath" by comparing
-    `exc.name` against the module it asked for — which was complete while every endpoint-bearing
-    bundle shipped a `server/` directory. `chem`'s capability moved to `Chemclaw3-mcp` and the
-    directory went with it, so the *parent package* is what is missing and `exc.name` is the
-    package. The function raised where its own docstring says it returns `None`, and every caller —
-    `make connector-validate`, `make template-validate`, and the transport tests' parametrization —
-    died at import.
-
-    It passed locally throughout, off the same commit, and the reason is worth a sentence because it
-    will recur: a deleted `server/` leaves its `__pycache__` behind, so the directory survives as a
-    PEP 420 namespace package, the import gets one level further, and the error names the module
-    after all. There was no test at all before this one, which is what let a documented three-way
-    contract be checked by nothing.
+    Without a `server/` directory the missing module is the parent package, so `exc.name` is the
+    package. Note a leftover `__pycache__` makes the directory a namespace package locally, which
+    can hide this.
     """
     assert server_tools_module("chem") is None
 
@@ -726,14 +623,10 @@ def test_a_jobs_only_bundle_has_no_server_module() -> None:
 
 
 def test_a_bundle_outside_the_installed_package_has_no_server_module() -> None:
-    """The documented `PATH` extension point, one level higher than the case above again.
+    """A bundle outside the installed package has no server module.
 
-    `connectors_dir` is a `PATH`-style list and `ARCHITECTURE.md` advertises pointing a deployment
-    at an *additional* private bundle directory. Such a bundle has no `chemclaw.connectors.<name>`
-    package at all, so `exc.name` is the bundle package rather than its `server` child — and the
-    `ModuleNotFoundError` escaped and was reported as "its server module could not be imported",
-    which is the same sentence a genuinely broken bundle gets. The only way to make CI green was to
-    stop validating that directory.
+    `connectors_dir` is a `PATH`-style list, so a private bundle has no `chemclaw.connectors.<name>`
+    package and `exc.name` is the bundle package; that is also "no server module".
     """
     assert server_tools_module("no-such-bundle-ships-here") is None
 
@@ -747,12 +640,10 @@ def test_a_bundle_that_serves_tools_returns_its_module() -> None:
 def test_a_broken_dependency_underneath_a_server_still_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The half that must *not* be swallowed, and the reason the predicate is a set of two names.
+    """A broken dependency underneath a server still raises.
 
-    A missing or renamed dependency underneath a real server means the bundle is broken. Swallowing
-    it leaves a validator checking less and still reporting success — measured once already, where
-    `validate_templates` resolved 46 signatures instead of 50 and printed "template validation
-    passed" for a bundle that could not be imported at all.
+    Swallowing it would let a validator check less while reporting success, which is why the
+    predicate is exactly the two expected names.
     """
     import importlib
 
@@ -771,18 +662,11 @@ def test_a_broken_dependency_underneath_a_server_still_raises(
 def test_a_stdio_manifest_does_not_launch_its_command_unless_the_deployment_allows_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`command:` is the one endpoint field that executes, so a *file* may not turn it on.
+    """A stdio manifest does not launch its command unless the deployment allows it.
 
-    A bundle is discovered by existing — any subdirectory of `connectors_dir` holding a
-    `connector.yaml` — and discovery is enablement unless `connectors_enabled` narrows it. So a
-    manifest written by anything that can reach that path (a CI job syncing a sibling repo, a
-    ConfigMap edit, a reviewer treating YAML as configuration rather than as code) used to run its
-    command in the chat process, before the MCP handshake, under the identity that holds every
-    connector bearer token and the database pool. The spawn happened even when the handshake then
-    failed and the connector was reported "unreachable", which is what made it quiet.
-
-    No shipped bundle declares stdio. The transport stays reachable for local development and for
-    its own tests, which say so explicitly — the default refuses.
+    Discovery is enablement, so a file on `connectors_dir` could otherwise run a command in the chat
+    process (holding every bearer token and the database pool) before the handshake. No shipped
+    bundle uses stdio; its tests opt in explicitly.
     """
     _bundle(
         tmp_path,
@@ -803,11 +687,11 @@ def test_a_stdio_manifest_does_not_launch_its_command_unless_the_deployment_allo
 def test_an_opt_in_bundle_is_discovered_and_not_enabled_by_silence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`default_enabled: false` changes what an *empty* enable-list means, and nothing else.
+    """An opt-in bundle is discovered and not enabled by silence.
 
-    The property the five process-development bundles rest on
-    (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`): the manifest is
-    on disk, so every validator can resolve its tool names, and no turn pays for its schemas.
+    `default_enabled: false` changes only what an empty enable-list means
+    (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`): validators see
+    its tool names, and no turn pays for its schemas.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _bundle(tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n")
@@ -819,12 +703,10 @@ def test_an_opt_in_bundle_is_discovered_and_not_enabled_by_silence(
 def test_an_explicit_enable_list_reaches_an_opt_in_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Naming it wins over the flag — otherwise no configuration could ever reach it.
+    """An explicit enable-list reaches an opt-in bundle.
 
-    The asymmetry is the decision rather than an oversight. Filtering the explicit list by
-    `default_enabled` too would leave an opt-in bundle unreachable by every deployment, which is
-    `reject_widening`'s shape: a control whose condition cannot occur. This is the test that would
-    red if somebody "fixed" the inconsistency.
+    Filtering the explicit list by `default_enabled` would make an opt-in bundle unreachable by any
+    configuration.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _bundle(tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n")
@@ -835,13 +717,10 @@ def test_an_explicit_enable_list_reaches_an_opt_in_bundle(
 def test_a_validator_resolves_an_opt_in_tool_that_no_turn_binds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The declared/bound fork, in one assertion over the two functions that disagree.
+    """A validator resolves an opt-in tool that no turn binds.
 
-    `connector_tool_names` answers "what can this turn call" and is what the runtime verifier
-    reads; `declared_connector_tool_names` answers "what does this tree declare" and is what
-    `skill-validate`, `prose-validate` and `template-validate` read. Before the fork they were the
-    same function, and a skill naming an opt-in bundle's tool would have failed validation on every
-    checkout that had not turned the bundle on — which is every checkout by default.
+    `connector_tool_names` is what a turn can call; `declared_connector_tool_names` is what the tree
+    declares, read by `skill-validate`, `prose-validate` and `template-validate`.
     """
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _bundle(tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n")
@@ -854,12 +733,10 @@ def test_a_validator_resolves_an_opt_in_tool_that_no_turn_binds(
 def test_an_opt_in_bundles_own_skill_is_still_validated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A bundled skill no validation run ever reads is a check whose condition never occurs.
+    """An opt-in bundle's own skill is still validated.
 
-    So `declared_skills_dirs` reaches one step further than `skills_dirs`: the agent is not offered
-    judgment about tools it cannot call, and CI still reads that judgment. Without this the four
-    skills shipped beside the process-development bundles would be free to name a tool their own
-    manifest dropped three releases ago.
+    `declared_skills_dirs` reaches further than `skills_dirs`: the agent is not offered judgment
+    about tools it cannot call, but CI still validates it.
     """
     bundle = _bundle(
         tmp_path, "optin", _http_manifest("optin", tools="mtsr") + "default_enabled: false\n"
@@ -874,12 +751,10 @@ def test_an_opt_in_bundles_own_skill_is_still_validated(
 def test_the_five_shipped_process_bundles_are_declared_and_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shipped tree, not a fixture: these five are discovered and none is bound by silence.
+    """The five shipped process bundles are declared and off.
 
-    Asserted over the real `connectors_dir` because the cost this arrangement exists to avoid is a
-    property of what ships, not of what a tmp_path can demonstrate. ~22,000 tokens of tool schema
-    rides ahead of the system message on every model call for whoever binds these, and
-    `tests/test_context_floor.py` only stays true while the default answer here is "off".
+    Asserted over the real `connectors_dir`: their schemas would ride on every model call, and
+    `tests/test_context_floor.py` holds only while the default is off.
     """
     process_bundles = {"thermalsafety", "kinetics", "unitops", "props", "suitability"}
     assert process_bundles <= set(discovered())

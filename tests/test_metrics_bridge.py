@@ -1,14 +1,7 @@
-"""The two counters that were declared and never incremented (REV-19, D-136).
+"""`chemclaw_jobs_started_total` and `chemclaw_notes_recorded_total` are actually incremented.
 
-`chemclaw_jobs_started_total` and `chemclaw_notes_recorded_total` were in `core/metrics.py`'s
-declaration table and written by nothing, so every scrape reported a flat `0`. That is worse than
-omitting them: the module's gauge path explicitly refuses to emit an unbound gauge because "a
-fabricated zero would be indistinguishable from a genuinely idle service", and these counters had
-exactly that failure with no such protection. A write path rejecting every note looked identical
-to a quiet afternoon.
-
-These tests read the registry value before and after, so they fail on the unfixed code. Asserting
-that some function *was called* would have passed against a counter nobody ever read.
+A declared counter nothing writes reports a flat `0`, a fabricated zero indistinguishable from an
+idle service. These tests read the registry value before and after rather than asserting a call.
 """
 
 import asyncio
@@ -28,13 +21,10 @@ class _Submitter:
 
 
 class _NoOpWriter:
-    """A writer that succeeds and changes nothing — the byte-identical re-write.
+    """A writer that succeeds and changes nothing: the byte-identical re-write.
 
-    `GitNoteWriter` returns `written=False` when every file was already there with the same bytes,
-    and `WriteOutcome`'s own docstring makes that the point of the field: "the counter below means
-    'a note reached the graph', and incrementing it for a no-op would make it count attempts."
-    Nothing drove it. Every other fake here returns the default `written=True`, so `if
-    outcome.written:` -> `if True:` survived the whole record/knowledge set — 112 tests.
+    `GitNoteWriter` returns `written=False` in that case, and the counter means "a note reached the
+    graph", so a no-op must not move it. Every other fake returns the default `written=True`.
     """
 
     async def write(self, write: NoteWrite) -> WriteOutcome:
@@ -68,11 +58,10 @@ def test_a_recorded_note_moves_the_counter() -> None:
 
 
 def test_a_failed_write_does_not_move_the_counter() -> None:
-    """A write path that is failing every note must not report healthy.
+    """A failed write does not move the notes counter.
 
-    This is the whole point of the counter, and the reason it is incremented *after* the writer
-    returns rather than before: counting the attempt would show a busy, working system during
-    exactly the outage the metric exists to reveal.
+    It is incremented after the writer returns, so a failing write path cannot look busy and
+    healthy.
     """
     before = METRICS.value("chemclaw_notes_recorded_total")
     try:
@@ -83,11 +72,10 @@ def test_a_failed_write_does_not_move_the_counter() -> None:
 
 
 def test_a_write_that_changed_nothing_does_not_move_the_counter() -> None:
-    """A no-op is not a note reaching the graph, and the counter must not say it was.
+    """A write that changed nothing does not move the notes counter.
 
-    The distinction the field exists for: re-recording the same note byte-for-byte is a legitimate
-    and frequent outcome (a miner re-running over a corpus it has already read), and counting it
-    turns "notes recorded" into "writes attempted" — which `tool_usage` already answers.
+    Re-recording a note byte-for-byte is frequent; counting it would turn "notes recorded" into
+    "writes attempted", which `tool_usage` already answers.
     """
     before = METRICS.value("chemclaw_notes_recorded_total")
     reference = asyncio.run(record_note(_agent_note("rev19-noop"), _NoOpWriter()))
@@ -107,12 +95,10 @@ def test_a_rejected_human_note_does_not_move_the_counter() -> None:
 
 
 def test_the_bridge_tolerates_an_update_that_raises() -> None:
-    """A metrics bug must cost the metric, never the operation being counted.
+    """A metrics bug costs the metric, never the operation being counted.
 
-    `Metrics.increment` raises `KeyError` on an undeclared counter name or a label set that does
-    not match the declaration — strictness that is right for the registry and fatal on a request
-    path. The swallow is what makes the ~10 call sites across six packages safe, and it is asserted
-    by passing an update that genuinely raises rather than by reaching into the swallow.
+    `Metrics.increment` raises on an undeclared name or mismatched labels; the bridge swallows that.
+    Asserted with an update that genuinely raises.
     """
     from chemclaw.core.metrics_bridge import record_metric
 
@@ -120,15 +106,11 @@ def test_the_bridge_tolerates_an_update_that_raises() -> None:
 
 
 def test_the_priced_token_dimensions_are_published_separately() -> None:
-    """One undifferentiated total cannot answer "what is this costing" (REV-10, D-144).
+    """The priced token dimensions are published separately.
 
-    Input, output and cache-read carry different prices — a cache read is roughly an order of
-    magnitude cheaper than a fresh input token — so a deployment that caches well and one that does
-    not published *identical* `chemclaw_tokens_total` while their bills differed several-fold. The
-    provider had reported all four dimensions all along; nothing read past the sum.
-
-    Driven through `graph_usage_tokens` on a real chunk shape rather than by calling the counters
-    directly, because the defect was in the reading, not the publishing.
+    Input, output and cache-read tokens carry different prices, so one total cannot answer cost.
+    Driven through `graph_usage_tokens` on a real chunk shape, since reading is where it can go
+    wrong.
     """
     from chemclaw.api.runner_usage import graph_usage_tokens
 
@@ -155,14 +137,10 @@ def test_the_priced_token_dimensions_are_published_separately() -> None:
 
 
 def test_a_provider_that_reports_cache_outside_its_input_meters_no_negative_input() -> None:
-    """The clamp under the cache subtraction, which every fixture so far kept comfortably positive.
+    """A provider reporting cache tokens outside its input meters no negative input.
 
-    LangChain's own client reports `input_tokens` *including* the cached share and breaks it out
-    again, which is what the test above pins. A gateway is not obliged to: reporting the cached
-    tokens beside the input rather than inside it makes the subtraction negative, and a negative
-    input token count would flow into `chemclaw_input_tokens_total` and into the turn's own record
-    as a credit against real spend. It meters 0 — the honest answer when two of a provider's own
-    numbers disagree — and the total, which is what the budget binds on, is untouched.
+    Some gateways report cached tokens beside input rather than inside it, so the subtraction is
+    clamped at 0; the total, which the budget binds on, is untouched.
     """
     from chemclaw.api.runner_usage import graph_usage_tokens
 
@@ -182,13 +160,11 @@ def test_a_provider_that_reports_cache_outside_its_input_meters_no_negative_inpu
 
 
 def test_an_unreadable_usage_block_is_counted_once_per_chunk() -> None:
-    """`chemclaw_usage_unreadable_total` is incremented *by the count*, so the count is the claim.
+    """An unreadable usage block is counted once per chunk.
 
-    `unreadable` distinguishes "nobody reported usage" from "usage was reported and we could not
-    read it" — the second is an upstream rename, which measured on the reader this replaced booked
-    50 turns of 15,000 real tokens each as zero while the budget went on allowing the next one. The
-    counter it feeds is a rate an operator alerts on, so a flag that reads 2 per chunk doubles that
-    rate; nothing asserted the value, only that it was truthy.
+    `chemclaw_usage_unreadable_total` is incremented by the count and alerted on as a rate, so the
+    value is asserted, not just truthiness. Unreadable means usage was reported but could not be
+    read (e.g. an upstream rename), distinct from no usage reported.
     """
     from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner_usage import graph_usage_tokens
@@ -206,12 +182,9 @@ def test_an_unreadable_usage_block_is_counted_once_per_chunk() -> None:
 
 
 def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> None:
-    """A fabricated zero is indistinguishable from a genuinely uncached deployment.
+    """A provider reporting no cache counts leaves those counters alone.
 
-    The same rule `chemclaw.core.metrics` states for gauges — it refuses to emit an unbound one
-    because "a fabricated zero would be indistinguishable from a genuinely idle service" — and the
-    exact failure REV-19 found in the counters. An `openai_compatible` endpoint that reports no
-    cache fields must leave those two counters untouched, not publish 0.
+    A fabricated zero is indistinguishable from a genuinely uncached deployment.
     """
     from chemclaw.api.runner_usage import graph_usage_tokens
     from chemclaw.core.metrics import METRICS

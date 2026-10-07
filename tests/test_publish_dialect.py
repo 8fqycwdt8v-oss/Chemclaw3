@@ -1,21 +1,9 @@
 """What the row builder writes beside the science: provenance, identity and electronic state.
 
-`test_publish_projection.py` asserts what a projector extracts and `test_publish_sql.py` asks the
-six chemistry questions of a loaded database. Between them sits `dialect.rows_for`, which turns one
-record into the rows every table gets — and three of its columns were being filled with values no
-producer ever supplied:
-
-- `calculation_publication` was built **only** from `record.publications`, and the cache hook (the
-  path every primitive takes, i.e. most of the corpus) constructs none — so the tenant the manifest
-  declares, and any row-level security a site attaches to that table, covered the composites only.
-- `structure.charge` and `structure.multiplicity` were `member.charge or 0` and
-  `member.multiplicity or 1`, while no projector ever set either — so every anion and every radical
-  this system published was recorded as a neutral closed-shell singlet.
-- `calculation.writer_version` came from a driver parameter with no default and no manifest key,
-  so it was the empty string on every row a deployment writes: "recorded, and blank".
-
-Each of those reads as a stored fact and is not one, which is what makes this file's assertions
-about *columns* rather than about chemistry.
+`dialect.rows_for` turns one record into every table's rows. These tests are about columns that
+must not be filled with values no producer supplied: the publication row carries the manifest's
+tenant even for primitives, `structure.charge`/`multiplicity` come from the record (or stay
+absent), and a column no writer can fill does not exist.
 """
 
 from datetime import UTC, datetime
@@ -65,11 +53,10 @@ def _record() -> ResultRecord:
 
 
 def _anion(z: float = 1.0) -> Structure:
-    """A deprotonated phenolate-shaped geometry: charge -1, and a real one.
+    """A deprotonated phenolate-shaped geometry with charge -1.
 
-    Element list chosen so the electron count is even at charge -1 — `Structure` refuses an
-    open-shell species declared as a closed-shell singlet, which is exactly the check that makes
-    the charge on this fixture meaningful rather than decorative.
+    The electron count is even at -1, since `Structure` refuses an open-shell species declared a
+    singlet; that check makes the charge meaningful.
     """
     return Structure(
         elements=[8, 6, 1, 1, 1],
@@ -110,14 +97,11 @@ def _anionic_ensemble() -> ResultRecord:
 
 
 def test_a_record_with_no_publication_still_names_its_tenant() -> None:
-    """The tenant is a property of the *writer*, and is the one field always knowable at write time.
+    """A record with no publication still names its tenant.
 
-    `publish_stored_result` and `backfill_cached` — the paths every primitive takes — construct no
-    `Publication`, so this list was empty for the overwhelming majority of rows and no publication
-    row was written at all. The shipped DDL says of that table "a site's grants and row-level
-    security attach here rather than to `calculation`", so a site following that advice saw zero
-    primitives, and the manifest's `tenant_id` (whose stated purpose is keeping two deployments'
-    output from merging in one shared database) was unreachable for them.
+    The cache hook and `backfill_cached` construct no `Publication`, yet a site's grants and
+    row-level security attach to that table and the manifest's `tenant_id` separates deployments
+    sharing a database.
     """
     rows = rows_for(_record(), tenant_id="acme", writer_version="rev")["calculation_publication"]
 
@@ -146,13 +130,10 @@ def test_a_declared_publication_is_not_duplicated_by_the_fallback() -> None:
 
 
 def test_a_charged_geometry_is_not_published_as_neutral() -> None:
-    """Charge and multiplicity are in the `structure_id` hash; they must reach the columns too.
+    """A charged geometry is not published as neutral.
 
-    Both were hardcoded — `or 0` / `or 1` on the member rows, literal `0` / `1` on the conformer
-    rows — and no projector set either, so *every* geometry this writer emitted was recorded as a
-    neutral closed-shell singlet. "Show me every anionic geometry we have optimised" then returns
-    nothing, and a consumer re-running a calculation from a published geometry re-runs it on the
-    wrong species.
+    Charge and multiplicity are in the `structure_id` hash and must reach the columns, or queries
+    for anions return nothing and a re-run from a published geometry uses the wrong species.
     """
     record = _anionic_ensemble()
     rows = rows_for(record, tenant_id="t", writer_version="w")["structure"]
@@ -166,12 +147,10 @@ def test_a_charged_geometry_is_not_published_as_neutral() -> None:
 
 
 def test_an_unstated_electronic_state_is_absent_rather_than_neutral() -> None:
-    """A geometry named only by its address says nothing about its charge — and must not claim to.
+    """An unstated electronic state is absent rather than neutral.
 
-    `0` and `1` are real values a query filters on, so fabricating them where the payload states
-    nothing is worse than a null: it makes "we did not record this" indistinguishable from "we
-    recorded a neutral singlet", and — because a later writer that *does* know is an ordinary
-    upsert — it overwrites the real value with the fabricated one.
+    `0` and `1` are real values; fabricating them makes "not recorded" look like "neutral singlet"
+    and, via upsert, overwrites a real value.
     """
     record = _record().model_copy(
         update={
@@ -189,11 +168,10 @@ def test_an_unstated_electronic_state_is_absent_rather_than_neutral() -> None:
 
 
 def test_a_writer_that_does_not_know_the_state_cannot_erase_one_that_does() -> None:
-    """The argument `PRESERVE_ON_BLANK` already makes for `origin_calc_ref`, applied to the state.
+    """A writer that does not know the state cannot erase one that does.
 
-    Two builders emit `structure` rows for one content-addressed id — a subject member, which may
-    know only the address, and a conformer, which knows the geometry's charge. Whichever landed
-    second used to win, so a member row arriving after a conformer row blanked a real charge.
+    A subject member may know only the address while a conformer knows the charge;
+    `PRESERVE_ON_BLANK` keeps the known value whichever row lands second.
     """
     assert "charge" in PRESERVE_ON_BLANK["structure"]
     assert "multiplicity" in PRESERVE_ON_BLANK["structure"]
@@ -203,16 +181,11 @@ def test_a_writer_that_does_not_know_the_state_cannot_erase_one_that_does() -> N
 
 
 def test_no_table_is_required_for_a_fact_nothing_can_write() -> None:
-    """`calculation_artifact` had no producer at any of the three layers that shipped it.
+    """No table is required for a fact nothing can write.
 
-    No projector returned an `artifacts` key, `project()` never read one, and `record.artifacts`
-    was therefore `[]` on every record this system can build — while the table stayed in
-    `TABLE_ORDER`, so `_known_columns` refused to deliver *anything* to a site that had not created
-    it. A requirement on the site, for a table guaranteed to stay empty.
-
-    An absence test rather than a comment, exactly as
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` left behind for
-    `audit_events.agent`: re-adding the claim without a producer fails here.
+    `calculation_artifact` had no producer, yet `_known_columns` would refuse to deliver to a site
+    that had not created it. An absence test, so re-adding it without a producer fails
+    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`).
     """
     assert "calculation_artifact" not in TABLE_ORDER, (
         "a table in `TABLE_ORDER` is a table the site must create for delivery to work; do not "
@@ -224,11 +197,10 @@ def test_no_table_is_required_for_a_fact_nothing_can_write() -> None:
 
 
 def test_every_table_the_row_builder_emits_is_ordered_and_keyed() -> None:
-    """The three declarations that must agree, checked against each other rather than by eye.
+    """Every table the row builder emits is in `TABLE_ORDER` and `CONFLICT_KEYS`.
 
-    Deleting `calculation_artifact` had to touch the row builder, `TABLE_ORDER` and `CONFLICT_KEYS`
-    together; leaving it in any one of them would have kept the requirement on the site (the probe
-    reads `TABLE_ORDER`) or crashed the upsert (which reads `CONFLICT_KEYS`).
+    The probe reads `TABLE_ORDER` and the upsert reads `CONFLICT_KEYS`, so the three declarations
+    must agree.
     """
     built: dict[str, list[dict[str, Any]]] = rows_for(
         _anionic_ensemble(), tenant_id="t", writer_version="w"
@@ -247,18 +219,11 @@ def test_every_table_the_row_builder_emits_is_ordered_and_keyed() -> None:
 
 
 def test_a_converted_fact_keeps_the_number_its_calculator_reported() -> None:
-    """`reported_value`/`reported_unit` are a *pair*, and one of them was the other's value.
+    """A converted fact keeps the number its calculator reported.
 
-    The shipped DDL says of these two columns: "what the calculator actually said, before
-    canonicalization. Kept for audit and for the day a conversion is found wrong - at which point
-    the canonical column can be rebuilt from this." `PropertyFact` had only the canonical number to
-    offer, so this row builder wrote *that* under the reported unit — a number in kcal/mol labelled
-    `hartree`, which is not merely wrong but unrecoverable, and rebuilding from it would convert a
-    second time.
-
-    Invisible today because every projector reports the canonical unit already, which is the same
-    reason the conversion in `project._fact` is untested (`test_publish_projection.py` pins that
-    half). Asserted here through the columns, because that is where the pair is written.
+    `reported_value`/`reported_unit` record what the calculator said before canonicalization, so the
+    canonical column can be rebuilt if a conversion is found wrong. Writing the canonical number
+    under the reported unit would make that unrecoverable. Asserted through the columns.
     """
     record = _record().model_copy(
         update={"properties": [_fact("reaction_delta_g", -0.02, "hartree")]}
@@ -270,12 +235,7 @@ def test_a_converted_fact_keeps_the_number_its_calculator_reported() -> None:
 
 
 def test_a_fact_with_no_reported_value_still_records_one() -> None:
-    """A `PropertyFact` built outside `_fact` reports the canonical number, not NULL.
-
-    `reported_value` is optional on the model — `_text` and `_flag` produce no number at all, and
-    one projector constructs a `PropertyFact` directly — so the fallback is what keeps this column
-    populated for the rows that have always populated it.
-    """
+    """A `PropertyFact` with no reported value still records the canonical number, not NULL."""
     fact = PropertyFact(property="reaction_delta_g", value=-12.5, unit="kcal/mol")
     record = _record().model_copy(update={"properties": [fact]})
     row = rows_for(record, tenant_id="t", writer_version="w")["property_value"][0]
@@ -284,16 +244,11 @@ def test_a_fact_with_no_reported_value_still_records_one() -> None:
 
 
 def test_the_compound_row_carries_the_structure_its_own_id_was_derived_from() -> None:
-    """`compound_id` names a standardized structure, so `canonical_smiles` must name the same one.
+    """The compound row carries the structure its own id was derived from.
 
-    The two columns of one row disagreed: the key is `core.chem.compound_id`, a hash over the
-    **standardized** SMILES, while the value was the member's own species SMILES. Every species of
-    one standardized compound therefore wrote the same key with a different value, and since the
-    upsert is `DO UPDATE`, the row read as whichever species was published last — an anion one day
-    and its neutral acid the next, under a key that names neither in particular.
-
-    The species' own SMILES is not lost by this: it is on `subject_member.smiles` and on
-    `calculation_candidate.smiles`, which is where a *species* belongs.
+    `compound_id` hashes the standardized SMILES, so `canonical_smiles` must be that structure, not
+    whichever species was published last. A species' own SMILES lives on `subject_member.smiles` and
+    `calculation_candidate.smiles`.
     """
     acid = _record().model_copy(
         update={
@@ -320,23 +275,11 @@ def test_the_compound_row_carries_the_structure_its_own_id_was_derived_from() ->
 
 
 def test_no_structure_column_is_blank_in_every_row_the_writer_can_build() -> None:
-    """A column no writer can fill is a stored fact that is not one — the third bullet above, again.
+    """No `structure` column is blank in every row the writer can build.
 
-    `atom_count` and `geometry` were columns of the shipped `structure` DDL, whose comment said
-    coordinates lived there (and named a `formula` column that never existed). The two builders in
-    `rows_for` are the table's only writers and neither `SubjectMember` nor `ConformerFact` carries
-    either fact, so both hardcoded `0` and `{}`: measured over all 19 published shapes, 15
-    structure rows and one distinct value between them, `(0, '{}')`. `PRESERVE_ON_BLANK` then read
-    those two as "the writer did not know", so no later delivery could fill them either — a
-    `structure_id` addressed a row saying every geometry this system has ever published has no
-    atoms. Both are gone from `rows_for` and from the DDL
-    (`002_structure_loses_the_columns_no_writer_fills.sql`); the coordinates ride whole in
-    `calculation_payload`, and `atom_count` is a `property_value` fact wherever a payload states
-    one.
-
-    Asserted over the union of a record's rows rather than per row, because the two builders know
-    different halves — a subject member has no `origin_calc_ref` and a conformer does, which is
-    what `PRESERVE_ON_BLANK` exists for.
+    A column no writer can fill is a stored fact that is not one; `atom_count` and `geometry` were
+    dropped from `rows_for` and the DDL. Coordinates travel in `calculation_payload`. Asserted over
+    the union of a record's rows, since the two builders know different halves.
     """
     rows = rows_for(_anionic_ensemble(), tenant_id="t", writer_version="w")["structure"]
     blanks: tuple[Any, ...] = (None, "", 0, {})

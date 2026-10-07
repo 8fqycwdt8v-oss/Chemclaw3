@@ -200,6 +200,5 @@ def test_an_achiral_molecule_pays_nothing_for_the_change() -> None:
 
 
 def test_the_definition_names_what_decides_the_bits() -> None:
-    """The fingerprint definition names chirality, since the definition string is what retires rows.
-    """
+    """The fingerprint definition names chirality, since that string is what retires rows."""
     assert "chiral" in molecule_definition()

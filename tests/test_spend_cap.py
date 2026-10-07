@@ -440,9 +440,7 @@ def test_a_turn_with_no_watch_has_billed_exactly_nothing() -> None:
 
 
 def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
-    """`enforce_spend_cap` marks its watch through the public `record_spend_cap`, as the loop cap
-    does.
-    """
+    """`enforce_spend_cap` marks its watch via the public `record_spend_cap`."""
     sources = {
         "spend": (Path("src/chemclaw/agent/spend_cap.py"), "enforce_spend_cap", "record_spend_cap"),
         "loop": (Path("src/chemclaw/agent/loop_cap.py"), "enforce_loop_cap", "record_loop_cap"),
@@ -483,9 +481,7 @@ def test_the_turn_cap_stays_above_what_the_other_two_guards_authorise() -> None:
 
 
 def test_the_turn_cap_funds_more_calls_than_the_loop_cap_permits() -> None:
-    """The turn cap funds more model calls than the loop cap permits, counted in `PREFIX_BOUND`
-    calls.
-    """
+    """The turn cap funds more model calls than the loop cap permits, at `PREFIX_BOUND` each."""
     from tests.test_context_floor import PREFIX_BOUND
 
     funded = settings.agent_max_turn_billed_tokens // PREFIX_BOUND

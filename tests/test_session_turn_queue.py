@@ -577,8 +577,7 @@ class _TwoGates(_Ledger):
 def test_a_sender_at_their_cap_when_their_turn_comes_is_refused_at_the_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The per-actor turn cap is counted again when a waiting message reaches the head of the line.
-    """
+    """The per-actor turn cap is counted again when a waiting message reaches the head."""
     agent = _TwoGates()
 
     async def _run() -> list[dict[str, Any]]:

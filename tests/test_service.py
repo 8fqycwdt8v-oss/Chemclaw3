@@ -262,8 +262,7 @@ def test_readyz_refuses_a_pod_whose_image_is_ahead_of_the_schema(
 def test_readyz_stays_ready_when_the_schema_is_ahead_of_the_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/readyz` stays ready when the schema is ahead of the image, the normal state after a
-    rollback.
+    """`/readyz` stays ready when the schema is ahead of the image, as after a rollback.
 
     That direction is reported by `core/migrate.py`'s `migrate.database_ahead` warning instead.
     """
@@ -2300,7 +2299,7 @@ def _held_keepalive_sockets(port: int, count: int) -> list[socket.socket]:
 
 
 def test_the_connection_limit_refuses_the_liveness_probe_above_the_app() -> None:
-    """uvicorn's connection limit refuses `/healthz` along with everything else, above the app.
+    """The uvicorn connection limit refuses `/healthz` too, above the app.
 
     It counts open sockets, including idle keep-alives, so at the limit a busy pod fails liveness.
     Driven on a bare ASGI app since this is a transport property; `Settings` cross-checks the caps

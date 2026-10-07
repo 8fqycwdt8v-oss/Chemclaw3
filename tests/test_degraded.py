@@ -1,18 +1,10 @@
 """Warn-and-degrade sites leave a number behind, and the subsystem label set stays enumerable.
 
-Measured on `391b6ec^`, under a stated definition — one `ast.ExceptHandler` whose subtree calls
-`.warning()`/`.warn()` and contains no `raise`: **41 such handlers across 34 modules, and exactly 4
-of them counted anything** (`api/routes/turns.py:173`, `api/state.py:237`, `durable/publish.py:151`,
-`kg/graph.py:155`). Every swallow is individually right — the alternative is failing a
-chemist's turn because a preference did not persist — which is exactly why each has to leave a count
-behind: from outside, a preference store that has stopped writing, a cost ledger losing every row,
-and a redaction filter that never resolved its connector token names all look identical to a healthy
-service.
-
-`core/metrics_bridge.degraded` is `agent/audit.py`'s pattern with one owner: count it through the
-swallowing bridge, then log it under a stable `degraded[<subsystem>]` marker with the caller's own
-logger. These tests drive the real helper against the real registry rather than asserting a call
-was made, which is the same discipline `test_metrics_bridge.py` records for the counters it fixed.
+Each swallow is individually right (a preference that did not persist must not fail a turn),
+which is why each must leave a count: from outside, a silently failing store and a healthy service
+look identical. `core/metrics_bridge.degraded` counts through the swallowing bridge, then logs
+under a stable `degraded[<subsystem>]` marker with the caller's logger. Driven against the real
+registry, not by asserting a call was made.
 """
 
 from __future__ import annotations
@@ -34,188 +26,117 @@ _COUNTER = "chemclaw_degraded_total"
 # failure message names what changed, and pinned at all because this is the metric's label value
 # space: a label whose values are not enumerable is how a registry ends up with unbounded series.
 _EXPECTED_SUBSYSTEMS = {
-    # `core/db.py`, on the two branches where a DSN libpq cannot parse is swallowed: the error
-    # message degrades to a bare `<postgres>`, and any `options` the DSN carried (a `search_path`,
-    # an `application_name`) are dropped from the connection. Both are invisible from the connect's
-    # own failure, and the second is invisible even on a connect that succeeds.
+    # `core/db.py`, where a DSN libpq cannot parse is swallowed: the error message degrades to
+    # `<postgres>` and the DSN's `options` are dropped, invisible even on a connect that succeeds.
     "db_dsn",
-    # `connectors/calc/remote.py`, on the three paths that raise `CalcServerError` — the
-    # calculation backend unreachable, answering with an internal error, or dropping mid-call. Its
-    # sibling `CalcToolError` (a *refusal*: an unparameterised solvent, a bad atom index) is
-    # deliberately not counted here: that is the server working and a chemist's input being wrong,
-    # and putting it on the same series would make a typo indistinguishable from a down pod. Added
-    # because that module imported no `logging` at all, so every calculation in the system crossed
-    # a wire whose outage produced no first-party signal.
+    # `connectors/calc/remote.py`, on the paths that raise `CalcServerError` (backend unreachable,
+    # internal error, dropped mid-call). `CalcToolError` is a refusal of a chemist's input and is
+    # not counted, so a typo cannot look like a down pod.
     "calc_server",
-    # `agent/checkpointer.SchemaStampedSaver.aput`. The one site here that does **not** swallow: the
-    # checkpoint write did not happen, so the caller must still fail — what the counter buys is that
-    # a checkpointer outage is visible at all. Nothing counted a checkpoint write failure before,
-    # and mid-turn it is silent loss of the turn's state.
+    # `agent/checkpointer.SchemaStampedSaver.aput`. The one site that does **not** swallow: the
+    # caller still fails, and the counter makes a checkpointer outage visible.
     "checkpointer",
     # `agent/compaction`. A raising context edit used to kill the turn as a generic internal error;
     # it now continues uncompacted, which is the safe direction — a request over budget still has a
     # chance of being answered, where a failed turn has none.
     "compaction",
-    # `agent/context_budget.MeasureRequestPrefix`. A request whose prefix cannot be measured is
-    # budgeted as though it had none, which is the generous direction — the alternative is a
-    # middleware raising on the way to every model call. Counted because the consequence is silent:
-    # a declared context window would then be subtracted from nothing, and the budget would quietly
-    # be the configured constant again.
+    # `agent/context_budget.MeasureRequestPrefix`. An unmeasurable prefix is budgeted as zero (the
+    # generous direction), which silently reverts the budget to the configured constant.
     "context_budget",
-    # `api/budget.py`, both halves of the durable spend window. A meter that cannot be read or
-    # written degrades to this pod's own counters rather than refusing the turn, which is the
-    # right direction and is silent: the cap then binds per-process again, which is precisely
-    # the behaviour `D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota` removed. Counted so
-    # a deployment can see it has silently gone back to it.
+    # `api/budget.py`, both halves of the durable spend window. An unreadable meter degrades to this
+    # pod's own counters, so the cap silently binds per process again
+    # (`D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`).
     "budget_window",
     # `api/budget.check_thread_size`, whose read of a thread's stored size admits the turn when the
     # database cannot answer — the load that follows reads the same database. Silent otherwise: the
     # memory bound it enforces would simply stop binding.
     "thread_size",
     "cost_ledger",
-    # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
-    # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one
-    # degradation a chemist actually feels (evidence missing from an answer) was the one missing
-    # from `chemclaw_degraded_total`.
+    # A retrieval source that could not be asked — the degradation a chemist feels as evidence
+    # missing from an answer.
     "evidence_source",
     # `agent/exhibit_notes.exhibit_turn_note`. An artefact store that cannot be read at turn start
     # means the turn runs without the note — no listing and no announcement of a chemist's edit —
     # which is silent from the chemist's side: the agent simply does not know the table changed.
     "exhibits",
-    # `durable/connector_job.py::ConnectorJobWorkflow._record_run`, whose log line has always said
-    # the swallowed write means the run "survives only in Temporal's history" — that it loses data
-    # nothing else
-    # holds. A fleet-wide loss of the durable record produced exactly what a quiet deployment
-    # produces.
+    # `durable/connector_job.py::ConnectorJobWorkflow._record_run`: a swallowed write means the run
+    # survives only in Temporal's history.
     "job_record",
     "job_resume",
-    # `durable/job_metrics.refresh_open_jobs`, whose visibility count of open durable jobs is
-    # swallowed so a broker hiccup cannot take the refresh loop — and with it the drain and the
-    # probe surface — down with it. Counted because the alternative is a gauge that quietly stops
-    # moving, which reads as "no durable work" rather than as "nobody asked".
+    # `durable/job_metrics.refresh_open_jobs`, swallowed so a broker hiccup cannot stop the refresh
+    # loop; counted because a gauge that stops moving reads as "no durable work".
     "jobs_in_flight",
-    # `agent/protocol_design_tools.recorded_failures`, on a corpus that cannot be read. The check
-    # it feeds reports "no recorded failure bears on this design" either way, so a lookup that has
-    # silently stopped working returns every draft clean — which is the one state a chemist would
-    # read as reassurance. Swallowed deliberately (a corpus outage must not refuse a design), and
-    # counted for exactly that reason.
+    # `agent/protocol_design_tools.recorded_failures`, on an unreadable corpus. The check reports
+    # "no recorded failure" either way, so a broken lookup would pass every draft clean; swallowed
+    # so an outage cannot refuse a design, and counted for that reason.
     "failure_memory",
     "log_redaction",
-    # `durable/deliver_message.deliver_message_activity`. Outbound delivery shipped with no signal
-    # of any kind: `deliver()` swallows a per-channel failure so one broken webhook is not
-    # everyone's outage, the caller discarded the return value, and nothing in
-    # `chemclaw.deliver.registry` held a logger or a metric — so every digest being dropped and
-    # every digest being delivered produced identical observations. Swallowed deliberately (the
-    # mailbox is the durable handover and the watermark turns on it), which is exactly why it has
-    # to be counted. Named for the seam rather than for the digest since
-    # `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` gave the report, the
-    # finished job and the open question the same path.
+    # `durable/deliver_message.deliver_message_activity`. `deliver()` swallows a per-channel failure
+    # so one broken webhook is not everyone's outage; without a count, dropped and delivered
+    # messages look identical. Named for the seam, which every outbound kind shares.
     "message_delivery",
-    # `deliver/message._connector_secret_envs`. The half of the redaction inventory that leaves the
-    # cluster: if the connector bearer-token names cannot be resolved, tokens quoted inside a tool
-    # error stop being scrubbed from outbound webhook bodies for the life of the process. Its
-    # sibling in `core/logging` has had this signal since it was written; this one shipped with a
-    # bare `logger.error`, which is the only security degradation in the tree with no counter.
+    # `deliver/message._connector_secret_envs`. If connector bearer-token names cannot be resolved,
+    # tokens quoted inside a tool error stop being scrubbed from outbound webhook bodies for the
+    # life of the process — a security degradation.
     "deliver_redaction",
-    # `deliver/registry.deliver`, on a channel that cannot be *built* — a `config:` block its driver
-    # will not take, an unimportable `module:callable`, or a destination `entra_required` forbids.
-    # Split off `chemclaw_delivery_failures_total` because the two facts have different lifetimes: a
-    # send failure is usually a destination having a bad afternoon, and a build failure is a
-    # misconfiguration that will fail identically on every message until somebody edits a manifest.
-    # Sharing one series made the permanent fault read as the transient one.
+    # `deliver/registry.deliver`, on a channel that cannot be *built* (bad `config:`, unimportable
+    # callable, a destination `entra_required` forbids). Separate from
+    # `chemclaw_delivery_failures_total` because a build failure is a permanent misconfiguration, a
+    # send failure usually transient.
     "delivery_channel_config",
-    # `ingest/commitments/json_export.fetch_commitments`, on an export path that does not exist — a
-    # mistyped `CHEMCLAW_COMMITMENT_EXPORT_DIR` or a mount that failed. The whole symptom is
-    # silence: the sync succeeds, nothing is mirrored, `mirror_freshness` stays NULL, and
-    # `review_commitments` presents that to a project leader as a truthful empty portfolio. It had
-    # a WARNING and no counter, which is the `deliver_redaction` shape one seam over.
+    # `ingest/commitments/json_export.fetch_commitments`, on an export path that does not exist. The
+    # sync succeeds, nothing is mirrored, and `review_commitments` would present an empty portfolio
+    # as truthful.
     "commitment_mirror",
-    # The same module, on an export that *is* present and does not become a portfolio: files that
-    # would not parse, or rows that would not validate. A separate subsystem from the one above on
-    # purpose — "found nothing because the knob points nowhere" and "found nothing because none of
-    # it parsed" need different operator actions, and both had a bare `logger.warning` and no
-    # counter, so from outside they were the same silence as a genuinely empty portfolio.
+    # The same module, on an export present but unparseable or invalid. Separate from the one above
+    # because "the knob points nowhere" and "none of it parsed" need different operator actions.
     "commitment_export",
-    # `api/runner.py::_escalate_exhausted_review`, on a review request that could not be opened —
-    # no broker, a refusing task queue, anything. The answer still ships, exactly as it did before
-    # the escalation existed, which is what makes this a degradation rather than an error: nothing
-    # a chemist waited for is lost. What *is* lost is silent and is the whole point of the
-    # feature — the rounds were spent, `chemclaw_answer_review_exhausted_total` moved, and the
-    # answer went out marked for review with nobody asked to read it, which from outside is
-    # indistinguishable from a deployment that never turned the escalation on.
+    # `api/runner.py::_escalate_exhausted_review`, on a review request that could not be opened. The
+    # answer still ships (a degradation, not an error), but it goes out marked for review with
+    # nobody asked to read it, indistinguishable from the escalation being off.
     "answer_review_escalation",
     "plan_approval",
-    # `agent/protocol_design_tools.uncited_precedent`, on a reaction index that cannot be reached.
-    # The same shape as `failure_memory` one function over and counted for the same reason, with
-    # one addition: this search reaches Postgres, so "cannot be reached" is the ordinary condition
-    # of a laptop rather than a rare fault — and `precedent_consulted`'s passing text therefore
-    # says nothing was *offered* rather than that no precedent exists. A silent version of this
-    # would leave every draft looking like a corpus that had been consulted and found nothing.
+    # `agent/protocol_design_tools.uncited_precedent`, on an unreachable reaction index — ordinary
+    # on a laptop. The passing text then says nothing was offered, not that no precedent exists.
     "precedent_lookup",
     "preferences",
-    # `publish/outbox`, on a row wave 6 found had no name: the claim spends its attempt and commits
-    # before delivery, so an interruption mid-delivery leaves the row `pending` at the attempt
-    # ceiling with an empty error — unclaimable, invisible to the dead-letter counter, counted
-    # forever in the pending gauge, and reset by nothing. The reaper turns it into an honest dead
-    # letter; this counter is how an operator learns it happened at all, since the row's own
-    # history is exactly what the interruption failed to write.
+    # `publish/outbox`, on a row left `pending` at the attempt ceiling with no error after an
+    # interrupted delivery: unclaimable and invisible to the dead-letter counter. The reaper
+    # dead-letters it; this counter is how an operator learns it happened.
     "result_outbox_orphaned",
-    # `publish/drivers/sql`, on a result store one migration behind the writer. Measured: the
-    # missing columns were simply dropped and the delivery reported success, which is the
-    # `deliver_redaction` shape at the far end of the same pipeline — the site believes it holds a
-    # record it does not hold. Per (sink, table) rather than per row, because a lagging schema is a
-    # deployment fact and one row's worth of it is not news.
+    # `publish/drivers/sql`, on a result store one migration behind the writer: missing columns
+    # would otherwise be dropped while the delivery reports success. Per (sink, table), since a
+    # lagging schema is a deployment fact.
     "result_sink_schema_lag",
-    # `publish/drivers/sql`, when a whole `executemany` group is refused and the sink falls back to
-    # sending that group a row at a time so the error can name the row. The fast path having failed
-    # is the degradation — the delivery itself still either lands or raises `SinkRejectedError`
-    # naming the table and the `calc_ref`, which is the granularity the batching would otherwise
-    # have cost. WARNING rather than ERROR because the answer is unchanged; what is lost is the
-    # round-trip saving, and a site whose store refuses a statement this release writes should see
-    # it counted rather than inferred from the drain taking longer.
+    # `publish/drivers/sql`, when an `executemany` group is refused and the sink replays it a row at
+    # a time so the error can name the row. The delivery still lands or raises `SinkRejectedError`;
+    # what is lost is the batching, which should be counted rather than inferred from a slower
+    # drain.
     "result_sink_batch_replayed",
-    # `agent.condense`, added with the protocol condenser. Two degradations share it and both
-    # are per protocol rather than per turn: no reachable `"protocol-digest"` route (the comparison
-    # still renders from every record's own figures), and one extraction that failed or timed out
-    # (that row keeps its recorded figures and says its procedure was not read). Without the
-    # counter, a condensing endpoint that is down looks exactly like a corpus of protocols whose
-    # procedures happen to be empty.
+    # `agent.condense`, per protocol: no reachable `"protocol-digest"` route, or one extraction that
+    # failed. Otherwise a down endpoint looks like protocols with empty procedures.
     "protocol_digest",
-    # `agent/session_store.message_from_row`, added when its catch was widened to `Exception`. The
-    # counter is the point of that widening: a catch that broad also swallows a converter *bug*,
-    # which degrades every row of every transcript into plausible prose, and a log line nobody
-    # alerts on cannot tell that apart from one unreadable legacy row.
+    # `agent/session_store.message_from_row`. Its catch is `Exception`, which also swallows a
+    # converter *bug*; the counter separates that from one unreadable legacy row.
     "session_transcript",
     "skill_manifest",
     "spend_cap",
-    # `agent/stored_skill_tools._unreadable`, the stored tiers' door into the same degradation
-    # `skill_manifest` counts for the filed trees — a `SKILL.md` whose frontmatter cannot be read,
-    # so the skill is scoped to nothing rather than left visible. A **separate** label rather than
-    # the same one, because what an operator does about it differs: a filed occurrence is an
-    # authoring fault in a corpus `make skill-validate` gates, while a stored one is a body somebody
-    # saved before a rule tightened, reachable only through a route and fixable only by its owner or
-    # an administrator. The message deliberately carries the exception *type* and never its text,
-    # since a parser quotes what it choked on and that would be a person's own words in a shared
-    # log.
+    # `agent/stored_skill_tools._unreadable`: a stored `SKILL.md` whose frontmatter cannot be read
+    # is scoped to nothing. Separate from `skill_manifest` (the filed trees) because the remedy
+    # differs: a stored body is fixable only by its owner or an administrator. The message carries
+    # the exception type, never its text, which would quote a person's own words.
     "stored_skill_manifest",
-    # `science/calc/geometry.check_server_address`, added with the geometry store
-    # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). It is the one degradation in this
-    # system that is *only* visible as a counter: a `structure_id` the calculation server and this
-    # deployment derive differently costs no calculation and produces no wrong number — every
-    # lookup keyed on it simply misses, forever, while the service looks healthy.
+    # `science/calc/geometry.check_server_address`
+    # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Visible *only* as a counter: a
+    # `structure_id` derived differently here and on the calculation server makes every lookup miss
+    # while the service looks healthy.
     "structure_id",
-    # `core/temporal_client.telemetry_runtime`, when the SDK's Prometheus exporter cannot bind. It
-    # used to raise out of `connect_options()` into `connect()`'s `except Exception`, so a
-    # double-booked metrics port was reported to every durable tool as "Temporal is unreachable …
-    # This is an infrastructure outage" while the broker was up and answering.
+    # `core/temporal_client.telemetry_runtime`, when the SDK's Prometheus exporter cannot bind; it
+    # must not be reported as Temporal being unreachable.
     "temporal_sdk_metrics",
-    # `api/runner._earlier_user_texts`. The bounded transcript read behind `core/turn_text`'s
-    # ambient — what a `basis="stated"` quote is checked against. A store this cannot reach
-    # degrades to *no earlier words*, which is the strict direction: a truthful quote from an
-    # earlier turn is refused rather than a fabricated one accepted. Counted because the
-    # consequence is otherwise invisible on both sides — the turn answers normally, and the model
-    # is told to mark a real chemist constraint `inferred`, which is the mislabelling that check
-    # exists to prevent.
+    # `api/runner._earlier_user_texts`, the transcript read a `basis="stated"` quote is checked
+    # against. An unreachable store degrades to no earlier words (the strict direction: a true quote
+    # is refused, a fabricated one never accepted); counted because the turn otherwise looks normal.
     "stated_quote_history",
     # `api/runner.run_turn`'s review-revision loop, around the two checkpointer reads and the one
     # write that keep the thread ending on the answer that ships. The answer is already in hand, so
@@ -241,11 +162,9 @@ def _subsystem_argument(node: ast.Call) -> ast.expr | None:
 def _is_degraded_call(node: ast.AST) -> bool:
     """Whether `node` calls the helper — `degraded(...)` or `<module>.degraded(...)`.
 
-    Both spellings, because matching only the bare name is not a narrowing, it is a hole:
-    `metrics_bridge.degraded(logger, f"conn_{n}", "x")` passed this whole file while a computed
-    label reached the metric. Matched on the attribute name alone for the same reason
-    `test_metric_declarations.py` matches `increment` that way — pinning the receiver would stop
-    covering whichever import form a new call site chose.
+    Both spellings, or a computed label through `metrics_bridge.degraded` would pass. Matched on the
+    attribute name alone, like `test_metric_declarations.py` matches `increment`, so any import form
+    is covered.
     """
     if not isinstance(node, ast.Call):
         return False
@@ -283,13 +202,10 @@ def test_the_subsystem_label_space_is_exactly_what_is_declared() -> None:
 
 
 def test_the_enumeration_sees_both_call_spellings_and_both_argument_forms() -> None:
-    """The extractor itself, pinned — because two ways past it were found by measurement.
+    """The extractor sees both call spellings and both argument forms.
 
-    `metrics_bridge.degraded(logger, f"conn_{n}", "x")` and
-    `degraded(logger, subsystem=f"conn_{n}", message="x")` each passed this whole file while
-    putting a computed value on a metric label, which is the one thing `core/metrics.py` says
-    cannot happen ("nothing a request carries can reach this label"). A per-connector or per-actor
-    f-string would have reached it silently, bounded only by `_MAX_SERIES_PER_COUNTER`.
+    A computed subsystem passed positionally through `metrics_bridge.degraded` or as
+    `subsystem=f"..."` must be caught: nothing a request carries may reach this label.
     """
     calls = [
         node
@@ -359,12 +275,11 @@ def _boom(*_args: object, **_kwargs: object) -> None:
 def test_a_registry_failure_cannot_replace_the_degradation_it_reports(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The reason the helper lives beside `record_metric` rather than in the registry module.
+    """A registry failure cannot replace the degradation it reports.
 
-    `Metrics.increment` raises on an undeclared name or label, and `degraded` is called from inside
-    `except` blocks — the one place where a raising metric update would substitute a `KeyError`
-    from the reporting for the failure being reported. Proved by breaking the registry underneath
-    it and requiring the log line to arrive anyway, rather than by reading the swallow.
+    `degraded` is called inside `except` blocks, and `Metrics.increment` raises on an undeclared
+    name or label, so the update is swallowed. Proved by breaking the registry and requiring the log
+    line anyway.
     """
     logger = logging.getLogger("chemclaw.test.degraded")
     original = METRICS.increment

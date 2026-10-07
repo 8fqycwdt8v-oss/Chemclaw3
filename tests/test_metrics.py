@@ -1,15 +1,8 @@
-"""The operational metrics surface (gaps DEP-4, SCH-4, SCH-5).
+"""The operational metrics surface.
 
-Three things were working correctly and completely invisibly: admission control shedding turns
-with a 503, the budget guard refusing with a 429, and `chemclaw.agent.audit` swallowing a sink
-failure to
-keep tool calls alive. "At capacity" looked identical to "fine" from outside, and the audit trail
-could be quietly incomplete indefinitely.
-
-The gauge set matters as much as the counters: the Helm chart autoscales the front door on CPU,
-which for a stream-bound, model-latency-dominated service is close to noise — a pod blocked on the
-model uses almost no CPU while being completely full. In-flight turns against the admission cap is
-the signal that actually describes saturation.
+Admission shedding (503), budget refusals (429) and audit-sink failures are counted so "at
+capacity" and an incomplete audit trail are visible from outside. In-flight turns against the
+admission cap is the saturation signal: a pod blocked on the model is full while using little CPU.
 """
 
 import re
@@ -100,29 +93,18 @@ def test_the_endpoint_exposes_saturation_not_cpu() -> None:
 
 
 def test_metrics_carry_no_identifiers_or_turn_content() -> None:
-    """The route is unauthenticated (like `/healthz`), so it must expose counts and capacity only.
+    """Metrics carry no identifiers or turn content: the route is unauthenticated, like `/healthz`.
 
-    This used to assert that a histogram's `le` bucket boundary was the *only* label anywhere, and
-    that was the right guard while the registry had no label support. It is now an allowlist of the
-    label names actually declared, because the reason behind it was never "no labels" — it was "no
-    label may carry turn-derived data on an unauthenticated route".
-
-    A declared label name passes that test on its own terms: `profile` is a value from
-    `profiles/*.yaml`, chosen by whoever deploys the system, bounded by the number of files on disk
-    and identical for every chemist using it. It says nothing about *who* asked or *what* they
-    asked. A session id, an actor oid, a tool argument or a model-supplied string would all fail
-    here, and the allowlist is what keeps the next label from being one of those by accident — the
-    registry refuses an undeclared label name, and this refuses an undeclared one reaching the wire.
+    Label names are checked against an allowlist of the names actually declared. A declared label
+    such as `profile` is deployment-chosen and bounded, and says nothing about who asked or what; a
+    session id, actor oid, tool argument or model-supplied string would fail here.
     """
     with TestClient(create_app()) as client:
         client.post("/sessions")
         body = client.get("/metrics").text
-    # **All three declaration tables, not just the counters'.** The allowlist is "the label names
-    # actually declared", and for as long as only counters carried labels those were the same set.
-    # They no longer are: `operation` on `chemclaw_db_query_duration_seconds` is declared, bounded
-    # by a source literal at each `db.connection()` call site, and appears in no counter — so
-    # reading one table would refuse a label this registry declares, which is the opposite of the
-    # guard's purpose. The gauge families are here on the same terms.
+    # All three declaration tables, not just the counters': `operation` on
+    # `chemclaw_db_query_duration_seconds` appears in no counter, and gauge families are declared
+    # too.
     permitted = (
         {"le"}
         | {label for labels in _COUNTER_LABELS.values() for label in labels}
@@ -144,11 +126,9 @@ def test_metrics_carry_no_identifiers_or_turn_content() -> None:
 
 
 def test_a_declared_label_reaches_the_exposition() -> None:
-    """The allowlist above is only meaningful if a label can actually get there.
+    """A declared label actually reaches the exposition.
 
-    Without this, `test_metrics_carry_no_identifiers_or_turn_content` would keep passing on a
-    registry that had silently stopped emitting labels at all — which is how a guard becomes
-    decoration.
+    Otherwise the allowlist test would keep passing on a registry that emitted no labels at all.
     """
     metrics = Metrics()
     metrics.increment("chemclaw_tokens_total", 7.0, {"profile": "property-lookup"})
@@ -165,11 +145,10 @@ def test_an_undeclared_label_is_refused() -> None:
 
 
 def test_a_labelled_counter_cannot_be_incremented_bare() -> None:
-    """The declaration binds both ways: declared labels are required, not merely permitted.
+    """A labelled counter cannot be incremented bare: declared labels are required.
 
-    Without this, a bare sample could land beside the labelled ones — and a scraper reads that as
-    a *further* series, not as their total, so any `sum()` over the counter double-counts. Making
-    it impossible is cheaper than rendering around it.
+    A scraper reads a bare sample as a further series, not as the total, so any `sum()` would
+    double-count.
     """
     metrics = Metrics()
     with pytest.raises(KeyError, match="chemclaw_tokens_total"):
@@ -201,14 +180,10 @@ def test_the_series_count_is_capped() -> None:
 
 
 def test_the_dropped_series_counter_names_the_metric_that_is_undercounting() -> None:
-    """The counter that reports the cap has to say *which* metric hit it.
+    """The dropped-series counter names the metric that hit the cap.
 
-    Its own docstring already argued for the label — "a metric that is deliberately *not* itself
-    capped, since its whole label domain is the declared metric names" — and it was incremented
-    unlabelled, so an operator alerting on it learned that something was dropping series and had to
-    go and find the one WARNING `_note_series_cap` emits per metric per process lifetime. That log
-    line nobody re-reads is exactly what the counter was added to replace, and its sibling
-    `chemclaw_gauge_read_failures_total` has carried `("metric",)` all along.
+    Its label domain is the declared metric names, so it is not itself capped; like
+    `chemclaw_gauge_read_failures_total`, it carries `("metric",)` so an alert says which metric.
     """
     metrics = Metrics()
     for index in range(_MAX_SERIES_PER_COUNTER + 3):
@@ -236,16 +211,10 @@ def test_a_swallowed_audit_sink_failure_is_counted() -> None:
 
 
 def test_every_gauge_family_declares_the_label_it_is_keyed_by() -> None:
-    """A family with no label name renders one bare line per reading, which collides on itself.
+    """Every gauge family declares the label it is keyed by, checked in both directions.
 
-    `_GAUGE_FAMILIES` and `_GAUGE_FAMILY_LABELS` are two tables that have to name the same set:
-    the first says a metric is a family of readings, the second says what the key *is*. Declare a
-    family and forget the label and every one of its series renders without the label that
-    distinguishes it — one metric name emitted N times with no way to tell the sinks, sources or
-    tables apart, which a scraper reads as a single series flapping between N values.
-
-    Asserted in both directions rather than one, for the reason `_COUNTER_LABELS` is: a label
-    entry for a family nobody declares is a name that renders nothing, and it reads as coverage.
+    A family without a label renders one metric name N times with nothing to tell the series apart;
+    a label for an undeclared family renders nothing yet reads as coverage.
     """
     assert set(_GAUGE_FAMILIES) == set(_GAUGE_FAMILY_LABELS), (
         "a gauge family and the label it is keyed by are one declaration in two tables: "
@@ -255,12 +224,10 @@ def test_every_gauge_family_declares_the_label_it_is_keyed_by() -> None:
 
 
 def test_a_gauge_family_renders_one_labelled_series_per_reading() -> None:
-    """The rendering contract the retention sizes and the outbox depths both depend on.
+    """A gauge family renders one labelled series per reading.
 
-    A family is bound to a callable returning `{label value: reading}` and read on every scrape.
-    What an operator has to be able to do with the result is `topk(5, chemclaw_table_bytes)` and
-    see which table is filling the volume — which needs the label on every line, and needs a
-    family that has never been read to be absent rather than zero.
+    A family is bound to a callable returning `{label value: reading}` read on every scrape; each
+    line carries the label (so `topk` works), and a never-read family is absent rather than zero.
     """
     metrics = Metrics()
     assert "chemclaw_table_bytes{" not in metrics.render(), (
@@ -276,12 +243,9 @@ def test_a_gauge_family_renders_one_labelled_series_per_reading() -> None:
 
 
 def test_a_non_finite_gauge_reading_renders_as_prometheus_spells_it() -> None:
-    """`inf` and `nan` are not tokens the exposition format has, and one poisons the whole scrape.
+    """A non-finite gauge reading renders as Prometheus spells it (`+Inf`, `NaN`).
 
-    A bound gauge computing a ratio reaches a zero denominator sooner or later. Before `_sample`,
-    `render()` formatted every gauge with `:g`, which spells those `inf` and `nan` — and a sample
-    Prometheus cannot parse does not fail alone, it fails the scrape, so one unreadable ratio loses
-    every metric this pod has at the moment somebody is looking for them.
+    An unparseable sample fails the whole scrape, losing every metric the pod has.
     """
     for reading, expected in (
         (float("inf"), "+Inf"),
@@ -294,18 +258,10 @@ def test_a_non_finite_gauge_reading_renders_as_prometheus_spells_it() -> None:
 
 
 def test_a_bool_reading_renders_as_a_number_rather_than_as_the_word_true() -> None:
-    """The scrape-killer `_sample` shipped with, defended by a comment that had it backwards.
+    """A bool reading renders as a number rather than `True`.
 
-    `bool` is a subclass of `int`, so the original `if isinstance(value, int): return str(value)`
-    arm rendered `True` — not `1` — for any gauge whose source returned a flag. Its comment said
-    "includes bool, which is an int and renders 0/1 — correct here", which is the whole defect
-    stated as the reason it is safe. `True` is not a sample Prometheus can parse, and an
-    unparseable sample loses the *entire* exposition, so this is the same total outage as the
-    `inf` case above reached by a much more ordinary mistake: binding a gauge to a predicate.
-
-    It was dead code as well as wrong — every shipped emission site hands `_sample` a float — so
-    the fix is the coercion rather than a narrower `isinstance`. Pinned here because the next
-    person to bind a gauge to `lambda: some_flag` has no reason to expect this to matter.
+    `bool` subclasses `int`, and `True` is not a parseable sample, so binding a gauge to a predicate
+    would fail the whole exposition. `_sample` coerces it.
     """
     for reading, expected in ((True, "1.0"), (False, "0.0")):
         metrics = Metrics()
@@ -314,12 +270,10 @@ def test_a_bool_reading_renders_as_a_number_rather_than_as_the_word_true() -> No
 
 
 def test_a_counter_past_a_million_is_rendered_exactly() -> None:
-    """`:g` carries six significant digits, so this was the point every counter stopped being true.
+    """A counter past a million is rendered exactly.
 
-    The non-finite half above is loud — Prometheus rejects the scrape. This half was silent:
-    1,234,567 rendered as `1.23457e+06`, which is well-formed, accepted, graphed, and wrong by
-    three. `chemclaw_tool_calls_total` on the shipped fleet crosses a million in days, so this was
-    not a hypothetical range.
+    `:g` carries six significant digits, which would render 1,234,567 as `1.23457e+06`: accepted,
+    graphed and wrong.
     """
     metrics = Metrics()
     metrics.increment("chemclaw_turns_started_total", amount=1_234_567)
@@ -345,12 +299,10 @@ def test_a_histogram_sum_keeps_the_precision_its_observations_had() -> None:
 
 
 def test_the_bucket_boundary_label_is_left_alone_because_it_is_a_series_identity() -> None:
-    """`le` is a label, not a sample: re-spelling it would mint a new series beside the old one.
+    """The bucket boundary label `le` is left alone because it is a series identity.
 
-    This asserts the asymmetry deliberately, so that a later sweep "finishing the job" by routing
-    `le` through `_sample` as well has to argue with a test rather than with a comment. `3600` and
-    `3600.0` are the same number and two different series to every dashboard already reading this
-    histogram.
+    `3600` and `3600.0` are the same number but two different series to existing dashboards, so `le`
+    must not be routed through `_sample`.
     """
     metrics = Metrics()
     metrics.observe("chemclaw_turn_duration_seconds", 0.5)

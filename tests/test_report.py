@@ -308,9 +308,7 @@ async def test_fingerprint_retriever_cites_reaction_records() -> None:
 
 
 async def test_graph_retriever_finds_a_note_through_ordinary_phrasing(tmp_path: Path) -> None:
-    """`the biaryl route` must find the biaryl note through ordinary phrasing, not a substring
-    match.
-    """
+    """`the biaryl route` must find the biaryl note through ordinary phrasing."""
     (tmp_path / "a.md").write_text(
         "---\nid: campaign-biaryl\ntype: campaign\n---\nSuzuki scope for the product.\n",
         encoding="utf-8",

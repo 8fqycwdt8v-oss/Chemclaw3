@@ -637,8 +637,7 @@ def test_recorded_but_all_unknown_conditions_are_not_read_as_absent() -> None:
 
 
 def test_a_conditions_payload_that_is_not_an_object_is_refused_by_name() -> None:
-    """A non-object conditions payload is corruption and is refused naming the table and reaction.
-    """
+    """A non-object conditions payload is refused as corruption, naming table and reaction."""
 
     async def _run() -> str:
         await migrated_db_or_skip()

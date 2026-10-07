@@ -132,9 +132,7 @@ async def test_session_owner_lists_only_its_own_sessions_most_recently_used_firs
 
 
 async def test_session_owner_does_not_list_a_session_nobody_spoke_in() -> None:
-    """A created-but-unused session is not listed; the last-activity join drops sessions with no
-    messages.
-    """
+    """A created-but-unused session is not listed: the last-activity join drops it."""
     await migrated_db_or_skip()
     store = SessionOwnerStore()
     await store.record("sess-warmed-unused", "owner-warmed-test")

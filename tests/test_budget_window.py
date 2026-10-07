@@ -1,19 +1,9 @@
 """The durable per-user spend window (`D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`).
 
-`tests/test_budget.py` proves the in-process tracker against monkeypatched settings and no database,
-which is the right shape for what it covers and is structurally unable to cover this: the defect
-being fixed is that the counters *are* the process, so a test that builds one tracker can never see
-it. Every test here builds a **second** `BudgetTracker` — the stand-in for a restart, an LRU
-eviction or a second pod — and asserts against what the first one spent.
-
-Postgres-backed, in the style of `tests/test_postgres_turn_cost_store.py`: `migrated_db_or_skip()`
-first, a distinct actor prefix per test so tests sharing the session schema cannot see each other's
-rows, and the read-back written here rather than in production code.
-
-**The window is rolled by moving the row, not by sleeping.** A test that waited for a real window to
-expire would either take the window's length or need the window set so short that the assertion
-races the statement; `UPDATE ... window_start = now() - interval` puts the row in the state the next
-booking has to recognise, which is the thing under test.
+Every test builds a second `BudgetTracker` — a restart, an LRU eviction or a second pod — and
+asserts against what the first one spent. Postgres-backed (`migrated_db_or_skip()`), with a
+distinct actor prefix per test. The window is rolled by moving the row (`UPDATE ... window_start`),
+not by sleeping.
 """
 
 import asyncio
@@ -63,13 +53,7 @@ def _durable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_a_turn_booked_by_one_tracker_binds_a_second_one(_durable: None) -> None:
-    """The whole point: a restart, an eviction or a second pod does not hand back the allowance.
-
-    Two `BudgetTracker`s share nothing in memory — this is exactly the state a pod roll leaves, and
-    the state an LRU eviction leaves for one user without any roll at all. Before this window
-    existed the second tracker admitted the turn, because the only counter that had ever seen the
-    spend died with the first.
-    """
+    """The whole point: a restart, an eviction or a second pod does not hand back the allowance."""
     await migrated_db_or_skip()
     await _clean("window-restart")
 
@@ -127,10 +111,7 @@ async def test_an_unreachable_meter_admits_the_turn_rather_than_refusing_it(
 ) -> None:
     """A budget that cannot be read must not become an outage amplifier.
 
-    The in-process half still bounds this pod, so the honest degrade is "bound on what I can see"
-    rather than "refuse every chemist's question because the meter is down". Asserted by breaking
-    the read, not by trusting the `except` — a test that patched nothing would pass against a
-    version with no error handling at all.
+    The in-process half still bounds this pod. Asserted by actually breaking the read.
     """
 
     async def _boom(actor: str) -> budget_store.Window:
@@ -148,16 +129,8 @@ async def test_the_in_process_counter_still_binds_before_the_durable_write_lands
 ) -> None:
     """`record` is synchronous and its durable write is not, so the gap has to be covered.
 
-    This is the case `max(in-process, durable)` exists for: immediately after `record` returns the
-    row may hold nothing, and the guard must still refuse on what this pod knows.
-
-    **The durable half is silenced rather than merely un-drained, and that is the whole fixture.**
-    This test used to skip `_drain()` and trust that the write had not landed — but `check` awaits
-    before it reads, which yields to the very task `record` just scheduled, so the row was often
-    already written and the refusal came from the half the test is not about. Measured over 20
-    runs: the write had landed in 2, and with the in-process half deleted the assertion still held
-    in 2 — a test that passes a broken implementation one run in ten, and unpredictably more under
-    `PYTEST_WORKERS`. Forcing the read to zero makes the refusal attributable to one source.
+    `max(in-process, durable)` refuses on what this pod knows. The durable read is forced to zero,
+    since `check` yields to the pending write and could otherwise refuse from the durable half.
     """
 
     async def _silent(actor: str) -> budget_store.Window:
@@ -178,10 +151,8 @@ async def test_the_in_process_counter_still_binds_before_the_durable_write_lands
 def _age_counter(tracker: BudgetTracker, actor: str, hours: float) -> None:
     """Rewind a live in-process counter's window start, so elapsed time can be simulated.
 
-    Reaching into `_users` deliberately: the in-process half keeps its window on `time.monotonic()`,
-    which nothing can move from outside, and the alternative — a window set to a second and a real
-    sleep — is the race this file's header argues against for the durable half. Ageing *both* halves
-    is what makes a test model 25 hours passing rather than a database edit.
+    The in-process half uses `time.monotonic()`, which cannot be moved from outside; ageing both
+    halves models real time passing.
     """
     counter = tracker._users.get(actor)
     assert counter is not None, "nothing was booked for this actor"
@@ -191,13 +162,8 @@ def _age_counter(tracker: BudgetTracker, actor: str, hours: float) -> None:
 async def test_a_rolled_window_stops_binding_on_the_pod_that_spent_it(_durable: None) -> None:
     """The window has to roll on *both* halves, or `max()` is a ratchet instead of a floor.
 
-    The defect this pins shipped: the durable row rolled and the in-process counter never did, so
-    `max()` held the principal at their lifetime spend for as long as the pod stayed up. Measured,
-    a tracker that had booked 900 tokens still refused against a 500-token cap after the durable
-    row had correctly read (0, 0) — while a *freshly built* tracker admitted the same turn. That
-    inverts this feature's premise: a restart became the only thing that handed the allowance back,
-    and the test that was supposed to cover the roll never re-checked the tracker that did the
-    spending, only `budget_store.usage()`.
+    The tracker that did the spending must admit again once the durable row has rolled, as a fresh
+    tracker would.
     """
     await migrated_db_or_skip()
     await _clean("window-both-halves")
@@ -220,12 +186,9 @@ async def test_a_rolled_window_stops_binding_on_the_pod_that_spent_it(_durable: 
 async def test_a_pod_that_joined_late_rolls_with_the_durable_window(_durable: None) -> None:
     """The in-process window is anchored to the durable row's, not to this pod's first booking.
 
-    The review of 2026-09-26 scenario: the durable row opened at 00:00, this pod first booked the
-    user at 20:00 (a restart, an eviction, a second replica) and the user hit the cap here. At
-    24:00 the row expires; the pod's own counter, anchored at 20:00, would have kept refusing
-    until 20:00 the next day while a sibling pod admitted. Modelled by building the late pod's
-    counter by hand and backdating only the durable row — the pod's counter is 4 hours old, the row
-    past its window — which is exactly the state `_rolled` alone cannot see.
+    A pod that first booked a user late must roll when the durable row rolls, not a day after its
+    own first booking. Modelled by building the late pod's counter by hand and backdating only the
+    row.
     """
     await migrated_db_or_skip()
     actor = "window-late-pod"
@@ -274,10 +237,8 @@ async def test_an_unwritten_turn_inside_the_window_still_binds_after_reconciling
 async def _drain() -> None:
     """Let the fire-and-forget durable write finish before reading it back.
 
-    `record` schedules its write as a task for the reason its docstring gives (it is called from a
-    teardown where an `await` would lose the rest of the frame), so a test that read immediately
-    would be racing it. Awaiting the module's own pending set is the honest wait — a fixed sleep
-    would be a slower version of the same race.
+    `record` schedules the write as a task (it runs from teardown); awaiting the module's pending
+    set avoids racing it.
     """
     from chemclaw.api.budget import _PENDING
 
@@ -288,23 +249,11 @@ async def _drain() -> None:
 async def test_two_concurrent_bookings_neither_lose_an_update_nor_reset_twice(
     _durable: None,
 ) -> None:
-    """The upstream behaviour the whole durable window rests on, pinned rather than believed.
+    """Two concurrent bookings neither lose an update nor reset twice.
 
-    `_BOOK` is one `INSERT ... ON CONFLICT DO UPDATE` whose three `CASE` arms each test
-    `budget_usage.window_start`. That is only safe because a conflicting writer blocks on the row
-    lock and then re-evaluates against what the first writer *committed* — not against its own
-    command snapshot, which is what this module's comment asserted until it was measured. Under the
-    snapshot reading, two concurrent bookings would each add 1 to the same pre-image and the window
-    would be reset once per writer.
-
-    Driven over the pool on both arms of the `CASE`: a live window must accumulate every booking,
-    and an expired one must reset exactly once no matter how many writers arrive together.
-
-    **This is a pin on Postgres, not a mutation-provable assertion about our code**, and saying so
-    is the point — there is no edit to `_BOOK` that produces the snapshot semantics the old comment
-    described, because the re-check is unconditional. It fails if a future server changes that, or
-    if somebody splits the reset into a second statement. `tests/test_upstream_surface.py` keeps
-    the same kind of assertion for the same reason: a promise nothing in this repository owns.
+    `_BOOK`'s `CASE` arms are safe because a conflicting writer re-evaluates against the committed
+    row after the lock. Driven on both arms: a live window accumulates every booking; an expired one
+    resets once. A pin on Postgres behaviour, like `tests/test_upstream_surface.py`.
     """
     await migrated_db_or_skip()
 

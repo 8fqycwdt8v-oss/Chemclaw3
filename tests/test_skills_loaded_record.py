@@ -118,9 +118,7 @@ def test_a_revision_round_still_records_what_it_loaded() -> None:
 
 
 def test_no_graph_run_of_a_turn_suppresses_the_whole_signal_union() -> None:
-    """No graph run of a turn suppresses the whole signal union with a blanket `lambda _signal:
-    None`.
-    """
+    """No graph run of a turn suppresses the whole signal union with a blanket lambda."""
     from pathlib import Path
 
     source = Path("src/chemclaw/api/runner.py").read_text()

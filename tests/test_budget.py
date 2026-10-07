@@ -1,8 +1,8 @@
-"""The runaway-cost guard: turn/token budgets and usage metering (budget #3).
+"""The runaway-cost guard: turn/token budgets and usage metering.
 
-Proves the missing ceiling above the per-turn loop cap — `BudgetTracker` counts turns and meters
-tokens per session and per user and refuses a turn past a cap, `graph_usage_tokens` reads a
-streamed chunk's usage, and the whole thing is a no-op when `budget_enabled` is off (the default).
+`BudgetTracker` counts turns and meters tokens per session and per user and refuses a turn past a
+cap; `graph_usage_tokens` reads a streamed chunk's usage; all of it is a no-op with
+`budget_enabled` off.
 """
 
 import asyncio
@@ -33,15 +33,8 @@ def _enabled(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_disabled_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
     """With `budget_enabled` off, check never raises and record books nothing.
 
-    The second half is the load-bearing one and it used to be asserted only in this docstring:
-    while budgets are off `check` returns before looking at anything, so whether `record` booked
-    is invisible to it, and deleting `record`'s own `if not settings.budget_enabled: return`
-    changed nothing any test could see (measured: 77 tests still passed).
-
-    So the disabled period is *re-read* through an enabled tracker. Nothing must have been
-    booked, because a deployment that turns budgets on — the chart does, `values.yaml` ships
-    `budget_enabled: true` — would otherwise start every already-live session partway through its
-    cap and refuse turns nobody had paid for.
+    The disabled period is re-read through an enabled tracker: nothing may be booked, or turning
+    budgets on would start live sessions partway to their cap.
     """
     monkeypatch.setattr(settings, "budget_enabled", False)
     monkeypatch.setattr(settings, "budget_max_turns_per_session", 1)
@@ -187,15 +180,7 @@ def test_tokens_accumulate_across_turns_rather_than_replacing_each_other(
 ) -> None:
     """A token cap counts a session's *total*, so `_book` must add rather than assign.
 
-    Found by mutation testing (2026-08-04): changing `counter.tokens += max(tokens, 0)` to
-    `counter.tokens = max(tokens, 0)` survived the whole budget suite. Nothing here booked two
-    turns and then checked a token cap, so every existing test passed with a meter that
-    remembered only the last turn — and a token budget that only ever sees the newest turn is a
-    budget that is never reached, which is the failure mode of a runaway-cost guard that costs
-    money instead of saving it.
-
-    Three turns of 400 against a cap of 1000: assignment leaves the counter at 400 and admits a
-    fourth; addition reaches 1200 and refuses.
+    Three turns of 400 against a cap of 1000: assignment would admit a fourth; addition refuses.
     """
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
     tracker = BudgetTracker()
@@ -208,12 +193,10 @@ def test_tokens_accumulate_across_turns_rather_than_replacing_each_other(
 def test_a_turn_that_metered_no_tokens_books_none(
     monkeypatch: pytest.MonkeyPatch, _enabled: None
 ) -> None:
-    """Zero is booked as zero — the other half of `max(tokens, 0)`, and also a survivor.
+    """Zero is booked as zero — the other half of `max(tokens, 0)`.
 
-    `max(tokens, 1)` survived too, which says the same thing from the opposite side: no test
-    distinguished a free turn from a one-token turn. It matters because a turn whose usage the
-    provider did not report meters as zero, and a guard that charged it anyway would make the token
-    cap a function of how many turns failed to report rather than of what they cost.
+    A turn whose usage was not reported meters zero; charging it anyway would tie the cap to
+    reporting failures rather than cost.
     """
     tracker = BudgetTracker()
     for _ in range(50):
@@ -226,14 +209,9 @@ def test_a_turn_that_metered_no_tokens_books_none(
 def test_graph_usage_does_not_count_a_cached_token_twice() -> None:
     """A cached token is one token, however the gateway chose to report it.
 
-    `langchain_openai` sets `input_tokens = prompt_tokens` — which OpenAI defines as *including*
-    the cached share — and then breaks that share out again under `input_token_details`. Reading
-    both without adjusting would bill every cached token as both a cheap read and a fresh input,
-    overstating the priced input of exactly the deployments that cache best, which is the
-    population the split exists to measure (REV-10). The key names are pinned in
+    `langchain_openai`'s `input_tokens` includes the cached share and `input_token_details` breaks
+    it out again, so `input` here is the residual. Key names are pinned in
     `tests/test_upstream_surface.py`.
-
-    So `input` here is the *residual*: what was neither read from nor written to the cache.
     """
     chunk = SimpleNamespace(
         usage_metadata={
@@ -254,9 +232,7 @@ def test_graph_usage_does_not_count_a_cached_token_twice() -> None:
 def test_a_usage_block_with_no_cache_details_meters_full_input() -> None:
     """The ordinary uncached reply: no `input_token_details`, so nothing is subtracted.
 
-    The axis this holds against the test above is absent-vs-present, which is the one that broke a
-    reader before: `cache` defaults to `{}` rather than to the mapping, so a `.get` on a missing
-    block must not fail the turn or silently zero the input.
+    A missing block must neither fail the turn nor zero the input.
     """
     usage = graph_usage_tokens(
         SimpleNamespace(
@@ -271,9 +247,7 @@ def test_a_usage_block_with_no_cache_details_meters_full_input() -> None:
 def test_a_chunk_with_no_usage_meters_nothing_and_is_not_called_unreadable() -> None:
     """Most chunks in a stream carry no usage; that is the normal case, not a missing-keys signal.
 
-    The distinction matters because `unreadable` is what would catch an upstream rename — the
-    failure that once booked 50 turns of 15,000 real tokens as zero while the budget guard went on
-    allowing the next one. A counter that fires on every ordinary chunk would say nothing.
+    `unreadable` is what catches an upstream rename, so it must not fire on ordinary chunks.
     """
     assert graph_usage_tokens(SimpleNamespace()).total == 0
     assert graph_usage_tokens(SimpleNamespace()).unreadable == 0
@@ -282,19 +256,9 @@ def test_a_chunk_with_no_usage_meters_nothing_and_is_not_called_unreadable() -> 
 def test_a_service_tier_does_not_turn_every_cached_token_into_fresh_input() -> None:
     """The cache split survives a service tier, because the tier renames the keys.
 
-    `_create_usage_metadata` prefixes both cache keys when a tier is in play —
-    `priority_cache_read`, `flex_cache_creation` — and `_create_chat_result` reads that tier off
-    the **response**, so no request parameter and no setting in this repository has to exist for it
-    to happen: a gateway that stamps `service_tier` decides it. `graph_usage_tokens` read the bare
-    names, so measured 2026-09-06 the same 1,000-prompt / 400-cached reply booked
-    `input 500, cache_read 400, cache_write 100` untiered and `input 1,000, cache_read 0,
-    cache_write 0` on `priority` — every cached token priced as fresh input, and
-    `chemclaw_cache_read_tokens_total` flat on the one deployment whose caching it is the only way
-    to see. The total is unaffected, so the budget still binds and only the price split breaks.
-
-    Driven through `_create_usage_metadata` itself rather than through a hand-written key list,
-    because the thing being asserted is that this reader survives *upstream's* renaming, and a
-    literal here would only assert that it survives mine.
+    `_create_usage_metadata` prefixes the cache keys (`priority_cache_read`, ...) when the response
+    carries a `service_tier`, which a gateway decides. Driven through `_create_usage_metadata`
+    itself, so the reader is shown to survive upstream's renaming.
     """
     from langchain_core.messages import AIMessage
     from langchain_openai.chat_models.base import _create_usage_metadata
@@ -321,20 +285,12 @@ def test_a_service_tier_does_not_turn_every_cached_token_into_fresh_input() -> N
 
 
 def test_a_judge_reply_that_fails_validation_still_books_what_the_gateway_served() -> None:
-    """The verifier's documented degrade path spent real tokens and booked zero.
+    """A judge reply that fails validation still books what the gateway served.
 
-    With `method="json_schema"` the reply is validated inside the OpenAI SDK, called from
-    `langchain_openai._agenerate` — so a reply missing a required field raises before
-    `_agenerate_with_cache` returns, `on_llm_end` never fires, and `_OffStreamMeter` books nothing.
-    Measured 2026-09-06 end to end: the same turn twice against a gateway serving 6,600 tokens both
-    times booked **6,600** with a valid verdict and **1,100** with one missing `confidence`, with
-    `estimated_tokens` at 0 as well — 5,500 billed, nothing recorded anywhere, on the path
-    `agent/verifier.py` degrades through on every schema drift.
-
-    Asserted through the callback the meter actually implements, handed the `LLMResult` shape
-    `langchain_core._generate_response_from_error` builds — raw HTTP body under
-    `response_metadata["body"]` — because that shape is the whole mechanism: it is what makes this
-    the provider's measured number rather than an estimate.
+    With `method="json_schema"` validation raises before `on_llm_end`, so tokens would go unbooked
+    on the verifier's degrade path. Asserted through the callback the meter implements, with the
+    `LLMResult` shape `_generate_response_from_error` builds (raw body under
+    `response_metadata["body"]`), so the provider's own count is used.
     """
     from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, LLMResult
@@ -415,15 +371,10 @@ def test_the_warning_fires_before_the_cap_rather_than_at_it(
 def test_the_warning_fires_once_for_a_crossing_rather_than_on_every_turn_in_the_band(
     monkeypatch: pytest.MonkeyPatch, _enabled: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A crossing is an edge, and the band behind it is wide enough to matter.
+    """The warning fires once for a crossing rather than on every turn in the band.
 
-    `_near` is a predicate over a running total, so warning whenever it holds warns on every turn
-    spent between the fraction and the cap — measured at ten warnings for one crossing of a
-    1,000-token cap, and at the shipped 20,000,000-token user cap the band is 4,000,000 tokens
-    wide, some 130 turns. It is not only log volume: the alert over this series is written with no
-    `for:` clause on the stated ground that "a crossing is a **step**, not a rate ... a single
-    crossing never produces a repetition", which is a property the level-triggered version did not
-    have.
+    The band between the fraction and the cap can span many turns, and the alert has no `for:`
+    clause because a crossing is a step, not a rate.
     """
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
     monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
@@ -445,10 +396,7 @@ def test_the_warning_names_the_principal_it_is_about(
 ) -> None:
     """The series is unlabelled on purpose, so the log line is the only route to *who*.
 
-    A session id or an Entra `oid` cannot be a label value (`033_cost_attribution.sql`), which is
-    why the alert names no principal and why three documents said in the present tense that the
-    log line beside it carried one. It carried the scope *kind* — "session", "user" — which no
-    `grep` turns into somebody an operator can go and talk to.
+    Principals cannot be label values, so the warning names the principal, not just the scope kind.
     """
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
     monkeypatch.setattr(settings, "budget_max_tokens_per_user", 1_000)
@@ -465,11 +413,9 @@ def test_the_warning_names_the_principal_it_is_about(
 def test_the_warning_is_silent_below_the_fraction_and_at_the_cap(
     monkeypatch: pytest.MonkeyPatch, _enabled: None
 ) -> None:
-    """Both ends are excluded, and the top end is the one worth pinning.
+    """The warning is silent below the fraction and at the cap.
 
-    Under the fraction there is nothing to say. At or past the cap the *refusal* says it, to the
-    caller rather than only to a log — so a warning there would be a second, weaker copy of a
-    message that already arrived, on every subsequent turn, forever.
+    At the cap the refusal already tells the caller; a warning would repeat it every turn.
     """
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
     monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
@@ -485,12 +431,7 @@ def test_the_warning_is_silent_below_the_fraction_and_at_the_cap(
 
 
 def test_checking_a_budget_never_warns(monkeypatch: pytest.MonkeyPatch, _enabled: None) -> None:
-    """The warning is booked by `record`, because `check` runs twice for every one turn.
-
-    `api/routes/turns.py` checks once on the fast path before taking an admission permit and again
-    inside the stream after it — the second being the binding one. A warning emitted from `check`
-    would therefore count every turn twice and log it twice, for a fact that changed once.
-    """
+    """The warning is booked by `record`, because `check` runs twice for every one turn."""
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1_000)
     monkeypatch.setattr(settings, "budget_warn_fraction", 0.8)
     tracker = BudgetTracker()

@@ -1,22 +1,9 @@
 """The corpus-wide backfill walk: every row seen exactly once, and skip vs. queue counted right.
 
-`backfill_cached`/`backfill_jobs` page through `calculation_results`/`job_records` by **keyset**:
-each page asks for the rows after the last one read, `(created_at, key)` and `(completed_at,
-job_id)`. `created_at`/`completed_at` are not unique on their own — concurrent calculator workers,
-or a bulk import in one transaction, can give several rows the identical instant — so what is under
-test here is the tiebreaker (`key`/`job_id`, each table's own primary key): every row inserted must
-be `seen` exactly once by a walk whose batch size is smaller than a run of tied rows, however the
-ties land.
-
-The walk used to be `LIMIT`/`OFFSET`, which is O(n²/batch) — measured on 500 000 rows, page 1 costs
-1.4 ms and page 400 costs 388.7 ms, so 500k rows in 1 000-row pages is ~90 s of pure skipping and a
-5M-row calculation cache is hours of it. A cursor predicate is not only faster, it is *correct
-under concurrent writes*, which is the half a row count cannot see and
-`test_a_row_arriving_behind_the_cursor_does_not_shift_the_walk` is for.
-
-This file was an empty stand-in (`git show`: added as the empty blob by a large dead-code sweep) —
-the pagination/skip logic this module owns had no coverage at all, only a monkeypatched stand-in
-used elsewhere for heartbeat timing.
+`backfill_cached`/`backfill_jobs` page by keyset on `(created_at, key)` and `(completed_at,
+job_id)`. The timestamps tie under concurrent workers or bulk imports, so the primary-key
+tiebreaker must make a walk with a batch smaller than a run of ties see every row once. A keyset is
+also correct under concurrent writes, which an `OFFSET` walk is not.
 """
 
 import asyncio
@@ -45,16 +32,8 @@ async def _reset(conn: Any) -> None:
 def _leave_the_corpus_as_it_was_found() -> Iterator[None]:
     """Empty the three tables again when this module finishes.
 
-    Every test here calls `_reset` on the way *in*, which makes the file self-consistent and lets
-    its rows escape to every file that runs after it. Measured:
-    `pytest tests/test_publish_backfill.py tests/test_job_record_postgres.py -p no:randomly` failed
-    `test_a_past_run_is_found_by_the_reason_it_was_run`, which asserts an **exact** roster for
-    `connector='calc'` and got `['pg-qm-barrier-1', 'n2', 'n1']` — two rows this module left behind.
-
-    It survived because the suite runs in random order and the two files rarely land adjacent in
-    that direction, so the failure looked like flake rather than like the deterministic corpus
-    difference it is. Resetting on the way in cannot fix it: by then the damage is to somebody
-    else's assertion, and `tests/pg.py` gives every run its own schema but not every *file* one.
+    Resetting on the way in protects this file but leaks its rows to later files, whose exact-roster
+    assertions then fail depending on test order; `tests/pg.py` isolates runs, not files.
     """
     yield
 
@@ -72,11 +51,8 @@ def _leave_the_corpus_as_it_was_found() -> Iterator[None]:
 
 
 async def _insert_cached(conn: Any, key: str, created_at: datetime, calc_type: str = "pka") -> None:
-    """A cached row whose payload actually projects.
-
-    It used to be `{"pka": 4.2}` with no subject at all, which `_pka` cannot build a record from —
-    harmless while a dry run only *routed*, and a projection failure the moment one projects. A
-    fixture that cannot be read is the wrong control for "was this row queued".
+    """A cached row whose payload actually projects, so it is a valid control for "was this row
+    queued".
     """
     await conn.execute(
         "INSERT INTO calculation_results "
@@ -96,12 +72,10 @@ async def _insert_job(conn: Any, job_id: str, completed_at: datetime, connector:
 
 
 def test_the_queries_break_ties_on_a_unique_column_and_walk_by_keyset() -> None:
-    """A tiebreaker, and a cursor rather than an offset — the two shapes this walk depends on.
+    """The queries break ties on a unique column and walk by keyset, not `OFFSET`.
 
-    Offline and exact, so a future edit that drops either fails here immediately rather than
-    waiting on the non-deterministic Postgres behaviour it would take to reproduce a skipped row.
-    The `OFFSET` half is an absence check for the same reason: it is what regressed, it reads as
-    harmless, and its cost is invisible until a deployment has enough rows to page through.
+    Offline and exact, so dropping either fails at once rather than via non-deterministic Postgres
+    behaviour.
     """
     assert "ORDER BY created_at, key" in backfill._CACHED
     assert "ORDER BY completed_at, job_id" in backfill._JOBS
@@ -142,18 +116,11 @@ async def test_every_row_is_seen_exactly_once_even_when_many_share_a_timestamp(
 def test_a_row_arriving_behind_the_cursor_does_not_shift_the_walk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A concurrent insert older than the cursor must not push a row out of the walk.
+    """A concurrent insert older than the cursor does not shift the walk.
 
-    This is what a keyset buys beyond speed, and it is why the fix is a different *predicate*
-    rather than a bigger batch. `OFFSET n` means "skip the first n rows **of the query as it is
-    now**", so a row landing before the cursor between two pages shifts every later page by one:
-    the row on the boundary is fetched twice and its neighbour never at all — silently, with no
-    error and no `skipped` increment. This walk is exactly where that happens. It is the
-    long-running one (a 5M-row cache took hours of pure skipping before this), and
-    `calculation_results` is written by every calculator worker while it runs.
-
-    So the assertion is on the *sequence of keys visited*, not on a count: under an offset walk the
-    count can even come out right while the list holds a duplicate and misses a row.
+    With `OFFSET`, a row landing before the cursor shifts later pages, fetching one row twice and
+    another never, silently. `calculation_results` is written by every worker while this long walk
+    runs. Asserted on the sequence of keys visited, since a count can come out right regardless.
     """
     visited: list[str] = []
     intruded = False
@@ -163,12 +130,8 @@ def test_a_row_arriving_behind_the_cursor_does_not_shift_the_walk(
         return [object()]
 
     async def _intruding_enqueue(records: list[Any]) -> int:
-        """The intrusion rides on the walk's own `await`, so it is committed before the next page.
-
-        It was on `enqueue_payload`, which the walk no longer calls; splitting that into a
-        projection and a write moved the only awaited step to here. A background task would have
-        made the insert race the next page read, which is the one thing this test must not leave to
-        chance — it asserts the *sequence of keys visited*.
+        """The intrusion rides on the walk's own `await`, so it is committed before the next page is
+        read; a background task would race the read.
         """
         nonlocal intruded
         if not intruded:
@@ -222,12 +185,10 @@ async def test_every_job_is_seen_exactly_once_even_when_many_share_a_timestamp()
 async def test_a_row_with_a_registered_projector_is_queued_not_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The skip/queue split itself, decoupled from the real outbox and projection machinery.
+    """A row with a registered projector is queued, not skipped.
 
-    The projection is stubbed here rather than driven for real: what this module owns is deciding
-    whether a row *has* a projector and dispatching accordingly, not what the projection then does
-    with a valid payload — `test_publish_outbox.py` and `test_publish_project*.py` are where that
-    is proven.
+    The projection is stubbed: this module owns the routing decision; projection itself is proven in
+    `test_publish_outbox.py` and `test_publish_project*.py`.
     """
 
     def _one_record(**_kwargs: Any) -> list[Any]:
@@ -257,11 +218,10 @@ async def test_a_row_with_a_registered_projector_is_queued_not_skipped(
 
 
 async def test_dry_run_counts_without_calling_the_outbox(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`dry_run=True` must be a read-only preview: no row reaches the outbox *write*.
+    """`dry_run=True` is a read-only preview: no row reaches the outbox write.
 
-    It reaches the *projection* now, deliberately — that is what makes the preview's numbers the
-    numbers the real pass produces — so the line this guards moved from `enqueue_payload` to
-    `enqueue`, which is where the write is.
+    It does run the projection, so the preview's numbers match the real pass; the guarded line is
+    `enqueue`.
     """
 
     async def _explode(records: list[Any]) -> int:
@@ -307,13 +267,10 @@ async def test_requeue_failed_returns_failed_rows_to_pending() -> None:
 
 
 def test_a_requeue_dry_run_counts_the_retired_rows_without_touching_them() -> None:
-    """The preview must not make the one write that destroys what it is previewing.
+    """A `--requeue` dry run counts retired rows without resetting them.
 
-    `--requeue` reset every retired row whatever `--dry-run` said, and the run then printed "dry
-    run: nothing was written" — so an operator previewing a backfill cleared the attempt budget and
-    the recorded error on every dead-lettered publication in the deployment, and the drain
-    redelivered them. Driven through the CLI's own `main`, because the walks below honoured
-    `dry_run` all along and only the entry point's requeue branch did not.
+    Resetting would clear the attempt budget and recorded errors of every dead-lettered publication
+    during a preview. Driven through the CLI's `main`, where the requeue branch lives.
     """
     import chemclaw.cli.backfill_publications as backfill_publications
 
@@ -351,11 +308,8 @@ def test_a_requeue_dry_run_counts_the_retired_rows_without_touching_them() -> No
 async def _insert_legacy_scan(conn: Any, key: str, created_at: datetime) -> None:
     """An `xtb.scan` row from a calculator that wrote `energy`, not `energy_hartree`.
 
-    A real shape rather than a synthetic one: `scan` was an `XtbTask` before
-    `D-2026-08-16-the-physics-leaves-the-cache-stays` and is not one now, and
-    `_CALC_TYPE_PROJECTORS` keeps its projector precisely because `calculation_results` is never
-    pruned. So this is the row an upgrading deployment actually holds — a projector exists for it
-    and cannot read it, which is the whole distinction under test.
+    `calculation_results` is never pruned, so upgrading deployments hold such rows: a projector
+    exists for them and cannot read them.
     """
     await conn.execute(
         "INSERT INTO calculation_results "
@@ -397,16 +351,9 @@ def test_a_row_no_projector_can_read_is_its_own_bucket_not_a_silent_zero(
 ) -> None:
     """Every row visited lands in exactly one bucket, and the dry run predicts the real pass.
 
-    The regression: `outbox.enqueue_payload` swallows a projection failure and returns 0, and this
-    module added that 0 to `queued` and touched nothing else — so a row written by an older
-    calculator was seen, not queued, not skipped, and named nowhere. Measured on this corpus, the
-    dry run reported `(seen=4, queued=3, skipped=1)` and the real pass `(seen=4, queued=2,
-    skipped=1)`: an operator reading "4 row(s) seen, 2 queued, 1 skipped" over four rows was told a
-    complete-looking story with one row missing from it.
-
-    Both halves are asserted because either alone passes on the broken code: the partition alone
-    would pass on a dry run that never projects, and dry==real alone would pass if both agreed on
-    the *wrong* number.
+    `outbox.enqueue_payload` swallows a projection failure and returns 0, so an unreadable row must
+    be counted in its own bucket. Both halves are needed: the partition alone passes on a dry run
+    that never projects, and dry == real alone passes if both are wrong.
     """
     _publishing(monkeypatch)
 
@@ -450,13 +397,10 @@ def test_a_row_no_projector_can_read_is_its_own_bucket_not_a_silent_zero(
 def test_a_second_pass_counts_a_row_it_already_queued_as_covered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Idempotency must not read as loss.
+    """A second pass counts a row it already queued as covered.
 
-    The enqueue is `ON CONFLICT DO NOTHING`, so a second pass writes no rows — and `queued` used to
-    be the *rows written*, so re-running a completed backfill reported every row as queued zero and
-    skipped zero: three rows in no bucket, on a corpus with nothing wrong with it at all. `queued`
-    counts rows whose records reached the outbox, which is what makes the partition hold on every
-    pass rather than only the first.
+    The enqueue is `ON CONFLICT DO NOTHING`, so `queued` counts rows whose records reached the
+    outbox, not rows written, and the partition holds on every pass.
     """
     _publishing(monkeypatch)
 
@@ -481,17 +425,11 @@ def test_a_second_pass_counts_a_row_it_already_queued_as_covered(
 def test_the_jobs_walk_partitions_its_rows_and_counts_records_in_their_own_unit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """All four buckets and the unit split, on the walk where a row really does decompose.
+    """The jobs walk partitions its rows and counts records in their own unit.
 
-    `backfill_jobs` covers `job_records`, whose payloads are the composites — and a solvent screen
-    projects into an aggregate plus one record per medium. While `queued` carried the record count,
-    a walk over such a corpus reported **more queued than seen**, which is both wrong on its face
-    and the reason `seen - skipped` could not be used to recover the missing bucket.
-
-    Driven end to end rather than through a stub, on three real shapes: one that decomposes, one
-    whose projector raises on an incomplete payload, and one nothing routes. What comes back is
-    `(seen=3, queued=1, skipped=1, failed=1, records=3)` — the partition holds, `queued` is a row
-    count that cannot exceed `seen`, and `records` is the number that is allowed to.
+    A composite such as a solvent screen projects into several records, so `queued` is a row count
+    that cannot exceed `seen` and `records` is the one allowed to. Driven end to end on a
+    decomposing shape, a raising projector and an unrouted one.
     """
     _publishing(monkeypatch)
 
@@ -568,19 +506,11 @@ def test_the_jobs_walk_partitions_its_rows_and_counts_records_in_their_own_unit(
 def test_both_entrypoints_of_one_walk_refuse_when_this_deployment_publishes_nowhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guard existed on the operator's half and not on the chemist's.
+    """Both entrypoints of one walk refuse when this deployment publishes nowhere.
 
-    `enqueue` is a no-op with `CHEMCLAW_RESULT_SINKS` empty, so `republish_calculations` ran a full
-    scan of two never-pruned tables, wrote nothing, and reported `calculations_seen: 10,
-    calculations_queued: 0` — indistinguishable from a corpus with nothing left to publish, at the
-    end of a job that can take hours, for the caller least able to diagnose it. Measured before the
-    fix, with ten queueable rows in the cache: exactly that report, and zero rows in
-    `result_publications`.
-
-    Asserted as a pair rather than one test each, because the defect was the *asymmetry*: one walk,
-    two entrypoints, and only one of them checked. `ResultSinkError` is already in
-    `durable/publish._BAD_DATA_TYPES`, so the job fails fast rather than spending eight attempts on
-    a setting no retry changes.
+    With `CHEMCLAW_RESULT_SINKS` empty, a full scan would write nothing and report what looks like
+    nothing left to publish. Asserted as a pair because one walk has two entrypoints.
+    `ResultSinkError` is in `_BAD_DATA_TYPES`, so the job fails fast.
     """
     from chemclaw.cli import backfill_publications
     from chemclaw.connectors.results import workflows
@@ -606,15 +536,11 @@ def test_both_entrypoints_of_one_walk_refuse_when_this_deployment_publishes_nowh
 async def test_the_jobs_walk_carries_the_note_the_run_produced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The backfill reads the very row `job_records.note_id` sits in, and dropped it.
+    """The jobs walk carries the note the run produced
+    (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`).
 
-    The live publish path and this one are two producers of one field, and both had the value in
-    hand (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`). This is the half
-    that re-publishes history: a deployment turning a sink on for the first time gets its whole
-    corpus through here, so a walk that drops the note link drops it for every row ever computed.
-
-    A second row with no note is walked beside it, so the assertion is a difference — empty means
-    "this run produced none", and a walk that hard-coded the empty string would pass on one row.
+    A first-time sink gets its whole history through here. A second row with no note is walked
+    beside it, so a hard-coded empty string fails.
     """
     _publishing(monkeypatch)
     captured: list[Any] = []

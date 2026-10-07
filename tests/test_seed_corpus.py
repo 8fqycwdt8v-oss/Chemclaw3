@@ -119,9 +119,7 @@ def test_the_seed_corpus_cites_no_calculation_the_store_cannot_back() -> None:
 
 
 def test_the_seed_corpus_and_the_eval_corpus_stay_separate() -> None:
-    """`data/evals/retrieval_corpus/` stays outside the live graph, so eval numbers stay
-    reproducible.
-    """
+    """`data/evals/retrieval_corpus/` stays outside the live graph, keeping evals reproducible."""
     seeded = {note.id for note in _notes()}
     invalidate_cache()
     gold = {note.id for note in load_notes(_GOLD_CORPUS)}

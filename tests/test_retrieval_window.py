@@ -51,9 +51,7 @@ def test_a_note_that_was_current_in_the_requested_window_is_served_for_that_wind
 
 
 def test_the_same_note_stays_out_of_an_unwindowed_current_evidence_sweep(tmp_path: Path) -> None:
-    """A retired note stays out of an unwindowed current-evidence sweep; it is still reachable by
-    id.
-    """
+    """A retired note stays out of an unwindowed sweep; it is still reachable by id."""
     root = _corpus(tmp_path, _retired())
 
     chunks = asyncio.run(GraphRetriever(root).retrieve("degassing sparge catalyst", {}))

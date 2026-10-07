@@ -1,9 +1,8 @@
-"""The shared PR-gate publish retry policies fail fast on bad data and bound transient retries.
+"""The shared activity retry policies fail fast on bad data and bound transient retries.
 
-These guard the fix for the durability hole where an unclassified deterministic failure
-(a `KeyError`/`RuntimeError` bug, or a git ref that can never be created) retried forever
-because `BAD_DATA_RETRY` had no attempt bound. The policy must (a) be bounded, and (b) mark
-every bad-data error type non-retryable by its exact class name (Temporal matches by name).
+`BAD_DATA_RETRY` must be bounded, so an unclassified deterministic failure cannot retry forever,
+and must mark every bad-data error type non-retryable by its exact class name (Temporal matches by
+name).
 """
 
 import asyncio
@@ -76,12 +75,10 @@ def test_bad_data_retry_lists_every_bad_data_type_by_name() -> None:
 
 
 def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
-    """Temporal matches non-retryable types by exact class name, not isinstance.
+    """Every `ChemclawError` subclass is listed non-retryable by name.
 
-    So subclassing `ChemclawError` alone does NOT make a new bad-data error fail fast
-    across an activity boundary — its concrete name must be in `_BAD_DATA_TYPES`. This
-    walks every first-party module so all subclasses are defined, then asserts none is
-    missing from the policy (the drift this base class was created to eliminate).
+    Temporal matches by exact class name, not `isinstance`, so a subclass is not covered until its
+    own name is in `_BAD_DATA_TYPES`. Walks every first-party module so all subclasses are defined.
     """
     # `walk_packages` reaches every module under `chemclaw` (D-148), so a new subclass anywhere
     # in the tree is still defined by the time the assertion runs.
@@ -98,12 +95,8 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     # And an exemption must never also be listed — a name in both sets is a contradiction the
     # policy would resolve silently (the list wins, and the "retryable" claim becomes false).
     assert not _DECLARED_RETRYABLE & set(BAD_DATA_RETRY.non_retryable_error_types or [])
-    # Nor may the list say a name twice. Temporal matches by name, so a duplicate changes no
-    # behaviour at all — which is exactly why one survived a review: `StatusConflict` was added in
-    # two hunks of one merge, each carrying its own justification, and the first called itself "the
-    # one conflict in this list that a retry makes worse" four lines from the second making the
-    # identical argument for `RevisionConflict`. This list is the classification register the tests
-    # above walk, and a register with two entries for one class has two answers for it.
+    # Nor may the list name a class twice: a duplicate changes no behaviour, so it survives review,
+    # and a classification register with two entries for one class has two answers for it.
     from chemclaw.durable.publish import _BAD_DATA_TYPES
 
     duplicated = sorted({name for name in _BAD_DATA_TYPES if _BAD_DATA_TYPES.count(name) > 1})
@@ -111,13 +104,10 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
 
 
 def test_every_authorization_error_subclass_is_listed_non_retryable() -> None:
-    """The same completeness walk, rooted at `AuthorizationError` instead of `ChemclawError`.
+    """Every `AuthorizationError` subclass is listed non-retryable.
 
-    `AuthorizationError` is deliberately not a `ChemclawError` (an authorization refusal is not
-    "bad data" — see its docstring in `chemclaw.agent.authz`), so the walk above never visits it or
-    its subclasses (`DryRunRefusal`, `PlanNotApprovedError`). Without a walk of its own, a new
-    subclass could cross an activity boundary unregistered and retry forever, exactly the drift
-    `ChemclawError`'s walk exists to catch.
+    `AuthorizationError` is deliberately not a `ChemclawError`, so the walk above never visits it or
+    its subclasses (`DryRunRefusal`, `PlanNotApprovedError`).
     """
 
     def names(cls: type) -> set[str]:
@@ -129,18 +119,11 @@ def test_every_authorization_error_subclass_is_listed_non_retryable() -> None:
 
 
 def test_no_subsystem_outage_error_is_listed_non_retryable() -> None:
-    """The third hierarchy is absent from `_BAD_DATA_TYPES` **on purpose** — do not "fix" this.
+    """No `SubsystemUnavailableError` is listed non-retryable, on purpose.
 
-    `SubsystemUnavailableError` (`chemclaw.core.errors`) means "the infrastructure this needs is not
-    answering", which is the *retryable* failure par excellence: the identical call succeeds once
-    the broker is back. Registering it would tell Temporal to fail an activity fast on precisely the
-    fault a retry fixes — the QM/BO/report workflows would give up on a broker restart instead of
-    riding it out.
-
-    It reads like an omission next to the two walks above, and the walks are exactly what would
-    invite someone to close the gap: both fail loudly when a subclass is *missing* from the list.
-    So this one fails loudly when a subclass is *present*, and the assertion message says why. The
-    completeness sweep and this test cannot both be satisfied by accident — only by reading.
+    It means the infrastructure is not answering, the failure a retry fixes; registering it would
+    make workflows give up on a broker restart. The walks above fail on a missing subclass, so this
+    fails on a present one, with the reason in the message.
     """
     _import_first_party_tree()
 
@@ -170,22 +153,13 @@ def test_no_subsystem_outage_error_is_listed_non_retryable() -> None:
 def test_bad_data_class_crosses_an_activity_boundary_as_non_retryable(
     error_cls: type[Exception],
 ) -> None:
-    """The real classification Temporal applies, not the isinstance mismatch (R5).
+    """A bad-data class crosses an activity boundary as non-retryable, under Temporal's real
+    classification.
 
-    Temporal matches `non_retryable_error_types` by the `ApplicationError.type` string its own
-    `DefaultFailureConverter` assigns — the exact class name, never an ancestor's. A class that
-    derives from `ChemclawError` (hence `ValueError`) but is missing from `_BAD_DATA_TYPES` by its
-    *own* name would still retry `activity_max_attempts` times with transient backoff before
-    failing, exactly as `ConnectorError` did before it and its three siblings were reparented and
-    registered, and exactly as `ProfileError` did before this test covered it.
-
-    `AuthorizationError` is the sharper case: it is not a `ChemclawError`/`ValueError` at all (see
-    its docstring for why reparenting it would be wrong), yet the same name-matching mechanism
-    still applies — Temporal never looks at `isinstance`, so a plain `Exception` registered by name
-    is classified non-retryable exactly like a `ChemclawError` subclass would be. This drives the
-    real SDK converter (no server needed) rather than asserting on the class hierarchy, so it
-    catches the isinstance/name mismatch the docstring in `template_activities.authorize_job_step`
-    used to get wrong.
+    `DefaultFailureConverter` sets `ApplicationError.type` to the exact class name, never an
+    ancestor's. `AuthorizationError` is a plain `Exception`, yet registered by name it is classified
+    the same way. Drives the real SDK converter (no server needed) rather than inspecting the class
+    hierarchy.
     """
     converter = DefaultFailureConverter()
     payload_converter = DefaultPayloadConverter()
@@ -205,16 +179,12 @@ def test_note_publish_retry_shares_the_bad_data_types() -> None:
 
 
 def test_the_agent_step_bound_is_narrower_than_the_shared_one() -> None:
-    """The agent step is retried less than everything else, because its retry is not free.
+    """The agent-step retry bound is narrower than the shared one.
 
-    Every other activity recomputes on a retry. An agent step replays the whole turn from the
-    prompt — an activity has no checkpointer behind it — so every tool the failed attempt already
-    ran runs again with its side effects; measured, one provider 503 produced two PR-gate branches
-    and two audit rows for one logical note. Strictly less than `BAD_DATA_RETRY`, because equal
-    would mean the narrowing had been quietly undone while both settings still existed.
-
-    It shares the bad-data list, and that is the point of the pairing: the two policies differ in
-    *how many* transient attempts, never in *which* failures count as transient.
+    An agent step replays the whole turn, re-running every tool the failed attempt already ran, side
+    effects included. Strictly less than `BAD_DATA_RETRY`, so equal settings cannot undo the
+    narrowing. The bad-data list is shared: the policies differ in how many transient attempts,
+    never in which failures are transient.
     """
     policy = agent_step_retry()
 
@@ -224,20 +194,12 @@ def test_the_agent_step_bound_is_narrower_than_the_shared_one() -> None:
 
 
 def test_the_calculation_retry_waits_out_a_full_backend_without_spinning_at_it() -> None:
-    """A backend refusing "every slot is taken" is worth asking again about — later, not sooner.
+    """The calculation retry waits out a full backend without spinning at it.
 
-    `CalcBusyError` made that failure retryable, and Temporal's default spacing would have made the
-    fix cosmetic: one second doubling means five attempts inside fifteen seconds, against a hold
-    that is a whole calculation long (a measured CREST search is ~19 minutes, and the server's own
-    ceiling is four hours). So the schedule is asserted rather than the policy's existence.
-
-    Both ends are derived from configured values, which is what stops this from being four magic
-    numbers: the cap is one `calc_server_timeout_seconds` because that is the longest single
-    calculation this client waits for, and the first interval is that cap divided by the doublings
-    the attempt budget allows, so the *last* retry waits exactly one calculation.
-
-    The type list is asserted identical to `BAD_DATA_RETRY`'s for `agent_step_retry`'s reason: the
-    two policies may differ in how long they wait, never in which failures count as transient.
+    `CalcBusyError` is retryable, but a slot is held for a whole calculation. The cap is one
+    `calc_server_timeout_seconds` and the first interval is that cap divided by the doublings the
+    attempt budget allows, so the last retry waits one calculation. The type list matches
+    `BAD_DATA_RETRY`'s.
     """
     # Called outside a workflow, so the schedule is the nominal one — the jitter is per-run and
     # has no run here. `test_two_runs_refused_together_do_not_come_back_together` drives that half.
@@ -260,14 +222,9 @@ def test_the_calculation_retry_waits_out_a_full_backend_without_spinning_at_it()
     # Nineteen minutes is the measured CREST search this has to outlast.
     total = sum(waits, timedelta())
     assert total > timedelta(minutes=19)
-    # **And the slack it has to fit in is the composite, not the ceiling minus the work.** This
-    # read `connector_job_timeout_seconds - xtb_job_timeout_seconds` and so measured the room left
-    # over one *attempt*, ignoring the queue wait that precedes it — which is the same
-    # bound-versus-composite error `connector_queue_wait_timeout` was rederived to end
-    # (`D-2026-09-05-a-refusal-for-capacity-is-not-a-refusal-of-the-question` §3). What the parent
-    # ceiling must actually contain on the path these retries exist for is a job that waits for a
-    # slot, is refused at capacity, backs off, and then runs: p95 backpressure on `connector-calc`
-    # is ~1.98 h measured, and one full attempt is `xtb_job_timeout_seconds`.
+    # The slack is measured against the composite, not one attempt: on the path these retries exist
+    # for, a job waits for a slot, is refused at capacity, backs off and then runs, all within the
+    # parent ceiling (`D-2026-09-05-a-refusal-for-capacity-is-not-a-refusal-of-the-question`).
     longest, _ = settings.longest_bundle_activity
     composite = timedelta(hours=1.98) + total + timedelta(seconds=longest)
     assert composite < timedelta(seconds=settings.connector_job_timeout_seconds), (
@@ -288,17 +245,11 @@ class _RetrySpacingWorkflow:
 
 
 def test_two_runs_refused_together_do_not_come_back_together() -> None:
-    """The jitter, driven where it exists: inside a workflow, across two runs.
+    """Two runs refused together do not come back together.
 
-    Temporal applies none of its own — measured on 2026-09-05 against the real broker, an activity
-    with initial 1 s and coefficient 2 was retried at 1.016 / 2.013 / 4.015 / 8.021 s, i.e. exactly
-    nominal. The arrival pattern this platform is sized against is a burst, so without a spread a
-    slate of jobs refused in the same instant returns in the same instant, four are admitted and the
-    rest are refused again in lockstep, with the pod idle between pulses.
-
-    Two runs, because one run says nothing about desynchronisation. The bound is asserted as well as
-    the difference: jitter that could push the interval *up* would be swallowed by
-    `maximum_interval` at exactly the attempt that waits longest.
+    Temporal applies no jitter of its own, and a burst refused at once would otherwise retry in
+    lockstep. Two runs show desynchronisation; the bound is asserted too, since upward jitter would
+    be swallowed by `maximum_interval` on the longest wait.
     """
     nominal = settings.calc_server_timeout_seconds / 2 ** max(settings.activity_max_attempts - 2, 0)
 
@@ -326,17 +277,11 @@ def test_two_runs_refused_together_do_not_come_back_together() -> None:
 
 
 def test_a_bundle_queue_wait_is_bounded_generously_rather_than_by_cores_hour() -> None:
-    """The two queue bounds mean different things, and using one for both breaks the other.
+    """A bundle queue wait is bounded generously rather than by core's hour.
 
-    `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait` bounded core's queue at an hour
-    and excluded the bundles, correctly: a bundle wait *is* backpressure. Measured on the real
-    broker at target load, `connector-calc`'s wait is p50 ~1.04 h and p95 ~1.98 h, so core's hour
-    applied there would fail more than half of a healthy peak. Leaving it unbounded was the other
-    error — the only ceiling left was the parent's execution timeout, which reaches no workflow
-    code and names neither the queue nor the reason.
-
-    So this asserts the ordering that makes both true at once, in terms of the settings rather than
-    in seconds, because the numbers are a deployment's to change.
+    Core's queue wait is an hour, but a bundle's wait is backpressure that at healthy peak exceeds
+    an hour; unbounded, only the parent's execution timeout would end it, naming neither queue nor
+    reason. Asserted as an ordering of settings, since the numbers are a deployment's.
     """
     bundle = connector_queue_wait_timeout()
     core = queue_wait_timeout()
@@ -344,13 +289,8 @@ def test_a_bundle_queue_wait_is_bounded_generously_rather_than_by_cores_hour() -
     ceiling = timedelta(seconds=settings.connector_job_timeout_seconds)
 
     assert bundle > timedelta(hours=1.98), "measured p95 backpressure would fail this bound"
-    # **The composite, because the wait precedes the work and the ceiling has to hold both.**
-    # `bundle < ceiling` is true of the bound alone and was false of the pair it is spent with:
-    # at the fraction this replaced, 9,000 s of wait plus a 15,000 s CREST search was 24,000
-    # against an 18,000 s ceiling, so a job inside both of its own bounds died as a bare
-    # `WorkflowExecutionTimedOut` — the failure the bound was added to remove. Asserted against
-    # `longest_bundle_activity` rather than against `xtb_job_timeout_seconds` so a bundle whose
-    # longest activity overtakes the CREST search is covered by the same line.
+    # The composite, because the wait precedes the work and the ceiling must hold both. Asserted
+    # against `longest_bundle_activity` so any bundle's longest activity is covered.
     assert bundle + timedelta(seconds=longest) < ceiling, (
         "the queue wait plus the longest activity it precedes must fit inside the child's own "
         "execution ceiling, or a job that waits and then runs dies as a workflow execution "
@@ -360,19 +300,11 @@ def test_a_bundle_queue_wait_is_bounded_generously_rather_than_by_cores_hour() -
 
 
 def test_no_provider_transient_name_is_listed_non_retryable() -> None:
-    """The other way someone could "fix" the duplicate-note bug, and it would be wrong.
+    """No LLM provider transient error name is listed non-retryable.
 
-    The pairing to `test_no_subsystem_outage_error_is_listed_non_retryable` above: that one guards
-    the hierarchy this repo owns, this one guards the names it does not. Filing an LLM provider's
-    503/429/connection error as bad data would stop the duplicate turns — by declaring a failure
-    that *does* succeed on retry to be one that never will, which is false in exactly the direction
-    this list exists to keep straight, and would make every workflow give up on a provider blip it
-    would otherwise ride out. `agent_step_retry`'s bound is the honest lever instead.
-
-    Worse than merely wrong, it would be wrong at a distance. Temporal matches by bare class name,
-    `anthropic` and `openai` use the *same* class names for these, and `_BAD_DATA_TYPES` is shared
-    by every activity — so one entry here would silently reclassify these failures for the QM, BO
-    and report workflows too, none of which involve a model call at all.
+    Those failures succeed on retry; `agent_step_retry`'s bound is the lever for duplicate turns.
+    `_BAD_DATA_TYPES` matches bare class names and is shared by every activity, so one entry would
+    reclassify these failures across unrelated workflows too.
     """
     provider_transient = {
         "InternalServerError",
@@ -394,10 +326,8 @@ def test_no_provider_transient_name_is_listed_non_retryable() -> None:
 def _fake_workflow(*, raises: bool, replaying: bool = False) -> types.SimpleNamespace:
     """A stand-in for `temporalio.workflow` inside this module.
 
-    The real workflow API refuses to run outside a workflow event loop, and the time-skipping test
-    server is not reachable offline — so the honest way to exercise this function's *own* logic
-    (does a failure get counted, is a replay suppressed, is a success left alone) is to substitute
-    the handle it calls through. The function under test is the real one, unmodified.
+    The real API refuses to run outside a workflow loop and the test server is not reachable
+    offline, so the handle is substituted while the function under test stays real.
     """
 
     async def execute_activity(*_args: Any, **_kwargs: Any) -> str:

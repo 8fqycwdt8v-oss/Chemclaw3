@@ -146,8 +146,7 @@ def test_the_refusal_tells_the_model_what_to_do_instead(watching: None) -> None:
 
 
 def test_a_pydantic_argument_does_not_break_the_call_it_guards(watching: None) -> None:
-    """A pydantic argument, which `json.dumps` refuses, does not break the call the guard protects.
-    """
+    """A pydantic argument, which `json.dumps` refuses, does not break the guarded call."""
 
     class _Spec(BaseModel):
         query: str
@@ -174,9 +173,7 @@ def test_the_guard_is_a_no_op_off_the_request_path() -> None:
 
 
 def test_ending_a_turn_puts_the_guard_back_to_where_it_found_it() -> None:
-    """Ending a turn restores the guard; the runner process is reused, so a leftover counter would
-    refuse the next chemist.
-    """
+    """Ending a turn restores the guard, since the runner process is reused across chemists."""
     tool = _Tool()
     token = begin_call_watch()
     for _ in range(settings.max_identical_tool_calls):
@@ -190,8 +187,7 @@ def test_ending_a_turn_puts_the_guard_back_to_where_it_found_it() -> None:
 
 
 def test_a_refused_repeat_is_counted_so_a_deployment_can_alert_on_it(watching: None) -> None:
-    """A refused repeat is counted per tool, since the turn still answers and leaves no other trace.
-    """
+    """A refused repeat is counted per tool, since the turn still answers and leaves no trace."""
     from chemclaw.core.metrics import METRICS
 
     tool = _Tool()

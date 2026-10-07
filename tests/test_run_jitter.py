@@ -145,8 +145,6 @@ def test_no_two_harnesses_can_derive_the_same_payload_value() -> None:
 
 
 def test_each_jitter_is_constant_within_one_process() -> None:
-    """Each jitter is a module constant, so a relaunch within one process derives the same workflow
-    id.
-    """
+    """Each jitter is a module constant, so a relaunch in one process gets the same workflow id."""
     for jitter in _JITTERS:
         assert len(_values(jitter, range(1_700_000_000, 1_700_000_001))) == 1

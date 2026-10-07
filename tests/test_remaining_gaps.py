@@ -82,8 +82,7 @@ def test_a_figure_from_too_few_points_is_flagged_as_not_meaningful() -> None:
 
 
 def test_an_empty_ledger_is_empty_rather_than_a_fabricated_zero_bias() -> None:
-    """An empty ledger reports `None` figures, not a bias of 0.0 that reads as perfect calibration.
-    """
+    """An empty ledger reports `None` figures, not a 0.0 bias that reads as perfect."""
     empty = summarize("solubility", [])
     assert empty == Calibration(calc_type="solubility", n=0)
     assert not empty.is_meaningful

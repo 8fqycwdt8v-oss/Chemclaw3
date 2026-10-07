@@ -1,15 +1,10 @@
 """The delegation experiment's run half, held to what the comparator cannot see for itself.
 
-`tests/test_delegation_eval.py` covers `compare_arms`: given `ArmRun`s, the arithmetic. Nothing
-covered where an `ArmRun` comes from, because until now nothing produced one. What is asserted here
-is therefore the *observation* rather than the comparison — whether `delegated` is read off the
-record that knows, whether an arm's own name or prompt could have leaked into it, and whether the
-three arm profiles vary one thing or two.
-
-The one property with no test here is the one only a run can have: that the pieces compose against a
-front door. `make live-delegation` is that, it has been driven against `cli.mock_llm --catalogue
-delegation`, and the run exits non-zero on purpose — a double supplies the decision to delegate, so
-such a run is evidence about this runner and about nothing else.
+`tests/test_delegation_eval.py` covers `compare_arms`; this covers where an `ArmRun` comes from:
+whether `delegated` is read off the record that knows, whether an arm's name or prompt could leak
+into it, and whether the arm profiles vary one thing. Composition against a front door is
+`make live-delegation`'s job, and a run against the mock exits non-zero on purpose, since a
+double supplies the decision to delegate.
 """
 
 import asyncio
@@ -85,17 +80,12 @@ def _repeat(
 
 
 def test_the_three_arm_profiles_differ_only_in_their_delegation_ask() -> None:
-    """One variable, which is the whole reason there are three files instead of one.
+    """The three arm profiles differ only in their delegation ask.
 
-    A profile's `instructions:` **replace** the deployment's domain prose wholesale
-    (`agent/chemclaw_agent.instructions_for`), so a baseline that supplies prose against a `default`
-    treatment arm varies the delegation ask and the whole system prompt together — the instrument
-    `D-2026-09-14-tools-were-never-the-variable` was written about, and on the token axis this
-    experiment is mostly about, the prose is the larger of the two by an order of magnitude.
-
-    Both directions, because either alone is satisfiable by doing nothing: the bodies must be
-    byte-identical **and** the three asks must differ from one another. A single `Delegation:` per
-    file is asserted too — two of them would make "the body" ambiguous and the split silently wrong.
+    A profile's `instructions:` replace the domain prose wholesale, so the bodies must be
+    byte-identical **and** the asks must differ, or the whole prompt varies with the treatment
+    (`D-2026-09-14-tools-were-never-the-variable`). Exactly one `Delegation:` per file, so the split
+    is unambiguous.
     """
     asks: dict[str, str] = {}
     bodies: set[str] = set()
@@ -123,12 +113,9 @@ def test_the_three_arm_profiles_differ_only_in_their_delegation_ask() -> None:
 def test_the_baseline_profile_asks_the_model_not_to_call_task() -> None:
     """The behavioural arm is an *ask*, and the ask has to name the tool it is about.
 
-    `BASELINE_ARM` cannot be built by taking `task` away — `SubAgentMiddleware` is in
-    `create_deep_agent`'s `_REQUIRED_MIDDLEWARE` and an empty roster makes upstream re-insert its
-    own — so this sentence is the whole treatment. The tool name is asked of
-    `subagent_tool_names()` rather than written here: upstream spells it as a literal inside
-    `_build_task_tool`, and a rename would otherwise leave a baseline profile asking the model not
-    to call something that no longer exists, with this test still green.
+    `task` cannot be removed (`SubAgentMiddleware` is required), so the sentence is the whole
+    treatment. The name comes from `subagent_tool_names()` rather than a literal, so an upstream
+    rename cannot leave the baseline asking about a tool that no longer exists.
     """
     spec = delegation_run.arm_by_name(BASELINE_ARM)
     profile = _load(_PROFILE_DIR / f"{spec.profile}.yaml")
@@ -142,13 +129,11 @@ def test_the_baseline_profile_asks_the_model_not_to_call_task() -> None:
 
 
 def test_the_treatment_is_read_off_the_producers_rather_than_a_literal() -> None:
-    """`task` comes from the middleware and a handoff from `handoff_tool_name`, never from a string.
+    """The treatment is read off the producers rather than a literal.
 
-    Both names are minted elsewhere — upstream writes `task` inside `_build_task_tool`, and
-    `agent/handoff.py` mints `transfer_to_<peer>` from a profile name with its hyphens replaced. A
-    copy of either in `delegation_run` would be a third source that an upstream rename or a profile
-    name containing a hyphen leaves silently stale, and silently stale here means an arm whose
-    treatment cannot be recognised is reported as an arm that declined.
+    Upstream mints `task` in `_build_task_tool` and `agent/handoff.py` mints `transfer_to_<peer>`; a
+    copy here would go stale on a rename or a hyphenated profile name, reporting an unrecognised
+    treatment as a declined one.
     """
     spawn = sorted(subagent_tool_names())[0]
     hand = handoff_tool_name("property-lookup")
@@ -156,10 +141,8 @@ def test_the_treatment_is_read_off_the_producers_rather_than_a_literal() -> None
 
     assert delegation_run.treatment_tools("helper", surface) == frozenset({spawn})
     assert delegation_run.treatment_tools("handoff", surface) == frozenset({hand})
-    # The baseline's treatment is the union, and that matters only once a peer arm exists: the arms
-    # share one front door, so a run including the peer arm has a handoff tool bound for *every*
-    # arm, and a baseline that handed the conversation away is no more a baseline than one that
-    # spawned a helper.
+    # The baseline's treatment is the union: arms share one front door, so with a peer arm present a
+    # baseline that handed off is no more a baseline than one that spawned a helper.
     assert delegation_run.treatment_tools("any", surface) == frozenset({spawn, hand})
     assert delegation_run.treatment_tools("helper", {"find_notes"}) == frozenset()
     with pytest.raises(ValueError, match="unknown treatment"):
@@ -167,11 +150,9 @@ def test_the_treatment_is_read_off_the_producers_rather_than_a_literal() -> None
 
 
 def test_the_baselines_treatment_is_the_union_of_both_acts() -> None:
-    """A property of the *table* as well as of the function, because the table is the risk.
+    """The baseline's treatment is the union of both acts, checked on the `ARMS` table too.
 
-    `treatment_tools` can be right while `ARMS` asks it the wrong question. A baseline declared with
-    `treatment="helper"` would pass every assertion above and still let a run in which the baseline
-    handed the conversation to a peer be compared as a clean baseline.
+    `treatment_tools` can be right while `ARMS` asks it the wrong question (`treatment="helper"`).
     """
     assert delegation_run.arm_by_name(BASELINE_ARM).treatment == "any", (
         "the baseline's treatment must be the union of both acts, or a baseline that handed the "
@@ -187,13 +168,10 @@ def test_the_baselines_treatment_is_the_union_of_both_acts() -> None:
 
 
 def test_a_repeat_that_did_not_delegate_is_recorded_rather_than_dropped() -> None:
-    """Intention-to-treat, at the point where a selection on the treatment would be easiest.
+    """A repeat that did not delegate is recorded rather than dropped.
 
-    `compare_arms` reports `undelegated` and `partially_delegated` as *compliance* and drops nothing
-    for them, and that discipline is worth nothing if the runner never records the repeat in the
-    first place. A non-delegating repeat that failed to become an `ArmRun` would arrive at the
-    comparator as fewer repeats — `incomplete` — so the ITT reporting the comparator took three
-    tries to get right would be defeated one layer up, invisibly.
+    Otherwise it would reach the comparator as a missing repeat (`incomplete`), defeating
+    intention-to-treat one layer up.
     """
     result = delegation_run.assemble_runs(
         [_repeat("helper", "s1", repeat=1), _repeat("helper", "s2", repeat=2)],
@@ -210,13 +188,11 @@ def test_a_repeat_that_did_not_delegate_is_recorded_rather_than_dropped() -> Non
 
 
 def test_a_repeat_with_no_verdict_and_one_with_no_cost_are_different_named_holes() -> None:
-    """Two failures that are not results, and not each other.
+    """A repeat with no verdict and one with no cost are different, named holes.
 
-    `ungraded` is the *absence* of a verdict (`evals/live_judge.Verdict` records what conflating
-    it with `unserved` cost: 65 of 190 probes mislabelled), and `VERDICT_SCORES` has no entry for
-    it, so such a repeat cannot carry a quality. A session with no `turn_costs` row is the other:
-    a turn that failed before billing legitimately records **zero**, so inventing zero for an
-    unwritten row would put a fabricated cost into a comparison whose whole subject is cost.
+    `ungraded` is the absence of a verdict and has no score. A session with no `turn_costs` row is
+    not zero cost: a turn that failed before billing records zero legitimately, so inventing zero
+    would fabricate a cost.
     """
     result = delegation_run.assemble_runs(
         [
@@ -247,12 +223,10 @@ def test_a_repeat_with_no_verdict_and_one_with_no_cost_are_different_named_holes
 
 
 def test_one_arm_that_cannot_be_reported_on_does_not_cost_the_others_their_report() -> None:
-    """Four arms, so a `NoComparableTask` is carried rather than raised.
+    """One arm that cannot be reported on does not cost the others their report.
 
-    The comparator refuses an empty comparison on purpose — a delegation report over nothing reads
-    as "no effect anywhere". With one arm per call that refusal is correct and total; across four
-    arms it would mean an arm nobody could compare (a posture the front door was not started with,
-    say) discards the three that ran.
+    The comparator refuses an empty comparison on purpose; across four arms that refusal is carried
+    per arm rather than raised, so one uncomparable arm does not discard the rest.
     """
     runs = [
         ArmRun(
@@ -280,12 +254,10 @@ def test_one_arm_that_cannot_be_reported_on_does_not_cost_the_others_their_repor
 def test_recorded_runs_aggregate_across_passes_and_an_empty_file_is_refused(
     tmp_path: Path,
 ) -> None:
-    """`--compare-runs` is what assembles a partially-delegating pair at all.
+    """`--compare-runs` aggregates recorded runs across passes; an empty file is refused.
 
-    A `(task, arm)` whose repeats differ in whether they delegated cannot come out of one pass
-    against a deterministic double, and against a real model it can arrive across two campaigns —
-    so reading recorded runs back is the feature, not a convenience. A file that contributed nothing
-    is refused before the comparator is asked, for `NoComparableTask`'s reason one step earlier.
+    A partially delegating `(task, arm)` cannot come out of one deterministic pass, and against a
+    real model may span campaigns. A file that contributed nothing is refused before the comparator.
     """
     first = tmp_path / "a.json"
     second = tmp_path / "b.json"
@@ -293,12 +265,8 @@ def test_recorded_runs_aggregate_across_passes_and_an_empty_file_is_refused(
     def recorded(*, delegated: bool) -> ArmRun:
         """Built through the constructor, because `load_recorded_runs` validates what it reads.
 
-        The second pass used to be `run.model_copy(update={"delegated": False})`, and
-        `tests/test_model_copy_fixtures.py` flagged it on the day this file was written: `src/`
-        obtains an `ArmRun` through `model_validate`, so a fixture that assigns the observation
-        this whole module exists to record is not crossing the boundary production crosses. It is
-        also the one field whose value is the finding, which makes it the worst one to assign past
-        a check.
+        `model_copy(update=...)` would assign the one observation this module records past the
+        boundary production crosses (`tests/test_model_copy_fixtures.py`).
         """
         return ArmRun(
             task_id="dl-01",
@@ -326,14 +294,9 @@ def test_recorded_runs_aggregate_across_passes_and_an_empty_file_is_refused(
 def test_every_arms_scripted_behaviour_exists_and_every_behaviour_is_reached() -> None:
     """Both directions over the double's catalogue, which is where a dead entry hides.
 
-    `tests/test_live_storm.py` holds the same property over the storm's catalogue and records why:
-    six behaviours were declared and driven by nothing while the run reported "17/17 checks passed".
-    That test reads the harness's *source* for each name, because a storm selector travels as a
-    string inside a turn message and there is no symbol to resolve. Here there is: a behaviour is
-    reached either because an `ArmSpec` names it or because another behaviour's rendered arguments
-    carry its marker — and reading the rendered arguments rather than the file is what made this
-    test bite on its first run, since the one marker this catalogue writes is built from a constant
-    and the literal `[[d-helper-report]]` appears nowhere in the module.
+    Every scripted behaviour must be reached, either named by an `ArmSpec` or carried as a marker in
+    another behaviour's *rendered* arguments (the marker is built from a constant, so reading the
+    file would miss it).
     """
     declared = {behaviour.name for behaviour in DELEGATION_BEHAVIOURS}
     wanted = {spec.mock_behaviour for spec in delegation_run.ARMS}
@@ -352,13 +315,11 @@ def test_every_arms_scripted_behaviour_exists_and_every_behaviour_is_reached() -
 
 
 def test_no_scripted_answer_carries_a_behaviour_marker() -> None:
-    """A marker in an answer is read back as a note citation, which is this harness's worst signal.
+    """No scripted answer carries a behaviour marker.
 
-    `evals/live._score_citations` parses `[[…]]` out of the answer and reports anything no tool
-    returned as `uncited_note_ids` — "a citation that resolves to nothing is worse than no citation,
-    because it reads as evidence". So a selector left in a behaviour's `text` would make every
-    scripted answer cite a note that does not exist. The one marker this catalogue writes sits in a
-    `task` **argument**, where it selects the helper's own behaviour and reaches no answer.
+    `evals/live._score_citations` reads `[[…]]` in an answer as a citation and reports unresolved
+    ones, so a marker in `text` would fabricate a dangling citation. The one marker sits in a `task`
+    argument, which reaches no answer.
     """
     names = {behaviour.name for behaviour in DELEGATION_BEHAVIOURS}
     for behaviour in DELEGATION_BEHAVIOURS:
@@ -378,13 +339,11 @@ def test_no_scripted_answer_carries_a_behaviour_marker() -> None:
 
 
 def test_a_caller_carrying_both_markers_answers_as_itself_rather_than_as_its_helper() -> None:
-    """Catalogue *order*, which is a property nothing else would notice until a report read wrong.
+    """A caller carrying both markers answers as itself rather than as its helper.
 
-    `MockLlm.select` returns the first declared behaviour whose marker appears anywhere in the
-    serialized request, and one request carries two: the caller's second pass holds both its own
-    question and the `task` arguments it wrote on the first. Declared the other way round, a
-    delegating caller's final answer would be its helper's report — and since that report is prose
-    rather than a verdict, every repeat of the treatment arm would come back `ungraded`.
+    `MockLlm.select` returns the first declared behaviour whose marker appears, and the caller's
+    second pass carries both; in the other order its final answer would be the helper's report and
+    every treatment repeat would be `ungraded`.
     """
     mock = MockLlm(catalogue("delegation"))
     payload = {
@@ -400,12 +359,11 @@ def test_a_caller_carrying_both_markers_answers_as_itself_rather_than_as_its_hel
 
 
 def test_the_marker_lands_where_the_judge_will_also_see_it() -> None:
-    """On `question`, because the judge's own model call is a model call against the same gateway.
+    """The marker lands on `question`, where the judge will also see it.
 
-    `evals/live_judge._prompt` quotes `probe.question`, so a marker put only on the *message* would
-    leave every grading request unmarked, the double would answer it as the catalogue's default, and
-    the repeat would be a hole. The probe is copied rather than mutated: one corpus object is shared
-    across every arm and every repeat.
+    `evals/live_judge._prompt` quotes `probe.question`; a marker only on the message would leave
+    grading requests unmarked. The probe is copied, since one corpus object is shared across arms
+    and repeats.
     """
     probe = _probe()
     marked = live_probes._marked(probe, "d-delegates")
@@ -419,13 +377,10 @@ def test_the_marker_lands_where_the_judge_will_also_see_it() -> None:
 
 
 def test_scripting_the_double_is_refused_against_a_real_gateway() -> None:
-    """The one flag here that could script a *result* rather than a double.
+    """Scripting the double is refused against a real gateway.
 
-    `--mock-behaviour` exists so a compliance state a deterministic double cannot otherwise reach —
-    a baseline that delegates, a treatment arm that does not — can be driven. Applied to a real
-    model it would be a flag claiming to change what a model decided, so it is refused there rather
-    than ignored: ignoring it would produce a report whose arms are not the arms the command asked
-    for.
+    `--mock-behaviour` drives compliance states a deterministic double cannot otherwise reach; on a
+    real model it would claim to change what the model decided, so it is refused, not ignored.
     """
     assert live_probes._mock_behaviour_overrides(["helper=d-no-helper"], mock=True) == {
         "helper": "d-no-helper"
@@ -439,16 +394,12 @@ def test_scripting_the_double_is_refused_against_a_real_gateway() -> None:
 
 
 def test_a_refused_task_is_not_a_delegation() -> None:
-    """The one thing `audit_events` knows that a tool *name* alone does not.
+    """A refused `task` is not a delegation.
 
-    A gate — authorization, the plan gate, the dry-run guard — stops a call by raising above the
-    tool body, so a `refused` row means the helper's graph was never entered and no helper was
-    spawned. Every other outcome means the call was made: a `task` that entered and then failed is a
-    delegation that happened, and under ITT it dilutes the effect toward zero, which is the
-    conservative direction. Reading the name without the outcome would count a refusal as
-    compliance — and on the baseline arm, as contamination.
-
-    Against the real table, because the claim is about what the SQL selects.
+    A gate stops a call above the tool body, so a `refused` row means no helper ran; any other
+    outcome is a delegation that happened. Reading the name without the outcome would count a
+    refusal as compliance (or as contamination on the baseline). Against the real table, since the
+    claim is about the SQL.
     """
     from tests.pg import migrated_db_or_skip
 
@@ -489,9 +440,8 @@ def test_the_audit_read_and_the_ledger_read_each_use_their_own_database(
 ) -> None:
     """`audit_events` is on `postgres_dsn`; `turn_costs` is on the session store's DSN.
 
-    `tools_that_ran` read the audit trail off `session_store_dsn or postgres_dsn`, so a deployment
-    that split the two found no audit rows and reported every repeat as undelegated. Driven with
-    the DSNs set apart and the connection recorded rather than opened.
+    Reading the audit trail off the session DSN would find no rows on a split deployment and report
+    every repeat undelegated. Driven with the DSNs apart and the connection recorded, not opened.
     """
     from contextlib import asynccontextmanager
     from typing import Any

@@ -835,8 +835,7 @@ class _CappedAndSilentAgent(ScriptedTurn):
     ("cap", "code"), [("spend", "spend_cap_reached"), ("loop", "loop_cap_reached")]
 )
 def test_a_capped_turn_that_wrote_nothing_says_so_once(cap: str, code: str) -> None:
-    """A capped turn that wrote nothing emits one event, moves one counter, and promises nothing
-    below.
+    """A capped turn that wrote nothing emits one event, moves one counter, promises nothing.
 
     Driven through `run_turn` because the defect is a sequence of two events: the cap error and an
     `empty_answer` error with opposite `retryable` flags, the empty-answer counter moving, and a cap

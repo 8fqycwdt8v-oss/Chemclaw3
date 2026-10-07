@@ -93,10 +93,10 @@ def test_an_earlier_epoch_cannot_be_served_to_a_later_one() -> None:
 
 
 def test_the_epoch_reaches_every_calculator_not_just_the_one_that_needed_it() -> None:
-    """`CalculationKey.build` folds the epoch into every key it derives, so no calculator must name
-    it.
+    """`CalculationKey.build` folds the epoch into every key it derives.
 
-    Remote keys are built on the calculation server, whose epoch composes with this one.
+    No calculator has to name it. Remote keys are built on the calculation server, whose epoch
+    composes with this one.
     """
     structure = Structure(
         elements=[1, 1], positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]], smiles="[H][H]"

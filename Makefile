@@ -51,11 +51,11 @@ SHELL := bash
   channel-validate template-validate prose-validate helm-validate kind-validate up down db-migrate \
   db-grants schedules-apply connectors chat phoenix-up phoenix-down kind-up kind-down kind-status \
   kind-smoke synthesize reindex reindex-full share-estimate share-sync rekey-compounds user-erase \
-  sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up live-down live-status \
-  live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status live-jobs live-probes \
-  live-ab live-delegation live-plan-gate live-degradation live-turn-cost live-benchmark \
-  live-template-args live-verifier-margin live-data live-storm live-soak live-soak-report \
-  live-leak-probe \
+  sink-schema trajectory-census distill propose-profile live-infra live-infra-down live-up \
+  live-down live-status live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status \
+  live-jobs live-probes live-ab live-delegation live-plan-gate live-degradation live-turn-cost \
+  live-benchmark live-template-args live-verifier-margin live-data live-storm live-soak \
+  live-soak-report live-leak-probe \
   retrieval-arms hypothesis-recovery phoenix-publish explain
 
 help:  ## List every target, grouped by section.

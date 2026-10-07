@@ -649,8 +649,7 @@ def _assert_every_served_tool_is_called_or_declined(seam: _Seam) -> None:
 
 
 def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
-    """`calc`, the seam that carries every calculation, calls only tools the fleet records serving.
-    """
+    """The `calc` seam calls only tools the fleet records serving."""
     _assert_every_call_names_a_served_tool(_CALC_SEAM)
 
 

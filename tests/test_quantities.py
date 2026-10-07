@@ -106,8 +106,7 @@ def test_a_mass_is_recognised_through_the_markdown_the_answer_wrapped_it_in() ->
 
 
 def test_digits_inside_an_identifier_are_not_quantities() -> None:
-    """A structure id, a SMILES and a note slug are names; reading them as numbers vouches falsely.
-    """
+    """A structure id, a SMILES and a note slug are names, not numbers to vouch for."""
     values = returned_values(_PROPERTIES)
     assert 8.0 not in values and 23.0 not in values and 880.0 not in values
 
@@ -169,9 +168,7 @@ def test_a_unit_is_read_only_from_the_object_that_states_it() -> None:
 
 
 def test_prose_is_left_to_the_bare_numbers() -> None:
-    """A non-JSON result yields no labels; pairing values with preceding words would invent
-    relations.
-    """
+    """A non-JSON result yields no labels rather than invented value-word pairings."""
     assert labelled_values("the pKa is about 4.76") == []
     assert returned_values("the pKa is about 4.76") == [4.76]
 

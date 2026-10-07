@@ -262,10 +262,9 @@ def test_a_stored_skill_under_a_shipped_name_is_never_served(store: InMemoryStor
 
 
 def test_a_role_gate_alone_does_not_reach_the_reserved_name_case(store: InMemoryStore) -> None:
-    """A role gate alone hides the stored copy, so it does not distinguish the `UnreservedNames`
-    arms.
+    """A role gate alone cannot distinguish the `UnreservedNames` arms.
 
-    Kept so the next reader does not write this scenario as the guard.
+    It hides the stored copy on its own; kept so this scenario is not written as the guard.
     """
     contested = "deep-research"
     body = f"---\nname: {contested}\ndescription: my own digging\n---\n\nMine.\n"

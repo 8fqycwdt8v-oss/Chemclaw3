@@ -1,13 +1,8 @@
 """The revision history, proven identically against both backends.
 
-`InMemoryDesignStore` is **a real backend, not a test double** — it is what a deployment without
-Postgres runs on — so every claim below is parametrized over both. That is the only way the
-in-memory half of the suite means anything: if the two disagreed, every other test in this feature
-would be proving something the deployment does not do.
-
-The claim the whole table exists for is the append-only one: a write derived from anything but the
-head is a `RevisionConflict` the writer sees, rather than a silent overwrite of the revision they
-did not know about. Two chemists editing one plate is the ordinary case.
+`InMemoryDesignStore` is a real backend a deployment without Postgres runs on, so every claim is
+parametrized over both. The central claim is append-only history: a write derived from anything
+but the head is a `RevisionConflict`, never a silent overwrite.
 """
 
 import asyncio
@@ -84,11 +79,10 @@ def _design(
 
 
 def _fresh_id(backend: str, name: str) -> str:
-    """A design id unique to this *run*, for the tests that must start from nothing.
+    """A design id unique to this run, for tests that assert on a design's first revision.
 
-    `_id` is stable so a Postgres row can be inspected after a failure; these three assert on a
-    design's first revision, and a row left behind by an earlier run makes that assertion about
-    somebody else's history.
+    `_id` is stable so a Postgres row can be inspected after a failure; these tests must not see an
+    earlier run's history.
     """
     return f"design-{backend}-{name}-{uuid4().hex[:8]}"
 
@@ -354,15 +348,12 @@ def test_set_status_moves_a_design_a_write_never_would(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: str) -> None:
-    """Two transitions happen on a write, and the rest are a human's.
+    """Two transitions happen on a write; the rest are a human's.
 
-    A structured ask stays `requested`; the first protocol revision makes it a `draft`; and a
-    revision landing on an **approved** design takes it back to `draft`, because an approval is a
-    statement about a document and the document has changed. That last one is a correction: holding
-    the status let a chemist approve revision 1 at 80 °C, an agent draft revision 2 at 200 °C, and
-    the header keep reading `approved` over conditions nobody had read — with `GET /protocols/{id}`
-    serving the head. `abandoned` is deliberately held, because a design somebody decided not to run
-    does not come back because an agent wrote to it.
+    The first protocol revision makes a `requested` design a `draft`, and a revision landing on an
+    `approved` design returns it to `draft`, since an approval is about a document that has changed.
+    `abandoned` is held: a design someone decided not to run does not come back because an agent
+    wrote to it.
     """
 
     async def _body() -> None:
@@ -421,17 +412,11 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: str) -> None:
-    """Two `CHECK (status IN (...))` constraints now restate `DesignStatus`, in SQL.
+    """Every status `DesignStatus` allows is accepted by the schema's `CHECK` constraints.
 
-    Neither can be derived from the Literal, so a sixth status added in Python would pass mypy,
-    pass every in-memory test, and be rejected by Postgres at runtime — on the write, in front of a
-    chemist. Driving all five through the real store is what ties the three declarations together.
-
-    **Two designs, because `require_movable` now refuses one of the five on a protocol head.**
-    `requested` means "holds only the structured ask", so a drafted design may not take it — the
-    mirror of the refusal of `executed` on an ask. The subject here is the SQL constraint rather
-    than the lifecycle, so each status is driven through a design that may legally hold it; a
-    single-design version of this test would prove the constraint by breaking the guard.
+    The constraints cannot be derived from the Literal, so all five statuses are driven through the
+    real store. Two designs, because `require_movable` refuses `requested` on a protocol head; each
+    status uses a design that may legally hold it.
     """
 
     async def _body() -> None:
@@ -497,12 +482,10 @@ def test_advanced_states_the_rule_the_stores_both_implement() -> None:
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_a_status_move_records_which_revision_it_was_made_against(backend: str) -> None:
-    """The record `advanced()`'s docstring claimed and `set_status` did not keep.
+    """A status move records which revision it was made against.
 
-    An approval is retired by the next revision, correctly — so unless the move itself is recorded
-    against a revision, "which document did the chemist approve?" has no answer anywhere. Before
-    this, `set_status` wrote one column on the header row and logged a line without the revision
-    in it.
+    An approval is retired by the next revision, so only the recorded move answers which document
+    was approved.
     """
 
     async def _body() -> None:
@@ -598,25 +581,12 @@ def test_both_backends_satisfy_the_declared_protocol() -> None:
 
 
 def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
-    """The loser of a real race is told the same thing a stale `parent_revision` is told.
+    """Two writers racing on one head: the loser gets `RevisionConflict`.
 
-    Postgres only, because the race is one `core.db`'s READ COMMITTED connections make possible and
-    a single-threaded dict cannot. No artificial barrier is needed and none is used:
-    `asyncio.gather` over two real appends reproduces it, which is how it was found.
-
-    **What decides it is `_SELECT_HEAD`'s `FOR UPDATE`, and this docstring used to name the primary
-    key.** That was true when it was written — both writers read `head=1`, both built revision 2,
-    and `(design_id, revision)` stopped the second as a raw `psycopg.errors.UniqueViolation` nobody
-    translated, which is the 500 the 409 exists to prevent. The lock was then added for a different
-    defect and serialises these two as a side effect, so the loser is refused by the
-    `parent_revision` comparison and never reaches the INSERT: measured over 5x100 pairs, the
-    primary key decided none of them, and replacing that handler with a raised `AssertionError`
-    leaves the suite green.
-
-    So what this test proves is the contract — exactly one writer wins, the loser is told
-    `RevisionConflict`, and one revision 2 exists — and not the mechanism. The assertion that used
-    to sit below, that the loser "cannot pass by inheritance" from `UniqueViolation`, was emphatic
-    about a branch nothing reaches; it is gone rather than left looking load-bearing.
+    Postgres only, since READ COMMITTED connections make the race possible; `asyncio.gather` over
+    two real appends reproduces it. `_SELECT_HEAD`'s `FOR UPDATE` serialises them, so the loser
+    fails the `parent_revision` comparison. This proves the contract (one winner, one revision 2),
+    not the mechanism.
     """
 
     async def _body() -> None:
@@ -666,14 +636,11 @@ def test_two_writers_racing_on_one_head_lose_as_a_revision_conflict() -> None:
 def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
     backend: str,
 ) -> None:
-    """`session_id` is set once, by the write that opened the design, on **both** backends.
+    """`session_id` and `opened_by` are set once, by the write that opened the design, on both
+    backends.
 
-    They disagreed: `InMemoryDesignStore` overwrote it on every append while `_UPSERT_DESIGN` omits
-    it from its `DO UPDATE SET` and keeps the creator's — so `listing(session_id=…)` returned
-    different designs depending on which backend was configured. The in-memory store is "a real
-    backend, not a test double", which is exactly why that is a wrong answer on one of them rather
-    than a harmless difference. `opened_by` is asserted beside it because it is the same rule and
-    the same omission.
+    `_UPSERT_DESIGN` omits them from `DO UPDATE SET`, and the in-memory store must match, or
+    `listing(session_id=…)` differs by backend.
     """
 
     async def _body() -> None:
@@ -716,13 +683,11 @@ def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_an_unpaired_surrogate_is_refused_rather_than_diverging(backend: str) -> None:
-    r"""Both backends refuse it, which is the only reason `require_storable` exists.
+    r"""Both backends refuse an unpaired surrogate (`require_storable`).
 
-    Starlette parses a request body with stdlib `json.loads`, which turns `"\\ud800"` into a lone
-    surrogate, and pydantic only refuses one on a `str` field carrying a constraint — so any
-    unconstrained string in a design reached the driver. Measured on the real app before this:
-    `POST /protocols/{id}/revisions` answered **500** on Postgres and **200** in memory. It is not
-    even counted as a database failure, because `UnicodeEncodeError` is not a `psycopg.Error`.
+    `json.loads` turns `"\\ud800"` into a lone surrogate and pydantic only refuses it on constrained
+    strings, so Postgres would raise `UnicodeEncodeError` (a 500, not a `psycopg.Error`) while
+    memory accepted it.
     """
 
     async def _body() -> None:
@@ -794,20 +759,11 @@ def test_a_design_holding_only_the_ask_cannot_be_marked_executed(backend: str) -
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_two_people_at_one_revision_cannot_both_decide(backend: str) -> None:
-    """The defect `expected_status` closes, driven the way it actually happens: sequentially.
+    """Two people at one revision cannot both decide.
 
-    `expected_revision` is a compare-and-set on the *document*, so it was silent about the
-    decision. Measured before this: alice abandoning revision 1 and bob approving revision 1 both
-    returned, and the header read `approved`. No race is needed; reading a design, thinking, and
-    clicking is enough — which is why this test, the cheaper one, is the one that runs on both
-    backends over a plain sequence.
-
-    **The race is `test_two_deciders_racing_from_one_status_take_exactly_one_write` and it asserts a
-    count, not a split.** This docstring used to add "100 of 100 pairs over `asyncio.gather` as
-    well, with the header landing 16 `approved` / 84 `abandoned`", and neither figure was
-    reproducible: nothing in the tree drove the race at all, and *which* of the two deciders wins is
-    decided by the lock queue — measured 44/56, 51/49 and 47/53 over three runs of a hundred on one
-    commit.
+    `expected_revision` covers the document, not the decision; `expected_status` closes that.
+    Reading, thinking and clicking is enough, so this runs sequentially on both backends. The
+    concurrent case is `test_two_deciders_racing_from_one_status_take_exactly_one_write`.
     """
 
     async def _body() -> None:
@@ -844,41 +800,20 @@ def test_two_people_at_one_revision_cannot_both_decide(backend: str) -> None:
     _run(_body)
 
 
-#: How many pairs the racing test drives. Unlike `_TORN_READ_ROUNDS` this is repetition rather than
-#: a probabilistic bound, and the difference is the mechanism: a torn read needs a scheduling window
-#: to open, while this outcome is decided by a row lock that is always taken. Measured 30/30 either
-#: way on both backends — every round took exactly one write, and every round took *both* with
-#: `require_unmoved` neutered — so one round would already be evidence. What the repetition buys is
-#: that both deciders get to be the winner: which one lands is the lock queue's answer, ~50/50 over
-#: 100 Postgres rounds and always the first coroutine in memory, and the assertion is the same
-#: either way. Twenty is what that costs 1.4 s of Postgres for.
+#: How many pairs the racing test drives. A row lock decides the outcome every time, so one round is
+#: already evidence; repetition lets each decider be the winner, which the lock queue chooses.
 _RACING_DECIDER_ROUNDS = 20
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_two_deciders_racing_from_one_status_take_exactly_one_write(backend: str) -> None:
-    """Two people decide at once from the same status: one write lands, the other is told.
+    """Two people deciding at once from the same status: one write lands, the other is told.
 
-    The race the test above drives sequentially, driven as a race — because nothing in this tree
-    did, while `set_status`, its ADR and the ledger row all quoted a figure from a `gather` run
-    (`100/100 -> 0/100`) that no test reproduced. This reproduces the half that is a property of the
-    code: the *count*. It never asserts which decider wins, because that is the lock queue's answer
-    and it moves from run to run.
-
-    **The pair is chosen so that `require_unmoved` is the only guard that can refuse either move.**
-    Both are legal from `approved`, and — the part that matters — each stays legal from where the
-    other leaves the design, so a refusal here cannot be the transition table's. That is asserted
-    below rather than reasoned about, since a table edit would otherwise quietly change what this
-    test is about.
-
-    Both backends, because `InMemoryDesignStore` is what a deployment without Postgres runs on.
-    Its arm is consistent by construction — nothing in its `set_status` awaits between reading the
-    status and writing it — which is exactly the property worth pinning: an `await` added there
-    would make the dict lose a decision the same way the missing comparison did.
-
-    Two mutations were run against it and both are caught at round 0: neutering `require_unmoved`
-    fails both arms, and dropping `_SELECT_HEAD`'s `FOR UPDATE` fails the Postgres arm alone — so
-    this covers the lock as well as the comparison, which is the pair `set_status` describes.
+    Asserts the count, never which decider wins (the lock queue's answer). The pair of moves is
+    legal from `approved` and from each other's result, so only `require_unmoved` can refuse; that
+    is asserted. Both backends: the in-memory store is consistent because nothing in `set_status`
+    awaits between read and write. Fails if `require_unmoved` or `_SELECT_HEAD`'s `FOR UPDATE` is
+    removed.
     """
     require_movable("draft", "abandoned", "protocol")
     require_movable("abandoned", "draft", "protocol")
@@ -982,11 +917,10 @@ def test_the_status_a_caller_saw_is_the_one_it_moves_from(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_a_stale_revision_is_reported_before_a_stale_status(backend: str) -> None:
-    """Both compare-and-sets are stale at once whenever a revision lands on a decided design.
+    """A stale revision is reported before a stale status.
 
-    `advanced()` demotes an `approved` design to `draft` when a revision arrives, so a caller
-    holding revision 1 / `approved` is wrong about both. The document is the bigger loss and its
-    remedy is a diff, so that is the refusal the caller is given.
+    A revision landing on a decided design makes both stale; the document is the bigger loss and its
+    remedy is a diff.
     """
 
     async def _body() -> None:
@@ -1049,14 +983,10 @@ def test_a_drafted_protocol_can_still_be_approved(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_a_drafted_protocol_cannot_be_moved_back_to_requested(backend: str) -> None:
-    """The mirror of the guard above, and it was missing while the guard's own argument covered it.
+    """A drafted protocol cannot be moved back to `requested`.
 
-    `requested` is the one status that says the design "holds only a structured ask"
-    (`models.DesignStatus`), so a `protocol` head contradicts it exactly as a `request` head
-    contradicts `executed`. Nothing refused it: measured on both backends, an executed design moved
-    to `requested` and stayed there with a fully drafted protocol as its head, so
-    `GET /protocols?status=requested` listed it among the intakes and `?status=executed` did not.
-    `advanced()` only repaired it when the *next* revision landed.
+    `requested` means the design holds only the ask, so a `protocol` head contradicts it, mirroring
+    the refusal of `executed` on a request head.
     """
 
     async def _body() -> None:
@@ -1086,14 +1016,9 @@ def test_a_drafted_protocol_cannot_be_moved_back_to_requested(backend: str) -> N
     _run(_body)
 
 
-#: The lifecycle table as the decision states it, written out here rather than imported from the
-#: store. A test that reads the store's own map proves the code agrees with itself and nothing else;
-#: this is the decided table, so a row edited by accident fails on this side.
-#:
-#: Every self-transition (`X -> X`) is exempt from these rows and is deliberately *not* written into
-#: them: it is one rule about retries rather than five decisions about the lifecycle. Exempt from
-#: the *table* only — the document rules still refuse three of the ten (status, head-kind) repeats,
-#: which `test_a_repeat_is_exempt_from_the_table_and_not_from_the_document_rules` pins.
+#: The lifecycle table as decided, written out rather than imported, so an accidental edit to the
+#: store's map fails here. Self-transitions are one rule about retries and are not in the rows; they
+#: are exempt from the table but not from the document rules.
 _LEGAL_MOVES_AS_DECIDED: dict[str, set[str]] = {
     "requested": {"draft", "abandoned"},
     "draft": {"approved", "abandoned"},
@@ -1102,18 +1027,10 @@ _LEGAL_MOVES_AS_DECIDED: dict[str, set[str]] = {
     "abandoned": {"draft"},
 }
 
-#: The start states each head kind can actually hold. A `protocol` head cannot be `requested` (the
-#: document rule refuses it) and a `request` head cannot be `approved` or `executed` (same rule,
-#: read the other way), so each start state is driven on the head kind that can hold it.
-#:
-#: **Every one of the 25 (from, to) pairs is driven through a real store**, which the matrix now
-#: asserts rather than claiming here — this comment used to say it drove "35 of the 25 pairs",
-#: conflating the store-driven *moves* with the *pairs* they cover, and then named
-#: `approved -> requested` and `executed -> requested` as unreachable when both are driven, through
-#: the `pytest.raises(UnstorableDocument)` arm. What is true of those two is narrower and is the
-#: reason the pure-function test above exists: on the only head kind that can hold their start
-#: state, the refusal that arrives is the *document* rule's, because it runs first. The matrix
-#: asserts which pairs those are, so a start state added here has to say so.
+#: The start states each head kind can hold: a `protocol` head cannot be `requested`, and a
+#: `request` head cannot be `approved` or `executed`. Every (from, to) pair is driven through a real
+#: store; for `approved -> requested` and `executed -> requested` the refusal is the document
+#: rule's, which runs first, and the matrix asserts which pairs those are.
 _PROTOCOL_HEAD_STATES: tuple[DesignStatus, ...] = ("draft", "approved", "executed", "abandoned")
 _REQUEST_HEAD_STATES: tuple[DesignStatus, ...] = ("requested", "draft", "abandoned")
 
@@ -1147,13 +1064,10 @@ def _route_to(head_kind: str, state: DesignStatus) -> tuple[DesignStatus, ...]:
 
 
 def test_every_pair_of_statuses_is_decided_by_the_transition_table() -> None:
-    """All 25 (from, to) pairs, driven on the head kind that leaves the *order* rule under test.
+    """Every (from, to) status pair is decided by the transition table.
 
-    `require_movable` answers two questions — is this status true of the document, and is this move
-    legal from where the design is — so each pair here is driven on a head the first question has
-    nothing to say about: `approved` and `executed` need a `protocol` head, `requested` needs a
-    `request` one. Any refusal reaching these assertions is therefore the table's, and the message
-    is checked for both status names so a document-rule refusal cannot pass as agreement.
+    Each pair runs on a head kind the document rule says nothing about, and the refusal message must
+    name both statuses, so a document-rule refusal cannot pass as agreement.
     """
     for current in get_args(DesignStatus):
         for target in get_args(DesignStatus):
@@ -1171,21 +1085,11 @@ def test_every_pair_of_statuses_is_decided_by_the_transition_table() -> None:
 
 
 def test_a_repeat_is_exempt_from_the_table_and_not_from_the_document_rules() -> None:
-    """A repeat skips the table; it does not skip the question of what the document says.
+    """A repeat is exempt from the table, not from the document rules.
 
-    `require_movable`'s docstring stated the exemption absolutely — "Every self-transition is
-    legal" — and gave it as the reason the table omits `X -> X`. Measured across all ten
-    (status, head-kind) repeats, three are refused: `requested` on a protocol head, and `approved`
-    and `executed` on a request head. The document rules run first and outrank the exemption exactly
-    as they outrank an edge.
-
-    Nothing here is behaviour that should change — those three states are unreachable while
-    `advanced()` demotes the status on every revision that changes the head's kind, which is
-    precisely why an absolute sentence could stand for as long as it did. What is pinned is the
-    *precedence*, because that sentence is what a reader adding a sixth status would rely on.
-
-    Expected from `_document_permits` rather than a written list of three, so the pairs follow the
-    decided rule instead of being restated beside it.
+    `requested` on a protocol head and `approved`/`executed` on a request head are refused even as
+    repeats; the precedence is pinned for whoever adds a status. Expected pairs come from
+    `_document_permits`.
     """
     for status in get_args(DesignStatus):
         for head_kind in ("request", "protocol"):
@@ -1198,12 +1102,10 @@ def test_a_repeat_is_exempt_from_the_table_and_not_from_the_document_rules() -> 
 
 
 def test_the_transition_table_covers_every_status_the_type_allows() -> None:
-    """A sixth `DesignStatus` with no row in the table is a design nothing can move.
+    """The transition table covers every status the type allows.
 
-    The same tie `test_every_status_the_type_allows_is_a_status_the_schema_accepts` makes between
-    the Literal and the two SQL `CHECK` constraints, one declaration along. The table is indexed on
-    the *current* status, so a status the table does not know is a `KeyError` in front of a chemist
-    — driving each status's self-transition is what forces that index for all five.
+    The table is indexed by current status, so an unknown status would be a `KeyError`; driving each
+    self-transition forces the lookup for all five.
     """
     for status in get_args(DesignStatus):
         head_kind: RevisionKind = "request" if status == "requested" else "protocol"
@@ -1212,22 +1114,11 @@ def test_the_transition_table_covers_every_status_the_type_allows() -> None:
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_both_backends_decide_every_reachable_lifecycle_move_identically(backend: str) -> None:
-    """The table as a matrix, through `set_status`, on a real store of each kind.
+    """Both backends decide every reachable lifecycle move identically, through `set_status`.
 
-    A rule that holds on one backend and not the other is not a rule — `InMemoryDesignStore` is what
-    a deployment without Postgres runs on — and the order rule needs the design's *current* status,
-    which is read from a different place on each side: a dict here, the header row already locked
-    `FOR UPDATE` there. Measured before this guard: `abandoned -> executed` and `draft -> executed`
-    were both accepted on both backends, so a design retired because the starting material
-    decomposes could be marked run, and a protocol nobody signed off could be marked run.
-
-    A refused move must also leave the header where it was, which is the half a store could get
-    wrong on its own: raising after the UPDATE would refuse the caller and move the design anyway.
-
-    **What the walk covers is asserted before it runs**, because the comment above
-    `_PROTOCOL_HEAD_STATES` used to state it in prose and got it wrong in both halves — it counted
-    store-driven moves as if they were status pairs, and named two pairs unreachable that the walk
-    drives through its refusal arm.
+    The order rule reads current status from a dict on one side and a `FOR UPDATE` header row on the
+    other. A refused move must leave the header unchanged. Coverage of the walk is asserted before
+    it runs.
     """
     heads: tuple[tuple[RevisionKind, tuple[DesignStatus, ...], int], ...] = (
         ("protocol", _PROTOCOL_HEAD_STATES, 2),
@@ -1244,11 +1135,8 @@ def test_both_backends_decide_every_reachable_lifecycle_move_identically(backend
         f"the walk drives {len(driven)} of the {len(get_args(DesignStatus)) ** 2} status pairs; "
         "a pair no store test reaches is decided by the pure-function test alone"
     )
-    # The pairs whose store-side refusal can only ever be the *document* rule's, on every head kind
-    # that can hold their start state — so the pure-function test above is the only place their
-    # *order* refusal is exercised. Derived from the walk and compared against the decided list, so
-    # a start state added to either tuple has to be argued rather than silently changing what the
-    # order rule is tested on.
+    # Pairs whose store-side refusal is always the document rule's, so only the pure-function test
+    # exercises their order refusal. Derived from the walk and compared to the decided list.
     document_only = {
         (current, target)
         for current, target in driven
@@ -1277,10 +1165,8 @@ def test_both_backends_decide_every_reachable_lifecycle_move_identically(backend
                 author_kind="agent",
                 status="draft" if arms else "requested",
             )
-            # `expected_status` is required, so the walk states what it is leaving at every step —
-            # which is also what makes the refusal below unambiguous: a `StatusConflict` here would
-            # mean the fixture drifted, not that the table refused, and the two raise different
-            # types.
+            # `expected_status` is required, so the walk states what it is leaving; a
+            # `StatusConflict` here would mean the fixture drifted, not that the table refused.
             seen: DesignStatus = "draft" if arms else "requested"
             for step in _route_to(head_kind, current):
                 await store.set_status(design_id, step, expected_revision=1, expected_status=seen)
@@ -1315,33 +1201,19 @@ def test_both_backends_decide_every_reachable_lifecycle_move_identically(backend
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_a_repeated_sign_off_is_a_no_op_rather_than_a_refusal(backend: str) -> None:
-    """Every `X -> X` is legal, and this is the case that needs it: a repeat by somebody who read.
+    """A repeated sign-off is a no-op rather than a refusal, and its event row is still written.
 
-    `Chemclaw3_ui`'s sign-off panel renders a *Mark X* button for all five statuses whatever the
-    design's current one is, so `approved -> approved` is one click away by construction — a second
-    approver co-signing, the same chemist recording a second reason, or a retry made *after* the
-    screen was reloaded. Forbidding the repeat would turn a button the client offers into a 422 on
-    the one screen where the answer is "it already worked".
-
-    **It is not the lost-response retry**, which this docstring and the comment below both used to
-    name: a panel that has not re-read still shows the pre-move status, so that retry names the old
-    status and is refused one guard earlier.
-    `test_a_retry_that_has_not_re_read_is_refused_before_the_repeat` drives that scenario, because
-    writing it as a no-op here fails.
-
-    The event row is still written, which is the half worth asserting: a repeat is somebody acting a
-    second time, and `experiment_protocol_status_events` is the record of who moved a design and
-    why. A store that made the repeat a silent no-op would lose the second act.
+    `Chemclaw3_ui` offers every status button, so `approved -> approved` is a co-signature or a
+    second reason after a reload. The event table records who acted and why, so the repeat is
+    recorded. A retry that has not re-read is a different case, refused earlier.
     """
 
     async def _body() -> None:
         store = await _backend(backend)
         design_id = _fresh_id(backend, "retry")
         await store.append(design_id, _design(arms=1), [], author_kind="agent", status="draft")
-        # Each click states what the panel was showing when it was pressed, which is what makes the
-        # second one a repeat at all: it names `approved`, because this chemist is looking at an
-        # approved design. That click exercises `require_unmoved` *and* the table's self-transition
-        # together, which is the case that would break if either forbade it.
+        # Each click states what the panel showed; the second names `approved`, exercising
+        # `require_unmoved` and the table's self-transition together.
         clicks: tuple[tuple[DesignStatus, str], ...] = (
             ("draft", "clicked approve"),
             ("approved", "approved again, with the plate in front of me"),
@@ -1367,21 +1239,11 @@ def test_a_repeated_sign_off_is_a_no_op_rather_than_a_refusal(backend: str) -> N
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_a_retry_that_has_not_re_read_is_refused_before_the_repeat(backend: str) -> None:
-    """The lost response, driven as code — and it is a refusal, not the `X -> X` exemption.
+    """A retry after a lost response, without a re-read, is refused by `require_unmoved`.
 
-    `require_movable`'s exemption was justified by this scenario: a move whose response is lost is
-    reported to the chemist as "The status was not recorded" when it may well have been, so pressing
-    again is the ordinary recovery, "and it arrives here as `X -> X`". Measured on both backends it
-    does not arrive there at all. `Chemclaw3_ui` reloads the design only on a *successful* move, so
-    after a lost response the panel still shows the pre-move status, the retry sends that as
-    `expected_status`, and `require_unmoved` refuses it — `require_movable` is never reached.
-
-    Which guard answered is the assertion, and the exception type is what says so: `StatusConflict`
-    is `require_unmoved`'s alone, and a repeat refused by the table would be `UnstorableDocument`.
-
-    Nothing here argues the refusal is wrong — the caller *is* out of date, and the store cannot see
-    that the person it is out of date with is the caller themselves. What it is evidence against is
-    the sentence that said this path is exempt.
+    The UI reloads only on success, so the retry sends the pre-move status and `require_movable` is
+    never reached. The exception type says which guard answered: `StatusConflict` is
+    `require_unmoved`'s, a table refusal would be `UnstorableDocument`.
     """
 
     async def _body() -> None:
@@ -1427,28 +1289,12 @@ _TORN_READ_ROUNDS = 200
 
 
 def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write() -> None:
-    """`GET /protocols/{id}` answers from one snapshot, not four.
+    """One read of a design is internally consistent under a concurrent write.
 
-    The route's own docstring says the history comes back in the same call because "asking for them
-    separately makes the two answers race whenever somebody else is editing" — and the store then
-    answered `read`, `summary`, `history` and `status_history` from four separate connections.
-    Measured against a real database with one concurrent `append`: **100/100** reads were
-    internally inconsistent, serving revision 1's document under a header saying head revision 2
-    with revision 2 in the history beside it. A client picks its `parent_revision` out of that.
-
-    One transaction is not by itself the fix, which is why this test is worth its cost: `core/db.py`
-    is READ COMMITTED and takes a new snapshot per *statement*, so four statements in one
-    transaction tear exactly as four transactions do. `page()` sets `REPEATABLE READ`.
-
-    Postgres only — `InMemoryDesignStore` never yields between its four reads, so it has always
-    been consistent, and every route test proved a property the deployment did not have.
-
-    **The round count is arithmetic rather than a round number**, and the first one was too small
-    to catch what it exists to catch. A race does not tear on every round: measured on this database
-    with the isolation level removed and nothing else changed, **9 of 200** rounds tore — 4.5%. At
-    the 25 rounds this ran for, a broken store passes with probability `0.955 ** 25`, which is
-    **32%**: the test missed the regression roughly one run in three, and a green line was therefore
-    not evidence. At 200 the same figure is `0.955 ** 200` ≈ 0.01%, for about five seconds more.
+    `page()` reads document, summary, history and status history in one `REPEATABLE READ`
+    transaction; under READ COMMITTED each statement takes its own snapshot and can tear. Postgres
+    only. The round count is chosen so a store that tears a few percent of the time fails with near
+    certainty.
     """
 
     async def _body() -> None:
@@ -1485,13 +1331,10 @@ def test_one_read_of_a_design_is_internally_consistent_under_a_concurrent_write(
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_page_selects_a_revision_and_orders_the_two_histories(backend: str) -> None:
-    """The four halves of `GET /protocols/{id}`, over both backends, on a design with a past.
+    """`page()` selects the right revision and orders both histories, on both backends.
 
-    The torn-read test above drives `page()` hard and asserts only that its halves *agree*; nothing
-    asserted what any of them contains. So the parts a client actually reads — which revision came
-    back, whether the history is oldest-first, whether the sign-offs are newest-first — were
-    unchecked on the backend that serves them, and the in-memory store is not evidence about SQL
-    ordering.
+    The torn-read test asserts only that the halves agree; this asserts the content (oldest-first
+    history, newest-first sign-offs), and in-memory ordering says nothing about SQL.
     """
 
     async def _body() -> None:
@@ -1552,16 +1395,9 @@ def test_page_selects_a_revision_and_orders_the_two_histories(backend: str) -> N
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_a_listing_says_how_many_designs_it_did_not_list(backend: str) -> None:
-    """The listing has always been a page and only the row count said so — which is not saying so.
+    """A listing says how many designs it did not list.
 
-    Driven on both backends: 60 designs stored, `listing(limit=20)` returned 20 and the value
-    carried nothing else, so `find_experiment_protocols` and `GET /protocols` both answered "the
-    stored experiment designs" over a third of them. `GET /sessions` in the same API package was
-    explicitly fixed for exactly this — "it always bounded the answer, and nothing said so" — and
-    the sibling listing route was not.
-
-    Scoped to one project so the shared Postgres schema's other rows cannot make the total
-    meaningless: a count is only honest about the predicate it counts.
+    Scoped to one project so other rows in the shared schema cannot distort the total.
     """
 
     async def _body() -> None:

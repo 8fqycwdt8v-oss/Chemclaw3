@@ -77,8 +77,7 @@ def test_an_evicted_narrowed_session_comes_back_narrowed(monkeypatch: pytest.Mon
 
 
 def test_a_session_with_no_profile_still_rehydrates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A session with no profile still rehydrates on the default; `None` must round-trip as `None`.
-    """
+    """A session with no profile rehydrates on the default; `None` round-trips as `None`."""
     client, app, _owners = _client_with_one_slot(monkeypatch)
     with client:
         plain = client.post("/sessions").json()["session_id"]

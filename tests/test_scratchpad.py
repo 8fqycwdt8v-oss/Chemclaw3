@@ -67,15 +67,12 @@ def test_memories_need_both_a_store_and_an_actor(skills: CompositeBackend) -> No
 
 
 def test_the_skills_routes_survive_being_wrapped(skills: CompositeBackend) -> None:
-    """The skills routes survive being wrapped, so the role gate applies to reads, not only
-    listings.
-    """
+    """The skills routes survive being wrapped, so the role gate also applies to reads."""
     assert "/skills/" in scratchpad_backend(skills, permits=_ALL).routes
 
 
 def test_two_spellings_of_one_person_get_two_prefixes() -> None:
-    """`unverified:<id>` and `<id>` get two distinct prefixes, so the erasure sweep can reach both.
-    """
+    """`unverified:<id>` and `<id>` get distinct prefixes, so erasure can reach both."""
     assert memory_prefix("alice-oid") != memory_prefix("unverified:alice-oid")
     assert memory_prefix("alice-oid") == memory_prefix("alice-oid"), "must be stable across calls"
     assert memory_namespace("alice-oid")[0] == "memories"
@@ -216,9 +213,7 @@ def test_a_memory_write_is_gated_and_a_scratch_write_is_not() -> None:
 
 
 def test_an_unreadable_path_argument_is_treated_as_durable() -> None:
-    """An absent, `None` or non-string path argument is treated as durable, so the gate fails
-    closed.
-    """
+    """An absent, `None` or non-string path is treated as durable, so the gate fails closed."""
     from chemclaw.agent.authz import side_effecting_call
 
     for arguments in ({}, {"file_path": None}, {"file_path": 17}, {"file_path": ["/memories/x"]}):
@@ -534,11 +529,10 @@ def test_a_plain_memory_substitution_is_not_refused_by_that_guard() -> None:
 def test_the_migrate_role_creates_the_store_tables_it_is_about_to_grant_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`chemclaw.agent.store_setup` creates the store tables before the grants run, on a real
-    database.
+    """`chemclaw.agent.store_setup` creates the store tables before the grants run.
 
-    It creates the tables, a second run applies nothing, and it does nothing where the deployment
-    keeps no store.
+    Driven on a real database: it creates the tables, a second run applies nothing, and it does
+    nothing where the deployment keeps no store.
     """
     from chemclaw.agent.store_setup import create_store_tables
 

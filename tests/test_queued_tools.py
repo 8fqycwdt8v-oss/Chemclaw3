@@ -218,9 +218,7 @@ def test_the_activity_returns_answers_and_refusals_and_retries_only_a_full_serve
 
 
 def test_a_queued_call_touches_no_database(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The interactive worker holds no Postgres pool, so a queued call must never touch the
-    database.
-    """
+    """The interactive worker holds no Postgres pool, so a queued call never touches the DB."""
     from chemclaw.core import db
 
     def _refuse(*_: Any, **__: Any) -> Any:
@@ -487,8 +485,7 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
 def test_a_call_on_a_queue_nothing_polls_says_queued_and_never_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On a queue no worker polls, the turn says `queued`, never `running`, then returns the job id.
-    """
+    """On a queue no worker polls, the turn says `queued`, never `running`, then gives a job id."""
     reported: list[tuple[str, str, str, int | None]] = []
     monkeypatch.setattr(
         "chemclaw.connectors.queued.record_tool_queued",
@@ -533,9 +530,7 @@ def test_progress_says_nothing_when_no_activity_is_pending(monkeypatch: pytest.M
 
 
 def test_progress_reads_queued_before_any_worker_has_picked_the_run_up() -> None:
-    """A run no worker has picked up reads as queued, with a `None` count rather than a wrong
-    number.
-    """
+    """A run no worker has picked up reads as queued, with a `None` count, not a wrong one."""
     from chemclaw.connectors import queued
 
     handle = SimpleNamespace(id="q", describe=AsyncMock(return_value=_Description()))

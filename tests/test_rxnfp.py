@@ -220,8 +220,7 @@ async def test_a_tautomer_query_matches_the_row_indexed_from_its_canonical_tauto
 
 
 def test_an_already_standardized_query_is_bits_neutral() -> None:
-    """An already standardized query is bits-neutral: the per-species pass reproduces raw DRFP bits.
-    """
+    """An already standardized query is bits-neutral under the per-species pass."""
     direct = DrfpEncoder.encode(_ESTER_ETHYL, n_folded_length=settings.drfp_bits)[0]
     direct_bits = "".join("1" if value else "0" for value in direct)
     assert drfp_bitstring(_ESTER_ETHYL) == direct_bits
@@ -364,8 +363,7 @@ def test_an_atom_mapped_reaction_fingerprints_as_its_own_unmapped_form(spelling:
 
 
 def test_the_mapped_and_unmapped_corpora_are_searchable_against_each_other() -> None:
-    """Mapped and unmapped corpora are searchable against each other above the configured threshold.
-    """
+    """Mapped and unmapped corpora find each other above the configured threshold."""
     similarity = tanimoto(drfp_bitstring(_MAPPED), drfp_bitstring(_UNMAPPED))
     assert similarity == 1.0, (
         f"a mapped reaction scores {similarity:.4f} against its own unmapped form; the default "

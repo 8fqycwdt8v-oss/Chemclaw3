@@ -1,14 +1,9 @@
-"""Tests for the next-experiment agent tool (plan Phase 1d, agent surface).
+"""Tests for the next-experiment agent tool.
 
-Proves the agent can turn a decision space + historic runs into a concrete suggestion without
-a durable workflow: a fresh problem yields seed points, a problem with observations yields
-model-guided candidates inside the space, and a batch returns the asked-for count. BoFire runs
-in-process (no Temporal), the same as the campaign tests.
-
-Also pins the tool's own input contract: an observation whose parameters do not match the declared
-decision space is refused here, naming the observation and the parameter, rather than reaching
-BoFire and coming back as an internal `KeyError` the connector must sanitize into an unrepairable
-"an internal error occurred".
+A decision space plus historic runs becomes a suggestion without a durable workflow: seed points
+for a fresh problem, model-guided candidates inside the space otherwise, the asked-for batch size.
+An observation whose parameters do not match the space is refused here, naming the observation
+and parameter, rather than surfacing as an internal `KeyError`.
 """
 
 import ast
@@ -74,14 +69,10 @@ def test_proposes_from_observations() -> None:
 
 
 def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
-    """Regression: the tool is called with plain dicts, not `OptimizationProblem`/`Observation`.
+    """The tool is called with plain dicts, not `OptimizationProblem`/`Observation`.
 
-    The agent-framework function-tool boundary validates a call's arguments against the JSON
-    schema derived from this signature, then invokes the function with that payload
-    `model_dump()`-ed back to plain dicts/lists (the tool-call wire format has no model concept)
-    — never with reconstructed instances. Every direct/test caller above passes real model
-    instances and would not have caught a regression here; this reproduces the actual shape a
-    live turn delivers.
+    The tool-call boundary validates arguments against the schema, then passes them as plain
+    dicts/lists; this reproduces what a live turn delivers.
     """
     problem = {
         "parameters": [
@@ -101,13 +92,10 @@ def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
 
 
 def test_accepts_observations_json_encoded_as_a_string() -> None:
-    """Regression: on a large call, the model sometimes emits `observations` JSON-encoded.
+    """On a large call, the model sometimes emits `observations` JSON-encoded.
 
-    A single string instead of a real array — a live e2e finding on a 6-parameter problem. The
-    schema validation rejected the whole call before this function ever ran, with no detail
-    reaching the model to self-correct from ("Error: Argument parsing failed.", no exception
-    text). Accepting the string here and decoding it makes the tool robust to that formatting
-    slip instead of relying on the model to notice and retry blind.
+    Schema validation would reject the call with no detail for the model to correct from, so the
+    string is accepted and decoded.
     """
     problem = _problem()
     observations_json = (
@@ -137,12 +125,8 @@ def _three_factor_problem() -> OptimizationProblem:
 def test_an_observation_missing_a_declared_parameter_names_it_and_its_index() -> None:
     """A declared parameter absent from an observation is refused before BoFire sees anything.
 
-    This is the class of fault behind the live `KeyError: 'base'` from inside BoFire's
-    `_optimize_acqf_discrete`, which `connectors/server.py` correctly refuses to forward verbatim
-    and so delivered to the model as "an internal error occurred". BoFire does already raise a
-    well-worded `ValueError` of its own on this direction (measured), so what is pinned here is
-    the *index*: with six observations in the call, "invalid values for `base`" does not say which
-    one to repair, and this message does.
+    BoFire's own error does not say which of several observations to repair; this message names the
+    index.
     """
     observations = [
         Observation(params={"temperature": 40.0, "solvent": "THF", "base": "NEt3"}, value=55.0),
@@ -153,12 +137,10 @@ def test_an_observation_missing_a_declared_parameter_names_it_and_its_index() ->
 
 
 def test_an_observation_naming_an_undeclared_parameter_names_it() -> None:
-    """The mirror fault, and the one that was not failing loudly at all.
+    """An observation naming an undeclared parameter names it.
 
-    Measured against this BoFire version before the check existed: an extra key is *silently
-    ignored*, the ask succeeds, and candidates come back from a decision space that quietly
-    dropped a condition the chemist reported. So this direction is not about error wording — it
-    turns a confidently wrong answer into a question the caller can fix.
+    BoFire silently ignores an extra key, so candidates would come from a space that dropped a
+    reported condition.
     """
     observations = [
         Observation(
@@ -188,13 +170,11 @@ def test_matching_observations_are_unaffected() -> None:
 
 
 def test_the_descriptor_bearing_path_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression guard on the `structures` path, which the boundary check now runs ahead of.
+    """The descriptor-bearing path is unaffected by the boundary check.
 
-    Featurization rewrites the *parameters* (it fills `descriptors`) but never their names, so the
-    check has to sit before it and still agree with what BoFire is finally handed. The whole path
-    is exercised rather than a stubbed one: a real `cached_remote` over an in-memory store, with
-    `tests/calc_server_fake.py` where the xTB engine used to be
-    (`D-2026-08-16-the-physics-leaves-the-cache-stays`).
+    Featurization fills `descriptors` but never renames parameters, so the check runs first.
+    Exercised through a real `cached_remote` over an in-memory store with
+    `tests/calc_server_fake.py`.
     """
     monkeypatch.setattr(bo_tools, "default_store", InMemoryStore)
     install(monkeypatch, FakeCalcServer())
@@ -226,24 +206,11 @@ def test_the_seeding_path_with_no_observations_is_unaffected() -> None:
 
 
 def test_the_tool_the_model_sees_states_what_is_and_is_not_supported() -> None:
-    """The description has to keep pace with the capability, and it has twice failed to.
+    """The description has to keep pace with the capability.
 
-    Four states so far, and each transition broke this test on purpose — which is the point of
-    having it. Originally it asserted "One objective, no constraints … they are unrepresentable",
-    because both were, and probe `op-16` was graded `fabricated` for answering that it had optimized
-    "both objectives" anyway. W3 shipped multi-objective, so half that sentence became wrong and was
-    replaced while the constraint half survived verbatim. W4 shipped constraints, so the other half
-    went — and then, within the same wave, the exclusion turned out to be buildable after all, so
-    "a forbidden combination of categories cannot be expressed" had to go too, one commit after it
-    was written.
-
-    A refusal that outlives its refusal is worse than no refusal: it teaches the model to decline a
-    capability that exists. What is still *not* supported is stated in its own right rather than
-    inherited from an older sentence — an exclusion needs an all-categorical problem, and a screen
-    carries no constraint at all.
-
-    Asserted against the served MCP description rather than the Python docstring, because that is
-    what actually travels to the model.
+    A stale refusal teaches the model to decline a capability that exists. What is still unsupported
+    is stated directly: an exclusion needs an all-categorical problem, and a screen carries no
+    constraint. Asserted against the served MCP description, which is what travels to the model.
     """
     from chemclaw.connectors.bo.server.tools import server
 
@@ -311,14 +278,8 @@ def _trade_off_runs() -> list[Observation]:
 def trade_off_suggestion() -> bo_tools.ExperimentSuggestion:
     """One acquisition over `_trade_off_problem()`/`_trade_off_runs()`, read by four tests.
 
-    A multi-objective acquisition — a GP fit plus a multi-start optimizer — is the expensive half
-    of this file, and the four tests below asked for it with byte-identical constant inputs, each
-    to assert a different field of the same answer: the front, the summary sentence, the
-    per-objective scales, the per-objective predictions on a candidate. None of them is about
-    repeatability or about the optimizer's run-to-run variance, so one answer serves all four.
-
-    The tests either side of this block are *not* on it and must not be: each supplies a different
-    problem or a different run list, and what they assert is a consequence of that difference.
+    A multi-objective acquisition is expensive and these tests read different fields of the same
+    answer. Tests that supply a different problem or run list must not use it.
     """
     # Annotated on the way out because the served tool's signature reaches mypy as `Any`.
     suggestion: bo_tools.ExperimentSuggestion = asyncio.run(
@@ -400,17 +361,10 @@ def test_an_observation_that_disagrees_with_itself_is_refused() -> None:
 
 
 def test_two_categories_with_the_same_descriptor_row_are_refused() -> None:
-    """The surrogate cannot tell them apart, so it answers one number for both — measured.
+    """Two categories with the same descriptor row are refused.
 
-    Featurizing replaces a label with a position in descriptor space; BoFire's
-    `CategoricalDescriptorInput` gives the model the position and nothing else. Two categories at
-    one position are one point to the model. Measured before the guard existed: with A observed at
-    10 and B at 90 on an otherwise identical two-descriptor parameter, `predict_at` returned the
-    same 70.85 for each — a confident recommendation for a reagent never distinguished from
-    another, with no warning anywhere.
-
-    Refused at the tool boundary rather than in the model, because a campaign stored before this
-    rule existed must still deserialize (the reason `require_names_do_not_clash` sits there too).
+    To the surrogate they are one point, so it would recommend between indistinguishable reagents.
+    Refused at the tool boundary, not in the model, so stored campaigns still deserialize.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -438,11 +392,7 @@ def test_two_categories_with_the_same_descriptor_row_are_refused() -> None:
 def test_observations_json_encoded_as_a_non_array_are_refused_with_a_sentence() -> None:
     """`json.loads` decodes any JSON, so the tolerance needed a floor under it.
 
-    The string tolerance exists for a real failure — the model sometimes sends the observations
-    array JSON-encoded as one string. But three call sites decoded it and iterated the result
-    unchecked, so `"42"` became an int nothing can iterate (a `TypeError` the connector reports as
-    "an internal error occurred") and `"{}"` iterated its *keys*, failing with a validation error
-    about strings that were never observations. Both now say what is wrong.
+    A JSON-encoded `"42"` or `"{}"` is not an observations array and is refused with a sentence.
     """
     problem = _problem()
     with pytest.raises(ValueError, match="must be an array of objects"):
@@ -462,16 +412,9 @@ def test_observations_json_encoded_as_a_non_array_are_refused_with_a_sentence() 
 def test_every_tool_that_spends_is_declared_state_changing() -> None:
     """The manifest's partition is derived from the code, not maintained beside it.
 
-    The `state_changing`/`read_only` split drives `agent/authz.py` and the plan gate, and it **fails
-    open**: a tool wrongly listed read-only ships an ungated spend that looks exactly like a gated
-    one. Both BO tools that featurize were listed read-only until a review traced the call chain —
-    `featurize_problem` runs xTB per option and upserts into `calculation_results`, and
-    `record_suggestion` writes two tables.
-
-    So this reads the tool bodies rather than restating the answer: any `@server.tool()` that calls
-    one of those two must appear under `state_changing`. Restating the list would pin today's names
-    and stay green the day someone adds featurization to `campaign_progress`, which is the only
-    change worth catching.
+    The `state_changing`/`read_only` split fails open. Any `@server.tool()` that calls
+    `featurize_problem` (xTB per option, cache upserts) or `record_suggestion` (two table writes)
+    must be `state_changing`; reading tool bodies catches a newly added call.
     """
     source = ast.parse(Path(bo_tools.__file__).read_text())
     spending = {"featurize_problem", "record_suggestion"}
@@ -499,12 +442,10 @@ def test_every_tool_that_spends_is_declared_state_changing() -> None:
 
 
 def test_a_cold_multi_objective_start_does_not_announce_an_empty_front() -> None:
-    """With nothing measured, "front holds the 0 runs that nothing else beats" is a contradiction.
+    """A cold multi-objective start does not announce an empty front.
 
-    The trade-off sentence told the model to quote a front, and named its length as zero, about a
-    campaign that supplied no runs at all — leaving the model to reconcile "quote the trade-off"
-    with "there is no trade-off". A model asked to resolve a contradiction resolves it by inventing.
-    Now the cold case says what an empty front means: nothing measured, not nothing survived.
+    With nothing measured, the sentence says so, rather than telling the model to quote a zero-run
+    front.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -540,13 +481,10 @@ def _nearly_exhausted() -> tuple[OptimizationProblem, list[Observation]]:
 
 
 def test_a_batch_that_could_not_be_filled_says_so() -> None:
-    """A short batch used to read as a complete answer to the question asked.
+    """A batch that could not be filled says so.
 
-    `propose_candidates` returns fewer than `n` by design once a finite space has run low — that
-    is correct, and is not what is fixed here. What was missing is that nothing said so: measured
-    on this fixture, asking for three candidates returned one, and every word of the summary was a
-    reading of that one candidate's posterior sd. The model composing the answer had no signal that
-    the other two were not merely worse but nonexistent.
+    `propose_candidates` returns fewer than `n` once a finite space runs low; the summary must tell
+    the model the rest do not exist.
     """
     problem, runs = _nearly_exhausted()
     suggestion = asyncio.run(suggest_next_experiment(problem, runs, count=3))
@@ -574,9 +512,8 @@ def test_a_batch_that_was_filled_says_nothing_about_a_shortfall() -> None:
 def test_a_directly_built_suggestion_claims_no_shortfall() -> None:
     """`requested` defaults to 0, which must read as "not stated" rather than as "asked for none".
 
-    The summary is a pure function of the fields and several tests build one directly to assert a
-    sentence without paying for an acquisition run. A default that made the clause fire would put a
-    false shortfall into every one of them.
+    Tests build suggestions directly; a default that triggered the shortfall clause would add a
+    false one to each.
     """
     suggestion = bo_tools.ExperimentSuggestion(
         campaign_id="campaign-test",
@@ -635,11 +572,8 @@ def test_every_field_of_the_decision_space_is_still_reachable_from_the_schema(
 ) -> None:
     """Narrowing the descriptions must not have narrowed the surface a chemist can express.
 
-    The `OptimizationProblem` closure is 1,029 tokens per copy and is carried by five tool schemas
-    on every turn, so its prose is worth cutting — and cutting prose is exactly the change that can
-    silently take a *field* with it. The field names are read off the pydantic models rather than
-    transcribed, so a model that loses a field fails here rather than agreeing with a list somebody
-    wrote at the same time.
+    Cutting schema prose can silently take a field with it, so field names are read off the pydantic
+    models rather than transcribed.
     """
     from chemclaw.science.bo.problem import (
         ExcludeConstraint,
@@ -668,24 +602,14 @@ def test_every_field_of_the_decision_space_is_still_reachable_from_the_schema(
 
 
 def test_the_decision_space_still_explains_itself_where_the_model_reads_it() -> None:
-    """The guidance moved out of the developer rationale; it did not leave the schema.
+    """The decision space still explains itself where the model reads it.
 
-    The 2026-09-05 narrowing cut ~680 tokens per copy out of the five inlined
-    `OptimizationProblem` schemas by moving design rationale — ADR ids, BoFire internals, why a
-    discriminated union has two members rather than five — into `#` comments. **The load-bearing
-    half stayed**, and that is what this asserts: a chemist-facing model has to be told when to
-    reach for `structures`, that a one-parameter limit is a bound rather than a constraint, and
-    that an exclusion needs an all-categorical problem. A narrowing that dropped any of those
-    would cost more in one failed call than the tokens it saved.
-
-    Asserted over the served `inputSchema` rather than over the Python docstrings, for the reason
-    `test_the_tool_the_model_sees_states_what_is_and_is_not_supported` gives: that is what travels.
+    The served schema must still say when to use `structures`, that a one-parameter limit is a bound
+    rather than a constraint, and that an exclusion needs an all-categorical problem. Asserted over
+    the served `inputSchema`.
     """
-    # Whitespace-normalised, because a docstring's *line wrapping* is not part of what travels: the
-    # sentence this asserts sits across a line break in `LinearConstraint`, so a literal `in` over
-    # the raw text fails on where the source happens to wrap and passes again on a reflow nobody
-    # meant as a change. The property is that the sentence is in the schema, not that it is on one
-    # line — and this is exactly the arm that was red when the tests were first written.
+    # Whitespace-normalised: source line wrapping is not part of what travels, and the asserted
+    # sentence spans a line break.
     prose = " ".join(" ".join(_described(_served_input_schema("suggest_next_experiment"))).split())
     # A categorical whose options are molecules is worth featurizing, and `descriptors` is not the
     # model's to fill.
@@ -706,10 +630,8 @@ def test_a_problem_using_every_narrowed_model_still_round_trips_as_wire_dicts(
 ) -> None:
     """The whole decision space, as the plain JSON a tool call actually delivers.
 
-    Every model whose docstring was cut is exercised in one call — a continuous parameter, a
-    categorical carrying `structures` (so featurization runs), two objectives, and a linear
-    constraint — through `model_validate` on dicts rather than on constructed models, because the
-    wire format has no model concept and that coercion is the boundary the narrowing touched.
+    A continuous parameter, a categorical with `structures`, two objectives and a linear constraint,
+    validated from dicts because the wire format has no model concept.
     """
     monkeypatch.setattr(bo_tools, "default_store", InMemoryStore)
     install(monkeypatch, FakeCalcServer())
@@ -765,19 +687,11 @@ def test_a_problem_using_every_narrowed_model_still_round_trips_as_wire_dicts(
 
 
 def test_a_batch_beyond_the_ceiling_is_refused_before_the_optimizer_runs() -> None:
-    """`count` was the one model-supplied size in this bundle with no bound above it.
+    """A batch beyond the ceiling is refused before the optimizer runs.
 
-    Measured on an unconstrained two-parameter problem, the acquisition cost is linear in the
-    batch: 1.3 s at 2 candidates and 2.6 s at 4, ~0.65 s each. `suggest_next_experiment`'s own
-    docstring puts a *constrained* problem at roughly nine seconds per further candidate. Behind a
-    `request_timeout: 120`, that makes a three-digit `count` a request the client abandons while
-    the pod keeps computing it — and every sibling size here (`bo_max_design_runs`,
-    `bo_max_evaluations`, `bo_max_enumerated_cells`) is bounded by config already.
-
-    Bounded in the engine rather than in the tool signature, for the reason
-    `_require_design_fits_the_ceiling` states in full: a bound in the transport is a bound the
-    in-process callers do not get. So the durable campaign's per-round batch is held to the same
-    number, and it is checked *before* the strategy runs rather than after the batch exists.
+    Acquisition cost is linear in the batch, so an unbounded `count` would outlive the request
+    timeout. Bounded in the engine, so the durable campaign's per-round batch gets the same bound,
+    and checked before the strategy runs.
     """
     problem = OptimizationProblem(
         parameters=[ContinuousParameter(name="t", lower=20.0, upper=120.0)],

@@ -318,8 +318,7 @@ def test_the_resume_message_stays_framed_as_data() -> None:
 
 
 def test_the_shipped_refinement_template_carries_an_address_between_its_steps() -> None:
-    """The shipped refinement template carries an address between its steps, with no model involved.
-    """
+    """The shipped refinement template passes an address between steps, with no model."""
     from pathlib import Path
 
     import yaml

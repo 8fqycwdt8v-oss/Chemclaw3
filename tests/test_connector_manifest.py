@@ -1,15 +1,9 @@
 """The connector manifest is a contract, not a config file — every way to get it wrong fails loudly.
 
-Replaces `test_mcp_server_spec.py`, whose subject (`McpServerSpec`) the connector seam absorbed.
-The properties worth keeping are the same ones: the transport union dispatches, the agent-facing
-allow-list is transport-independent, and a field that does not belong to the chosen variant is a
-config error rather than a silent drop. The properties that are *new* are the manifest's own:
-a bundle must contribute something reachable, a job must declare its arguments exactly one way,
-and a name may not be claimed twice.
-
-Pure validation — no subprocess and no network. One test at the end reaches the loader, and
-says why: a number a bundle author got wrong is only actionable if the failure names the file it
-is in, and that framing belongs to `registry._load_manifest` rather than to the model.
+The transport union dispatches, the agent-facing allow-list is transport-independent, a field
+foreign to the chosen variant is an error, a bundle must contribute something reachable, a job
+declares its arguments exactly one way, and a name may not be claimed twice. Pure validation;
+the one loader test checks that a failure names its file.
 """
 
 from pathlib import Path
@@ -107,15 +101,11 @@ def test_auth_defaults_to_none_and_bearer_names_an_env_var() -> None:
 
 
 def test_a_networked_endpoint_may_not_declare_no_credential() -> None:
-    """`auth: mode: none` is refused for a host that is reachable from the network.
+    """A networked endpoint may not declare no credential.
 
-    The rule `NoAuth`'s docstring claimed for a long time and nothing enforced. It only became
-    reachable when a bundle could name somebody else's server (the chart's `connectors.<name>.url`),
-    and the failure it prevents is the quiet one: an unauthenticated MCP call carrying the turn's
-    actor and full role set to a host outside our trust boundary.
-
-    Loopback stays free — every shipped bundle declares a loopback dev default and lets the
-    deployment move it — and a bearer credential makes any host legal.
+    Otherwise an unauthenticated MCP call carries the turn's actor to a host outside our trust
+    boundary. Loopback stays free (shipped dev defaults), and a bearer credential makes any host
+    legal.
     """
     with pytest.raises(ValidationError, match="is not loopback"):
         _manifest(endpoint={**_HTTP, "url": "https://model.vendor.example/mcp"})
@@ -137,11 +127,10 @@ def test_a_networked_endpoint_may_not_declare_no_credential() -> None:
 
 
 def test_a_stdio_endpoint_needs_no_credential_at_all() -> None:
-    """The rule above is about a *network* hop; a subprocess of our own pod has none.
+    """A stdio endpoint needs no credential at all.
 
-    Worth pinning separately because the two variants share the `tools` surface and it would be
-    easy to lift the check onto something they share — which would make the zero-infrastructure
-    local path impossible to declare.
+    The rule is about a network hop; lifting it onto the shared `tools` surface would make the local
+    stdio path undeclarable.
     """
     stdio = _manifest(
         endpoint={
@@ -226,11 +215,10 @@ def test_a_job_name_must_be_a_valid_tool_name() -> None:
 
 
 def test_a_typo_in_the_classification_is_refused_rather_than_ignored() -> None:
-    """Every way of getting the classification wrong fails **open**, so none of them is tolerated.
+    """A typo in the classification is refused rather than ignored.
 
-    A misspelled `state_changing` entry matches no tool, leaves the real one ungated, and looks
-    exactly like a correct manifest. So it is a load-time error — and the tool it was meant to name
-    then shows up as unclassified, which is also an error (D-167).
+    A misspelled `state_changing` entry leaves the real tool ungated (fails open), so it is a
+    load-time error, and the intended tool then shows as unclassified (D-167).
     """
     with pytest.raises(ValidationError, match="does not serve"):
         HttpEndpoint.model_validate(
@@ -253,13 +241,10 @@ def test_a_typo_in_the_classification_is_refused_rather_than_ignored() -> None:
 
 
 def test_a_tool_listed_twice_in_one_endpoint_is_refused_where_it_is_readable() -> None:
-    """The partition collapsed `tools` to a set, so a repeat validated here and failed later.
+    """A tool listed twice in one endpoint is refused where it is readable.
 
-    `registry._declared_tool_names` walks the raw list, so `make connector-validate` and every
-    agent build then reported the bundle colliding with *itself* — "connector 'x' declares tool 'a',
-    which connector 'x' already provides as a tool", which is true and unactionable without reading
-    the source to learn it means "you listed `a` twice". The manifest is the only place that can
-    still see the repetition, so it is the place that names it.
+    Otherwise the registry reports the bundle colliding with itself, which is unactionable; only the
+    manifest can still see the repetition.
     """
     with pytest.raises(ValidationError, match="lists tool.*more than once"):
         HttpEndpoint.model_validate(
@@ -272,12 +257,10 @@ def test_a_tool_listed_twice_in_one_endpoint_is_refused_where_it_is_readable() -
 
 
 def test_an_unclassified_tool_refuses_to_load() -> None:
-    """Silence is not "read-only": a bundle has to say, because core cannot tell.
+    """An unclassified tool refuses to load.
 
-    Defaulting an omission to "read" would put the entire harness gate on a bundle author
-    remembering, and defaulting it to "write" would gate every connector's lookups and make the
-    approval-first posture unusable. Refusing to load is the only answer that cannot be wrong
-    quietly, and it costs one line per tool, once.
+    Defaulting to read would leave the harness gate to memory; defaulting to write would gate every
+    lookup. Refusing cannot be wrong quietly.
     """
     with pytest.raises(ValidationError, match="does not say whether"):
         HttpEndpoint.model_validate(
@@ -286,16 +269,11 @@ def test_an_unclassified_tool_refuses_to_load() -> None:
 
 
 def test_an_endpoint_that_declares_no_tools_refuses_to_load() -> None:
-    """An empty `tools` list is the other way to be unclassified, and it used to be the quiet one.
+    """An endpoint that declares no tools refuses to load.
 
-    `_check_classification` partitions `tools` against `state_changing` and `read_only`, and a
-    partition of nothing is trivially satisfied — so an endpoint that simply omitted `tools:`
-    passed the very check written to make an omission loud. Both of its guarantees inverted at
-    once: `registry` read the empty list as "no allow-list" and bound the server's entire
-    advertised surface, and none of what arrived was in `state_changing_tool_names()`, so
-    `side_effecting_call` answered `False` for every tool including a write — which is the input
-    the plan gate (D-167) and the dry-run gate ask. The manifest that declared the least got the
-    most, so the empty list is refused where the typo already was.
+    An empty partition is trivially classified, yet the registry would read it as "no allow-list",
+    bind the server's whole surface and treat every tool, writes included, as non-side-effecting for
+    the plan and dry-run gates (D-167).
     """
     for endpoint in (HttpEndpoint, StdioEndpoint):
         payload = (
@@ -308,14 +286,10 @@ def test_an_endpoint_that_declares_no_tools_refuses_to_load() -> None:
 
 
 def test_a_job_may_declare_its_own_ceiling_and_a_bad_number_is_refused() -> None:
-    """The new key's shape: absent by default, a positive number, and nothing else.
+    """A job may declare its own ceiling, and a bad number is refused.
 
-    Absent is the state of every manifest written before the field existed, and it must stay
-    distinguishable from any declared number — `None` is what `child_execution_timeout` reads as
-    "the deployment's ceiling, unchanged", so a zero or a negative silently coerced into it would
-    turn a typo into a behaviour change nobody asked for. `gt=0` refuses both where a bundle author
-    meets them, at load, rather than at the moment a child workflow is started with a ceiling of
-    zero seconds.
+    `None` means "the deployment's ceiling" to `child_execution_timeout`, so zero or negative values
+    must be refused at load (`gt=0`) rather than coerced.
     """
     assert JobSpec.model_validate(_JOB).timeout_seconds is None
     assert JobSpec.model_validate({**_JOB, "timeout_seconds": 900}).timeout_seconds == 900.0
@@ -325,14 +299,10 @@ def test_a_job_may_declare_its_own_ceiling_and_a_bad_number_is_refused() -> None
 
 
 def test_a_job_cannot_both_wait_on_a_person_and_declare_what_it_costs() -> None:
-    """`awaits_answer` and `timeout_seconds` are opposite claims, so declaring both is refused.
+    """A job cannot both wait on a person and declare what it costs.
 
-    `timeout_seconds` says what this job's whole durable run costs; `awaits_answer` says the run
-    has no wall-clock bound worth stating, because most of it is a person not having answered yet.
-    Honouring both would rebuild the defect the field was added for — `_measure`'s fortnight-long
-    wait under a ceiling sized for a CREST search — and honouring one silently would leave the
-    other looking like a control it is not. Absent by default, because every job in the tree but
-    one computes.
+    `timeout_seconds` states the run's cost; `awaits_answer` says it has no meaningful wall-clock
+    bound. Honouring both would restore a compute ceiling over a person's wait.
     """
     assert JobSpec.model_validate(_JOB).awaits_answer is False
     assert JobSpec.model_validate({**_JOB, "awaits_answer": True}).awaits_answer is True
@@ -343,25 +313,12 @@ def test_a_job_cannot_both_wait_on_a_person_and_declare_what_it_costs() -> None:
 def test_a_manifest_cannot_take_the_operators_ceiling_off_its_own_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`awaits_answer` was the one field a manifest could use to fund its own runtime.
+    """A manifest cannot take the operator's ceiling off its own job.
 
-    `child_execution_timeout`'s argument is right and is not what this changes: a job that suspends
-    on a person has no correct finite ceiling, because a measured campaign is `(n_rounds + 1)`
-    waits and the shipped spec alone spans 154 days. That argument is about the *shape* of such a
-    job. It says nothing about who may claim the shape, and nothing checked the claim — measured, a
-    bundle from a directory on `connectors_dir` turned an 18,000 s fleet ceiling into `None` with
-    no setting changed, in a tree that refuses `transport: stdio` by default on the stated grounds
-    that a manifest is data.
-
-    **Asserted on the shared pre-flight, and this test used to assert the wrong function.** It
-    drove `build_job_tool`, on that function's own claim to be "the one function both
-    `registry.job_tools` and `make connector-validate` go through". The template workflow's job
-    step is a third launcher and builds no tool: it resolves through `authorize_job_step` ->
-    `prepare_job_launch`, which is the function D-168 made shared *because* there is more than one
-    launcher. So the gate covered one of two paths and the suite pinned that as correct.
-    `require_funded_ceiling` now lives in the pre-flight, and building a tool refuses nothing —
-    which also bounds a mis-set allowlist to the job being launched instead of taking every
-    launcher `job_tools()` rebuilds down on every turn.
+    `awaits_answer` removes the ceiling, so claiming it requires the operator's allowlist
+    (`require_funded_ceiling`). The check is in the shared pre-flight `prepare_job_launch`, which
+    every launcher (generated tools and template job steps) goes through, so building a tool refuses
+    nothing and a misconfiguration affects only the job being launched.
     """
     from chemclaw.connectors.jobs import (
         ConnectorJobError,
@@ -393,14 +350,10 @@ def test_a_manifest_cannot_take_the_operators_ceiling_off_its_own_job(
 
 
 def test_a_bad_ceiling_in_a_real_manifest_names_the_file_it_is_in(tmp_path: Path) -> None:
-    """The one test here that reaches the loader, because the file name is the whole message.
+    """A bad ceiling in a real manifest names the file it is in.
 
-    `JobSpec` raising a `ValidationError` is not by itself useful to whoever wrote the number: a
-    bundle is discovered by existing on `connectors_dir`, so the report has to name *which*
-    `connector.yaml` among however many are on that path. `registry._load_manifest` wraps every
-    validation failure with the file it read, which is what makes a manifest problem a
-    fail-closed startup error somebody can act on — asserted here on the field this module added,
-    since a rule that is only checked in the abstract is a rule nobody can locate.
+    Bundles are discovered by existing on `connectors_dir`, so `registry._load_manifest` wraps each
+    validation failure with the file it read.
     """
     from chemclaw.connectors.registry import ConnectorError, _load_manifest
 
