@@ -1,14 +1,9 @@
 """The precedent questions, as thin shapings of one facet query.
 
-Each of these is a thin shaping of `LabelIndex.select` or `agent_counts`, and that is the point:
-several presentations of one query cannot drift the way several queries would. What each function
-contributes is the *pre-pass* that turns a chemist's question into a facet — a similarity search
-over `corpus_molecules` for "products like this", a DRFP search over `corpus_reactions` for
-"transformations like this", a substructure screen for "products containing this", a role for "as
-starting material".
-
-Every answer carries a coverage sentence. On a half-labelled corpus a count is a lower bound, and
-a lower bound presented as a total is the failure this subsystem is most exposed to.
+Each function is a pre-pass that turns a chemist's question into a facet (similarity over
+`corpus_molecules`, DRFP over `corpus_reactions`, a substructure screen, or a role) followed by
+`LabelIndex.select` or `agent_counts`, so the presentations cannot drift apart. Every answer carries
+a coverage sentence, because on a half-labelled corpus a count is a lower bound.
 """
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -85,17 +80,14 @@ class PrecedentSearch(BaseModel):
     def verdict(self) -> str:
         """The one sentence the model must read before writing an answer from this.
 
-        A `computed_field` rather than a bare property, for the reason `FingerprintSearch.verdict`
-        records at length: a plain property is not serialized, so the caveat never leaves this
-        process — a lesson learned on a hazard screen that told a chemist "no hazards detected"
-        six times.
+        A `computed_field` so the caveat is serialized with the result.
         """
         if not self.hits:
             unsearched = self.coverage.unsearched
             if unsearched is not None and unsearched.giving_query:
-                # Said first, for the reason `FingerprintSearch.verdict` orders its clauses: the
-                # sentence below calls an empty labelled answer a genuine negative, and a model that
-                # stops there writes "no in-house precedent" about a run on file.
+                # Said first: the sentence below calls an empty labelled answer a genuine negative,
+                # and a model that stops there would write "no in-house precedent" about a run on
+                # file.
                 return (
                     "NO PRECEDENT IN THE LABELLED CORPUS — BUT CITATION-ONLY RECORDS ON FILE LIST "
                     f"THIS STRUCTURE. {self.coverage.verdict} The empty labelled answer is a "
@@ -117,8 +109,8 @@ class PrecedentSearch(BaseModel):
         return f"{head} {self.coverage.verdict}"
 
 
-# Roles a species holds when it is *what the reaction is about* rather than how it was run. The
-# recipe is everything else, which is what `Precedent.agents` reports.
+# Roles a species holds when it is what the reaction is about; the recipe is everything else,
+# reported in `Precedent.agents`.
 _SUBSTRATE_ROLES = frozenset({SpeciesRole.STARTING_MATERIAL, SpeciesRole.PRODUCT})
 
 
@@ -132,9 +124,8 @@ async def substrate_precedents(
 ) -> PrecedentSearch:
     """Answers: has this substrate been used in other reactions, and as what?
 
-    Exact on the standardized structure, because the question is about *this* compound. For "like
-    this", the caller runs a similarity pass first and asks about each neighbour — kept separate so
-    that a hit is never a near-miss the answer presents as a match.
+    Exact on the standardized structure; for "like this" the caller runs a similarity pass first, so
+    a near-miss is never presented as a match.
     """
     facet = Facet(
         species_smiles=smiles,
@@ -155,16 +146,14 @@ async def conditions_for_similar_products(
 ) -> PrecedentSearch:
     """Answers: give me conditions that worked for similar products.
 
-    Two passes, and the split is what makes the answer honest. Structural neighbours are found in
-    fingerprint space — where "similar" is defined and measurable — and only then are their
-    reactions looked up. A single query cannot do that, because similarity is not a SQL predicate;
-    and doing it the other way round (select reactions, then rank) would rank whatever the row cap
-    happened to admit.
+    Two passes: neighbours are found in fingerprint space, where similarity is defined, then their
+    reactions are looked up. Selecting reactions first and ranking would rank whatever the row cap
+    admitted.
     """
     matches, _ = await find_matches(fingerprints, ecfp_bitstring(product_smiles), limit, threshold)
     if not matches:
-        # An empty neighbour set is not an empty answer, and the difference has to survive: the
-        # facet below would otherwise be open and select the whole corpus.
+        # An empty neighbour set must return empty, not run an open facet that selects the whole
+        # corpus.
         coverage = await index.coverage(version)
         return PrecedentSearch(
             question=f"conditions for products similar to {product_smiles}", coverage=coverage
@@ -185,26 +174,18 @@ async def conditions_for_similar_reactions(
 ) -> PrecedentSearch:
     """Answers: has this *transformation* been done, and under what conditions?
 
-    The transformation-space twin of `conditions_for_similar_products`, and the reason
-    `corpus_reactions` is written at all: without it a bulk source is searchable by structure and
-    never by what the reaction actually does, so "have I got precedent for this coupling" answers
-    from product similarity alone — which cannot tell a Buchwald from a Suzuki that happens to make
-    the same biaryl.
+    The transformation-space twin of `conditions_for_similar_products`: product similarity cannot
+    tell a Buchwald from a Suzuki making the same biaryl. Neighbours are found in DRFP space, then
+    their recorded conditions are looked up.
 
-    Same two passes and the same reason: neighbours are found in DRFP space, where similarity is
-    defined and measurable, and only then are their recorded conditions looked up.
-
-    `fingerprints` is the *corpus* reaction index (`science.labels.reactions.corpus_reactions`),
-    never `reaction_fingerprints`. Both are `(source, id)`-keyed since
-    `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`, so a `Match` carries the pair
-    `Facet.reaction_keys` narrows on directly. What separates them is what a hit *cites*: the ELN
-    index resolves to a `reaction-<id>` transcription, this one to whatever the corpus gave.
+    `fingerprints` is the corpus reaction index (`corpus_reactions`), never `reaction_fingerprints`;
+    a `Match` carries the `(source, id)` pair `Facet.reaction_keys` narrows on.
     """
     matches, _ = await find_matches(fingerprints, drfp_bitstring(reaction_smiles), limit, threshold)
     asked = f"conditions recorded for reactions similar to {reaction_smiles}"
     if not matches:
-        # An empty neighbour set is not an empty answer — the same distinction the product twin
-        # makes, and for the same reason: an open facet would select the whole corpus.
+        # An empty neighbour set must return empty, not run an open facet that selects the whole
+        # corpus.
         return PrecedentSearch(question=asked, coverage=await index.coverage(version))
     facet = Facet(reaction_keys=frozenset((m.source, m.id) for m in matches))
     return await _search(index, facet, version, asked, limit)
@@ -215,10 +196,8 @@ async def workup_precedents(
 ) -> PrecedentSearch:
     """Answers: how do we best work up reactions with this reagent?
 
-    The one question no structural index can answer at all: it is answered by showing a chemist
-    what other people actually did, so the hits are filtered to those that recorded a workup. A
-    reaction that used the reagent and wrote nothing down is not a workup precedent, and returning
-    it with an empty field would pad the answer with rows that say nothing.
+    Hits are filtered to reactions that recorded a workup; one that wrote nothing down is not a
+    workup precedent.
     """
     facet = Facet(species_smiles=reagent_smiles)
     found = await _search(
@@ -240,10 +219,8 @@ async def agent_frequency(
 ) -> FrequencyReport:
     """Answers both "which ligands for Buchwald couplings" and "what are the workhorse conditions".
 
-    One function for both, because they are one query with a different role filter: the first names
-    `roles={LIGAND}`, the second leaves `roles` empty and gets every role back, which is what
-    "conditions" means. Narrowing by `product_functional_group` is what makes the second question's
-    "with a product carrying this group" a facet rather than a second search.
+    One query with a different role filter: `roles={LIGAND}` for the first, empty `roles` (every
+    role) for the second. `product_functional_group` narrows by product group as a facet.
     """
     facet = Facet(
         named_reaction=named_reaction,
@@ -266,8 +243,8 @@ async def reactions_with_product_substructure(
     """Reactions whose *product* contains a SMARTS pattern, optionally of one named reaction.
 
     Screen-then-verify over `corpus_molecules` finds the structures; the facet finds their
-    reactions. The screen's truncation is carried through rather than dropped, because a capped
-    screen that found nothing is not a corpus that contains nothing.
+    reactions. The screen's truncation is carried through, since a capped empty screen is not an
+    empty corpus.
     """
     page = _page(limit)
     products, screen_truncated = await molecules.containing(
@@ -298,10 +275,8 @@ async def _search(
 def _page(limit: int | None) -> int:
     """The page size, clamped — the one chokepoint a model-supplied `limit` passes through.
 
-    Reuses the fingerprint knobs rather than introducing `precedent_top_k`/`precedent_max_top_k`,
-    because they bound the same hazard (a value from a tool argument landing in a SQL `LIMIT`) and
-    a second pair that means almost the same thing is how two expressions of one condition come to
-    disagree.
+    Reuses the fingerprint `top_k` knobs, since they bound the same hazard (a tool argument landing
+    in a SQL `LIMIT`).
     """
     page = limit if limit is not None else settings.fingerprint_top_k
     return min(max(page, 1), settings.fingerprint_max_top_k)

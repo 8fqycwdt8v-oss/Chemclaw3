@@ -1857,7 +1857,7 @@ _VENDOR_SHAPES = {
 #: Shapes the same reconciliation saw and **declined**, with the reason, and asserted below to be
 #: still uncovered.
 #:
-#: A register rather than a silence, for the reason `DEFERRED.md` exists: "we did not add a Stripe
+#: A register rather than a silence, for the reason `BACKLOG.md` exists: "we did not add a Stripe
 #: rule" and "nobody looked at Stripe" are indistinguishable from the table, and only one of them is
 #: a decision. The reason is the same for all of them — no part of this family holds one, and the
 #: *value* inventory (`_SECRET_SETTINGS`, `register_secret_env`) covers any credential this process
@@ -2003,7 +2003,7 @@ def test_a_shape_the_inventory_declined_is_still_declined(sample: str) -> None:
 
     The register is only worth keeping if it is true. A shape that quietly became covered would
     leave a row saying "deliberately not covered" about a rule that exists — which is the
-    `DEFERRED.md` failure mode, in a file nobody re-reads. Move the row into `_VENDOR_SHAPES` in the
+    `BACKLOG.md` failure mode, in a file nobody re-reads. Move the row into `_VENDOR_SHAPES` in the
     same commit that adds the rule.
     """
     assert redact_secrets(sample) == sample, (

@@ -2,6 +2,8 @@
 
 ## Status
 
+**Superseded-by:** [D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail](D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail.md) (in part)
+
 Accepted. Sweeps up what `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` did not
 reach. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` stands unchanged and binds
 whoever re-adds subagents.

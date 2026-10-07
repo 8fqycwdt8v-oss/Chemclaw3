@@ -1,29 +1,12 @@
 """Run a Temporal worker so that a pod termination finishes its work instead of losing it.
 
-`asyncio.run(main())` around `worker.run()` looks complete and has no shutdown in it at all. Python
-installs no `SIGTERM` handler, so the default disposition applies: the process dies **immediately**,
-mid-activity, with no unwinding — and that is what every worker in this system did on a node drain,
-a rolling update, an HPA scale-down or an eviction. Temporal makes the *work* survivable (the
-activity is retried on another worker after its start-to-close timeout expires) but survivable is
-not free:
+Python installs no `SIGTERM` handler, so without one a worker dies mid-activity on every drain,
+rollout or scale-down: long activities rerun from scratch after their start-to-close timeout,
+and pools and checkouts are abandoned. A signal handler calls `Worker.shutdown()` — stop polling,
+let in-flight tasks finish, cancel the rest after `graceful_shutdown_timeout`.
 
-- A long activity is re-run from the beginning, so an ELN sync or a report is paid for twice.
-- The retry does not begin until the timeout elapses, which for `calc` is a CREST search's whole
-  budget. A deploy therefore stalls a job by up to that timeout for no reason other than how it
-  was killed.
-- The pod's own cleanup never runs: `db.pooling()`'s connections are dropped rather than closed, and
-  a git checkout the note writer was mid-way through is abandoned in place.
-
-`Worker.shutdown()` is the supported alternative — stop polling for new tasks, let in-flight ones
-finish, then cancel what remains after `graceful_shutdown_timeout`. It just needs something to call
-it, and a signal handler is that something.
-
-**One function rather than two shared helpers.** A worker process needs three things wired: the
-Postgres pool, the probe/scrape surface (`core/worker_http.py`), and this shutdown. They are wired
-identically in both entrypoints, and a third worker wiring two of the three would be a pod that
-looks healthy while doing the wrong thing on termination — the exact failure mode
-`D-2026-08-01-every-process-carries-its-own-witness` had just finished closing for probes. So the
-tail of every worker's `main()` is a single call.
+Every worker's `main()` ends in one call here, which wires the Postgres pool, the probe/scrape
+surface (`core/worker_http.py`) and this shutdown together, so no entrypoint can wire a subset.
 """
 
 import asyncio
@@ -48,32 +31,18 @@ from chemclaw.durable.job_record import log_record_durability
 
 logger = logging.getLogger(__name__)
 
-# The signals a container runtime uses to ask for a shutdown. SIGTERM is what the kubelet sends
-# before the grace period; SIGINT is Ctrl-C, so a developer's local worker drains the same way the
-# cluster's does rather than through a different code path that has never been exercised.
+# SIGTERM is what the kubelet sends; SIGINT (Ctrl-C) makes a local worker drain the same way.
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 def refuse_unauthenticated_worker() -> None:
     """Fail closed when a Temporal worker would run with sign-in off and nobody said so.
 
-    **What "exposed" means for a process that only makes outbound calls**, which the front door's
-    guard cannot answer. `api/middleware._refuse_unauthenticated_exposure` reads `service_host` —
-    a *bind* — and a worker binds no request surface, so that signal is meaningless here. What a
-    worker does have is the other half of the same posture: with `entra_required` False every
-    activity it runs resolves the shared dev principal, and every authorization gate an activity
-    asks is open. A deployment that forgot `CHEMCLAW_ENTRA_REQUIRED` used to start its workers in
-    exactly that state, silently, while its front door refused to boot.
-
-    So the posture is **stated**, the shape `core/llm_gateway.refuse_unconfigured_llm_gateway`
-    took for the same reason (`D-2026-09-26-a-worker-states-its-unauthenticated-posture`):
-    `worker_allow_unauthenticated`, default False, set by the local lanes that mean it
-    (`infra/live/processes.sh`, the suite's autouse fixture) and by nothing a deployment inherits.
-    With `entra_required` on this is a no-op, whatever the flag says.
-
-    Called at the top of each worker entrypoint, before `connect()`, so a refused worker never
-    polls — `tests/test_worker_posture.py` derives the entrypoints from every `Worker(` in `src/`
-    rather than trusting this sentence.
+    A worker binds no request surface, so the front door's bind-based check does not apply; but with
+    `entra_required` False every activity resolves the shared dev principal and every authorization
+    gate is open. So that posture must be stated with `worker_allow_unauthenticated` (set only by
+    local lanes). A no-op when `entra_required` is on. Called before `connect()`, so a refused
+    worker never polls; `tests/test_worker_posture.py` checks every entrypoint calls it.
 
     Raises:
         RuntimeError: naming the setting that proceeds and the one that should be set instead.
@@ -99,25 +68,11 @@ def refuse_unauthenticated_worker() -> None:
 def worker_interceptors() -> list[Interceptor]:
     """The interceptor chain every `Worker` in this system adds to the client's own.
 
-    One function rather than a literal at each constructor, for the reason this module exists at
-    all: two entrypoints wiring different subsets of the cross-cutting concerns is a pod that looks
-    healthy while doing less than the other one. A third worker gets the whole chain by calling
-    this, or gets none of it visibly.
-
-    **The tracing interceptor is deliberately not here, and used to be.** A `Worker` does not use
-    the list it is given as the chain; `temporalio.worker._worker` prepends the interceptors the
-    *client* already carries (`interceptors_from_client + list(config["interceptors"])`), and
-    `core/temporal_client.py::connect_options` puts a `TracingInterceptor` on every client when
-    `otel_enabled`. Measured on 2026-08-28 against a live broker, the chain a worker actually ran
-    was `['TracingInterceptor', 'ChemclawWorkerInterceptor', 'TracingInterceptor']` — every
-    activity and workflow traced twice, from one interceptor added in two places.
-
-    That measurement also corrects what this docstring used to claim. It said "the observability
-    interceptor is outermost so its log line and its failure counter bracket everything"; the SDK
-    wraps in reverse list order, so the *client's* tracing interceptor is outermost and ours runs
-    inside it, whatever this function returns. Which is the right way round: a span that does not
-    enclose the log line and the failure counter it explains is a span that ends before the thing
-    it is measuring does.
+    One function, so every worker gets the same chain. The tracing interceptor is deliberately
+    absent:
+    the SDK prepends the client's interceptors, and `core/temporal_client.connect_options` already
+    puts one there, so adding it here would trace everything twice. The client's tracing interceptor
+    is therefore outermost and encloses ours.
     """
     return [ChemclawWorkerInterceptor()]
 
@@ -125,23 +80,10 @@ def worker_interceptors() -> list[Interceptor]:
 def worker_ready(worker: Worker) -> bool:
     """Whether this worker is both alive **and** still hearing from the broker.
 
-    **Readiness names the broker, not the lifecycle.** `worker.is_running` alone is true from the
-    moment `run()` is entered until shutdown, so it stays true through a total broker outage —
-    measured: every poll failing with `ConnectionRefused` while `/readyz` answered 200
-    `{"status":"ready"}`, which is the exact claim `core/worker_http.py` says the route exists to
-    falsify. The second half is the freshness of `poll_open_jobs`, which is already asking the
-    broker a question on a timer in every worker process.
-
-    Cold start is unaffected and was already correct: a worker that cannot reach the broker at
-    startup exits 1 and crash-loops. This is for the runtime severing — a broker restart, a
-    NetworkPolicy change, an mTLS rotation — where the pod stays up and lies.
-
-    **A module-level function rather than the closure it used to be**, because a predicate nothing
-    can reach is a predicate nothing can test. It lived inside `serve_worker`, so
-    `tests/test_worker_observability.py` asserted `broker_seen_recently()` on its own and claimed
-    in its docstring to fail "if either half is dropped" — measured, reverting this to
-    `worker.is_running` alone left the whole worker suite green and a severed worker answering
-    `/readyz` 200 again. One definition, and the test drives *it*.
+    `worker.is_running` alone stays true through a broker outage; the second half is the freshness
+    of `poll_open_jobs`, which already queries the broker on a timer. Covers runtime severing
+    (broker restart, NetworkPolicy change, mTLS rotation); a worker that cannot reach the broker at
+    startup exits instead. Module-level so the test drives this definition.
     """
     return worker.is_running and broker_seen_recently()
 
@@ -150,31 +92,21 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
     """Poll until asked to stop, then drain — with the pool open and the probes answering.
 
     Args:
-        worker: An already-built Temporal worker. Built by the caller, not here, because what a
-            worker *serves* is the one thing that genuinely differs between them — and because
-            `graceful_shutdown_timeout` belongs at the constructor where a reader looks for it.
+        worker: An already-built Temporal worker; what it serves differs per entrypoint, and
+            `graceful_shutdown_timeout` belongs at its constructor.
         component: What this process is (`background-worker`, `connector-worker-calc`), for the
-            health
-            payloads and the log line.
+            health payloads and the log line.
 
-    A worker fatal error propagates rather than being swallowed by the drain: it is the one case
-    where the process *should* end loudly, and Temporal's own `run()` docstring says `shutdown()`
-    need not be invoked for it.
+    A worker fatal error propagates rather than being swallowed by the drain.
     """
     loop = asyncio.get_running_loop()
-    # Before the worker polls for its first task. Several activities offload blocking work — the
-    # note-corpus read, the RRHO arithmetic, the fingerprint scans — and they share one pool with
-    # whatever else this process threads. The loop's stock default is `min(32, cpu_count + 4)`,
-    # which on a 4-CPU pod is 8: exactly `worker_max_concurrent_activities`, so a full slate of
-    # activities could occupy every thread and anything else needing one would queue behind a
-    # corpus parse. See `core/executor.py`.
+    # Before the first poll: activities offload blocking work to the default executor, and the stock
+    # size can equal `worker_max_concurrent_activities`, starving everything else. See
+    # `core/executor.py`.
     install_default_executor(
         component=component, reserved=settings.worker_max_concurrent_activities
     )
-    # Before the probe surface opens, so the first scrape already has a reading rather than a
-    # missing series. Here for the same reason the pool and the probes are: this is the one tail
-    # every worker's `main()` runs through, so no entrypoint can wire the drain and forget the
-    # gauge.
+    # Before the probe surface opens, so the first scrape has a reading.
     bind_job_gauges()
     # And beside it, the one deployment fact a worker's own logs never carried: whether the runs it
     # is about to record are kept at all. See `job_record.log_record_durability`.
@@ -183,23 +115,18 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
     for sig in _STOP_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
     try:
-        # Every activity here is a coroutine on this process's one event loop, so a per-call
-        # Postgres handshake is loop time stolen from task polling and heartbeats. Pooled for the
-        # worker's whole life and closed on shutdown — which is a promise only kept because the
-        # signal handler above lets the `async with` actually unwind.
-        # Readiness is `worker_ready`, which owns the argument for both halves. Bound here rather
-        # than restated: the route and the test have to be asking the same question.
+        # Pooled for the worker's life, since a per-call handshake steals loop time from polling and
+        # heartbeats; closed on shutdown because the signal handler lets this unwind. Readiness is
+        # `worker_ready`, shared with its test.
         async with (
             db.pooling(),
             worker_http(component=component, ready=partial(worker_ready, worker)),
         ):
             running = asyncio.create_task(worker.run())
             waiting = asyncio.create_task(stop.wait())
-            # The gauge's reading, refreshed against the broker rather than kept by a workflow
-            # body — see `durable/job_metrics.py` for the three live measurements that retired the
-            # process-local set this replaced. Cancelled however this function leaves, so it never
-            # outlives the client it queries; kept alive *through* the drain, so `/metrics` does
-            # not freeze at the moment an operator is watching a shutdown.
+            # Refreshes the open-jobs gauge from the broker (`durable/job_metrics.py`). Kept alive
+            # through the drain so `/metrics` does not freeze during shutdown, and cancelled however
+            # this function exits.
             polling = asyncio.create_task(poll_open_jobs(worker.client, stop))
             try:
                 await asyncio.wait({running, waiting}, return_when=asyncio.FIRST_COMPLETED)
@@ -207,18 +134,8 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
                 if running.done():  # a fatal worker error, or a shutdown from somewhere else
                     await running
                     return
-                # **The count, not just the fact.** This module's own docstring names the cost of
-                # a hard kill — a long activity re-run from the beginning, paid for twice — and the
-                # two log lines said only "draining" and "drained", so nothing anywhere reported
-                # what the drain was actually carrying. Work is not *lost* (Temporal redelivers),
-                # which is exactly why it needs a number: a silent second payment leaves no other
-                # trace.
-                #
-                # Activities and not durable jobs, because an activity is what a drain can actually
-                # lose: a cancelled one is redelivered and paid for twice, while an evicted parent
-                # workflow is picked up by another worker with no work repeated. This line used to
-                # report both, taking the second figure from a process-local set that read the
-                # *wrong number* under exactly this event (`durable/job_metrics.py`).
+                # Log how many activities the drain is carrying: an activity cancelled by shutdown
+                # is redelivered and paid for twice, and this count is the only trace of that.
                 log_event(
                     logger,
                     "worker.draining",
@@ -229,9 +146,8 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
                     activities_in_flight=activities_in_flight(),
                     budget_seconds=settings.worker_graceful_shutdown_seconds,
                 )
-                # Whatever `graceful_shutdown_timeout` does not cover is cancelled by `shutdown()`,
-                # and each cancellation is counted where it is observed: inside the interceptor,
-                # the only frame that sees one. See `durable/interceptor.py::draining`.
+                # What `graceful_shutdown_timeout` does not cover is cancelled; each cancellation is
+                # counted in the interceptor (`durable/interceptor.py::draining`).
                 with draining():
                     await worker.shutdown()
                     await running

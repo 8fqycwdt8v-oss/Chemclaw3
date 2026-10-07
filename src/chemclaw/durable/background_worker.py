@@ -1,34 +1,16 @@
-"""The `background-jobs` worker (plan step 1.8).
+"""The `background-jobs` worker.
 
 Hosts light, long-running background jobs: ELN sync, note re-indexing, reports, memory
 synthesis, the generic connector-job wrapper and template runs. Run it with
-`python -m chemclaw.durable.background_worker` (after `make up`). This is core's only
-worker, and D-006's heavy/light split is intact one level down: one core queue, plus one
-per bundle, each sized for its own work.
+`python -m chemclaw.durable.background_worker` (after `make up`). A connector's own workflows
+run on the bundle's own worker and queue, so this worker never imports a capability's
+dependency closure.
 
-A *connector's* own workflows are not here: they run on the bundle's own worker and
-queue (`connectors/calc/worker.py` on `connector-calc`), which is the point of the seam —
-this worker never imports a capability's dependency closure.
-
-**Why the chart pins this one to `replicas: 1`, and what that pin is actually protecting**
-(`D-2026-08-27-what-a-second-background-worker-would-race-on`). Not the database writes: one
-worker already runs `worker_max_concurrent_activities` activities and many workflow tasks at
-once, so a single replica was never a serialization guarantee for anything a second *process*
-could not also do. And the periodic jobs are each one Temporal Schedule under
-`ScheduleOverlapPolicy.SKIP` (`durable/schedules.py`), which the *server* enforces, so a second
-pod cannot produce a second concurrent run of one of them however many workers poll.
-
-What a single replica does buy is exclusion over state that lives **in the pod**, and after the
-note writer's cluster advisory lock (`kg/git_writer.py::GitNoteWriter._cluster_lock`, which
-outlived the PR-gate it was built under) closed the git half there is exactly one such dependency
-left:
-`NoteReindexWorkflow`. `retrieval/vector_index.py::reindex_notes` retires index rows for every
-note absent from *this pod's* knowledge checkout, which is an `emptyDir` refreshed by the pod's
-own sidecar — so two pods are two views of the corpus, and a note one has fetched and the other
-has not is indexed and retired in turn, each run logging that it retired a note that exists.
-Every other activity on this queue is either serialized by its Schedule, idempotent by upsert,
-claim-based, or prunes against a window far wider than a sidecar's lag. Raising the count means
-giving that prune a cluster-wide view of the corpus first.
+The chart pins this worker to `replicas: 1` because of `NoteReindexWorkflow`: it retires index
+rows for every note absent from this pod's own knowledge checkout, so two pods would index and
+retire each other's notes. Periodic jobs are Schedules under `ScheduleOverlapPolicy.SKIP` and
+every other activity is serialized, idempotent or claim-based. Raising the count requires giving
+that prune a cluster-wide view of the corpus first.
 """
 
 import asyncio
@@ -44,10 +26,8 @@ from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
 
-# Importing the modules is what registers their workflows and activities (the same
-# side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
-# populated, the sets this worker serves come from it — so adding a durable capability
-# to one of these modules is a decorator at its definition site, not an edit here.
+# Importing the modules registers their workflows and activities; the sets this worker serves
+# come from that registry.
 from chemclaw.durable import artifact_eviction as _artifact_eviction  # noqa: F401
 from chemclaw.durable import awaiting as _awaiting  # noqa: F401
 from chemclaw.durable import check_in as _check_in  # noqa: F401
@@ -89,15 +69,9 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities("bac
 async def main() -> None:
     """Connect and poll the background-jobs queue: graph writes, ELN sync, jobs, templates.
 
-    The gateway guard runs here for the same reason it runs in `create_app`, and the reason it did
-    not used to is that it lived in `api/middleware.py`: `template_activities.run_agent_step` builds
-    a LangGraph agent inside an activity, so this process takes turns. Driven against the live
-    broker with this line deleted, an unconfigured worker connects and polls `background-jobs` with
-    `run_agent_step` registered and the mock's loopback address on the settings object; with the
-    line, it refuses before `connect()` is reached. After `configure_logging`, so the refusal and
-    the opt-in warning both go through this process's own handlers rather than the root logger's
-    default. The sign-in posture is checked beside it for the same reason and in the same place
-    (`durable/serve.refuse_unauthenticated_worker`).
+    The gateway guard and the sign-in posture check run before `connect()`, because
+    `template_activities.run_agent_step` builds an agent inside an activity, so this process takes
+    turns. After `configure_logging`, so the refusal goes through this process's handlers.
     """
     configure_logging()
     configure_telemetry()
@@ -109,31 +83,20 @@ async def main() -> None:
         task_queue=settings.background_task_queue,
         workflows=BACKGROUND_WORKFLOWS,
         activities=BACKGROUND_ACTIVITIES,
-        # How long an in-flight activity gets to finish after a stop signal before it is cancelled.
-        # Here at the constructor rather than inside `serve_worker` because it is the one shutdown
-        # knob a reader would look for beside the work being served, and because the chart's
-        # `terminationGracePeriodSeconds` has to sit above it — a drain the kubelet SIGKILLs
-        # through is not a drain.
+        # How long an in-flight activity gets to finish after a stop signal; the chart's
+        # `terminationGracePeriodSeconds` must sit above it.
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
-        # Beside it for the same reason: the other bound on what this process may have in flight.
-        # Unset, temporalio admits 100 activities at once against a Postgres pool an order of
-        # magnitude smaller — and this queue's work is almost entirely database work (the retention
-        # sweep, the reindex, the chain verification, every job record).
+        # Bounded because this queue's work is almost entirely database work against a pool far
+        # smaller
+        # than temporalio's default of 100 concurrent activities.
         max_concurrent_activities=settings.worker_max_concurrent_activities,
-        # What the worker holds *between* tasks, which the activity ceiling above does not bound:
-        # a cached workflow is a started one kept resident so its next task replays from memory
-        # instead of from history. Set here because the SDK's own default would otherwise be the
-        # choice, and measured rather than adopted — `core/config/temporal.py` carries the numbers
-        # and `tests/test_workers.py` holds them against the chart's memory request.
+        # Bounds workflows kept resident between tasks; `tests/test_workers.py` holds it against the
+        # chart's memory request.
         max_cached_workflows=settings.worker_max_cached_workflows,
-        # Every activity this worker serves, bound to the turn that asked for it and recorded on
-        # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
-        # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,
-        # and a reader looking for "why does this activity log anything" looks at the constructor.
-        #
-        # The SDK's OpenTelemetry interceptor rides beside it when span export is on, which is the
-        # half that makes a durable job a child of the launching turn — `core/temporal_client.py`
-        # writes the context on the client, this reads it here.
+        # Every activity is bound to the turn that asked for it and recorded in and out
+        # (`durable/interceptor.py`); with span export on, the SDK's OpenTelemetry interceptor makes
+        # a
+        # durable job a child of the launching turn.
         interceptors=worker_interceptors(),
     )
     logger.info(

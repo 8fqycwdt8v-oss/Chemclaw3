@@ -255,7 +255,7 @@ see if the CIFS mount flaps.
 binds the requester as the actor but with an **empty** role set — a workflow payload is relayed data,
 not a verified claim, so roles do not cross the durable boundary unsigned — and the source therefore
 declines. A scheduled report has no requester at all. Fail-closed by construction; lifting it needs
-a signed identity payload, the same blocker as `docs/planning/DEFERRED.md`'s template-step row.
+a signed identity payload, the same blocker as `docs/planning/BACKLOG.md`'s template-step row.
 
 **A stale vector is fixed before a missing document is found.** Each run drains re-embedding
 before it crawls: a vector made by a superseded model is wrong *now*, being compared against

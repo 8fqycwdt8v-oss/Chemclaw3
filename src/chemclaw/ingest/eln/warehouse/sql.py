@@ -1,20 +1,10 @@
 """Turning a binding into statements. Every value is bound; only checked identifiers are written.
 
-The rule this module exists to hold: **a binding contributes identifiers, the engine contributes
-structure, and everything else is a parameter.** Relation and column names reach the statement text,
-and each one was matched against `binding._IDENTIFIER` before it got here. The cursor timestamp, the
-entry keys of a batch, the query vector and the row limit are bound. There is no path by which a
-column *value* — anything a chemist typed into the ELN — becomes SQL.
-
-The one deliberate exception is `where:`, inserted literally. It is authored in the same file as the
-`module:callable` the same seam imports, by the same person, and reviewed the same way; a predicate
-language that could express "the site's notion of finished" without being a predicate would be a
-worse trade than trusting the file we already trust.
-
-Statements are built as text rather than through a query builder because there are four of them and
-they are shaped by the binding, not by the caller. A builder would add a dependency and an
-indirection to save nothing, and it would make the thing a test wants to assert — the exact string
-that would be sent — harder to see rather than easier.
+A binding contributes identifiers (each matched against `binding._IDENTIFIER`), the engine
+contributes structure, and everything else (cursor, keys, query vector, limit) is a parameter, so no
+ELN column value ever becomes SQL. The one exception is `where:`, inserted literally: it is authored
+and reviewed in the same trusted manifest that names the driver to import. Built as text rather than
+with a query builder so tests can assert the exact statement sent.
 """
 
 from collections.abc import Sequence
@@ -38,23 +28,10 @@ SCORE_COLUMN = "CHEMCLAW_SCORE"
 def watermark_expression(entry: EntryBinding) -> str:
     """The column the sync's cursor filters and orders on.
 
-    `COALESCE(modified, created)` when the source records amendments, because the ELN sync's
-    contract is that an amended entry counts as new (`chemclaw.ingest.eln.adapter.entry_window`
-    says so, and both file-drop adapters honour it). Filtering on creation alone would ingest a run
-    once and never see the correction a chemist made to it the following week.
-
-    **A declared `retracted_at:` joins it, because a withdrawal is the same kind of fact.** A site
-    that stamps its retraction column without touching its amendment column leaves the withdrawn
-    row behind the cursor forever — the tombstone is written at the site and fetched by nobody,
-    which is a producer nobody can write
-    (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
-
-    `GREATEST(W, COALESCE(retracted, W))` rather than `GREATEST(W, retracted)`, and the nesting is
-    not decoration: warehouses disagree about `GREATEST` over a NULL — Postgres and Databricks skip
-    it, others propagate it — and a propagating one would move every *un*-retracted row's watermark
-    to NULL and stop the source dead. Neither argument here is ever NULL unless `W` is, so the
-    expression means `max(W, retracted)` under both readings. This module names no vendor
-    (`D-2026-08-26-the-driver-s-signature-is-the-schema`), so it may not assume either one.
+    `COALESCE(modified, created)` when amendments are recorded, so an amended entry counts as new. A
+    declared `retracted_at:` joins it, so a withdrawal stamped without touching the amendment column
+    is still fetched. Written `GREATEST(W, COALESCE(retracted, W))` because warehouses disagree
+    about `GREATEST` over NULL, and a propagating one would null every unretracted watermark.
     """
     if entry.modified_at:
         window = f"COALESCE({entry.modified_at}, {entry.created_at})"
@@ -68,34 +45,16 @@ def watermark_expression(entry: EntryBinding) -> str:
 def entry_statement(
     entry: EntryBinding, placeholder: str, since: datetime, limit: int, after_key: str = ""
 ) -> tuple[str, list[Any]]:
-    """Every reaction at or after the cursor, oldest first, bounded — as a composite keyset.
+    """Every reaction at or after the cursor, oldest first, bounded, as a composite keyset.
 
-    **Oldest first and bounded together.** The durable sync drains a source in chunks, persisting
-    its cursor after each one; that only makes progress if each fetch returns the *earliest*
-    outstanding rows. Ordering ascending and taking the first `limit` is exactly that, and it is
-    what keeps a first sync of a warehouse with a decade of history from being one query that tries
-    to materialise the decade.
-
-    **The entry key is the tiebreaker, and it is what makes the `LIMIT` mean anything.** Ordering on
-    the watermark alone leaves the rows sharing one value in whatever order the warehouse felt like,
-    so the page cut out of a block of ties is a different subset on every fetch — and, worse, the
-    cursor is that same timestamp, so it can only ever advance *to* the tie value. More rows sharing
-    a watermark than `fetch_limit` allows then truncated the source **permanently and silently**:
-    every later fetch returned the same first page, nothing was rejected, and the run logged
-    `ingested=0 rejected=0`. Two ordinary shapes produce it — a `created_at:` bound to a DATE
-    column, and the bulk `UPDATE … SET LAST_MODIFIED_TS = now()` of a warehouse reload.
-    `corpus_statement` next door has used a unique keyset for exactly this reason from the start.
-
-    `after_key` continues *inside* one watermark block: the page starts strictly after
-    `(since, after_key)` in that total order, which is the only way past a block bigger than a page.
-    An empty `after_key` is the ordinary page, inclusive at the cursor for the reason the adapter's
-    contract gives. The two forms bind `[since, limit]` and `[since, since, after_key, limit]`.
-
-    The cursor predicate is parenthesised as a whole because the continuation form is an `OR`, and
-    `A OR B AND (where)` would silently apply the site's `where:` to only half of it.
-
-    `SELECT *` because the binding's `attributes.include: ['*']` means "every column the row has",
-    and a projection would have to know them — which is the thing nobody knows today.
+    Ascending and limited so the durable sync drains in chunks and each fetch returns the earliest
+    outstanding rows. The entry key breaks ties: with the watermark alone, more rows sharing one
+    value than `limit` (a DATE column, a bulk reload) would return the same page forever.
+    `after_key` continues inside one watermark block, strictly after `(since, after_key)`; empty,
+    the page is inclusive at the cursor. The two forms bind `[since, limit]` and `[since, since,
+    after_key, limit]`. The cursor predicate is parenthesised so the site's `where:` applies to both
+    halves of its `OR`. `SELECT *` because `attributes.include: ['*']` means every column the row
+    has.
     """
     watermark = watermark_expression(entry)
     if after_key:
@@ -123,17 +82,9 @@ def corpus_statement(
 ) -> tuple[str, list[Any]]:
     """One bounded page of a bulk reaction corpus, resuming strictly after `after`.
 
-    **Keyset, not offset, and not a datetime.** `OFFSET n` on a multi-million-row table makes the
-    warehouse walk and discard n rows on every page, so a drain gets quadratically slower exactly
-    as it gets further in; and a datetime cursor is meaningless for a versioned release that was
-    loaded all at once. Resuming after the last key seen is O(index seek) per page and is what
-    makes a stopped drain resumable at no cost.
-
-    An empty `after` starts at the beginning, which is the first pass and also a full re-drain.
-    Re-drainng is safe: every write the corpus drain makes is an id-keyed upsert.
-
-    `SELECT *` for the same reason `entry_statement` uses it — the binding names the columns it
-    reads by path, and a projection would have to know a schema nobody can see yet.
+    Keyset rather than `OFFSET` (which rescans skipped rows on every page) or a datetime
+    (meaningless for a release loaded at once). An empty `after` starts from the beginning;
+    re-draining is safe because every write is an id-keyed upsert.
     """
     cursor = corpus.cursor_column
     predicate = f"{cursor} > {placeholder}" if after else "1 = 1"
@@ -151,12 +102,9 @@ def corpus_statement(
 def related_statement(
     block: RelatedBinding, placeholder: str, keys: Sequence[str]
 ) -> tuple[str, list[Any]]:
-    """One child table's rows for a whole batch of entries — one query per block, not per row.
+    """One child table's rows for a whole batch of entries: one query per block, not per row.
 
-    Per row would be the obvious loop and would issue a query per reaction per table; a batch of a
-    hundred reactions across four child tables would be four hundred round trips to a warehouse
-    that charges for them. The `IN (...)` list is a fixed number of placeholders, so the values are
-    still bound.
+    The `IN (...)` list is a fixed number of placeholders, so values stay bound.
     """
     if not keys:
         raise BindingError("related_statement needs at least one entry key")
@@ -181,17 +129,9 @@ def vector_statement(
 ) -> tuple[str, list[Any]]:
     """The similarity search, ranked and truncated inside the warehouse.
 
-    Ranking server-side is the whole reason this half exists: the embedding column is already there,
-    over a corpus larger than what gets ingested, and the alternative is pulling rows out to score
-    them here. `LIMIT` is bound so the warehouse returns `top_k` rows rather than a corpus.
-
-    `query` is the embedded vector under `embedding: local`, and the raw query text under `server`,
-    where the warehouse's own function embeds it — the two paths differ only in what stands in the
-    similarity call's second argument.
-
-    **The similarity function and the query-vector binding come from the driver**, not from a table
-    here: both are dialect facts, and this module contributes structure. See
-    `chemclaw.ingest.eln.warehouse.driver.VectorDialect` for why that moved.
+    `LIMIT` is bound so only `top_k` rows return. `query` is the embedded vector under `embedding:
+    local` and the raw text under `server`. The similarity function and the query-vector binding are
+    dialect facts supplied by the driver's `VectorDialect`.
     """
     function, direction = dialect.similarity(vector.metric)
     params: list[Any] = []
@@ -205,16 +145,14 @@ def vector_statement(
             embedded = f"{vector.server_embed_function}({placeholder})"
             params.append(query)
     else:
-        # `embedding: local` means the caller embedded the query, so a string here is a wiring bug
-        # rather than a binding one — and it would otherwise reach the warehouse as a vector of
-        # characters. The guard is what narrows the union as well as what reports it.
+        # Under `embedding: local` a string is a wiring bug and would be sent as a vector of
+        # characters.
         if isinstance(query, str):
             raise BindingError(
                 "embedding: local expects an embedded query vector, not the query text"
             )
-        # The one value `sql.py` cannot render itself: a 1536-float vector is a *value*, and how it
-        # is bound is the sharpest dialect difference of all. The driver returns the expression and
-        # the single parameter that fills it.
+        # How a vector is bound differs most between dialects, so the driver returns the expression
+        # and its single parameter.
         embedded, bound = dialect.query_vector(placeholder, query, embedding_dim)
         params.append(bound)
 
@@ -238,15 +176,9 @@ def scope_statement(
 ) -> tuple[str, list[Any]]:
     """The keys eligible under `filters`, for an index-ranked source.
 
-    An index ranks the whole corpus; the caller's filters have to reach it *before* the top-k or a
-    narrow tag over a wide relation returns nothing at all — the k nearest vectors would all belong
-    to something else. `VectorStore.search` takes eligibility as a set of ids, so it is computed
-    here, in the one system that can evaluate a predicate over the site's own columns.
-
-    `LIMIT` is bound and one over the caller's cap, so a scope too broad to send is *detected*
-    rather than truncated: a silently truncated eligibility set is a wrong answer that looks like a
-    thin corpus. The residual this bounds is the one `retrieval/vectors/README.md` states — a scope
-    is a set, and a broad filter over a very large corpus builds a big one.
+    Eligibility must reach the index before its top-k, and only the warehouse can evaluate the
+    site's columns. `LIMIT` is one over the caller's cap, so a scope too broad to send is detected
+    rather than silently truncated.
     """
     predicates, params = vector_predicates(vector, placeholder, filters)
     where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
@@ -261,28 +193,13 @@ def scope_statement(
 def resolve_statement(
     vector: VectorBinding, placeholder: str, keys: Sequence[str]
 ) -> tuple[str, list[Any]]:
-    """The content columns for the keys an index returned — the catalogue half of a split search.
+    """The content columns for the keys an index returned: the catalogue half of a split search.
 
-    The counterpart of `ExternalVectorDocumentIndex._resolve`, with the warehouse standing in for
-    Postgres: the store answers "which, and how similar", and the system that owns the text answers
-    "what does it say". One query for the whole batch, as `related_statement` does and for the same
-    reason — a warehouse charges per round trip.
-
-    No `ORDER BY`: the ranking is the store's and the caller re-imposes it. Ordering by the key here
-    would look tidy and would silently discard the ranking.
-
-    **`where:` is enforced here, and this is the only place it can be.** It is a *corpus*
-    restriction — "these rows are eligible at all" — so it is typically broad, and on an
-    index-ranked source the corpus is the size that made an index necessary. Enumerating it as a
-    key set to pre-filter with is therefore exactly what `vector_store_max_scope_keys` refuses; a
-    first attempt did that and turned a binding's `where:` into "this source answers nothing".
-    Applying it to the resolve costs one predicate on a query already keyed to `top_k` rows.
-
-    The residual, stated because it is a real cost: a row the `where:` excludes can still occupy a
-    slot in the store's top-k, so a search may return fewer than `top_k` hits. That is the
-    post-filter trade this seam otherwise refuses — and it is right *here* and wrong for the query's
-    own `tag`/`since`/`until`, because those are narrow. Post-filtering a narrow predicate loses
-    everything; post-filtering a broad one loses a slot or two.
+    One query for the batch. No `ORDER BY`: the ranking is the store's and the caller re-imposes it.
+    The binding's `where:` is enforced here, the only place it can be: it is broad, so enumerating
+    it as a scope would exceed the cap. The cost is that an excluded row can occupy a top-k slot, so
+    a search may return fewer than `top_k` hits; acceptable for a broad predicate, not for the
+    query's narrow filters.
     """
     if not keys:
         raise BindingError("resolve_statement needs at least one key")
@@ -304,14 +221,8 @@ def vector_predicates(
 ) -> tuple[list[str], list[Any]]:
     """Translate the honoured evidence filters onto the site's own columns.
 
-    Only the keys the binding mapped are applied. An unmapped filter is ignored rather than guessed
-    at — inventing a column name would either error on every query or, worse, match a column that
-    means something else at this site.
-
-    **The scope query uses this; the resolve query does not.** An index-ranked search pre-filters on
-    the *query's* narrow keys and enforces the binding's broad `where:` at the resolve instead —
-    `resolve_statement` says why. So `where:` appears in both statements when a scope is built, and
-    in the resolve alone when one is not, which is what makes it unconditional either way.
+    Only filters the binding mapped are applied; an unmapped one is ignored rather than guessed.
+    Used by the scope query, not the resolve query, which enforces `where:` instead.
     """
     predicates: list[str] = []
     params: list[Any] = []
@@ -332,14 +243,8 @@ def vector_predicates(
 def normalise_score(metric: str, raw: float) -> float:
     """Map a metric's raw result onto the 0..1 an `EvidenceChunk` carries.
 
-    A distance and a similarity are not the same quantity, and the chunk's field is documented as a
-    similarity. A distance is folded through `1/(1+d)`, which is monotonic; cosine already lands in
-    -1..1 and is clamped.
-
-    **The returned order is authoritative, not this number.** The warehouse has already ranked the
-    rows, this system fuses sources by rank position rather than by score, and an inner product is
-    genuinely unbounded — so clamping it can tie two hits at 1.0 without changing which one the
-    agent sees first. Rank is what carries the ranking; this is what a reader sees beside a chunk.
+    A distance is folded through `1/(1+d)`; cosine and inner product are clamped. The returned order
+    is authoritative, not this number: sources are fused by rank, and clamping may tie hits.
     """
     if metric == "l2":
         return 1.0 / (1.0 + max(raw, 0.0))

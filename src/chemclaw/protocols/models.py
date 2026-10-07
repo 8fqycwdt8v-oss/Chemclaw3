@@ -1,13 +1,10 @@
-"""The shape of a prescriptive experiment design — one envelope for a single run and for a plate.
+"""The shape of a prescriptive experiment design: one envelope for a single run and for a plate.
 
-The one thing to internalize: **a single experiment is a design with one arm and no factors.** An
-HTE screen is the same object with factors, levels, N arms and a layout. Everything downstream —
-the checks, the store, the renderer, the CSV export, the UI — is written once because of that.
+**A single experiment is a design with one arm and no factors**; an HTE screen is the same
+object with factors, levels, N arms and a layout, so everything downstream is written once.
 
-Docstrings here are short on purpose. Pydantic turns a class docstring into the JSON-schema
-`description` and `convert_to_openai_tool` ships it on every turn, so design rationale lives in `#`
-comments (which do not ship) and only caller-facing guidance lives in the docstring. This is the
-rule `docs/planning/BACKLOG.md` records after measuring `science/bo/problem.py` at 38% rationale.
+Class docstrings here are short on purpose: pydantic ships them as JSON-schema descriptions in
+every tool schema, so rationale lives in `#` comments.
 """
 
 from __future__ import annotations
@@ -21,13 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
-#: Every `SpeciesRole` field in this module is declared through this, and the `description` is the
-#: reason. Pydantic publishes a referenced enum's **class docstring** as the field's JSON-schema
-#: description, and `convert_to_openai_tool` inlines rather than `$ref`s — so `SpeciesRole`'s
-#: docstring (180 tokens arguing why the derived vocabulary is not `Role`, which is exactly the
-#: right thing for a reader of `science/labels`) shipped once for every field that names it, three
-#: times in one tool schema. An explicit description wins over the inherited one and says the only
-#: thing a caller needs: the values.
+#: Every `SpeciesRole` field is declared through this: an explicit description replaces the enum's
+#: long class docstring, which pydantic would otherwise inline into every tool schema per use.
 _ROLE_FIELD = Field(
     default=SpeciesRole.UNKNOWN,
     description=(
@@ -39,10 +31,8 @@ _ROLE_FIELD = Field(
 # `reaction-<id>` do, so a citation in prose is recognisable without a lookup.
 DESIGN_ID_PREFIX = "design"
 
-#: Modes a design can be in. `screen` is a fixed up-front array a human runs as a batch; `campaign`
-#: is a screen that expects to be re-asked after results arrive (the BO loop). They are one enum
-#: rather than a boolean because the *checks* differ: a campaign is allowed to ship a first round
-#: that does not cover its factor space, and a screen is not.
+#: `screen` is a fixed array run as a batch; `campaign` expects to be re-asked after results
+#: (the BO loop) and may ship a first round that does not cover its factor space.
 DesignMode = Literal["single", "screen", "campaign"]
 
 #: Where a field in the structured request came from. `stated` obliges a verbatim quote; see
@@ -73,16 +63,10 @@ DesignStatus = Literal["requested", "draft", "approved", "executed", "abandoned"
 class ProtocolStepKind(StrEnum):
     """What one step of a procedure does."""
 
-    # Deliberately *not* `ingest.eln.ord.StepKind`, for the reason `science.labels.vocabulary`
-    # gives for not widening `Role`: that enum is the **record** vocabulary — the values a source
-    # is allowed to state and a warehouse binding's `value_map` may write — and its members decide
-    # how a recorded procedure is segmented. This is the **prescriptive** vocabulary, and it needs
-    # three verbs a record has no reason to carry: an instruction to take a sample, an instruction
-    # to run an analysis, and an instruction to hold. Widening the record enum to carry them would
-    # let a tenant YAML file write a value the ingest path cannot interpret.
-    #
-    # The first six values are spelled identically to `StepKind`'s so a design that is later
-    # transcribed as a run maps across without a translation table.
+    # Deliberately not `ingest.eln.ord.StepKind`: that is the record vocabulary a source may write,
+    # and this prescriptive one adds sample, analyse and hold, which the ingest path cannot
+    # interpret.
+    # The shared values are spelled identically so a design transcribed as a run maps across.
     CHARGE = "charge"
     ADDITION = "addition"
     TEMPERATURE = "temperature"
@@ -98,20 +82,14 @@ class ProtocolStepKind(StrEnum):
 class RequestField(BaseModel):
     """One slot of the ask: its value, where it came from, and the words that said so."""
 
-    # `basis="stated"` obliges the chemist's verbatim words in `quote`, checked against their
-    # text; `inferred` is a value supplied from chemical judgment rather than from what they
-    # wrote, and is expected rather than an admission; `absent` means the text did not say. The
-    # whole honesty claim of the structured ask is this model, and the prose describing it was
-    # the largest single item in the request schema: pydantic publishes a class docstring as the
-    # JSON-schema description and `convert_to_openai_tool` inlines it once per *use*, so this one
-    # shipped four times in one tool. The guidance now lives where a caller reads it, in
-    # `structure_experiment_request`.
+    # `stated` requires the chemist's verbatim words in `quote`; `inferred` is chemical judgment;
+    # `absent` means the text did not say. Caller guidance lives in
+    # `structure_experiment_request`, since a docstring here would ship once per use in the schema.
 
     value: str = ""
     basis: FieldBasis = "absent"
-    # The verbatim span. Checked against the supplied text rather than trusted — see
-    # `agent.protocol_design_tools.require_quotes_are_verbatim`. A paraphrase is the failure
-    # this field exists to catch.
+    # The verbatim span, checked against the supplied text by
+    # `agent.protocol_design_tools.require_quotes_are_verbatim`.
     quote: str = ""
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
@@ -146,10 +124,8 @@ class RequestedComponent(BaseModel):
 class ExperimentRequest(BaseModel):
     """The chemist's ask, structured."""
 
-    # Fill it from the chemist's own words: anything the text does not say is either a marked
-    # inference or `absent`, never a silent default. The guidance is in
-    # `structure_experiment_request`'s docstring rather than here, because pydantic would ship
-    # this one again inside every schema that nests the model.
+    # Fill from the chemist's own words: anything unsaid is a marked inference or `absent`, never a
+    # silent default (guidance in `structure_experiment_request`).
 
     # One line a human recognises the design by. Not derived from the objective, because a chemist
     # names a piece of work after the step it belongs to ("SM-3 Suzuki, deactivated aryl chloride").
@@ -184,9 +160,8 @@ class FactorLevel(BaseModel):
     """One setting a factor can take."""
 
     label: str = Field(min_length=1)
-    # For a categorical factor: the structure behind the label, when it is a species. Carrying it
-    # is what lets `checks` screen a level for hazard and lets a downstream BO campaign featurize
-    # the category rather than one-hot it (`science.bo.problem.CategoricalParameter.structures`).
+    # For a categorical factor: the structure behind the label, so `checks` can screen it and a BO
+    # campaign can featurize it.
     smiles: str = ""
     # For a continuous factor.
     value: float | None = None
@@ -203,10 +178,7 @@ class Factor(BaseModel):
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     kind: Literal["categorical", "continuous"]
     role: SpeciesRole = _ROLE_FIELD
-    # Bounded like every sibling collection, and it was the one that was not. A design is
-    # browser-supplied, and 1536 arms carrying 120 levels each is a legal 2.76 MB document inside
-    # `service_max_request_bytes` that costs ~1.8 s of server CPU to accept. A screen varying one
-    # factor over more than 96 levels is not a screen anybody runs on a plate.
+    # Bounded like every sibling collection: the design is browser-supplied.
     levels: list[FactorLevel] = Field(min_length=2, max_length=96)
     unit: str = ""
 
@@ -231,10 +203,8 @@ class Factor(BaseModel):
 class Setpoints(BaseModel):
     """The physical conditions one arm is run at."""
 
-    # Deliberately not `kg.note.ProcessConditions`, which is *recorded* — it mixes setpoints with
-    # yield and impurity, and its docstring says it holds "what a run recorded". A plan's
-    # temperature is an instruction; a plan's yield is a prediction. Two models, so a reader can
-    # never take one for the other.
+    # Deliberately not `kg.note.ProcessConditions`, which is recorded and mixes setpoints with
+    # outcomes: a plan's temperature is an instruction, a plan's yield a prediction.
     temperature_c: float | None = None
     time_h: float | None = Field(default=None, gt=0.0)
     pressure_bar: float | None = Field(default=None, gt=0.0)
@@ -320,9 +290,8 @@ class EvidenceRef(BaseModel):
     ref: str = ""
     tool: str = ""
     summary: str = Field(min_length=1)
-    # Dotted paths into the design this citation is offered for — `base.setpoints.temperature_c`,
-    # `factors.ligand.levels`. What lets a reader put the reason next to the number instead of at
-    # the bottom of the page.
+    # Dotted paths into the design this citation supports, so a reader sees the reason beside the
+    # number.
     supports: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
@@ -373,9 +342,8 @@ class ProtocolBody(BaseModel):
 class ProtocolArm(BaseModel):
     """One runnable set of conditions."""
 
-    # Stable within a design and used as the well's label, the CSV row key and the id a result is
-    # reported against. Not an index, because arms get reordered by a randomised run order and a
-    # positional key would then name a different experiment.
+    # Stable within a design: the well label, CSV row key and result id. Not an index, because a
+    # randomised run order reorders arms.
     arm_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
     # `{factor_name: level_label}`. Empty for a single experiment. Bounded for the reason
     # `Factor.levels` is: this is the per-arm half of the same unbounded document.
@@ -383,12 +351,10 @@ class ProtocolArm(BaseModel):
     # Only what differs from `ProtocolBody`. A screen whose arms each restated the whole body would
     # be N protocols rather than one design, and a reader could not see what is being varied.
     setpoints: Setpoints | None = None
-    # There is deliberately no per-arm charge override. An arm that varies an *amount* declares
-    # that amount as a continuous factor, which is the same statement in the vocabulary the design
-    # already has — and a second way to say it would have inlined the whole `ChargeLine` model into
-    # every tool schema for a field nothing needed. A control that genuinely differs says so in
-    # `note`; if that stops being enough, adding it back is a decision with a caller behind it.
-    # A control is excluded from the factor-coverage check and rendered apart on the plate.
+    # No per-arm charge override: an arm varying an amount declares it as a continuous factor. A
+    # control that genuinely differs says so in `note`. Controls are excluded from the coverage
+    # check
+    # and rendered apart on the plate.
     control: Literal["", "positive", "negative", "blank"] = ""
     replicate_of: str = ""
     note: str = ""
@@ -426,11 +392,8 @@ class PlateLayout(BaseModel):
     def _randomized_is_reproducible(self) -> PlateLayout:
         """A shuffled run order carries the seed that produced it.
 
-        `place()` refuses this combination — "a randomized layout needs a seed so the run order can
-        be reproduced" — but a `PlateLayout` posted by a browser never goes through `place()`, and
-        `layout_fits` re-verifies everything about such a layout *except* this. So a design could be
-        stored claiming a randomised run order that nobody can reproduce, which is the one property
-        randomising is done for. The rule belongs on the model, where both routes meet it.
+        On the model rather than only in `place()`, because a layout posted by a browser bypasses
+        `place()` and reproducibility is the point of recording a randomisation.
         """
         if self.randomized and self.seed is None:
             raise ValueError("a randomized layout needs a seed so the run order can be reproduced")
@@ -462,9 +425,8 @@ class RecordedFailure(BaseModel):
 class ProtocolCheck(BaseModel):
     """One deterministic verdict about the design."""
 
-    # Computed by `checks`, never supplied by a caller — which is why this model is not part of any
-    # tool's argument schema. A design that graded itself would be a second answer about its own
-    # first answer.
+    # Computed by `checks`, never supplied by a caller, so this model is in no tool's argument
+    # schema.
     check_id: str = Field(min_length=1)
     severity: CheckSeverity
     passed: bool
@@ -478,58 +440,10 @@ class ExperimentDesign(BaseModel):
 
     request: ExperimentRequest
     base: ProtocolBody = Field(default_factory=ProtocolBody)
-    # **These ceilings are what closed the event-loop stall, and they are tight rather than
-    # generous.** Nothing capped these lists, and `POST /protocols/{id}/revisions` takes a whole
-    # design from a browser — so a caller chose `n` for a diff that was O(n²), and one
-    # authenticated request inside every other declared bound (the 4 MB body cap, the per-principal
-    # rate limit) blocked the front door's event loop for **46 s**. `diff._labelled` no longer
-    # scans quadratically, but that is a constant-factor tidy-up (22.4 ms → 0.107 ms at n=1536):
-    # the refusal is the control.
-    #
-    # `max_length=1536` is **exactly** the largest plate this system knows, not an order of
-    # magnitude above it — an earlier version of this comment said the latter, which would have
-    # made a 1536-well design sound like an absurdity rather than the case the number was chosen to
-    # admit.
-    #
-    # **The cost at that ceiling is a diff time, not a byte count, and this comment used to quote a
-    # byte count as though the ceilings fixed it.** They do not: they bound *counts*, and the free
-    # text inside those counts is bounded only by the body cap. Re-measured with every count
-    # actually at its ceiling — 50 factors x 96 levels, 1536 arms, 500 charge lines — varying only
-    # how full the notes and rationales are, over a diff of one edited field:
-    #
-    #     empty free text    1618 KB   105,869 paths   diff 0.18 s
-    #     short notes        1748 KB   105,869 paths   diff 0.19 s
-    #     long notes         4464 KB   105,869 paths   diff 0.18 s   (past the 4 MB body cap)
-    #
-    # So the diff time is flat in the bytes and set by the path count — which is the measurement
-    # that says these ceilings, and not the body cap, are what bound the cost.
-    #
-    # **The three rows that stood here (482/572/1382 KB, ~0.3 s) were not that shape, and the
-    # sentence above them said they were.** The emptiest legal design with every count at its
-    # ceiling is 1.6 MB, so 482 KB was measured with something well below one of them — and at the
-    # real ceilings the diff cost **1.67 s**, not 0.33 s: one authenticated request holding the
-    # pod's only event loop for most of two seconds, inside every declared bound, which is the
-    # stall this paragraph claims to have closed. What brought it to 0.18 s was `diff_designs`
-    # ordering only the paths that *differ* rather than every path in the document; these ceilings
-    # bound the count being ordered, and the two together are the control. The single figure before
-    # those rows (414 KB, 0.060 s) was one sample of a two-variable space quoted as a constant, and
-    # it was low on both axes.
-    #
-    # **Every collection in this module is bounded, and the comment here used to say otherwise.**
-    # It read "what is bounded is the lists a diff keys by an identifier, which are the six in
-    # `diff._KEYED_LISTS`" and then named `Factor.levels`, `ProtocolArm.levels`,
-    # `ProtocolStep.components`, `Analytic.measures` and `EvidenceRef.supports` as deliberately
-    # unbounded — while the same commit had in fact bounded `components`, `objectives`, `forbidden`,
-    # `steps`, `in_process_controls` and `hazards`, none of which is keyed. The rule was rewritten
-    # twice on the way to being wrong twice; what follows is the count as it stands.
-    #
-    # Keying is not the criterion, and superlinearity was never the whole cost. The two `levels`
-    # collections were genuinely unbounded until 2026-08-30, and a design carrying 1536 arms with
-    # 120 levels each is a legal 2.76 MB document inside `service_max_request_bytes` that costs
-    # ~1.8 s of server CPU to parse, check and diff — linear work, and still a browser-supplied
-    # request holding a worker for nearly two seconds. A bound belongs on anything a caller can
-    # repeat, and the number is what a chemist could plausibly mean rather than what the machine
-    # could survive.
+    # Every collection is bounded because a whole design arrives from a browser
+    # (`POST /protocols/{id}/revisions`). The ceilings bound path counts, which set the diff cost;
+    # free text is bounded only by the body cap. `max_length=1536` is exactly the largest plate this
+    # system knows. Numbers are what a chemist could plausibly mean, not what the machine survives.
     factors: list[Factor] = Field(default_factory=list, max_length=50)
     arms: list[ProtocolArm] = Field(default_factory=list, max_length=1536)
     layout: PlateLayout | None = None
@@ -540,12 +454,8 @@ class ExperimentDesign(BaseModel):
     @model_validator(mode="after")
     def _names_resolve_and_steps_are_ordered(self) -> ExperimentDesign:
         """Ids are unique, `replicate_of` names a real arm, and steps are numbered 1..n."""
-        # The last two are here rather than in `checks` because they are not judgments about a
-        # design — they are the difference between a document that means something and one that
-        # does not, and both were measured *defeating* a check. A `replicate_of` naming an arm that
-        # does not exist exempted its arm from `arms_are_distinct`, and two factors sharing a name
-        # collapsed in `factor_levels_declared`'s `declared` dict, so the first factor's levels
-        # left the *blocker* and the diff at once.
+        # These structural rules live here, not in `checks`: a dangling `replicate_of` or duplicate
+        # factor names would let an arm or factor escape the checks entirely.
         ids = [arm.arm_id for arm in self.arms]
         if len(set(ids)) != len(ids):
             raise ValueError("arm_id repeats; each arm needs its own id")
@@ -555,13 +465,10 @@ class ExperimentDesign(BaseModel):
         dangling = sorted({arm.replicate_of for arm in self.arms if arm.replicate_of} - set(ids))
         if dangling:
             raise ValueError(f"replicate_of names no arm in this design: {', '.join(dangling)}")
-        # **A replicate chain has to terminate**, and testing `arm.replicate_of == arm.arm_id` was
-        # only the length-1 case of that. A 2-cycle (A1→A2→A1) names no arm that does not exist and
-        # no arm that is itself, so it walked straight past — and reproduced the defect verbatim:
-        # `arms_are_distinct` skips every arm carrying `replicate_of` and `coverage_is_stated`
-        # counts none of them, so three identical arms in a ring reported "no unmarked duplicate
-        # conditions" over a grid coverage of zero. Following each chain to its end is the
-        # invariant that was actually wanted.
+        # A replicate chain must terminate: following each chain to its end catches cycles of any
+        # length,
+        # which would otherwise exempt every arm in the ring from the distinctness and coverage
+        # checks.
         parent = {arm.arm_id: arm.replicate_of for arm in self.arms}
         looped: list[str] = []
         for start in parent:
@@ -578,22 +485,12 @@ class ExperimentDesign(BaseModel):
                 "A replicate names the arm it repeats, and that chain has to end at an arm that "
                 "is not itself a replicate"
             )
-        # **A replicate has to run the same conditions**, which is the second half of the same
-        # hole. `replicate_of` naming a *real* arm with different levels was accepted, and it
-        # defeated the same two readers a dangling one did: `arms_are_distinct` skips every arm
-        # carrying `replicate_of`, and `coverage_is_stated` counts none of them towards the grid —
-        # so two mislabelled arms turned a full grid into "reduced design: 2 of 4" while the run
-        # sheet told a chemist A2 was a repeat of A1. Averaging a replicate pair is how the noise
-        # of an assay is estimated; averaging two different conditions reports that noise as the
-        # answer. An arm that varies something is not a replicate, and clearing `replicate_of` is
-        # what says so.
+        # A replicate must run the same conditions: averaging two different conditions would report
+        # assay noise as the answer.
         by_id = {arm.arm_id: arm for arm in self.arms}
-        # **`setpoints_for`, not `arm.setpoints`** — the *effective* conditions, which is the
-        # definition `checks.arms_are_distinct` uses when it tells a chemist to mark a repeat with
-        # `replicate_of`. Comparing the raw overrides refused arms whose conditions are provably
-        # identical (one stating nothing and inheriting, one restating the body verbatim), so the
-        # check prescribed a remedy this validator rejected — the exact contradiction the check's
-        # own comment claims to have closed, re-opened by fixing only one side of it.
+        # Compare the *effective* conditions (`setpoints_for`), the definition
+        # `checks.arms_are_distinct`
+        # uses, so the remedy it prescribes is never refused here.
         differing = [
             arm.arm_id
             for arm in self.arms
@@ -616,61 +513,39 @@ class ExperimentDesign(BaseModel):
     def has_protocol(self) -> bool:
         """Whether this design says what to do, rather than only what is being asked for.
 
-        The one definition, read by `checks.is_a_protocol`, by the intake (which must not replace a
-        drafted design with an empty ask), by the edit route (which must not grade a correction to
-        the *ask* at the protocol stage) and by `render.summarise`. Callers deciding it separately
-        is how the second and third got it wrong — and `summarise` was still spelling the condition
-        out when that sentence was written, which is how the fourth nearly did.
+        The one definition, read by `checks.is_a_protocol`, the intake, the edit route and
+        `render.summarise`.
         """
         return bool(self.arms or self.base.steps or self.base.charge)
 
     @property
     def is_single_experiment(self) -> bool:
-        """Whether this is one experiment rather than a screen — one arm and nothing varied.
+        """Whether this is one experiment rather than a screen: one distinct arm and nothing varied.
 
-        The one definition, for the same reason `has_protocol` is one. Three checks decided it from
-        `request.mode` instead, which is a field of the *ask* and is tied to nothing the design
-        actually is: a 96-arm design whose intake still said `single` switched off the plate-fits
-        blocker, the controls warning and the coverage note together, reporting "a single experiment
-        needs no layout" over ninety-six arms. One mis-set enum disabled three checks on a real
-        plate.
-
-        Reading the arm count alone is the opposite error and is just as wrong: a one-arm design
-        that declares factors is the first round of a screen, and it needs its control and its
-        coverage statement exactly as a full plate does. `summarise` has always spelled this
-        condition out; it now reads it from here.
-
-        **A replicate is the same experiment again, not a second one.** The count was over every
-        arm, so one experiment run in triplicate came out a screen: `controls_present` warned that
-        "a screen with nothing to compare against cannot tell a flat result from a failed run" over
-        three arms that are the same conditions by construction, and `layout_fits` asked a single
-        experiment for a plate. `arms_are_distinct` and `coverage_is_stated` already skip an arm
-        carrying `replicate_of` — this is that same reading, in the predicate the other two derive
-        from. `summarise` names the replicate count so the runs are not lost with the word.
+        The one definition for every check. Not `request.mode` (the ask is tied to nothing the
+        design
+        is), and not the raw arm count: a one-arm design with factors is a screen's first round, and
+        an
+        experiment in triplicate (arms carrying `replicate_of`) is still one experiment.
         """
         return len(self.distinct_arms) <= 1 and not self.factors
 
     @property
     def distinct_arms(self) -> list[ProtocolArm]:
-        """The arms that are their own conditions — every arm that is not a repeat of another.
+        """The arms that are their own conditions: every arm that is not a repeat of another.
 
-        The model validator already guarantees a replicate runs the same levels and the same
-        resolved setpoints as the arm it names, so this is the set of *conditions* the design tries
-        rather than the set of runs it schedules.
+        The validator guarantees a replicate matches its target, so this is the set of conditions
+        tried.
         """
         return [arm for arm in self.arms if not arm.replicate_of]
 
     @property
     def is_plate(self) -> bool:
-        """Whether the plate checks apply — **either** the shape or the ask says this is one.
+        """Whether the plate checks apply: **either** the shape or the ask says this is one.
 
-        The union is deliberate, because the two disagree in opposite directions and each is the
-        only witness to its own case. Reading `request.mode` alone let a 96-arm design whose intake
-        still said `single` switch off the plate-fits blocker, the controls warning and the coverage
-        note together. Reading the shape alone drops a one-arm design whose chemist *said* screen —
-        the first round of one, which needs its control exactly as a full plate does.
-
-        So a design is exempt only when nothing about it claims to be a plate.
+        The union is deliberate: a many-arm design with a stale `single` ask and a one-arm design
+        whose
+        chemist said `screen` both need plate checks. Exempt only when nothing claims to be a plate.
         """
         return not self.is_single_experiment or self.request.mode != "single"
 
@@ -681,15 +556,8 @@ class ExperimentDesign(BaseModel):
     def setpoints_for(self, arm: ProtocolArm) -> Setpoints:
         """The arm's own setpoints over the shared body's, **field by field**.
 
-        The docstring always said "falling back to the shared body's"; the code was
-        `arm.setpoints or self.base.setpoints`, which falls back only when the arm states *nothing*.
-        An arm overriding one field therefore lost every other — measured, an arm that set only
-        `temperature_c=60` produced a run-sheet row with no reaction time and no solvent, beside
-        rows that had both, with every blocker passing.
-
-        A field counts as stated when it is not the model's default: `None` for the numbers, `""`
-        for the two strings. That is what `ProtocolArm.setpoints`'s own comment means by "only what
-        differs from `ProtocolBody`" — an arm says the fields it changes, and inherits the rest.
+        A field is stated when it is not the default (`None` for numbers, `""` for strings); an arm
+        states what it changes and inherits the rest.
         """
         if arm.setpoints is None:
             return self.base.setpoints
@@ -701,11 +569,9 @@ class ExperimentDesign(BaseModel):
         return self.base.setpoints.model_copy(update=stated)
 
 
-#: What a stored revision *is*. `request` holds only a structured ask (the intake, before any
-#: protocol exists); `protocol` holds a whole design. Two kinds in one table because they are the
-#: same document growing, and a reader wants the history in one list. It is derived from the
-#: document by `store.revision_kind` rather than declared — see that function for what a caller
-#: declaring it separately cost.
+#: What a stored revision is: `request` holds only a structured ask, `protocol` a whole design.
+#: One table because they are the same document growing. Derived by `store.revision_kind`, never
+#: declared by a caller.
 RevisionKind = Literal["request", "protocol"]
 
 
@@ -775,25 +641,11 @@ class DesignSummary(BaseModel):
 def design_id_for(request: ExperimentRequest, *, owner: str, salt: str = "") -> str:
     """The id a new design is filed under.
 
-    Derived from the ask rather than random, so the same request restructured in the same session
-    reaches the same design instead of forking one. `salt` is how a chemist deliberately opens a
-    second design for the same ask — a `campaign_id_for`-shaped decision, taken by the caller.
-
-    **`owner` is part of the identity, and leaving it out was a cross-chemist collision.** The hash
-    read the title, goal, transformation and mode and nothing about who was asking, so two chemists
-    who phrased the same ask the same way landed on one design. Measured: a second chemist, in a
-    different session with a different `oid`, restructured the ask onto the first chemist's design
-    id, demoted her `approved` header back to `draft`, and replaced her two-arm plate with his own —
-    while `status_history` still recorded her sign-off at revision 2. Two people wanting the same
-    experiment is the *normal* case in one group, not an edge one.
-
-    Owner-scoping and the ownership gate on the write path are two halves of one fix and neither
-    works alone: without this, a second chemist silently overwrites the first; without the gate, an
-    explicit `design_id` still reaches somebody else's design. With both, the second chemist gets
-    their own design and nobody can write to a design they do not own.
-
-    A required keyword rather than a defaulted one, deliberately: an id that silently omits the
-    owner is the defect itself, so a caller that forgets it must not compile.
+    Derived from the ask and the owner, so the same request restructured in the same session reaches
+    the same design, while two chemists phrasing the same ask get separate designs. Together with
+    the write path's ownership gate, nobody can overwrite another's design. `salt` deliberately
+    opens a second design for the same ask. `owner` is required keyword-only so a caller cannot
+    omit it.
     """
     identity = {
         "title": request.title.strip().lower(),

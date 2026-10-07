@@ -1,32 +1,12 @@
 """Postgres backing for the durable job record (`infra/sql/023_job_records.sql`, D-157).
 
-Kept separate from `chemclaw.durable.job_record` for the reason `chemclaw.agent.audit_store` is
-kept separate from `chemclaw.agent.audit`: the module the workflow and the agent tools import
-carries no database dependency, so a deployment (or a test, or a connector worker) that runs
-without Postgres never pulls psycopg for a store it will not use.
+Separate from `chemclaw.durable.job_record` so processes without Postgres never import psycopg.
 
-Writes are an **upsert on `job_id`**, not an append. The id is the deterministic idempotency key
-(`connectors/jobs.py::job_workflow_id`), a Temporal activity is at-least-once, and a re-run of a
-failed job legitimately produces a second, better result for the same id — so "the record of this
-run" must have exactly one row in all three cases.
-
-**Two upserts, because a record with nothing to say about a result must not say it loudly enough
-to erase one.** A completed record refreshes every mutable column; so does a failed one that
-carries a result of its own (a template run keeps the steps that did complete). A failed record
-that leaves all five result columns empty refreshes only the rest, and never clears them.
-Measured on 2026-08-28 against a live database: writing a failure record over the completed row
-for one job id turned
-`{'summary': 'dG = -12.3 kJ/mol', 'result': {'dg': -12.3}, 'note_id': 'note-1',
-'calc_refs': ['k1', 'k2'], 'state': 'completed'}` into
-`{'summary': '', 'result': {}, 'note_id': '', 'calc_refs': [], 'state': 'failed'}` — the scientific
-result of a finished run destroyed by the bookkeeping of the step that failed after it. That is
-reachable whenever the record activity commits and then overruns its own timeout (`record_job`'s
-docstring names exactly that case), because the workflow then believes no row was written.
-
-The asymmetry is the point rather than an omission: a record that is the whole account of a run
-replaces the row entire, which is what lets a re-run of a failed job supersede it. A record that
-has nothing to say about a result says nothing, instead of saying nothing loudly enough to erase
-one. Which of the two a failure is depends on the failure — see `_says_nothing_about_a_result`.
+Writes are an upsert on `job_id` (the deterministic idempotency key), so retries and re-runs of
+one id keep exactly one row describing the latest run. Two upserts: a record carrying a result
+replaces the row entire; a record that leaves every result column empty (a failure after a
+completed write) refreshes only the rest and never clears a stored result. See
+`_says_nothing_about_a_result`.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -45,13 +25,8 @@ _COLUMNS = (
     "payload_kind, state, failure_reason"
 )
 
-# Every column a second write for the same job id may refresh, **including the attribution**.
-# Updating the reason and the result while keeping the first run's `requested_by` was a row that
-# contradicted itself: a second execution under this id is a different person asking a differently-
-# worded question (the id is reused when Temporal has expired the first execution, which is exactly
-# the horizon this table exists for), and half-updating left run 2's reason beside run 1's name —
-# the worst possible answer for the field an audit joins on. The row describes the latest run,
-# whole.
+# Every column a second write for the same job id may refresh, including the attribution, so the
+# row describes the latest run whole rather than mixing two runs' reasons and requesters.
 _MUTABLE = (
     "rationale",
     "requested_by",
@@ -70,27 +45,17 @@ _MUTABLE = (
     "failure_reason",
 )
 
-# The five columns that say what a run *produced*. Named once and subtracted, so a new result
-# column is protected by being added here instead of by remembering to omit it from a second SQL
-# literal.
+# The five columns that say what a run produced. Named once and subtracted, so a new result column
+# is protected by adding it here.
 _RESULT_COLUMNS = ("summary", "result", "note_id", "calc_refs", "payload_kind")
 
 
 def _says_nothing_about_a_result(record: JobRecord) -> bool:
     """Whether this record leaves every result column empty, and so must not clear one.
 
-    **The property is the record's, not its state's, and reading it as the state's reopened the
-    self-contradicting row `_MUTABLE` above was fixed to close.** `connector_job.failed_job_record`
-    fills none of these — a failure has no envelope to take one from — which is where the
-    protection below comes from. `template_job.failed_template_record` fills `result` and
-    `payload_kind`, deliberately and with its own docstring saying why: "a five-step procedure that
-    died at step four ran four real steps, and discarding them would lose the work." Choosing the
-    narrow upsert on `state == "failed"` refused to write those, and `TemplateWorkflow` launches
-    under `ALLOW_DUPLICATE_FAILED_ONLY`, so a re-run of a failed template is the ordinary case.
-    Measured against the live database: a second failed run kept the *first* run's step results
-    beside the second run's payload, actor and failing step — a row saying bob failed at step `a`
-    while carrying results for steps `a` and `b` that his run never produced, read back by
-    `find_past_jobs`, `operations.job_activity` and `evidence_pack.assemble` alike.
+    A property of the record, not of its state: a failed template run legitimately carries the
+    results of the steps that completed, and must replace the previous run's results rather than
+    sit beside them.
     """
     return not (
         record.summary or record.result or record.note_id or record.calc_refs or record.payload_kind
@@ -111,53 +76,22 @@ def _upsert(columns: tuple[str, ...]) -> str:
 
 
 _UPSERT = _upsert(_MUTABLE)
-# Named for what it does rather than for who calls it: it was `_FAIL_UPSERT`, and reading
-# "the failure statement" as "the statement every failure takes" is what put a template
-# run's own steps behind it.
+# Named for what it does: keep the stored result columns.
 _KEEP_RESULT_UPSERT = _upsert(tuple(c for c in _MUTABLE if c not in _RESULT_COLUMNS))
 
 _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = %s"
 
-# The listing projection: everything a chemist needs to recognise a run, and none of the result
-# blob (see `JobRecordSummary`). Both filters are self-disabling — an empty term matches every row
-# through the `%s = ''` arm — so "any connector, any text" needs no second statement, and the
-# self-disabling arm costs nothing: `core/db.py` connects with `plan_cache_mode=force_custom_plan`,
-# so the planner sees the bound value, folds `%s = ''` away and is free to use an index on the
-# `ILIKE` that survives. Measured, that is exactly what it does.
+# The listing projection: everything needed to recognise a run, none of the result blob. Both
+# filters self-disable through the `%s = ''` arm; with `plan_cache_mode=force_custom_plan` the
+# planner folds it away.
 #
-# **ILIKE, still — but the sentence that used to follow it was a claim about a commit, and it was
-# false.** It read: "this table holds one row per durable run (thousands, not millions) … a search
-# index would be machinery to maintain for a scan the database does in milliseconds." At 200
-# chemists doing ~5 durable jobs a day that is ~365k rows a year, and a leading wildcard is
-# unindexable by a btree, so the scan the sentence called milliseconds is the **whole table** —
-# measured at 500 000 rows, 1 036 ms and 19 920 buffers for a term that matches nothing, holding
-# one of `pg_pool_max_size` connections for the duration, from a tool the *model* calls
-# (`search_job_records` in `src/chemclaw/agent/durable_tools.py`). A term that matches is fast
-# for a reason that
-# hides this: the `completed_at` index lets the scan stop at the first page of hits, so every test,
-# demo and eyeball sees 0.2 ms. A miss is what an agent searching for a phrase it invented
-# produces.
+# `ILIKE` with a leading wildcard is served by the `gin_trgm_ops` indexes from migration `081`,
+# which keep substring semantics (a `tsvector` would change what matches). Without them a
+# non-matching term scans the whole never-pruned table.
 #
-# Migration `081` adds `gin_trgm_ops` indexes on the three searched columns, which is why the
-# statement below is unchanged: trigrams accelerate this *same* predicate rather than replacing it,
-# so the rows returned are identical (1 036 ms -> 1.09 ms on the miss, 950x). A `tsvector` — the
-# other thing that removes the scan — would have changed what the tool matches, from the substring
-# search its docstring promises to stems and boolean widening, and `core/fulltext.py` exists to
-# keep *that* rule identical across the two hybrid indexes rather than to be a second answer here.
-#
-# **The keyset and the tiebreak are one change, not two.** The order was `completed_at DESC` alone,
-# which is not a total order: `completed_at` is the database's own `now()` and a batch of runs
-# recorded inside one transaction shares it, so two pages of the same listing could repeat a row
-# and skip another. `job_id` is the primary key, so ordering by the pair is total, and the pair is
-# what the anchor below compares against.
-#
-# **The anchor is a `job_id`, and there is nothing to decode.** `GET /sessions` mints an opaque
-# base64 cursor because its sort key (last activity + id) is not otherwise on the row; here the
-# whole key is derivable from a row the caller already holds, so the token is that row's id and the
-# subquery reads its position. That also survives the ordering gaining a third component, which a
-# spelled-out cursor does not. It relies on the anchor row still existing, which is a property this
-# table has and `session_messages` does not: `job_records` is never pruned
-# (`durable/retention.py`), by decision.
+# Ordered by `(completed_at, job_id)`, a total order, so pages neither repeat nor skip rows. The
+# keyset anchor is a `job_id` whose position the subquery reads; safe because `job_records` is
+# never pruned.
 _SEARCH = """
     SELECT job_id, connector, job, rationale, summary, note_id, plan_step, state, completed_at
     FROM job_records
@@ -184,10 +118,9 @@ class PostgresJobRecordSink:
     async def record(self, record: JobRecord) -> None:
         """Insert the record, refreshing what this particular record is entitled to refresh.
 
-        A record carrying a result replaces the row entire; a failure that carries none sets how
-        the run ended and leaves the result columns alone. See the module docstring for the
-        measurement behind the split, and `_says_nothing_about_a_result` for why the test is the
-        record rather than its state.
+        A record carrying a result replaces the row entire; one carrying none sets how the run ended
+        and
+        leaves the result columns alone (see `_says_nothing_about_a_result`).
         """
         async with _connect() as conn:
             await conn.execute(
@@ -221,18 +154,11 @@ class PostgresJobRecordSink:
 async def read_job_record(job_id: str) -> JobRecord | None:
     """The full record for one job, or None when the table has no row for it.
 
-    **Built by name, not by position.** This was nineteen `row[n]` subscripts restating the order of
-    `_SELECT_ONE` a second time in Python, on a projection of nine adjacent `TEXT` columns — so
-    editing the SELECT list swapped fields silently, type-checked, and produced a record that reads
-    as a record. `class_row` passes each selected column as a keyword argument, which makes the
-    column list and the model one declaration instead of two that agree by inspection.
+    Built by column name via `class_row`, so the SELECT list and the model are one declaration.
 
     Raises:
-        pydantic.ValidationError: The SELECT and the model no longer describe the same row —
-            `JobRecord` is `extra="forbid"`, so a column that is not a field of it is an error at
-            the read rather than a value silently landing in the wrong field. Deliberately not
-            caught: every caller of this is a tool or a route that reports an exception, and there
-            is no answer to give instead of the record.
+        pydantic.ValidationError: The SELECT and the model no longer describe the same row
+            (`JobRecord` is `extra="forbid"`). Deliberately not caught.
     """
     async with _connect() as conn:
         async with conn.cursor(row_factory=class_row(JobRecord)) as cursor:
@@ -245,13 +171,8 @@ async def read_job_record_summaries(
 ) -> JobRecordSearch:
     """Past runs matching the (optional) text and connector filters, newest first.
 
-    **One row beyond `limit` is fetched and dropped**, which is what makes `hits_truncated`
-    evidence rather than a guess. Inferring it from a full page — the cheaper answer, and the one
-    `GET /sessions` takes for its own listing — reports a corpus of exactly `limit` matches as
-    truncated, and this flag is read by the model as "an older run may exist": a false positive on
-    the one tool whose job is to say whether a run already happened costs a duplicate expensive
-    run, which is the whole thing being avoided. One extra row on a query already bounded by an
-    index is the cheaper side of that trade.
+    One row beyond `limit` is fetched and dropped so `hits_truncated` is exact: a false "an older
+    run may exist" could cost a duplicate expensive run.
 
     Args:
         text: Substring to look for in the reason, the summary or the job name; empty matches all.

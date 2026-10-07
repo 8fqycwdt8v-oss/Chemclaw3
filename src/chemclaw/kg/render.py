@@ -1,28 +1,13 @@
-r"""Render a Note back to Markdown-with-frontmatter (plan step 2.6).
+r"""Render a Note back to Markdown-with-frontmatter, the inverse of `kg.note.parse_note`.
 
-The inverse of `chemclaw.kg.note.parse_note`: turns a validated `Note` into the exact file
-form the graph stores, so the write path (`kg/record.py`) and the read path share one
-serialization.
+The write path (`kg/record.py`) and the read path share this one serialization.
+`parse_note(write(render_note(n))) == n` up to two body normalisations: `python-frontmatter` strips
+surrounding whitespace, and `Path.read_text` translates line endings. Every frontmatter field
+round-trips exactly.
 
-**Round-trips: `parse_note(write(render_note(n))) == n`, up to two normalisations of the body**,
-both measured by generating notes rather than assumed (`tests/test_properties_core.py`). The
-equation used to be written here unqualified and is not one:
-
-- `python-frontmatter` runs `str.strip()` on the content it parses — so a body of `" "` returns
-  as `""`, and equally a leading tab or a blank line before a fenced block is gone on the way
-  back. The rule is the strip, not the empty-body special case it was first noticed as.
-- `Path.read_text` translates line endings, so a body containing `\r` returns with `\n`.
-
-Neither distinction survives Markdown rendering, so neither is worth defending — but a note whose
-body is *only* whitespace comes back empty, and a docstring that promised equality would have sent
-whoever hit that looking for a schema bug. Every frontmatter field round-trips exactly.
-
-**Empty-default fields are rendered, deliberately.** `render_note` dumps `exclude_none` but not
-`exclude_defaults`, so every note carries `calc_refs: []`, `tags: []`, `created_by: human` and so
-on. Byte-stability of the rendering is load-bearing: the writer stages the rendered bytes and
-treats "nothing staged" as "no change, nothing to commit", so tightening the dump would make every
-re-write of every existing note a spurious commit. Changing the shape is a corpus migration, not
-a rendering tweak.
+Empty-default fields are rendered on purpose (`exclude_none`, not `exclude_defaults`): the writer
+treats "nothing staged" as "no change", so the rendering must stay byte-stable; changing its shape
+is a corpus migration.
 """
 
 import frontmatter
@@ -33,8 +18,7 @@ from chemclaw.kg.note import Note
 def render_note(note: Note) -> str:
     """Serialize a note to a Markdown string with a YAML frontmatter header.
 
-    Null fields are omitted to keep the frontmatter minimal; the body follows the
-    header. `valid_from`/`valid_to` serialize as ISO dates via YAML.
+    Null fields are omitted; `valid_from`/`valid_to` serialize as ISO dates.
     """
     metadata = note.model_dump(exclude={"body"}, exclude_none=True, mode="python")
     post = frontmatter.Post(note.body, **metadata)

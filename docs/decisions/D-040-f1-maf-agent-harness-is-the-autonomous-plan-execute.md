@@ -1,5 +1,7 @@
 # D-040 — F1: MAF Agent Harness is the autonomous plan/execute backbone (foundation D-020)
 
+**Superseded-by:** [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
+
 **Relation to D-038.** This re-integrates and supersedes the earlier harness-adoption decision
 (D-038): the same `create_harness_agent` wiring, now promoted from an *optional* backbone to the
 foundation's autonomous plan/execute path and refactored into `_build_harness_agent`/

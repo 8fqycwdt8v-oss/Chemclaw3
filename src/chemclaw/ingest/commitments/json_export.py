@@ -1,14 +1,8 @@
 """A commitments half over a JSON export on disk — the shape a portfolio tool's extract takes.
 
-The counterpart of `ingest/eln/json_adapter.py`, and here for the same two reasons: it is the
-integration a site can stand up without a vendor client, and it is what makes the seam provable end
-to end with no network. A portfolio system's scheduled extract is a file on a share; this reads it.
-
-**It infers nothing.** Every field is taken as the export stated it, a row missing a required field
-is *rejected and counted* rather than repaired, and no date is derived. That is the same discipline
-`record_from_ord_reaction` follows, and it is what lets a mirrored row be data rather than a claim
-(`D-2026-08-25-an-eln-transcription-is-data-not-a-claim`) — a mirror that guessed a due date would
-be asserting a plan, which is the one thing this tier must not do.
+Needs no vendor client and makes the seam testable end to end with no network. It infers
+nothing: fields are taken as the export states them, an invalid row is rejected and counted
+rather than repaired, and no date is derived, so a mirrored row is data rather than a claim.
 """
 
 import asyncio
@@ -29,25 +23,14 @@ logger = logging.getLogger(__name__)
 class JsonCommitmentExport:
     """Read commitments from a directory of JSON files, or from one file.
 
-    Each file holds either a list of commitment objects or an object with a `commitments` list, so
-    both shapes an export tool produces are readable without a per-site flag.
+    Each file holds either a list of commitment objects or an object with a `commitments` list.
     """
 
-    #: The protocol default, and the instance attribute below is what actually answers.
+    #: The protocol default; the instance attribute set in `__init__` is what answers.
     #:
-    #: `False` even though `fetch_commitments` does return the whole export every time, because the
-    #: two are not the same claim: `snapshot` licenses a *destructive* sweep that deletes every
-    #: commitment this pass did not see, so it is the operator's statement that the export is
-    #: complete rather than this class's statement that it read all of it. A directory this adapter
-    #: is pointed at mid-write, or one an export tool half-filled, returns "everything" and means
-    #: nothing.
-    #:
-    #: **So it is the manifest's to set, not this class's to decide.** Which of those a given
-    #: site's export is cannot be known here — it is a property of the tool writing the directory
-    #: and of whether it writes atomically. A `snapshot: true` in that site's `datasource.yaml` is
-    #: the operator saying so, and it costs no core edit: `registry._build_half` calls
-    #: `factory(**manifest.config)`, so the constructor's signature *is* the config schema and
-    #: `make datasource-validate` binds the key against it.
+    #: `False` even though every call reads the whole export: `snapshot` licenses a destructive
+    #: sweep, so it is the operator's statement (in the site's `datasource.yaml`) that the export
+    #: is written completely and atomically, not this class's observation that it read everything.
     snapshot: bool = False
 
     def __init__(self, name: str, path: str, *, snapshot: bool = False) -> None:
@@ -57,8 +40,7 @@ class JsonCommitmentExport:
             name: The data source's name, as the manifest declares it.
             path: The file or directory the export lands in.
             snapshot: Whether this export is complete every pass, which licenses the destructive
-                sweep in `durable/commitment_sync.py`. Default `False`, so a deployment that does
-                not say otherwise keeps today's behaviour exactly.
+                sweep in `durable/commitment_sync.py`.
         """
         self.name = name
         self.path = Path(path)
@@ -67,18 +49,10 @@ class JsonCommitmentExport:
     async def fetch_commitments(self, since: datetime | None) -> list[Commitment]:
         """Every commitment in the export.
 
-        `since` is accepted and **deliberately ignored**, which the sync is built for: a portfolio
-        extract is a snapshot rather than a change feed, and filtering one by a watermark this side
-        would drop rows whose state moved without their file being rewritten. The upsert is keyed on
-        `(source, external_id)`, so re-reading the whole snapshot converges rather than duplicating.
-
-        **The read runs off the event loop.** It is awaited from an activity on the background
-        worker, whose single event loop also carries that activity's Temporal heartbeat and
-        `/healthz`, `/readyz` and `/metrics` (`core/worker_http.py`), and the glob, every
-        `read_text` and every `json.loads` ran as one uninterrupted block across all of them —
-        measured 2026-09-06 with a 1 ms heartbeat on the same loop, **595.1 ms** for a
-        10,000-file export, the worst gap equal to the whole scan. Same rule and same fix as the
-        two ELN adapters this class is the counterpart of.
+        `since` is deliberately ignored: the export is a snapshot, and filtering by a watermark
+        would drop rows whose state moved without their file being rewritten. The read runs in a
+        thread because the worker's event loop also carries Temporal heartbeats and the health
+        endpoints.
         """
         return await asyncio.to_thread(self._read)
 
@@ -86,23 +60,12 @@ class JsonCommitmentExport:
         """The whole blocking read, in one synchronous function so one thread can hold it.
 
         Returns:
-            Every commitment the export holds, refusals counted and skipped as below.
+            Every commitment the export holds, refusals counted and skipped.
         """
         if not self.path.exists():
-            # **Said out loud, because the alternative is a truthful-looking empty portfolio.** A
-            # mistyped `CHEMCLAW_COMMITMENT_EXPORT_DIR` or a mount that failed returns no files, the
-            # sync reports success with nothing mirrored, `mirror_freshness` stays NULL, and
-            # `review_commitments` presents that to a project leader as "nothing was ever mirrored".
-            # Creating the shipped default directory does not help a deployment that points the knob
-            # somewhere else, which is the only reason the knob exists.
-            #
-            # Through `degraded()` rather than a bare `logger.warning`, for the reason
-            # `deliver/message.py` states about the sibling it was extracted from: a WARNING with no
-            # counter is invisible to everything except a person already reading the log of the pod
-            # they already suspect. This failure lasts as long as the misconfiguration and its whole
-            # symptom is *silence*, so `chemclaw_degraded_total{subsystem="commitment_mirror"}` is
-            # the only place it can be seen from outside. `exc_info=False` because this is a
-            # configuration fact rather than a caught exception.
+            # A missing path otherwise looks like a successful sync of an empty portfolio, so it is
+            # counted on `chemclaw_degraded_total{subsystem="commitment_mirror"}` rather than only
+            # logged. `exc_info=False` because this is a configuration fact, not a caught exception.
             degraded(
                 logger,
                 "commitment_mirror",
@@ -115,17 +78,9 @@ class JsonCommitmentExport:
             return []
         files = sorted(self.path.glob("*.json")) if self.path.is_dir() else [self.path]
         if not files:
-            # **The same silence, one step later, and the first version of this guard missed it.**
-            # A directory that exists and holds nothing this reads — the wrong subdirectory, a mount
-            # that came up empty, an export written as `.jsonl` — produces the identical symptom the
-            # missing-path branch above was added to end: zero commitments, a successful sync,
-            # `mirror_freshness` NULL, and a project leader told the portfolio is empty. The
-            # existence check alone covers only the mistyped half of a mistyped knob.
-            #
-            # Same `commitment_mirror` subsystem as the branch above, deliberately: both mean
-            # "nothing was mirrored and the pointer is why", which is one alert and one operator
-            # action. The *content* faults below are a different subsystem, so that "found nothing"
-            # and "found something and could not read it" are distinguishable from the metric alone.
+            # An existing directory with nothing readable in it has the same symptom, so it is the
+            # same `commitment_mirror` alert. Content faults below use a separate subsystem so
+            # "found nothing" and "found something unreadable" are distinguishable from the metric.
             degraded(
                 logger,
                 "commitment_mirror",
@@ -142,12 +97,8 @@ class JsonCommitmentExport:
         for file in files:
             if not file.is_file():
                 continue
-            # **Reject-and-continue applies to a *file*, not only to a row.** It was written for
-            # the row and the file was left to raise: a truncated export (a partial write, a failed
-            # extract) or one containing `null` aborted `fetch_commitments` before every file
-            # sorting after it was read, the activity failed, the cursor never advanced, and the
-            # mirror silently froze on last week's snapshot while `review_commitments` kept
-            # answering from it. One bad file must cost that file.
+            # Reject-and-continue applies per file: one truncated or `null` file must not abort the
+            # pass and freeze the mirror on the previous snapshot.
             try:
                 payload = json.loads(file.read_text(encoding="utf-8"))
                 rows = payload if isinstance(payload, list) else payload.get("commitments", [])
@@ -173,14 +124,8 @@ class JsonCommitmentExport:
                     # Counted and skipped, the reject-and-continue rule the ELN ingest uses: one
                     # malformed row in a thousand-row export must not cost the other 999.
                     rejected += 1
-        # **Both totals are counted, not only logged, and for the reason `degraded()` exists.** A
-        # `logger.warning` with no series behind it is visible to a person already reading the log
-        # of the pod they already suspect — and nobody suspects a mirror that reports success. These
-        # are the two ways an export can be *present* and still not become a portfolio: the files
-        # would not parse, or the rows would not validate. Neither is a missing knob, so neither
-        # belongs on `commitment_mirror`: `commitment_export` is the content's own subsystem, which
-        # is what lets an operator read "found nothing because the export is empty" apart from
-        # "found nothing because none of it parsed" off the metric rather than off the prose.
+        # Unparseable files and invalid rows are counted under `commitment_export`, the content's
+        # own subsystem, since a mirror that reports success is not one anybody reads the log of.
         if unreadable:
             degraded(
                 logger,
@@ -212,15 +157,9 @@ def json_commitment_export(
 ) -> JsonCommitmentExport:
     """Build a `JsonCommitmentExport` — the `module:callable` a manifest names.
 
-    `path` defaults to the configured `commitment_export_dir` rather than being required in the
-    manifest, the same way `eln-json` leaves its directory to `eln_export_dir`: a path in a manifest
-    is CWD-relative and a deployment cannot override it without editing a shipped file.
-
-    `snapshot` goes the other way and is deliberately *not* a setting: it is a statement about one
-    site's export tool — whether it writes the directory completely and atomically — so it belongs
-    beside that site's source rather than in a process-wide field two sources would share. It
-    defaults `False`, so the shipped `commitments-json` manifest needs no `config:` block and
-    nothing changes for a deployment that does not ask for the sweep.
+    `path` defaults to `commitment_export_dir` so a deployment can move it without editing a shipped
+    manifest. `snapshot` is not a setting because it describes one site's export tool, so it belongs
+    in that source's manifest `config:`.
 
     Args:
         name: The data source's name, as the manifest declares it.

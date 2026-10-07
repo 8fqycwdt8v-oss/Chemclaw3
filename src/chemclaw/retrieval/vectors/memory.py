@@ -1,13 +1,8 @@
 """The in-memory reference `VectorStore` — exact cosine, no server, no client package.
 
-What every test of the composition above runs against, and the definition of what the adapters are
-expected to agree with. `InMemoryDocumentIndex` plays the same role for the catalogue: the ranking
-is computed in Python so a test exercises the real loop rather than a mock agreeing with itself.
-
-Exact rather than approximate, which is the one way it differs from any real backend: a production
-store answers from an ANN index (HNSW in pgvector and in Qdrant alike) and may miss a true neighbour
-at high recall settings. The *ordering* is the same; the recall is not, and that difference is a
-property of ANN search rather than of any adapter here.
+What tests of the composition run against and what the adapters must agree with. Exact rather than
+approximate: real stores answer from an ANN index and may miss a neighbour; ordering is the same,
+recall is not.
 """
 
 import math
@@ -18,10 +13,8 @@ from chemclaw.retrieval.vectors.base import VectorMatch, VectorPoint
 def _cosine(a: list[float], b: list[float]) -> float:
     """Cosine similarity of two equal-length vectors; 0.0 if either is a zero vector.
 
-    Clamped to [0, 1] for the reason `ingest.documents.index._cosine` documents at length: the
-    denominator is two square roots and rounds below the numerator, so an *identical* vector scores
-    fractionally above 1.0 about half the time, and `VectorMatch.score` is bounded `le=1.0`. A
-    chemist pasting a sentence back is an exact match, and it must not raise.
+    Clamped to [0, 1]: rounding can put an identical vector fractionally above 1.0, which
+    `VectorMatch.score` rejects.
     """
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
@@ -48,9 +41,7 @@ class InMemoryVectorStore:
         groups: set[str] | None = None,
     ) -> list[VectorMatch]:
         """Rank by exact cosine within the scope; drop non-positive similarity, best first."""
-        # A zero query vector is cosine 0 against everything — no hit, and never an ordering over
-        # NaN distances. The same short-circuit both Postgres backends make before touching the
-        # index.
+        # A zero query vector is cosine 0 against everything: no hit, and no ordering over NaN.
         if not any(embedding):
             return []
         matches = [

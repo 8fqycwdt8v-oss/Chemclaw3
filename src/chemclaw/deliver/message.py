@@ -1,17 +1,8 @@
 """What leaves: a message addressed to a person, and the redaction it passes through first.
 
-**Every free-text field is redacted on the way out, and there are three of them, not two.** That
-sentence read "every field is bounded except two… `subject` and `body` are the only free text a
-channel carries" while `redacted()` 140 lines below already said otherwise in as many words —
-"every free-text field, `recipient` included. It was skipped, and it is free text by construction"
-— and `_redacted_attachment` scrubs `Attachment.content` besides. `recipient` also carries
-`min_length=1` with no `max_length`, so it is not bounded in the sense that sentence used either.
-A delivered message is the one thing in this system that reaches a destination the deployment does
-not fully control — an inbox, a chat room, a mounted share. `core/logging.py` already resolves
-every connector bearer-token env-var name so a
-credential can be scrubbed from a log line; the same filter runs here, because a message assembled
-from a tool result is exactly as capable of carrying one as a log line is, and a log line at least
-stays inside the cluster.
+A delivered message reaches a destination the deployment does not fully control (an inbox, a
+chat room, a mounted share), so every free-text field — `recipient`, `subject`, `body` and
+attachment content — is scrubbed of secrets, including connector bearer tokens, on the way out.
 """
 
 import base64
@@ -31,26 +22,17 @@ logger = logging.getLogger(__name__)
 def _connector_secret_envs() -> tuple[str, ...]:
     """The connector bearer-token variable names, or `()` if they cannot be resolved.
 
-    Imported lazily and shared with `core.logging.SecretRedactingFilter` through
-    `connectors.registry.bearer_token_env_names`, so the log scrub and the delivery scrub cannot
-    cover different sets. This file used to claim they were already the same ("the same filter runs
-    here") — they were not: `redact_secrets` reaches connector tokens only through its
-    `extra_secrets` argument, which nothing here passed. A tool error quoting its own
-    `Authorization` header was scrubbed from the log line and shipped verbatim to the webhook host.
-
-    Failure degrades to redacting nothing *extra* rather than blocking a delivery, matching the
-    filter — but unlike the filter this is on a path that leaves the cluster, so the caller logs it.
+    Shared with `core.logging.SecretRedactingFilter` through
+    `connectors.registry.bearer_token_env_names`, so the log scrub and the delivery scrub cover the
+    same set. Failure degrades to redacting nothing extra rather than blocking a delivery, and is
+    reported because this path leaves the cluster.
     """
     try:
         from chemclaw.connectors.registry import bearer_token_env_names
 
         return bearer_token_env_names()
     except Exception:
-        # `degraded()` rather than a bare `logger.error`, matching the sibling this was extracted
-        # from: it increments `chemclaw_degraded_total{subsystem}`, which is alerted and
-        # dashboarded. A bare log line here would have made this the *only* security degradation in
-        # the tree with no counter — on the half that leaves the cluster, which this module's own
-        # docstring calls the more consequential of the two.
+        # `degraded()` counts `chemclaw_degraded_total{subsystem}`, which is alerted.
         degraded(
             logger,
             "deliver_redaction",
@@ -72,26 +54,17 @@ def _decode(value: Any) -> bytes:
     raise ValueError(f"attachment content must be bytes or base64 text, not {type(value).__name__}")
 
 
-#: An attachment's bytes, base64 on the wire in **both** directions.
-#:
-#: Not a bare `bytes`, and the reason is this repository's own replay break. `OutboundMessage`
-#: crosses a Temporal activity boundary, so the encoding is part of a durable payload rather than
-#: an implementation detail — and pydantic's default for `bytes` is a utf-8 *decode*, which raises
-#: on the first byte outside it and silently rewrites the ones inside. A seam that shipped text-only
-#: and widened later would be changing the wire under open histories, which is exactly the class of
-#: defect `D-2026-09-14-the-seam-shipped-a-replay-break-and-the-adr-said-nothing-changes` records.
-#: Base64 costs 33% on a webhook POST; measured, a full 96-well run sheet is ~6 kB, so the cost is
-#: two kilobytes on the largest artefact this system currently produces.
+# An attachment's bytes, base64 on the wire in both directions. The message crosses a Temporal
+# activity boundary, and pydantic's default `bytes` handling (utf-8 decode) would corrupt or
+# reject binary content in a durable payload.
 AttachmentBytes = Annotated[
     bytes,
     PlainValidator(_decode),
     PlainSerializer(lambda value: base64.b64encode(value).decode("ascii"), return_type=str),
 ]
 
-#: What a filename may be. A driver puts this on a filesystem or hands it to a receiver that will,
-#: so the same argument as `Message.kind`: the type is the bound, and prose is not. No separator,
-#: no `..`, no leading dot — an attachment cannot escape an outbox, hide itself, or overwrite a
-#: message file it sits beside.
+# What a filename may be: no separator, no `..`, no leading dot, so an attachment cannot escape
+# an outbox, hide itself, or overwrite the message file it sits beside.
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -127,61 +100,23 @@ class Message(BaseModel):
     recipient: str = Field(min_length=1)
     subject: str = Field(min_length=1)
     body: str = ""
-    #: What produced this, so a delivery can be joined back to the run that caused it.
-    #:
-    #: **A `Literal` rather than a documented convention, because the file driver builds a filename
-    #: out of it.** This said "a bounded vocabulary" in prose and was a bare `str`, while
-    #: `FileDeliveryDriver` does `self.directory / f"{message.kind}-{identity}{self.suffix}"` — and
-    #: an absolute or `../`-bearing value escapes the outbox entirely, with `mkdir(parents=True)`
-    #: creating whatever it traverses to. Inert while the single caller passes a literal, and an
-    #: arbitrary file write with the pod's uid the moment a `kind` is ever derived from a payload.
-    #: The type is the bound; the prose was not.
-    #:
-    #: `work-check-in` is the fifth, and it was the first value to be *declared elsewhere and
-    #: delivered as something else*: `durable/check_in.py` names the kind for its mailbox and then
-    #: built its outbound copy without a `kind=` at all, so every check-in travelled as a `digest` —
-    #: into the digest's own outbox file, and into the webhook `Idempotency-Key` as a digest. A
-    #: reader cannot tell "new knowledge matched your query" from "your own work is still blocked"
-    #: if both arrive under one name, which is the distinction that feature exists for.
+    # What produced this, so a delivery can be joined back to the run that caused it. A `Literal`
+    # because the file driver builds a filename from it; an arbitrary string could escape the
+    # outbox.
     kind: Literal["digest", "awaiting", "job-result", "report", "work-check-in"] = "digest"
     #: The turn or job this came from, for the same join. Never rendered to the recipient.
     correlation_id: str = ""
-    #: The files this message carries. **Bounded, because a delivery leaves the cluster**: a driver
-    #: writes them to a share or POSTs them, and an unbounded list is an unbounded write with the
-    #: pod's uid at a destination this deployment does not fully control. `body` stays the message
-    #: and an attachment is the artefact — a chemist who cannot open the graph still gets the file.
+    # The files this message carries. Bounded, because a driver writes them outside the cluster.
     attachments: list[Attachment] = Field(default_factory=list, max_length=8)
 
     def redacted(self) -> "Message":
         """This message with every configured secret scrubbed from its free text.
 
-        Applied by the registry immediately before a driver sees it, rather than by each driver:
-        a redaction every driver has to remember is a redaction the next driver forgets, and the
-        one that forgets is the one that sends outside the cluster.
-
-        **Every free-text field, `recipient` included.** It was skipped, and it is free text by
-        construction — resolving an address is the driver's job, so this model cannot constrain its
-        shape — while both shipped drivers put it exactly where the body goes: the file driver
-        writes it into the file, the webhook driver POSTs it. Today's only caller passes an actor
-        id, so nothing carries a credential there yet; the point of a seam-level scrub is that the
-        guarantee does not depend on who is calling it.
-
-        `_connector_secret_envs()` is resolved once rather than per field: it reaches
-        `connectors.registry`, and asking it three times per message would import and re-derive the
-        bundle set three times for an answer that cannot differ between two fields of one message.
-
-        **A rewritten `recipient` is logged, because scrubbing an address re-addresses a message.**
-        `redact_secrets` rewrites *structural* shapes as well as this deployment's own secret
-        values, and a routable address can be one: a Teams channel URN loses its token to the
-        `TOKEN=` pattern, a webhook URL with userinfo loses its password, a `xoxb-`-shaped address
-        is replaced whole. Keeping the scrub is right — a driver puts this field where it puts the
-        body, so the guarantee must not depend on the caller — but the failure it can cause is a
-        message delivered nowhere, and the driver reporting it can only name the address it was
-        given. `subject` and `body` are not logged on the same terms: a redaction there costs
-        words, not a destination.
-
-        The line carries the *scrubbed* address only. What tripped the pattern may be a real
-        credential, and this is the half of the redaction that leaves the cluster.
+        Applied by the registry immediately before a driver sees it, so no driver can forget it.
+        Covers `recipient` too, since drivers put it where they put the body. A rewritten
+        `recipient`
+        is logged (scrubbed form only), because scrubbing an address can re-address a message to
+        nowhere; a redaction in `subject` or `body` only costs words.
         """
         extra = _connector_secret_envs()
         recipient = redact_secrets(self.recipient, extra_secrets=extra)
@@ -205,18 +140,8 @@ class Message(BaseModel):
 def _redacted_attachment(attachment: Attachment, extra: tuple[str, ...]) -> Attachment:
     """The same scrub over an attachment's bytes, where they decode as text.
 
-    **An attachment is free text that leaves the cluster, which is the whole premise of the scrub
-    above** — and skipping it because the field is typed `bytes` would put the one field a driver
-    writes to a share *outside* the guarantee `redacted()` exists to give. The two artefacts this
-    seam carries today (a report's Markdown, a run sheet's CSV) are text and are assembled from
-    tool results, exactly as a body is.
-
-    Bytes that are not utf-8 pass through untouched rather than failing the delivery:
-    `redact_secrets` works on text, a binary attachment has no text for it to scrub, and one that
-    *raises*
-    turns the courtesy copy into the thing that fails the job. That is a stated limit rather than a
-    silent one — a credential inside a future binary artefact is not scrubbed, and the first such
-    producer is when that becomes a decision rather than a note.
+    Bytes that are not utf-8 pass through untouched rather than failing the delivery: a credential
+    inside a binary attachment is not scrubbed.
     """
     try:
         text = attachment.content.decode("utf-8")

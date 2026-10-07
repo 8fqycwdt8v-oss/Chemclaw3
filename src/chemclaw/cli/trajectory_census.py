@@ -1,31 +1,17 @@
 """Count recurring tool-call trajectories over the stored sessions.
 
-The instrument `D-2026-08-27-count-the-trajectories-before-building-the-distiller` defines: before
-anyone builds a trajectory→skill distiller, the sessions on disk have to show enough recurrence to
-distill — and "enough" is that ADR's stated trigger, not a feeling. This command produces the
-number: per-turn tool-call sequences (consecutive duplicates collapsed), the classes of length ≥ 2
-that recur across sessions, and the subset where a later session repeated a sequence an earlier
-one had already completed — the case where a distilled skill could actually have changed a later
-answer.
+The instrument `D-2026-08-27-count-the-trajectories-before-building-the-distiller` defines as the
+trigger for building a trajectory→skill distiller. Two arms:
 
-**And a second arm, over recurring failure.** The definition above measures a recurring
-*procedure* — the shape the 2026 literature that ADR names (SkillRL, SkillForge) abstracts. It is
-structurally blind to the other shape a skill can be distilled from: a failure that keeps
-happening. A recurring failure does not produce a recurring tool-call sequence, it produces
-divergent sequences that end badly, so a corpus dense in repeated mistakes reports **zero**
-recurring classes on the first arm alone
-(`D-2026-09-05-a-census-that-counts-only-success-is-blind-to-half-the-signal`). The second arm
-counts tools that returned an error across sessions, and the subset where an earlier session
-*recovered* from a failure a later session then hit again — the case where the earlier session
-already demonstrated the procedure the later one lacked.
+* **Procedure**: per-turn tool-call sequences (consecutive duplicates collapsed), classes of
+  length ≥ 2 recurring across sessions, and those a later session repeated after an earlier one
+  completed them.
+* **Failure**: tools that errored across sessions, and those a later session hit again after an
+  earlier session recovered — a recurring failure produces divergent sequences, which the first
+  arm cannot see.
 
-Reads the durable read-model (`session_messages`) through `session_store.message_from_row`, the
-one function allowed to decide which serialization a row holds. Both arms read the same rows: a
-tool result is persisted as a `ToolMessage` carrying `status`, and the transcript writer stores the
-tool exchanges alongside the question and the answer. An empty store prints zeros rather
-than refusing, so "the corpus does not exist" stays a claim anyone can re-produce with one command
-— and a deployment that prunes this table by retention is measuring its retention window, which the
-output says.
+Reads `session_messages` through `session_store.message_from_row`. An empty store prints zeros
+rather than refusing; a deployment pruning the table by retention measures its retention window.
 """
 
 import argparse
@@ -55,8 +41,7 @@ def normalized_tools(messages: list[BaseMessage]) -> list[tuple[str, ...]]:
     """Each turn's tool-name sequence, consecutive duplicates collapsed (a retry is not a step).
 
     A turn is what lies between one `HumanMessage` and the next; the sequence is read off every
-    `AIMessage.tool_calls` inside it, in order. Split out from the census so the definition the
-    ADR states is one function a test can hold, independent of any database.
+    `AIMessage.tool_calls` inside it, in order.
     """
     turns: list[tuple[str, ...]] = []
     current: list[str] = []
@@ -81,10 +66,7 @@ def normalized_tools(messages: list[BaseMessage]) -> list[tuple[str, ...]]:
 class SessionFailures:
     """One session's failure surface: which tools errored in it, and which of those later worked.
 
-    Session-scoped rather than turn-scoped on purpose. The would-have-helped question this arm
-    asks orders *sessions* — did a later one re-hit what an earlier one had already got past — so
-    a recovery two turns after the failure is still a recovery, and splitting it per turn would
-    discard exactly the pairs the arm exists to count.
+    Session-scoped, not turn-scoped: a recovery two turns after the failure is still a recovery.
     """
 
     session_id: str
@@ -96,19 +78,12 @@ class SessionFailures:
 def failed_and_recovered(messages: list[BaseMessage]) -> tuple[frozenset[str], frozenset[str]]:
     """Which tools errored in this session, and which of those later returned a result that did not.
 
-    **The name is not on the result.** A `ToolMessage` carries `status` and a `tool_call_id`; the
-    tool's name is on the `AIMessage.tool_calls` entry that issued it. Joining the two is the whole
-    of the work here, and getting it wrong would attribute every failure to the empty string —
-    which is why `tests/test_trajectory_census.py` constructs the pair rather than a bare result.
+    A `ToolMessage` carries `status` and `tool_call_id`; the tool's name is on the issuing
+    `AIMessage.tool_calls` entry, so the two are joined. "Later returned a non-error result" is a
+    proxy for recovery, not proof.
 
-    **Recovery is a proxy and is named as one.** "The same tool later returned a non-error result
-    in the same session" is not proof that a chemist found the right procedure; it is the strongest
-    thing this read-model can say without a model reading the transcript. It is deliberately the
-    weaker half of the trigger below — the arm is guarded by the class and session counts too.
-
-    A result whose `status` this row cannot carry counts as success, matching
-    `api/graph_stream.py`'s own `getattr(message, "status", "success")`: the two must not disagree
-    about what an unstamped result means, or the census would report failures the turn never did.
+    A result with no `status` counts as success, matching `api/graph_stream.py`'s
+    `getattr(message, "status", "success")`.
     """
     names: dict[str, str] = {}
     for message in messages:
@@ -133,13 +108,11 @@ def failed_and_recovered(messages: list[BaseMessage]) -> tuple[frozenset[str], f
 
 
 def _failure_census(sessions: list[SessionFailures]) -> dict[str, Any]:
-    """The second arm's numbers: failure classes recurring across sessions, and repeats after a fix.
+    """The failure arm's numbers: failure classes recurring across sessions, and repeats after a fix.
 
-    A **failure class** is one tool name that errored. It **recurs** when it errored in ≥ 2 distinct
-    sessions. It was **repeated after recovery** when some session that both failed and recovered on
-    it precedes a session that failed on it again — ordered by the same session timestamps the first
-    arm uses, and left undecided (counted not-repeated) when a stamp is missing, for the same reason
-    that arm gives: an unknown order must not inflate the number that greenlights a build.
+    A failure class is one tool name that errored; it recurs when it errored in ≥ 2 sessions. It was
+    repeated after recovery when a session that failed and recovered on it precedes one that failed
+    again. A missing timestamp counts as not-repeated, so unknown order never inflates the trigger.
     """
     by_tool: dict[str, list[SessionFailures]] = defaultdict(list)
     for session in sessions:
@@ -179,16 +152,12 @@ def _failure_census(sessions: list[SessionFailures]) -> dict[str, Any]:
 def census(turns: list[Turn], failures: list[SessionFailures] | None = None) -> dict[str, Any]:
     """Reduce the corpus to both arms' numbers: recurring procedure, and recurring failure.
 
-    A class recurs when the identical sequence of length ≥ 2 appears in ≥ 2 distinct sessions; it
-    would have helped when some later session's first occurrence follows an earlier session's —
-    ordering decided by the rows' own timestamps, and left undecided (counted not-helped) when a
-    timestamp is missing, because an unknown order must not inflate the number that greenlights a
-    build.
+    A class recurs when the identical sequence of length ≥ 2 appears in ≥ 2 sessions; it would have
+    helped when a later session's first occurrence follows an earlier one's. A missing timestamp
+    counts as not-helped, so unknown order never inflates the trigger.
 
-    `failures` carries the second arm and defaults to none, so every key D-2026-08-27 defined keeps
-    the meaning it had — `generator_greenlit` still answers *that* ADR's question about procedure
-    alone. `any_greenlit` is the disjunction, and it is what a reader should act on, because either
-    shape is a corpus worth distilling from.
+    `generator_greenlit` answers the procedure arm alone; `any_greenlit` is the disjunction a reader
+    should act on. `failures` defaults to none.
     """
     by_class: dict[tuple[str, ...], list[Turn]] = defaultdict(list)
     for turn in turns:
@@ -249,8 +218,7 @@ def census(turns: list[Turn], failures: list[SessionFailures] | None = None) -> 
 async def _stored() -> tuple[list[Turn], list[SessionFailures]]:
     """Every stored session's turns and failure surface, decoded through the one sanctioned reader.
 
-    One pass and one query for both arms: they read the same rows, and two readers would be two
-    definitions of which sessions the census covers.
+    One query for both arms, so they cover the same sessions.
     """
     from chemclaw.agent.session_store import message_from_row
     from chemclaw.core import db

@@ -1,32 +1,14 @@
 """Where a trending attribute meets its specification limit — an ICH Q1E-shaped estimate.
 
-`specification.py` answers "does this batch meet specification **today**". This answers the
-question that follows it: given the same attribute measured at several timepoints, when does the
-trend reach the limit? That is what a retest period or a shelf life is derived from, and it is the
-calculation analytical development does by hand in a spreadsheet.
+Fits the attribute against time by least squares, takes a one-sided 95% confidence bound and
+intersects it with the acceptance criterion. That is one step of Q1E, not a shelf-life
+determination: poolability testing across batches, worst-case batch choice and model choice are
+not done here, and every result says so.
 
-**It is an estimate, not a shelf life, and the gap is not a technicality.** ICH Q1E derives a
-retest period or shelf life from a procedure this module implements one step of: a least-squares
-fit with a one-sided 95% confidence bound, intersected with the acceptance criterion. What it does
-**not** do is everything that makes that procedure a determination — poolability testing across
-batches (Q1E §2.3's ANCOVA on slopes and intercepts, at the 0.25 significance level), the choice of
-the worst-case batch, the statistical justification for a common intercept, and the judgment about
-whether a linear model is right for the attribute at all. A single batch's regression is an input
-to that procedure, never its output. Every result carries that sentence; nothing here returns a
-number called a shelf life.
-
-**The bound is one-sided and its side is the direction of change.** An impurity that grows is
-bounded from *above* — the upper confidence limit is what must stay under the specification — and
-an assay that falls is bounded from below. Getting that backwards produces a longer estimate than
-the data supports, which is the error direction that matters, so the side is derived from the fitted
-slope rather than taken as an argument.
-
-**Extrapolation is bounded, and the bound is Q1E's rather than this module's taste.** Q1E §2.4
-permits extrapolation to at most **twice** the period covered by long-term data, and never more than
-**twelve months beyond** it. An intersection past that is reported as *beyond what this data
-supports* rather than returned as a number, because the arithmetic will happily produce 60 months
-from six months of data and the regression's own confidence band is the thing that stops meaning
-anything out there.
+The bound's side follows the direction of change (a rising impurity is bounded from above), derived
+from the fit, since the wrong side overstates the period. Extrapolation is capped at Q1E §2.4's
+limit — twice the long-term period and at most twelve months beyond it; a crossing past that is
+reported as unsupported, not as a number.
 """
 
 from __future__ import annotations
@@ -42,18 +24,15 @@ from chemclaw.core.units import Measurement, UnitError
 #: The confidence level Q1E specifies for the one-sided bound.
 CONFIDENCE = 0.95
 
-#: The fewest timepoints a regression may be fitted to. Three is not a statistical recommendation —
-#: Q1E expects considerably more — it is the point below which the arithmetic stops existing: two
-#: points fit a line with zero residual degrees of freedom, so there is no confidence band at all
-#: and the estimate would come back infinitely precise.
+# The fewest timepoints a regression may be fitted to. Not a statistical recommendation: with two
+# points there are zero residual degrees of freedom and no confidence band.
 MINIMUM_TIMEPOINTS = 3
 
 
 class StabilityError(ValueError):
     """Data no regression here can be fitted to.
 
-    A `ValueError` so the message reaches a model verbatim, and every one names what is wrong with
-    the data rather than reporting a number derived from it.
+    A `ValueError` so the message, which names the problem, reaches a model verbatim.
     """
 
 
@@ -61,9 +40,7 @@ class StabilityError(ValueError):
 class Timepoint:
     """One measurement of one attribute at one storage time."""
 
-    #: Months on stability. Months rather than a date because that is the unit Q1E's periods,
-    #: pull schedules and extrapolation limits are all written in, and converting dates here would
-    #: put a calendar in a module that has no business holding one.
+    # Months on stability: the unit Q1E's periods and extrapolation limits are written in.
     months: float
     value: Measurement
 
@@ -76,9 +53,9 @@ class TrendEstimate:
     slope_per_month: float
     #: The fitted value at time zero, in the attribute's own unit.
     intercept: float
-    #: Coefficient of determination. Reported rather than gated: a low value on a flat, in-control
-    #: attribute is the *expected* result — there is nothing to explain — so refusing on it would
-    #: refuse exactly the batches that are behaving.
+    # Coefficient of determination. Reported, not gated: a flat, in-control attribute legitimately
+    # has
+    # a low value.
     r_squared: float
     #: Months at which the one-sided 95% bound reaches the limit, or `None` when it does not within
     #: the extrapolation Q1E permits. `note` says which.
@@ -94,10 +71,8 @@ class TrendEstimate:
 def _fit(months: list[float], values: list[float]) -> tuple[float, float, float, float]:
     """Least squares on `values` against `months`, returning slope, intercept, r², residual s.
 
-    Written out rather than taken from `scipy.stats.linregress` for one reason: the residual
-    standard error is what the confidence band needs and that function does not return it, so a
-    caller would compute it separately from the fit it belongs to. One function, one set of
-    residuals.
+    Hand-written because the confidence band needs the residual standard error, which
+    `scipy.stats.linregress` does not return.
     """
     n = len(months)
     mean_x = sum(months) / n
@@ -114,9 +89,7 @@ def _fit(months: list[float], values: list[float]) -> tuple[float, float, float,
     residuals = [y - (intercept + slope * x) for x, y in zip(months, values, strict=True)]
     total = sum((y - mean_y) ** 2 for y in values)
     residual_sum = sum(r**2 for r in residuals)
-    # A perfectly flat attribute has zero total variance, where r² is 0/0. Reported as 1.0: the
-    # model explains everything there is to explain, which is 'nothing'. Calling it 0.0 would read
-    # as a failed fit on exactly the data a stability study hopes for.
+    # Zero total variance makes r² 0/0; report 1.0, since a flat attribute is the hoped-for result.
     r_squared = 1.0 if total == 0 else 1.0 - residual_sum / total
     standard_error = math.sqrt(residual_sum / (n - 2))
     return slope, intercept, r_squared, standard_error
@@ -126,17 +99,16 @@ def estimate_trend(timepoints: list[Timepoint], criterion: AcceptanceCriterion) 
     """Fit the attribute against time and find where its 95% bound meets the criterion.
 
     The bound at time `t` is `fit(t) ± t_{0.95,n-2} · s · sqrt(1/n + (t - x̄)²/Sxx)` — the
-    confidence interval for the *mean response*, which is what Q1E uses, rather than a prediction
-    interval for a future single result. Solved for the crossing by bisection over the permitted
-    extrapolation window, because the bound is not linear in `t` and the intersection has no closed
-    form.
+    confidence
+    interval for the mean response, as Q1E uses. The crossing is found by bisection over the
+    permitted
+    extrapolation window, since the bound is not linear in `t`.
 
     Args:
-        timepoints: At least `MINIMUM_TIMEPOINTS` measurements of one attribute, in one unit or in
-            units of one dimension. Order does not matter.
-        criterion: The limit the trend is read against. The bound's side follows the slope, so a
-            criterion needs only the bound the attribute is heading towards; one stating both is
-            fine and the relevant one is used.
+        timepoints: At least `MINIMUM_TIMEPOINTS` measurements of one attribute, in units of one
+            dimension. Order does not matter.
+        criterion: The limit the trend is read against. Only the bound on the side the attribute is
+            heading towards is used.
 
     Returns:
         The fit, the crossing if there is one inside Q1E's extrapolation window, and a note saying
@@ -198,13 +170,10 @@ def estimate_trend(timepoints: list[Timepoint], criterion: AcceptanceCriterion) 
 def _is_a_drift(months: list[float], slope: float, standard_error: float) -> bool:
     """Whether the fitted slope is distinguishable from zero at the band's own confidence level.
 
-    `se(slope) = s / sqrt(Sxx)`, compared against `t_{0.95,n-2} · se(slope)`. The level is
-    `CONFIDENCE` rather than a second number of its own: this module draws its bound at Q1E's
-    one-sided 95%, and asking whether the drift it is extrapolating is real at any *other* level
-    would be two standards in one calculation.
-
-    A perfect fit (`s == 0`) has no uncertainty for a slope to hide in, so any non-zero slope is a
-    drift and a zero one is not. `Sxx > 0` is guaranteed: `_fit` refuses a single distinct time.
+    Compares the slope against `t_{0.95,n-2} · s / sqrt(Sxx)`, using `CONFIDENCE` so the module
+    applies
+    one standard. With a perfect fit (`s == 0`) any non-zero slope is a drift. `_fit` guarantees
+    `Sxx > 0`.
     """
     n = len(months)
     if standard_error == 0.0:
@@ -230,37 +199,15 @@ def _side_the_attribute_approaches(
 ) -> bool:
     """True when the upper bound is the relevant one — from the slope, or from the criterion.
 
-    **A slope of exactly zero is not "falling", and reading it that way was a real defect.** The
-    ordinary branch is the sign of the drift: an attribute rising towards a maximum is bounded from
-    above, one falling towards a minimum from below. A perfectly flat attribute — every timepoint
-    identical, which a well-behaved impurity at the reporting threshold really does produce — has no
-    drift to take a sign from, and `slope > 0` silently classified it as falling and then refused a
-    specification that states only a maximum.
+    Real data is never exactly flat, so the slope's sign alone would refuse an in-control impurity
+    whose noise happens to fit a negative slope against a maximum-only specification. So:
 
-    **The gate on that was bit-exact equality, and real data is never bit-exactly flat.** An
-    in-control impurity profile of 0.10, 0.11, 0.10, 0.11 area% fits a *negative* slope, so it was
-    "falling" and `_bound_for` refused it outright against a specification that states only a
-    maximum — which is every impurity specification. Driven over 2,000 simulated truly-flat series
-    at the reporting threshold, 749 of them (37%) were refused, and the two halves of that split
-    differ only in the sign of the noise: two datasets a chemist would call identical, one answering
-    and one erroring.
-
-    So the sign is used where it is usable and only there. `drifting` (`_is_a_drift`) says whether
-    the slope is distinguishable from zero at the same confidence the band is drawn at, and the
-    three cases are:
-
-    * the criterion bounds the side the slope points at — that side, whatever `drifting` says.
-      This is every ordinary case and its behaviour is unchanged, which is what keeps a genuine
-      trend safe from a significance test that is weak at three or four timepoints.
-    * it does not, and the slope is a real drift — that side still, so `_bound_for` raises: an
-      impurity genuinely rising against a minimum-only specification has nothing to reach, and
-      answering about the other bound would answer a question nobody asked.
-    * it does not, and the slope is noise — the criterion decides, exactly as for a flat fit.
-
-    With no usable drift the confidence band still widens with extrapolation, so a bound does still
-    move and the question is only *which one*. Answered from the criterion: the side it states, or,
-    when it states both, the one the fitted value sits nearer to — which is the one the widening
-    band reaches first.
+    * the criterion bounds the side the slope points at — use that side;
+    * it does not, and the slope is a real drift (`_is_a_drift`) — still that side, so `_bound_for`
+      raises: there is nothing to reach;
+    * it does not, and the slope is noise — the criterion decides: the side it states, or, with
+      both,
+      the bound the fitted value sits nearer to, which the widening band reaches first.
     """
     rising = slope > 0
     if slope != 0.0 and (drifting or _states_a_bound(criterion, rising=rising)):
@@ -278,9 +225,7 @@ def _bound_for(rising: bool, criterion: AcceptanceCriterion, unit: str) -> Measu
     """The limit the attribute is drifting towards, in the timepoints' own unit.
 
     Raises:
-        StabilityError: The criterion states no bound on that side — an impurity rising against a
-            specification that only sets a minimum has nothing to reach, and returning "never" for
-            it would be an answer about the wrong question.
+        StabilityError: The criterion states no bound on that side.
     """
     wanted = criterion.maximum if rising else criterion.minimum
     side = "maximum" if rising else "minimum"
@@ -311,8 +256,9 @@ def _crossing(
 ) -> tuple[float | None, str]:
     """Where the one-sided bound reaches `limit`, inside the extrapolation Q1E permits.
 
-    Returns `(None, why)` when it does not — which is a real answer and the common one for a stable
-    product, and is deliberately not spelled as a very large number.
+    Returns `(None, why)` when it does not — the common answer for a stable product, deliberately
+    not
+    spelled as a very large number.
     """
     n = len(months)
     mean_x = sum(months) / n
@@ -327,15 +273,8 @@ def _crossing(
 
     # Q1E §2.4: at most twice the observed period, and never more than 12 months beyond it.
     ceiling = min(2.0 * observed, observed + 12.0)
-    # **The search starts at the first measurement, not at time zero, and that is the fix rather
-    # than a refinement.** The band's half-width grows with `(t - x̄)²`, so on a programme whose
-    # first pull is at 24 months it is at its *widest* before any data exists — and this asked
-    # `bound_at(0.0)`, a point the study never observed and Q1E never extrapolates backwards to.
-    # Driven on a compliant 24/30/36-month assay (98.5, 98.3, 97.4 % w/w against a 95.0 % minimum):
-    # the lower bound is **96.97% at the first pull** and crosses 95.0% at **39.2 months**, inside
-    # the 48-month ceiling — and the shipped function answered `months_to_limit=0.0` with "this data
-    # does not support any period". Zero is the number a chemist reads off a batch that is in
-    # specification at every timepoint it has.
+    # Search from the first measurement, not time zero: the band is widest far from the data, so a
+    # programme whose first pull is late would otherwise cross at t=0 before any data exists.
     start = min(months)
     if _past_limit(bound_at(start), limit, rising):
         return 0.0, (
@@ -350,9 +289,7 @@ def _crossing(
             "period, and no more than 12 months beyond it). That is a statement about this data's "
             "reach, not a finding that the attribute never reaches the limit"
         )
-    # Bracketed by the two points just tested: the bound is inside the limit at `start` and past it
-    # at `ceiling`, which is the sign change bisection needs. Starting from 0.0 bracketed on a value
-    # the check above no longer evaluates.
+    # Bracketed by the two points just tested: inside the limit at `start`, past it at `ceiling`.
     low, high = start, ceiling
     for _ in range(200):
         middle = (low + high) / 2.0

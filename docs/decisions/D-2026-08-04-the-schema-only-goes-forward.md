@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-08-04
 
+**Superseded-by:** [D-2026-08-08-a-rollback-that-is-not-a-schema-step](D-2026-08-08-a-rollback-that-is-not-a-schema-step.md) (in part)
+
 ## Context
 
 `infra/sql/` holds 35 migrations, applied in filename order and tracked in a `schema_migrations`

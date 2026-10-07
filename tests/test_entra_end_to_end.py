@@ -7,7 +7,7 @@ talks to a network, never runs. Every other authorization test sets the ambient 
 So the chain that a deployment actually depends on — *an issuer publishes a key, the front door
 fetches it over HTTP, validates a token against it, turns the token into a `Principal`, stamps that
 principal into the turn's ambient identity, and the authorization gates decide on it* — had no test
-that ran it as one thing. `docs/planning/DEFERRED.md` recorded this as gated on "a real Entra
+that ran it as one thing. `docs/planning/BACKLOG.md` recorded this as gated on "a real Entra
 tenant", which was never true: an issuer is a JWKS document served over HTTP, and this file serves
 one.
 

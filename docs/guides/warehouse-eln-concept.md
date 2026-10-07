@@ -9,7 +9,7 @@ operator procedure. The decisions are
 their child tables, and the per-reaction embedding beside them — when the tables and columns are not
 knowable in advance.
 **Non-scope:** the live tenant, the driver dependency, and user-scoped reads via on-behalf-of; all
-three need infrastructure this environment does not have (`docs/planning/DEFERRED.md`).
+three need infrastructure this environment does not have (`docs/planning/BACKLOG.md`).
 
 ---
 
@@ -30,7 +30,7 @@ the site invents next quarter is adding a block to it.
 ## 1. What was already free, and what was not
 
 D-120 made *attaching* a source free: a folder holding a `datasource.yaml`, plus the folder's name
-in `CHEMCLAW_DATA_SOURCES`, and no core Python changes. `docs/planning/DEFERRED.md` recorded the
+in `CHEMCLAW_DATA_SOURCES`, and no core Python changes. `docs/planning/BACKLOG.md` recorded the
 warehouse connector as blocked on "the tenant, not the seam", and for attachment that was true.
 
 It was not true for *mapping*. Both existing adapters —
@@ -186,7 +186,7 @@ and the site's real binding are the whole remaining list.
 **Per-user reads.** Everything here connects as a service identity, so warehouse-side row access
 control sees one principal. An on-behalf-of exchange is what that would need; one was built, never
 wired, and deleted in D-2026-08-15, so re-introducing it is a new decision plus a real tenant on both
-sides (`docs/planning/DEFERRED.md`, "Per-user reads from the warehouse ELN"). Until then, the deployment's answer to "who may
+sides (`docs/planning/BACKLOG.md`, "Per-user reads from the warehouse ELN"). Until then, the deployment's answer to "who may
 see which reactions" is the view named in the binding.
 
 **Child tables cost a query each.** One `IN (...)` per block per chunk is the mitigation, and it is

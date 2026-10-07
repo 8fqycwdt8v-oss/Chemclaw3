@@ -1,5 +1,7 @@
 # D-057 — Four more engine gaps closed (KM-5, KM-14 retrieval half, AG-14, AG-15)
 
+**Superseded-by:** [D-2026-08-01-a-cap-that-starves-a-source](D-2026-08-01-a-cap-that-starves-a-source.md) (in part)
+
 **Context.** After D-055/D-056, five gap-doc findings remained. Each carried a design decision that
 had been left un-guessed. Directed to implement four of them (AG-13 stays deferred — see below), each
 with a **defensible default** documented here rather than a new config knob per open question.

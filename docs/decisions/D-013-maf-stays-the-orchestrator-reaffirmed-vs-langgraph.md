@@ -1,5 +1,7 @@
 # D-013 — MAF stays the orchestrator (reaffirmed vs. LangGraph)
 
+**Superseded-by:** [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
+
 Reconsidered MAF vs. LangGraph explicitly. LangGraph's main edge (durable/checkpointed execution)
 is largely moot here because durability lives in Temporal (D-002); MAF's native Agent-Skills
 (SKILL.md progressive disclosure) and Entra/Azure fit are load-bearing for our design. The agent

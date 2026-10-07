@@ -1,9 +1,7 @@
-"""Azure Entra ID identity and authorization (plan Phase F4, F10-C).
+"""Settings for Azure Entra ID identity and authorization.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from typing import Literal, Self
@@ -13,122 +11,66 @@ from pydantic_settings import BaseSettings
 
 
 class EntraSettings(BaseSettings):
-    """Azure Entra ID identity and authorization (plan Phase F4, F10-C).
+    """Azure Entra ID identity and authorization as one contract.
 
-    Grouped because identity is one coherent contract: the OIDC fields, the derived JWKS/issuer
-    URLs, the parsed role/action sets, the tool-authz gates, the outbound token endpoint, and
-    the enforcement validator that rejects a half-configured deployment — all in one place
-    (kernel review note).
+    The OIDC fields, derived JWKS/issuer URLs, role/action sets, tool-authz gates, and the validator
+    that rejects a half-configured deployment.
     """
 
-    # User auth at the front door is OIDC with Entra as the IdP: the service is an Entra app
-    # registration, and every non-health request carries an Entra JWT that is validated against
-    # the tenant JWKS with the audience checked (the confused-deputy guard — the service is both
-    # OAuth client and resource). `oid`/`upn` + app-roles are extracted into a `Principal` that
-    # authorizes and attributes every backend action. `entra_required` gates enforcement: True
-    # in any real deployment (a missing/invalid token is 401); False only for local dev, where a
-    # stand-in principal runs the app without a tenant. `entra_jwks_url`/`entra_issuer` default
-    # empty and derive from `entra_tenant_id` when set (the standard v2.0 endpoints), so a
-    # deployment sets just tenant + audience + required.
+    # Front-door auth is OIDC with Entra as IdP: every non-health request carries an Entra JWT
+    # validated against the tenant JWKS with the audience checked (confused-deputy guard), and
+    # `oid`/`upn` plus app-roles become the `Principal`. True in any real deployment
+    # (missing/invalid token is 401); False only for local dev with a stand-in principal.
+    # `entra_jwks_url` and `entra_issuer` derive from `entra_tenant_id` when empty.
     entra_required: bool = False
-    # Explicit opt-in for a **Temporal worker** to boot with `entra_required` False
-    # (`durable/serve.refuse_unauthenticated_worker`,
-    # `D-2026-09-26-a-worker-states-its-unauthenticated-posture`). A worker binds no request
-    # surface, so the front door's signal — a non-loopback `service_host` — means nothing in it;
-    # what it does have is every activity running as the shared dev principal with the
-    # authorization gates open. So the posture is stated rather than inferred, the shape
-    # `llm_allow_loopback_gateway` set: the local lanes that run without sign-in say so, and a
-    # deployment that forgot `entra_required` is refused at boot instead of polling.
+    # Explicit opt-in for a Temporal worker to boot with `entra_required` False
+    # (`durable/serve.refuse_unauthenticated_worker`). A worker has no request surface to infer the
+    # posture from, and every activity would run as the shared dev principal with gates open, so a
+    # deployment that forgot `entra_required` is refused at boot.
     worker_allow_unauthenticated: bool = False
     entra_tenant_id: str = ""
     entra_audience: str = ""
     entra_jwks_url: str = ""
     entra_issuer: str = ""
-    # Authorization for expensive triggers (plan F4-T5): the single fachliche gate. An action
-    # named in `entra_expensive_actions` (comma list, e.g. "sample_conformers,start_bo_campaign")
-    # may run only for a user holding at least one role in `entra_privileged_roles` — so an
-    # autonomously-planned todo cannot launch a costly calculation or BO job outside the user's
-    # entitlements. Enforced only when `entra_required` (a real deployment with real roles); in
-    # dev the gate is open. Both empty by default: nothing is privileged until a deployment
-    # declares it.
+    # Gate for expensive triggers: an action named in `entra_expensive_actions` (comma list, e.g.
+    # "sample_conformers,start_bo_campaign") runs only for a user holding a role in
+    # `entra_privileged_roles`, so an autonomously planned todo cannot launch costly work outside
+    # the user's entitlements. Enforced only under `entra_required`. Both empty by default.
     entra_expensive_actions: str = ""
     entra_privileged_roles: str = ""
-    # Per-tool authorization (plan F10-C): generalizes the single expensive-trigger gate to
-    # *every* tool invocation via one middleware. `tool_role_gates` maps a tool name to the
-    # Entra app-roles allowed to call it. A tool with no entry follows `tool_authz_default`:
-    # under `"deny"` (allowlist mode) it is refused outright — only listed tools are callable,
-    # by a role-holder; under `"allow"` it is callable, except the built-in write-tool gates
-    # (`agents.authz.DEFAULT_WRITE_TOOL_GATES`: job launchers and state-mutating tools require
-    # an `entra_privileged_roles` role out of the box — an explicit entry here overrides that).
-    # The built-in write gate only narrows `"allow"`; it never widens `"deny"`. Enforced only
-    # when `entra_required` (dev gate is open). ENV override for the gates is JSON, e.g.
-    # CHEMCLAW_TOOL_ROLE_GATES='{"sample_conformers": ["process-chemist"]}'. Note: `deny` with an
-    # empty `tool_role_gates` blocks *all* tools — a deliberate lockdown, not a footgun to
-    # stumble into.
+    # Per-tool authorization: maps a tool name to the app-roles allowed to call it. A tool with no
+    # entry follows `tool_authz_default`: `"deny"` refuses it; `"allow"` permits it except the
+    # built-in write gates (`agents.authz.DEFAULT_WRITE_TOOL_GATES`, which need an
+    # `entra_privileged_roles` role; an entry here overrides). The write gate only narrows
+    # `"allow"`. Enforced only under `entra_required`. JSON in the env, e.g.
+    # CHEMCLAW_TOOL_ROLE_GATES='{"sample_conformers": ["process-chemist"]}'. `deny` with no gates
+    # blocks every tool, deliberately.
     tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)
     tool_authz_default: Literal["allow", "deny"] = "allow"
-    # The identity a *user-triggered* workflow records when there is no authenticated user (plan
-    # F4-T3). Only reachable in local dev (`entra_required=False`, no tenant) and for
-    # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead of
-    # falling back. Config, not the old magic `"unknown"` literal.
+    # Identity a user-triggered workflow records with no authenticated user: local dev and
+    # system-triggered jobs only; under enforcement `require_actor` rejects an absent user.
     service_actor_id: str = "service-account"
-    # How long the front door waits on the tenant when it does have to fetch keys. The one
-    # outbound-facing Entra setting left, and it has a live reader: `api/auth._client_for` builds
-    # the `PyJWKClient` with it, so a slow or blackholed IdP is bounded by our config rather than
-    # by PyJWT's 30-second default.
-    #
-    # Three settings used to sit beside it — `entra_token_endpoint`, `entra_sa_token_path` and
-    # `entra_token_refresh_leeway_seconds` — for a pod minting its own Entra token from a projected
-    # ServiceAccount JWT. That code (workload identity federation, F4-T2, and the On-Behalf-Of
-    # exchange, F4-T4) was deleted unused by D-2026-08-15, and the settings were kept on the
-    # argument that they describe the tenant rather than the mechanism. That argument does not
-    # survive contact with `values.yaml`, which shipped `CHEMCLAW_ENTRA_TOKEN_ENDPOINT` as a
-    # rendered ConfigMap value: a reader of the chart saw a configured OAuth token endpoint and
-    # concluded something exchanged tokens there. Nothing did. That is the `map_to_hpc_identity`
-    # shape one layer up — a deployment declaring a credential path that does not exist — so the
-    # three go the way their code went. D-046 still stands as the design for whatever re-adds one.
+    # How long the front door waits on the tenant when fetching keys (`api/auth._client_for` builds
+    # the `PyJWKClient` with it), instead of PyJWT's 30-second default.
     entra_http_timeout_seconds: float = Field(default=10.0, gt=0)
-    # A PEM bundle of the CAs the tenant's JWKS endpoint is verified against, **instead of**
-    # certifi. Empty — the default — is certifi, exactly as before this setting existed. Two
-    # deployments need it: a test tenant behind a private or self-signed CA (`Chemclaw3_mock`'s
-    # https OIDC surface, which msal-browser insists on), and an enterprise whose TLS-inspecting
-    # proxy re-signs `login.microsoftonline.com` with its own root. Replacing rather than adding to
-    # certifi is the semantics of `llm_tls_ca_bundle` and of httpx's own `verify`: one source, so
-    # the file is the whole statement of whom the key set is trusted from. There is deliberately no
-    # way to switch verification *off* — the key set is what every bearer token is checked against,
-    # so an unverified fetch is a forgeable tenant. The front door refuses to boot when the path is
-    # missing or holds no PEM certificate (`api/auth.refuse_unusable_entra_ca_bundle`).
+    # PEM bundle of CAs the tenant's JWKS endpoint is verified against, replacing certifi (empty
+    # means certifi). For a test tenant behind a private CA or a TLS-inspecting proxy. There is no
+    # way to switch verification off: an unverified key set is a forgeable tenant. The front door
+    # refuses to boot on a missing or certificate-less path
+    # (`api/auth.refuse_unusable_entra_ca_bundle`).
     entra_ca_bundle: str = ""
-    # How long the front door waits between JWKS re-fetches forced by a token whose `kid` is not
-    # in the cached key set. PyJWT re-fetches on *every* such miss, and the `kid` is chosen by an
-    # unauthenticated caller, so without a floor one credential-less request becomes one outbound
-    # request to the tenant IdP — an amplifier that also queues on the validation thread pool.
-    # The cost is rotation latency: a genuinely new signing key is picked up after at most this
-    # long instead of on the first token that uses it. That is bounded and configurable, and the
-    # 300 s `lifespan` of the key cache already admits staleness of its own.
+    # Minimum gap between JWKS re-fetches forced by an unknown `kid`. The `kid` is caller-chosen, so
+    # without a floor each unauthenticated request could cost an outbound IdP fetch. A new signing
+    # key is picked up at most this late.
     entra_jwks_refresh_cooldown_seconds: float = Field(default=60.0, ge=0)
-    # How long a failed JWKS fetch is remembered before the tenant is asked again. A key set is
-    # cached only when it parses, so without this every request arriving while the IdP is down —
-    # or answering 200 with something that is not a key set — paid its own outbound fetch,
-    # unauthenticated callers included (measured: 20 requests, 20 fetches, every one a 503). With
-    # it the fault costs one fetch per window per process, and the price is that a recovered IdP is
-    # noticed up to this long late. 0 turns the memory off.
+    # How long a failed JWKS fetch is remembered before asking the tenant again, so an IdP outage
+    # costs one fetch per window per process rather than one per request. 0 disables.
     entra_jwks_failure_backoff_seconds: float = Field(default=5.0, ge=0)
-    # Read the token's `groups` claim and fold it into the same role set every gate already
-    # matches on (D-2026-08-06-a-share-is-mounted-not-called). An AD security group is an
-    # entitlement, and this system has exactly one entitlement vocabulary; a second one (a
-    # `groups` set beside `roles`, checked in its own places) would be the same rule written
-    # twice, which is how it comes to be enforced in one place and not the other.
-    #
-    # Each claim joins that set **namespaced** with `core.identity_context.GROUP_ROLE_PREFIX`, so a
-    # gate configured against a group names `group:<claim value>` and not the bare value — the
-    # prefix is what stops a directory group from being read as the app role of the same name. A
-    # tenant usually emits object-ids, so such a gate reads as a prefixed GUID;
-    # `groupMembershipClaims` can also emit names, which is precisely why the namespace exists.
-    #
-    # Off by default because it needs the tenant to emit the optional claim. Where the tenant
-    # instead assigns the group to an app role, that arrives as a normal `roles` value and nothing
-    # here is needed at all. Both wirings therefore work, and neither needs a second code path.
+    # Fold the token's `groups` claim into the one role set every gate matches on, so an AD security
+    # group is an entitlement like any role. Each value is namespaced with
+    # `core.identity_context.GROUP_ROLE_PREFIX` (`group:<value>`), so a group cannot be read as the
+    # app role of the same name. Off by default because the tenant must emit the optional claim; a
+    # group assigned to an app role already arrives in `roles`.
     entra_group_claims_as_roles: bool = False
 
     @property
@@ -157,31 +99,16 @@ class EntraSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _entra_enforcement_is_configured(self) -> Self:
-        """Under `entra_required`, fail fast on a half-configured identity setup (review finding).
+        """Under `entra_required`, fail fast on a half-configured identity setup.
 
-        Two footguns the front-door/authorization code cannot catch at request time:
-        - an empty `entra_audience` (or no tenant/issuer/JWKS) makes every token rejected — a
-          deny-all availability outage that should surface at startup, not as mysterious 401s.
-          The issuer and the JWKS endpoint derive independently from the tenant, so each needs
-          its own source: an issuer alone cannot resolve the keys endpoint;
-        - naming an expensive action with **no** privileged role closes that action to everyone:
-          `authz.authorize_trigger` fails closed on an empty role set, so the very action the
-          operator singled out is refused for every user, with no role in existence that could
-          pass it. That is a silent deny-all on one deliberate path, and it stays an error.
+        Two mistakes that would otherwise surface as request-time deny-alls:
+        - an empty `entra_audience`, or no tenant/issuer/JWKS source (issuer and JWKS derive
+          independently, so each needs one), rejects every token;
+        - an expensive action with no privileged role refuses that action for everyone, since
+          `authz.authorize_trigger` fails closed on an empty role set.
 
-        **The converse is a valid configuration, and rejecting it was a shipped contradiction.**
-        This validator used to demand the two settings be set *together*, on the reasoning that a
-        role without an action gated nothing. That stopped being true when `expensive: true` in a
-        `connector.yaml` started deriving into the gate (`authz.expensive_actions`): the action set
-        now comes from the manifests, so `entra_privileged_roles` alone is the *complete* and
-        intended configuration — it is the operator's remedy for a deployment whose declared
-        expensive jobs currently refuse everyone, and it is exactly what `docs/guides/runbook.md`
-        instructs. Requiring `entra_expensive_actions` beside it would force operators to
-        hand-maintain the list of job names the derivation exists to eliminate, and a hand-copied
-        list of other people's job names goes stale the first time a bundle adds one.
-
-        Hence the asymmetry: actions without roles is a deny-all mistake, roles without actions is
-        the normal production setup.
+        Roles without actions is valid and normal: the action set derives from manifests'
+        `expensive: true` (`authz.expensive_actions`).
         """
         if not self.entra_required:
             return self

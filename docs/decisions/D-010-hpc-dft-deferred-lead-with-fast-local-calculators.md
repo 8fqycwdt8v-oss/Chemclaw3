@@ -1,5 +1,7 @@
 # D-010 — HPC/DFT deferred; lead with fast local calculators (user decision)
 
+**Superseded-by:** [D-2026-08-26-semiempirical-is-the-whole-tier](D-2026-08-26-semiempirical-is-the-whole-tier.md) (in part)
+
 The real HPC/SLURM DFT path is postponed. The mock spine (Phase 1) already proves the durable
 async pattern, so early value comes from **fast, locally runnable** compute instead: semiempirical
 **xTB (latest GFN, GFN2)** and ML predictors (**GNN solubility**, **pKa/property**). They reuse the

@@ -1,24 +1,12 @@
-"""Who core says is calling this connector, readable inside a tool — advisory, never a gate.
+"""Who core says is calling this connector, readable inside a tool: advisory, never a gate.
 
-`chemclaw.connectors.identity` sends `X-Chemclaw-Actor`/`-Session`/`-Correlation-Id` on every
-request, and `chemclaw.connectors.server.CallerLogMiddleware` logs them — with a docstring stating
-exactly why they exist: "so a connector's own records can be joined to the core audit trail by
-actor and session". That was the whole point of D-141, and until now a connector could only put
-them in a *log line*. A connector that writes a durable record — a persisted BO suggestion, say —
-had no way to stamp it with the conversation that asked for it, which is the gap that made the
-record worth little: rows nobody can trace back to a chemist or a turn.
+`CallerLogMiddleware` binds the `X-Chemclaw-Actor`/`-Session`/`-Correlation-Id` headers into
+task-local contextvars (a tool has no request object, and one process serves every user), so a
+connector's durable records can be joined to core's audit trail (D-141).
 
-So the middleware now binds them into task-local contextvars a tool body can read, exactly as
-`chemclaw.core.identity_context` does on the core side and for the same reason: a tool has no
-request object, and a connector process serves every user, so anything bound at import time would
-be shared across them.
-
-**The trust rule is unchanged and is the important part.** These values arrive on an
-unauthenticated header from outside this process's trust boundary. Authorization already happened
-in core (`chemclaw.agent.authz`) before the call was made, and a connector that gated on one of
-these would be trusting a string anyone who can reach the Service could set. They are for
-attribution in records and logs, and for nothing else. Every reader here is named so that stays
-checkable.
+These values arrive on an unauthenticated header. Authorization already happened in core
+(`chemclaw.agent.authz`); a connector must use them for attribution in records and logs only,
+never to gate anything.
 """
 
 from contextvars import ContextVar
@@ -48,15 +36,9 @@ class CallerTokens:
 def bind_caller(actor: str, session_id: str, correlation_id: str) -> CallerTokens:
     """Bind the calling identity for this request; returns tokens for `reset_caller`.
 
-    Called by the connector's request middleware, never by a tool — a tool that could set its own
-    caller would make the attribution it is stamping meaningless.
-
-    **It also binds the log attribution**, here rather than at either call site, because there are
-    two (`CallerLogMiddleware.dispatch` in the ASGI task, `_bind_caller_per_tool_call` in the MCP
-    session-manager task) and a log line written by a tool body runs only in the second. Bound into
-    `core.logging`'s claimed-caller variable, never the core identity ones: the trust rule above.
-    Measured before: every record a connector pod wrote, its own request line included, carried
-    `correlation_id=- session_id=- actor=-`.
+    Called by request middleware, never by a tool (a tool that set its own caller would make the
+    attribution meaningless). Also binds `core.logging`'s claimed-caller variable, never the core
+    identity ones, so every log line a connector writes carries the caller.
     """
     return CallerTokens(
         actor=_caller_actor.set(actor),
@@ -69,12 +51,9 @@ def bind_caller(actor: str, session_id: str, correlation_id: str) -> CallerToken
 def reset_caller(tokens: CallerTokens) -> None:
     """Unbind the caller bound by the matching `bind_caller`.
 
-    This used to claim "so one request's identity cannot leak into the next", which measurement
-    disproved: the reset in the HTTP middleware never governed what a *tool body* read, because a
-    tool runs in the MCP session-manager task and so saw the handshake's identity for the life of
-    the session. `connectors/server.py::_bind_caller_per_tool_call` binds and resets around each
-    tool call, which is what actually gives one call its own identity; this function is the
-    unbinding half of both, and claims only that.
+    Per-call isolation comes from `connectors/server.py::_bind_caller_per_tool_call`, which binds
+    and
+    resets around each tool call; this is the unbinding half of both call sites.
     """
     _caller_actor.reset(tokens.actor)  # type: ignore[arg-type]
     _caller_session.reset(tokens.session)  # type: ignore[arg-type]
@@ -85,12 +64,7 @@ def reset_caller(tokens: CallerTokens) -> None:
 def caller_provenance() -> tuple[str, str, str]:
     """The serving call's `(actor, session_id, correlation_id)`, empty strings off that path.
 
-    "The serving call's" is load-bearing and was once wrong: read from a tool body this returned
-    the identity of the request that opened the MCP session, so a durable row a connector wrote
-    named the chemist who happened to connect first rather than the one who asked.
-
-    Empty rather than `None` because every consumer writes them into a record whose columns default
-    to `''`: a connector tool exercised directly (a test, a CLI) genuinely has no caller, and that
-    is "not recorded", not an error.
+    Empty rather than `None` because consumers write them into columns defaulting to `''`; a tool
+    exercised directly (a test, a CLI) has no caller, which is "not recorded", not an error.
     """
     return _caller_actor.get(), _caller_session.get(), _caller_correlation.get()

@@ -729,7 +729,7 @@ class FakeCalcServer:
         **Geometry-dependent, which is the entire point of the tool.** This used to delegate on the
         SMILES alone, so every conformer of one molecule came back byte-identical — and an ensemble
         average over identical members cannot show a mispairing, a reordering or a truncation. The
-        `DEFERRED.md` row this tool closed was written to ask how often the top-ranked site *moves*
+        `BACKLOG.md` row this tool closed was written to ask how often the top-ranked site *moves*
         between geometries; a fake that holds it still answers "never" by construction.
         """
         structure = arguments["structure"]

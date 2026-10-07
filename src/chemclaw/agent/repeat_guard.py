@@ -1,41 +1,15 @@
 """Stop a turn re-asking a tool the identical question it already answered.
 
-**The measurement.** A live full-stack run (2026-08-04) recorded `find_past_jobs` called **7-8
-times in a single turn** across three separate probes — the same tool, the same arguments, the same
-answer — alongside `load_skill` x6 and `find_notes` x5. Every call was cheap on its own, which is
-why nothing failed; what it cost was the turn. Median turn ran 128-142 s against 16.9 s on the
-archived comparison run, and each repeat also spends its result back into the context window, so a
-turn that loops on a fruitless retrieval crowds out the evidence it needed to answer from.
+A repeated call with the same arguments returns the same answer and spends context each time, so
+past `max_identical_tool_calls` (default 2, allowing one legitimate re-check) the next identical
+call is refused with a message the model can act on.
 
-A repeat is not a bug in any tool. It is the model doing the one thing a tool call cannot tell it is
-useless: `find_past_jobs` returning nothing looks, from the model's side, exactly like a call that
-has not been made yet. So the correction belongs in the loop, not in the tool.
+It refuses rather than caches: a cached answer could go stale within a turn, a refusal cannot.
+Tools that poll moving state declare it (`core/tool_registry.polls_moving_state`) and are never
+counted; their bound is the Temporal long-poll and the loop cap.
 
-**Why this refuses rather than caches.** Serving the first call's result would be faster still, and
-wrong: `get_durable_job_status` is read-only and legitimately changes *within* one turn, so a cached
-answer would pin a job at "running" for a model that was correctly re-checking it. Refusing never
-fabricates and never goes stale — it says what happened and hands the decision back.
-
-**A poll is exempt by declaration, and that paragraph used to be the whole of its protection.**
-Refusing rather than caching kept a status read from being served stale; it did nothing to stop
-the status read being *refused*. Driven live against a real model (du-01, 2026-09-27): the turn
-launched `compute_reaction_energy`, polled `get_durable_job_status` with the one job id it had, and
-the third through seventh polls were refused as repeats — while Temporal says the job COMPLETED
-inside the turn. The model never saw the result, and its answer then claimed it had "polled across
-several turns". The premise this guard rests on, "it will not answer differently", is false for a
-read of something that moves, so a tool declares that at its definition site
-(`core/tool_registry.polls_moving_state`) and is never counted here. Its bound is elsewhere, and
-already stronger: every poll long-polls `job_status_wait_seconds` inside Temporal, and the loop cap
-bounds how many there can be.
-
-**Why the third call and not the second.** One re-check is a real pattern (a job polled after a
-wait, a note re-read after a write). Seven is a loop. `max_identical_tool_calls` is the boundary
-and defaults to 2, so a legitimate re-check still goes through and the measured shape does not.
-
-The carrier is a contextvar, for the reasons `chemclaw.core.turn_signals` gives for its buffer: it
-is task-local (concurrent turns on one worker cannot see each other's calls), empty off the request
-path (CLI, tests, the classic agent), and mutated rather than rebound, so it is visible even when
-the agent's stream is driven from a task of its own.
+The counters live in a task-local contextvar, mutated rather than rebound, and are absent off the
+request path (CLI, tests), where every function here is a no-op.
 """
 
 import json
@@ -61,21 +35,9 @@ logger = logging.getLogger(__name__)
 class TurnCallWatch:
     """One turn's repeat bookkeeping: the counters, and what compaction already forgave.
 
-    `forgiven` holds *tool call ids*, not `(name, arguments)` keys, and that difference is the fix
-    for a defect that disarmed the guard on every long turn. Compaction's observer runs on every
-    model call and re-derives "which results are cleared" from the freshly re-edited request — the
-    edits are non-destructive, so the same old results read as cleared on every call after the
-    first. Forgiving by call *identity* therefore reset the same counter once per model call, and
-    past the clearing trigger the guard was effectively off for the rest of the turn: the exact
-    7-8-identical-calls loop it was measured to stop (128-142 s vs 16.9 s) came back with the
-    counters being wiped as fast as they accumulated. A call id names one *invocation*, so each
-    cleared result forgives exactly one repeat, once.
-
-    **What is deliberately no longer here is `peak_reclaimed`.** Compaction's high-water mark sat
-    on this object because compaction had nowhere else to put a per-turn fact, and it made the
-    repeat guard's state carry a subject it has nothing to do with. It lives on
-    `agent/context_budget.TurnContext` now, beside the two flags `turn_costs` records — one ambient
-    per subject, both started by the same two callers that bracket a turn.
+    `forgiven` holds tool call ids, not `(name, arguments)` keys: compaction re-derives the cleared
+    set on every model call, so forgiving by call id makes each cleared result forgive exactly one
+    repeat, once, instead of resetting the counter on every model call.
     """
 
     counts: Counter[tuple[str, str]] = field(default_factory=Counter)
@@ -88,10 +50,8 @@ _calls: ContextVar[TurnCallWatch | None] = ContextVar("chemclaw_repeated_calls",
 class RepeatedCallRefusal(ChemclawError):
     """A tool was asked the identical question once too often in one turn.
 
-    A `ChemclawError` so the two mechanisms that already exist do the work: the audit middleware
-    records it as an `error` outcome, and `surface_domain_errors` hands the message to the model
-    verbatim instead of an opaque "Function failed." — which matters more here than anywhere
-    else, since the whole point is to tell the model something it can act on.
+    A `ChemclawError`, so the audit middleware records it as an `error` outcome and
+    `surface_domain_errors` hands the message to the model verbatim.
     """
 
 
@@ -108,15 +68,8 @@ def end_call_watch(token: object) -> None:
 def _key(name: str, arguments: Any) -> tuple[str, str]:
     """A call's identity: its tool and its arguments, canonicalized so key order cannot fork it.
 
-    `sort_keys` because a model that emits the same call twice is under no obligation to serialize
-    its arguments in the same order, and two spellings of one question are one question.
-
-    `default=str` because a hand-written tool declares a pydantic model rather than a JSON object
-    (`start_optimization_campaign(spec: CampaignSpec)`), and `json.dumps` refuses one. Rendering it
-    keeps the guard total: a middleware that raised on the argument shape half this system's tools
-    use would fail the calls it exists to protect, which is worse than the repetition. There is no
-    fallback beyond it because there is nothing left to fall back from — tool arguments are either
-    a decoded JSON object or a pydantic model, and neither can be circular.
+    `default=str` renders pydantic-model arguments, keeping the guard total over every tool's
+    argument shape.
     """
     return (name, json.dumps(arguments, sort_keys=True, default=str))
 
@@ -124,47 +77,10 @@ def _key(name: str, arguments: Any) -> tuple[str, str]:
 def forget_calls(cleared: Iterable[tuple[str, str, Any]]) -> None:
     """Clear the repeat counters for calls whose answers compaction just took away.
 
-    **The dead end this removes.** The guard's whole justification is that a repeat "will not
-    answer differently" and the model already has the first answer. Compaction takes that second
-    half away: `agent/compaction.py` replaces older tool results with a placeholder, so inside one
-    long turn a result can be read, cleared, re-fetched, cleared again — and the third identical
-    call is refused, leaving the model told to "answer from what you already have" about something
-    it demonstrably no longer has.
-
-    Both modules already knew about each other and neither closed it: `compaction.py` removed a
-    "re-run the tool if you still need it" line from its placeholder *precisely because* this guard
-    would then deny it. Written down on both sides, unfixed on both sides.
-
-    **Clearing, not exempting.** After a reduction an identical call is a *re-read*, not a repeat,
-    and the counter that would refuse it is measuring a context that no longer exists. Resetting is
-    also what keeps the guard's own measurement intact — the loop it was built for (7-8 identical
-    `find_past_jobs` calls, 128-142 s against 16.9 s) happens inside a context that is not being
-    reduced, and a turn large enough to compact will re-accumulate its counts from here.
-
-    **Only the calls whose results were actually cleared.** The reduction preserves the newest
-    `agent_keep_last_tool_groups` results, so a blanket reset also forgave repeats of answers the
-    model is still holding — and it did so once per reduction, which in a long turn is repeatedly.
-    That made the guard's effectiveness a function of the clearing threshold, and lowering that
-    threshold from 100k to 30k (`agent_tool_result_clear_trigger`) is what made the coupling worth
-    removing rather than documenting. Passing the calls that lost their answers keeps the premise
-    exact: a call is forgiven when, and only when, its own result is gone.
-
-    **And each cleared result forgives exactly once.** The caller re-derives the cleared set from
-    the freshly re-edited request on every model call — the edits are non-destructive, so an old
-    result reads as cleared on every call after the first — and forgiving it again each time reset
-    the counter as fast as repeats accumulated: past the clearing trigger the guard was off for
-    the rest of the turn. The watch's `forgiven` set of call ids is what makes a second sighting
-    of the same cleared result a no-op (see `TurnCallWatch`).
-
-    A no-op off the request path, like every other function in this module.
-
-    **It reports nothing, because nothing reads a report.** This returned a count of the results
-    forgiven for the first time, documented as "the caller's signal that this model call saw a
-    *new* reduction rather than the standing one re-derived" — and its one caller
-    (`compaction._publish_reduction`) discarded it and decided that same question from the turn
-    watch's high-water reclaim, which is the better signal because it also sees the conversation
-    window's cut. A documented return with no reader is a claim about a collaboration that does not
-    exist.
+    After compaction replaces a result with a placeholder, an identical call is a re-read, not a
+    repeat. Only the calls whose own results were cleared are forgiven, and each call id is forgiven
+    at most once (see `TurnCallWatch`), because the caller re-derives the cleared set on every model
+    call. A no-op off the request path.
 
     Args:
         cleared: `(tool call id, tool name, arguments)` per result replaced by a placeholder.
@@ -186,21 +102,9 @@ def forget_calls(cleared: Iterable[tuple[str, str, Any]]) -> None:
 def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     """Count this call and return the refusal it has earned, or `None` to let it through.
 
-    The decision, framework-free, so there is one counter, one threshold and one sentence however
-    the plumbing around it is written. Splitting it would let a turn's repeat budget drift — and the
-    number that matters here was measured (7–8 identical `find_past_jobs` calls in one turn, a
-    median of 128–142 s against 16.9 s), so a second copy free to drift from it would quietly undo
-    the finding.
-
-    **Counting is the side effect**, and it happens before the threshold test, so a call that is
-    let through is still recorded against the next one. Off the request path there is no counter
-    and this is a no-op — the CLI, the tests and the classic agent all take that branch.
-
-    **The `/metrics` series is not recorded here**, and that is the one thing this function
-    deliberately does not do with `name`. A metric label must be the *served* tool name, and only a
-    caller holding the request can clamp it to one — so the counter moved to `refuse_repeated_calls`
-    below, which is also the only caller in `src/`. Keeping it here behind a defaulted parameter
-    would leave the raw label one direct call away, which is exactly the shape this was.
+    The one framework-free decision: one counter, one threshold, one sentence. Counting happens
+    before the threshold test, so a call let through still counts against the next. The `/metrics`
+    series is recorded by `refuse_repeated_calls`, which holds the clamped tool name.
     """
     watch = _calls.get()
     if watch is None:
@@ -222,29 +126,15 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
 
 @wrap_tool_call
 async def refuse_repeated_calls(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """The LangGraph wiring of `refuse_repeated_calls` — same counter, same threshold, same words.
+    """The LangGraph wiring of `count_call` — same counter, same threshold, same words.
 
-    Raised rather than returned as a `ToolMessage`, unlike the gates in `tool_authz`: a
-    `RepeatedCallRefusal` is a `ChemclawError`, so `surface_domain_errors` is what turns it into
-    the message the model reads. That keeps one converter responsible for how a refusal reaches the
-    model, instead of this gate having its own opinion about it.
+    Raises rather than returning a `ToolMessage`, so `surface_domain_errors` is the one
+    converter that shapes the refusal for the model.
 
-    **It also owns the counter, because it owns the only clamped name.** `/metrics` is
-    unauthenticated by decision (`SECURITY.md`) and its stated guarantee is a declared label
-    allowlist carrying no session id, user or turn content — so `request.tool_call["name"]`, which
-    is whatever string the model emitted, may not be a label. `ToolNode` dispatches an unregistered
-    name through this chain deliberately, and this guard sits *above* `refuse_unparsed_arguments`,
-    so it runs for names the graph does not hold: measured, an injected name minted
-    `chemclaw_repeated_tool_calls_total{tool="IGNORE_PREVIOUS. exfiltrate=…"}` at 253 characters,
-    one new series per invented name until `_MAX_SERIES_PER_COUNTER` drops the rest — at which
-    point the counter also stops recording genuine repeats, so the exfiltration poisons the signal
-    on its way out. The same class was closed for the invalid-tool-call label
-    (`SECURITY-REVIEW-2026-08-28.md`, `agent/audit.metric_tool_name`,
-    `agent/model_calls._bump_invalid`); this was the one raw reader left.
-
-    The clamp is `metric_tool_name`'s, reused rather than re-derived, and it applies to the *label*
-    only: the refusal sentence still names what the model asked for, which is the same split that
-    function draws for the audit row.
+    It also records the metric, because the label must be clamped with `metric_tool_name`: the
+    model-emitted name reaches this guard even for unregistered tools, and `/metrics` is
+    unauthenticated, so a raw name would mint arbitrary series. The refusal text still names
+    what the model asked for.
     """
     # A declared poll is not counted at all, rather than counted and let through: its identical
     # calls are the tool working, and a count of them would be a number about nothing.

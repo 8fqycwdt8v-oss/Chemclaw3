@@ -1,35 +1,15 @@
 """The argument check `make template-validate` cannot make, taken against running servers.
 
-`python -m chemclaw.cli.validate_template_args_live`, the live-lane half of the template gate.
+`python -m chemclaw.cli.validate_template_args_live`, the live-lane half of the template gate. For
+a bundle declared here but served elsewhere there is no local signature, so this opens the
+connectors for real (`connectors.registry.open_connector_specs`, as a turn does) and checks each
+step's arguments against the `args_schema` the server advertises. The rule (`ToolArguments`,
+`argument_problems`) is shared with `validate_templates`, so both lanes answer in the same words.
 
-A template is a *pinned* procedure, so a step passing an argument its tool does not take is a run
-that spends compute and then fails on step four. `make template-validate` checks that offline by
-reading a signature out of this tree — and for a bundle we **declare but do not run** there is no
-signature here to read. Seven shipped tool steps are in that state today (`chem`'s five
-enumerations, `safety`'s two `screen_hazards` calls): name-checked, arguments unchecked, and the
-offline gate says so in a note rather than pretending otherwise.
-
-**The missing authority is a live session, and there is exactly one.** A running MCP server
-advertises each tool's `args_schema`, which is what the model is handed and what the call is
-validated against — so this opens the connectors for real
-(`chemclaw.connectors.registry.open_connector_specs`, the same function every turn uses) and checks
-the same argument rule against what actually answered. The rule itself is not re-implemented:
-`ToolArguments` and `argument_problems` come from `chemclaw.cli.validate_templates`, so both lanes
-give the same verdict in the same words and only the authority differs.
-
-**Why this is a live-lane target and not a `ci` one.** It needs a network, and `ci` must not: the
-row that asked for this proposed putting it in `make connector-validate`, which is inside `ci` and
-imports the bundle's *local* module — so it would have answered `[]` for exactly the bundles in
-question while looking like it had checked them. `make template-validate` stays offline, keeps its
-note, and this runs beside `make live-probes` against a deployment.
-
-**What it refuses to do is count an unreached connector as checked.** That is
-`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` exactly: a
-harness that starts some of the fleet and prints one green line is a harness that tested some of
-the fleet and said nothing about the rest. So the report has three parts, not two — the steps it
-checked, the problems it found, and the steps it could not reach — and a run that reached nothing
-exits non-zero with a distinct code, because "no problems found" over an empty check is the
-sentence this whole module exists to prevent.
+Not in `ci`, because it needs a network. An unreached connector is never counted as checked
+(`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two`): the report
+lists what was checked, what was wrong and what was unreached, and a run that reached nothing exits
+with a distinct code.
 
 Read-only; it opens sessions and calls no tool.
 """
@@ -58,9 +38,8 @@ from chemclaw.templates.registry import discovered
 
 logger = logging.getLogger(__name__)
 
-# Exit 1 is "a template is wrong", exit 3 is "this run is not evidence". Two codes because they ask
-# for two different actions — fix the template, or start the server and run it again — and one code
-# would collapse them. 2 is skipped because `argparse` already owns it for a usage error.
+# Exit 1 means "a template is wrong" (fix it); exit 3 means "this run is not evidence" (start the
+# server and re-run). 2 is argparse's usage error.
 EXIT_MISMATCH = 1
 EXIT_INCOMPLETE = 3
 
@@ -68,9 +47,9 @@ EXIT_INCOMPLETE = 3
 class LiveReport(NamedTuple):
     """The three things a run of this check has to say, kept apart on purpose.
 
-    `checked` is what the run is evidence about, `problems` is what it found, and `unreached` is
-    what it is *not* evidence about. Folding the third into silence is the failure
-    `D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` names.
+    `checked` is what the run is evidence about, `problems` what it found, and `unreached` what it
+    is
+    not evidence about.
     """
 
     problems: list[str]
@@ -82,13 +61,8 @@ class LiveReport(NamedTuple):
 def connector_owners() -> dict[str, str]:
     """Every endpoint tool an enabled connector serves, mapped to the connector's name.
 
-    This is the set whose arguments a live session can answer for, and the set the offline gate can
-    only sometimes answer for. In-process tools are deliberately absent: their signatures are in
-    this tree, `make template-validate` checks them there, and checking them again here would make
-    a second answer to a settled question.
-
-    One name cannot belong to two connectors — `registry._declared_tool_names` raises on that at
-    load — so a flat mapping is sound rather than lossy.
+    In-process tools are absent; `make template-validate` checks their local signatures. One name
+    cannot belong to two connectors (the registry raises at load), so a flat mapping is sound.
     """
     return {
         tool: manifest.name
@@ -106,17 +80,12 @@ def check_live_arguments(
 ) -> LiveReport:
     """Check every connector-served tool step against the tool as the running server describes it.
 
-    Pure, so the whole decision is testable without a fleet: `main` supplies the live half and this
-    supplies the judgment. Four outcomes per step, and each is recorded as itself:
+    Pure, so the decision is testable without a fleet. Per step:
 
-    1. **Not a connector tool** — skipped silently. It has a local signature and the offline gate
-       owns it.
-    2. **Its connector did not come up** — recorded in `unreached` under that connector. Never a
-       problem (nothing is known to be wrong) and never a pass (nothing was checked).
-    3. **Its connector came up without it** — a problem. The template names a tool that server does
-       not serve, which is a run that fails at the call, and the manifest saying otherwise is the
-       drift both `connector.yaml` files warn about and no offline gate can see for these bundles.
-    4. **It is there** — the argument rule applies, in `argument_problems`' words.
+    1. **Not a connector tool** — skipped; the offline gate owns it.
+    2. **Its connector did not come up** — recorded in `unreached`, neither a problem nor a pass.
+    3. **Its connector came up without it** — a problem: the call would fail.
+    4. **It is there** — `argument_problems` applies.
 
     Args:
         templates: The templates to check, normally `templates.registry.discovered().values()`.
@@ -157,10 +126,8 @@ def check_live_arguments(
 def _specs_for(owners: Mapping[str, str], needed: Collection[str]) -> list[ConnectorSpec]:
     """The connection specs for just the connectors some template step actually names.
 
-    Opening the whole enabled set would pay a connect timeout for every connector this check has no
-    question for, and — worse — would report those as `unreached`, turning an honest signal about
-    coverage into noise nobody reads. `owners` is passed rather than re-derived so the set this
-    opens and the set `check_live_arguments` judges are the same one.
+    Opening the whole enabled set would pay connect timeouts and pad `unreached` with irrelevant
+    connectors. `owners` is passed in so this opens exactly the set `check_live_arguments` judges.
     """
     wanted = {owners[tool] for tool in needed if tool in owners}
     return [spec for spec in mcp_connections() if spec.name in wanted]
@@ -169,10 +136,8 @@ def _specs_for(owners: Mapping[str, str], needed: Collection[str]) -> list[Conne
 async def run() -> LiveReport:
     """Open the connectors the shipped templates name and check their steps against them.
 
-    Identity comes from the CLI's own seam (`cli.chat.resolve_identity`) because the connector
-    client stamps `X-Chemclaw-Actor` on every request and a server logs it; there is no anonymous
-    way to open a session, and inventing an actor label here rather than reusing the one the CLI
-    already resolves would put a second identity story in the tree.
+    Identity comes from `cli.chat.resolve_identity`: the connector client stamps `X-Chemclaw-Actor`
+    on every request, and there is no anonymous session.
     """
     templates = list(discovered().values())
     owners = connector_owners()
@@ -192,9 +157,8 @@ async def run() -> LiveReport:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the live argument check and print all three parts of what it found.
 
-    Parses even though it declares no option, for the reason its siblings do: an argument this
-    cannot honour is refused rather than discarded under a green line. The knobs are
-    `CHEMCLAW_TEMPLATES_DIR` and `CHEMCLAW_CONNECTOR_URLS`.
+    Parses arguments though it declares none, so an unsupported argument is refused rather than
+    ignored. The knobs are `CHEMCLAW_TEMPLATES_DIR` and `CHEMCLAW_CONNECTOR_URLS`.
     """
     argparse.ArgumentParser(
         prog="python -m chemclaw.cli.validate_template_args_live",

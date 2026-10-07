@@ -1,26 +1,13 @@
 """Walk every enabled reaction corpus into the label index, one bounded page at a time.
 
-The counterpart of `eln_sync.py` for the other kind of reaction source, and the differences are all
-consequences of one thing: a corpus is *literature*, not this organisation's own record. So it
-writes no transcription of its own, it carries a patent citation rather than a note id, and it is
-drained by keyset rather than by a datetime watermark — a release is a versioned load, not a live
-feed. The
-reasoning is in `ingest/labels/corpus.py` and in
-`D-2026-08-25-a-corpus-is-evidence-not-an-eln`.
+The counterpart of `eln_sync.py` for literature corpora (D-2026-08-25-a-corpus-is-evidence-
+not-an-eln): no transcription of its own, a patent citation rather than a note id, and a keyset
+drain rather than a datetime watermark. Shaped like `document_sync.py`: a planning activity, a
+bounded page per activity, `continue_as_new` to keep history replayable.
 
-Shaped like `document_sync.py`: a planning activity that reads the live values once, a bounded page
-per activity, `continue_as_new` so a multi-million-row corpus drains over many runs without an
-event history that cannot be replayed.
-
-**Whether the cursor outlives the run is the binding's call, not this file's**
-(`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`). For a *release* — the default, and what this
-job was written for — it is intra-run only and rides the state, exactly as the document crawl's
-does: a re-drain of an unchanged release is a no-op (every write is an id-keyed upsert of the record
-phase) and a *new* release must be walked from the top, so there is nothing worth storing. For a
-source whose binding declares `append_only: true` it is persisted in `corpus_cursors` and the next
-fire resumes there, because a live feed is the case where re-walking means reading the whole corpus
-daily to find yesterday's rows. Not `sync_cursors`: that column is a datetime and this is a keyset
-key in the source's own domain.
+For a release (the default), the cursor lives only in workflow state: a re-drain is an
+idempotent upsert and a new release must be walked from the top. For a binding with
+`append_only: true`, it persists in `corpus_cursors` so a live feed resumes where it stopped.
 """
 
 from datetime import timedelta
@@ -59,20 +46,10 @@ _corpus_reactions = corpus_reactions
 def corpus_sources() -> dict[str, CorpusBinding]:
     """Every active source whose warehouse binding declares a drainable reaction corpus, by name.
 
-    Also what `durable/schedules.py` asks to decide whether this job earns a Schedule at all — the
-    `share_sources()` twin, and asked of the manifests rather than of a `*_enabled` setting for the
-    reason that file records three times over.
-
-    **Read off the manifest rather than off the built retrieve half**, which is the shape
-    `share_sources()` uses and is deliberately *not* what this did first. A corpus and a vector
-    index are two seams onto one table — Pistachio carries both — and a source declares exactly one
-    `retrieve:` callable, so "which sources have a corpus" cannot be answered by asking what the
-    retrieve half happens to be an instance of. It is also cheaper: a manifest is YAML, and this
-    runs on every Schedule reconcile.
-
-    A malformed binding is skipped rather than raised on: `make datasource-validate --construct` is
-    where a bad binding is reported, and a worker that refuses to start because one disabled-ish
-    source has a typo would take every other drain down with it.
+    Also decides whether this job gets a Schedule. Read off the manifest, not the built retrieve
+    half, because one source may carry both a corpus and a vector index. A malformed binding is
+    skipped (`make datasource-validate --construct` reports it) so one typo cannot stop every
+    drain.
     """
     found: dict[str, CorpusBinding] = {}
     for manifest in active_manifests():
@@ -110,9 +87,8 @@ class CorpusSyncPlan(BaseModel):
     """What one run will drain, and the bound it is fixed to."""
 
     sources: list[str]
-    # Captured in the activity rather than read in the workflow: this decides how many commands the
-    # run emits, so a redeploy that lowers it mid-drain would replay `continue_as_new` earlier than
-    # history records — a non-determinism error, which retries forever and wedges the run (D-093).
+    # Captured in the activity: it decides how many commands the run emits, so reading it in the
+    # workflow would break replay after a redeploy.
     max_iterations: int
 
 
@@ -157,21 +133,15 @@ async def plan_corpus_sync() -> CorpusSyncPlan:
     )
 
 
-# One page is thousands of rows out of a warehouse and a fingerprint per distinct structure —
-# minutes of work with no natural progress point — so liveness is time-based, the same shape every
-# other drain in this package uses. The eager pre-beat is kept because `beating()` waits one
-# interval before its first, and a small page may finish before that.
+# A page has no natural progress point, so liveness is time-based; the eager pre-beat covers a
+# page shorter than one interval.
 @durable_activity("background")
 @activity.defn
 async def drain_reaction_corpus(source: str, after: str) -> CorpusReport:
     """Read one page of `source`, resuming after `after`, and record it.
 
-    **The persisted cursor is read and written here, not in the workflow**, for the reason every
-    other IO in this file is in an activity: a workflow must replay deterministically, and a
-    database read cannot. An empty `after` means "the start of this source" — the workflow spells
-    it that way both on the first page and after it pops a finished source — so it is the one
-    moment a stored position is worth consulting. For a release-mode binding there is none, and the
-    drain begins at the top exactly as it always has.
+    The persisted cursor is read and written here because workflows cannot do IO. An empty `after`
+    means "the start of this source", the one moment a stored position is consulted.
     """
     binding = corpus_sources().get(source)
     if binding is None:  # names come from `plan_corpus_sync`, so this is a wiring bug
@@ -193,32 +163,23 @@ async def drain_reaction_corpus(source: str, after: str) -> CorpusReport:
         f"reaction corpus {source}",
         settings.corpus_sync_heartbeat_timeout_seconds,
     )
-    # Every page that *advanced*, not only the last one: a run interrupted between pages must
-    # resume where it stopped rather than at the position the previous *run* left, and the write is
-    # one indexed upsert against thousands of rows of work.
-    #
-    # **Gated on `advanced` rather than written unconditionally, and that gate is what gives
-    # `updated_at` a meaning.** Re-writing the same position each fire refreshes the timestamp, so a
-    # feed whose source stopped exporting would look freshly synced forever — and the staleness
-    # signal `ingest/labels/cursor.py` and `072` both name over that column could never fire. With
-    # the gate, `updated_at` answers "when did this feed last move", which is the question.
+    # Persist after every page that advanced, so an interrupted run resumes where it stopped. Gated
+    # on
+    # `advanced` so `updated_at` means "when this feed last moved" and staleness stays detectable.
     if binding.append_only and report.advanced:
         await store_corpus_cursor(source, report.cursor)
     return report
 
 
 @durable_workflow("background")
-# Without `failure_exception_types` this workflow cannot fail — it hangs. The SDK parks a plain
-# exception in an infinite workflow-task-failure loop, so a genuine bad-data failure looks like a
-# run that is still going, forever (measured; `connector_job.py` records it).
+# Without `failure_exception_types` a bad-data failure would park in an infinite workflow-task
+# retry loop and look like a run still going.
 @workflow.defn(failure_exception_types=[Exception])
 class ReactionCorpusWorkflow:
     """Drain each enabled reaction corpus into the label index's record phase.
 
-    The labelling itself is `ReactionLabelWorkflow`'s job and runs on its own Schedule: a row lands
-    here unlabelled and leaves the stale set when the labeller reaches it. Splitting them is what
-    lets a corpus be re-drained without re-labelling it, and a labeller upgraded without re-reading
-    the warehouse.
+    Labelling is `ReactionLabelWorkflow`'s job on its own Schedule, so a corpus can be re-drained
+    without re-labelling and a labeller upgraded without re-reading the warehouse.
     """
 
     @workflow.run
@@ -257,15 +218,11 @@ class ReactionCorpusWorkflow:
                     workflow.continue_as_new(state)
                 continue
             if page.has_more:
-                # Unreachable with a well-behaved binding (a truncated page always advances the
-                # cursor), but a mis-declared `order_by` must stop one source with a warning rather
-                # than spin this loop — and Temporal's event history — forever.
-                #
-                # `page.advanced` rather than `page.cursor != state.after`, which is what this read
-                # before append-only sources existed and would now be wrong on their first page:
-                # the activity resolves a *stored* position, so `state.after` is `""` here while
-                # the drain started somewhere else, and the comparison would call a stalled cursor
-                # an advance and re-read the same page every fire.
+                # Unreachable with a well-behaved binding; a mis-declared `order_by` stops one
+                # source with a
+                # warning rather than spinning forever. Uses `page.advanced` because an append-only
+                # source starts
+                # from a stored position while `state.after` is still `""`.
                 workflow.logger.warning(
                     "reaction corpus %s reported more rows but no cursor advance; stopping. Check "
                     "that its `order_by` column is unique and stable across the release.",

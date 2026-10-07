@@ -1,45 +1,17 @@
 """Proposed changes to what the agent *does*, and what a person decided about them.
 
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` drew the axis this module sits on: a thing
-is gated when it changes what the agent does. Knowledge does not, so it lands in the graph and is
-corrected. A **skill** does — it is injected into the prompt and reshapes every later answer with no
-citation trail — which is why `agent/skill_backend.SkillsReadOnlyRefusal` refuses every write a turn
-could attempt, on the shared tree and on the chemist's own tier alike.
+A skill changes behaviour, so no turn writes one; `propose_skill` files a proposal here instead.
+A row is never a skill: nothing reads it as judgment, and only a person calling a route turns it
+into one.
 
-That refusal left one thing unanswered, and this module is the answer. The agent often *is* the
-party that has just worked out a procedure worth keeping, and until now the only thing it could do
-was write the text into an answer and hope somebody copied it into
-`POST /skills/mine`. `propose_skill` lets it put one here instead. **A row here is a proposal and
-never a skill**: nothing reads it as judgment, no prompt contains it, and the only thing that turns
-one into behaviour is a person calling a route. The refusal is untouched, because this is a
-different table.
+Rules:
 
-**Modelled on two predecessors, because the halves have different shapes and each has a table that
-already got its half right.**
-
-From `plan_approvals`: two backends chosen by `session_store`, for the reason
-`agent/plan_approval_store.py` gives at length — a record must not outlive, or be outlived by, the
-thing it authorizes, and under `session_store="memory"` the thing it authorizes is a process.
-
-From retired `note_proposals`, including the defect its own successor migration had to fix: **the
-key is the content, not the name.** Re-proposing byte-identical text is the same proposal, so a
-rejection in July survives the same text arriving again in August — which is the whole of "an
-unchanged re-proposal cannot reopen a rejection". A *changed* body is a different proposal and
-appends a new row, and the earlier one is marked `superseded` rather than left `open`: migration 058
-records what happens otherwise, a queue rendering versions nothing would deliver and one decision
-later applied to both.
-
-**A decision is final, and that is a decision rather than an omission.** `decide` transitions `open`
-to `accepted` or `rejected` and nothing else moves; a second call reports the standing decision
-instead of replacing it. A person who rejected something and later wants it has a shorter path than
-reopening a queue entry — `POST /skills/mine` writes the skill directly, which is the same act with
-one fewer indirection and no pretence that the agent proposed it twice. The alternative, letting a
-decision be overwritten, buys a change of mind at the cost of the property this table exists for:
-that a rejection is evidence somebody can find later.
-
-**Content identity is per actor.** Two chemists may independently be offered the same procedure, and
-one rejecting it must not decide for the other — a proposal is per person, like the tier an accepted
-one is written to.
+- Two backends chosen by `session_store`, like `plan_approvals`: the record must not outlive the
+  context it authorizes.
+- The key is the content, per actor: re-proposing identical text is the same proposal, so a
+  rejection stays standing; a changed body is a new row and marks the open one `superseded`.
+- A decision is final: `decide` moves `open` to `accepted` or `rejected` only, so a rejection
+  remains findable. A person who changes their mind uses `POST /skills/mine`.
 """
 
 from __future__ import annotations
@@ -61,21 +33,15 @@ from chemclaw.core.metrics_bridge import record_metric
 
 
 class ProposalStoreError(ChemclawError):
-    """The proposal store could not answer — a fault, never a refusal.
-
-    Separate from a refusal because the two read differently to everything downstream: a refusal is
-    an answer (`decide` on a decided proposal), and this is the store failing to do arithmetic it
-    guaranteed.
-    """
+    """The proposal store could not answer — a fault, never a refusal."""
 
 
 #: What a proposal proposes. Constrained because the accepting code dispatches on it, and an
 #: unknown kind is a proposal nobody can act on — the database says the same thing in a CHECK.
 ProposalKind = Literal["skill", "profile"]
 
-#: Where a proposal can be in its life. `superseded` is deliberately not a decision: a newer version
-#: of the same name replaced it in the queue and no human decided anything about it, which is what
-#: keeps `decided_at` meaning what an auditor reads it as.
+# Where a proposal can be in its life. `superseded` is not a decision (no human decided it), which
+# keeps `decided_at` meaningful.
 ProposalState = Literal["open", "accepted", "rejected", "superseded"]
 
 #: The states a person's decision produces, as opposed to the two the system produces.
@@ -85,11 +51,8 @@ DECIDED: frozenset[str] = frozenset({"accepted", "rejected"})
 def _book(kind: str, outcome: str) -> None:
     """Count one outcome of this queue.
 
-    **Booked in the store rather than in either caller, because only the store knows which of the
-    four happened.** A `propose` that met its own content is not a fresh proposal, and a `decide` on
-    a decided row is not a decision — a caller counting its own intent would report a queue busier
-    than it is, in the one series whose purpose is telling an operator whether anybody is reading
-    it.
+    Booked in the store because only the store knows which outcome happened; callers would count
+    intent and overstate the queue's activity.
     """
     record_metric(
         lambda m: m.increment(
@@ -99,23 +62,11 @@ def _book(kind: str, outcome: str) -> None:
 
 
 def _arrival(inserted: bool, stored: Proposal, *, revived: bool) -> str:
-    """What a `propose` call actually was, which is not the same as what its caller intended.
+    """Classify what a `propose` call actually was.
 
-    Four outcomes, because a queue's usefulness is measured by the gap between them. A **fresh**
-    row is a proposal. A call that met its own content on an **open** row proposed nothing — the
-    model is repeating itself, which is worth seeing and is not a second proposal. A call that met a
-    **decided** row is the idempotent path this table exists for: the same text cannot reopen a
-    rejection, and counting it as a proposal would report a queue busier than it is in the one
-    series whose purpose is telling an operator whether anybody is reading it.
-
-    **`revived` is the fourth and it used to be counted as the second.** `superseded` is
-    deliberately not a decision, so a re-proposal of a superseded body fell through to the
-    `stored.decided` test and booked `already_open` — for a row that `GET /proposals?state=open`
-    does not list and `POST /proposals/{kind}/{name}` answers 409 for. The idempotence this table
-    exists for is over a *decision*; applying it to a state the system produced told an operator
-    the queue was being repeated at while it was in fact being refilled, and told the model its
-    proposal was waiting for a chemist who could never see it. A revive is a genuine state change
-    and is counted as its own thing rather than folded into either neighbour.
+    `fresh` is a new row; `already_open` met its own open row (the model repeating itself);
+    `already_decided` met a decided row (the idempotent path); `revived` put a superseded body back
+    in the queue, a real state change.
     """
     if inserted:
         return "proposed"
@@ -125,11 +76,7 @@ def _arrival(inserted: bool, stored: Proposal, *, revived: bool) -> str:
 
 
 def content_hash(content: str) -> str:
-    """The identity of one proposed document.
-
-    `stable_hash` rather than a fresh digest so this repository has one answer to "are these the
-    same bytes" — the same function `local_skills_namespace` and the note index use.
-    """
+    """The identity of one proposed document, via the repository-wide `stable_hash`."""
     return stable_hash(content)
 
 
@@ -137,9 +84,7 @@ def content_hash(content: str) -> str:
 class Proposal:
     """One proposed change to what the agent does, as the store answers it.
 
-    Frozen because a caller holding one is holding a record of something that happened, and the one
-    field that changes after the fact — the decision — changes in the store rather than in a
-    caller's copy.
+    Frozen: the decision changes in the store, not in a caller's copy.
     """
 
     kind: ProposalKind
@@ -151,9 +96,7 @@ class Proposal:
     session_id: str
     correlation_id: str
     state: ProposalState = "open"
-    # Defaulted because the store stamps it: Postgres with `now()`, the in-process backend
-    # with its own clock. A caller that had to supply one would be inventing a time the row
-    # then overwrites, which is a second answer to "when was this proposed".
+    # Defaulted because the store stamps it; a caller-supplied time would be overwritten.
     proposed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     decided_at: datetime | None = None
     decided_by: str = ""
@@ -211,37 +154,25 @@ _INSERT = (
     "ON CONFLICT (actor, kind, name, content_hash) DO NOTHING"
 )
 
-# Everything this person still has open under one name, other than the version just proposed. The
-# `<> %s` is what keeps a re-proposal of the *same* content from superseding itself, which would
-# turn the idempotent path into a state change.
+# Everything this person still has open under one name, other than the version just proposed;
+# the `<> %s` stops a re-proposal of the same content superseding itself.
 _SUPERSEDE = (
     "UPDATE behaviour_proposals SET state = 'superseded' "
     "WHERE actor = %s AND kind = %s AND name = %s AND content_hash <> %s AND state = 'open'"
 )
 
-# **Putting a superseded body back in the queue, which is what re-proposing it means.** The unique
-# key is `(actor, kind, name, content_hash)`, so the row holding V1 is the only row that body can
-# ever have — `ON CONFLICT DO NOTHING` cannot append a second one, and nothing else moves a row out
-# of `superseded` (`_DECIDE` is `AND state = 'open'`). So without this the proposer is told V1 is
-# waiting to be decided while it is listed nowhere and `POST /proposals/{kind}/{name}` answers 409:
-# a decision with nowhere to land.
-#
-# `proposed_at` is refreshed because it is what the queue orders by and what a chemist reads as
-# "when was I asked": the ask is now. The original ask is not lost — `superseded` was reached
-# through a supersede that is itself booked, and the decision columns are untouched (the row was
-# never decided, which is exactly why reviving it is legal).
+# Put a superseded body back in the queue, which is what re-proposing it means. The unique key
+# means that row is the only one the body can have, so without this the proposal would be
+# reported waiting while listed nowhere. `proposed_at` is refreshed because the ask is now; the
+# decision columns stay untouched since the row was never decided.
 _REVIVE = (
     "UPDATE behaviour_proposals SET state = 'open', proposed_at = now() "
     "WHERE actor = %s AND kind = %s AND name = %s AND content_hash = %s AND state = 'superseded'"
 )
 
-# **The serializer for one name's queue.** `_SUPERSEDE` reads under READ COMMITTED before a peer's
-# insert is visible, so N concurrent proposes of N different bodies each found nothing to supersede
-# and left N open rows — measured at 8 concurrent, 7 open, no error and no deadlock, which is
-# silently the state the module says must never exist ("a reviewer who sees both has to guess which
-# one a decision applies to"). A transaction-scoped advisory lock keyed on the name is what makes
-# the read-then-write a critical section; it releases on commit, and it is per name so two chemists
-# and two skills never contend.
+# Serializes one name's queue: without a transaction-scoped advisory lock, concurrent proposes of
+# different bodies each find nothing to supersede and leave several open rows. Per name, so
+# unrelated proposals never contend.
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 
 _ONE = (
@@ -297,18 +228,11 @@ class PostgresProposalStore:
     async def propose(self, proposal: Proposal) -> Proposal:
         """Record a proposal, or return the standing one for this exact content.
 
-        **Arriving at one open row per name is the invariant, and all three writes are in one
-        transaction under the advisory lock** — the queue must never show two open versions of one
-        name, because a reviewer who sees both has to guess which one a decision applies to, which
-        is the state migration 058 exists to describe. The order is insert-or-revive, then
-        supersede: `_SUPERSEDE`'s `content_hash <> %s` is what keeps the version this call is about
-        out of its own sweep, and the `if arrived` guard is what keeps a call that arrived at
-        nothing from killing an open sibling it did not replace.
-
-        `ON CONFLICT DO NOTHING` is the whole of "an unchanged re-proposal cannot reopen a
-        **decision**": the row already there is returned untouched when a person decided it.
-        `_REVIVE` is where that idempotence stops — `superseded` is a state this system produced
-        and no person answered, so a re-proposal of that body is a proposal rather than a repeat.
+        Invariant: at most one open row per name. All writes run in one transaction under the
+        advisory
+        lock, insert-or-revive then supersede, and only a version that arrived sweeps its siblings.
+        `ON CONFLICT DO NOTHING` keeps a decided row untouched; `_REVIVE` reopens only a superseded
+        one.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -342,13 +266,9 @@ class PostgresProposalStore:
                         (proposal.actor, proposal.kind, proposal.name, proposal.content_hash),
                     )
                     revived = cur.rowcount == 1
-                # **Only a version that arrived supersedes anything**, which the first spelling
-                # got wrong by running the update unconditionally: re-proposing a body already
-                # stored killed the *open* sibling and revived nothing, so a queue holding one
-                # open proposal and one superseded one came back holding two superseded ones and
-                # nothing to decide. Measured — `OPEN rows: []` — while `propose_skill` went on
-                # telling the model its proposal was "already waiting". A revive arrives in exactly
-                # the same sense an insert does, so it sweeps the siblings an insert would.
+                # Only a version that arrived (inserted or revived) supersedes its siblings;
+                # otherwise a repeat
+                # would close the open sibling and leave nothing to decide.
                 superseded = 0
                 if inserted or revived:
                     await cur.execute(
@@ -436,16 +356,8 @@ class _Held:
 class InMemoryProposalStore:
     """The same contract for a deployment whose sessions are in-process too.
 
-    It is **not** a test double, for the reason `InMemoryPlanApprovalStore` is not: it is the
-    backend a `session_store="memory"` deployment gets, and the CLI is a real one of those. A queue
-    with two implementations that disagree about whether a rejection can be reopened is a control
-    nobody can reason about, so the three rules are reproduced exactly — content is the key, a
-    changed body supersedes an open sibling, and only an `open` proposal moves.
-
-    Unbounded, and measured rather than defended, the same way its sibling is: a proposal is a
-    deliberate act by a model that a person then reads, so the arrival rate is bounded by
-    attention. The shipped chart sets `session_store="postgres"`, so a deployed fleet never reaches
-    this class.
+    Not a test double: it is the backend `session_store="memory"` (e.g. the CLI) uses, so it
+    reproduces the Postgres rules exactly. Unbounded, since proposals arrive at human pace.
     """
 
     def __init__(self) -> None:
@@ -459,10 +371,7 @@ class InMemoryProposalStore:
     async def propose(self, proposal: Proposal) -> Proposal:
         """Record a proposal, or return the standing one for this exact content.
 
-        Mirrors `PostgresProposalStore.propose` statement for statement, including the revive: the
-        two backends disagreeing about what a re-proposal *means* is the defect this module's
-        header is about, and `superseded` is the state where the difference would have been
-        invisible until a chemist could not decide something the model said was waiting for them.
+        Mirrors `PostgresProposalStore.propose` step for step, including the revive.
         """
         key = self._key(proposal.actor, proposal.kind, proposal.name, proposal.content_hash)
         standing = self._held.get(key)
@@ -483,11 +392,7 @@ class InMemoryProposalStore:
         return fresh
 
     def _supersede_open_siblings(self, proposal: Proposal) -> None:
-        """Close every *other* open version of this name, which is `_SUPERSEDE` in Python.
-
-        `content_hash != proposal.content_hash` is the `<> %s` — the version this call is about is
-        not swept by its own arrival, whether it arrived by insert or by revive.
-        """
+        """Close every *other* open version of this name; the in-memory `_SUPERSEDE`."""
         for held in self._held.values():
             other = held.proposal
             if (
@@ -539,32 +444,19 @@ class InMemoryProposalStore:
             for held in self._held.values()
             if held.proposal.actor == actor and (not wanted or held.proposal.state in wanted)
         ]
-        # `reverse=True` on a stable sort keeps *insertion* order among equal timestamps, which is
-        # oldest-first — the opposite of what this method promises and of what `ORDER BY
-        # proposed_at DESC, id DESC` gives. Measured on three rows stamped identically: Postgres
-        # answered newest-first and this answered oldest-first. Reversing the list first makes the
-        # tiebreak arrival order descending, which is what the id does on the other backend.
+        # Reverse first so the stable descending sort breaks timestamp ties newest-first, matching
+        # `ORDER BY proposed_at DESC, id DESC`.
         mine.reverse()
         mine.sort(key=lambda proposal: proposal.proposed_at, reverse=True)
         return mine[: settings.agent_proposals_list_max]
 
 
-#: The one in-process store for a `session_store="memory"` deployment.
-#:
-#: A module singleton for the reason `templates/composed.py` has one: the CLI is one process and one
-#: person, and a per-call instance would lose every proposal between the turn that made it and the
-#: route that decides it.
+# The one in-process store: a per-call instance would lose proposals between turn and route.
 _IN_MEMORY = InMemoryProposalStore()
 
 
 def default_proposal_store() -> ProposalStore:
-    """This deployment's proposal store, chosen the way the plan-approval store chooses one.
-
-    The backend follows `session_store` rather than being configured separately, and
-    `agent/plan_approval_store.py` carries the whole argument: the record must not outlive, or be
-    outlived by, the thing it authorizes. A proposal authorizes a change to what the agent does for
-    one person, and under `session_store="memory"` that person's whole context is a process.
-    """
+    """This deployment's proposal store; the backend follows `session_store`."""
     if settings.session_store == "postgres":
         return PostgresProposalStore()
     return _IN_MEMORY

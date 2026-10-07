@@ -1,25 +1,12 @@
 """What a designed arm produced: the join between the prescriptive tier and the numbers.
 
-`protocols/` says what to run and `ingest/eln` records what was done, and until now nothing
-connected them. A plate was laid out here, exported as a run sheet, run, and its numbers came back
-into somebody's spreadsheet — so the round trip `skills/hte-campaign-design` promises in its own
-closing section, *"the arms that survive become the observations `suggest_next_experiment` fits a
-surrogate to"*, was a person retyping a table.
+Closes the loop from a laid-out plate back to `suggest_next_experiment` without retyping. The
+key is (design, revision, arm), so an externally run plate is attachable with only the ids on
+its run sheet; `reaction_id` is optional. The revision is part of the key because a plate is
+run from a printed revision, and a later edit must not re-point old numbers at arms that changed.
 
-**The key is (design, revision, arm), and that choice is what makes an externally-run plate
-attachable.** A chemist who ran the run sheet in another lab has a `design_id` and an `arm_id` and
-nothing else; this module asks for nothing else, and `reaction_id` is optional so an ELN
-transcription links when one exists and is absent when the run lives on paper.
-
-**The revision is part of the key rather than the head.** A plate is run from the revision a
-chemist printed. A later edit that drops a factor level must not silently re-point last week's
-numbers at arms that no longer mean the same thing, so an outcome names the revision it was
-measured against and a reader can see when the two have diverged.
-
-**Append-only**, like the revisions beside it and for a related reason: a re-measured well is a
-second observation, not a correction. An assay repeated on a degraded sample is data about the
-sample, and overwriting would delete the evidence that the two disagree. `latest_by_arm` takes the
-newest per (arm, outcome) and `disagreements` is what makes the rest visible rather than lost.
+Append-only: a re-measured well is a second observation. `latest_by_arm` takes the newest per
+(arm, outcome) and `disagreements` keeps the rest visible.
 """
 
 from collections.abc import Iterable, Sequence
@@ -34,17 +21,15 @@ from chemclaw.protocols.models import AuthorKind, ExperimentDesign
 class UnknownArm(ChemclawError):
     """An outcome names an arm the stored revision does not have.
 
-    Checked here rather than in SQL because the arms live inside a JSONB document: a foreign key
-    that cannot see them would be a control whose condition never occurs, and the refusal a caller
-    needs is one that names the arms that *do* exist.
+    Checked here rather than in SQL because the arms live inside a JSONB document, and the refusal
+    should name the arms that do exist.
     """
 
 
 class MixedUnits(ChemclawError):
     """The latest values for one outcome carry more than one unit, so they make no one column.
 
-    Its own type so a reader that can still answer without observations — `read_plate_results`
-    returns the rest of the plate — catches this refusal and nothing else.
+    Its own type so a reader that can still answer without observations catches only this.
     """
 
 
@@ -61,9 +46,9 @@ class ArmResult(BaseModel):
 
     arm_id: str = Field(min_length=1)
     outcome: str = Field(min_length=1)
-    # Finite, because the store is append-only: a `NaN` accepted here (pydantic takes the strings
-    # "NaN" and "inf" too) lands permanently, reads as a disagreement with itself (`nan != nan`),
-    # and reaches a surrogate through `observations_for` as a measured value.
+    # Finite, because the store is append-only: a NaN would land permanently and reach a surrogate
+    # as
+    # a measured value.
     value: float = Field(allow_inf_nan=False)
     # As `core/units` spells it. Carried rather than assumed: a yield in percent and an assay in
     # mg/mL are both numbers, and only one of them is comparable to a specification limit.
@@ -108,9 +93,8 @@ class PlateOutcomes(BaseModel):
 def require_arms_exist(design: ExperimentDesign, results: Iterable[ArmResult]) -> None:
     """Refuse an outcome naming an arm this revision does not have.
 
-    The one check worth making before a write, because the failure it prevents is silent: an
-    outcome attached to a mistyped arm id is stored, counts toward nothing, and leaves the arm it
-    was meant for looking unrun. Worse on a plate, where `A1` and `A11` are both plausible.
+    The failure it prevents is silent: an outcome on a mistyped arm id (`A1` vs `A11`) is stored,
+    counts toward nothing, and leaves the intended arm looking unrun.
 
     Raises:
         UnknownArm: Naming the offending ids and the arms that exist.
@@ -140,9 +124,7 @@ def summarise(
 ) -> PlateOutcomes:
     """Fold a design's stored outcomes into the three facts a reader needs.
 
-    The unmeasured arms are named rather than counted for `analytical.evaluate`'s reason about
-    `not_measured`: an arm nothing measured is an unanswered question, and a summary that reports
-    only what it has makes a half-run plate look finished.
+    Unmeasured arms are named, not counted, so a half-run plate never looks finished.
     """
     latest = latest_by_arm(results)
     measured = {arm for arm, _ in latest}
@@ -150,8 +132,7 @@ def summarise(
     for result in results:
         first = latest[(result.arm_id, result.outcome)]
         # A unit change is its own line rather than a numeric disagreement: 85 % and 0.85 fraction
-        # agree, and reporting them as "85 and 0.85" would send a chemist to re-run a well that
-        # was only relabelled.
+        # agree.
         if first.unit != result.unit:
             disagreements.append(
                 f"{result.arm_id} {result.outcome}: unit {first.unit!r} and {result.unit!r}"
@@ -176,19 +157,12 @@ def observations_for(
 ) -> list[dict[str, float | str]]:
     """Each measured arm's factor levels plus its outcome, ready to seed a campaign.
 
-    **This is the loop's payoff and the reason the join exists.** `experiment_arms_from_campaign`
-    already turns a campaign's suggested points into a design; this is the other direction, and
-    without it a chemist who ran a plate this system laid out had to retype the table before
-    `suggest_next_experiment` could fit anything to it.
-
-    Returns one row per arm that has a value for `outcome`, with the arm's declared factor levels
-    beside it. Arms with no measurement are omitted rather than defaulted — a missing well is not a
-    zero, and a surrogate fitted to invented zeros is worse than one fitted to fewer points.
+    The inverse of `experiment_arms_from_campaign`: one row per arm with a value for `outcome`,
+    beside the arm's declared levels. Unmeasured arms are omitted, never defaulted to zero.
 
     Raises:
         MixedUnits: the latest values for `outcome` carry more than one unit, naming the arms
-            under each. A column mixing percent and fraction fits a surrogate to numbers that are
-            not comparable, and which unit is right is the chemist's call, not a conversion here.
+            under each. Which unit is right is the chemist's call, not a conversion here.
     """
     latest = latest_by_arm(results)
     measured = [

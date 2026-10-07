@@ -3,6 +3,8 @@
 **Status:** accepted · **Date:** 2026-08-01 · **Implements:** F9-T3 · **Extends:** D-009 (the
 eval/metric layer) · **Does not close:** AG-13 (agent-behaviour evaluation on a live endpoint)
 
+**Superseded-by:** [D-2026-08-01-the-cap-reports-itself](D-2026-08-01-the-cap-reports-itself.md) (in part)
+
 ## Context
 
 `implementation-tickets.md` specifies three autonomy measures — plan quality, a plan-vs-single-shot

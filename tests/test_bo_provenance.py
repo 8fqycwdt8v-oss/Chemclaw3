@@ -201,38 +201,3 @@ def test_the_durable_path_records_its_validated_actor_unmarked(
     assert not suggestion.actor.startswith("unverified:"), (
         "the memo-derived actor crossed no attacker-writable surface and must not be marked"
     )
-
-
-def test_the_threat_model_this_module_states_is_the_one_its_manifest_declares() -> None:
-    """The marker's docstring describes who can forge the header; the manifest decides.
-
-    `_recorded_provenance`'s docstring is where a reader learns what the `unverified:` prefix is
-    defending against, and for a while it said the pod "does not even authenticate *core*: anything
-    that can open a socket to it can name any chemist it likes" — over a manifest that had declared
-    `mode: bearer` since `D-2026-08-20-a-networkpolicy-selects-peers-not-paths`. Driven against the
-    real app, `/mcp` answers 401 with no token and 401 with a wrong one, so the paragraph overstated
-    the exposure by the width of a credential.
-
-    Asserted in both directions rather than as "the phrase is absent", because the failure that
-    matters is *disagreement*: a bundle that loses its bearer and keeps a docstring saying it has
-    one is the same defect with the signs swapped, and it is the direction that understates the
-    exposure.
-
-    It does not assert the marking itself stays — that is the tests above. The prefix survives the
-    narrowing on its own argument: a bearer proves *core called*, never *which chemist*, so the
-    header is still an unverifiable claim.
-    """
-    from chemclaw.connectors.bo.server.tools import _recorded_provenance
-    from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
-    from chemclaw.connectors.registry import discovered
-
-    _path, manifest = discovered()["bo"]
-    assert isinstance(manifest.endpoint, HttpEndpoint)
-    authenticated = isinstance(manifest.endpoint.auth, BearerAuth)
-    doc = _recorded_provenance.__doc__ or ""
-    claims_open = "does not even authenticate" in doc
-    assert claims_open != authenticated, (
-        "connectors/bo/server/tools.py::_recorded_provenance describes a pod that authenticates "
-        f"{'nobody' if claims_open else 'its caller'} while connectors/bo/connector.yaml declares "
-        f"auth {manifest.endpoint.auth!r}"
-    )

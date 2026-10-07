@@ -1,45 +1,15 @@
-"""The per-turn ambients every driver of a turn has to open, in one place that cannot be half-used.
+"""The per-turn cap ambients every driver of a turn opens, behind one context manager.
 
-**Why this module exists: a cap is only as wide as the watch under it, and only one of the three
-drivers opened all four.** `agent/loop_cap.py`'s `_LoopWatch.calls` is what makes a `task` fan-out
-share one iteration allowance rather than getting one each — measured at a cap of 4 over 8
-helpers, **25**
-model calls following `1 + W*(cap - 1)`, and **193** at the shipped cap of 25 and width 8. Without a
-watch the cap falls back to the per-branch channel snapshot, and `SubAgentMiddleware` hands every
-helper the same pre-superstep state, so W branches each spend the whole allowance. The same gap
-existed for the spend cap's watch, which is what lets a fan-out's branches share one budget
-rather than each
-comparing against its own pre-superstep copy.
+The loop cap's and spend cap's watches are what make a `task` fan-out share one allowance:
+without them each helper branch reads its own pre-superstep snapshot and spends the whole budget.
+The usage ledger additionally counts model calls made inside tool bodies, but only where a meter
+fills it (the front door and template steps; the CLI's stays empty). Every driver — `api/runner`,
+`durable/template_activities`, `cli/chat` — enters `turn_caps`, so none can open half of them.
 
-**What the *ledger* buys is narrower than the watch, and only where something fills it.**
-`set_turn_usage` is the ambient that can see a model call a tool body makes — those reach no
-`wrap_model_call`, and `agent/spend_cap.py` measured 5,200 tokens spent against a 150-token budget
-with the cap never firing. But the ledger is only written by `api/graph_stream.py` at the front door
-and by `_StepMeter` in a template step; the CLI passes one and nothing fills it, so
-`metered_turn_tokens()` is 0 there and the spend cap still reads the channel alone. Measured: after
-a CLI turn whose model reported 240 tokens the ledger held (0, 0, 0). So this manager closes the
-*fan-out* half on all three drivers and the off-stream half only where a meter already exists.
-
-`api/runner.py` opened all four. `durable/template_activities.py` opened **two** — the call watch
-and the context record, not the two caps — and `cli/chat.py` opened **none**. So on those two paths
-a template step's fan-out and a CLI turn were bounded by the fallback rather than by the turn. Four
-zero-argument, token-returning watches of identical shape, opened by hand in each driver, is a
-thing three callers get wrong in three different ways; one context manager is a thing a driver
-either
-enters or does not.
-
-**What is deliberately *not* here.** The front door also stamps the session, the authenticated
-identity, the correlation id, the dry-run flag and the chemist's own words — all of which need
-arguments only a request has, and none of which a Temporal activity or a REPL has any business
-inventing. `api/runner._turn_ambient` keeps those and delegates the caps here, so the two halves
-compose without this module growing a signature that only one caller can fill.
-
-**Synchronous on purpose**, because `api/runner._turn_ambient` is and must stay so: its resets are
-reached by cancellation on the disconnect path (D-130), and an `await` between the last statement
-and a reset re-raises the cancellation on the spot and leaks one turn's ambient identity into the
-next turn on the worker. `tests/test_disconnect_teardown.py` asserts the related property — that
-`run_turn`'s `finally` contains no `await` — rather than this manager's synchronicity, which fails
-loudly at the `with` instead; the reason to keep it sync is the argument above, not a test.
+Request-scoped ambients (session, identity, correlation id, dry-run) stay in
+`api/runner._turn_ambient`. This module is synchronous on purpose: the runner's resets run on the
+disconnect path, where an `await` re-raises the cancellation and leaks one turn's ambient identity
+into the next turn on the worker.
 """
 
 from __future__ import annotations
@@ -61,28 +31,19 @@ logger = logging.getLogger(__name__)
 def reset_tolerantly(reset: Callable[[Any], None], token: Any, *, closing: str) -> None:
     """Undo one ambient, tolerating a token whose `Context` is not the one closing the turn.
 
-    A contextvar `Token` remembers the `Context` it was created in, and one teardown path closes the
-    turn from somewhere else: when a client stops reading, the turn's generator is abandoned at a
-    `yield` and asyncio's async-generator finalizer runs `aclose()` in a *new task with a new
-    context*. Every reset then raises `ValueError` — and the first one aborted the ones after it,
-    including `reset_current_identity`, while surfacing as an unretrieved-task traceback naming a
-    `ContextVar` and no session.
-
-    Tolerating it loses nothing: the context those tokens belong to is being discarded either way,
-    so the values are gone whether or not the reset lands. What is gained is that the *rest* of the
-    teardown runs, and that the log line names what was being closed. Only `ValueError` — anything
-    else from a reset is a real defect and must not be swallowed.
-
-    Lives here rather than in `api/runner.py`, where it was written, because the cap ambients below
-    need exactly the same tolerance for exactly the same reason, and a second copy of a function
-    whose whole docstring is one subtle hazard is the "one fact declared twice" defect this package
-    keeps finding. `tests/test_layering.py` forbids `agent -> api`, so the shared home is this side.
+    When a client stops reading, the turn's generator is finalised by `aclose()` in a new task with
+    a
+    new context, so every reset raises `ValueError`; without tolerance the first one aborts the
+    rest,
+    including `reset_current_identity`. The context is being discarded anyway, so nothing is lost by
+    skipping it. Only `ValueError` is tolerated. Lives here so `api/runner` and the cap ambients
+    share
+    it (`agent` may not import `api`).
 
     Args:
         reset: The contextvar reset to attempt.
         token: The token `reset` takes.
-        closing: What is being torn down, for the log line — a session id at the front door, the
-            step or command elsewhere. Never a value worth redacting.
+        closing: What is being torn down, for the log line (a session id, step or command).
     """
     try:
         reset(token)
@@ -98,23 +59,13 @@ def reset_tolerantly(reset: Callable[[Any], None], token: Any, *, closing: str) 
 def turn_caps(usage: TurnUsage, *, closing: str = "a turn") -> Iterator[TurnUsage]:
     """Open every per-turn cap ambient, and close all of them however the turn ends.
 
-    Yields the turn's `TurnUsage` ledger, so a driver that wants to book what the turn spent reads
-    the same object the caps were enforced against rather than a second one.
-
-    **`usage` is required rather than defaulted, and that is deliberate.** A default would let a
-    nested `turn_caps()` shadow an outer turn's ledger and silently discard the inner scope's
-    off-stream spend. No driver nests today, so this is a footgun removed rather than a bug fixed —
-    but the three callers all have a ledger to hand (`_StepMeter`'s for a step, the runner's for a
-    request, a fresh one for the CLI), so requiring it costs a caller nothing.
-
-    The four watches are opened in the order `api/runner.py` opened them and torn down in that same
-    order, which is the order that was already shipped and reviewed; nothing here depends on it, and
-    saying so is cheaper than leaving a reader to wonder.
-
-    **A watch is not the cap.** `_harness_middleware` attaches both caps unconditionally, so a turn
-    without this manager is still capped — by the per-branch channel and the message count, which is
-    the pre-existing fallback rather than no bound at all. What this adds is that a *fan-out* shares
-    one allowance, and, where a meter fills the ledger, that an off-stream model call is counted.
+    Yields the turn's `TurnUsage` ledger, so a driver books spend from the same object the caps
+    read.
+    `usage` is required so a nested call cannot shadow an outer turn's ledger. Without this manager
+    a
+    turn is still capped, by the per-branch channel; this makes a fan-out share one allowance and,
+    where
+    a meter fills the ledger, counts off-stream model calls.
     """
     calls_token = begin_call_watch()
     context_token = begin_context_watch()

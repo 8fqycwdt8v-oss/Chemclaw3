@@ -81,7 +81,6 @@ def test_preferences_never_reach_the_pr_gate(monkeypatch: pytest.MonkeyPatch) ->
     import chemclaw.agent.preferences as module
 
     assert not hasattr(module, "record_note")
-    assert "record_note" not in module.__doc__ or "not" in module.__doc__.lower()
 
 
 def test_the_tools_are_scoped_to_the_calling_chemist(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,55 +1,19 @@
 """Skill visibility for the LangGraph engine: a backend that can only reach permitted skills.
 
-**Why a backend and not a filter.** MAF's `SkillsProvider` owns skill loading end to end — it
-advertises names and registers `load_skill`/`read_skill_resource` to fetch bodies — so narrowing
-the advertised list was enough: there was no other way in. `deepagents.SkillsMiddleware` works
-differently, and the difference is a security property rather than an API detail. It puts each
-skill's *path* in the system prompt and expects the model to read the body with an ordinary
-filesystem tool over the same backend. Listing is therefore only half the gate: a model told about
-`/deep-research/SKILL.md` can ask for `/anything-else/SKILL.md`, and a role-gated skill would be
-one guessed path away from the caller who was refused it.
+`deepagents.SkillsMiddleware` publishes each skill's path in the system prompt and the model reads
+bodies with ordinary filesystem tools over the same backend, so narrowing the listing is not enough:
+a gated skill would be one guessed path away. The narrowing therefore lives in the backend, applying
+`chemclaw.agent.skill_access`'s predicate on every reach path (`ls`, `read`, `glob`, `grep`,
+`download_files`); the async twins dispatch through these overrides, pinned by
+`tests/test_skill_backend.py`.
 
-So the narrowing moves to the backend, which is the only place both halves meet.
-`chemclaw.agent.skill_access` still decides *which* skills survive — the same three predicates,
-because a gate that answers differently depending on which code path asked is not a gate — and this
-module makes those answers binding on every path that can reach a file.
+`virtual_mode=True` is written out rather than inherited: it roots every path at `/` and refuses
+traversal, so a path's first segment is its skill.
 
-**Every reach path, not the obvious one.** `BackendProtocol` exposes `ls`, `read`, `glob` and
-`grep`, each with an async twin, plus a write half. Filtering `ls` alone would leave three
-bypasses open. The async twins need no override: `FilesystemBackend` implements them as
-`asyncio.to_thread(self.read, ...)`, so they dispatch through the subclass — measured, and pinned
-by `tests/test_skill_backend.py` rather than assumed, because it is exactly the kind of upstream
-detail that changes quietly.
-
-**`virtual_mode=True` is not a default we accept, it is a decision.** It was the *non*-default when
-this was written, under a deprecation warning that said so outright: *"leaving `virtual_mode=False`
-allows absolute paths and `'..'` to bypass `root_dir`"*. deepagents 0.7 made it the default and
-dropped the warning, so the citation is gone and the argument is not: under `False`, a model handed
-a filesystem tool could read any file the pod's service account can — over a tool
-surface whose whole point is that capability is enumerated. It stays written out rather than
-inherited, because a security property that arrives as somebody else's default can leave the same
-way. Virtual mode roots every path at `/`, refuses traversal with a `ValueError`, and has the useful
-side effect that a path's first segment *is* its skill, which is what makes the predicate below a
-one-line lookup.
-
-**The write half is refused outright.** A skill is judgment this system ships and a human reviews;
-an agent that can edit `SKILL.md` can rewrite its own instructions, and D-038 disabled MAF's
-file-write batteries for the same reason. Refusing is not a narrowing that could be configured
-open — there is no deployment for which a writable skills tree is correct.
-
-**And it is refused in the vocabulary the tool chain already has.** These four verbs raised a bare
-`PermissionError`, which is neither of the two families `agent/tool_authz.py` words deliberately —
-so the one policy-bearing refusal this module makes arrived at the model as "that tool failed
-unexpectedly", with a traceback logged at ERROR beside it. `SkillsReadOnlyRefusal` is an
-`AuthorizationError`, which is what makes a refusal read as a refusal; its own docstring carries the
-argument.
-
-**That half grows, and it grew here.** deepagents 0.7 added `delete` to the protocol; nothing in
-this class refused it, so a bump alone would have inherited a working delete into the one backend
-whose reason to exist is that skills are read-only. It was caught by the derived enumeration in
-`tests/test_skill_backend.py` rather than by review, which is the argument for deriving it: the
-methods this class must answer for are whatever upstream declares this week, and a hand-written list
-is a list of what upstream declared the week it was written.
+The write half (`write`, `edit`, `upload_files`, `delete`) is refused outright, as
+`SkillsReadOnlyRefusal`, so an agent can never rewrite its own instructions. The set of refused
+methods is derived from upstream's protocol in the tests, so a new upstream verb cannot slip
+through.
 """
 
 import logging
@@ -76,17 +40,12 @@ from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
-# What a refused read returns. A result rather than an exception, because these are model-facing
-# tool results: a refusal the model can read keeps the turn going, where a raised error surfaces as
-# a tool failure it may retry. It deliberately does not say whether the skill *exists* — "not
-# available to you" is the same answer for a gated skill and for a typo, and distinguishing them
-# would turn the gate into an enumeration oracle.
+# What a refused read returns: a readable result keeps the turn going. It does not say whether the
+# skill exists, so the gate is not an enumeration oracle.
 REFUSED = ModelProse("This path is not part of the skills available to you.")
 
-# What a refused *write* says, once, because four verbs raise it. Worded for the model rather than
-# for a log: it says nothing was changed (so there is nothing to undo or retry) and names the root a
-# turn's own working notes belong under, since wanting to write a skill is usually wanting to write
-# something down.
+# What a refused write says, worded for the model: nothing changed, and working notes belong under
+# the scratch root.
 _READ_ONLY = routed(
     "the skills tree is read-only — a skill is reviewed judgment, not something a turn may "
     "rewrite. Nothing was changed; keep working notes under /scratch/ instead.",
@@ -100,18 +59,8 @@ _READ_ONLY = routed(
 class SkillsReadOnlyRefusal(AuthorizationError):
     """A turn tried to change the skills tree, which no deployment permits.
 
-    **An `AuthorizationError` because the chain has exactly one word for this, and a
-    `PermissionError` was not it.** `PermissionError` is neither a `ChemclawError` nor an
-    `AuthorizationError`, so `tool_authz.surface_domain_errors` caught it in its catch-all: the
-    model was told "that tool failed unexpectedly and returned nothing" — which is the opposite of
-    what happened and reads as something to retry — and `logger.exception` wrote a traceback at
-    ERROR, a log line any model could produce at will by naming a skills path. Under this class
-    `surface_authorization_denials` relays the message verbatim behind `Refused:`, which is the
-    prefix the system prompt already tells the model means an access-control decision rather than a
-    fault, and the audit row records a refusal rather than a failure.
-
-    Refusal rather than narrowing, so it carries no path and no configuration: there is no
-    deployment for which a writable skills tree is correct.
+    An `AuthorizationError`, so `surface_authorization_denials` relays it behind `Refused:` (an
+    access-control decision, not a fault to retry) and the audit row records a refusal.
     """
 
 
@@ -121,9 +70,8 @@ class NarrowedSkillsBackend(FilesystemBackend):
     Args:
         root_dir: The skills tree.
         permits: Whether a skill *name* is visible to this turn — `skill_access`'s composed
-            narrowing. Called per reach rather than once at construction, because the role gate
-            reads the turn's ambient identity and one backend serves every concurrent turn (the
-            same lifetime rule that keeps connector MCP tools per-turn).
+        narrowing. Called per reach, because the role gate reads the turn's ambient identity and one
+        backend serves every concurrent turn.
     """
 
     def __init__(self, root_dir: str, permits: Callable[[str], bool]) -> None:
@@ -134,10 +82,8 @@ class NarrowedSkillsBackend(FilesystemBackend):
     def _allows(self, path: str) -> bool:
         """Whether this turn may reach `path` at all.
 
-        A skill is a directory holding `SKILL.md`, so everything belonging to one lives under that
-        directory and the first segment names it — true of the `SKILL.md`, a helper script and a
-        reference doc alike. A path with no segments is the tree root, which is neither permitted
-        nor refused: listing it is how discovery starts, and `ls` filters what comes back.
+        A path's first segment names its skill. The tree root is neither permitted nor refused:
+        listing it starts discovery, and `ls` filters what comes back.
         """
         skill = skill_of(path)
         return not skill or self._permits(skill)
@@ -153,56 +99,15 @@ class NarrowedSkillsBackend(FilesystemBackend):
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
         """Read a file, refusing anything outside a permitted skill — and say which, either way.
 
-        The half that makes this a gate rather than a listing: the model is handed skill paths in
-        its system prompt and could otherwise ask for one it was never shown.
+        The half that makes this a gate: the model could otherwise ask for a path it was never
+        shown.
 
-        **Both branches are recorded, because neither was.** This module and `skill_access` between
-        them held zero `logger.` calls and zero metric calls, so "the agent is not following the
-        procedure" — a top-three support question — could not be answered at its first step: *was
-        the skill even offered, and did the model read it?* An INFO per body read is the answer to
-        the second half.
-
-        **INFO is a judgement about volume, and the bound it used to rest on does not exist.** The
-        claim here was that "a skill is read once per turn at most, not per model call"; nothing
-        enforces that. `read` is a model-callable tool, a skill directory holds as many documents
-        as its author put in it, and a model that re-reads one on every step of a plan is doing
-        something this tree neither prevents nor refuses. The line stays at INFO because *which
-        procedure the model actually opened* is the fact the support question turns on and it is
-        not reconstructible from anywhere else — but it is a per-call line, and a deployment
-        drowning in it is looking at a real thing rather than at a broken bound.
-
-        **The count is taken on a skill body that was actually delivered, and it takes three
-        conditions to say that.** `chemclaw_skill_loads_total` carries the skill name, and `skill`
-        is the first segment of a path the *model* wrote, so counting beside the INFO above would
-        mint a series for every string a model can invent — `permits` only ever *narrows* and
-        returns True for any name in a deployment that configures none of the three gates. The
-        read having resolved is the first condition and it is **not sufficient**, which is where
-        the first version of this paragraph was wrong: it argued that a resolved path is one inside
-        `root_dir` so its first segment is a real directory, which is true and is not the property
-        wanted — `skills/README.md` resolves and booked a skill called `README.md`. So
-        `is_a_skill_body` is the second condition, and `no_lines_requested` is the third, because
-        `read_file(limit=0)` returns empty content with no error and would otherwise book a load of
-        zero bytes under a paragraph claiming the count is taken on the bytes.
-
-        Counting a delivered body is also the truer measurement — "which procedure the model
-        actually opened" is the support question, and an ask that returned an error, or named a
-        file beside the tree, or asked for no lines, opened nothing. The denial counter beside it
-        is the other half, and the two do not sum to the asks: a read that passes the gate and then
-        fails on a missing file is in neither.
-
-        A refusal is a WARNING and a count, not an INFO, because the role gate lives here — this is
-        the enforcement point (the class docstring says why), and an enforcement point whose
-        refusals are silent is a control nobody can audit. It names the path rather than the skill,
-        since a refused path may name no skill that exists; that is the same reason the message the
-        *model* gets refuses to say whether the skill exists at all.
-
-        **The path is bounded before it is written, on both branches.** `file_path` arrives
-        verbatim out of the model's tool arguments — nothing between the provider and here caps it
-        — so a megabyte-long or newline-laden path was written whole into a WARNING on the refusal
-        and an INFO on the success, which is a model-authored string with unbounded reach into a
-        log stack. `audit.bounded_repr` is the budget this tree already applies to every other
-        model-authored string that reaches a record, and it reprs, so an embedded newline can no
-        longer split one refusal into two log lines.
+        A delivered body logs at INFO (which procedure the model actually opened) and increments
+        `chemclaw_skill_loads_total`. The counter's label is model-authored, so it is booked only
+        when the read resolved, `is_a_skill_body` holds, and lines were actually requested. A
+        refusal logs a WARNING and a denial count; it names the path, since a refused path may name
+        no real skill. The path is bounded with `audit.bounded_repr` before logging on both
+        branches, since it arrives verbatim from the model.
         """
         skill = skill_of(file_path)
         recorded = bounded_repr(file_path)
@@ -223,25 +128,16 @@ class NarrowedSkillsBackend(FilesystemBackend):
             record_metric(
                 lambda m: m.increment("chemclaw_skill_loads_total", labels={"skill": skill})
             )
-            # The same load, on the channel that can carry it into *this turn's* cost row — which a
-            # counter cannot, because it says a skill was read and never in which turn. The guard
-            # `agent/distiller.py` needs is one predicate over exactly that, so the array and the
-            # counter are taken on one condition rather than two that could drift apart.
+            # Also record the load for this turn's cost row (a counter cannot say which turn), on
+            # the same condition as the counter.
             record_skill_loaded(skill)
         return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         """Match files, dropping every hit outside a permitted skill.
 
-        **Narrowed with `replace`, not rebuilt.** `GlobResult` carries `truncated` beside `error`
-        and `matches` — upstream sets it when the walk's wall-clock budget expired — and a rebuild
-        naming two of the three fields reset it to `False`, so a partial walk was reported to the
-        model as the whole tree. That is the defect this repository names elsewhere: `NoteSearch`
-        carries `total_matches`/`widened` because "a capped list with no marker reads as the whole
-        corpus" (D-066 #4). `replace` also carries whatever field upstream adds next, which is the
-        argument `tool_framing._rewritten_block` makes for a content block's other keys — and this
-        gate only ever *removes* from the list, so nothing it does can make a complete result
-        partial or the reverse.
+        Narrowed with `replace` so upstream's `truncated` flag (and any future field) survives; this
+        gate only removes matches.
         """
         result = super().glob(pattern, path)
         if not result.matches:
@@ -259,17 +155,8 @@ class NarrowedSkillsBackend(FilesystemBackend):
     ) -> GrepResult:
         """Search files, dropping every hit outside a permitted skill.
 
-        The two keyword-only arguments are forwarded rather than accepted-and-ignored because
-        upstream *introspects* for them: `protocol._method_accepts_max_count` decides whether to
-        push the cap down to the backend or apply it itself, so an override that quietly dropped
-        them would change how many matches a caller gets depending on which class is underneath.
-        Filtering after the fact is still correct with a cap in play — `max_count` bounds what the
-        tree returns, and this gate only ever removes from that. But *saying* the cap fired is a
-        separate obligation, and the rebuild this used to do dropped it: measured, a base backend
-        answering `truncated=True` over two of five matches came back from here `truncated=False`,
-        and `_format_grep_tool_result` appends its truncation note only when the flag is set. So the
-        model read a cut match list as the complete one. `replace` carries it, for the reason
-        `glob` above spells out.
+        The keyword-only arguments are forwarded because upstream introspects for them to decide
+        where `max_count` applies. Narrowed with `replace` so `truncated` survives, as in `glob`.
         """
         result = super().grep(pattern, path, glob, max_count=max_count, context_lines=context_lines)
         if not result.matches:
@@ -281,17 +168,10 @@ class NarrowedSkillsBackend(FilesystemBackend):
         return [hit for hit in hits if self._allows(path_of(hit))]
 
     def download_files(self, paths: list[str]) -> Any:
-        """Return the bodies of the permitted paths only — the reach path the gate had missed.
+        """Return the bodies of the permitted paths only.
 
-        `read` was gated and this was not, and it returns a file's **full bytes**: measured on the
-        installed backend, a gated `SKILL.md` came back whole through here while `read` refused it
-        and `ls` did not list it. Nothing binds it today — only `skill_read_tool` and the
-        middleware's own listing reach the backend — so this was a latent hole rather than a live
-        one, and it becomes live the moment upstream fetches a body this way. That is a patch
-        release in a 0.x package, against the one narrowing that is a *security* property.
-
-        Filtered rather than refused outright: this returns per-path results, so a caller asking for
-        five paths of which one is gated should get the four, exactly as `glob` and `grep` do.
+        This returns full bytes, so it must be gated like `read`. Filtered rather than refused,
+        since results are per path, as in `glob` and `grep`.
         """
         return super().download_files([path for path in paths if self._allows(path)])
 
@@ -304,11 +184,9 @@ class NarrowedSkillsBackend(FilesystemBackend):
         raise SkillsReadOnlyRefusal(_READ_ONLY)
 
     def delete(self, *args: Any, **kwargs: Any) -> Any:
-        """Refuse, for the reason `write` gives — and it is the newest way in.
+        """Refuse, for the reason `write` gives.
 
-        `delete` arrived with deepagents 0.7. Unrefused it is worse than `write`, not milder: a
-        turn that cannot rewrite a `SKILL.md` but can remove it still decides what judgment the
-        next turn is able to load.
+        A turn that can remove a `SKILL.md` decides what judgment the next turn can load.
         """
         raise SkillsReadOnlyRefusal(_READ_ONLY)
 
@@ -320,10 +198,8 @@ class NarrowedSkillsBackend(FilesystemBackend):
 def skill_of(path: str) -> str:
     """The skill a path belongs to — its first segment, which is what `_allows` gates on.
 
-    Empty for the tree root, which belongs to no skill. One definition beside `_allows` so the
-    name a log line reports and the name the gate decided on are the same string — and the stored
-    tiers (`agent/skill_store.py`) import it rather than restate it: a pure function of the path
-    string, it gives the same answer whether the path is relative to this tree or to a mount.
+    Empty for the tree root. One definition, so the logged name and the gated name agree; the stored
+    tiers (`agent/skill_store.py`) import it too.
     """
     parts = PurePosixPath(path.strip("/")).parts
     return parts[0] if parts else ""
@@ -332,23 +208,10 @@ def skill_of(path: str) -> str:
 def is_a_skill_body(path: str) -> bool:
     """Whether `path` names a document *inside* a skill, rather than one at the tree root.
 
-    The clamp on `chemclaw_skill_loads_total`'s label, and it is a second predicate rather than a
-    tightening of `skill_of` because the two questions differ. `_allows` asks which skill a path is
-    *gated* as, and a root-level document gated under its own filename is the conservative answer
-    there. This asks which skill a read is *evidence about*, and a root-level document is evidence
-    about none.
-
-    **Written because the first version of this clamp was false on the shipped tree.** The claim was
-    that a path which resolved is one inside `root_dir`, so its first segment is a directory that
-    exists — true, and not the property wanted: `skills/README.md` resolves, its first segment is
-    `README.md`, and the counter booked a skill by that name. `ls("/")` lists it to the model, so
-    this was reachable rather than theoretical. A series that is the stated evidence base for
-    ranking, promoting and retiring skills must not carry a row for a document that is not one, and
-    any future top-level file lands the same way.
-
-    Two segments after the root is the test: a skill is a directory holding `SKILL.md`, so anything
-    belonging to one has a directory segment before its filename. No `stat` is needed — the read
-    already resolved, so a path with a segment before its filename has a real directory there.
+    The clamp on `chemclaw_skill_loads_total`'s label. A root-level file such as `README.md`
+    resolves and is gated under its own name, but it is evidence about no skill. A path with a
+    directory segment before its filename belongs to a skill; the read already resolved, so no
+    `stat` is needed.
     """
     return len(PurePosixPath(path.strip("/")).parts) > 1
 
@@ -362,9 +225,7 @@ def path_of(hit: Any) -> str:
     return str(getattr(hit, "path", ""))
 
 
-# The tool the skills prompt tells the model to call. It is *not* a free choice: deepagents'
-# `SKILLS_SYSTEM_PROMPT` publishes each skill's path and instructs the model to "use `read_file` on
-# the path shown", so a differently-named tool would leave every skill advertised and unloadable.
-# Pinned against the prompt by `tests/test_skill_backend.py` rather than trusted, for the reason
-# D-117 gives: a name space that drifts silently is one every validator built on it then gets wrong.
+# The tool the skills prompt tells the model to call: deepagents' `SKILLS_SYSTEM_PROMPT` says "use
+# `read_file` on the path shown", so any other name would leave skills unloadable. Pinned against
+# the prompt by `tests/test_skill_backend.py`.
 SKILL_READ_TOOL = "read_file"

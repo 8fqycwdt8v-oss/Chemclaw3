@@ -1,11 +1,7 @@
-"""The `bo` connector's FastAPI app — the one-shot experiment-design tool behind its own server.
+"""The `bo` connector's FastAPI app, serving the inline `suggest_next_experiment` tool.
 
-The bundle's *durable* half is not here: `chemclaw.durable` is served by
-`chemclaw.connectors.bo.worker` on its
-own Temporal queue. This app serves only the inline `suggest_next_experiment`.
-
-Run it with `uvicorn chemclaw.connectors.bo.server.app:app --port 8816`, or through `make
-connectors`.
+The durable half is served by `chemclaw.connectors.bo.worker` on its own Temporal queue.
+Run with `uvicorn chemclaw.connectors.bo.server.app:app --port 8816`, or `make connectors`.
 """
 
 from fastapi import FastAPI

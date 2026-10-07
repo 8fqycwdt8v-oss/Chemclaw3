@@ -18,7 +18,7 @@ added seventeen tools and 32% to the static context floor, which is exactly the 
 exists to make visible and which landed while the file was still on a branch. Every one of them is
 now probed by `data/evals/probes/multistep-calculation.yaml`, so the list is deleted rather than
 left empty — a debt list that outlives its debt reads as live state, which is the rule
-`DEFERRED.md`, `BACKLOG.md` and `test_context_floor.py::KNOWN_OVERSIZED` all run on. Nothing about
+`BACKLOG.md`, `BACKLOG.md` and `test_context_floor.py::KNOWN_OVERSIZED` all run on. Nothing about
 enforcement changes: a tool added after this gate existed could never reach that list anyway, so
 the only thing it ever held was a closed, dated record.
 
@@ -270,7 +270,7 @@ def test_every_note_a_direction_names_is_declared_as_data() -> None:
     """The pairs stay readable as data rather than sliding back into prose.
 
     46 labelled (query, note) pairs across 20 probes existed for months inside `direction:`, where
-    only a human grader could read them — `DEFERRED.md` recorded the consequence as "the shipped
+    only a human grader could read them — `BACKLOG.md` recorded the consequence as "the shipped
     graph has none", then corrected itself to "unreadable as data because `Probe` is
     `extra='forbid'`". Transcribing them once fixes that instant and nothing keeps it fixed: the
     next probe written in the same style re-opens the same hole, silently, because a direction
@@ -309,7 +309,7 @@ def test_every_exemption_names_what_covers_it() -> None:
 def test_no_exemption_outlives_its_reason() -> None:
     """The other direction on the exemptions: one that is now probed should stop being exempt.
 
-    Same rule `DEFERRED.md` and `BACKLOG.md` both run on — a row that outlives its closure reads as
+    Same rule `BACKLOG.md` and `BACKLOG.md` both run on — a row that outlives its closure reads as
     live state, so it is deleted rather than annotated.
     """
     redundant = sorted(set(EXEMPT) & _expected_tools())

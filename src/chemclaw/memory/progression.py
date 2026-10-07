@@ -1,25 +1,12 @@
 """Read an optimization series as a *sequence* rather than a set (D-162).
 
-`memory.optimization` answers "which runs are the same transformation"; it says nothing about
-order, because DRFP similarity has no time axis and `cluster_by_similarity` returns ids sorted
-lexically. That is the right answer for grouping and the wrong one for the way process
-development actually happens: one technician, one step, one experiment a day for weeks, each
-run chosen in response to yesterday's result. Handed those runs as an unordered table, the agent
-could compare any two of them and could not see the trajectory — which variable was being walked,
-what the last three days ruled out, what has not been touched since day one.
+`memory.optimization` groups runs by DRFP similarity, which has no time axis. This module adds
+the two deterministic facts that make a series legible: the order runs were performed in, and
+what differs from the run before each one. Both are read straight off the record. The judgment
+(which change was the lever) belongs to the `experiment-progression` skill.
 
-This module supplies the two deterministic facts that make a series legible: the order runs were
-performed in, and, for each run, *what differs from the run before it*. Both are read straight
-off the record — `performed_at` and the recorded conditions — so nothing here is inference. The
-inference (which change was the lever, what to try next) is the `experiment-progression` skill's
-judgment, which nothing applies automatically — it is loaded on demand in a chat turn, exactly as
-`optimization-campaign-synthesis` is over the comparative table. The two deterministic facts are a
-complete answer to "what was tried, in what order"; the judgment is a separate question a chemist
-or a model asks.
-
-**What is deliberately not here: causality.** `performed_at` proves that run B came after run A.
-It does not prove that B was run *because of* A, and the module never says it was — a `follows`
-edge is minted by the agent (or a chemist) who can read the intent, never derived from two dates.
+Causality is deliberately not derived: `performed_at` proves B came after A, not that B was run
+because of A, so a `follows` edge is never minted from two dates.
 """
 
 from datetime import date
@@ -29,9 +16,8 @@ from pydantic import BaseModel
 from chemclaw.core.reagents import display_name, resolve_compound_name
 from chemclaw.ingest.eln.ord import DateSource, OrdReaction, Role, RoleSpecies
 
-# The roles whose species set is worth diffing between consecutive runs — `RoleSpecies`' fields,
-# so this and the projection `reaction_records.species` stores are one list rather than two. Its
-# docstring says why `product` is not one of them.
+# The roles diffed between consecutive runs: `RoleSpecies`' fields, so this list and the stored
+# species projection cannot diverge.
 DIFFED_ROLES: tuple[Role, ...] = tuple(Role(name) for name in RoleSpecies.model_fields)
 
 
@@ -63,10 +49,7 @@ class ProgressionStep(BaseModel):
 
     reaction_id: str
     performed_at: date | None
-    # Carried through from `OrdReaction.date_source` so `ordering_caveat` can weaken its sentence
-    # for a series dated from entry timestamps rather than from stated experiment dates. A step that
-    # dropped it would make the caveat's three cases four, with the fourth silently reading as the
-    # strongest one.
+    # Lets `ordering_caveat` weaken its sentence for a series dated from entry timestamps.
     date_source: DateSource = "stated"
     changes: list[ConditionChange]
 
@@ -92,9 +75,7 @@ class Progression(BaseModel):
     def entry_dated(self) -> list[str]:
         """The ids whose date is the entry's write time rather than a stated experiment date.
 
-        `is_timeline()` is true for these — they are ordered, and the order is the best available —
-        but the ordering is of when the records were *written*. A batch transcribed in one sitting
-        orders by nothing at all, and the reader has to be told which kind of timeline this is.
+        These are ordered by when the records were written, which the reader has to be told.
         """
         return [
             step.reaction_id
@@ -106,11 +87,8 @@ class Progression(BaseModel):
 def order_chronologically(reactions: list[OrdReaction]) -> list[OrdReaction]:
     """Sort runs by the date they were performed, undated ones last, ties broken by id.
 
-    Total and deterministic, which matters because the result is rendered into a note that
-    re-synthesis rewrites in place: the same set of runs must produce the same note or every
-    re-synthesis is a spurious diff.
-    Undated runs sort last rather than first — an unknown date is not "long ago", and putting
-    them at the end keeps the dated prefix a clean timeline.
+    Total and deterministic, so re-synthesis of the same runs rewrites the same note. Undated runs
+    go last: an unknown date is not "long ago".
     """
     return sorted(
         reactions,
@@ -121,8 +99,7 @@ def order_chronologically(reactions: list[OrdReaction]) -> list[OrdReaction]:
 def progression(reactions: list[OrdReaction]) -> Progression:
     """Order the runs and name what changed at each step.
 
-    Each run is diffed against the one immediately before it in time — the comparison the
-    chemist actually made — not against the first run or against a notional baseline.
+    Each run is diffed against the one immediately before it in time, not against a baseline.
     """
     ordered = order_chronologically(reactions)
     return Progression(
@@ -138,37 +115,20 @@ def progression(reactions: list[OrdReaction]) -> Progression:
     )
 
 
-# What this rule can be asked about: an optional scalar, where `None` means "nobody wrote it down".
-# Deliberately *not* `frozenset[str]` — a species set is derived from a components list that is
-# present either way, so "empty" is an answer rather than a gap, and mypy rejecting the call is what
-# keeps that distinction from being erased by someone tidying two similar-looking guards into one.
+# An optional scalar, where `None` means "nobody wrote it down". Deliberately not a species set:
+# an empty set is an answer, not a gap.
 Recorded = float | str | None
 
 
 def both_recorded(before: Recorded, after: Recorded) -> bool:
-    """Whether a field was recorded on *both* sides, which is the precondition for diffing it.
+    """Whether a field was recorded on *both* sides, the precondition for diffing it.
 
-    **The one rule, defined once.** A field present on one side and absent on the other differs in
-    what was *recorded*, never in what was done — and the two are indistinguishable to a reader once
-    they are in the same column. So a diff against absent is a change nobody made, rendered exactly
-    like one they did.
+    A field present on one side only differs in what was recorded, not in what was done, so a diff
+    against absent would render a change nobody made. Absent is `None`, empty or whitespace; `0.0`
+    is recorded.
 
-    It lived in `agent/condense._changes` first, where an arbitrary set of protocols made the
-    fabrication constant: three runs with identical conditions and one failed extraction rendered
-    `solvent 2-MeTHF → —` then `solvent — → 2-MeTHF`, two swaps that never happened. It belongs
-    here, because `changes_between` has the same hole for the same reason — bounded rather than
-    absent, since a campaign's members are all `OrdReaction`s from one DRFP cluster and usually
-    record the same fields. Two rules for one question is how the bounded half stayed open.
-
-    Absent is `None`, the empty string or whitespace. `0.0` is a recorded temperature and passes.
-
-    **It applies to optional scalars and to nothing else** — the two setpoints and the solvent the
-    condenser reads out of prose. `species_change` is deliberately outside it: a role's species set
-    is derived from a components list that is present either way, so an empty `reagent` set is the
-    record stating that the run used no reagent, not a gap in it. `BACKLOG.md` asked for the rule
-    over the species sets too; measured against `OrdReaction.species`, that would have erased the
-    most common real change a run-to-run series carries — a reagent added mid-procedure — to
-    suppress a fabrication that needs a *partially transcribed* source to happen at all.
+    Applies to optional scalars only. Species sets are exempt: an empty `reagent` set states the run
+    used no reagent, a real change.
     """
     return all(_recorded(value) for value in (before, after))
 
@@ -185,11 +145,8 @@ def _recorded(value: Recorded) -> bool:
 def changes_between(previous: OrdReaction, current: OrdReaction) -> list[ConditionChange]:
     """The recorded conditions that differ between two runs, in a stable order.
 
-    Covers what an ELN reliably records and a chemist reliably turns: the two headline setpoints
-    and the species set of each non-product role. Amounts (equivalents, loading) are deliberately
-    out: they are optional on `Component` and frequently absent, so diffing them would report a
-    change every time one run happened to record a mass and its neighbour did not — which is
-    `both_recorded`'s rule, stated here about amounts before it was applied to anything.
+    Covers the two headline setpoints and the species set of each non-product role. Amounts are
+    out: they are optional on `Component` and often absent, so they would report spurious changes.
     """
     changes = [
         change
@@ -213,12 +170,8 @@ def number_change(
 ) -> ConditionChange | None:
     """A setpoint change, or None when the two runs agree (including both being unrecorded).
 
-    Public because the turn-time condenser diffs the same two setpoints off note frontmatter, where
-    it has numbers but not the `OrdReaction` species sets `changes_between` also walks. One rule for
-    "did this setpoint move, and how is that written" — two copies would render `90 °C -> 70 °C` in
-    the campaign note and something subtly different in the comparison a chemist reads beside it.
-
-    A setpoint one side did not record is not a move: see `both_recorded`.
+    Public so the turn-time condenser renders setpoint moves with the same rule. A setpoint one side
+    did not record is not a move (see `both_recorded`).
     """
     if not both_recorded(before, after) or before == after:
         return None
@@ -230,25 +183,11 @@ def number_change(
 
 
 def canonical_condition(species: str) -> str:
-    """Fold a condition species to one canonical token (gap KNW-4).
+    """Fold a condition species to one canonical token.
 
-    `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` are the same solvent and were three unrelated
-    tokens to every lexical and grouping path, so an optimization campaign could be split in two by
-    spelling alone. Resolution reuses the one identity table (`chemclaw.core.reagents`), so the
-    vocabulary here cannot drift from the one every other in-process caller uses. That guarantee is
-    now bounded by the process: after `D-2026-08-16-the-physics-leaves-the-cache-stays` the
-    calculators and the hazard screen answer from `Chemclaw3-mcp`, each carrying its own reagent
-    table, and a shared import no longer holds them together.
-
-    An unrecognised species folds to its own trimmed, lowercased form rather than being dropped:
-    an unknown reagent is still a real condition, and losing it would silently merge campaigns that
-    genuinely differ.
-
-    **It lives here because `text_change` is its caller**, and it had none. Defined next to the
-    campaign builder, it was reachable only from a test that called it directly — a control that
-    exists as a function and not as behaviour, which is the `reject_widening` shape `CLAUDE.md`
-    names by that name. `memory.optimization` imports this module already, so this is also the
-    direction that has no cycle in it.
+    `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` resolve to one token through
+    `chemclaw.core.reagents`, so a campaign is not split by spelling. An unrecognised species folds
+    to its trimmed, lowercased form rather than being dropped: it is still a real condition.
     """
     match = resolve_compound_name(species)
     return match.smiles if match is not None else species.strip().lower()
@@ -257,21 +196,10 @@ def canonical_condition(species: str) -> str:
 def text_change(variable: str, before: str | None, after: str | None) -> ConditionChange | None:
     """A change in a condition the record only carries as words, or None when they agree.
 
-    The condenser's counterpart to `species_change`, for a protocol with no stored species
-    projection: a solvent read out of a procedure is a name, not a structure, so it cannot be
-    compared as a graph the way `species_change` does — but it can be *resolved*, and
-    `canonical_condition` is the one table that does it. Two spellings of one solvent therefore
-    agree here: `DMF` and `N,N-dimethylformamide`, `DIPEA` and
-    `N,N-diisopropylethylamine`, a name and its SMILES. Before that fold this compared casefolded,
-    whitespace-collapsed prose, so a technician writing the long name in one entry and the acronym
-    in the next produced `solvent DMF → N,N-dimethylformamide` in the "Changed vs previous" column
-    — a fabricated lever in the one artifact built for reading levers off. The casefold is not lost:
-    it is what `canonical_condition` falls back to for a species the table does not know, so
-    "2-MeTHF" and "2-methf " still agree and `Mystery-A` and `Mystery-B` still differ.
-
-    What is *displayed* is what was written; the fold decides only whether anything moved.
-
-    A side that recorded no words at all is not a swap either: see `both_recorded`.
+    The condenser's counterpart to `species_change` for a solvent read out of prose: both sides are
+    resolved through `canonical_condition`, so two spellings of one solvent agree. What is displayed
+    is what was written; the fold decides only whether anything moved. A side with no words is not a
+    swap (see `both_recorded`).
     """
     if not both_recorded(before, after):
         return None
@@ -285,23 +213,12 @@ def species_change(
 ) -> ConditionChange | None:
     """The change in one role's species set, or None when the same structures are present.
 
-    Public because the turn-time condenser diffs the same sets off a stored record's projection
-    (`reaction_records.species`), where it has no `OrdReaction` to walk — one rule for "did this
-    role's species move, and how is that written", for the reason `number_change` gives.
+    Public so the turn-time condenser diffs stored projections with the same rule. Reported as what
+    went out -> what came in, with structural identity (canonical SMILES), so a respelling cannot
+    fabricate a change.
 
-    Reported as *what went out* → *what came in*, not as the full set on each side: a run that
-    swaps one of four reactants should read `reactant A → B`, not two four-item lists a reader
-    has to diff by eye. Identity is structural (canonical SMILES, `OrdReaction.species`), so a
-    source spelling the same molecule differently cannot fabricate a change.
-
-    **`both_recorded` deliberately does not apply here**, and that asymmetry is the whole point of
-    where the rule is drawn. A setpoint is an optional scalar, so `None` means *nobody wrote it
-    down*. A role's species set is derived from a components list that is present either way — so an
-    empty `reagent` set beside a full one is the record saying "this run used no reagent", which is
-    a real change a chemist made and the most common one a series is built out of
-    (`test_a_reagent_added_mid_procedure_is_diffed_too`). Suppressing it would trade a rare
-    fabrication for a routine erasure. A record with *no projection at all* is the other case, and
-    it is the caller's to skip: there is no set to pass here.
+    `both_recorded` deliberately does not apply: an empty set beside a full one means the run used
+    none of that role, a real change. A record with no projection at all is the caller's to skip.
     """
     if before == after:
         return None

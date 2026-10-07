@@ -1,5 +1,7 @@
 # D-029 — The agent consumes fingerprint search over MCP (config-driven servers)
 
+**Superseded-by:** [D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches](D-2026-08-05-a-skill-that-outlives-the-tools-it-teaches.md) (in part)
+
 **Context.** The FastMCP servers in `mcp_servers/` (molfp, rxnfp) existed but the agent used
 their capability *in-process* (`agents/search_tools.py` imported the search functions), so the
 servers were dead relative to the agent path and "add a capability" meant editing agent code —

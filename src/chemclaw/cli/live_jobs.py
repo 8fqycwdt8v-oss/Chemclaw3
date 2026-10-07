@@ -1,30 +1,14 @@
 """`python -m chemclaw.cli.live_jobs` — run a real durable job against a real Temporal and Postgres.
 
-This is the half of the live lane that has never existed. `chemclaw.evals.live` drives the front
-door with a real model, and its probe corpus says in its own headers that *"Temporal is NOT running
-in this test run"* (`data/evals/probes/optimization.yaml`, `reporting.yaml`); the thirteen
-Temporal test modules run against the time-skipping test server with no model, no front door and no
-database. So the path a durable capability actually takes in production — agent tool →
-`ConnectorJobWorkflow` on `background-jobs` → the bundle's workflow on `connector-<name>` → the
-calculation cache → `job_records` — has been exercised only in pieces.
+Exercises the production durable path end to end: agent tool → `ConnectorJobWorkflow` on
+`background-jobs` → the bundle's workflow on `connector-<name>` → the calculation cache →
+`job_records`.
 
-**Why no model is involved here.** The obvious design is to ask the agent to run a job and grade
-the answer. That conflates two failures: a broker that did not run the job, and a model that did
-not ask it to. Splitting them means a red result here names the durable spine and nothing else,
-and it also makes the durable half runnable where no model credential exists — which is most CI
-runners, and this repository's own agent containers. `make live-probes` is the other half and does
-involve the model; it is a strictly later question.
-
-**What it drives.** The real tool built by `connectors.jobs.build_job_tool` for a declared job —
-not a hand-rolled `start_workflow`. That matters: the pre-flight (`prepare_job_launch`), the
-idempotency key (`job_workflow_id`), the actor rule (`require_actor`) and the rationale requirement
-are the *product's*, so a change to any of them changes what this checks, and a smoke test that
-reimplemented the launch would keep passing while the real launcher broke.
-
-**What it asserts.** Only things the live system can be asked for: the workflow's terminal state
-from Temporal, and rows from Postgres. Nothing is scored from prose. That is the correction
-D-2026-08-03 made to the fabrication metric — a signal that reads a summary is measuring the
-summary — applied here from the start.
+No model is involved, so a red result names the durable spine and nothing else, and the lane runs
+without a model credential; `make live-probes` covers the model. The job is launched through the
+real tool `connectors.jobs.build_job_tool` builds, so the pre-flight, idempotency key, actor rule
+and rationale requirement checked are the product's. Assertions read only Temporal's terminal
+state and Postgres rows, never prose.
 """
 
 from __future__ import annotations
@@ -66,49 +50,20 @@ _TERMINAL = {
     WorkflowExecutionStatus.TIMED_OUT,
 }
 
-# The job the smoke runs. `compute_reaction_energy` is chosen for three reasons and none of them
-# is convenience: it is a *real* durable job (the same `ConnectorJobWorkflow` wrapper every job
-# uses), its engine is `tblite` in-process so it needs no cluster and no external
-# binary, and it writes
-# to the calculation cache — which is what makes the never-recompute guarantee (D-011) observable
-# rather than asserted. A QM job would need a cluster; a BO campaign would need rounds of
-# observations before it wrote anything.
+# The job the smoke runs: a real durable job through the shared `ConnectorJobWorkflow` wrapper that
+# writes to the calculation cache, which makes the never-recompute guarantee (D-011) observable.
 SMOKE_JOB = "compute_reaction_energy"
 
 # The temperature this run's reactions are evaluated at — chosen once per process, from the clock.
 #
-# It looks like a decoration and it is the opposite. The workflow id is a hash of the payload
-# (`job_workflow_id`), and a duplicate launch deliberately rejoins the existing run rather than
-# recomputing (D-011). With a payload fixed across runs, the *second* `make live-jobs` against the
-# same database would start nothing, compute nothing, and pass every check against the first run's
-# residue — a lane that goes green while exercising none of the system it claims to test. That is
-# precisely the failure this whole lane exists to remove, so it must not be built into it.
+# The workflow id is a hash of the payload and a duplicate launch rejoins the existing run (D-011),
+# so a payload fixed across runs would let a second run against the same database compute nothing
+# and pass on the first run's residue. A real physical input varies instead of a nonce, constant
+# within the process so the idempotency check derives the same id.
 #
-# Varying a real physical input rather than adding a nonce keeps the payload something a chemist
-# could have asked for: any temperature in this range is a legitimate question, and the answer
-# changes with it. Constant within the process, so the idempotency check below still derives the
-# same id when it relaunches.
-#
-# **The modulus is the whole guarantee, and this copy had the wrong one.** `% 25` on a one-second
-# grid yields exactly 25 distinct temperatures that ever exist, so after ~25 runs against one
-# database the calculation cache holds all of them and every subsequent `make live-jobs` rejoins a
-# completed run — the lane goes permanently green while computing nothing, which is the precise
-# failure the paragraph above says it exists to remove. `cli/storm_behaviours.py` already carried
-# the reasoned value after a soak measured the smaller period failing (6 of 81 rounds), and the fix
-# landed in one of the three copies. 100,000 values on a 10-µK grid puts the recurrence at ~27.8
-# hours, past any soak this harness runs, and every value is still a temperature a chemist could
-# ask about. `tests/test_run_jitter.py` pins all three periods so a fourth copy cannot regress it.
-#
-# **The base is 301.15 K and not 298.15 K, and that is the second half of the same guarantee.**
-# Copying the reasoned modulus here left this module and `cli/storm_behaviours.py` carrying the
-# identical expression over otherwise byte-identical payloads — measured at `t = 1700000123`, both
-# derived 298.15123 and the two payloads compared equal. Before that they had one value in common;
-# after it they had all of them, so a `make live-jobs` launched during a soak round hashed to the
-# storm's workflow id, rejoined its completed run and wrote no `job_records` row: the same "0
-# job_records row(s) written" false failure, now reachable *between* harnesses. Each grid spans
-# base + [0, 1) K, so the three bases (298.15, 300.0 in `live_storm`, 301.15 here) have to stay at
-# least 1 K apart; `tests/test_run_jitter.py` asserts the union is disjoint rather than trusting
-# that. 301.15 K is 28 °C — still a temperature a chemist could have asked for.
+# 100,000 values on a 10-µK grid give a ~27.8-hour period. The base (301.15 K) keeps this grid
+# disjoint from `storm_behaviours` (298.15) and `live_storm` (300.0); each spans base + [0, 1) K.
+# `tests/test_run_jitter.py` asserts both properties.
 _RUN_TEMPERATURE_K = 301.15 + (int(time.time()) % 100_000) / 100_000.0
 
 # Ammonia synthesis at the quick level: three species, small, and its symmetry numbers are the
@@ -123,13 +78,8 @@ SMOKE_PAYLOAD: dict[str, Any] = {
 }
 
 # A second, different reaction for the wedged-worker check, so its launch cannot be answered from
-# the cache the smoke has just filled: methanol hydrogenolysis, CH3OH + H2 → CH4 + H2O.
-#
-# It carries **its own** symmetry numbers rather than inheriting the smoke's. Reusing them was the
-# first version of this check, and the job rejected it correctly — `_checked_symmetry_numbers`
-# refuses a map naming species the equation does not contain — so the check failed on its own bad
-# input while reading as a system fault. The lane caught it exactly as it would catch a real one,
-# which is the argument for the lane; it is not an argument for leaving the payload wrong.
+# the cache the smoke has just filled: methanol hydrogenolysis, CH3OH + H2 → CH4 + H2O. It carries
+# its own symmetry numbers, since `_checked_symmetry_numbers` refuses a map naming other species.
 WEDGE_PAYLOAD: dict[str, Any] = {
     "kind": "reaction",
     "reactants": ["CO", "[H][H]"],
@@ -149,9 +99,7 @@ SMOKE_RATIONALE = (
 class Check:
     """One assertion about the live system, and what was actually observed.
 
-    `observed` is kept even when the check passes. A green run that cannot say *what* it saw is a
-    green run nobody can audit later, and the whole point of this lane is to leave evidence on
-    disk rather than a claim in a terminal.
+    `observed` is kept even on a pass, so the record on disk says what was seen.
     """
 
     name: str
@@ -177,8 +125,7 @@ class SmokeRun:
 async def _launch(rationale: str) -> tuple[str, Any]:
     """Launch the smoke job through its real agent tool; return the workflow id and the result.
 
-    The tool is built from the manifest exactly as `connectors.registry.job_tools` builds it for
-    the agent, so this exercises the generated launcher rather than a copy of it.
+    Built from the manifest exactly as `connectors.registry.job_tools` builds it for the agent.
     """
     connector, job = find_job(SMOKE_JOB)
     tool = build_job_tool(connector, job)
@@ -203,11 +150,9 @@ _POLL_SECONDS = 1.0
 async def _await_terminal(workflow_id: str) -> tuple[WorkflowExecutionStatus | None, float]:
     """Poll until the workflow reaches a terminal state or the wait runs out; say which and when.
 
-    Any terminal state ends the wait, not only the one being hoped for — a run that failed while
-    this polled for COMPLETED would otherwise be reported as "never completed", which sends the
-    reader looking for a hang instead of reading the failure Temporal already has. The bound is
-    `live_jobs_terminal_wait_seconds`, so a job that is genuinely stuck is still reported, with the
-    state it was stuck in.
+    Any terminal state ends the wait, so a failed run is reported as failed rather than "never
+    completed". Bounded by `live_jobs_terminal_wait_seconds`; a stuck job is reported with its
+    state.
 
     Returns:
         The last status the broker reported, and the seconds this waited for it.
@@ -232,14 +177,9 @@ async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
 async def check_workflow_completed(run: SmokeRun) -> Check:
     """The wrapper workflow reached COMPLETED, as Temporal reports it.
 
-    **Waited for, then judged.** The launch returns a bare workflow id when the job outlives the
-    tool's `inline_wait_seconds` — the pending outcome `connectors/jobs.py` is designed to give a
-    turn — and this used to describe the workflow at that instant: a cold first launch took 20.2 s,
-    read RUNNING, and failed a job that completed moments later (3/5, then 5/5 on the rerun).
-    `_await_terminal` polls to a terminal state inside `live_jobs_terminal_wait_seconds` first.
-
-    The start time is reported alongside the status, so the record dates itself: a reader can see
-    the execution belongs to this run rather than to some earlier one it rejoined.
+    The launch may return a bare workflow id when the job outlives `inline_wait_seconds`, so this
+    waits for a terminal state before judging. The start time is reported so the record shows the
+    execution belongs to this run.
     """
     status, waited = await _await_terminal(run.workflow_id)
     client = await temporal_connect()
@@ -257,9 +197,8 @@ async def check_workflow_completed(run: SmokeRun) -> Check:
 async def check_result_cached() -> Check:
     """The calculation landed in the Postgres cache.
 
-    This is the D-011 guarantee made observable. The job's own result envelope travels back through
-    Temporal, but the *cache* row is what makes a second ask free — and a workflow that returned a
-    number without persisting it would look identical from the summary alone.
+    The D-011 guarantee made observable: a workflow that returned a number without persisting it
+    would look identical from the result alone.
     """
     count = await _scalar(
         "select count(*) from calculation_results where calc_type like %s", ("xtb%",)
@@ -272,10 +211,10 @@ async def check_result_cached() -> Check:
 
 
 async def check_job_recorded(run: SmokeRun) -> Check:
-    """A `job_records` row carries the run's rationale and actor (D-157).
+    """A `job_records` row carries the run's rationale and actor.
 
-    Recorded by `record_job` on the background queue *after* the child workflow returns, so this
-    also proves the wrapper's own post-processing ran rather than just the connector's workflow.
+    Written by `record_job` after the child workflow returns, so this also proves the wrapper's
+    post-processing ran.
     """
     row = await _scalar(
         "select json_build_object('rationale', rationale, 'requested_by', requested_by, "
@@ -297,15 +236,9 @@ async def check_job_recorded(run: SmokeRun) -> Check:
 async def check_idempotent(run: SmokeRun) -> Check:
     """Relaunching the identical payload rejoins the same run and computes nothing new.
 
-    Measured, not asserted: the cache row count is read before and after, and a second *compute*
-    would move it. `WorkflowAlreadyStartedError` is swallowed inside the launcher (it is the
-    idempotency contract succeeding), so the only honest way to tell a rejoin from a recompute is
-    to count what the recompute would have written.
-
-    The rationale is deliberately different from the first launch's. It is excluded from the
-    workflow id on purpose — two people asking the same question for different stated reasons must
-    still share one run — and a lane that reused the same sentence would never notice if that
-    stopped being true.
+    The launcher swallows `WorkflowAlreadyStartedError`, so the cache row count is read before and
+    after: a recompute would move it. The rationale differs from the first launch's because it is
+    excluded from the workflow id — different stated reasons must still share one run.
     """
     before = await _scalar("select count(*) from calculation_results")
     workflow_id, _ = await _launch("live-lane idempotency probe: the same payload, a second time")
@@ -321,16 +254,11 @@ async def check_idempotent(run: SmokeRun) -> Check:
 async def check_pending_when_worker_wedged(run_dir: Path) -> Check:
     """A job whose connector worker is not polling comes back *pending*, not hung and not crashed.
 
-    The one failure this lane exists to catch. `connectors/jobs.py` distinguishes three outcomes —
-    a result inside the turn, a bare workflow id when the job outlives `inline_wait_seconds`, and a
-    `ConnectorJobError` when the launch could not be confirmed — and until now nothing exercised
-    the middle one against a real broker. It is also the shape of the 2026-08-02 incident named in
-    that module's own comment: a task queue with no worker registered reached the model as
-    "Error: Function failed."
-
-    SIGSTOP rather than a kill: it freezes the worker mid-poll without unregistering it or needing
-    a restart, which is both closer to a wedged process than a clean exit is and reversible in one
-    signal. The payload differs from the smoke's so the launch cannot be answered from cache.
+    `connectors/jobs.py` has three outcomes — a result inside the turn, a bare workflow id when the
+    job
+    outlives `inline_wait_seconds`, and `ConnectorJobError` when the launch is unconfirmed; this
+    exercises the middle one. SIGSTOP freezes the worker mid-poll without unregistering it and is
+    reversible in one signal. The payload differs from the smoke's so cache cannot answer it.
     """
     pidfile = run_dir / "worker-calc.pid"
     if not pidfile.is_file():
@@ -447,18 +375,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     configure_logging()
-    # **This smoke launches a *user-triggered* durable job, so it has to say who it is.**
-    # `connectors.jobs.prepare_job_launch` calls `require_actor()`, which under `entra_required`
-    # refuses work with no authenticated user — the F4-T3 rule, and correct: a job record whose
-    # `requested_by` is nobody is a record that answers no question. Unbound, this tool simply
-    # could not run in the posture the chart ships, which is the one worth smoking.
-    #
-    # Through `chat.resolve_identity` rather than a second reading of the same two settings: it
-    # already encodes "--admin bypasses *authentication* only" and reads `cli_admin_actor` and
-    # `cli_admin_roles`, and a smoke that invented its own entitlement would be measuring a
-    # permission this deployment never granted. `cli_admin_roles` is empty by default, so an
-    # enforced lane whose job is declared `expensive: true` still refuses it here — which is the
-    # trigger gate working, and an operator naming a role is the remedy.
+    # A user-triggered job must name its actor: `prepare_job_launch` calls `require_actor()`, which
+    # refuses an unauthenticated launch under `entra_required`. Resolved through
+    # `chat.resolve_identity` so the smoke uses the configured `cli_admin_actor`/`cli_admin_roles`
+    # rather than inventing an entitlement; with no roles, an `expensive: true` job is refused here.
     actor, roles = resolve_identity(admin=True, actor=args.actor)
     identity = set_current_identity(actor, roles)
     try:
@@ -468,15 +388,11 @@ def main(argv: list[str] | None = None) -> int:
     text = report(run)
     print(text)
 
-    # Imported here rather than at module scope: this CLI needs one path policy from the probe
-    # lane and none of the httpx/yaml/judge machinery that importing it at the top would pull into
-    # a run whose whole point is that no model is involved.
+    # Imported here so this model-free CLI does not load the probe lane's httpx/yaml/judge
+    # machinery.
     from chemclaw.cli.live_probes import run_output_dir
 
-    # A directory per run, never over the record. This wrote
-    # `tasks/live-test/transcripts/durable-smoke.md` — a *tracked* file — so every smoke run
-    # dirtied the working tree and replaced the previous run's report with no way to tell them
-    # apart. `run_output_dir` states the whole argument, including why the parent stays committed.
+    # A directory per run, so reports never overwrite each other or a tracked file.
     destination = args.report or run_output_dir("durable") / "durable-smoke.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")

@@ -1,29 +1,14 @@
 """The `rxnfp` bundle's MCP tool surface: reaction similarity, and the faceted precedent search.
 
 Declaration, not logic: each function delegates to `chemclaw.science.fingerprints.rxnfp` or
-`chemclaw.science.labels`, and what this file contributes is the `@server.tool()` decoration the
-agent sees. `app.py` serves it over HTTP; `main()` runs the same tools over stdio for running the
-capability by hand. Judgment stays out (G6) — see the `molfp` twin for the full note.
+`chemclaw.science.labels`. `app.py` serves it over HTTP; `main()` runs it over stdio. Judgment
+stays out (see the `molfp` twin). The facet tools live here because they share the store, RDKit,
+the pool, the pod and the `reaction-search` skill with `similar_reactions`.
 
-**Why the facet tools are here and not in a new bundle.** They share the store, RDKit, the Postgres
-pool, the pod and the `reaction-search` skill with `similar_reactions`; a second bundle would cost
-a Deployment, a Service, a token, a chart entry, a port and a runbook paragraph for no isolation
-(Rule of Three, and the third caller does not exist). The honest cost is that "rxnfp" now names
-more than fingerprints, which is written down here and in
-`D-2026-08-25-a-label-is-derived-not-recorded` rather than left for a reader to notice.
-
-**Every one of them also says what it did not search.** A citation-only ELN record has no
-fingerprint and no label row, by the tier's decision
-(`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`), so each result carries
-`ReactionRecordStore.citation_only` — how many such records exist and which list the queried
-structure as drawn — and its verdict says so. A "COMPLETE" coverage over the label index was read
-as a search of the ELN, and a chemist was told there was no in-house data on a substrate the ELN
-holds.
-
-**Every one of them answers over the labelled corpus and says so.** The version searched is the one
-the index is currently labelled at (`current_version`), asked of the index rather than of the
-labelling server — the question "what is this corpus labelled at" is about our data, and a remote
-call on the read path would make search depend on a background service being up.
+Every result also states what it did not search: citation-only ELN records have no fingerprint
+and no label row, so each carries `ReactionRecordStore.citation_only` and its verdict says so.
+Facet answers are over the corpus at the index's current label version, asked of the index rather
+than the labelling server so search does not depend on a background service.
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -82,24 +67,20 @@ async def similar_reactions(
     be both, and `verdict` says so when it is.
     """
     search = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
-    # **The index knows bits and a label; whether the run still stands is the record store's.**
-    # This tool asked the store nothing, so a reaction the source had withdrawn was served as a
-    # precedent with `verdict` saying nothing about it — the same hole the retrieval sweep had, in
-    # the tool a chemist reaches directly. `structurally_withheld` is a positive question over this
-    # page of ids, so a hit whose record is missing is still served: an unindexed record is not a
-    # withdrawal (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`). The same question drops
-    # a citation-only record, which reaches the index only as a stale row from before an amendment
-    # took a structure away
-    # (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+    # The index knows bits and a label; whether the run still stands is the record store's. A hit
+    # whose
+    # record is missing is still served (unindexed is not withdrawn); a citation-only record, which
+    # can
+    # only be a stale row here, is dropped.
     withdrawn = await _records.structurally_withheld(
         [(match.source, match.id) for match in search.hits]
     )
     return search.model_copy(
         update={
             "unsearched": await _records.citation_only(reaction_smiles),
-            # The id a hit is cited by names the source it was found in, because
-            # `reaction_fingerprints` is keyed by `(source, id)` and a bare citation to an id two
-            # sites hold resolves to neither (`records._one_of` refuses rather than guessing).
+            # The cited id names its source, because fingerprints are keyed by `(source, id)` and a
+            # bare id two
+            # sites hold resolves to neither.
             "hits": [
                 match.model_copy(update={"id": note_id_for_reaction(match.id, match.source)})
                 for match in search.hits
@@ -112,9 +93,8 @@ async def similar_reactions(
 async def _disclosed(coverage: CorpusCoverage, query: str | None) -> CorpusCoverage:
     """`coverage` with the citation-only records outside the label index stated beside it.
 
-    On the coverage rather than on each result type, because `CorpusCoverage.verdict` is the one
-    sentence every facet answer quotes for its denominator — `PrecedentSearch` and
-    `FrequencyReport` alike — and "COMPLETE" is the word that was read as the whole ELN.
+    On the coverage because `CorpusCoverage.verdict` is the denominator sentence every facet answer
+    quotes.
     """
     return coverage.model_copy(update={"unsearched": await _records.citation_only(query)})
 
@@ -127,11 +107,8 @@ async def _precedents(search: PrecedentSearch, query: str | None) -> PrecedentSe
 async def _unlabelled(question: str, query: str | None) -> PrecedentSearch:
     """The answer when nothing in the index has been labelled yet.
 
-    Every facet tool routes through this rather than inventing its own way to say it, and the one
-    thing none of them may do is return a bare empty list — which reads as "no such reaction
-    exists". The coverage is asked for under a version nothing carries, so `total` is the real
-    corpus size and `labelled` is zero: the sentence then says the corpus holds N reactions and
-    none of them can answer yet, which is the true state.
+    Never a bare empty list, which reads as "no such reaction". Coverage is asked under a version
+    nothing carries, so it reports the real corpus size with zero labelled.
     """
     coverage = await _labels.coverage("never-labelled")
     return PrecedentSearch(question=question, coverage=await _disclosed(coverage, query))
@@ -140,9 +117,8 @@ async def _unlabelled(question: str, query: str | None) -> PrecedentSearch:
 def _roles(names: list[str] | None) -> frozenset[SpeciesRole]:
     """Role names as members, refusing one this vocabulary does not have.
 
-    Strict where `merge._role` is lenient, and the asymmetry is deliberate: a *stored* role from a
-    newer labeller must degrade quietly, but a role a model typed into a query must not silently
-    match nothing — that is a filter that returns "no precedent" for a spelling mistake.
+    Strict, unlike `merge._role` for stored roles: a mistyped query role must not silently match
+    nothing.
     """
     if not names:
         return frozenset()

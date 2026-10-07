@@ -1,46 +1,17 @@
 """The connector manifest: one validated contract for everything a capability contributes.
 
-Why this exists: before connectors, a capability was added in one of four unrelated places — a
-`@tool` function in `agent/`, a `settings.mcp_servers` entry, a bespoke Temporal adapter plus a
-hand-maintained worker list, and a `SKILL.md` folder — three of which are Python edits to
-orchestration code. A capability was a concept the codebase could not name. A `connector.yaml`
-names it: one folder declares the tools it serves, the durable jobs it can run, the skills that
-teach them, and the agent profiles it enables.
+A `connector.yaml` names a capability: the tools it serves, the durable jobs it runs, the skills
+that teach them and the profiles it enables. Validated with `extra="forbid"`, so a misspelled key
+fails `make connector-validate` instead of silently vanishing.
 
-The manifest is *the whole contract*. Everything a connector contributes is declared here and
-validated by pydantic with `extra="forbid"`, so a misspelled key fails `make connector-validate`
-in CI instead of silently vanishing — the same fail-fast stance `SkillManifest` takes for
-`SKILL.md` frontmatter and the config models take for env values.
+Three kinds of tool stay in core by rule: conversation plumbing (another process does not have the
+turn), the graph writers (one write path stamps provenance; a connector reaches the graph only by
+returning a `Note` in a job envelope), and the knowledge graph's own reads (core is its main
+consumer, so a bundle would take no dependency closure with it; D-115).
 
-**What does *not* become a connector, and why the line is here.** A connector holds *capability* —
-work whose dependencies and CPU are its own business and whose result is a value. Three kinds of
-tool stay in core by rule, and each is a rule rather than a backlog item:
-
-1. **Conversation plumbing** — anything that reads or writes the *turn's* own state (attachments,
-   preferences, watches, clarifying questions). Another process does not have the turn.
-2. **The graph writers** (`record_knowledge_note`, `record_confirmed_answer`). One write path is
-   one place that stamps provenance; a connector reaches the graph only by returning a `Note` in a
-   job envelope, which core publishes through `kg.record`. That asymmetry is the point, and it
-   outlived the review boundary it was first argued from
-   (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
-3. **Core's own data layer — the knowledge graph.** This one is worth stating because it looks like
-   a capability and is not (D-115). Thirteen core modules import `kg`: the note write path, all
-   six memory layers, the report retrievers, the eval verifier, the note index. Moving `find_notes`,
-   `expand_note` and `find_knowledge_gaps` to a bundle would leave every one of those imports in
-   core — a zero dependency win — and add a second read path to one note tree. A capability earns a
-   bundle by taking a dependency closure *with* it; the graph cannot, because core is its main
-   consumer, not the conversation.
-
-Two shapes vary by kind and are therefore discriminated unions: the transport a connector is
-reached over, and how we authenticate to it. They are unions *here*, in the manifest, rather than
-in `core/config/` — which is the whole point, and is now the rule rather than this
-file's preference: config says which attached things exist and where, a manifest says what
-each one is
-(D-118, D-120). The two config-side unions this docstring used to cite as precedent,
-`McpServerSpec` and `DataSourceSpec`, were both replaced by manifests for that reason.
-
-Adding a transport or an auth mode is one variant plus one branch at the single dispatch site,
-never a widening of one model with optional fields that only apply sometimes.
+Transport and auth vary by kind and are discriminated unions here, in the manifest, not in
+`core/config/`: config says which attached things exist and where, a manifest says what each one
+is (D-118). Adding a variant is one model plus one branch at its single dispatch site.
 """
 
 import re
@@ -51,11 +22,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from chemclaw.core.http import is_loopback_url
 from chemclaw.core.manifest_io import MAX_MANIFEST_TEXT_CHARS
 
-# A job parameter's declared type, mapped to a Python annotation by `connectors.jobs`.
-# Deliberately a *closed* set: the generated pydantic model becomes the JSON schema the model
-# fills in, and a schema the model can always fill correctly is worth more than an open type
-# language. These cover every launch argument the existing durable jobs take (SMILES strings,
-# method names, counts, flags, lists of either, and one nested spec object).
+# A job parameter's declared type, mapped to an annotation by `connectors.jobs`. Closed on purpose:
+# the generated model becomes the JSON schema the model fills, and every type here is one it can
+# fill
+# correctly.
 JobParamType = Literal["string", "integer", "number", "boolean", "string[]", "number[]", "object"]
 
 
@@ -99,12 +69,8 @@ class BearerAuth(BaseModel):
     token_env: str = Field(min_length=1)
 
 
-# How chemclaw authenticates to a connector, discriminated on `mode`. Only the two modes with a
-# real caller are built: `none` for the trust-boundary cases and `bearer` for everything
-# in-cluster. The Entra service-identity and on-behalf-of modes are a documented extension
-# point, not a stub — OBO needs the user's raw access token, which `service.auth.Principal`
-# deliberately does not carry, and neither exchange can be verified without a real tenant (see
-# `docs/archive/plans/connector-plan.md` §11).
+# How chemclaw authenticates to a connector, discriminated on `mode`: `none` for trust-boundary
+# cases, `bearer` for everything in-cluster. Only modes with a real caller are built.
 ConnectorAuth = NoAuth | BearerAuth
 
 
@@ -169,10 +135,9 @@ class HttpEndpoint(BaseModel):
     def _queues_only_tools_it_serves(self) -> Self:
         """Reject a queued tool the endpoint does not serve.
 
-        Such a name would queue nothing while reading, in review, as if it did.
-
-        Deliberately *not* tied to `read_only`/`state_changing`: that split is about side effects,
-        and cost is a different axis — `rxnpredict`'s predictions are reads and cost seconds of CPU.
+        Such a name would queue nothing while looking as if it did. Not tied to the read/write
+        split: cost
+        is a different axis from side effects.
         """
         if self.queued is None:
             return self
@@ -190,18 +155,11 @@ class HttpEndpoint(BaseModel):
     def _a_networked_endpoint_carries_a_credential(self) -> Self:
         """Reject `auth: mode: none` on a URL that is reachable from the network.
 
-        The rule is about the *declared* URL — what a bundle ships in the repo — and not about the
-        effective one after `connector_urls`, which is a deliberate line rather than an oversight.
-        A deployment override points at the operator's own infrastructure (in the shipped chart, an
-        in-cluster Service bounded by the `connector-ingress` NetworkPolicy), and a validator that
-        failed on those would flag the entire shipped fleet the moment the chart set the override —
-        an alarm that fires on the normal case teaches people to disable it. What it does catch is
-        the case that has no compensating control and is now expressible: a manifest naming somebody
-        else's host, reached across a network we do not own, with no credential on the call.
-
-        `NoAuth` stays the default because the transports it is right for — stdio, and the loopback
-        dev endpoint every shipped bundle declares — are the common ones; this makes the default
-        unavailable exactly where it stops being true.
+        Judges the declared URL, not the `connector_urls` override, which points at the operator's
+        own
+        infrastructure and would otherwise flag every in-cluster deployment. What it catches is a
+        manifest
+        naming a foreign host with no credential. `NoAuth` stays the default for stdio and loopback.
         """
         if isinstance(self.auth, NoAuth) and not is_loopback_url(self.url):
             raise ValueError(
@@ -246,32 +204,17 @@ def _check_classification(
 ) -> None:
     """Raise unless every served tool is in exactly one of `state_changing` and `read_only`.
 
-    **A partition, not two optional hints, and the strictness is the whole point.** Whether a tool
-    spends real resources or merely looks something up decides whether the harness's plan gate
-    refuses it under an unapproved plan (D-167), and every way of getting that wrong fails *open* —
-    a typo matches nothing, an omission reads as "harmless", and either ships a write that looks
-    exactly like a gated one. Defaulting an undeclared tool to "read" would put the whole burden on
-    a bundle author remembering; defaulting it to "write" would gate a connector's lookups and make
-    the approval-first posture unusable. Refusing to load is the only option that cannot be wrong
-    quietly, and it costs a bundle author one line per tool, once.
-
-    Core still cannot infer the answer — that is exactly why the bundle has to state it.
-
-    **An empty `tools` list is refused for the same reason, and it is not the same check.** A
-    partition of nothing is trivially satisfied, so an endpoint that simply omits `tools:` passed
-    this function while turning both of its guarantees off at once: `registry` read the empty list
-    as "no allow-list" and bound the server's entire advertised surface, and none of what arrived
-    appeared in `state_changing_tool_names()`, so `agent.authz.side_effecting_call` answered `False`
-    for every one of them — including a write. That is the plan gate's input (D-167) and the
-    dry-run gate's, so the manifest that declared the least got the most.
+    The classification decides whether the plan gate refuses a tool under an unapproved plan
+    (D-167),
+    and every way of getting it wrong (a typo, an omission, a default) fails open. So it is a strict
+    partition, and an empty `tools` list is refused too: it would bind the server's whole surface
+    with
+    nothing classified as state-changing.
     """
     served = set(tools)
-    # **Checked before the partition, because the partition is where the evidence is lost.** Every
-    # comparison below works on sets, so `tools: [a, a]` validates here and fails one layer up in
-    # `registry._declared_tool_names`, which walks the raw list and reports the bundle colliding
-    # with itself — a true sentence naming one connector twice, and unactionable without reading
-    # the source. This is the last place the repetition is still visible, so it is the place that
-    # says what it is.
+    # Checked before the partition, whose set comparisons would hide a duplicated name until a
+    # confusing
+    # collision error one layer up.
     if len(tools) != len(served):
         repeated = sorted({name for name in served if tools.count(name) > 1})
         raise ValueError(
@@ -305,14 +248,10 @@ def _check_classification(
 def _check_knowledge_reads(knowledge_read: list[str], read_only: list[str]) -> None:
     """Raise unless every declared knowledge read is one of this endpoint's own reads.
 
-    **Optional where the classification above is a partition, and the asymmetry is deliberate.**
-    Getting `state_changing` wrong fails open — a write the plan gate reads as a read — so it may
-    not be left blank. `knowledge_read` decides only what `turn_costs.retrieval_calls` counts, so
-    an omission understates a metric rather than removing a control; requiring every bundle to
-    answer a question most of them answer "none" to would be ceremony a validator has to police.
-
-    What it does refuse is the pair that cannot both be true: a search over the record that this
-    same endpoint calls state-changing. That would count a write as a look.
+    Optional, unlike the classification: an omission only understates `turn_costs.retrieval_calls`
+    rather than removing a control. What it refuses is a search over the record that the same
+    endpoint
+    calls state-changing.
     """
     unknown = sorted(set(knowledge_read) - set(read_only))
     if unknown:
@@ -322,28 +261,14 @@ def _check_knowledge_reads(knowledge_read: list[str], read_only: list[str]) -> N
         )
 
 
-# One connector endpoint, discriminated on `transport`. A new transport is one variant here plus
-# one branch in `connectors.registry._mcp_connection`. Both variants carry `tools` — the
-# agent-facing allow-list — because it is a property of *an endpoint's* surface: nesting it
-# here rather than at the manifest's top level makes "an allow-list with no endpoint to serve
-# it" unrepresentable instead of something a validator has to catch.
+# One connector endpoint, discriminated on `transport`; a new transport is one variant here plus one
+# branch in `connectors.registry._mcp_connection`. `tools` (the agent-facing allow-list) lives on
+# the endpoint, so an allow-list with nothing to serve it is unrepresentable.
 #
-# `state_changing` names the subset of `tools` that spends real resources or writes data a person
-# would care about — the ones the harness's plan gate refuses under an unapproved plan (D-167).
-# It is declared **here, by the bundle**, and not as a list in core, for the same reason the queue
-# and the params model are: whether `predict_pka` is a lookup or a calculation is the capability's
-# own fact, and a copy of it in core is a second source of truth that goes stale the first time a
-# bundle changes what a tool does. There is no such thing as an undeclared tool: `tools` may not be
-# empty and every entry must be classified, because both ways of leaving it blank end at the same
-# place — a write the plan gate reads as a read.
-#
-# `knowledge_read` names the subset of `read_only` that consults **the record** — the reaction
-# corpus, the fingerprint indexes, anything a turn looks at before it answers. It is separate from
-# `read_only` because they answer different questions: `read_only` says a tool may run without an
-# approved plan, and `assemble_evidence_pack` and `ask_clarifying_question` are both read-only
-# while only one of them looks anything up. It is declared by the bundle for the same reason
-# `state_changing` is — whether `substrate_precedent` searches the record is `rxnfp`'s own fact,
-# and core naming other people's tools is the second source of truth D-118 exists to prevent.
+# `state_changing` names the tools the plan gate refuses under an unapproved plan (D-167);
+# `knowledge_read` names the subset of `read_only` that consults the record. Both are declared by
+# the bundle, because what a tool does is the capability's own fact, and a copy in core would go
+# stale.
 Endpoint = HttpEndpoint | StdioEndpoint
 
 
@@ -423,9 +348,9 @@ class EffectSpec(BaseModel):
     def _compensating_names_its_compensation(self) -> Self:
         """A compensating effect must name what undoes it, and no other kind may name one.
 
-        Both directions, because both are a claim: an unnamed compensation is a reversibility
-        nobody can perform, and a compensation on an irreversible effect is the opposite claim in
-        the same field.
+        Both directions are claims: an unnamed compensation cannot be performed, and a compensation
+        on an
+        irreversible effect contradicts it.
         """
         if self.reversal == "compensating" and not self.compensation:
             raise ValueError(
@@ -471,138 +396,68 @@ class JobSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # The advertised tool name, so it is keyed and gated exactly like a hand-written tool
-    # (`tool_role_gates`, `DEFAULT_WRITE_TOOL_GATES`, profile narrowing all address this
-    # string).
+    # The advertised tool name; authorization gates and profile narrowing address this string.
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     workflow: str = Field(min_length=1)
-    # The first line of the generated tool's docstring — what the model reads when deciding to
-    # call it. `description` carries the rest (when to use it, what the id is for, idempotency).
-    # Bounded, because this text *is* the prompt. `jobs.build_job_tool` puts both verbatim into
-    # the generated tool's docstring, which is what the model is sent on every call, and neither
-    # field had a maximum: measured, a 5.4 MB `connector.yaml` produced a 5,200,664-character tool
-    # docstring — roughly 1.3 million tokens from one file — with `connector-validate` reporting
-    # nothing. `tests/test_context_floor.py` is the ratchet on the total prefix, but it measures
-    # the graph built from the *shipped* bundles, so an out-of-tree bundle on `connectors_dir` —
-    # the supported way to add a capability — is outside it by construction. This is the bound
-    # such a bundle is held to instead.
+    # The first line of the generated tool's docstring; `description` carries the rest. Bounded
+    # because
+    # both go verbatim into the prompt on every call, and an out-of-tree bundle is outside
+    # `tests/test_context_floor.py`'s reach.
     summary: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
     description: str = Field(default="", max_length=MAX_MANIFEST_TEXT_CHARS)
-    # A job declares its launch arguments one of two ways, and the choice is about *fidelity*,
-    # not taste. `params` is the easy path: flat, closed-type arguments declared inline, which
-    # covers a job whose input is a handful of scalars (a SMILES, a method name, a count).
-    # `params_model` is the full-fidelity path: a dotted `module:Attribute` reference to an
-    # existing pydantic model, for a job whose input is a rich domain object — a nested
-    # optimization problem with discriminated feature kinds cannot be re-declared in YAML
-    # without losing exactly the structure that makes the model call it correctly, and
-    # re-declaring it would be a second source of truth for a schema that already exists in
-    # code. Declaring neither is a job with no arguments.
+    # Launch arguments, declared one of two ways: `params` for a few flat, closed-type arguments, or
+    # `params_model` (`module:Attribute`) for a rich domain object whose existing pydantic model
+    # should
+    # not be re-declared in YAML. Neither means no arguments.
     params: list[JobParam] = Field(default_factory=list)
     params_model: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
-    # A domain precondition checked *before* any durable work starts: a dotted `module:function`
-    # taking the validated params object and raising to refuse the launch.
-    #
-    # It exists because the checks a durable capability needs at creation time are not all
-    # generic. Authorization and dry-run are (`expensive`, and the ambient flag), but "this
-    # campaign asks for more rounds than Temporal's event history can hold" is the BO domain's
-    # own rule — and every other place to put it is replay-unsafe. A pydantic validator on the
-    # params model, or a check inside the workflow, re-runs during replay against *current*
-    # config, so lowering the ceiling would retroactively fail an in-flight campaign that was
-    # legal when it started. Only the launch boundary is safe, and after the generic factory
-    # replaced the hand-written adapters this is the launch boundary. Declaring it is how a job
-    # keeps a guard it would otherwise silently lose.
+    # A domain precondition checked before any durable work starts: a `module:function` taking the
+    # validated params and raising to refuse the launch. The launch boundary is the only replay-safe
+    # place for a rule that reads current config: a validator or an in-workflow check would re-run
+    # during replay and could fail an in-flight run that was legal when it started.
     precondition: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
-    # Whether *this deployment* can run the job at all: a dotted `module:function` taking nothing
-    # and returning a sentence saying why not, or `None` when it can. A job with a reason is
-    # withheld from the model (`registry.job_tools`) and refused on every other launch path
-    # (`jobs.prepare_job_launch`). The deployment-level twin of `precondition`, which judges one
-    # launch's arguments — no argument can make a job runnable that has nowhere to put its result,
-    # and offering it anyway is a tool whose only outcome is a failed run (`jobs.unavailable_reason`
-    # has the live measurement). Declared-but-unbound, the pattern
-    # `D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off` applies to
-    # template launchers.
+    # Whether this deployment can run the job at all: a `module:function` taking nothing and
+    # returning a
+    # reason why not, or `None`. A job with a reason is withheld from the model
+    # (`registry.job_tools`)
+    # and refused on every other launch path (`jobs.prepare_job_launch`).
     unavailable_reason: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
     expensive: bool = False
     publish_to_graph: bool = False
-    # What this job changes *outside* this deployment, and whether it can be undone. Absent means
-    # the job's writes are this system's own — a calculation cached, a note proposed, a row
-    # recorded — which is every job in this repository today.
+    # What this job changes outside this deployment, and whether it can be undone. Absent means its
+    # writes are this system's own.
     effect: EffectSpec | None = None
-    # How long the launcher waits for the run to finish before handing back a job id instead.
-    # Unset (the default) means "always a job": start it, return the id, poll it.
-    #
-    # This exists for the capability whose cost varies by orders of magnitude with its input. A
-    # reaction energy over two small species is a couple of seconds and belongs *in* the answer;
-    # the same tool over eight species with Hessians is minutes and must not hold a conversation
-    # open. Declaring one number here lets one tool serve both, and the model sees a result or a
-    # job id without having to choose between two tools on a cost estimate it cannot make.
-    #
-    # Deliberately a wait on the real run rather than a predicted-cost threshold, which is what
-    # this replaced: a prediction is a second model of the calculation that can be wrong in both
-    # directions (a slow "cheap" call blocks the turn anyway; a fast "expensive" one is deferred
-    # for nothing), and it can only live where the cost model lives — which would put chemistry
-    # back in core, the exact coupling the seam removes. Elapsed time needs no model and is
-    # always right.
-    #
-    # Keep it comfortably under the front door's `service_turn_timeout_seconds`: this budget is
-    # spent inside a turn, and a job that outlives the turn is the failure it exists to prevent.
+    # How long the launcher waits for the run before handing back a job id instead; unset means
+    # always a
+    # job. Lets one tool serve a seconds-long input inline and a minutes-long one as a job, decided
+    # by
+    # elapsed time rather than a cost prediction that would put chemistry back in core. Keep it well
+    # under `service_turn_timeout_seconds`.
     inline_wait_seconds: float | None = Field(default=None, gt=0)
-    # A ceiling on this job's whole durable run, in seconds — **a lowering of the deployment's
-    # ceiling, never a raise.** The effective ceiling is
-    # `min(this, connector_job_timeout_seconds)`, computed in one place
-    # (`durable/connector_job.py::child_execution_timeout`), so a manifest in this repository can
-    # ask for *less* runtime than the deployment funds and never for more. That asymmetry is the
-    # whole reason this field can exist at all: `connector_job_timeout_seconds` is one global
-    # number precisely because a bundle must not be able to grant itself unlimited runtime, and a
-    # bound that can only move downward takes nothing away from the operator.
+    # A ceiling on this job's whole durable run, in seconds, that can only lower the deployment's:
+    # the
+    # effective ceiling is `min(this, connector_job_timeout_seconds)`
+    # (`durable/connector_job.py::child_execution_timeout`), so a bundle can never grant itself more
+    # runtime. Unset means the deployment's ceiling.
     #
-    # Unset (the default) means exactly the deployment's ceiling — what every manifest written
-    # before this field existed got, and still gets.
-    #
-    # It exists because one global ceiling bounds a twenty-second job and a four-hour job
-    # identically. With a bundle's worker down, a job that would have answered in seconds sits
-    # `running` for the whole global ceiling with nothing said, because the only thing that ends it
-    # is a number sized for the *longest* job in the fleet. The bundle knows what its own job
-    # costs; the deployment knows the maximum it will fund. Declaring the first here keeps both.
-    #
-    # **Declare what this job actually costs, and never less than the longest activity its own
-    # workflow runs.** Core cannot check that half and does not pretend to: it can see neither the
-    # bundle's workflow nor its activity budgets, so a ceiling below the child's own activity
-    # budget re-creates — for this one job — the defect
-    # `Settings._the_job_ceiling_covers_the_activity_it_bounds` refuses globally: a single attempt
-    # exhausts the whole ceiling, the activity's retry policy becomes unreachable, and the run dies
-    # as a bare `WorkflowExecutionTimedOut` naming no setting at all.
+    # Never set it below the longest activity its workflow runs: core cannot check that, and a
+    # single
+    # attempt would exhaust the ceiling and make retries unreachable.
     timeout_seconds: float | None = Field(default=None, gt=0)
-    # **Whether this job suspends on a person, so its elapsed time is not a measure of its cost.**
-    # A job that opens a durable wait (`durable/awaiting.py`) spends wall clock doing nothing, and a
-    # workflow execution timeout cannot tell that apart from a wedged run — so
-    # `child_execution_timeout` hands such a job no ceiling at all, and every job that leaves this
-    # `false` keeps the deployment's own one exactly as before.
-    #
-    # It exists because the ceiling and the wait were 67x apart and no manifest could close the gap:
-    # `BoCampaignWorkflow._measure` waits `bo_measurement_deadline_days` (a fortnight, the plate
-    # turnaround a screening campaign is *for*) under `connector_job_timeout_seconds` (hours, sized
-    # off a CREST search and the queue wait it funds), and `timeout_seconds` above may only lower.
-    # Raising the fleet-wide number instead would have given every xTB and CREST job a fortnight to
-    # be wedged in.
-    #
-    # This is a claim about the job's *shape*, not a number it may inflate, which is why it is safe
-    # to let a manifest declare it: the bundle knows whether its workflow suspends and core cannot
-    # see the code, exactly as with `expensive` and `publish_to_graph`. What a bundle still cannot
-    # do is buy itself compute — a job that declares this and then loops without waiting is a
-    # workflow whose activities are each still bounded by their own budgets.
+    # Whether this job suspends on a person (`durable/awaiting.py`), so elapsed time is not cost:
+    # `child_execution_timeout` then gives it no ceiling. Safe to declare because it describes the
+    # job's
+    # shape rather than buying compute (each activity keeps its own budget), and it requires the
+    # operator's grant (`jobs.require_funded_ceiling`).
     awaits_answer: bool = False
 
     @model_validator(mode="after")
     def _a_job_that_waits_does_not_also_declare_what_it_costs(self) -> Self:
-        """Reject `awaits_answer` beside `timeout_seconds` — the two say opposite things.
+        """Reject `awaits_answer` beside `timeout_seconds`: the two say opposite things.
 
-        `timeout_seconds` bounds the job's whole durable run; `awaits_answer` says that run has no
-        wall-clock bound worth stating, because most of it is a person not having answered yet.
-        Honouring both would re-create the exact defect this field was added for — a fortnight-long
-        wait under a ceiling sized for compute — and honouring one silently would make the other a
-        key that reads like a control and is not. An author who wrote both believed one of them,
-        and which one is not something a resolver should guess.
+        Honouring one silently would make the other a key that reads like a control and is not, and
+        which
+        one the author meant is not for a resolver to guess.
         """
         if self.awaits_answer and self.timeout_seconds is not None:
             raise ValueError(
@@ -616,10 +471,9 @@ class JobSpec(BaseModel):
     def _effects_are_gated(self) -> Self:
         """A job that changes somebody else's system is expensive by declaration, not by choice.
 
-        `expensive` is what puts a job in `authorize_trigger`'s set, so a manifest could otherwise
-        declare an external effect that any authenticated user could trigger. Refused rather than
-        silently corrected: a manifest saying `expensive: false` beside an `effect:` block is an
-        author who believed one of the two, and which one they believed matters.
+        `expensive` puts a job behind `authorize_trigger`. Refused rather than corrected, since the
+        author
+        believed one of the two fields and which one matters.
         """
         if self.effect is not None and not self.expensive:
             raise ValueError(
@@ -671,65 +525,35 @@ class ConnectorManifest(BaseModel):
     description: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
     endpoint: Endpoint | None = Field(default=None, discriminator="transport")
     jobs: list[JobSpec] = Field(default_factory=list)
-    # Names of the `SKILL.md` folders under this bundle's `skills/` dir and the profile files
-    # under its `profiles/` dir. Declared rather than inferred so a stray folder is a CI failure
-    # instead of a silently-shipped skill (`scripts.validate_connectors`).
+    # Names of the `SKILL.md` folders under this bundle's `skills/` and the profile files under its
+    # `profiles/`. Declared so a stray folder fails CI rather than shipping
+    # (`scripts.validate_connectors`).
     skills: list[str] = Field(default_factory=list)
     profiles: list[str] = Field(default_factory=list)
     # The knowledge-graph vocabulary this bundle's `publish_to_graph` jobs mint, unioned into
     # `KNOWN_NOTE_TYPES`/`KNOWN_RELATIONS` by `chemclaw.kg.note.known_note_types` and its sibling.
-    #
-    # **Why a bundle may extend a closed vocabulary.** Those two frozensets are closed on purpose:
-    # a typo makes a note or an edge unfindable by every filter keyed on it, so the vocabulary is
-    # checked in CI (`make kg-validate`) rather than left open. But the vocabulary is not core's
-    # alone —
-    # `bo-candidate` is minted by a bundle (`connectors/bo/knowledge.py`) and was written into
-    # core's frozenset by hand. That made a bundle contributing a note type the one connector
-    # contribution needing a core edit, in the seam whose whole claim is that a capability is a
-    # folder (D-118).
-    #
-    # Declaring it here keeps both properties: the set is still closed (an undeclared name still
-    # fails `make kg-validate`), a human still sees a genuinely new type in the commit that adds
-    # the bundle, and the deployment's effective vocabulary is exactly what its enabled bundles say
-    # it is. Names are validated for shape here and for *existence* nowhere — a type nothing has
-    # minted yet is a declaration, not an error.
+    # The
+    # vocabulary stays closed (an undeclared name still fails `make kg-validate`), but a bundle can
+    # extend it without a core edit (D-118). Validated for shape only.
     note_types: list[str] = Field(default_factory=list)
     relations: list[str] = Field(default_factory=list)
-    # Whether an empty `connectors_enabled` turns this bundle on. True for every bundle that
-    # predates this field, so "discovery is enablement until you say otherwise" is unchanged for
-    # all of them.
-    #
-    # **Why a bundle would ever declare `false`.** A manifest is load-bearing for four validators
-    # whether or not a turn binds it: `chemclaw_agent.available_tool_names` builds the set
-    # `skill-validate`, `prose-validate`, `template-validate` and `connector-validate` check
-    # against by reading manifests out of `connectors_dirs`, so a skill naming `mtsr` needs a
-    # manifest declaring `mtsr` to exist — that is the D-117 defect, and it is why
-    # `connectors/safety/connector.yaml` stays here for a server this tree does not run.
-    #
-    # Binding is a different question from declaring, and it has a different price. Every bound
-    # tool's schema is serialised ahead of the system message on *every* model call, so a bundle
-    # that is on by default is charged to `tests/test_context_floor.PREFIX_BOUND`, which
-    # `core/config/agent.py` derives both compaction thresholds from — a token of prefix is a
-    # token of thread nobody gets back. The five process-development bundles
-    # (`thermalsafety`, `kinetics`, `unitops`, `props`, `suitability`) are ~22,000 tokens
-    # together, which is why they declare `false`: a deployment that wants them names them in
-    # `CHEMCLAW_CONNECTORS_ENABLED` and pays for them, and one that does not is unchanged.
-    #
-    # This is the same posture `publish/` and `deliver/` already take — off until a setting names
-    # it — applied to the one contribution that costs every turn rather than only the turn that
-    # uses it. It is not a second enablement mechanism: `connectors_enabled` remains the single
-    # switch, and this only decides what the *empty* list means for one bundle.
+    # Whether an empty `connectors_enabled` turns this bundle on. Declaring a capability and binding
+    # it
+    # are separate decisions: a manifest is read by the validators whether or not a turn binds it,
+    # but
+    # every bound tool's schema is charged on every model call
+    # (`tests/test_context_floor.PREFIX_BOUND`).
+    # A costly optional bundle declares `false` and a deployment that wants it names it in
+    # `CHEMCLAW_CONNECTORS_ENABLED`; `connectors_enabled` remains the single switch.
     default_enabled: bool = True
 
     @model_validator(mode="after")
     def _vocabulary_is_well_formed(self) -> Self:
         """Reject a note type or relation that is not a lowercase hyphenated token.
 
-        The same shape the shipped vocabulary uses (`bo-candidate`, `computed-from`). Enforced
-        because these names become path segments (`knowledge/<type>/<id>.md`) and frontmatter keys:
-        a name with a slash, a space or an uppercase letter would produce a note that validates and
-        then cannot be found by the filters keyed on it — the exact failure the closed vocabulary
-        exists to prevent, arriving through the door opened for extending it.
+        These names become path segments and frontmatter keys, so anything else would produce a note
+        that
+        validates and then cannot be found by the filters keyed on it.
         """
         for field, values in (("note_types", self.note_types), ("relations", self.relations)):
             bad = sorted(v for v in values if not re.fullmatch(r"[a-z][a-z0-9-]*", v))
@@ -763,13 +587,9 @@ class ConnectorManifest(BaseModel):
     def _compensations_name_a_declared_job(self) -> Self:
         """A named compensation must be a job this bundle actually declares.
 
-        Nothing *runs* a compensation, and that is a decision rather than an omission
-        (`D-2026-08-29-an-effect-declares-whether-it-can-be-undone`): naming one tells an operator
-        which job undoes this one, and launching it is their call through the ordinary launcher.
-        Which is exactly why the name has to resolve — the whole value of the field is that
-        somebody can act on it, so a name nothing answers to is a reversibility nobody can perform,
-        the claim `EffectSpec` already refuses when the field is left *empty*. It could not be
-        checked there: a job cannot see its siblings, and this model is the first thing that can.
+        Nothing runs a compensation automatically; the name tells an operator which job undoes this
+        one,
+        so it must resolve. Checked here because a job cannot see its siblings.
         """
         declared = {job.name for job in self.jobs}
         unresolved = sorted(

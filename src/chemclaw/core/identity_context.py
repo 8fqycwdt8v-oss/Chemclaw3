@@ -1,58 +1,24 @@
-"""The ambient authenticated identity for the current turn (plan Phase F4-T5).
+"""The ambient authenticated identity for the current turn.
 
-Like the session id (`chemclaw.core.session_context`), the authenticated user's Entra `oid` and
-app roles are ambient to a turn, not tool arguments: the front-door runner stamps them from the
-request's validated `Principal`, and audit, the authorization gate, and job-attribution read them
-here. A `contextvar` is the right carrier — task-local, so concurrent turns never cross identities
-— and it defaults to "no identity" off the request path (tests, the classic non-service caller),
-where the static audit actor and the dev-mode allowances apply.
+The user's Entra `oid`, app roles and the turn's correlation id are ambient to a turn, not tool
+arguments: the front-door runner stamps them from the validated `Principal`, and audit, the
+authorization gate, job attribution, logging and `kg/record.record_note` read them here. A
+`contextvar` keeps concurrent turns from crossing identities and defaults to "no identity" off the
+request path. The correlation id is per-turn state and must never be bound on a cached agent.
 
-The turn's **correlation id** rides here for the same reason and with the same consumer. It used
-to be bound once inside `build_langgraph_agent`, and agents are cached per profile for the process's
-whole life — so every turn from every user on a pod shared one id, which is precisely the opposite
-of what a correlation id is for: the audit trail could not separate two chemists' tool calls, and
-"show me everything that happened in this conversation" returned the pod's entire history. It is
-per-turn state, so it belongs in a task-local like the actor, not on a cached object.
-
-The **running specialist** used to ride here as a fourth carrier, and does not any more
-(`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): its setter had no caller in
-`src/` for as long as it existed, so the audit trail's `agent` column could only ever be empty while
-the module said the trail named the agent beside the human. The rule it carried is not lost — a
-subagent is an attenuation of its caller's authority and never a new actor
-(`docs/decisions/D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor.md`), which binds whoever
-re-adds one — and re-adding the carrier beside `_current_actor` rather than over it is what that
-rule asks for. An invariant is not a function.
-
-**Plain `str`/`frozenset` values and nothing but `contextvars`**, which is what makes this kernel
-material: the turn's actor is read across many packages — audit, the authz gate, connector
-identity headers, template activities, the durable interceptor, the CLI, `core.logging`'s own
-`ContextFilter`, the transcript store, and `kg/record.record_note`, which stamps it on a note as the
-person it was written for (`D-2026-09-27-an-author-is-a-person-and-an-agent`). (The PR-gate stood
-in that list until `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`.) It sat
-in `chemclaw.agent` until the R2 layering move, where it was the single import that put `kg` and
-`connectors` above the conversation layer and forced `core/logging.py` to reach for it lazily.
+Values are plain `str`/`frozenset`, which is what lets this sit in the kernel below every reader.
+A subagent is an attenuation of its caller's authority, never a new actor; any carrier for the
+running agent belongs beside `_current_actor`, not over it.
 """
 
 from contextvars import ContextVar
 
-# What a group-derived entitlement is named, so it can never collide with an app role.
+# Prefix for a group-derived entitlement, so it can never collide with an app role.
 #
-# Entra app roles are values the API's own app registration defines; group claims are values the
-# *directory* defines, and a tenant may emit them as object-ids or as names
-# (`groupMembershipClaims` accepts `sam_account_name`, `cloud_displayname`, …). Merged into one flat
-# set, a directory group called `process-chemist` is indistinguishable from the app role of that
-# name — so enabling `entra_group_claims_as_roles` to give one file share its read entitlement would
-# also widen every write-tool and skill gate. The prefix keeps the two namespaces apart.
-#
-# **It lives here because it is part of the role vocabulary, not of the HTTP layer.** `api.auth`
-# stamps it onto the roles this module carries, and the places that *tell an operator how to write
-# a group-gated entitlement* have to name the same string — the shipped `sharedrive` manifest, the
-# binding's own refusal message, `docs/guides/sharedrive-concept.md`. While it sat in `api.auth`
-# those were four hand-typed copies of one security-relevant string, and three of them were wrong:
-# they told an operator to write the bare object-id, which matches nothing, so a correctly
-# configured tenant got an empty corpus and no error anywhere.
-# `tests/test_document_share.py::test_every_place_that_teaches_a_group_gate_names_the_real_prefix`
-# is what keeps them agreeing now.
+# App roles are defined by the API's app registration, group claims by the directory; merged without
+# a prefix, a group named like an app role would widen every write-tool and skill gate. It lives in
+# the role vocabulary because manifests, refusal messages and docs that teach a group gate must name
+# the same string; `tests/test_document_share.py` keeps them agreeing.
 GROUP_ROLE_PREFIX = "group:"
 
 _current_actor: ContextVar[str | None] = ContextVar("chemclaw_current_actor", default=None)
@@ -79,30 +45,10 @@ def reset_current_identity(tokens: tuple[object, object]) -> None:
 def get_current_actor() -> str | None:
     """The Entra oid of the turn in flight, or None when there is no authenticated user.
 
-    A **blank** string is treated as no actor: `agent/authz.require_actor` and `authorize_trigger`
-    gate on `is None` / `is not None`, and nothing constrains the contextvar to be non-empty, so a
-    context bound with `set_current_identity("", ...)` would otherwise return `""` and pass the
-    reject-if-absent rule as an authenticated user. Fail closed here, in the one reader every gate
-    shares, rather than at each of the five producers separately.
-
-    **`or None` caught `""` and not `"   "`, and the difference is a namespace nobody can erase.**
-    Measured under `entra_required=True`: no actor was refused, `""` was refused, and `"   "` came
-    back as an authenticated actor. `agent/scratchpad.py` then adds the durable `/memories/` route
-    `if store is not None and actor` — a truthy blank passes, so it gets its own store prefix under
-    `memory_namespace("   ")`, which is the exact failure that module's own docstring says it
-    avoids: "a memory written under an 'anonymous' prefix would be a memory nobody can erase". An
-    erasure request names a person; nothing names that prefix. Both producers are
-    `Field(min_length=1)` (`api.auth.Principal.oid`,
-    `durable.template_activities.StepIdentity.actor`), which `" "` passes,
-    so this is an attribution and erasure-integrity hole rather than an authentication bypass — and
-    it is fixed at the same single reader, for the same reason, rather than by tightening five
-    validators into rejecting whitespace.
-
-    **The value is returned stripped, not verbatim, and that is the second half.** `" oid-alice "`
-    and `"oid-alice"` are one person and hashed to two memory namespaces — the same erasure defect
-    one spelling further along — so the reader every gate and every namespace shares normalizes
-    rather than leaving each of them to. Nothing legitimate is lost: an Entra `oid` is a GUID and a
-    template's actor is a configured string, and neither carries meaningful surrounding whitespace.
+    A blank or whitespace-only value is treated as no actor, so it cannot pass the reject-if-absent
+    gates or mint a per-actor memory namespace no erasure request can name. The value is returned
+    stripped so two spellings of one person share one namespace. Normalised here, in the one reader
+    every gate shares, rather than in each producer.
     """
     return (_current_actor.get() or "").strip() or None
 
@@ -125,14 +71,8 @@ def reset_current_correlation_id(token: object) -> None:
 def get_current_correlation_id() -> str | None:
     """The correlation id of the turn in flight, or None off the request path.
 
-    None means "no turn stamped one", and the caller falls back to whatever id it was built with —
-    which is what the Temporal template activities and the CLI rely on, since they bind a
-    meaningful id (the workflow id) at build time and have no per-turn stamp.
-
-    Blank-is-absent for `get_current_actor`'s reason, stated once there. It matters less here and
-    still matters: this is the id that joins a log line to an audit row to a Temporal run, and a
-    whitespace one is a join key that matches nothing while looking present — so the caller's
-    fallback to the id it was built with is what should happen, and `""` already got it while
-    `"   "` did not.
+    None means no turn stamped one, and the caller falls back to the id it was built with (Temporal
+    template activities and the CLI bind the workflow id). Blank is treated as absent, as for the
+    actor, since a whitespace join key matches nothing.
     """
     return (_current_correlation_id.get() or "").strip() or None

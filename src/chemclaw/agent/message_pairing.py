@@ -1,45 +1,17 @@
 """The one rule a stored conversation must satisfy: every tool call carries its result.
 
-Anthropic (and every other tool-calling API) rejects a thread in which a `tool_use` block is not
-answered by a matching `tool_result` — "tool_use ids were found without tool_result blocks". A
-thread that acquires an unmatched call is not one bad turn; it is a poison pill replayed on every
-subsequent turn, so whatever holds it is bricked until somebody edits it.
+Tool-calling APIs reject a thread with an unanswered `tool_use`, on every later turn. Nothing here
+heals such a thread; deepagents' `PatchToolCallsMiddleware` does that upstream (pinned in
+`tests/test_upstream_surface.py`). What is here:
 
-**Nothing here heals such a thread any more, and that is deliberate.** This module used to carry a
-read-time repair, because MAF's durable history *was* the thread sent to the model and a pod
-eviction between the two writes left an orphan in it. The graph builds its thread from the
-checkpointer now (D-2026-08-10 §2), so what is left are the two jobs that were never about healing:
-
-- **A guard on deletion.** `droppable_rows` is the rule every code path that deletes conversation
-  rows goes through, so an age cutoff cannot take one half of a pair. It is used by
-  `durable/retention.py`, and it contracts rather than expands, so the worst case is a straddling
-  group surviving one more sweep.
+- **A guard on deletion.** `droppable_rows`, used by `durable/retention.py`, keeps an age cutoff
+  from taking one half of a pair. It contracts rather than expands.
 - **Assertions.** `unmatched_call_ids`, `unmatched_result_ids` and
-  `calls_without_adjacent_results` are what a test uses to prove code that deletes or assembles
-  messages did not strand anything. None has a production caller, and none should acquire one:
-  their value is that they refuse to fix what they find, so a bug that strands a pairing fails a
-  test instead of being cleaned up behind. The one healer that *does* exist is upstream's:
-  deepagents' `PatchToolCallsMiddleware` answers a dangling call in `before_agent` — which is what
-  keeps a crash between two checkpointed supersteps (an orphaned `tool_use` the provider would
-  reject on every later turn) from bricking the session — and
-  `tests/test_upstream_surface.py` pins that behaviour precisely because this repository declined
-  to write a second one.
+  `calls_without_adjacent_results` let tests prove that code which deletes or assembles messages
+  (including `agent/compaction.py`) strands nothing. They report and never repair.
 
-  The third was briefly deleted as having no subject — the previous framework assembled and sent
-  the wire payload it checked, and the graph builds its thread from the checkpointer instead. That
-  reasoning missed the one thing that *does* still assemble a payload: `agent/compaction.py` edits
-  the message list a model call is handed, and the on-the-wire rule is precisely what its tests
-  must hold it to. A narrowing that stranded a `tool_use` would brick the thread it was narrowing.
-
-**`droppable_rows` takes call ids, not messages, and that is the shape the rule always wanted.**
-Pairing is a relation between *identifiers*; the message around them was only ever how the caller
-happened to hold them. Reading them out is `stored_call_ids`, the one function that knows the
-stored shapes — and it has to know **two**, because `session_messages` holds whichever shape the M6
-conversion pass has reached (`agent/message_migration.py`). That is also what removed the last
-framework import from the deletion path: a rule deciding what a nightly sweep destroys should not
-be able to break because a library renamed a content type.
-
-The assertions still take LangChain messages, because their callers are tests holding messages.
+`droppable_rows` takes call ids, read from either stored shape by `stored_call_ids`, so the
+deletion path imports no framework types.
 """
 
 import logging
@@ -50,26 +22,13 @@ from typing import Any
 from langchain_core.messages import BaseMessage
 from networkx.utils import UnionFind
 
-# The stamp `agent/message_migration` writes for a converted row, *imported* rather than restated.
-# This module used to keep its own `"langchain"` literal under a comment saying the two could not
-# drift, which named the source without depending on it — and the whole point of taking the stamp
-# is that one rule decides what a row is. `tests/test_message_pairing.py` scans the package for a
-# second definition, because two equal literals cannot be told apart at runtime.
+# Imported rather than restated so one rule decides what a row is.
 from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
 
 logger = logging.getLogger(__name__)
 
-# MAF's content-type discriminators, kept because *stored rows* still carry them: every
-# `session_messages` row written before the M6 conversion is a `Message.to_dict()`, and the
-# retention sweep reads them whether or not the conversion has run. They are read here and nowhere
-# else, which is the point of `stored_call_ids` existing.
-#
-# These two strings decide which rows a data-destroying nightly sweep may delete, so a mistake in
-# them does not fail loudly — it changes what gets destroyed. Measured against a plausible rename:
-# `droppable_rows([(1, {"c"}), (2, {"c"})], {1})` goes from `set()` (the partner correctly
-# protected) to `{1}` — the sweep deletes the call row and strands its answer, leaving a thread the
-# API rejects outright. Silent: no exception, no failed activity, conversations that stop rendering
-# days later and no longer say why.
+# MAF's content-type discriminators, still carried by unconverted stored rows. They decide which
+# rows the retention sweep may delete, so a wrong value silently strands pairings.
 _MAF_CALL = "function_call"
 _MAF_RESULT = "function_result"
 
@@ -77,47 +36,16 @@ _MAF_RESULT = "function_result"
 def stored_call_ids(payload: Mapping[str, Any], shape: str | None = None) -> frozenset[str] | None:
     """The tool-call ids one stored `session_messages.message` row mentions, in either direction.
 
-    **Both stored shapes, because the table holds both**, and **the stamp decides which** — the
-    same rule `session_store.message_from_row` goes by. A row written before the M6 conversion is a
-    MAF `Message.to_dict()` (`{"role", "contents"}`); one written after is a LangChain
-    `message_to_dict()` (`{"type", "data"}`); the conversion pass is resumable, so any given row may
-    be either.
-
-    This used to sniff the payload and ignore the stamp, which made **two functions decide one
-    question by two rules** — on a table where one of them governs a nightly *deletion*. Two rules
-    that agree today are two rules that can stop agreeing, and the direction that matters is the
-    destructive one. Reading the stamp first and falling back to the payload keeps the unstamped
-    historical rows working (that fallback is why the sniffing existed) without leaving a second
-    authority for what a row *is*.
-
-    Returns `None` for a payload matching neither shape — including one that is not a mapping at
-    all, which this column can hold — and that is not the same as "no ids".
-    Empty means "this row is in no pairing, so it may be disposed of on its own"; `None` means "this
-    row cannot be read, so nothing can be concluded about what it is paired with". Collapsing the
-    two would make an unreadable row look pairing-free and therefore *droppable*, which is the one
-    direction this module exists to prevent.
-
-    Args:
-        payload: One row's `message` column, as stored.
-        shape: The row's `message_shape` stamp, or `None` for a row written before the stamp
-            existed — which is every historical row, and is why the payload fallback stays.
-
-    Returns:
-        The call ids the row mentions, whether as a call or as its answer, or `None` when the row
-        matches neither stored shape.
+    The `message_shape` stamp decides the shape (MAF `{"role", "contents"}` or LangChain
+    `{"type", "data"}`), as in `session_store.message_from_row`; an unstamped historical row falls
+    back to the payload. Returns `None` for a payload matching neither shape (including a
+    non-mapping):
+    unreadable is not the same as "no ids", and treating it so would make the row droppable.
     """
     if not isinstance(payload, Mapping):
-        # `message` is a bare `jsonb` column, so a scalar, an array or a number is storable — and
-        # the annotation above says `Mapping`, which satisfies mypy and decides nothing at runtime.
-        # Without this the function *raises* on a payload matching neither shape, two lines before
-        # `_prune_session_messages`'s per-session `unreadable_rows` skip that exists for exactly
-        # this row: measured, one such row took the whole `session_messages` pass down, so every
-        # session stopped being pruned and Temporal retried the activity to exhaustion. That is the
-        # failure the comment above that call site records as already fixed once, through a second
-        # door. `session_store.message_from_row` guards the same column the same way, one module
-        # over, and the two readers of one column disagreeing is the defect rather than either
-        # branch. Note `"contents" in payload` below is a *substring* test on a string payload, so
-        # a row whose text happens to contain "contents" took the MAF branch and raised there.
+        # `message` is bare `jsonb`, so a non-mapping is storable; return `None` rather than raise,
+        # so the
+        # retention sweep's per-session unreadable-row skip handles it.
         return None
     if shape == LANGCHAIN_SHAPE:
         return _langchain_call_ids(payload)
@@ -138,9 +66,7 @@ def stored_call_ids(payload: Mapping[str, Any], shape: str | None = None) -> fro
 def _langchain_call_ids(payload: Mapping[str, Any]) -> frozenset[str] | None:
     """The ids a LangChain-shaped row mentions, or `None` when it is not that shape either.
 
-    An assistant message carries its calls in `tool_calls`; a tool message carries the id it answers
-    in `tool_call_id`. Both directions, because a component is joined by either — see
-    `droppable_rows`.
+    Calls from `tool_calls`, answers from `tool_call_id`: a component is joined by either.
     """
     data = payload.get("data")
     if not isinstance(data, dict):
@@ -159,8 +85,7 @@ def _langchain_call_ids(payload: Mapping[str, Any]) -> frozenset[str] | None:
 def _answered_id(message: BaseMessage) -> str | None:
     """The call id this message answers, or `None` when it answers none.
 
-    `tool_call_id` is `ToolMessage`'s, not `BaseMessage`'s, so it is read rather than accessed —
-    these functions take the base type on purpose, because their whole job is to walk a mixed list.
+    Read with `getattr` because these functions walk mixed `BaseMessage` lists.
     """
     answered = getattr(message, "tool_call_id", None)
     return str(answered) if answered else None
@@ -169,22 +94,10 @@ def _answered_id(message: BaseMessage) -> str | None:
 def calls_without_adjacent_results(messages: Sequence[BaseMessage]) -> set[str]:
     """Return the ids of tool calls whose answer is not in the *immediately following* message.
 
-    The stricter, on-the-wire form of the rule: the API does not merely require that an answer
-    exists somewhere, it requires it in the very next block — "tool_use ids were found without
-    tool_result blocks **immediately after**". The two checks differ exactly where duplicated
-    history does: replaying a call the transcript already answered leaves a second, unanswered copy
-    that an exists-somewhere check still considers satisfied, because the id does appear answered
-    once.
-
-    Use this to validate what is about to be sent. It is deliberately *not* the rule storage goes
-    by — there a merely out-of-order pair is intact history and must not be deleted, which is what
-    `droppable_rows` enforces.
-
-    "Immediately after" is read against the wire, not against one list slot: a parallel batch's
-    results are several consecutive `ToolMessage`s here, and they serialize into the single user
-    message the API requires — so the answering window is the *contiguous run* of tool messages
-    that follows the call, not only `messages[index + 1]`. The single-slot form flagged every
-    legitimate parallel batch past its first result.
+    The on-the-wire rule, for validating what is about to be sent; stricter than
+    `unmatched_call_ids` where history is duplicated. "Immediately after" is the contiguous run of
+    tool messages after the call, since a parallel batch serializes into one user message. Not the
+    storage rule: an out-of-order pair is intact history.
     """
     missing: set[str] = set()
     for index, message in enumerate(messages):
@@ -208,11 +121,7 @@ def calls_without_adjacent_results(messages: Sequence[BaseMessage]) -> set[str]:
 def unmatched_call_ids(messages: Sequence[BaseMessage]) -> set[str]:
     """Return the ids of tool calls that no tool message answers.
 
-    Order-independent on purpose: an answer is valid wherever it sits in the list, so this reports
-    genuinely unanswered calls rather than merely out-of-order ones.
-
-    One of the pair a deletion has to be checked against — see `unmatched_result_ids` for why both
-    directions are asked and neither is repaired.
+    Order-independent: an answer is valid wherever it sits in the list.
     """
     answered = {i for i in (_answered_id(m) for m in messages) if i is not None}
     return {
@@ -226,15 +135,8 @@ def unmatched_call_ids(messages: Sequence[BaseMessage]) -> set[str]:
 def unmatched_result_ids(messages: Sequence[BaseMessage]) -> set[str]:
     """Return the ids of tool *results* that no tool call accounts for.
 
-    The mirror of `unmatched_call_ids`, and both are deliberately assertions rather than repairs
-    (D-145). There used to be an asymmetry here: a read-time repair stripped an unanswered *call*,
-    so that direction self-healed while a stranded *result* did not. The repair is gone with the
-    MAF thread that needed it, and the symmetry is the better state — stripping either half would
-    silently destroy evidence and mask the bug in whatever produced it.
-
-    Their job is to be what a test asks: any code that deletes conversation rows must *prove* it
-    never leaves one of these, rather than rely on something cleaning up afterwards.
-    `droppable_rows` is what makes that provable; these are what check it.
+    The mirror of `unmatched_call_ids`. Both are assertions, never repairs (D-145): stripping either
+    half would destroy evidence and mask the bug that produced it.
     """
     called = {
         str(call["id"])
@@ -254,35 +156,15 @@ def droppable_rows(
 ) -> set[int]:
     """Narrow `candidates` to the rows that can be deleted without stranding a tool-call pairing.
 
-    Storage may not dispose of a conversation row on its own terms: a tool call and the message
-    answering it are one indivisible unit, and deleting either half alone bricks the thread
-    (`unmatched_result_ids` explains why the surviving half cannot be healed). The caller that
-    deletes rows — age-based retention — chooses its candidates for reasons that know nothing about
-    pairing, so the pairing rule is applied once, here rather than there.
-
-    Rows are joined into components by shared call id, in **either** direction: a row is linked to
-    every row mentioning an id it mentions, whether as the call or the answer. The relation is
-    transitive, which matters for parallel calls — one assistant message carrying three calls links
-    to all three answering rows, and those may link on again. A component survives or dies whole.
-
-    **This contracts, it never expands.** A component with even one row outside `candidates` is
-    dropped from the answer entirely, rather than pulling its remaining rows in. That direction is
-    the safety property: expanding would let an age cutoff reach *forward* and delete a live result
-    from a recent turn, whereas contracting can only ever return a subset of what the caller already
-    chose — so the worst case is a straddling group surviving one more pass, which is harmless and
-    self-correcting.
-
-    **An unreadable row (`None`) makes the whole session undroppable this pass.** Leaving it merely
-    undroppable is not enough: it links to nothing, so a partner it *would* have protected stays
-    eligible, and the sweep strands exactly the pairing this function exists to protect — reached
-    by being careful about the wrong row. Refusing the session is self-correcting, because the next
-    pass sees the same rows once somebody has looked at them.
+    Rows are joined into components by shared call id in either direction, transitively (parallel
+    calls), and a component survives or dies whole. This contracts and never expands: a component
+    with any row outside `candidates` is kept entirely, so the worst case is it survives one more
+    sweep. Any unreadable row (`None`) makes the whole session undroppable this pass, since it might
+    be the partner of a candidate.
 
     Args:
-        rows: Every row of the session, as `(row_id, call ids)` — not just the candidates. A
-            candidate's partner is frequently *not* a candidate (that is precisely the case worth
-            catching), so a partial view would report a split component as droppable. `None` in
-            place of a set marks a row whose stored shape could not be read (`stored_call_ids`).
+        rows: Every row of the session as `(row_id, call ids)`, not just the candidates, since a
+            candidate's partner is often not one. `None` marks an unreadable row.
         candidates: The row ids the caller wants to delete.
 
     Returns:
@@ -290,19 +172,8 @@ def droppable_rows(
     """
     if unreadable_rows(rows):
         return set()
-    # Union-find over row ids, keyed by call id — `networkx.utils.UnionFind` rather than a
-    # hand-typed `find`/`union` pair. The one property the hand-written version's comment claimed,
-    # path compression "keeps the transitive case honest", is the library's `__getitem__`; union
-    # *by weight* comes with it, which the hand-written form did not have. And the second loop
-    # that rebuilt a `members` dict out of the representatives is `to_sets()` — the same grouping,
-    # and the place the compression is forced. Behaviour is unchanged, checked against the old
-    # implementation over 30,000 random row sets.
-    #
-    # Seeded with every row, not only the linked ones, because a row mentioning no call id is its
-    # own component and has to be droppable on its own terms; `union` alone would never mint it.
-    # `networkx` is already a direct dependency and already imported in this package
-    # (`agent/graph_tools.py`), and `tests/test_third_party_layering.py` names it as a root that
-    # carries no layer edge.
+    # Union-find over row ids, keyed by call id. Seeded with every row, because a row mentioning no
+    # call id is its own component and must be droppable on its own terms.
     components = UnionFind(row_id for row_id, _ in rows)
     first_row_for_call: dict[str, int] = {}
     for row_id, call_ids in rows:
@@ -320,9 +191,6 @@ def droppable_rows(
 def unreadable_rows(rows: Iterable[tuple[int, AbstractSet[str] | None]]) -> list[int]:
     """The ids of rows whose stored shape could not be read — for a caller that wants to say so.
 
-    Separate from `droppable_rows` because the two answer different questions and only one of them
-    is a log line. The sweep refuses the session either way; an operator needs the row numbers to
-    find out *why*, and a rule that decides what to destroy should not also be deciding what to
-    print.
+    Separate from `droppable_rows` so the rule deciding deletion does not also decide logging.
     """
     return [row_id for row_id, call_ids in rows if call_ids is None]

@@ -1,25 +1,13 @@
 """Chemclaw's two cross-cutting error contracts: bad data, and an unreachable subsystem.
 
-**`ChemclawError` — "this input/data is invalid".** Every layer defines its own bad-input error
-(fingerprints, ELN mapping, ingestion, metrics, playbooks). Before this base they were five
-parallel `ValueError` subclasses, and every reject-and-continue boundary had to enumerate the
-exact types — forgetting one turned a single bad record into a batch-aborting poison pill (the
-CHECKMATE-review sync bug). Deriving them all from `ChemclawError` makes "this input is bad, skip
-it and move on" one catchable contract.
+`ChemclawError` means "this input/data is invalid": every layer's bad-input error derives from it,
+so a reject-and-continue boundary catches one type. It stays a `ValueError`. Temporal matches
+`non_retryable_error_types` by exact class name, so every concrete subclass that can cross an
+activity boundary must also be listed in `chemclaw.durable.publish._BAD_DATA_TYPES`.
 
-It stays a `ValueError` subclass so in-process `except ValueError` boundaries keep
-catching bad data. Temporal, however, matches `non_retryable_error_types` by exact
-class-name string — NOT by isinstance — so subclassing alone does not make an error
-non-retryable across an activity boundary: every concrete subclass name must also be
-registered in `chemclaw.durable.publish._BAD_DATA_TYPES` (a completeness test in
-`tests/test_publish.py` fails when one is forgotten).
-
-**`SubsystemUnavailableError` — "the infrastructure this needs is not answering".** The exact
-opposite claim about the same call, and therefore deliberately *outside* the hierarchy above (see
-its own docstring). Both live here because both are contracts the whole tree raises and catches,
-and because the one middleware that shows either of them to the model
-(`chemclaw.agent.tool_authz.surface_domain_errors`) must be able to import both without reaching
-into a subsystem's own module.
+`SubsystemUnavailableError` means "the infrastructure this needs is not answering" and sits
+deliberately outside that hierarchy. Both live here so `surface_domain_errors` can import them
+without reaching into a subsystem.
 """
 
 from typing import ClassVar
@@ -28,56 +16,33 @@ from typing import ClassVar
 class ChemclawError(ValueError):
     """Base for all domain errors meaning "this input/data is invalid".
 
-    Catch this at batch boundaries (reject-and-continue); raise a specific
-    subclass at the point of failure so messages stay layer-accurate. When a new
-    subclass can cross a Temporal activity boundary, add its class name to
-    `chemclaw.durable.publish._BAD_DATA_TYPES` — Temporal matches non-retryable types
-    by exact name, so the hierarchy alone does not cover it.
+    Catch at batch boundaries (reject-and-continue); raise a specific subclass at the point of
+    failure. A subclass that can cross a Temporal activity boundary must be added to
+    `chemclaw.durable.publish._BAD_DATA_TYPES`, which Temporal matches by exact name.
     """
 
 
 class SubsystemUnavailableError(Exception):
     """An infrastructure dependency could not be reached, so the requested work never began.
 
-    The message is written for the **chemist**, because
-    `chemclaw.agent.tool_authz.surface_domain_errors` hands it to the model verbatim as the tool's
-    result: it names the subsystem, says what the caller has lost (a durable job cannot be started
-    right now), and says plainly that this is an outage rather than a problem with what they asked.
-    Raisers therefore keep it free of hostnames, ports and driver text — the underlying exception
-    carries all of that as `__cause__`, for the log and the operator.
+    The message is written for the chemist, because `surface_domain_errors` hands it to the model
+    verbatim: name the subsystem, say what is lost, and say it is an outage, not a problem with the
+    request. Keep hostnames, ports and driver text out of it; they travel on `__cause__`. An opaque
+    error invites the model to fabricate the result instead.
 
-    Why it exists at all: an unreachable Temporal broker reached the model as an opaque
-    "Error: Function failed.", and in the 2026-08-03 live run the model responded to that by
-    **writing the entire development report by hand** — tables, executive summary, numbers,
-    citations — and presenting it as having entered the PR-gate. The generator never ran. An error
-    that says nothing is not a neutral outcome; it is an invitation to invent one.
-
-    Deliberately **not** a `ChemclawError` (hence not a `ValueError`), for the reason
-    `chemclaw.agent.authz.AuthorizationError` is not one, applied to the opposite claim: that
-    hierarchy means "this input/data is invalid", and an outage says nothing about the data — the
-    identical call with the identical arguments succeeds once the subsystem is back. Concretely,
-    `ChemclawError` is the **non-retryable** contract (every subclass name is registered in
-    `chemclaw.durable.publish._BAD_DATA_TYPES`), and an unreachable broker is the textbook
-    *retryable* failure, so membership would be wrong twice over: it would tell Temporal to fail
-    an activity fast on precisely the fault a retry fixes. `tests/test_publish.py` asserts this
-    class's absence from that list on purpose, so a future completeness sweep cannot quietly add
-    it.
+    Not a `ChemclawError`: an outage is retryable and says nothing about the data, while
+    `ChemclawError` is the non-retryable contract. It must stay out of `_BAD_DATA_TYPES`.
     """
 
 
 class AtCapacityError(SubsystemUnavailableError):
     """A backend was reached, ran nothing, and refused because every slot it has was already held.
 
-    The third bucket beside bad data and an outage, and the one worth asking again about *soon*:
-    the identical call succeeds the moment admitted work finishes. A subclass of
-    `SubsystemUnavailableError` so every retry contract that already holds for an outage holds for
-    it (it is asserted absent from `durable/publish.py::_BAD_DATA_TYPES`), and a class of its own so
-    the one place that turns a connector tool's exception into wire text can say *full* rather than
-    *broken*: `connectors/server.py::_sanitize_tool_errors` puts `marker` at the head of the
-    message,
-    which is the fleet's one at-capacity format (`core/mcp_session.at_capacity`). Without that, a
-    busy backend behind one of this repository's own bundles reached the caller as "an internal
-    error occurred" and nothing downstream could queue it.
+    Retryable soon: the identical call succeeds once admitted work finishes. A subclass of
+    `SubsystemUnavailableError` so every outage retry contract applies, and its own class so
+    `connectors/server.py::_sanitize_tool_errors` can prefix `marker` — the fleet's at-capacity
+    format
+    (`core/mcp_session.at_capacity`) — letting callers queue instead of failing.
     """
 
     #: The server whose slots were full — the `<server>` in `[<server>-at-capacity]`.

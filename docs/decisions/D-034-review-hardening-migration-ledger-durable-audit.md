@@ -1,5 +1,7 @@
 # D-034 — Review hardening: migration ledger, durable audit trail, injection framing, stmt timeout
 
+**Superseded-by:** [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) (in part)
+
 **Context.** The in-depth review surfaced four hardening gaps in otherwise-green code.
 
 **Migration ledger (`calc.migrate`).** The old runner split files on `;` (fragile against a

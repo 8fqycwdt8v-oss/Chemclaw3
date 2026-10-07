@@ -1,24 +1,10 @@
 """Entrypoint for `make schedules-apply`: apply the Temporal Schedules for the periodic jobs.
 
-The Schedule definitions and the apply/prune logic are durable-layer library code — a Temporal
-Schedule is Temporal's own durability primitive — and live in `chemclaw.durable.schedules`, which
-`chemclaw.api.app` also imports at module scope for the `/schedules` health endpoint. This module
-is only the CLI shim: `python -m chemclaw.cli.schedules` (what `make schedules-apply` runs)
-connects to Temporal and applies the plan.
+A CLI shim over `chemclaw.durable.schedules`, which holds the definitions and apply/prune logic.
 
-**It parses its command line, which it did not.** `asyncio.run(main())` ran unconditionally under
-`if __name__ == "__main__"`, so every argument was discarded: `--help` and `--delete-everything`
-alike *applied the Schedules* and exited 0. Asking a broker-mutating command what it does performed
-it — the same defect `validate_kg`'s docstring records as fixed one directory over, with a
-mutation on the other side of it.
-
-**Applying stays the default, unlike its data-touching siblings**, and the asymmetry is
-deliberate rather than an oversight. `erase_actor` and `rekey_campaigns` preview by default because
-an operator types them by hand; this one is a container command in
-`deploy/helm/chemclaw/templates/schedules-job.yaml`, invoked bare with no arguments, so a
-preview-by-default would turn every deployment's Schedule Job into a no-op that exits 0 — the same
-green-while-doing-nothing failure, moved rather than fixed. What an operator gets instead is
-`--dry-run`, which reads the plan and touches no broker at all.
+Applying is the default (unlike `erase_actor` or `rekey_campaigns`) because the Helm schedules Job
+runs it bare; a preview-by-default would make that Job a silent no-op. `--dry-run` prints the
+plan without touching the broker.
 """
 
 import argparse
@@ -40,14 +26,11 @@ logger = logging.getLogger(__name__)
 def _print_plan() -> None:
     """Print what an apply would do, computed without connecting to anything.
 
-    `planned_schedules()` is pure by design ("no client, so a test can assert the set of jobs and
-    their configured cadences without a live Temporal server"), and the prune set is
-    `OWNED_SCHEDULE_IDS` minus the planned ids by the same arithmetic `_prune` uses. So the whole
-    plan is derivable offline, which is what makes a dry run worth having: it answers "what will
-    this deployment's configuration produce" without a broker in reach.
-
-    The prune half is stated as *would delete if present* rather than as a deletion, because
-    whether a stale Schedule exists is the one part of the plan only Temporal can answer.
+    `planned_schedules()` is pure and the prune set is `OWNED_SCHEDULE_IDS` minus the planned ids,
+    so
+    the whole plan is derivable offline. Prunes are reported as "would delete if present", since
+    only
+    Temporal knows whether a stale Schedule exists.
     """
     plan = planned_schedules()
     print(f"{len(plan)} schedule(s) planned by this configuration:")

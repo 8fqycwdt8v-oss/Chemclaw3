@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Scope:** `science/`, `memory/`, `evals/`
 
+**Superseded-by:** [D-2026-08-09-a-twin-rule-is-one-string](D-2026-08-09-a-twin-rule-is-one-string.md) (in part)
+
 ## Context
 
 The 2026-08-08 review campaign's science lane found seven defects, each reproduced by executing the

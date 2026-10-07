@@ -1,17 +1,9 @@
 """The share's layout as a document, because a site's folder tree is not knowable from here.
 
-Same argument as `D-2026-08-04-the-schema-is-a-file`, one layer over: a warehouse's tables exist
-before the adapter is written, and so does a file share's directory structure. Which folders hold
-project work, which hold decade-old archives nobody wants indexed, which segment of a path is the
-project code — none of that can be written into Python, because it is different at every site and
-it changes without asking. So it is a binding in `datasource.yaml`, and attaching a real share is
-editing that file (better: mounting a folder holding your own copy of it and putting that folder
-first in `CHEMCLAW_DATA_SOURCES_DIR`, so the deployment's layout is not a change to this
-repository at all).
-
-Nothing in this package names a folder, an extension list or a project code. This module names
-what a *shape* of those is, validates one at load, and refuses anything it cannot make sense of
-before a single file is opened.
+Which folders hold project work, which are archives to skip, and which path segment is the project
+code differ per site, so they are a binding in `datasource.yaml` rather than Python. This module
+defines the shape of that binding, validates it at load, and refuses anything it cannot make sense
+of before a file is opened.
 """
 
 import re
@@ -30,9 +22,8 @@ from chemclaw.ingest.documents.formats import SUPPORTED_EXTENSIONS
 class DocumentShareError(ChemclawError):
     """A share that cannot be read as declared: a bad binding, or a root that is not there.
 
-    A `ValueError` by inheritance, and registered in `chemclaw.durable.publish` as non-retryable:
-    a misspelled root or an unmounted share fails identically on every attempt, so retrying it
-    only delays the log line that says what is wrong.
+    A `ValueError`, registered in `chemclaw.durable.publish` as non-retryable: a misspelled root or
+    an unmounted share fails identically on every attempt.
     """
 
 
@@ -51,10 +42,9 @@ class PathSegmentTag(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # 0-based, counted *below the root* — so under root `Projects`, segment 0 of
-    # `Projects/ACME-17/2024/report.pdf` is `ACME-17`. Relative to the root rather than to the
-    # mount, because a deployment that later nests the root one level deeper must not have to
-    # renumber every binding that reads from it.
+    # 0-based, counted below the root: under root `Projects`, segment 0 of
+    # `Projects/ACME-17/2024/report.pdf` is `ACME-17`. Relative to the root so nesting the root
+    # deeper does not renumber bindings.
     segment: int = Field(ge=0, description="Index of the path segment below the root, 0-based.")
     # Folder names are typed by humans over a decade; `ACME-17` and `acme-17` are one project.
     lowercase: bool = True
@@ -104,35 +94,18 @@ class RootBinding(BaseModel):
         return self
 
 
-# The version of the rule that decides what a stored chunk's `content` holds, folded into
-# `chunking_key` so a change to it re-reads and re-cuts every already-indexed document. Bump it
-# whenever the text a fresh index would store differs from the text an existing row holds — the
-# lever `chemclaw.retrieval.vector_index._NOTE_TEXT_VERSION` is for notes, and for the same reason:
-# a fix to the write path reaches a deployment's own corpus only when its rows are rewritten.
-# `ctv2` is the commit that stopped `PostgresDocumentIndex.upsert` binding one normalised string to
-# both `content` and the tsvector, which stored, served and read back `-78 °C` as ` 78 °C`.
+# Version of the rule deciding what a stored chunk's `content` holds, folded into `chunking_key` so
+# a change re-reads and re-cuts every indexed document. Bump it whenever a fresh index would store
+# different text than an existing row holds.
 _CHUNK_TEXT_VERSION = "ctv2"
 
 
-#: The largest document `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB` was measured
-#: against, and therefore the largest a binding may declare.
+#: The document size the chart's per-parse memory coefficient was measured at, and therefore the
+#: largest `max_file_bytes` a binding may declare.
 #:
-#: **The parse budget bounds what a parse allocates *beyond* the document it was handed**, because
-#: `ingest/documents/isolate._bound_allocations` reads its baseline after `raw` is unpickled —
-#: driven, `VmData` 230.4 MiB before a 50 MiB document and 280.5 MiB after. So a pod's real
-#: per-parse charge has two terms, and the chart's coefficient multiplies only the budget. That was
-#: sound while nothing could move the other term and unsound the moment anything could: this field
-#: is set per `datasource.yaml`, it had `ge=1024` and no upper bound, and a site binding at 200 MiB
-#: moved the real charge to ~360 MiB while
-#: `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` did not move at all
-#: (`D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap`).
-#:
-#: Refusing at load rather than charging both terms in the chart, because the coefficient is a
-#: *measurement* at a basis — 406.7 MiB of pod for two concurrent 50 MiB plain-text documents — and
-#: a site that wants larger documents needs it re-measured, not re-arithmetic'd. The refusal says
-#: so. The alternative of folding the document into the budget was built and reverted: it refuses a
-#: 40 MiB text file at the shipped 160 MiB budget, because a text parse holds the bytes, the
-#: decoded `str` and the pickle at once.
+#: The parse budget bounds allocation beyond the document itself, so a pod's real per-parse charge
+#: is the budget plus the document; a larger document needs the coefficient re-measured, so it is
+#: refused at load rather than silently under-charged.
 PARSE_COEFFICIENT_BASIS_BYTES = 52_428_800
 
 
@@ -146,38 +119,25 @@ class DocumentShareBinding(BaseModel):
     mount: str = Field(min_length=1)
     roots: list[RootBinding] = Field(min_length=1)
 
-    # The entitlement a caller must hold for this source to return anything. Matched against the
-    # turn's roles — which carry Entra app roles verbatim, plus each group claim under
-    # `entra_group_claims_as_roles`, **namespaced with `GROUP_ROLE_PREFIX`** — so an AD group
-    # reaches this either way. A group-gated share therefore names `group:<claim value>` here, not
-    # the bare object-id: the prefix is what stops a directory group from being read as the app
-    # role of the same name, and a value written without it matches nothing at all.
+    # The entitlement a caller must hold for this source to return anything, matched against the
+    # turn's roles. A group-gated share names `group:<claim value>` (the `GROUP_ROLE_PREFIX`
+    # namespace), not the bare object id, which matches nothing.
     #
-    # **A manifest must state its intent: either this or `public`, never neither.** It used to
-    # default to empty, and empty means ungated — so a hand-authored binding (which is the
-    # documented way to attach a real share) that named `mount` and `roots` and simply forgot this
-    # served the whole AD-gated drive to every authenticated user, with no warning and nothing to
-    # distinguish it from a correctly gated one. A security model whose default is "off" and whose
-    # failure is silent is not a security model.
+    # A manifest must state either this or `public`, never neither: an omitted gate would otherwise
+    # serve the whole share to every authenticated user, silently.
     required_roles: list[str] = Field(default_factory=list)
-    # The explicit opt-out, for a share every account holder may genuinely read. It exists so that
-    # "ungated" is something a manifest *says* rather than something it omits — an author who means
-    # it writes one word, and an author who forgot gets an error naming both choices.
+    # The explicit opt-out for a share every account holder may read, so "ungated" is something a
+    # manifest says rather than omits.
     public: bool = False
 
-    # Gitignore patterns matched against the mount-relative POSIX path. Office lock files
-    # (`~$...`), archive folders and scratch directories are the usual population, and excluding
-    # them is cheaper than parsing them. Compiled by `exclude_spec`, which is where the choice of
-    # gitignore semantics over `fnmatch`'s is argued.
+    # Gitignore patterns matched against the mount-relative POSIX path (lock files, archives,
+    # scratch folders). Compiled by `exclude_spec`.
     exclude: list[str] = Field(default_factory=list)
     # The formats to open, a subset of what this system can actually read. Narrowing it is a
     # legitimate cost control on a large share ("PDFs and decks only, for now").
     extensions: list[str] = Field(default_factory=lambda: sorted(SUPPORTED_EXTENSIONS))
-    # A share holds files no document reader should be handed: a 2 GB scanned archive, a database
-    # export named `.csv`. 50 MB covers real reports with room to spare.
-    #
-    # **`le` as well as `ge`, because this field is the second term of the pod's memory sizing and
-    # for a while it was the undeclared one** — see `PARSE_COEFFICIENT_BASIS_BYTES` below.
+    # Files no reader should be handed (scanned archives, huge exports) are skipped. Bounded above
+    # by `PARSE_COEFFICIENT_BASIS_BYTES` because this is a term of the pod's memory sizing.
     max_file_bytes: int = Field(default=52_428_800, ge=1024, le=PARSE_COEFFICIENT_BASIS_BYTES)
 
     # Chunking. Big enough that a chunk carries an argument rather than a sentence, small enough
@@ -191,20 +151,12 @@ class DocumentShareBinding(BaseModel):
 
     @property
     def chunking_key(self) -> str:
-        """Which chunking produced a stored row: the two settings that decide its boundaries.
+        """Which chunking produced a stored row: the settings that decide its boundaries and text.
 
-        The identity half of a chunk, and the counterpart to
-        `chemclaw.core.embeddings.embedding_config_key` — a stored chunk is only reusable for the
-        chunking that cut it, exactly as a vector is only reusable for the model that made it. Both
-        of the crawl's gates compare it (`DocumentIndex.fingerprints`, `known_documents`), because a
-        change here has to re-read the file *and* re-chunk it, and neither gate can see one from the
-        other's side. Defined on the binding because the binding is where these two numbers live;
-        one definition, so the file rows and the chunk rows cannot be written under two spellings.
-
-        `_CHUNK_TEXT_VERSION` rides along for the same reason it does in
-        `chemclaw.retrieval.vector_index`: what a stored row holds is decided by the rule that
-        wrote it as much as by the boundaries that cut it, and only a key change makes an existing
-        deployment re-read its own share.
+        The counterpart of `embedding_config_key`: a stored chunk is reusable only for the chunking
+        that cut it. Both crawl gates (`DocumentIndex.fingerprints`, `known_documents`) compare it,
+        so a change re-reads and re-chunks the file. Includes `_CHUNK_TEXT_VERSION` so a change to
+        what a row stores also forces a rewrite.
         """
         return f"{self.chunk_chars}:{self.chunk_overlap_chars}:{_CHUNK_TEXT_VERSION}"
 
@@ -212,31 +164,12 @@ class DocumentShareBinding(BaseModel):
     def exclude_spec(self) -> pathspec.GitIgnoreSpec:
         """The `exclude:` patterns compiled once, under gitignore semantics rather than `fnmatch`'s.
 
-        Gitignore is the semantics the patterns a deployment writes were already assuming —
-        `**/Archive/**`, `~$*`, `*.tmp` are gitignore lines, and `sharedrive/datasource.yaml` ships
-        exactly those three. `fnmatch` gives `**` no special meaning, which is why
-        `crawl._is_excluded` used to try every pattern three ways; `crawl.py` carries what that
-        bought, what it could not reach, and the compatibility measurement over the shipped set.
-
-        Compiled here because the binding is where the patterns live and the spec is a pure function
-        of them, so one compile serves every bounded crawl chunk instead of one per chunk.
-
-        `GitIgnoreSpec` rather than `PathSpec.from_lines("gitwildmatch", ...)`, which is the form
-        the library's own docs call subtly wrong for negation precedence — and which `pathspec` 1.x
-        deprecates, at two `DeprecationWarning`s per pattern per compile. How loud that is on a run
-        of `tests/test_document_share.py` is therefore a fact about that file's fixtures and about
-        the active warning filter rather than about this line — measured on one commit it was 76
-        under pytest's defaults and 262 under `-W always`, which is why no number is stated here and
-        why the two that were, in this docstring and in `pyproject.toml`, disagreed. `GitIgnoreSpec`
-        warns on neither generation. Measured over the shipped patterns the two spellings agree on
-        every probed path; the declared floor is `pathspec>=1.1` and `pyproject.toml` carries why —
-        a floor is a claim about the generation these assertions were measured against.
+        The patterns deployments write (`**/Archive/**`, `~$*`) are gitignore lines, and `fnmatch`
+        gives `**` no meaning. `GitIgnoreSpec` rather than `PathSpec.from_lines("gitwildmatch",
+        ...)`, which mishandles negation precedence and is deprecated in `pathspec` 1.x.
 
         Raises:
-            ValueError: A pattern gitignore cannot parse (`pathspec` raises a subclass of it).
-                Surfaced at load by `_is_coherent` rather than mid-crawl: a degenerate pattern
-                fails identically on every attempt, and `DocumentShareError` is the family the
-                durable layer already knows not to retry.
+            ValueError: A pattern gitignore cannot parse; surfaced at load by `_is_coherent`.
         """
         return pathspec.GitIgnoreSpec.from_lines(self.exclude)
 
@@ -290,16 +223,9 @@ class DocumentShareBinding(BaseModel):
                 "if every authenticated caller may read it. Omitting both used to mean ungated, "
                 "which is a security decision no manifest should make by accident"
             )
-        # Compiled at load, not at first use: an exclusion nobody can parse is a manifest error,
-        # and the alternative is a `GitWildMatchPatternError` out of the middle of a crawl — a
-        # deterministic failure in the one family `chemclaw.durable.publish` would keep retrying,
-        # because it is not a `DocumentShareError`.
-        #
-        # Caught as `ValueError` rather than by name: `pathspec` raises
-        # `GitWildMatchPatternError` on 0.12 and `GitIgnorePatternError` from a module that does
-        # not exist there on 1.x, and both subclass `ValueError`. Naming either one pins this
-        # package to a generation of a dependency for no gain — the message is what an operator
-        # reads, and it is carried through either way.
+        # Compiled at load: an unparseable exclusion is a manifest error, and failing mid-crawl
+        # would raise outside `DocumentShareError` and be retried forever. Caught as `ValueError`
+        # because `pathspec`'s error class differs between major versions and both subclass it.
         try:
             _ = self.exclude_spec
         except ValueError as exc:
@@ -320,8 +246,8 @@ class DocumentShareBinding(BaseModel):
 def load_binding(raw: Any) -> DocumentShareBinding:
     """Validate a manifest's `binding:` block, raising `DocumentShareError` if it is not one.
 
-    The single entry point both the retriever and the sync use, so a share is validated identically
-    whichever half is being built.
+    The single entry point for both the retriever and the sync, so both validate a share
+    identically.
 
     Args:
         raw: The `binding` value from a `datasource.yaml` `config:` block.

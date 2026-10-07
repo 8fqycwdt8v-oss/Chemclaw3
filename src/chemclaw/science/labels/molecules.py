@@ -1,16 +1,11 @@
 """The corpus's molecules: similarity over them, and substructure search that does not truncate.
 
-`corpus_molecules` carries the same five columns `molecule_fingerprints` does, so similarity needs
-no code at all — `PostgresFingerprintStore` is already table-parameterised and
-`corpus_fingerprints()` just points it at the other table. What this module adds is the column that
-table has and the other does not: `pattern_bits`, and the screen-then-verify search it makes
-possible.
+Similarity reuses `PostgresFingerprintStore` pointed at `corpus_molecules`. This module adds that
+table's `pattern_bits` column and the screen-then-verify search it enables.
 
-**Why a second table rather than more rows in the first.** They answer different questions and cite
-different things: `molecule_fingerprints` is "have we made this?" and its hits cite a compound note,
-this is "is there literature precedent?" and its hits cite a patent. Merging them would swamp the
-ELN corpus by four orders of magnitude and hand `similar_molecules` millions of hits whose
-`compound_note_id` resolves to nothing.
+A separate table from `molecule_fingerprints` because it answers a different question and cites
+different things: literature precedent citing a patent, not "have we made this" citing a compound
+note. Merging would swamp the ELN corpus.
 """
 
 import asyncio
@@ -50,9 +45,8 @@ def corpus_fingerprints() -> PostgresFingerprintStore:
 class CorpusMolecules:
     """Writes and substructure search over `corpus_molecules`.
 
-    Separate from `PostgresFingerprintStore` rather than a subclass of it: the shared half is
-    already shared by pointing that class at this table, and what is left — a column it does not
-    know about and a search it cannot express — is not a specialisation of ranking by distance.
+    Not a subclass of `PostgresFingerprintStore`: what is left after sharing ranking is a column and
+    a search that are not a specialisation of distance ranking.
     """
 
     _UPSERT = (
@@ -63,9 +57,9 @@ class CorpusMolecules:
         "pattern_bits = EXCLUDED.pattern_bits"
     )
 
-    # The screen. `@>` on the GIN index answers "has at least these bits", which is sound in the
-    # one direction a prefilter needs: a molecule missing any of the query's bits provably cannot
-    # contain the pattern. The survivors are verified exactly in Python afterwards.
+    # `@>` on the GIN index answers "has at least these bits", sound in the direction a prefilter
+    # needs: a molecule missing any query bit cannot contain the pattern. Survivors are verified
+    # exactly afterwards.
     _SCREEN = (
         "SELECT id FROM corpus_molecules "
         "WHERE pattern_bits @> %(bits)s::integer[] "
@@ -73,10 +67,8 @@ class CorpusMolecules:
         "LIMIT %(limit)s"
     )
 
-    # The degenerate case: a query so generic it sets no bits screens nothing, so there is nothing
-    # to intersect with and every row is a candidate. Bounded by the same cap, and the caller is
-    # told the scan truncated — a search that silently examined the first n rows of a corpus and
-    # reported no hits is the defect `FingerprintSearch.scan_truncated` exists to name.
+    # A query that sets no bits screens nothing, so every row is a candidate, bounded by the same
+    # cap and reported as truncated.
     _ALL = 'SELECT id FROM corpus_molecules ORDER BY id COLLATE "C" LIMIT %(limit)s'
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -93,10 +85,9 @@ class CorpusMolecules:
     async def add_many(self, smiles: Sequence[str]) -> int:
         """Index each distinct structure, skipping the ones RDKit cannot read.
 
-        Skipping rather than raising, and the asymmetry with the ELN path is deliberate: a patent
-        extract's fiftieth species may be an OCR artefact, and refusing the batch over it would
-        lose forty-nine good precedents. The reaction row is written either way — the species keeps
-        its raw SMILES there — so what a skip costs is a missing similarity hit, never a wrong one.
+        Skipping rather than raising, unlike the ELN path: a patent extract may carry an OCR
+        artefact, and refusing the batch would lose the good precedents. The reaction row keeps the
+        raw SMILES either way, so a skip costs a missing similarity hit, never a wrong one.
         """
         written = 0
         skipped = 0
@@ -124,38 +115,17 @@ class CorpusMolecules:
         """Structures that genuinely contain `smarts`, and whether the screen was truncated.
 
         Screen then verify: the GIN containment test admits every true hit and some false ones, and
-        `pattern.matching` decides. Truncation is reported rather than logged, because a caller that
-        cannot tell a complete negative from a capped one will report "no precedent exists" for a
-        corpus whose one match it never looked at.
+        `pattern.matching` decides. Truncation is returned, observed by fetching one row past the
+        cap, so a capped negative is never reported as "no precedent".
 
-        **Truncation is observed rather than inferred, the same way `molfp.search` observes it**:
-        the screen asks for one row past the cap and reports "there were more", because
-        `len(candidates) == limit` cannot tell "there were more" from "that was all of them" and so
-        turned a corpus sitting exactly on the cap into a `PARTIAL: … this is a sample rather than
-        the complete set` verdict over a complete answer. One extra row is the whole cost, and it
-        is dropped before the verify.
-
-        **The verify runs off the event loop, under a wall-clock bound, over a bounded query** —
-        the three protections `molfp.find_substructure_matches` has always applied to the other
-        substructure surface and this one applied none of. It matters more here, not less: `smarts`
-        arrives from the model through `reactions_making_substructure`, a query that sets no pattern
-        bits takes the `_ALL` branch so the screen narrows nothing, and the cap is
-        `substructure_scan_max_records` rows. Measured on 300 rows before this, the in-line
-        comprehension froze the pod's one event loop for 465 ms — every other session's SSE stream,
-        every in-flight turn and every bearer-token validation with it.
-
-        Honest limit, the same one the sibling path states and narrowed the same way: the timeout
-        releases the loop and the caller and cannot kill the RDKit thread, so the bound is carried
-        *into* the worker as a deadline (`_verify_within`) rather than only awaited from outside
-        it. Without that, a verify that outran the bound went on matching the whole remaining
-        candidate list in the background — up to `substructure_scan_max_records` molecules — while
-        holding a slot in the loop's *default* executor, which is also where `api.auth` validates
-        every bearer token. What is left is one molecule's match, because RDKit exposes no
-        interruption hook and the deadline can only be read between candidates.
+        `smarts` comes from the model, so the verify runs off the event loop under
+        `substructure_match_timeout_seconds`, with the deadline also carried into the worker
+        (`_verify_within`) because the timeout cannot stop the thread. The residual is one
+        molecule's match.
 
         Raises:
             FingerprintError: The query is longer than `substructure_query_max_length`, is not
-                parseable SMARTS, or its verify outran `substructure_match_timeout_seconds`.
+            parseable SMARTS, or its verify outran `substructure_match_timeout_seconds`.
         """
         query = compile_query(smarts)
         bits = query_bit_indices(query)
@@ -180,9 +150,8 @@ class CorpusMolecules:
             )
         timeout = settings.substructure_match_timeout_seconds
         try:
-            # Both halves of one bound, as `molfp.search.find_substructure_matches` does it: the
-            # deadline stops the worker, `wait_for` still releases the caller, and both raise
-            # `TimeoutError` so the refusal below is the same either way.
+            # The deadline stops the worker and `wait_for` releases the caller; both raise
+            # `TimeoutError`, so the refusal below is the same either way.
             verified = await asyncio.wait_for(
                 asyncio.to_thread(_verify_within, candidates, query, time.monotonic() + timeout),
                 timeout=timeout,
@@ -199,16 +168,13 @@ class CorpusMolecules:
 class VerifyDeadlineExceeded(TimeoutError):
     """A screen-then-verify pass stopped on its deadline, carrying how many candidates it reached.
 
-    The sibling of `science/fingerprints/molfp.ScanDeadlineExceeded` and deliberately not shared
-    with it: these are two different packages with two different callers, and the thing they have in
-    common is one attribute name rather than any behaviour. `tests/test_layering.py` would have to
-    grow an edge to make them one class, which is a worse trade than two four-line exceptions.
-
-    A `TimeoutError` subclass so every `except TimeoutError` upstream keeps working unchanged.
+    Deliberately not shared with `molfp.ScanDeadlineExceeded`: sharing would add a layering edge for
+    one attribute name. A `TimeoutError` subclass so every `except TimeoutError` upstream keeps
+    working.
     """
 
     def __init__(self, reached: int, total: int) -> None:
-        """Carry the cut-off point beside the message that used to be the only place it appeared."""
+        """Record how many of `total` candidates were reached."""
         super().__init__(f"substructure verify gave up after {reached} of {total} molecule(s)")
         self.reached = reached
         self.total = total
@@ -217,31 +183,9 @@ class VerifyDeadlineExceeded(TimeoutError):
 def _verify_within(structures: Sequence[str], query: Chem.Mol, deadline: float) -> list[str]:
     """`pattern.matching`, one candidate at a time, giving up at `deadline` (the CPU-bound half).
 
-    The verify's wall-clock bound is `asyncio.wait_for`'s, and that bound is about the *caller*:
-    it cannot stop the worker thread, which went on matching every remaining candidate — up to
-    `substructure_scan_max_records` of them — against a pattern already known to be pathological.
-    Reading the deadline between candidates is what makes the bound true of the thread as well.
-
-    A wrapper here rather than a `deadline` parameter on `matching` itself: that function is the
-    pure "which of these contain the query" rule, called from the screen-then-verify path and from
-    tests that have no clock in them, and threading a deadline through it would put this path's
-    scheduling concern inside the chemistry. The cost is one `time.monotonic()` and one one-element
-    list per candidate, against a subgraph isomorphism that is orders of magnitude dearer.
-
-    Args:
-        structures: The screened candidates, in the order the screen returned them.
-        query: The compiled SMARTS.
-        deadline: `time.monotonic()` value past which the verify stops.
-
-    Returns:
-        The structures that genuinely contain `query`, in the order given.
-
-    Raises:
-        VerifyDeadlineExceeded: The deadline passed before every candidate was verified. A
-            `TimeoutError`, so `containing` turns it into the same `FingerprintError`
-            `asyncio.wait_for` produces; it carries `reached` because the property this bound exists
-            for is a claim about *candidates*, and holding that as a ratio of two wall clocks is the
-            proxy that reddened the gate on its sibling in `science/fingerprints/molfp`.
+    `asyncio.wait_for` cannot stop the worker thread, so the deadline is read between candidates and
+    `VerifyDeadlineExceeded` raised. A wrapper rather than a parameter on `matching`, which stays
+    the pure, clock-free containment rule.
     """
     verified: list[str] = []
     for examined, structure in enumerate(structures):

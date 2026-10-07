@@ -1,17 +1,10 @@
-"""Front-door user authentication via Azure Entra ID (plan Phase F4-T1).
+"""Front-door user authentication via Azure Entra ID.
 
-Every non-health request to the front door must carry an Entra-issued OIDC token; this module
-validates it and turns it into a `Principal` — the authenticated user's object id, name, and app
-roles — which then authorizes and attributes every backend action (F4-T5). Validation checks the
-signature against the tenant JWKS **and the audience** (the confused-deputy guard: the front door is
-both an OAuth client and a protected resource, so a token minted for a *different* resource must be
-rejected), plus the issuer.
-
-`entra_required` gates enforcement: in any real deployment it is True and a missing/invalid token is
-a 401; only local dev sets it False, where a fixed stand-in principal lets the app run with no
-tenant. The signing-key lookup is a single indirection (`_signing_key`) so tests validate real
-tokens against a local key without network. The raw-inference-credential exception (LLM) does not
-apply here — this is a user-scoped resource access, so it is fully Entra-scoped.
+Validates the Entra OIDC token on every non-health request and turns it into a `Principal` (object
+id, name, app roles) that authorizes and attributes every backend action. Checks the signature
+against the tenant JWKS, the issuer, and the audience — the confused-deputy guard, since a token
+minted for another resource must be rejected. With `entra_required` False (local dev only) a fixed
+stand-in principal is used. `_signing_key` is the one indirection tests replace.
 """
 
 import asyncio
@@ -45,10 +38,8 @@ from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
-# Re-exported, not defined here: the prefix is part of the role vocabulary `core.identity_context`
-# owns, and the manifests and refusal messages that teach an operator how to write a group-gated
-# entitlement have to name the same string. Imported under its own name so `auth.GROUP_ROLE_PREFIX`
-# keeps resolving for anything that already reads it from this module.
+# Re-exported: the prefix belongs to `core.identity_context`'s role vocabulary and is still read
+# as `auth.GROUP_ROLE_PREFIX`.
 __all__ = [
     "GROUP_ROLE_PREFIX",
     "AuthError",
@@ -62,9 +53,8 @@ __all__ = [
 # The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
 # real deployment, where every request is a validated Entra token.
 DEV_PRINCIPAL_OID = "dev-user"
-# The private spelling is kept because this module and its tests use it throughout; the public one
-# exists because a guard that divides a pod *per actor* has to be able to recognise the one
-# principal that is not an actor. See `chemclaw.api.routes.turns`.
+# Public spelling so a per-actor guard can recognise the one principal that is not an actor (see
+# `chemclaw.api.routes.turns`).
 _DEV_PRINCIPAL_OID = DEV_PRINCIPAL_OID
 
 
@@ -88,58 +78,33 @@ class AuthError(Exception):
 
 
 class IdentityProviderUnavailable(Exception):
-    """The tenant JWKS could not be reached, so *no* token can be validated right now.
+    """The tenant JWKS could not be reached, so no token can be validated right now.
 
-    Deliberately not an `AuthError`. An unreachable IdP is our outage, not the caller's bad
-    credential: answering 401 would tell a user with a perfectly good token that it was rejected,
-    and would hide a dependency failure inside a metric operators read as "someone is probing us".
+    Not an `AuthError`: an unreachable IdP is our outage (503), not the caller's bad credential
+    (401).
     """
 
 
 class _HttpxJwkClient(PyJWKClient):
     """PyJWT's JWKS client with its one network call moved onto `httpx`.
 
-    **`fetch_data` is not a documented extension point** — it is a method of a concrete upstream
-    class, and PyJWT promises nothing about it staying the single place the key set is fetched.
-    That dependency is pinned in `tests/test_upstream_surface.py` rather than believed here,
-    because the failure if upstream restructures is silent: a `urlopen` would come back, and the
-    proxy posture below would quietly stop holding.
-
-    **Why it is worth the coupling.** `PyJWKClient.fetch_data` reaches the tenant through
-    `urllib.request.urlopen`, which resolves proxies from the process-global default opener and
-    takes no `trust_env` — so on a pod with `HTTPS_PROXY` set, the fetch of *the key set every
-    bearer token is validated against* went to the proxy, which could answer it with a key set of
-    its own choosing. Measured with a loopback recorder standing in for the proxy: it received
-    `GET http://<tenant-host>/…/discovery/v2.0/keys`.
-
-    What stood here before was `no_proxy` surgery: append the tenant host to both spellings of a
-    **process-global** environment variable on every client build, under a lock, because that
-    read-modify-write races on the `asyncio.to_thread` validation pool (measured with the window
-    widened: five concurrent writers of five distinct hosts left one of the five in `no_proxy`).
-    `trust_env=False` is the same decision taken on this one request instead of on the process, so
-    there is no shared state to race over, nothing left behind for the next `urlopen` caller in the
-    process, and no dependence on `proxy_bypass` agreeing with `getproxies_environment` about what
-    a host suffix is. It is the flag every other httpx client in this tree that reaches a real
-    dependency already carries, and this endpoint is the one where following the environment is a
-    *trust* decision rather than a routing one.
-
-    `verify=` is `_tenant_ssl_context`: the process's one trust store
-    (`core/http.default_ssl_context`) unless `entra_ca_bundle` names a private one, and built once
-    either way rather than httpx's per-client default, for the reason `default_ssl_context`
-    measures: httpx parses the whole certifi bundle into a fresh `SSLContext` per client, and
-    `httpx.get` is a client per fetch.
+    Upstream fetches via `urlopen`, which follows the process's `HTTPS_PROXY`, so a proxy could
+    answer
+    with a key set of its choosing. The fetch here uses `trust_env=False`, a per-request decision
+    with
+    no process-global state. `verify=` is `_tenant_ssl_context`, built once. Overriding `fetch_data`
+    relies on an undocumented upstream method, pinned in `tests/test_upstream_surface.py`.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Upstream's client, plus the lock and the memory that make one fetch serve a crowd.
 
-        **Every fetch of one client is serialised, and a caller that waited is answered by the
-        fetch it waited behind.** The validation pool runs `fetch_data` concurrently from two
-        paths — the cache-expiry read in `get_signing_keys`, which no lock upstream covers, and the
-        forced refresh `_signing_key` grants — so an expiry under load, or two unknown-`kid` tokens
-        racing the cooldown gate, each paid a fetch. And a failure is remembered for
-        `entra_jwks_failure_backoff_seconds`: a key set is cached only when it parses, so an IdP
-        fault was otherwise one outbound fetch per request, unauthenticated requests included.
+        Fetches per client are serialised (upstream's expiry read and our forced refresh can both
+        call
+        `fetch_data`), and a caller that waited is answered by the fetch it waited behind. A failure
+        is
+        remembered for `entra_jwks_failure_backoff_seconds`, so an IdP fault is not one fetch per
+        request.
         """
         super().__init__(*args, **kwargs)
         self._fetch_lock = threading.Lock()
@@ -150,9 +115,8 @@ class _HttpxJwkClient(PyJWKClient):
     def fetch_data(self) -> Any:
         """One fetch at a time per client; a caller that waited for one is answered by it.
 
-        A failure is answered for `entra_jwks_failure_backoff_seconds` from memory, as the same
-        `IdentityProviderUnavailable`, without asking the tenant again — `_fetch` below is the
-        fetch itself and its 401/503 split.
+        A failure is answered from memory for `entra_jwks_failure_backoff_seconds`, as the same
+        `IdentityProviderUnavailable`. `_fetch` is the fetch itself.
         """
         asked = time.monotonic()
         with self._fetch_lock:
@@ -173,9 +137,8 @@ class _HttpxJwkClient(PyJWKClient):
             try:
                 keys = self._fetch()
             except IdentityProviderUnavailable as unavailable:
-                # What is remembered is a copy with no traceback. The raised instance's grows up
-                # through the first caller's frames — `_signing_key`'s among them, holding the
-                # raw bearer token — and the memory would keep those alive until the next fetch.
+                # Remember a copy without a traceback: the raised one holds frames with the raw
+                # bearer token.
                 self._outcome = IdentityProviderUnavailable(str(unavailable))
                 self._fetched_at = time.monotonic()
                 raise
@@ -185,42 +148,18 @@ class _HttpxJwkClient(PyJWKClient):
     def _fetch(self) -> Any:
         """The tenant's key set, fetched off the environment's proxy and mapped onto our split.
 
-        **The 401/503 split is decided here, at the raise**, because this is the frame that knows
-        the difference between "the caller's `kid` is unknown" (not reachable from this method at
-        all) and "we could not get a usable key set to decide with". Every failure of the *fetch*
-        is `IdentityProviderUnavailable` — a 503 — for the reason that class exists: answering 401
-        would tell a user holding a perfectly good token that it was rejected. Three arms, because
-        httpx's taxonomy distinguishes three things the operator reads differently:
+        Every fetch failure is `IdentityProviderUnavailable` (503), never 401:
 
-        * `httpx.TransportError` — refused, blackholed, DNS-less, or past `timeout`; also the
-          malformed-endpoint case, since `UnsupportedProtocol` is one of these.
-        * `httpx.HTTPStatusError` — the tenant answered, and said no. A 404 from a wrong tenant id
-          and a 500 from the IdP are both deployment faults, and neither is a bad credential.
-        * `ValueError` — a 200 whose body is not JSON, which is what an intercepting proxy's error
-          page looks like. This is the arm that used to live in `_signing_key` as a workaround for
-          PyJWT letting `json.load`'s `ValueError` escape `PyJWKClientError`; it is not a
-          workaround any more, it is this method's own decode failing.
+        * `httpx.TransportError` — refused, unreachable, timed out, or a malformed endpoint.
+        * `httpx.HTTPStatusError` — the tenant answered with an error (wrong tenant, IdP fault).
+        * `ValueError` — a 200 whose body is not JSON, e.g. an intercepting proxy's error page.
 
-        **A redirect is refused rather than followed, and that is the one behaviour this move
-        changes.** `urlopen` followed 3xx by default and httpx does not, so the choice had to be
-        made rather than inherited — and refused is the right way round for exactly the reason
-        `trust_env=False` is: a redirect moves the key set's origin out of the address the
-        deployment declared, past `core/netguard.py`'s allowlist, which is derived from
-        `entra_jwks_endpoint` and cannot see where a `Location` header points. Real Entra does not
-        redirect this endpoint. Said explicitly, and *before* `raise_for_status`, because httpx
-        raises on 3xx as well: without this arm the refusal is the generic "answered 302", which
-        names a status where the operator needs to be told the address moved. (This paragraph
-        first shipped claiming an unfollowed 3xx would fall through to the decode as "unusable" —
-        driven against a real 302, it does not.)
-
-        Raising this module's own exception rather than `PyJWKClientConnectionError` is deliberate:
-        PyJWT catches nothing around `fetch_data`, so the type that reaches `require_principal` is
-        the one chosen here, and a second translation in `_signing_key` could only lose fidelity.
-
-        The cache write is upstream's, reproduced rather than inherited: `get_jwk_set` reads
-        `jwk_set_cache` before it calls this, so skipping the `put` would turn PyJWT's five-minute
-        key-set cache off and make every validation a fetch. Pinned in
-        `tests/test_upstream_surface.py` beside the method itself.
+        A redirect is refused explicitly, before `raise_for_status`: following it would move the key
+        set's origin past `core/netguard.py`'s allowlist. Our own exception type is raised because
+        PyJWT
+        catches nothing around `fetch_data`. The cache write reproduces upstream's, or PyJWT's
+        key-set cache
+        would be disabled; pinned in `tests/test_upstream_surface.py`.
         """
         try:
             response = httpx.get(
@@ -250,9 +189,9 @@ class _HttpxJwkClient(PyJWKClient):
             try:
                 self.jwk_set_cache.put(jwk_set)
             except (jwt.PyJWTError, ValueError) as exc:
-                # PyJWT >= 2.15 parses inside `put` and raises before storing, so a 200 that is not
-                # a key set reached `_signing_key` uncached and was asked for again on the next
-                # request. Raised here as the fetch failure it is, so `fetch_data` remembers it.
+                # PyJWT parses inside `put` and raises before storing; treat it as a fetch failure
+                # so `fetch_data`
+                # remembers it.
                 raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
         return jwk_set
 
@@ -261,19 +200,11 @@ class _HttpxJwkClient(PyJWKClient):
 def _tenant_ssl_context(ca_bundle: str) -> ssl.SSLContext:
     """The trust store the tenant's key set is fetched under: `ca_bundle`, else certifi.
 
-    **Unset is today's behaviour exactly** — the process's shared certifi context, the same object
-    every connector call uses. Set, the bundle *replaces* certifi rather than joining it, which is
-    what `verify` means to httpx and what `llm_tls_ca_bundle` means to the gateway clients: one
-    source, so the file an operator mounted is the complete answer to "whom is the key set trusted
-    from". `SSL_CERT_FILE`/`SSL_CERT_DIR` are not consulted on either branch, for the reason
-    `default_ssl_context` gives — the environment does not get to widen this trust store.
-
-    There is no branch that turns verification off, and that is the point of the function rather
-    than an omission: the key set is what every bearer token is validated against, so an unverified
-    fetch is a tenant anybody on the path can impersonate.
-
-    Cached per path, so the file is parsed once per process; a rotated bundle is picked up on
-    restart, which is when a mounted Secret's new content is too.
+    Unset, the process's shared certifi context. Set, the bundle replaces certifi rather than
+    joining
+    it, so the mounted file is the complete answer. `SSL_CERT_FILE`/`SSL_CERT_DIR` are ignored, and
+    there is no way to turn verification off: the key set is what every token is validated against.
+    Cached per path; a rotated bundle is picked up on restart.
 
     Raises:
         OSError: the path does not name a readable file.
@@ -287,13 +218,10 @@ def _tenant_ssl_context(ca_bundle: str) -> ssl.SSLContext:
 def refuse_unusable_entra_ca_bundle() -> None:
     """Refuse to boot when `entra_ca_bundle` names a file that is not a usable CA bundle.
 
-    **At boot, not at the first sign-in.** Left to the fetch, a typo in the path is an `OSError`
-    inside `_HttpxJwkClient._fetch` — outside every arm that maps a fetch failure to a 503, so each
-    request would be a 500, and every chemist would find the misconfiguration before the operator
-    did. Building the context here is the same call the fetch makes (`_tenant_ssl_context`, cached),
-    so what is checked is exactly what will be used rather than a second parser's opinion of the
-    file. Checked whether or not `entra_required` is on: a bundle that is configured is meant to be
-    used, and a deployment flipping enforcement on should not learn then that it never parsed.
+    At boot rather than at the first fetch, where it would surface as a 500 on every request. Uses
+    the
+    same cached `_tenant_ssl_context` the fetch uses, and runs whether or not `entra_required` is
+    on.
 
     Raises:
         RuntimeError: the path is missing, unreadable, a directory, or holds no PEM certificate.
@@ -313,15 +241,12 @@ def refuse_unusable_entra_ca_bundle() -> None:
 
 
 # One JWKS client per endpoint, cached: `PyJWKClient` keeps its own key cache, so rebuilding it per
-# request would re-fetch the tenant JWKS on the hot path and amplify under a token flood (review
-# finding). Keyed by endpoint so a config change is still picked up.
+# request would re-fetch the JWKS on the hot path. Keyed by endpoint so a config change applies.
 _jwks_clients: dict[str, PyJWKClient] = {}
 
-# When an unknown `kid` was last allowed to force a JWKS re-fetch, per endpoint. Caching the client
-# — the earlier fix above — bounds the *warm* path but not this one: `PyJWKClient.get_signing_key`
-# retries with `refresh=True` whenever the `kid` is absent from the cached set, and the `kid` comes
-# from an unauthenticated caller's token header. That made one credential-less request cost one
-# outbound fetch to the tenant IdP, and stalled the shared validation thread pool while it ran.
+# When an unknown `kid` last forced a JWKS re-fetch, per endpoint. The `kid` comes from an
+# unauthenticated token header and PyJWT re-fetches on any unknown one, so without this gate each
+# credential-less request would cost an outbound fetch.
 _forced_refresh_lock = threading.Lock()
 _last_forced_refresh: dict[str, float] = {}
 
@@ -329,26 +254,16 @@ _last_forced_refresh: dict[str, float] = {}
 def _client_for(endpoint: str) -> PyJWKClient:
     """The cached JWKS client for `endpoint`, built on first use with our configured timeout.
 
-    **No lock, and that is a change rather than an omission.** This runs on the validation thread
-    pool — `validate_token` is dispatched through `asyncio.to_thread`, so two requests bearing
-    tokens from two tenants genuinely build their clients at the same moment — and the body used to
-    be a read-modify-write of `os.environ` (the `no_proxy` bypass `_HttpxJwkClient` replaced) that
-    lost four writers in five when it raced. What is left is a check-then-insert into a dict, which
-    cannot lose data: `setdefault` is atomic, so a race builds a second client and then discards
-    it, and every caller leaves with the *stored* one rather than with a private copy whose key
-    cache nobody else would warm. The constructor performs no I/O — the key set is fetched lazily
-    on the first `get_signing_key` — so a discarded client costs nothing.
+    No lock: `setdefault` is atomic, so a race builds a second client and discards it, and every
+    caller gets the stored one. The constructor does no I/O, so a discarded client costs nothing.
     """
     client = _jwks_clients.get(endpoint)
     if client is None:
         client = _jwks_clients.setdefault(
             endpoint,
-            # **`cooldown_duration=0`: the refresh cooldown is ours, and one is the policy.**
-            # PyJWT 2.14 added its own — 30 s by default, restarted by every successful fetch —
-            # inside `get_signing_key`, which is the call `_signing_key` makes only after
-            # `_forced_refresh_allowed` has already granted a refresh. Two cooldowns compose to
-            # the longer one, so `entra_jwks_refresh_cooldown_seconds` stopped being the rotation
-            # latency it is configured as: measured, a rotated key was still refused with ours at 0.
+            # `cooldown_duration=0`: the refresh cooldown is ours (`_forced_refresh_allowed`);
+            # PyJWT's own
+            # would compose with it and stretch `entra_jwks_refresh_cooldown_seconds`.
             _HttpxJwkClient(
                 endpoint, timeout=settings.entra_http_timeout_seconds, cooldown_duration=0
             ),
@@ -359,12 +274,7 @@ def _client_for(endpoint: str) -> PyJWKClient:
 def _match_kid(signing_keys: list[Any], kid: str) -> Any | None:
     """The key in `signing_keys` whose id is `kid`, or `None`.
 
-    Written here rather than borrowed from `PyJWKClient.match_kid` so key resolution does not
-    depend on a class attribute — the lookup is one line of pure data matching over two attributes
-    of a `PyJWK`, and calling upstream's static method for it would be a second undocumented
-    dependency to pin. That reason is *narrower* than the one it replaced, which said this module
-    does not otherwise use the client's surface: since `_HttpxJwkClient` it plainly does. One
-    override that has to exist is a coupling; a convenience wrapper around `next()` is a choice.
+    Local rather than `PyJWKClient.match_kid`, to avoid a second undocumented upstream dependency.
     """
     return next((key for key in signing_keys if key.key_id == kid), None)
 
@@ -372,12 +282,11 @@ def _match_kid(signing_keys: list[Any], kid: str) -> Any | None:
 def _forced_refresh_allowed(endpoint: str, now: float) -> bool:
     """Whether an unknown `kid` may pay for a JWKS re-fetch — at most once per cooldown.
 
-    Records the attempt when it grants one, so the *first* caller to hit a genuinely rotated key
-    pays the fetch and every later caller reads the refreshed cache.
+    Records the attempt when it grants one, so the first caller after a key rotation pays and later
+    callers read the refreshed cache.
     """
-    # Locked, because the validation pool runs this concurrently and a check-then-set would grant
-    # two callers the same refresh. Upstream's client lock would serialise the two refreshes, but
-    # the second would still fetch again — so without this lock the gate grants two fetches.
+    # Locked: concurrent check-then-set would grant two refreshes, and upstream's lock would only
+    # serialise them.
     with _forced_refresh_lock:
         last = _last_forced_refresh.get(endpoint)
         if last is not None and now - last < settings.entra_jwks_refresh_cooldown_seconds:
@@ -389,15 +298,12 @@ def _forced_refresh_allowed(endpoint: str, now: float) -> bool:
 def _signing_key(token: str) -> Any:
     """Resolve the RSA signing key for `token` from the tenant JWKS (indirected for tests).
 
-    The JWKS fetch is synchronous network I/O (`_HttpxJwkClient`'s `httpx.get`), so callers on the
-    event loop must run validation in a worker thread (`require_principal` does); the client is
-    built with the configured `entra_http_timeout_seconds` so a slow/blackholed IdP is bounded by
-    our config, not PyJWT's 30s default.
-
-    A `kid` that matches the cached key set costs no network at all. A `kid` that does not is
-    rate-limited by `entra_jwks_refresh_cooldown_seconds` rather than refetching per request, and
-    is otherwise refused as an `AuthError` — an unknown signing key is a caller problem, and the
-    caller must not be able to choose how much work we do about it.
+    The fetch is blocking I/O, so callers on the event loop run validation in a worker thread; it is
+    bounded by `entra_http_timeout_seconds`. A cached `kid` costs no network. An unknown one may
+    force
+    a re-fetch at most once per `entra_jwks_refresh_cooldown_seconds`, and is otherwise an
+    `AuthError`:
+    the caller must not choose how much work we do.
     """
     endpoint = settings.entra_jwks_endpoint
     client = _client_for(endpoint)
@@ -414,46 +320,25 @@ def _signing_key(token: str) -> Any:
             raise AuthError(f"no signing key matches kid {kid!r} (refresh on cooldown)")
         return client.get_signing_key(kid).key
     except PyJWKClientError as exc:
-        # Not an `InvalidTokenError` — this is the class that used to escape every handler here
-        # and surface as a 500. **There is no `PyJWKClientConnectionError` arm above it any
-        # more**, and the ordering note that used to be here went with it: upstream raises that
-        # class in exactly one place, `fetch_data`, which `_HttpxJwkClient` overrides — so after
-        # the httpx move nothing in this process can produce one, and a handler for it would be a
-        # claim that a control exists. An unreachable tenant is now `IdentityProviderUnavailable`
-        # raised at the fetch, and it passes through this frame untouched.
+        # A `PyJWKClientError` here is an unknown key: the caller's problem. An unreachable tenant
+        # is
+        # `IdentityProviderUnavailable`, raised at the fetch, and passes through this frame
+        # untouched.
         raise AuthError(f"no signing key matches kid {kid!r}: {exc}") from exc
     except (ValueError, jwt.PyJWTError) as exc:
-        # **The IdP answered, and what it said is unusable.** The arm above covers a key set we
-        # could read but not match; it does not cover a *successful* HTTP response carrying
-        # something other than a JWKS — a tenant answering JSON that is not a key set, where
-        # `PyJWKSet.from_dict` raises `PyJWKSetError`, a `PyJWTError` that is neither a
-        # `PyJWKClientError` nor an `InvalidTokenError`. That escaped every handler in this module
-        # and became an HTTP 500 for callers holding perfectly valid tokens.
-        #
-        # **Only half of what this arm was written for is still reached here**, and saying so is
-        # the point: the other half — an intercepting proxy's HTML error page, where PyJWT let
-        # `json.load`'s `ValueError` escape `PyJWKClientError` — is now decoded and refused inside
-        # `_HttpxJwkClient.fetch_data`, because that is where the decode happens.
-        # A key-set *parse* failure is the other half, and where it raises moved with PyJWT: on
-        # 2.13.0 `PyJWKSet.from_dict` ran in `get_jwk_set`, while from 2.15 `JWKSetCache.put`
-        # parses inside `fetch_data` — measured on 2.15.1, `{"error": "tenant not found"}` raises
-        # `PyJWKSetError` there, before anything is cached. Either way it is a `PyJWTError` reaching
-        # this arm, and the 503 is unchanged. `ValueError` is kept beside it for the same
-        # fail-into-503 reason rather than for a named shape.
-        #
-        # `IdentityProviderUnavailable`, not `AuthError`, for the reason that class exists: we
-        # could not reach a usable tenant to decide, so it is our outage and a 503 — answering 401
-        # would blame the credential for a dependency failure. Placed last so the two specific arms
-        # above keep their meanings; `AuthError` raised inside the `try` is neither of these types
-        # and passes through untouched.
+        # The IdP answered with something that is not a usable key set (`PyJWKSetError` and other
+        # `PyJWTError`s, or a `ValueError`). That is our outage, not a bad credential, so 503 rather
+        # than 401.
+        # Last, so the arms above keep their meaning; an `AuthError` raised in the `try` passes
+        # through.
         raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
 
 
 def validate_token(token: str) -> Principal:
     """Validate an Entra OIDC token and return its `Principal`, or raise `AuthError`.
 
-    Verifies the RS256 signature against the tenant JWKS, the audience (`entra_audience` — the
-    confused-deputy guard), and the issuer, then extracts the identity claims.
+    Verifies the RS256 signature against the tenant JWKS, the audience (`entra_audience`, the
+    confused-deputy guard) and the issuer, then extracts the identity claims.
     """
     try:
         key = _signing_key(token)
@@ -475,12 +360,9 @@ def validate_token(token: str) -> Principal:
 def _principal_from_claims(claims: dict[str, Any]) -> Principal:
     """Build a `Principal` from validated claims (`oid` is mandatory — no anonymous identity).
 
-    Under `entra_group_claims_as_roles` the token's `groups` claim joins the same set. An AD
-    security group is an entitlement, and `authz`, `skill_access` and every manifest gate already
-    match entitlements against exactly one set — so a group belongs *in* it rather than beside it.
-    Carrying a second collection would mean every gate deciding, separately, whether it also
-    consults groups, which is the shape a rule takes just before it stops being enforced in one of
-    the places it was written.
+    Under `entra_group_claims_as_roles` the token's `groups` join the same entitlement set every
+    gate
+    reads, so no gate has to decide separately whether to consult groups.
     """
     oid = claims.get("oid")
     # Checked as `Principal` will check it (a string, non-empty once stripped), so a malformed
@@ -492,30 +374,24 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
         raise AuthError("token's 'preferred_username'/'upn' claim is not a string")
     entitlements = _string_list_claim(claims, "roles")
     if settings.entra_group_claims_as_roles:
-        # Entra emits `_claim_names`/`_claim_sources` instead of `groups` for a user in more
-        # groups than the token can carry (~150+). That is an *overage*, not an empty membership,
-        # and silently treating it as one would quietly deny the users with the most access. There
-        # is no fix here — resolving it needs a Graph call, which D-089 does not permit — so it is
-        # named in the log rather than hidden behind a shorter role list.
+        # Entra emits `_claim_names` instead of `groups` when a user is in too many groups. That is
+        # an
+        # overage, not an empty membership; resolving it needs a Graph call, which is not permitted,
+        # so it
+        # is logged rather than silently treated as no groups.
         if "groups" not in claims and "_claim_names" in claims:
-            # Counted as well as logged. The log line names *who*, which an operator needs once
-            # they are looking; the counter is what makes them look, because a warning on a pod's
-            # stdout is not something anyone watches and this failure is silent from the chemist's
-            # side too — a gated share simply returns nothing.
+            # Counted as well as logged: the counter is what makes someone look, and the chemist
+            # sees only a
+            # gated share returning nothing.
             record_metric(lambda m: m.increment("chemclaw_group_claim_overage_total"))
             logger.warning(
                 "token for %s carries a group-claim overage rather than 'groups'; "
                 "group-derived entitlements are unavailable for this user",
                 oid,
             )
-        # **Namespaced, not merged flat.** This same role set gates privileged tools
-        # (`entra_privileged_roles`, `tool_role_gates`) and skills
-        # (`agent/skill_access.py`), so an unprefixed group value is a role value. The comment that
-        # used to sit here asserted these are group *object-ids* — but that is a tenant setting,
-        # not a guarantee: `groupMembershipClaims` can emit `sam_account_name` or
-        # `cloud_displayname` instead, at which point a group named like a privileged app role
-        # silently grants it. One flag meant to hand a file share its read entitlement must not be
-        # able to widen the write-tool gates.
+        # Namespaced: group claims may be names rather than object ids (a tenant setting), so an
+        # unprefixed
+        # group could match a privileged app role and widen the write-tool gates.
         entitlements += [
             f"{GROUP_ROLE_PREFIX}{group}" for group in _string_list_claim(claims, "groups")
         ]
@@ -525,11 +401,8 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
 def _string_list_claim(claims: dict[str, Any], name: str) -> list[str]:
     """The claim `name` as a list of strings — absent is empty, any other shape is an `AuthError`.
 
-    **Checked rather than coerced, because both coercions were wrong.** `list(...)` over a claim
-    that is a string split it into one-character entitlements — `"ab"` granted roles `a` and `b` —
-    and over `null` raised a `TypeError`, while a list carrying a non-string reached `Principal` as
-    a pydantic `ValidationError`. Neither exception is one `require_principal` answers, so a signed
-    but malformed token was a 500 rather than the 401 it is.
+    Checked rather than coerced: `list("ab")` would grant roles `a` and `b`, and other shapes would
+    surface as a 500 instead of a 401.
     """
     if name not in claims:
         return []
@@ -542,13 +415,10 @@ def _string_list_claim(claims: dict[str, Any], name: str) -> list[str]:
 async def require_principal(request: Request) -> Principal:
     """FastAPI dependency: the validated Entra user for this request (401 if required and absent).
 
-    With `entra_required` False (local dev) a fixed dev principal is returned so the app runs
-    without a tenant; otherwise a missing/invalid `Authorization: Bearer` token is a 401.
-
-    Validation runs in a worker thread: on a JWKS cache miss (cold start, lifespan expiry, key
-    rotation) `_signing_key` performs a blocking HTTP fetch, and this single-process service serves
-    every SSE stream and health probe on one event loop — a fetch stall on the loop would freeze
-    them all.
+    With `entra_required` False (local dev) a fixed dev principal is returned; otherwise a
+    missing/invalid `Authorization: Bearer` token is a 401. Validation runs in a worker thread
+    because
+    a JWKS cache miss is a blocking fetch, and every stream shares the event loop.
     """
     _shed_if_the_database_is_known_down(request)
     if not settings.entra_required:
@@ -558,24 +428,15 @@ async def require_principal(request: Request) -> Principal:
         )
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
-        # **Counted and said out loud, and it used to be neither.** The invalid-token path below
-        # logs; this one raised in silence — so "a client is misconfigured and sending no header
-        # at all" and "a healthy service nobody is failing against" produced identical evidence,
-        # and the first is the one an operator can actually fix. `info` rather than `warning`
-        # because an unauthenticated probe of a public endpoint is ordinary internet traffic; the
-        # counter is what makes a *rate* of them alertable.
+        # Counted and logged so a client sending no header is distinguishable from no failures.
+        # `info`
+        # because unauthenticated probes are ordinary internet traffic; the counter makes a rate
+        # alertable.
         _count_auth_failure("missing")
-        # **The route template, never `request.url.path` — not even a truncated one.** This runs on
-        # the *no-bearer* path, before any credential is checked, so what it logged was an
-        # unauthenticated caller's own string: measured at 6,054 characters, straight into
-        # `SecretRedactingFilter`, whose opaque-token patterns are superlinear in input length,
-        # with the logging lock held — a 32 KB request line stalls the pod. Truncating to a few
-        # hundred characters bounds that cost and leaves the *other* half standing: the survivor is
-        # still caller-authored text on a log line, so it still carries whatever a log consumer
-        # will interpret, at whatever rate an unauthenticated client cares to send. It is the same
-        # hazard `_RequestObservability` cites for its `route` label and it takes the same answer —
-        # `route_template` comes from the route table, so it is bounded in length *and* in
-        # alphabet, and an unrouted request reads `<unmatched>` rather than the string it invented.
+        # Log the route template, never `request.url.path`: on this unauthenticated path the path is
+        # caller-authored, unbounded text that would stall the redacting log filter and inject into
+        # logs.
+        # An unrouted request reads `<unmatched>`.
         logger.info("request to %s carried no bearer token", route_template(request.scope))
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:
@@ -596,25 +457,14 @@ async def require_principal(request: Request) -> Principal:
 
 
 async def reauthorize(request: Request, principal: Principal) -> Principal:
-    """What this request's credential establishes *now* — `AuthError` once it no longer does.
+    """What this request's credential establishes now — `AuthError` once it no longer does.
 
-    **For work that starts long after its request was authenticated** — today one thing: a message
-    that waited in a shared session's line
-    (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`). Its POST was checked
-    at arrival and the turn runs at the head of the line, which can be about
-    `service_turn_queue_max` × `service_turn_timeout_seconds` later; a turn must not run on a token
-    that has expired in between.
-
-    **The same validation the request passed, run again on the same credential** — signature,
-    audience, issuer and `exp` — so an expired token is refused exactly as it would be on a fresh
-    request. Roles here come only from the token (`_principal_from_claims`; no Graph call, D-089),
-    so what is current about them is what the token still vouches for, and an expired token is the
-    one way that changes. A token that now names somebody else is refused too: the line's place
-    belongs to the sender who took it.
-
-    Deliberately *not* `require_principal`: that is the request funnel, and it also spends the
-    caller's rate budget and binds ambients — re-entering it would charge a waiting message for
-    waiting, and could cancel it for a rate the sender never exceeded.
+    For work that starts long after its request was authenticated: a message that waited in a shared
+    session's queue runs its turn up to `service_turn_queue_max` × `service_turn_timeout_seconds`
+    later. Re-runs the same validation (signature, audience, issuer, `exp`); roles come only from
+    the
+    token, so expiry is how they change. A token now naming someone else is refused. Not
+    `require_principal`, which would also charge the rate budget and rebind ambients.
 
     Under `entra_required=False` there is no credential to re-check and the dev principal stands.
 
@@ -636,30 +486,11 @@ async def reauthorize(request: Request, principal: Principal) -> Principal:
 def _shed_if_the_database_is_known_down(request: Request) -> None:
     """Answer at once when the readiness probe has just found Postgres unreachable.
 
-    **A fact the process already holds, which every request was re-buying at the pool's price.**
-    Measured 2026-09-06 against a dead Postgres: `/readyz` answered in 2.03 s and cached it, while
-    `POST /sessions` and `GET /sessions` each spent the full `pg_pool_timeout_seconds` — ten
-    seconds, per request — to reach the same conclusion. That is not merely slow: each of those
-    requests occupies a connection slot and a concurrency slot for the whole window, so a dead
-    database turns into a queue on a service that could have said so immediately.
-
-    **Only a *fresh* verdict sheds.** Nothing re-probes on its own — `_probe_database` runs inside
-    the readiness route — so a reading older than `service_readiness_cache_seconds` is history, and
-    treating it as current would keep shedding after the database came back. Past the window the
-    request goes and finds out for itself, which is exactly the behaviour this replaces.
-
-    **Where it lives is what exempts the probes.** `/healthz`, `/readyz` and `/metrics` do not
-    depend on `require_principal`, so they are untouched by construction rather than by a path list
-    — and that matters more here than for the rate limiter beside it: `/readyz` is the only thing
-    that can *clear* this verdict, so shedding it would make one outage permanent.
-
-    The cost, stated: a route that needs no database (`GET /profiles`) is shed too. That is
-    accepted rather than overlooked — the pod is already failing readiness and has been pulled out
-    of the Route, and a per-route "does this touch Postgres" map is a second thing to keep true.
-
-    The wording is `_database_unavailable`'s, unchanged, for the reason that handler gives: the
-    client behaviour is identical either way, and which dependency is down is the operator's
-    business rather than the caller's.
+    Otherwise every request waits out `pg_pool_timeout_seconds` holding a connection and concurrency
+    slot. Only a verdict younger than `service_readiness_cache_seconds` sheds, since only `/readyz`
+    re-probes. Living under `require_principal` exempts the probes, which matters: `/readyz` is the
+    only thing that can clear the verdict. Routes that need no database are shed too; the pod is
+    already out of rotation. The message matches `_database_unavailable`'s.
 
     Raises:
         HTTPException: 503, when a current readiness probe says the database is unreachable.
@@ -675,23 +506,11 @@ def _shed_if_the_database_is_known_down(request: Request) -> None:
 def _refuse_exposed_dev_principal(request: Request) -> None:
     """Refuse to mint the dev principal for a request that arrived from the network.
 
-    **This is the boot guard's other half, and it is here because this is where the principal is
-    minted.** `_refuse_unauthenticated_exposure` reads `settings.service_host` — an intention —
-    while uvicorn binds `--host`, and the two agree only on the container path. Measured against a
-    real uvicorn: `CHEMCLAW_SERVICE_HOST=127.0.0.1 uvicorn --host 0.0.0.0` booted silently and
-    answered an off-box `POST /sessions` with 200 and `dev-user`, every authorization gate open.
-    `arrived_over_the_network` reads the socket the request actually landed on, so what is refused
-    here is what happened rather than what was configured.
-
-    It sits on the *dev* branch only. With `entra_required` on there is no stand-in principal to
-    leak and an off-box request is an ordinary 401; answering 503 there would hide every real
-    authentication failure behind an availability error.
-
-    `service_allow_insecure=true` remains the conscious opt-out, exactly as at boot — one decision,
-    honoured in both places.
-
-    503 rather than 401 because the caller cannot fix this: no credential would help, the *service*
-    is misconfigured, and a retry against a corrected deployment is the right client behaviour.
+    The boot guard reads `settings.service_host`, which uvicorn's `--host` can contradict; this
+    reads
+    the socket the request actually arrived on. Dev branch only — with `entra_required` an off-box
+    request is an ordinary 401. `service_allow_insecure=true` opts out, as at boot. 503 because no
+    credential would help: the service is misconfigured.
 
     Raises:
         HTTPException: 503, when an unauthenticated deployment is serving the network.
@@ -707,8 +526,7 @@ def _refuse_exposed_dev_principal(request: Request) -> None:
 def _count_auth_failure(reason: str) -> None:
     """Book one refused authentication under its reason — a closed, four-value label set.
 
-    Through `record_metric` rather than `METRICS` directly, for the reason the group-claim overage
-    beside it does: this module is imported by processes that do not own the registry.
+    Via `record_metric`, since this module is imported by processes that do not own the registry.
     """
     record_metric(lambda m: m.increment("chemclaw_auth_failures_total", labels={"reason": reason}))
 
@@ -716,11 +534,9 @@ def _count_auth_failure(reason: str) -> None:
 def _bind(request: Request, principal: Principal) -> Principal:
     """Make the authenticated caller ambient for the rest of the request, then return it.
 
-    Here because this function is already the funnel every authenticated route passes through —
-    the same argument that put `_within_budget` here rather than on twenty decorators. Until this
-    existed the only thing in the process that ever stamped an actor was `run_turn`, so the ~30
-    WARNING sites on the other 22 routes all logged `actor=-`. The reset belongs to
-    `api/middleware._RequestObservability`, which is the one frame that runs on every exit path.
+    Here because every authenticated route funnels through this function, so every log line names
+    its
+    actor. The reset is `api/middleware._RequestObservability`'s, which runs on every exit path.
     """
     bind_request_actor(request, principal.oid, principal.roles)
     return principal
@@ -729,17 +545,10 @@ def _bind(request: Request, principal: Principal) -> Principal:
 def _within_budget(principal: Principal) -> Principal:
     """Spend one request against this principal's rate budget, or 429.
 
-    The one thing in this module that is not authentication, and it is here for the reason the
-    PR-gate's proposal record is inside `propose_note` (D-2026-07-31): every authenticated route
-    already funnels through `require_principal`, so one call here is a gate a new route cannot
-    forget, while a decorator on twenty routes is a gate the twenty-first silently skips. The
-    policy itself lives in `api/rate_limit.py`; this is only where the funnel is.
-
-    *After* validation, never before. Limiting on the raw bearer token would also throttle the
-    JWKS-backed validation path, which sounds like a bonus and is not: two tokens for one user are
-    two buckets, so the limit would be per-credential rather than per-person, and rotating a token
-    would reset it. `/healthz`, `/readyz` and `/metrics` do not depend on this function and are
-    therefore never limited — a throttled probe reads as a down pod.
+    Here because every authenticated route funnels through `require_principal`, so a new route
+    cannot
+    skip it; the policy is `api/rate_limit.py`'s. After validation, so the limit is per person, not
+    per credential. Probe routes do not depend on this and are never limited.
     """
     try:
         enforce_request_budget(principal.oid)

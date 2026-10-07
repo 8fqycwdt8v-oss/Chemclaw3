@@ -1,23 +1,12 @@
 """The durable record of one finished connector job — what ran, on what, and **why** (D-157).
 
-Why this exists: a durable job's result lived in exactly one place, the Temporal workflow result,
-and Temporal is an execution engine rather than an archive. A closed workflow's history expires
-with the namespace's retention window, taking the result with it — for a multi-round BO campaign,
-the best point *and every intermediate observation*, which is the part that cost real compute. The
-knowledge graph held only what a job chose to publish (a recommendation, PR-gated and opt-in), and
-`audit_events` held the fact of a tool call. Between them, three questions had no answer once the
-history aged out: *what did that campaign actually try*, *how do I find it from a later session*,
-and — for every job this system runs, not just BO — *why was it run at all*.
+Temporal's history expires with the namespace's retention window, taking a job's result with it.
+This record keeps what ran, what it produced and why it was started, for every connector job.
+It is written by core's `ConnectorJobWorkflow`, the one wrapper every job runs inside, so no
+connector can forget it.
 
-So the record is written by core's `ConnectorJobWorkflow` for **every** connector job, not by each
-connector. That placement is the same rule the note write and the actor stamp follow: an obligation
-that must hold for every capability belongs to the one wrapper they all run inside, because "each
-connector remembers" is precisely the discipline that fails silently.
-
-**The sink is durable by default** (`default_job_record_sink`), for the reason
-`chemclaw.agent.audit.default_audit_sink` is: opting *in* to a record, per call site, is the wrong
-polarity — a forgotten argument must not quietly downgrade it. A deployment with no Postgres falls
-back to the null sink and loses nothing it had before.
+The sink is durable by default (`default_job_record_sink`), so a forgotten argument cannot
+silently downgrade it; without Postgres it falls back to the null sink.
 """
 
 import logging
@@ -55,28 +44,16 @@ class JobRecord(BaseModel):
     job_id: str = Field(min_length=1)
     connector: str = Field(min_length=1)
     job: str = Field(min_length=1)
-    # Why this run was started, in the requester's terms. The one thing no other store holds for a
-    # *connector* job, whose payload is a decision space or a geometry and says nothing about why.
-    #
-    # **Empty means "a declared procedure, launched by name", never that the field was forgotten**
-    # — the same reading `plan_step` and `session_id` already carry. A template run is the case: its
-    # `job` column names a `data/templates/<name>.yaml` whose own `summary` is a reviewed statement
-    # of what the procedure is for, so a rationale here would restate a fact another store holds
-    # while claiming to be the requester's words, which is the shape
-    # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about.
-    #
-    # Relaxing this does **not** weaken the connector-job contract, because that contract was never
-    # enforced here: `connectors/jobs.py` refuses a blank rationale at the launcher, with a message
-    # written for the model, and says in its own comment that the check belongs there. This field
-    # was belt-and-braces over it. `tests/test_template_job_record.py` pins the launcher refusal so
-    # the guarantee is asserted where it actually lives.
+    # Why this run was started, in the requester's terms. Empty means a declared procedure launched
+    # by
+    # name (a template, whose own `summary` says what it is for), never a forgotten field. Connector
+    # jobs require a rationale at the launcher (`connectors/jobs.py`), not here.
     rationale: str = ""
     requested_by: str = Field(min_length=1)
     session_id: str = ""
     correlation_id: str = ""
-    # The plan step this run served and the plan revision it belonged to (D-2026-08-27) — the join
-    # a surface needs to tell a step waiting on a job from a plan that stalled. Empty means the
-    # run was not launched from a plan step, never that the fields were forgotten.
+    # The plan step and plan revision this run served, so a surface can tell a step waiting on a job
+    # from a stalled plan. Empty means not launched from a plan step.
     plan_step: str = ""
     plan_hash: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -85,34 +62,21 @@ class JobRecord(BaseModel):
     # The note this run produced, or "" — a join to the graph, and not proof the write landed:
     # it is copied off the result envelope, and the graph write that follows is best-effort.
     note_id: str = ""
-    # The calculation keys the run rested on, from its envelope (D-2026-08-21). Kept beside the
-    # note rather than inside `result` for the same reason `note_id` is: `result` is the
-    # connector's domain payload and this is a fact about the run.
+    # The calculation keys the run rested on, from its envelope. A fact about the run, so kept
+    # beside
+    # `result` rather than inside it.
     calc_refs: list[str] = Field(default_factory=list)
-    # Wall-clock seconds the run took, measured by the wrapper across the child workflow. The row
-    # said what ran and why and nothing about what it cost, so a two-second xTB call and a six-hour
-    # DFT run were one row shape and one increment of `chemclaw_jobs_started_total` — on the most
-    # expensive thing this system does, "how many" was the only number anyone had. Not node-hours:
-    # parallelism belongs to the launcher and none reports it back yet. Runtime is the factor
-    # node-hours multiplies, and it is measurable today.
+    # Wall-clock seconds the run took, measured by the wrapper across the child workflow. Not
+    # node-hours: no launcher reports parallelism back.
     runtime_seconds: float = Field(default=0.0, ge=0)
-    # The name of the model `result` was dumped from, off the envelope's own `payload_kind`. The
-    # backfill's only way to route a composite: `result` is a bare dict by the time it lands here,
-    # and `<connector>.<job>` is a route rather than a shape. Empty means the run did not say,
-    # which is every row written before this column and which the projector reads as "infer".
+    # The name of the model `result` was dumped from, off the envelope's `payload_kind`, so the
+    # backfill can route a composite. Empty means the run did not say; the projector infers.
     payload_kind: str = ""
-    # How the run ended: `completed`, `failed` or `cancelled` (D-2026-08-27-a-job-that-fails-leaves-
-    # no-row; `cancelled` because a stopped run listed as `failed` contradicted `GET /jobs/{id}`).
-    #
-    # This table used to be reachable only from `ConnectorJobWorkflow._finish`, and a failing job
-    # raises before it — so a failed run wrote no row at all and the only durable trace of it was
-    # Temporal's expiring history. Measured live: two runs, one success and one `ValueError`, left
-    # one row. Defaulted to `completed` because that is what every row written before this field is,
-    # not because a caller may omit it.
+    # How the run ended: `completed`, `failed` or `cancelled`. Failed and cancelled runs write a row
+    # too. Defaults to `completed` because every older row is one, not because a caller may omit it.
     state: str = "completed"
-    # The application's own account of *why* it failed, from `connector_job.py::failure_reason` —
-    # the first application-level frame of Temporal's nested chain, which is the sentence written
-    # for the chemist rather than the library internals beneath it. Empty for a run that succeeded.
+    # The application's own account of why it failed (`connector_job.py::failure_reason`), written
+    # for the chemist. Empty for a run that succeeded.
     failure_reason: str = ""
     completed_at: datetime | None = None
 
@@ -138,11 +102,9 @@ class JobRecordSummary(BaseModel):
     # The plan step the run served (D-2026-08-27), in the listing so "which step was this for"
     # needs no second lookup. Empty when the run was not launched from a plan step.
     plan_step: str = ""
-    # How the run ended, in the *listing* and not only in the full record. Required here the moment
-    # failures started being written at all: without it a failed run appears in `find_past_jobs`
-    # beside the successful ones with an empty summary and nothing saying it failed, which is a
-    # worse answer than the one that omitted it. `failure_reason` stays off the summary — the
-    # listing says *that* a run failed, and opening the record says why.
+    # How the run ended, so a failed run in `find_past_jobs` says it failed; the reason is in the
+    # full
+    # record.
     state: str = "completed"
     completed_at: datetime | None = None
 
@@ -169,15 +131,11 @@ class JobRecordSearch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     hits: list[JobRecordSummary] = Field(default_factory=list)
-    # True when more rows matched than this page could hold, so the count is a floor rather than a
-    # total. Established exactly — the store asks for one row beyond the limit — rather than
-    # inferred from a full page, because "exactly `limit` matches exist" is a real corpus and
-    # reporting it as truncated would make the flag decoration instead of evidence.
+    # True when more rows matched than this page holds, so the count is a floor. Established by
+    # fetching one extra row, not inferred from a full page.
     hits_truncated: bool = False
-    # False when this deployment keeps no durable job records at all (`session_store != postgres`),
-    # in which case the empty list above says nothing about what has been run. The honest answer
-    # was already being *returned*; nothing on the wire distinguished it from "no match", so the
-    # model read a configuration as a finding.
+    # False when this deployment keeps no durable job records (`session_store != postgres`), so an
+    # empty list says nothing about what has been run.
     records_kept: bool = True
 
     @computed_field  # type: ignore[prop-decorator]
@@ -185,11 +143,8 @@ class JobRecordSearch(BaseModel):
     def verdict(self) -> str:
         """The one sentence a reader must take from this result before drawing a conclusion.
 
-        A `computed_field` and not a bare `property`, which is the whole point of the method:
-        a plain property is **not serialized**, so `model_dump()` would carry the hits and the
-        flags and leave the sentence that explains them inside this process. That is the defect
-        `FingerprintSearch.verdict` was written against after a hazard screen reported "no hazards
-        detected" six times, and this model would have repeated it.
+        A `computed_field` so it is serialized with the hits; a plain property would be dropped by
+        `model_dump()`.
         """
         if not self.records_kept:
             return (
@@ -227,9 +182,7 @@ class NullJobRecordSink:
 def _records_are_durable() -> bool:
     """Whether this deployment keeps durable records at all.
 
-    `session_store="postgres"` is the deployment's statement that a database exists and durable
-    records belong in it — the same switch `default_audit_sink` reads, named here rather than
-    spelled out at each of the three entry points below so they cannot drift apart.
+    `session_store="postgres"` is the switch, the same one `default_audit_sink` reads.
     """
     return settings.session_store == "postgres"
 
@@ -237,20 +190,9 @@ def _records_are_durable() -> bool:
 def log_record_durability(component: str) -> None:
     """Say once, at worker start, whether this process actually keeps the records it writes.
 
-    `record_job` is best-effort by design and the null sink drops at debug, so a deployment that
-    resolved to it reported every run as "recorded in 0.000 s", kept nothing, and still booked
-    `chemclaw_jobs_finished_total` — a counter whose own docstring reads "a run was recorded".
-    Measured against a live Postgres with `session_store` at its shipped default of `memory`: zero
-    `job_records` rows for a completed run whose `job_completed` push-back *did* reach the same
-    database, because `record_session_event_activity` reads no such switch. One switch, two answers,
-    and nothing at any level said so; `find_past_jobs` and `get_durable_job_status`'s fallback are
-    then measuring an empty table they cannot distinguish from a quiet one.
-
-    A boot line rather than a per-record one: the fact is a property of the deployment, so it wants
-    saying once where somebody reading a worker's first ten lines finds it, and at WARNING because
-    it is nearly always a misconfiguration — a process is normally started against a database.
-    Beside the predicate rather than inline at the call site, so the announcement and the switch it
-    describes cannot drift.
+    `record_job` is best-effort and the null sink drops silently, so without this a deployment on
+    the in-memory store would report runs as recorded while keeping nothing. WARNING, since that is
+    nearly always a misconfiguration.
 
     Args:
         component: What this process is, for the log line — as `serve_worker` names it.
@@ -272,8 +214,7 @@ def log_record_durability(component: str) -> None:
 def default_job_record_sink() -> JobRecordSink:
     """The durable sink where a database exists, else the null one.
 
-    The store is imported lazily so a memory-store process (the CLI, the tests, a connector
-    worker) never pulls psycopg for a store it will not use.
+    The store is imported lazily so a memory-store process never pulls psycopg.
     """
     if not _records_are_durable():
         return NullJobRecordSink()
@@ -296,10 +237,8 @@ async def search_job_records(
 ) -> JobRecordSearch:
     """Past runs matching `text` (in the reason, the summary or the job name), newest first.
 
-    Answers with an empty `hits` rather than raising when no durable store is configured — "we
-    have no record of past runs" is the honest answer for such a deployment — and says which
-    empty it is: `records_kept` is False there, and the same empty list from an empty table is not
-    the same fact.
+    Returns empty `hits` rather than raising when no durable store is configured, with
+    `records_kept` False so that empty is distinguishable from an empty table.
 
     Args:
         text: Words to look for in the reason, the summary or the job name. Empty matches all.
@@ -328,41 +267,15 @@ async def search_job_records(
 async def record_job(record: JobRecord) -> None:
     """Persist one finished job's record through the configured sink, and publish what it consumed.
 
-    On the light background queue with core's other bookkeeping: it is one small write, and the
-    heavy work it describes is already done by the time it runs.
-
-    The metric is booked here, in the activity, rather than in the workflow: a workflow body may be
-    replayed, and a replayed increment would count one expensive run several times — the arithmetic
-    error a consumption counter must not make.
-
-    **And it is booked after the write, for exactly the reason `chemclaw_notes_recorded_total` is
-    (`kg/record.py`).** "An activity's side effects happen once per successful execution" is the
-    guarantee this counter needs, and it is a guarantee only about the code that runs *after* the
-    part which can fail: this activity runs under `BAD_DATA_RETRY`, so an increment at the top is
-    booked once per *attempt*. The everyday case is not an outage — the upsert commits and the
-    activity then overruns `job_record_timeout_seconds`, so Temporal retries a run that is already
-    recorded and one run is counted twice. In a sustained outage all five attempts increment, the
-    wrapper swallows the resulting `ActivityError`, and the counter reports five times the compute
-    for a run with no durable record at all. Counting after the awaited write makes the number mean
-    "a run was recorded", which is the only claim it can honestly make.
-
-    **It narrows the window rather than closing it, and the residual is worth naming.** An activity
-    whose write commits and whose *result report* is then lost — the worker dies between the commit
-    and the completion, the broker misses the response — is redelivered by Temporal and runs again:
-    the upsert keys on `job_id`, so the row is replaced rather than duplicated, but this counter is
-    incremented a second time for one run. The honest reading of `chemclaw_jobs_finished_total` is
-    therefore "runs recorded, at least once each", which is what a counter booked from an
-    at-least-once activity can be and no more. The alternative — deriving the number from the table
-    — is a `COUNT(*)` per scrape over rows that are never pruned, which is the trade the gauge
-    families decline elsewhere for the same reason.
+    On the light background queue: one small write after the heavy work is done. Metrics are booked
+    in the activity (a workflow body may replay) and after the write (the activity retries under
+    `BAD_DATA_RETRY`), so they mean "a run was recorded". A lost completion report can still
+    redeliver a committed write, so the counters read "at least once each"; the upsert on `job_id`
+    keeps the row single.
     """
     await default_job_record_sink().record(record)
-    # The counterpart `chemclaw_jobs_started_total` never had. Booked in the activity beside the
-    # runtime counter and for the identical reason the paragraph above gives: an increment in the
-    # workflow body would be re-counted on every replay, and one at the top of this activity would
-    # be booked once per *attempt*. Every run reaches here now, failures included, so this is the
-    # one series that carries a success rate — and the `outcome` label is what makes "all my CREST
-    # jobs are failing" distinguishable from "nobody is running jobs", which nothing could say.
+    # Booked here for the same reason; every run reaches this, failures included, so the `outcome`
+    # label gives a success rate.
     record_metric(
         lambda m: m.increment(
             "chemclaw_jobs_finished_total",
@@ -377,10 +290,7 @@ async def record_job(record: JobRecord) -> None:
                 {"connector": record.connector},
             )
         )
-        # A *distribution* beside the accumulating counter, which is not a duplicate of it: a
-        # counter answers "how much compute has this connector consumed" and can never answer "what
-        # does a slow one cost", because a total divided by a count is a mean and the interesting
-        # runs are in the tail. This is the most expensive work in the system and it had no p95.
+        # A distribution beside the accumulating counter, so the tail (p95) of job cost is visible.
         record_metric(
             lambda m: m.observe(
                 "chemclaw_job_duration_seconds",
@@ -393,35 +303,13 @@ async def record_job(record: JobRecord) -> None:
 def note_with_run_provenance(note: Note, record: JobRecord, *, ran_on: date | None = None) -> Note:
     """Return `note` with a footer naming the run that produced it and the reason it was started.
 
-    **Applied by core to every connector note**, which is the whole point: the reason a job ran is
-    the one thing a markdown note could never say by itself, and asking each connector to append it
-    would guarantee that some connector does not. A reader months later gets *why this was done*
-    from the same file that says what came out, with no second store to consult. This paragraph
-    ended "and a reviewer sees the reason on the PR they are being asked to sign", which
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified — and the footer matters
-    *more* without that reader, because nobody now meets the note before it is in the graph.
+    Applied by core to every connector note, so the reason a job ran travels with its result. The
+    footer carries no `[[wikilink]]`: the job id names a database row, not a graph node. `Note` is
+    frozen, so this builds a copy.
 
-    The footer carries **no `[[wikilink]]`**, deliberately. A link to a note that does not exist is
-    what `kg-validate` fails the corpus on, and the job id names a database
-    row rather than a graph node; it is rendered as code so it stays a literal.
-
-    `Note` is frozen, so this builds a copy — which also leaves the connector's own object intact
-    for the result envelope the launching tool hands back.
-
-    **`ran_on` dates the note so a standing query can see it, and only where the connector did
-    not.** `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long
-    as anyone has known — and therefore as not news, so an undated `job-result` note reaches a
-    subscriber who has never been told anything and then nobody, ever. Measured on the shipped
-    corpus, 32 of 39 notes carried no `valid_from` across ten types and `job-result` was three of
-    them; `D-2026-09-14-an-undated-note-is-not-news-every-hour`'s mitigation reached only the
-    memory miners. A connector result's validity date and its arrival date are the same day by
-    construction, so the run's own day is the honest reading.
-
-    A note that already carries a date keeps it: the connector knows what its result is *about*
-    and this function does not, so overwriting would replace a claim about chemistry with a claim
-    about scheduling. `record.completed_at` is deliberately not the source — it is filled by the
-    database's own `now()` *after* this runs, so it is `None` here — and the caller is workflow
-    code, which is why the date is passed in from `workflow.now()` rather than read from a clock.
+    `ran_on` dates a note the connector left undated, so standing-query digests see it (an absent
+    `valid_from` reads as open-ended, not news). A connector-supplied date is kept. The caller is
+    workflow code, so the date comes from `workflow.now()`; `record.completed_at` is not set yet.
     """
     footer = (
         f"\nWhy this ran: {record.rationale}\n\n"

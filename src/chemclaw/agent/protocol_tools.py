@@ -1,22 +1,10 @@
 """The agent's way to read many whole protocols at once.
 
-`similar_reactions` answers "have we run a transformation like this?" with ids and Tanimoto scores;
-`gather_evidence` returns 240-character excerpts. Neither is a protocol. To read one the agent calls
-`expand_note`, which returns the whole body — and that is right for one protocol and wrong for
-twenty: twenty are twenty model round-trips against the loop cap, and once the *request* crosses
-`agent_context_token_budget` — which charges this call's own ~43,000-token prefix before the thread
-gets a look in — the compaction policy reclaims the earliest by replacing them with a placeholder
-that takes their citations with them.
-
-`condense_protocols` is the call for the many case. It reads each protocol **once and whole** —
-the unit is never a fraction of a procedure — and returns one comparison instead of twenty bodies.
-The judgment about what the comparison *means* stays in the skills, as it does for every other tool
-here; this only condenses.
-
-Resolution lives here rather than in `agent.condense` because it is the part that knows what a
-citation looks like in this system: a knowledge-graph note id, or the `source:doc_id` a mounted
-share cites. The condenser itself takes whole protocols and knows nothing about where they came
-from, which is what lets a future source reach it without touching it.
+`expand_note` is right for one protocol and wrong for twenty: twenty round-trips count against the
+loop cap and compaction would reclaim the earliest bodies with their citations. `condense_protocols`
+reads each protocol once and whole and returns one comparison; judging what it means stays in the
+skills. Resolution of citations (note ids, `reaction-<id>` records, `source:doc_id` share documents)
+lives here so the condenser knows nothing about where protocols come from.
 """
 
 import asyncio
@@ -39,28 +27,18 @@ logger = logging.getLogger(__name__)
 def _procedure(note: Note) -> str:
     """The recipe out of a note body, or the whole body when it has no procedure section.
 
-    `record_from_ord_reaction` renders the recipe under `## Procedure`, so for an ELN-ingested
-    reaction that heading is exactly the prose worth reading — the conditions and outcomes above it
-    are already structured in `conditions` and re-reading them with a model would be a second,
-    weaker answer to a question the frontmatter has answered.
-
-    A note without the heading — a playbook, a human-written reaction, a campaign — falls back to
-    the whole body, because there the prose *is* the content and there is nothing else to read.
+    For an ELN reaction the `## Procedure` section is the prose worth reading; its conditions are
+    already structured. Without the heading the prose is the content.
     """
     _, _, procedure = note.body.partition("## Procedure")
     return procedure.strip() if procedure.strip() else note.body.strip()
 
 
 async def _from_record(ref: str) -> Protocol | None:
-    """Resolve a `reaction-<id>` citation to the transcription behind it (D-2026-08-25).
+    """Resolve a `reaction-<id>` citation to the ELN transcription behind it.
 
-    ELN runs left the graph's id space when they became rows, so the lookup above finds none of
-    them — and they are the largest class of protocol this tool exists to compare. Without this a
-    reaction reference reads as `missing`, which is the same silent hole `_from_share` was written
-    to close for share documents, arriving from the other direction.
-
-    The record carries `conditions` for the same reason a note did: the comparison wants numbers,
-    not sentences it would have to re-derive from the prose it just rendered.
+    ELN runs are rows, not graph notes, so the note lookup does not find them. The record carries
+    `conditions` so the comparison gets numbers rather than prose.
     """
     if not resolves_outside_graph(ref):
         return None
@@ -82,13 +60,8 @@ async def _from_record(ref: str) -> Protocol | None:
 def _share_readers() -> dict[str, Any]:
     """The enabled sources that can hand back a whole document, by name.
 
-    **Built once per call rather than once per reference**, which is the whole reason this is a
-    function returning a map instead of a loop inside `_from_share`. `active_retrieve_sources`
-    resolves and constructs every enabled retrieve half, and its own docstring flags that as a
-    production concern on this path; measured before the hoist, twelve references rebuilt the
-    registry twelve times, and this tool accepts up to `protocol_digest_max_protocols` of them.
-
-    A source with no `read_document` is not a share and simply does not appear.
+    Built once per call rather than per reference, because constructing the retrieve sources is
+    costly. A source with no `read_document` is not a share and does not appear.
     """
     readers: dict[str, Any] = {}
     for retriever in active_retrieve_sources():
@@ -102,9 +75,7 @@ def _share_readers() -> dict[str, Any]:
 async def _from_share(ref: str, readers: dict[str, Any]) -> Protocol | None:
     """Resolve a `source:doc_id` citation to the whole document behind it, if any share holds it.
 
-    The address is the one `ShareDocumentRetriever` has always emitted, minus its `#ordinal`. The
-    share's own entitlement gate is inside `read_document`, so a caller who may not search a share
-    cannot read a document out of it here either.
+    The share's entitlement gate is inside `read_document`.
     """
     source, _, doc_id = ref.partition(":")
     reader = readers.get(source)
@@ -215,17 +186,12 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
 
     result = await _condense(protocols)
     if missing:
-        # Said out loud rather than dropped: a comparison silently missing a protocol the caller
-        # asked for reads as a complete answer about a smaller set.
-        #
-        # **On `unresolved` rather than appended to `degraded`.** These refs have no row: they were
-        # never resolved, so nothing about them is in the table. `degraded` means the opposite —
-        # the protocol is a row and only its prose is missing — and merging the two made the
-        # rendered payload tell the model that a reference nobody could resolve had "recorded
-        # figures above", and that a two-row comparison covered all three references it was given.
+        # Said out loud rather than dropped, so a partial comparison does not read as complete. On
+        # `unresolved`, not `degraded`: these refs have no row at all, while `degraded` means a row
+        # whose
+        # prose is missing.
         result = result.model_copy(update={"complete": False, "unresolved": missing})
-    # **Rendered here, not handed over as a model.** A pydantic return is stringified by
-    # `langchain_core.tools.base._stringify`, which falls back to `str()` — pydantic's repr — for
-    # anything `json.dumps` cannot take. Returning the string means the payload measured and the
-    # payload sent are the same thing rather than one chosen by a library's fallback path.
+    # Rendered here so the payload sent is exactly this string, not a library's `str()` fallback of
+    # a
+    # pydantic model.
     return result.render()

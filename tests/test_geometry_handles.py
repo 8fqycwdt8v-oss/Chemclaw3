@@ -194,7 +194,7 @@ def test_a_fukui_ranking_runs_at_the_named_conformer(monkeypatch: pytest.MonkeyP
 
     `predict_site_reactivity` was the one geometry-describing calculator that could not take a
     handle, because the server had `compute_properties_at` and no `compute_fukui_at`. That gap is
-    what `DEFERRED.md` carried, and the honest consequence while it stood was that "which site is
+    what `BACKLOG.md` carried, and the honest consequence while it stood was that "which site is
     reactive in this conformer" was answered on a fresh force-field embedding.
     """
     server = install(monkeypatch, FakeCalcServer())

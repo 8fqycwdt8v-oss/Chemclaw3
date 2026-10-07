@@ -1,15 +1,9 @@
 """Agent tools for the durable wait: raise a question, and read what is outstanding.
 
-Two tools with deliberately asymmetric standing. `request_external_input` **starts a durable
-workflow** and so is state-changing: it authorizes, it requires an actor, and it is subject to the
-plan gate like every other launcher. `check_pending_requests` reads the projection and is a read.
-
-**Neither of them can answer a question, and that omission is the design.** Answering is
-`POST /pending/{id}/answer`, a route, for the same reason a plan decision is one (D-005): a model
-must never be able to authorize its own work. The note decision this named beside it went with the
-PR-gate (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). A tool that could settle
-a wait would let the agent ask itself for approval and grant it in the next tool call, and the
-audit trail would record a human's question answered by nobody.
+`request_external_input` starts a durable workflow, so it is state-changing (authorized, needs an
+actor, plan-gated); `check_pending_requests` is a read. Neither can answer a question: answering
+is the `POST /pending/{id}/answer` route, because a model must never be able to authorize its own
+work (D-005).
 """
 
 from typing import Literal
@@ -26,9 +20,8 @@ from chemclaw.durable import pending_store
 from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.kg.premise import count_refusals, premise_breaks
 
-#: The kinds a *chemist-facing* ask may take. Narrower than `awaiting.KINDS`, which also carries
-#: `approval` — an approval is raised by the effector seam and by the plan gate, never by the model
-#: asking for one, for the reason this module's header gives.
+# The kinds a chemist-facing ask may take. Narrower than `awaiting.KINDS`: an `approval` is raised
+# by the effector seam and the plan gate, never by the model.
 AskKind = Literal["measurement", "deliverable", "review"]
 
 
@@ -70,12 +63,9 @@ async def request_external_input(
         The request id, which is also how the wait is found in the inbox.
     """
     authorize_trigger("request_external_input")
-    # **The premise is derived, never an argument**, and it is derived by `AwaitRequest` itself
-    # rather than here. A `premise_note_ids` parameter would be a control the model can disable by
-    # forgetting it, which is the `map_to_hpc_identity` shape this repository has deleted twice — a
-    # claim that a check exists. Deriving it at this one call site was a weaker version of the same
-    # thing: two other producers of a wait simply never set the field. The model now lives where
-    # every producer must pass.
+    # The premise is derived by `AwaitRequest` itself, never passed as an argument, so no producer
+    # of a
+    # wait can skip it.
     request = AwaitRequest(
         kind=kind,
         subject=subject,
@@ -88,16 +78,11 @@ async def request_external_input(
         # it rather than the two that remembered. See `AwaitAnswerWorkflow.run`.
         deadline_days=deadline_days,
     )
-    # **Refused here, at the ask, and that is what makes the answer-time check mean "since".** This
-    # tree has no arrival signal for a note, so a break found at answer time is indistinguishable
-    # from one that predates the question — unless every wait that exists began with a whole
-    # premise. Refusing the open is what establishes that, by construction rather than by comparing
-    # two readings taken on two pods whose knowledge checkouts drift apart.
-    #
-    # Every break refuses here, including `absent`, which the answer end deliberately does not act
-    # on: the party being told is the model, it gets this text back, and it can rewrite its own
-    # citation. That is a self-correcting loop; the answer-time 409 is a dead end with a chemist in
-    # it. Nothing has been written at this point, so the refusal leaves no half-opened wait.
+    # Refused at the ask so every open wait begins with a whole premise; that is what lets a break
+    # found
+    # at answer time mean "since the question". Every break refuses here, including `absent`,
+    # because
+    # the model can fix its own citation. Nothing has been written yet.
     broken = await premise_breaks(request.premise_note_ids)
     if broken:
         count_refusals("ask", broken)
@@ -106,12 +91,8 @@ async def request_external_input(
             "usefully: " + "; ".join(item.describe() for item in broken) + ". Re-read the current "
             "evidence and ask again on what it says."
         )
-    # **The launch itself is `durable/awaiting.py`'s**, including the reuse policy this call site
-    # used to argue for in ten lines of comment: the id, the policy and the already-started catch
-    # are one decision with two callers now (the runner escalates an exhausted review the same
-    # way), and a second copy is how the two would come to disagree about what joins what. What
-    # stays here is what is this tool's own — the authorization, the premise refusal above, and the
-    # launch announcement below.
+    # The launch, its id and reuse policy are `durable/awaiting.py`'s, shared with the runner; this
+    # tool owns authorization, the premise refusal and the announcement.
     request_id, opened = await open_wait(request)
     if not opened:
         # The same question is already open. Hand back its id rather than opening a second wait,
@@ -142,9 +123,7 @@ class PendingOverview(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before saying what is outstanding.
 
-        `computed_field` rather than a bare property for the reason `FingerprintSearch.verdict`
-        states: a plain property is not serialized, so the sentence that says the list is a page
-        would never reach the model that writes the answer.
+        A `computed_field` so the sentence is serialized with the result.
         """
         scope = (
             "This is what is outstanding *in this system* — only the questions this system itself "
@@ -190,24 +169,10 @@ async def check_pending_requests(asked_of: str = "", limit: int = 20) -> Pending
     page = await pending_store.open_requests(asked_of=asked_of, limit=limit)
     return PendingOverview(
         requests=[
-            # **The whole row, not two fields of it, and the carve-out here was weaker than the one
-            # `commitment_tools` had.** This escaped `subject` and `rationale` on the ground that
-            # they are "free text a caller supplied" and the rest is not. Measured against
-            # `durable/pending_store.PendingRequest`: there is **not one `Literal`** on that model —
-            # `kind`, `state`, `asked_of`, `requested_by`, `session_id`, `answered_by` and
-            # `premise_note_ids` are all unvalidated `str`/`list[str]`, and `request_id` is minted
-            # from them. A request is raised by a *turn* and read by anyone entitled, so every one
-            # of those is text this system did not constrain. Driven with a live closing delimiter
-            # in each: **eight** of them reached the model unescaped.
-            #
-            # `defanged_payload` rather than eight more `defang(...)` entries, for the reason
-            # `commitment_tools` and `protocol_design_tools._readable` use it: a field added to that
-            # model next year is covered without this line being remembered, and a datetime or an
-            # int has no delimiter to spell so escaping it costs nothing.
-            #
-            # `answer` stays excluded rather than escaped, which is unchanged: these are the *open*
-            # requests, so it is empty by construction, and this overview is about what is still
-            # waiting rather than about what was said.
+            # Every field of `PendingRequest` is unconstrained text raised by some turn, so the
+            # whole row is
+            # defanged rather than a field list. `answer` is excluded: these are open requests, so
+            # it is empty.
             defanged_payload(request.model_dump(exclude={"answer"}))
             for request in page.requests
         ],

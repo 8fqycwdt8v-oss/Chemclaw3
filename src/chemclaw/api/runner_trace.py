@@ -1,33 +1,11 @@
 """Reading a turn's tool calls: the events a call and its result become.
 
-Everything here is a function of what the graph stream hands over and of what the caller injected —
-**no ambient state, no session, no contextvars**. The wire budgets it applies are read from
-`settings` rather than written as literals, which is the repo's rule for a threshold and does not
-make the functions impure: an ENV value is a constant of the process, not state a turn carries.
-That is why it lives beside the runner rather than inside it: the runner's own module is a
-lifecycle (contextvars, an `AsyncExitStack`, a rollback), and this is the one part of the per-turn
-path that can be exercised by handing it a call and comparing the events that come back.
-
-**`returned` is a coroutine and does one write**, which is the one thing here that is not pure and
-is worth stating rather than hiding. A tool result is persisted so a surface can fetch the whole of
-it (`api/tool_results.py`), and the write has to happen *before* the event naming it is yielded —
-announcing a ref and then storing the bytes leaves a window in which a client that follows the ref
-finds nothing. The store is reached through an injected `ResultSink`, not through the session id or
-a contextvar, so the sentence above stays literally true: this module still does not know what a
-session is, and a trace built with no sink (every test that does not care, the CLI paths) behaves
-exactly as it did.
-
-**There is no reassembly here any more, and this docstring used to say there was.** `feed`, the
-`_names`/`_fragments` buffers it filled and the `flush` that closed out a call whose arguments
-ended the stream were written against the previous engine's streamed content shape — a name on one
-content, then argument fragments carrying only a `call_id` (D-138, D-159). LangGraph's `updates`
-stream hands a *finished* `tool_calls` list over, and `api/graph_stream.py` deliberately does not
-read the fragmented `tool_call_chunks` off the token stream — its own docstring gives the reason,
-which is the two live defects that reassembly cost. So nothing in `src/` had called `feed` since
-that rebuild, `flush()` could only ever return `[]` (it was iterated on every turn), and the
-paragraph above named `feed` as the place the one write happens while the write was in `returned`.
-Whoever adds a provider that streams argument fragments adds the reassembly back with it; nothing
-else in this module changes.
+A function of what the graph stream hands over and what the caller injected — no session, no
+contextvars — so it can be tested by handing it a call and comparing events. The one write is in
+`returned`: a result's full text is persisted through an injected `ResultSink` before the event
+naming its ref is yielded, so a client following the ref always finds it. No sink stores nothing.
+Calls arrive fully assembled from LangGraph's `updates` stream, so there is no argument reassembly
+here.
 """
 
 import logging
@@ -40,65 +18,43 @@ from chemclaw.kg.note import mentioned_ids
 
 logger = logging.getLogger(__name__)
 
-# How many characters of a tool call's arguments the trace event carries — enough to see *what*
-# was called without streaming a whole evidence payload to the UI. This is the *same* budget the
-# audit trail applies (`agent/audit.py`), which is why it now reads the same setting rather than
-# repeating its default: the comment here used to say "mirrors the audit trail truncation" beside a
-# literal 200, so raising the audit budget for a fuller trail moved one of the two and the claim
-# quietly stopped being true (2026-08-05 review).
+# How many characters of a tool call's arguments the trace event carries: the same setting the audit
+# trail truncates to (`agent/audit.py`).
 
 
 class ToolCallTrace:
     """One turn's tool calls and results, as the events a surface renders and the evidence it left.
 
-    Two methods and no state machine: `issued` announces a call the graph has already assembled,
-    `returned` reports the result that answers it. They are matched by the provider's `call_id`,
-    which is why `_issued` outlives the call — the name is what the result event reports, and a
-    `ToolMessage` does not carry it.
-
-    One per turn, because every field is scoped to that turn.
+    `issued` announces an assembled call and `returned` reports its result, matched by `call_id`;
+    `_issued` keeps the name because a `ToolMessage` does not carry it. One per turn.
     """
 
     def __init__(self, sink: ResultSink | None = None) -> None:
         """Start an empty trace; one per turn, since every field is scoped to that turn.
 
-        `sink` is where a result's full text is stored so a surface can fetch it back
-        (`api/tool_results.py`); `None` stores nothing and every `result_ref` stays empty, which is
-        the honest state and the one every consumer already has to handle. Injected rather than
-        resolved from the session id here because this class deliberately knows nothing about
-        sessions — see the module docstring.
+        `sink` stores a result's full text so a surface can fetch it (`api/tool_results.py`); `None`
+        stores nothing and every `result_ref` stays empty.
         """
         self._sink = sink
-        # The name of every call already announced, kept so its result can be reported under the
-        # same name. Bounded by the calls in one turn, which the loop cap already bounds.
+        # Every announced call's name, so its result is reported under it; bounded by the loop cap.
         self._issued: dict[str, str] = {}
-        # What this turn's tools returned, in full, in the order they came back — the evidence the
-        # answer verifier and the parameter-shape gate check the answer against. Kept here rather
-        # than read back off the emitted `ToolResultEvent`s because those carry a 200-character
-        # *preview*: a `gather_evidence` result is ~20,000 characters over 40 chunks, so scoring
-        # against the preview would call 39 of its 40 citations fabricated. The budget is right for
-        # the UI and wrong for a grounding check, so the two read different things from one place.
-        # Bounded by the calls in one turn, like `_issued`, and never leaves the process.
+        # What this turn's tools returned, in full and in order — the evidence the verifier and
+        # shape gate check the answer against. Not the emitted events, which carry only a short
+        # preview that would make most citations look fabricated. Bounded by the calls in one turn;
+        # never leaves the process.
         self.outputs: list[str] = []
 
     @property
     def called_tools(self) -> list[str]:
         """Every tool this turn issued a call for, in the order the calls were announced.
 
-        Read off `_issued`, which already exists so a result can be reported under its call's name
-        — so this is a view of state the trace keeps, not a second ledger that could disagree with
-        the `tool_call` events the surface saw. Includes calls that went on to fail: the answer
-        gate's question is whether the turn *reached* for a tool, and a failed call did.
+        A view of `_issued`, so it cannot disagree with the `tool_call` events. Includes calls that
+        failed: the question is whether the turn reached for a tool.
         """
         return list(self._issued.values())
 
     def issued(self, key: str, tool: str, arguments: str) -> ToolCallEvent:
-        """Announce one *complete* call — the decision, with no reassembly in front of it.
-
-        LangGraph's `updates` stream hands over a finished `tool_calls` list, so the graph driver
-        (`chemclaw.api.graph_stream`) has nothing to reassemble and calls this directly. What this
-        owns is everything below: the argument budget, and remembering the name so the result can
-        be reported under it.
+        """Announce one complete call, applying the argument budget and remembering the name.
 
         Args:
             key: The provider's call id, which is what a later result names.
@@ -116,33 +72,13 @@ class ToolCallTrace:
     ) -> ToolResultEvent:
         """Record and describe one tool result — this module's one write.
 
-        Ids and values come off the *full* text and the preview off the truncated one, for the
-        reason `outputs` exists at all: a grounding check asking "was this in front of the model?"
-        against 200 characters of a 40-chunk sweep called 39 of 40 citations fabricated in a live
-        run, and the re-run with ids fixed still called six verbatim ICH limits invented because
-        the figures were only in the preview.
-
-        **`text` is what the model read, and for a cut result that is not what the tool returned**
-        (`agent/tool_result_size.py`). Everything above — `outputs`, ids, numbers, values — stays on
-        `text`, because the grounding question is what was *in front of the model*, and a figure
-        from the removed middle was not. What changes is only the ref: `full_ref` names the full
-        text the cut kept (`kept_in_full` wrote it before the message left the middleware), so a
-        surface fetching `result_ref` opens what the tool returned rather than what the model was
-        shown. When the full text could not be kept (`full_ref == ""` on a cut), the model's text
-        is stored as before — it carries the cut's own notice in-band, so it cannot read as whole.
-
-        **A result the middleware already stored is not stored again.** Every result whose full
-        text the turn's sink kept carries that ref (`tool_result_size.RESULT_REF_KEY`) — it is what
-        the handle line at the foot of the model's copy names — and `stored_ref` is that ref, so the
-        event's `result_ref` and the model's handle address the same bytes and the write happens
-        once (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`). `text` arrives
-        with the handle line already removed (`core.result_handle.without_handle_line`): it is an
-        address, not something the tool returned.
-
-        A result whose call was never announced is reported under its own id rather than under a
-        name this trace does not have. Nothing takes that fallback today — a node's update carries
-        the `tool_calls` entry before the `ToolMessage` answering it — and a `ToolResultEvent` with
-        an empty `tool` would be a surface labelling a value with nothing.
+        Ids, numbers and values come off `text`, the full text the model read (not the truncated
+        preview), because grounding asks what was in front of the model. For a cut result only the
+        ref differs: `full_ref` names the full tool output the cut kept, so a surface fetches what
+        the tool returned; with no kept full text, the model's text (with its in-band cut notice) is
+        stored. A result the middleware already stored carries `stored_ref` and is not stored again,
+        so the event and the model's handle address the same bytes. `text` arrives without the
+        handle line. A result whose call was never announced is reported under its own id.
 
         Args:
             key: The call id this answers, so the result is reported under the call's tool name.
@@ -163,9 +99,7 @@ class ToolCallTrace:
             note_ids=mentioned_ids(text),
             numbers=_capped_numbers(tool, text),
             values=_capped_values(tool, text),
-            # Awaited here rather than by the caller so the bytes are durable before the ref
-            # naming them leaves the process. A kept full text was already written, by the cut,
-            # and a stamped result by the middleware that stamped it.
+            # Awaited here so the bytes are durable before the ref naming them leaves the process.
             result_ref=full_ref or stored_ref or await stored_within_cap(self._sink, tool, text),
             result_inline=_inline(text),
             result_cut=cut,
@@ -175,11 +109,8 @@ class ToolCallTrace:
 def _capped_numbers(tool: str, text: str) -> list[float]:
     """The distinct values a result returned, bounded for the wire, saying so when it bounds them.
 
-    The cap is unreachable in normal traffic (`stream_max_result_numbers`), which is exactly
-    why the log line matters: the one time it fires, a consumer told to trust this list would be
-    trusting an incomplete one, and nothing else in the event would say so. This repository's rule
-    is that a silent truncation reads as completeness — it is the whole reason the preview needed a
-    companion field in the first place.
+    The cap (`stream_max_result_numbers`) rarely fires, so it logs when it does: a silent truncation
+    reads as completeness.
     """
     values = returned_values(text)
     if len(values) <= settings.stream_max_result_numbers:
@@ -196,14 +127,8 @@ def _capped_numbers(tool: str, text: str) -> list[float]:
 def _capped_values(tool: str, text: str) -> list[ResultValue]:
     """The named values a JSON result returned, under the same cap the bare numbers take.
 
-    Same bound and the same reason: this list goes to a browser, so it must be bounded, and the
-    bound is the operator's rather than a literal. Capped independently of `numbers` because they
-    are different lists over the same result — a payload can carry fifty distinct values under
-    forty labels — and sharing one budget between them would make either one's contents depend on
-    the other's.
-
-    Silent on a non-JSON result, which is not a failure: `labelled_values` refuses to guess a name
-    out of prose, and the figures are on the wire regardless.
+    Capped independently of `numbers`, so neither list's contents depend on the other's. Empty for a
+    non-JSON result: `labelled_values` does not guess names out of prose.
     """
     quantities = labelled_values(text)
     if len(quantities) > settings.stream_max_result_numbers:
@@ -220,15 +145,8 @@ def _capped_values(tool: str, text: str) -> list[ResultValue]:
 def _inline(text: str) -> str:
     """The result itself when it is small enough to ride along, or `""` when it is not.
 
-    Measured in bytes for the same reason `tool_results.stored_within_cap` measures in bytes: the
-    cap is protecting a wire, and a result full of multi-byte characters is up to four times its
-    length in what is
-    actually sent.
-
-    No log line on the empty case, and that is the difference from every other cap in this file.
-    Those are *truncations*, where silence reads as completeness; this is a shortcut declining to
-    apply, and the result stays reachable through its ref exactly as it always was. Nothing is
-    lost, so there is nothing to report.
+    Measured in bytes, since the cap protects a wire. Not logged when empty: nothing is lost, as the
+    result stays reachable through its ref.
     """
     if settings.stream_inline_result_bytes <= 0:
         return ""

@@ -2,6 +2,8 @@
 
 **Status:** accepted
 
+**Superseded-by:** [D-2026-08-28-a-gate-that-cannot-fire-and-a-rate-with-no-denominator](D-2026-08-28-a-gate-that-cannot-fire-and-a-rate-with-no-denominator.md) (in part)
+
 ## Context
 
 `[tool.mutmut]` has named seven invariant-bearing modules since it was written — the authorization

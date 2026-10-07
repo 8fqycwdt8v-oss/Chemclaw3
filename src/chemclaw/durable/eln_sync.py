@@ -1,23 +1,14 @@
-"""Durable ELN sync (plan step 4.5): fetch → validate → index → transcribe, on the bg queue.
+"""Durable ELN sync: fetch → validate → index → transcribe, on the `background-jobs` queue.
 
-A thin Temporal wrapper over `chemclaw.ingest.eln.sync.sync_entries`: the activity wires the
-production
-adapter and fingerprint stores and does all the I/O (ELN read, DB writes); the workflow invokes
-it with the high-water cursor. It runs on the
-`background-jobs` queue (light, periodic work), and a Temporal Schedule drives it
-(`durable/schedules.py`). The sync is **self-cursoring and per-source**: each active ingest
-source carries its own cursor in `sync_cursors` (keyed by the registry source name). A
-scheduled run (no `since`) loads each source's cursor, syncs from it, and stores the advanced
-value — so two ingest sources whose newest entries differ never let one skip the other's
-lagging entries (the per-source cursor fix, D-054). An explicit `since` (a manual backfill)
-runs every source from that point and does not touch any stored cursor. Each source is
-drained in bounded, heartbeating chunks (`eln_sync_batch_size` new entries per activity
-attempt, cursor persisted per chunk), so an arbitrarily large backlog makes durable forward
-progress instead of wedging one over-window attempt forever; only the first chunk reaches
-into the late-file overlap window, so a drain never replays it once per chunk. One *run* is
-bounded too (`eln_sync_max_iterations`), continuing as new with its position so that history
-length is a function of the bound and not of the backlog. Factories are module-level so tests
-swap them for in-memory stores.
+A thin Temporal wrapper over `chemclaw.ingest.eln.sync.sync_entries`, driven by a Schedule. Each
+active ingest source keeps its own cursor in `sync_cursors`, so sources never skip each
+other's lagging entries (D-054). A scheduled run loads, syncs from and stores each cursor; an
+explicit `since` (manual backfill) runs every source from that point and stores nothing.
+
+Each source drains in bounded, heartbeating chunks (`eln_sync_batch_size`), persisting the
+cursor per chunk; only the first chunk reaches into the late-file overlap window. A run
+continues as new after `eln_sync_max_iterations` chunks so history stays bounded. Factories are
+module-level so tests swap them for in-memory stores.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -81,9 +72,8 @@ class ElnSyncOutcome(BaseModel):
     # Reported separately because a run that ingests thousands and rejects thousands is a broken
     # source reporting healthy progress, and one total cannot say so.
     rejected: int = 0
-    # Sources this run could not drain at all, named rather than counted. A count would say "one
-    # source is dark" without saying which, and the answer to that question is what an operator
-    # acts on. Bounded by the source list, like every other field carried across `continue_as_new`.
+    # Sources this run could not drain at all, named so an operator knows which. Bounded by the
+    # source list.
     failed_sources: list[str] = []
     next_cursor: datetime
 
@@ -92,9 +82,7 @@ class ElnSyncPlan(BaseModel):
     """The two live values one drain is fixed to, read once and recorded in history."""
 
     sources: list[str]
-    # Read here rather than in workflow code because it decides how many activity commands the run
-    # emits, so a replaying worker must see the value the *first* attempt recorded and not whatever
-    # the config says now — the same argument `plan_label_sync` and `plan_document_sync` make.
+    # Read in the activity: it decides the command count, so a replay must see the recorded value.
     max_iterations: int
 
 
@@ -113,9 +101,8 @@ class ElnSyncState(BaseModel):
     since: datetime | None = None
     # The cursor within the source in progress, carried so a continued run resumes mid-source.
     source_since: datetime | None = None
-    # The late-file overlap window is a per-*run-chain* re-check, not a per-chunk one, so this
-    # stays False across `continue_as_new` — reaching behind the cursor once per chunk is
-    # quadratic over a backlog.
+    # The overlap window is re-checked once per run chain, so this stays False across
+    # `continue_as_new`.
     apply_overlap: bool = True
     ingested: int = 0
     citation_only: int = 0
@@ -145,8 +132,7 @@ def _absorb(state: ElnSyncState, summary: IngestSummary) -> None:
 async def plan_eln_sync() -> ElnSyncPlan:
     """Name the active ingest sources and fix the run chain's iteration bound.
 
-    Both are live reads that belong in an activity: the source set because it is deployment
-    configuration, and `max_iterations` because it decides a command count — see `ElnSyncPlan`.
+    Both are live reads, so they belong in an activity — see `ElnSyncPlan`.
     """
     return ElnSyncPlan(
         sources=active_ingest_source_names(),
@@ -169,19 +155,12 @@ class SyncChunk(BaseModel):
 class _BoundedIngest:
     """An `ElnAdapter` wrapper that caps how many *new* entries one sync attempt sees.
 
-    Entries at or before the run's cursor (`since`) — the overlap window's idempotent re-ingest —
-    pass through uncapped: they are cheap re-writes and never advance the cursor. Entries after it
-    are sorted oldest-first and truncated to `limit`, so one activity attempt does a bounded amount
-    of ingest work no matter how large the backlog, and `truncated` tells the workflow to come
-    back for the rest with the advanced cursor. Because the cap applies only past `since`, every
-    kept chunk that was truncated strictly advances the cursor — the loop always makes progress.
-
-    **The source's own truncation counts too** (`fetch_was_truncated`), and this is the half that
-    was missing. This cap sees only what the fetch handed over, so a source that cut its page short
-    of what the caller asked for — a warehouse whose `fetch_limit` landed inside a block of rows
-    sharing one watermark — looked exactly like a source with nothing new: `has_more` was `False`,
-    the workflow stopped, and the guard below it was never reached. Asking the adapter turns that
-    into "come back", which either advances the cursor or trips the guard out loud.
+    Entries at or before `since` (the overlap re-ingest) pass uncapped and never advance the cursor.
+    Entries after it are sorted oldest-first and truncated to `limit`, so each attempt is bounded
+    and
+    every truncated chunk strictly advances the cursor. A source's own truncation
+    (`fetch_was_truncated`) also sets `truncated`, so a short page means "come back" rather than
+    "nothing new".
     """
 
     def __init__(
@@ -196,15 +175,11 @@ class _BoundedIngest:
     async def _fetch(self, since: datetime, limit: int | None) -> list[RawEntry]:
         """Ask the wrapped adapter for entries, offering each capability only if it takes it.
 
-        `ElnAdapter.fetch_new_entries` publishes a one-argument signature and D-120 promises a new
-        source costs zero core edits, so an out-of-tree adapter written to that signature must not
-        be handed arguments it never declared — it would raise `TypeError` on its first chunk.
-        `accepts_a_limit` and `accepts_a_late_arrival_switch` are the capability probes, beside
-        `fetch_was_truncated`, which asks the same kind of question about the same seam.
-
-        **The late-arrival switch is passed only to say "not this chunk".** `True` is what every
-        adapter already does, so sending it would break an adapter that predates the flag for no
-        change in behaviour.
+        An out-of-tree adapter written to the one-argument `fetch_new_entries` signature must not
+        get
+        arguments it never declared; `accepts_a_limit` and `accepts_a_late_arrival_switch` are the
+        probes. The late-arrival switch is sent only as `False`, since `True` is the default
+        behaviour.
         """
         extra: dict[str, Any] = {}
         if limit is not None and accepts_a_limit(self._inner):
@@ -216,30 +191,15 @@ class _BoundedIngest:
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries.
 
-        **Ordered, split and truncated on `entry_window`**, which is the one definition of "the
-        timestamp an entry is filtered on" — the later of creation and amendment, because an
-        amended entry counts as new. All three used to read `created_at`, and the cursor
-        `sync_entries` stores has always been the window, so the two disagreed about which entries
-        a chunk contained. The consequence was silent loss rather than duplication: the kept chunk
-        could hold an entry whose window is later than a *dropped* entry's, so the cursor advanced
-        past entries this cap had discarded and the next fetch filtered them out for good. Measured
-        on a batch whose amendments run against its creations — old entries corrected recently,
-        which is the ordinary shape — 50 of 150 became unreachable in one chunk, with no
-        `ingest_rejections` row, because an entry the cap drops was never rejected by anything.
+        Ordered, split and truncated on `entry_window` (the later of creation and amendment), the
+        same
+        timestamp the stored cursor uses, so the cursor never advances past an entry the cap
+        dropped.
 
-        `ingest/eln/warehouse/sql.py` already orders and limits on `COALESCE(modified, created)`,
-        so this also makes the in-process cap agree with the page boundary the source itself cut.
-
-        **The bound is now offered to the source as well as applied here, and only on the chunks
-        where the two mean the same thing.** Truncating after the read is what made a chunked drain
-        re-read the whole outstanding set per chunk — O(corpus²/batch); the warehouse adapter turns
-        `limit` into its `LIMIT` and stops asking for 5,000 rows to keep 100. It is offered only
-        when `since >= self._since`, which is exactly a chunk with no overlap rewind behind it: on
-        the *first* chunk of a run the caller's floor sits `eln_sync_overlap_seconds` before the
-        cursor, so a `limit` applied at that floor would be spent on the overlap replay and could
-        return a chunk of nothing but already-ingested entries — a fetch that reports itself
-        truncated while the cursor cannot advance, which is the wedge the workflow's own guard
-        stops loudly. Every continuation chunk, which is what a large drain is made of, is bounded.
+        The bound is also offered to the source, so it can `LIMIT` its own read, but only when
+        `since >= self._since` (no overlap rewind): on the first chunk, a limit applied at the
+        overlap
+        floor could be spent entirely on already-ingested entries and stall the cursor.
         """
         bounded = since >= self._since
         entries = sorted(
@@ -267,17 +227,9 @@ class _BoundedIngest:
         return self._inner.map_to_ord(raw)
 
 
-# The sync activity's real work happens inside `sync_entries`, which this layer must not modify
-# (the loop is backend-agnostic core, G6) — so liveness is time-based: something beats while the
-# sync runs, letting Temporal detect a dead worker within `eln_sync_heartbeat_timeout_seconds`
-# rather than waiting out the whole start-to-close.
-#
-# That something is `durable.heartbeat.beating`, the helper extracted for exactly this shape. The
-# copy this file used to carry derived its interval as `timeout / 3` with **no floor**, so an
-# ENV-set timeout of a second — permitted, the field is only `gt=0` — beat three times a second
-# against the Temporal server for the whole chunk. `beating()` uses `max(1.0, timeout / 4)`, and
-# that floor is the difference. The eager pre-beat at the call site stays: `beating()` waits one
-# interval before its first beat and a fast sync may finish before it.
+# `sync_entries` is backend-agnostic core and has no progress hooks, so liveness is time-based via
+# `durable.heartbeat.beating` (one-second floor on the interval). The eager pre-beat at the call
+# site covers a sync shorter than one interval.
 
 
 @durable_activity("background")
@@ -285,37 +237,19 @@ class _BoundedIngest:
 async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = True) -> SyncChunk:
     """Ingest a bounded chunk of entries newer than `since` from the one named ingest source.
 
-    Bounded (`eln_sync_batch_size`) and heartbeating, so a large backlog can neither blow the
-    activity's start-to-close window in one giant attempt nor hide a dead worker until it lapses.
-    `apply_overlap` is True only for a run's first chunk: the late-file overlap window is a
-    per-run re-check, so subsequent chunks of the same drain fetch from the advancing cursor
-    instead of replaying the whole window once per chunk (quadratic during a backlog drain).
+    Bounded (`eln_sync_batch_size`) and heartbeating. `apply_overlap` is True only for a run's
+    first chunk, so later chunks fetch from the advancing cursor instead of replaying the window.
 
-    **Every record this chunk refused reaches the rejection ledger, and this is where that set is
-    known** (`D-2026-08-29-a-bound-derived-twice-is-two-bounds`). It used to be found by a
-    pre-flight inside `OrdJsonAdapter.fetch_new_entries`, which is handed the fetch *floor* and
-    knows neither `since` nor `eln_sync_batch_size` — so it re-derived its caller's chunk from
-    strictly less information than its caller had, and got it wrong in the direction nothing can
-    recover from: the overlap window sorts first, so its flat `entries[:batch_size]` slice fell
-    short of `_BoundedIngest`'s overlap-plus-batch composition by exactly the overlap count, and
-    the entries past it were refused with the cursor already advanced beyond them. A missed row is
-    therefore permanent — no later fetch offers that entry again.
-
-    Here there is nothing to derive: `summary.rejected` *is* what this chunk processed and refused,
-    with the reason the sync reported, so the two sets are one by construction and no entry is
-    mapped a second time to find them. The set is also wider in the way the ledger wants — an entry
-    whose record or fingerprint failed, and one stamped implausibly far in the future, are records
-    this system was offered and would not take, exactly like a message it could not map.
+    Every record this chunk refused is written to the rejection ledger from `summary.rejected`,
+    the exact set this chunk processed and refused — the cursor is already past those entries, so
+    a missed row would be permanent.
     """
     data_source = make_data_source(source)
     ingest = data_source.ingest
     if ingest is None:  # names come from the ingest-filtered set, so this is a wiring bug
         raise ChemclawError(f"data source {source!r} has no ingest half")
-    # `apply_overlap` is what makes this the run's *first* chunk: the only chunk whose floor
-    # reaches behind the cursor, and therefore the only one that can answer "will any scheduled run
-    # fetch this file". A continuation chunk's floor is the advancing cursor, and every file
-    # between the two was ingested by this very run — judging lateness there re-refuses what the
-    # drain just took in, growing by a batch per chunk. See `ingest/eln/adapter.is_late_arrival`.
+    # Only the first chunk reaches behind the cursor, so only it can judge late arrivals; on a
+    # continuation chunk this run itself ingested everything in between.
     bounded = _BoundedIngest(ingest, since, settings.eln_sync_batch_size, first_chunk=apply_overlap)
     # First beat immediately (a fast sync may finish before `beating()`'s first interval elapses),
     # then it keeps beating for as long as the chunk actually takes.
@@ -334,15 +268,10 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
         f"eln sync {source}",
         settings.eln_sync_heartbeat_timeout_seconds,
     )
-    # Never raises, and deliberately not folded into `sync_entries`: that loop is backend-agnostic
-    # core with every dependency injected, and a database write it did not take as a parameter would
-    # end that property. The ledger is a side record about the run, so the durable layer that owns
-    # the run's I/O writes it.
+    # Never raises. Kept out of `sync_entries` so that loop stays I/O-free with injected
+    # dependencies.
     await record_refusals(source, {entry.entry_id: entry.reason for entry in summary.rejected})
-    # The other half of the same ledger: an entry this chunk *stored* is no longer refused, however
-    # it was refused before — a source amended into shape, or a rule that changed under it (#482's
-    # citation-only tier took in records an earlier run had refused). Here for the reason the line
-    # above is: this is where the chunk's outcome is known, and `sync_entries` stays I/O-free.
+    # An entry this chunk stored is no longer refused, whatever refused it before.
     await forget_refusals(source, summary.ingested)
     return SyncChunk(summary=summary, has_more=bounded.truncated)
 
@@ -362,21 +291,15 @@ async def store_sync_cursor(source: str, cursor: datetime) -> None:
 
 
 @durable_workflow("background")
-# Declared, where its near-twin `DocumentShareSyncWorkflow` is not, and the difference is not
-# the shape of the drain — it is that this one has a starter that waits. `cli.live_data.
-# backfill` starts it with an explicit `since`, **no `execution_timeout`**, and then awaits
-# `handle.result()`: a plain exception parks a run nothing will ever end while the bring-up
-# blocks on it. Failing costs at most the chunk in flight, because every chunk persists its
-# cursor through `store_sync_cursor` — which is the same reason `schedule_run_timeout_seconds`
-# is safe to state at all. D-2026-08-27.
+# Declared (unlike `DocumentShareSyncWorkflow`) because `cli.live_data.backfill` awaits the
+# result with no execution timeout: a parked run would block it forever. Failing costs at most
+# the chunk in flight, since every chunk persists its cursor.
 @workflow.defn(failure_exception_types=[Exception])
 class ElnSyncWorkflow:
     """Run one ELN sync durably, returning what was ingested across every active ingest source.
 
-    Scheduled runs pass no `since`: for each active ingest source the workflow loads its stored
-    cursor, syncs, and stores the advanced one — so consecutive firings never re-do or skip work,
-    and each source advances on its own timeline. A manual run may pass an explicit `since` to
-    backfill every source from a chosen point without disturbing any stored cursor.
+    Scheduled runs pass no `since` and advance each source's stored cursor independently; a manual
+    run may pass `since` to backfill every source without touching any stored cursor.
     """
 
     @workflow.run
@@ -385,17 +308,10 @@ class ElnSyncWorkflow:
     ) -> ElnSyncOutcome:
         """Sync each active source from its cursor (or `since`); advance cursors when scheduled.
 
-        Each source is synced in bounded chunks (`eln_sync_batch_size` new entries per activity
-        attempt), the cursor advancing — and, when scheduled, being persisted — after every chunk.
-        A large backfill therefore makes durable forward progress chunk by chunk instead of
-        retrying one over-window batch forever.
-
-        **And the run itself is bounded.** After `eln_sync_max_iterations` chunks the drain hands
-        its position to a fresh execution with `continue_as_new`, so one run's history is a
-        function of the bound rather than of the backlog. Without it this was the only drain in the
-        package whose history grew without limit: at a measured 12.2 events per chunk, a first
-        backfill hit Temporal's 51,200-event ceiling around 420,000 entries and was *terminated* —
-        not failed, so nothing retried and nothing was pushed back.
+        Each source syncs in bounded chunks, the cursor advancing (and, when scheduled, persisted)
+        after each. After `eln_sync_max_iterations` chunks the run continues as new, so history
+        length
+        depends on the bound rather than the backlog.
 
         `state` is passed only by `continue_as_new`; a scheduled or manual run passes nothing.
         """
@@ -439,34 +355,17 @@ class ElnSyncWorkflow:
                     retry_policy=BAD_DATA_RETRY,
                 )
             except ActivityError as exc:
-                # **One source's fate is not the run's.** A drain over N sources is N independent
-                # drains that happen to share a schedule: they have separate cursors (D-054),
-                # separate manifests and separate backends, and nothing about one being
-                # unreachable says anything about the others. Unhandled, the first raise ended the
-                # workflow, so every source *after* it in the plan was never synced and none of
-                # their cursors advanced — a warehouse that was down for a week silently stopped
-                # the file-drop sources ingesting too.
-                #
-                # **A cancel is not a source failure, and narrowing the catch does not separate
-                # them.** This clause used to say that catching `ActivityError` rather than
-                # `Exception` was itself what kept a cancellation out — it is not. Temporal
-                # delivers a workflow cancellation to the awaiting `execute_activity` as exactly
-                # this type, with a `temporalio.exceptions.CancelledError` cause, so the narrow
-                # catch swallowed it: measured, a cancelled drain dropped the source in flight,
-                # synced the rest and ended COMPLETED, and the SDK's `uncancel` after an absorbed
-                # cancel meant no later activity was cancelled either. `is_cancelled_exception` is
-                # the SDK's own predicate for this conditional and covers the `ActivityError`-with-
-                # `CancelledError`-cause shape, so nothing here restates a shape upstream owns; the
-                # re-raise is what makes the run end CANCELLED rather than successful. What the old
-                # comment was right about is the boundary: a `continue_as_new` and a defect in the
-                # workflow's own code below are about the run and are not raised inside this `try`
-                # at all, and bad data never reaches here — it rejects and continues inside
-                # `sync_entries`, which is what `BAD_DATA_RETRY` exists to keep true.
+                # One source's failure is not the run's: sources have separate cursors and backends,
+                # so the rest
+                # still sync. A workflow cancellation arrives as
+                # `ActivityError(cause=CancelledError)` and is
+                # re-raised so the run ends CANCELLED. Bad data never reaches here; it is rejected
+                # inside
+                # `sync_entries`.
                 if is_cancelled_exception(exc):
                     raise
-                # The source is dropped rather than retried in-loop: its cursor is untouched, so
-                # the next scheduled run resumes it from exactly where it stopped, and a source
-                # that is down stays down for one run rather than spinning this loop against it.
+                # Dropped rather than retried in-loop: its cursor is untouched, so the next run
+                # resumes it.
                 workflow.logger.warning("eln sync for %s failed; skipping it: %s", source, exc)
                 state.failed_sources.append(source)
                 state.remaining = state.remaining[1:]
@@ -478,9 +377,8 @@ class ElnSyncWorkflow:
                 if state.remaining and iterations >= state.max_iterations:
                     workflow.continue_as_new(args=[since, state])
                 continue
-            # The overlap window is a per-drain re-check for late-landing files: only the first
-            # chunk reaches behind the cursor; later chunks — including those in a continued run —
-            # fetch from the advancing cursor, or every chunk would replay the window (quadratic).
+            # Only the first chunk of a drain reaches behind the cursor for late files; later chunks
+            # (including continued runs) fetch from the advancing cursor.
             state.apply_overlap = False
             _absorb(state, chunk.summary)
             iterations += 1
@@ -496,9 +394,9 @@ class ElnSyncWorkflow:
                 state.source_since = chunk.summary.next_cursor
             else:
                 if chunk.has_more:
-                    # Unreachable with a well-behaved adapter (a truncated chunk always advances
-                    # the cursor), but a buggy source must wedge one source with a warning, not
-                    # spin this loop — and Temporal's event history — forever.
+                    # Unreachable with a well-behaved adapter; a buggy source stops with a warning
+                    # rather than
+                    # looping forever.
                     workflow.logger.warning(
                         "eln sync for %s reported more entries but no cursor advance; stopping",
                         source,

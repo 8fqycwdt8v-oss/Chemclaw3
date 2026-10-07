@@ -1,51 +1,21 @@
 """`python -m chemclaw.cli.live_data` — prove the seeded corpus survives the pipeline *by value*.
 
-Every other live lane asks whether a capability is **reachable**. `live_jobs` asks whether a
-durable job runs; `live_probes` asks whether a model uses the right tool. Neither asks the
-question a chemist actually cares about: **is the number in the answer the number in the paper?**
-
-That question was never asked here, and the 2026-08-17 four-repo run shows what the gap costs. It
-reported "638 note proposals" and called ingestion proven. 638 is a count. A count cannot tell you
-that 57% of the seeded corpus never entered the system at all, which is what this lane found on its
-first run.
-
-## The ground truth is the paper, not the previous stage
-
-`Chemclaw3_mock` seeds ~10,000 ORD records from **real, published, cited** HTE screens, and it
-commits the raw factor tables it expanded them from as CSVs in `app/eln/real_data/`. Those CSVs are
-the only honest reference point: they are upstream of the mock's seeding code *and* upstream of
-this repo's adapter, so a check against them cannot be satisfied by two stages agreeing on the same
-mistake. Every assertion below compares against the CSV, never against the stage before it.
-
-## What it measures
-
-One ledger, per dataset, following the published rows down the pipeline:
+Other live lanes ask whether a capability is reachable; this asks whether the number in the
+answer is the number in the paper. `Chemclaw3_mock` seeds ORD records from real, published HTE
+screens and commits the raw factor tables as CSVs in `app/eln/real_data/`. Every assertion compares
+against those CSVs, never against the previous stage, so two stages agreeing on one mistake cannot
+pass. One ledger per dataset:
 
     published (CSV) -> seeded (ORD JSON) -> mapped (OrdReaction) -> reaction_records
 
-It stops at the stored record, which is now the whole of the transcription path.
-`D-2026-08-25-an-eln-transcription-is-data-not-a-claim` took the PR-gate off this hop, because
-`record_from_ord_reaction` infers nothing and so hands a reviewer nothing to decide. A record is
-readable the moment it is ingested, so the lane asks Postgres for the record itself rather than
-stopping short of a human's merge — which is a stronger check than the proposal count it replaces,
-not a weaker one.
+Each dataset declares the tier its records must arrive in; one is citation-only because the source
+names a coupling partner without its structure
+(`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`). Disagreement in either
+direction is red: a refused or demoted record has regressed, and a citation-only record arriving
+structured means a structure was invented.
 
-Every dataset declares the tier its records must arrive in, and one of them is declared
-*citation-only* deliberately (see `_DATASETS`): the source names a coupling partner without giving
-its structure, so those records arrive citable and outside every structure index
-(`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`). It is a failure when
-reality disagrees with the declaration, **in either direction**: a record that is refused, or that
-lands in a lower tier than declared, has regressed, and a citation-only dataset whose records
-suddenly arrive *structured* means somebody taught the adapter to invent a structure it cannot know.
-Both are red here, which is what makes this a regression detector rather than a number to admire.
-
-## Why no model is involved
-
-The same argument `cli/live_jobs.py` makes for the durable half. Grading an answer conflates a
-corpus that never held the data with a model that did not look for it — and the corpus half is the
-one nothing was checking. `make live-probes` is the strictly later question, and it is only
-interpretable once this lane is green: the 2026-08-17 grounded probes were graded against a corpus
-that contained **none** of the ORD data they name.
+No model is involved (as in `cli/live_jobs.py`); `make live-probes` is only interpretable once this
+lane is green.
 """
 
 from __future__ import annotations
@@ -77,14 +47,12 @@ from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError, pattern_budge
 
 logger = logging.getLogger(__name__)
 
-# The epoch every corpus read starts from. The ORD exports carry payload timestamps years in the
-# past and one shared mtime, so any later floor silently reads an empty corpus — the exact failure
-# the backfill below exists to undo.
+# The epoch every corpus read starts from. ORD exports carry old payload timestamps and one shared
+# mtime, so any later floor silently reads an empty corpus.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
-# Yields are compared at this precision unless a dataset declares its own. Four of the five
-# published tables carry two decimals, so six places is exact for them while still catching a
-# stage that rounds, truncates or rescales a measurement.
+# Default yield comparison precision: exact for the two-decimal published tables, while still
+# catching a stage that rounds, truncates or rescales.
 _YIELD_PLACES = 6
 
 
@@ -92,18 +60,10 @@ _YIELD_PLACES = 6
 class Dataset:
     """One published dataset, and how its CSV columns line up with the ORD records seeded from it.
 
-    This is a *binding*, in the sense `D-2026-08-04-the-schema-is-a-file` gives the word: the
-    published tables and the ORD input keys are both facts about somebody else's data, so they are
-    declared here rather than inferred. Inferring them is how a check ends up asserting that a
-    corpus agrees with itself.
-
-    `tier` is the declaration this lane is really built around. `CITATION_ONLY` says every record
-    is *expected* to arrive naming a species without its structure — and the check fails if one
-    arrives structured, because the only way to get there is to invent the structure the source
-    never published. It was `reachable=False` while such a record was refused outright, and the
-    same dataset is the one that changed: the refusal cost 5,760 records their yields and
-    conditions, and the owner decision recorded in
-    `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` keeps them as evidence.
+    A binding: published columns and ORD input keys are facts about someone else's data, declared
+    here
+    rather than inferred so the check cannot assert a corpus agrees with itself. `tier` is the
+    declaration the lane is built around; `CITATION_ONLY` fails if a record arrives structured.
     """
 
     csv_name: str
@@ -114,11 +74,9 @@ class Dataset:
     # (ORD input key, CSV column) for each experimental factor that identifies a row.
     factors: tuple[tuple[str, str], ...] = ()
     yield_column: str = ""
-    # Decimal places the seeded record is expected to carry. Declared rather than assumed: one
-    # published table reports a UV-area yield at full float precision (`4.76410921845962`) and the
-    # mock rounds it to ORD's reporting precision on the way in. Pinning the rounding here keeps
-    # the check strict — a stage that truncated further, or that seeded the mass-ion column
-    # instead, still fails — where a loosened global tolerance would have hidden both.
+    # Decimal places the seeded record is expected to carry. Declared per dataset because one table
+    # reports full float precision and the mock rounds it to ORD's reporting precision; a global
+    # tolerance would hide further truncation or a swapped column.
     yield_places: int = _YIELD_PLACES
     tier: RecordTier = RecordTier.STRUCTURED
     # (ORD input key, CSV column) for each species the source *names* without a structure. Checked
@@ -135,9 +93,9 @@ class Dataset:
         return tuple(sorted(set(self.partitions.values())))
 
 
-# The five published screens, bound to the ORD keys `Chemclaw3_mock` seeds them under. Counts are
-# deliberately absent: a hard-coded row count is a second source of truth that drifts, and the CSV
-# is right there.
+# The five published screens, bound to the ORD keys `Chemclaw3_mock` seeds them under. No row
+# counts:
+# the CSV is the source of truth.
 _DATASETS: tuple[Dataset, ...] = (
     Dataset(
         csv_name="bh_amination_hte.csv",
@@ -213,8 +171,7 @@ _DATASETS: tuple[Dataset, ...] = (
 class Check:
     """One assertion about the seeded corpus, and what was actually observed.
 
-    `observed` is kept even when the check passes, for the reason `cli/live_jobs.py` gives: a green
-    run that cannot say what it saw is a green run nobody can audit.
+    `observed` is kept even on a pass, so the record says what was seen.
     """
 
     name: str
@@ -257,22 +214,9 @@ class DataRun:
 def _default_real_data(ord_export_dir: Path) -> Path | None:
     """Where the mock's published factor tables sit, given its ORD export directory.
 
-    A function rather than an expression inside `main` because the arithmetic is off-by-one-able
-    and was: it walked up **three** levels and derived `<mock repo>/data/app/eln/real_data`, a path
-    that has never existed. Inline, nothing could reach it without running the whole lane, so the
-    bring-up's corpus backfill failed at argparse and the ORD half of the corpus stayed invisible —
-    while `up.sh` reported only a warning pointing at a log.
-
-    The two ends are both facts about `Chemclaw3_mock`'s layout, fixed by its own `start.sh` and by
-    this lane's `up.sh`: exports at `<repo>/data/eln/exports/ord` — four levels down — and the
-    tables at `<repo>/app/eln/real_data`. Hence `parents[3]`.
-
-    `None` when the export directory is too shallow to derive from, which is the *shipped default*
-    (`ord_export_dir = "data/eln-exports/ord"`, relative, three parts) and therefore the common
-    case outside this lane — not an edge. Returning it rather than indexing blindly is what keeps
-    `main` free to print the message that names the flag to pass; the first version of this fix
-    raised a bare `IndexError: 3` from inside `pathlib` instead, which tells a reader nothing about
-    what to do next.
+    Both ends are `Chemclaw3_mock`'s layout: exports at `<repo>/data/eln/exports/ord` and tables at
+    `<repo>/app/eln/real_data`, hence `parents[3]`. Returns `None` when the export directory is too
+    shallow to derive from — the shipped relative default — so `main` can name the flag to pass.
     """
     try:
         root = ord_export_dir.parents[3]
@@ -291,9 +235,8 @@ def _published_rows(real_data: Path, dataset: Dataset) -> list[dict[str, str]]:
 def _published_key(dataset: Dataset, row: dict[str, str]) -> tuple[Any, ...]:
     """The (dataset id, factors…, yield) tuple that identifies one published measurement.
 
-    A *multiset* of these is compared against the seeded corpus rather than a set, so a duplicated
-    row and a dropped one are both visible. Real screens repeat factor combinations across
-    replicates, so requiring uniqueness would be a claim about the chemistry, not about the code.
+    Compared as a multiset so duplicated and dropped rows are both visible; replicates legitimately
+    repeat factor combinations.
     """
     if dataset.partition_column is not None:
         dataset_id = dataset.partitions[row[dataset.partition_column]]
@@ -312,14 +255,9 @@ def _published_key(dataset: Dataset, row: dict[str, str]) -> tuple[Any, ...]:
 def _identifier(payload: dict[str, Any], key: str) -> str | None:
     """The first identifier value on one named ORD input, whatever its type — None if absent.
 
-    Deliberately type-agnostic: one real dataset identifies a coupling partner by `NAME` because
-    no structure was ever published for it, and a reader that demanded SMILES here could not even
-    *count* those records — which is the whole thing this lane exists to make visible.
-
-    **An absent input is data, not an error.** The Perera flow screen runs real no-ligand (480) and
-    no-base (720) control conditions, and the published table records them as blank cells. Raising
-    here would have made this lane unable to read a fifth of that dataset; treating the absence as
-    a distinct key value is what lets it check the controls arrived as controls.
+    Type-agnostic because one dataset identifies a partner only by `NAME`. An absent input is data:
+    no-ligand and no-base control conditions are blank cells, and treating absence as a key value
+    checks that controls arrived as controls.
     """
     entry = payload.get("inputs", {}).get(key)
     if entry is None:
@@ -334,10 +272,7 @@ def _identifier(payload: dict[str, Any], key: str) -> str | None:
 def _seeded_yield(payload: dict[str, Any], places: int = _YIELD_PLACES) -> float | None:
     """The headline yield percentage on an ORD export, or None when it records none.
 
-    `is not None` and never a truthiness test. 236 of the 3,955 published Buchwald-Hartwig wells
-    are exactly 0.00% — a real, informative result (that combination failed) that a falsy check
-    silently converts into "unknown". This is not hypothetical: the first draft of this lane's own
-    verification script had that bug and mis-reported 21 records.
+    `is not None`, never truthiness: a 0.00% yield is a real result, not "unknown".
     """
     for outcome in payload.get("outcomes", ()):
         for product in outcome.get("products", ()):
@@ -376,8 +311,8 @@ def check_seeding_is_faithful(
 ) -> list[Check]:
     """Every published measurement is seeded exactly once, unchanged — and nothing else is.
 
-    Multiset equality in both directions. A one-directional check would pass a corpus that
-    duplicated every row, and a count check would pass one that swapped two yields.
+    Multiset equality in both directions: one direction would pass duplication, a count would pass
+    swapped yields.
     """
     checks: list[Check] = []
     for dataset in _DATASETS:
@@ -403,8 +338,7 @@ def check_seeding_is_faithful(
 def check_zero_yields_survive(real_data: Path, seeded: dict[str, list[dict[str, Any]]]) -> Check:
     """A 0% yield is evidence, and it has to arrive as 0% rather than as silence.
 
-    Counted across every dataset at once because the failure mode is a shared one — a single falsy
-    test anywhere on the path erases all of them, and one aggregate number makes that unmissable.
+    Counted across all datasets, since one falsy test anywhere on the path erases all of them.
     """
     published = 0
     for dataset in _DATASETS:
@@ -432,10 +366,9 @@ def check_adapter_matches_its_declaration(
 ) -> list[Check]:
     """Each dataset maps, whole, into exactly the tier `_DATASETS` declares — no drift either way.
 
-    The asymmetry matters. A refused record, or one landing citation-only in a structured dataset,
-    is a plain regression. A record of a citation-only dataset that arrives *structured* is worse
-    than a regression: the only way to get there is to have invented a structure the source never
-    published, which would propagate into a fingerprint index and a similarity hit.
+    A refused or demoted record is a regression; a citation-only record arriving structured is
+    worse,
+    since an invented structure would reach fingerprint indexes and similarity hits.
     """
     checks: list[Check] = []
     for dataset in _DATASETS:
@@ -463,9 +396,8 @@ def check_adapter_preserves_values(
 ) -> list[Check]:
     """For every record the adapter accepts, its published factors and yield are still there.
 
-    The comparison is against the CSV, so this is not "the adapter agrees with the file it read".
-    Structures are compared as the strings both sides publish: the adapter is asserted to preserve
-    what it was given, and any canonicalisation it applied would be a change this must see.
+    Compared against the CSV, with structures as the published strings, so any canonicalisation the
+    adapter applied is a change this sees.
     """
     checks: list[Check] = []
     for dataset in _DATASETS:
@@ -521,12 +453,9 @@ def check_named_species_arrive_verbatim(
 ) -> list[Check]:
     """Every species the source only *names* arrives as that name, character for character.
 
-    The citation-only tier's half of "the number in the answer is the number in the paper": what
-    stands in for a structure the paper never gave is the paper's own text, and a stage that
-    normalised, resolved or dropped it would be changing what the source said. Multiset equality
-    against the published column, for the reason `check_seeding_is_faithful` gives — a count would
-    pass a corpus that swapped two partners. Products are left out: the published tables name none,
-    so a product's name is the mock's text rather than the paper's.
+    For the citation-only tier the paper's own text stands in for a structure, so any normalisation
+    would change what the source said. Multiset equality against the published column; products are
+    excluded because the published tables name none.
     """
     checks: list[Check] = []
     for dataset in _DATASETS:
@@ -556,9 +485,8 @@ def check_named_species_arrive_verbatim(
 def check_note_carries_the_number(mapped: dict[str, list[OrdReaction]]) -> Check:
     """The rendered note states the yield — including when the yield is zero.
 
-    The note body is what reaches the index, the retriever and eventually the answer, so a value
-    that survives every model above and is dropped here is a value the chemist never sees. A 0%
-    record is chosen deliberately: it is the one a truthiness test loses.
+    The note body is what reaches the index and the answer; a 0% record is chosen because a
+    truthiness test loses it.
     """
     zero: OrdReaction | None = None
     nonzero: OrdReaction | None = None
@@ -601,37 +529,21 @@ _PROSE_TIME = re.compile(r"for\s+(\d+(?:\.\d+)?)\s*h\b")
 async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
     """A condition stated only in prose reaches the record — as a **step**, not as a setpoint.
 
-    Both halves, because they are the two ways this can go wrong and they fail in opposite
-    directions. `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` forbids deriving a headline
-    `temperature_c`/`time_h` from a procedure: the first regex match in a procedure is the
-    *addition* temperature far more often than the reaction's, and a transcription nobody reviews
-    may not present a derived number as a recorded one. Segmentation is a different claim — a step
-    says what its own sentence says — so `_segment_steps` does extract per-step values, losslessly.
-
-    Which field it may be recovered *into* is decided, and the decision is the whole point.
-    `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
-    after measuring what it produced, because a procedure begins by charging a vessel and the
-    *addition* temperature is simply the first number it states — the entry that measurement was
-    taken on is written out once, in `ingest/eln/json_adapter._number`, which is the code that
-    stopped doing it; the ADR is the frozen copy, and a third would be the one free to drift. So
-    `OrdReaction.temperature_c`/`.time_h` are the structured field or absent, and the regex result
-    lives on `ReactionStep`, where "0 °C" belongs to the charging step and says so.
-
-    Both halves are asserted here, because each without the other is a check that passes for the
-    wrong reason: a record carrying no step temperature would mean the prose was lost entirely, and
-    a record carrying a *headline* setpoint it never stated would mean the fallback is back.
+    `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` forbids deriving a headline
+    `temperature_c`/`time_h` from a procedure (the first number is usually the addition
+    temperature),
+    while `_segment_steps` records per-step values losslessly. Both halves are asserted: no step
+    temperature means the prose was lost, and a headline setpoint never stated means the fallback is
+    back.
 
     Only records whose prose states both a temperature and a time are checked, and the count is
-    reported, because a silent denominator is how a check that stopped matching anything keeps
-    passing.
+    reported so a check matching nothing cannot pass silently.
     """
     adapter = JsonExportAdapter(str(eln_export_dir))
     raws = await adapter.fetch_new_entries(_EPOCH)
     checked = 0
     wrong: list[str] = []
-    # One budget for the whole check, matching how a real sync runs it: a per-entry budget would
-    # satisfy the derived guard below and bound nothing, since the cost this exists to bound is
-    # the page's total rather than any one entry's.
+    # One budget for the whole check, as a real sync runs it: the cost bounded is the page's total.
     with pattern_budget():
         for raw in raws:
             prose = str(raw.payload.get("procedure") or "")
@@ -642,25 +554,19 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
             try:
                 reaction = adapter.map_to_ord(raw)
             except PatternBudgetError:
-                # **Not swallowed, which the broad arm below would do.** `PatternBudgetError` is a
-                # bare `Exception`, so exhausting the page budget used to skip every remaining entry
-                # and let this check *pass* with a quietly smaller denominator — the exact "silent
-                # denominator" failure this function's own docstring names two paragraphs up. A
-                # binding too expensive to map a page is a finding, not a skippable entry.
+                # Re-raised before the broad arm below: an exhausted page budget is a finding, and
+                # skipping
+                # entries would shrink the denominator silently.
                 raise
             except Exception:
                 continue
             checked += 1
-            # `is not None` on the step values, and not a truthiness test: one fixture reads
-            # "cooled to 0 °C", and `0.0 or None` would report the extraction as a failure that it
-            # is not.
+            # `is not None`, not truthiness: "cooled to 0 °C" is a valid extraction.
             steps_carry = any(step.temperature_c is not None for step in reaction.steps) and any(
                 step.duration_h is not None for step in reaction.steps
             )
-            # The setpoint may be present only if the entry stated it in its own field. Read from
-            # the
-            # payload rather than assumed absent, so an entry that legitimately carries both is not
-            # counted as a regression.
+            # A setpoint may be present only if the entry stated it in its own field, read from the
+            # payload.
             stated = (
                 raw.payload.get("temperature_c") is not None,
                 raw.payload.get("time_h") is not None,
@@ -695,16 +601,9 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
 async def check_corpus_is_reachable(mapped: dict[str, list[OrdReaction]]) -> Check:
     """The mapped records actually landed in `reaction_records` — asked of Postgres, not of a log.
 
-    This is the check the 2026-08-17 run had no way to fail: it counted 638 proposals without ever
-    asking *which* records they were, and the answer was none of the ~4,200 ORD ones.
-
-    Since `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` the hop being checked is the
-    stored record rather than a PR-gate proposal, and the id is the ELN's own `reaction_id` — the
-    `reaction-` citation prefix is not stored, so a lookup never has to strip it.
-
-    **Counted per tier**, because a record stored in the wrong one is not reachable in the sense
-    that matters: a citation-only record stored `structured` would be served by structure search,
-    and a structured one stored `citation-only` would be withheld from it.
+    The id is the ELN's own `reaction_id` (the `reaction-` citation prefix is not stored). Counted
+    per
+    tier, since a record in the wrong tier is wrongly served by, or withheld from, structure search.
     """
     expected = Counter(
         (reaction.reaction_id, reaction.tier.value)
@@ -741,12 +640,10 @@ async def check_citation_only_is_not_structure_searchable(
 ) -> Check:
     """No citation-only record has a row in any index a structure search reads.
 
-    Asked of the tables rather than of a search, because a search can only fail to find something
-    for a reason it cannot state, while a row count of zero is the claim itself: with no
-    `reaction_fingerprints` row a similarity search has nothing to return, and with no
-    `reaction_labels` row the facet tools have nothing to count. (A row that predates an amendment
-    to citation-only is the one case this cannot see, and it is not a case the seeded corpus holds;
-    `ReactionRecordStore.structurally_withheld` is what keeps such a row unserved.)
+    Asked of the tables, not a search: zero `reaction_fingerprints` and `reaction_labels` rows is
+    the
+    claim itself. A row predating an amendment to citation-only is not visible here;
+    `ReactionRecordStore.structurally_withheld` keeps such a row unserved.
     """
     ids = [
         reaction.reaction_id
@@ -783,24 +680,13 @@ async def check_citation_only_is_not_structure_searchable(
 async def check_the_corpus_is_findable(mapped: dict[str, list[OrdReaction]]) -> Check:
     """A record that arrived can actually be found — asked through the tool a chemist would use.
 
-    The last hop, and the one that turns "the data is in the database" into "the data answers a
-    question". `find_similar_reactions` is the real entry point behind the agent's
-    `similar_reactions`, so this measures what a chemist gets rather than what a store contains.
-
-    **It is deliberately checked while the corpus has no notes at all**, which is what an ingested
-    corpus is: `ingest_reaction` writes the record and the fingerprint row and mints no note
-    (`D-2026-08-25-an-eln-transcription-is-data-not-a-claim`), so the two halves disagree by design
-    and which retrieval path you take decides what you see. Measured: an unfiltered search returns
-    10 real wells for a 4-bromoanisole coupling, and the same search narrowed by
-    `{"type": "reaction"}` through `FingerprintReactionRetriever` returns **0**, loudly ("filtered
-    reaction search returned 0 of 10 wanted hits"). Both are correct — a note that was never
-    written cannot satisfy a filter — and the gap is worth a check precisely because nothing else
-    states it. This paragraph read "while the notes are still unmerged … the state the PR-gate keeps
-    it in until a human acts", which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
-    falsified twice over: there is no gate, and there was never a pending note here to hold.
-
-    `index_empty` is asserted as well as the hit count: an empty index answering "no precedents" is
-    the exact defect `find_similar_reactions`' own docstring was written around.
+    `find_similar_reactions` is the entry point behind the agent's `similar_reactions`. Ingest
+    writes
+    the record and fingerprint row but mints no note, so an unfiltered search finds wells while one
+    filtered by `{"type": "reaction"}` returns none — both correct, and checked because nothing else
+    states it. `index_empty` is asserted too: an empty index answering "no precedents" is the defect
+    to
+    catch.
     """
     subject = next(
         (
@@ -836,15 +722,9 @@ async def check_the_corpus_is_findable(mapped: dict[str, list[OrdReaction]]) -> 
 async def backfill(timeout_seconds: float) -> str:
     """Run one `ElnSyncWorkflow` from the epoch, so the seeded corpus is reachable at all.
 
-    Every ORD export shares a single mtime — the moment the repo was cloned — and carries an older
-    payload timestamp, so the incremental sync's cursor passes all of them on its first scheduled
-    firing and no later run can ever qualify them again. `adapter.warn_late_arrivals` says exactly
-    this and names the remedy; nothing took it, so the four-repo lane ran with 0 of ~10,000 ORD
-    records ingested while `/readyz` was green and the sync log read normally.
-
-    Deliberately the real workflow on the real broker rather than `sync_entries` in-process: a
-    backfill that bypassed Temporal would prove the adapter works and leave the thing that actually
-    runs in production untested.
+    ORD exports share one mtime and carry older payload timestamps, so the incremental cursor passes
+    them on its first firing and never qualifies them again (`adapter.warn_late_arrivals`). Runs the
+    real workflow on the real broker, so the production path is what is tested.
     """
     from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -852,11 +732,9 @@ async def backfill(timeout_seconds: float) -> str:
     from chemclaw.durable.eln_sync import ElnSyncWorkflow
 
     client = await temporal_connect()
-    # **A fixed id, so a second invocation rejoins the running drain instead of racing it.**
-    # This is D-011's argument applied to the harness: the drain takes hours, `up.sh` starts one on
-    # every bring-up and a human may run the lane meanwhile, and two concurrent syncs over one
-    # corpus contend on one corpus while producing no row the first would not.
-    # Measured while writing this: calling it twice did start two.
+    # A fixed id, so a second invocation rejoins the running drain instead of racing it: the drain
+    # is
+    # long, `up.sh` starts one on every bring-up, and concurrent syncs only contend.
     workflow_id = "eln-backfill-epoch"
     try:
         handle = await client.start_workflow(
@@ -874,14 +752,9 @@ async def backfill(timeout_seconds: float) -> str:
     try:
         summary = await asyncio.wait_for(handle.result(), timeout=timeout_seconds)
     except TimeoutError:
-        # **A drain still running is a state, not an error.** The drain is long: ~1.8 s/record
-        # measured against this corpus when each record still cost a PR-gate git branch and commit
-        # (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` has since removed that cost and
-        # nobody has re-measured), so the mock's 4,251 then-ingestible records took a little over
-        # two hours and the timeout is set for that order rather than for a re-measured one. Failing
-        # here would make the lane red for
-        # a reason that is not a defect; the reachability check below reports how far it got, which
-        # is the honest number and the one that converges on its own.
+        # A drain still running is a state, not an error: it can take hours, and the reachability
+        # check
+        # below reports how far it got.
         return (
             f"{workflow_id}: still draining after {timeout_seconds:.0f}s — the workflow keeps "
             "running on the broker, so re-running this lane later reads the finished corpus"
@@ -900,9 +773,7 @@ async def _map_corpus(
 ) -> tuple[dict[str, list[OrdReaction]], dict[str, int]]:
     """Run this repo's real ORD adapter over the whole seeded corpus; group results by dataset.
 
-    The *real* adapter, from the configured export directory, for the reason `cli/live_jobs.py`
-    gives for using the real job tool: a lane that reimplemented the mapping would keep passing
-    while the mapping that ships broke.
+    The real adapter, so the mapping that ships is the one checked.
     """
     adapter = OrdJsonAdapter(str(export_dir))
     raws = await adapter.fetch_new_entries(_EPOCH)
@@ -937,7 +808,7 @@ async def run_data_checks(
 ) -> DataRun:
     """Check the published tables, the seeded corpus and the live database against each other.
 
-    One pass: optionally start the backfill, read both corpora, then run every check over them.
+    Optionally starts the backfill, reads both corpora, then runs every check.
     """
     run = DataRun()
     started = time.monotonic()
@@ -1098,17 +969,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     text = report(run)
     print(text)
 
-    # Imported here rather than at module scope, for the reason `live_jobs` gives at its own call
-    # site: this CLI needs one path policy from the probe lane and none of the httpx/judge
-    # machinery importing it at the top would pull in.
+    # Imported here so this CLI does not load the probe lane's httpx/judge machinery.
     from chemclaw.cli.live_probes import run_output_dir
 
-    # A directory per run, never over the record. This wrote
-    # `tasks/live-test/transcripts/corpus-fidelity.md` — a *tracked* file — so every fidelity run
-    # dirtied the working tree and replaced the previous run's report with nothing marking which
-    # run either came from. The third writer into that one committed directory, fixed the same way
-    # as the other two: `run_output_dir` holds the whole argument, including why the parent stays
-    # committed rather than moving to a scratch path.
+    # A directory per run, so reports never overwrite each other or a tracked file.
     destination = args.report or run_output_dir("corpus-fidelity") / "corpus-fidelity.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")

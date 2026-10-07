@@ -1,9 +1,7 @@
-"""Durable BoFire BO campaigns (plan step 1d.4).
+"""Settings for durable BoFire BO campaigns.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from pydantic import Field
@@ -11,118 +9,56 @@ from pydantic_settings import BaseSettings
 
 
 class BoSettings(BaseSettings):
-    """Durable BoFire BO campaigns (plan step 1d.4).
+    """How a Bayesian-optimization campaign runs durably.
 
-    Grouped because these knobs shape one thing: how a Bayesian-optimization campaign runs
-    durably — its per-round activity budget and heartbeat, reproducibility seed, the round and
-    evaluation ceilings a spec is refused above, and the two bounds that keep a model-supplied
-    decision space from costing unbounded CPU and memory to enumerate.
+    Per-round budget and heartbeat, the reproducibility seed, the round and evaluation ceilings a
+    spec is refused above, and the bounds on enumerating a model-supplied decision space.
     """
 
-    # A single round (BoFire propose + evaluate) can be slow, so activities get a generous
-    # start-to-close budget.
+    # Start-to-close for one round (BoFire propose + evaluate), which can be slow.
     bo_activity_timeout_seconds: float = Field(default=300.0, gt=0)
-    # How long a BO activity may go without a heartbeat before Temporal declares the worker dead
-    # and retries (Conn-F2). Comfortably shorter than `bo_activity_timeout_seconds` so a dead
-    # worker is noticed well before the full start-to-close budget — the same discipline
-    # `xtb_job_heartbeat_timeout_seconds` applies to calc's durable jobs, sized down for a
-    # per-round budget an order of magnitude smaller.
+    # Heartbeat timeout for a BO activity; well under `bo_activity_timeout_seconds` so a dead worker
+    # is noticed before the whole round budget lapses.
     bo_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
-    # The shortest queue wait a campaign's dispatch may be given, whatever its share of the
-    # execution ceiling works out to. `BoCampaignWorkflow._queue_wait` divides what is left of the
-    # ceiling between the dispatches still to come so that the first step cannot eat the whole of
-    # it — a fairness device, since the sum already fits by being measured against what is left.
-    # Without a floor that division answers the wrong question: at the default ten-round spec it
-    # hands every dispatch 433.6 s instead of the 10,170 s queue-wide bound, so a `bo` worker
-    # rolling, scaled to zero or merely slow to pull expires `schedule_to_start` and kills a
-    # healthy campaign. This is the deployment's answer to "how long may a `bo` worker be absent
-    # before a campaign gives up on it", which is why it is a setting and not an arithmetic:
-    # fifteen minutes is comfortably above a rolling restart and far below the queue-wide ceiling
-    # the `min` in `_queue_wait` still applies.
+    # Floor on one dispatch's queue wait. `BoCampaignWorkflow._queue_wait` splits the remaining
+    # ceiling across the dispatches still to come; without a floor a rolling or scaled-to-zero `bo`
+    # worker would expire `schedule_to_start` on a healthy campaign. Fifteen minutes covers a
+    # restart.
     bo_queue_wait_floor_seconds: float = Field(default=900.0, gt=0)
-    # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
-    # (deterministic seeding + proposals) rather than flaky run-to-run.
+    # Seed for BoFire's random design and SOBO strategies, so a campaign is reproducible.
     bo_seed: int = 42
-    # Ceiling on a campaign spec's round count — a *budget* bound, not a Temporal one. It used to
-    # be described as protecting the event-history limit, and did not: history is re-sent to the
-    # propose activity every round, so bytes grow quadratically and a measured 178 bytes per
-    # observation puts a batch-1 campaign past the 50 MB hard limit at round 441, inside this very
-    # ceiling. The workflow now continues-as-new when the server suggests it, which removes the
-    # history bound entirely; what is left is that every round costs an evaluation, and a spec
-    # asking for thousands is a mistake worth refusing at build time.
+    # Ceiling on a spec's round count: a budget bound, refused at build time. History growth is
+    # handled by continue-as-new, not by this.
     bo_max_rounds: int = Field(default=500, ge=1)
-    # Ceiling on a campaign spec's whole evaluation budget — `n_initial + n_rounds * batch` — and
-    # the reason `bo_max_rounds` alone was never the bound its name implied. A *round* is not a
-    # unit of cost: at `batch=50` a spec inside the 500-round ceiling asks for 25 000 objective
-    # evaluations, each one a registered objective that may call an uncached calculator. The round
-    # ceiling refuses a campaign that runs too long; this refuses one that costs too much, which is
-    # the quantity a chemist and a cluster budget both actually care about. 2 000 is a working
-    # default: far above any campaign this system has run (the durable tests run tens), far below
-    # what an unbounded batch turns a plausible round count into.
+    # Ceiling on a spec's total evaluations (`n_initial + n_rounds * batch`). A round is not a unit
+    # of cost — a large batch multiplies it — so this bounds what a campaign actually spends.
     bo_max_evaluations: int = Field(default=2000, ge=1)
-    # Ceiling on how many cells of a discrete decision space may be *enumerated*. Reached only when
-    # the space carries an exclusion constraint: `discrete_candidate_count` then counts feasible
-    # cells one at a time, because exclusions can overlap and inclusion-exclusion would be wrong.
-    # That walk is over the full categorical cross product, which is a product of model-supplied
-    # category-list lengths — ten parameters of ten options is 10^10 cells, and the walk happens
-    # inside `campaign_progress`, on a request. Above this ceiling the space is reported as
-    # effectively unbounded (None) instead of being counted, which is the safe degradation: the
-    # exhaustion guards it feeds simply do not fire, and a space this large cannot be exhausted by
-    # a campaign anyway.
+    # Ceiling on enumerating a discrete space's cells, reached only with an exclusion constraint
+    # (feasible cells are counted one by one over a model-supplied cross product). Above it the
+    # space is reported as unbounded (None), so the exhaustion guards it feeds simply do not fire.
     bo_max_enumerated_cells: int = Field(default=1_000_000, ge=1)
-    # Ceiling on the number of runs a screening design may contain. A full factorial is the product
-    # of every factor's level count, so `generate_screening_design` builds a list whose length is
-    # exponential in a model-supplied parameter count before anything bounds it — the same
-    # unbounded-model-input shape `fingerprint_max_top_k` guards on the search side. 4 096 is far
-    # past any design a human runs (a 12-factor two-level full factorial) and far below what
-    # exhausts a pod.
+    # Ceiling on runs in a screening design; a full factorial is exponential in the model-supplied
+    # factor count. 4096 is a 12-factor two-level full factorial.
     bo_max_design_runs: int = Field(default=4096, ge=1)
-    # Ceiling on how many candidates one ask may propose — `suggest_next_experiment`'s `count`, and
-    # the durable campaign's per-round `batch`. It was the one model-supplied size in this bundle
-    # with nothing above it, while every sibling here is bounded. The cost is linear in the batch:
-    # measured at ~0.65 s per candidate on an unconstrained two-parameter problem, and the tool's
-    # own docstring puts a *constrained* problem at roughly nine seconds each. Behind the bundle's
-    # `request_timeout: 120` a three-digit `count` is a request the client abandons while the pod
-    # keeps computing it.
-    #
-    # 96 is a plate, which is the largest batch anybody runs at once, and it is deliberately **not**
-    # a latency guarantee: 96 constrained candidates would still outlast that timeout. The number
-    # that bounds latency is the transport's; this bounds the ask. `bo_max_evaluations` still
-    # bounds a whole campaign's spend, of which this is one round.
+    # Ceiling on candidates per ask (`suggest_next_experiment`'s `count`, a campaign round's
+    # `batch`); cost is linear in it. 96 is a plate. This bounds the ask, not latency;
+    # `bo_max_evaluations` bounds a whole campaign.
     bo_max_candidates_per_ask: int = Field(default=96, ge=1)
-    # How many recent evaluations `science.bo.progress` reads for its "have the last N results
-    # moved at all" statement, and how many consecutive noise-sized evaluations make a plateau.
-    # Five is a working default rather than a statistical claim: it is short enough that a chemist
-    # asking mid-campaign gets an answer about recent work, and long enough that one flat pair does
-    # not read as convergence. The caller overrides it per question.
+    # Recent evaluations `science.bo.progress` reads for "have the last N moved", and consecutive
+    # noise-sized evaluations that make a plateau. A working default; callers override per question.
     bo_plateau_window: int = Field(default=5, ge=1)
-    # Below this many evaluations `campaign_progress` refuses a plateau verdict instead of giving
-    # one. A trend read off three points is the failure the whole tool exists to prevent, so the
-    # floor is stated rather than left to the caller's judgement.
+    # Below this many evaluations `campaign_progress` refuses a plateau verdict rather than read a
+    # trend off a handful of points.
     bo_plateau_min_observations: int = Field(default=6, ge=2)
-    # Folds for the cross-validated fit quality behind a recommendation (W5). Five is BoFire's own
-    # working default and costs five refits of a model that fits in well under a second at campaign
-    # sizes; the caller overrides it per question.
+    # Folds for the cross-validated fit quality behind a recommendation; BoFire's own default.
     bo_cv_folds: int = Field(default=5, ge=2)
-    # Below this many observations a cross-validated score is reported *with* the caveat that it
-    # will be over-read. Twenty is a judgement, not a threshold anyone derived: it is roughly where
-    # a five-fold split stops holding out two or three points per fold. The number is here rather
-    # than in the summary string because the sentence a chemist reads should not be a magic number
-    # in a docstring.
+    # Below this many observations a cross-validated score carries a caveat that it will be
+    # over-read (roughly where a five-fold split stops holding out two or three points per fold).
     bo_fit_quality_trustworthy_observations: int = Field(default=20, ge=2)
-    # When a response counts as flat, as a fraction of its own magnitude: the fit-quality guard
-    # reports no R² once `max - min <= abs(mean) * this`. Relative rather than the exact `== 0.0`
-    # test it replaces, because exact equality is defeated by a *systematic sub-noise drift* —
-    # driven over a real BoFire fit, eight runs of 42.0 differing by 1e-10 scored R² 0.9991 and
-    # published "predicts held-out runs with R² 1.00", where the same runs at exactly 42.0 correctly
-    # reported no fit quality at all. 1e-9 is a claim about assays rather than about arithmetic, and
-    # a deliberately extreme one: no instrument resolves a billionth of what it is reading, so
-    # nothing a chemist measures can trip this, while float noise and a stuck sensor both do. It is
-    # well above float64's own 2.2e-16 epsilon, which is why the epsilon is not the number used.
+    # Relative spread below which a response is flat and no R² is reported (`max - min <= abs(mean)
+    # * this`). Relative, not `== 0.0`, so sub-noise drift cannot score a spurious fit; 1e-9 is far
+    # below any assay's resolution and far above float64 epsilon.
     bo_flat_response_relative_spread: float = Field(default=1e-9, gt=0.0, le=1e-3)
-    # How long a measured campaign's round stays open before it expires unanswered
-    # (D-2026-08-29-a-decision-that-waits-is-a-workflow). A plate turnaround is the unit here, not
-    # a machine timeout: fourteen days is two working weeks, which is long enough that a batch
-    # genuinely in progress is not abandoned and short enough that a campaign nobody is running
-    # stops asking. Clamped against `awaiting_max_days` by `open_pending_request_activity`.
+    # Days a measured campaign's round stays open before it expires unanswered (two working weeks).
+    # Clamped against `awaiting_max_days` by `open_pending_request_activity`.
     bo_measurement_deadline_days: float = Field(default=14.0, gt=0)

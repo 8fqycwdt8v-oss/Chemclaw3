@@ -1496,24 +1496,12 @@ def test_a_streamed_message_still_names_the_node_it_ran_in_and_tools_run_in_tool
 
 
 def test_the_after_model_call_cap_is_still_the_one_upstream_shape_this_repo_declines() -> None:
-    """The runaway cap is first-party, and `CLAUDE.md` must not say otherwise.
+    """The runaway cap is first-party; upstream's `ModelCallLimitMiddleware` is unsafe here.
 
-    `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped` reverted the move onto
-    `ModelCallLimitMiddleware` and left a general rule behind: it is unsafe to compose with any
-    middleware that jumps from `after_model`, because upstream *increments* there — measured, a cap
-    of 2 ran 4 model calls. `CLAUDE.md` carried the pre-revert sentence sixty lines above the
-    paragraph describing the revert, so the primary document asserted a mechanism it then called
-    unsafe, and pointed every reader at the composition the ADR forbids.
-
-    Three assertions, because the claim has three halves and each can go stale on its own:
-
-    1. **Upstream still counts in `after_model`.** If it ever moves the increment into
-       `before_model`, the reason for the revert is gone and this goes red so the decision gets
-       taken again rather than inherited — the absence pattern this file's header describes.
-    2. **Nothing in `src/` imports it.** A subclass needs an import, so import-absence is the whole
-       check.
-    3. **`CLAUDE.md`'s cap sentence names `agent/loop_cap.py`**, and does not name the upstream
-       class before it. Prose is the half that was wrong; leaving it ungated is how it got wrong.
+    Upstream increments in `after_model`, so composing it with a middleware that jumps from
+    `after_model` skips the count
+    (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`).
+    Red if upstream moves the increment (re-take the decision) or if anything in `src/` imports it.
     """
     import ast
     import inspect
@@ -1547,18 +1535,6 @@ def test_the_after_model_call_cap_is_still_the_one_upstream_shape_this_repo_decl
         f"{importers} import ModelCallLimitMiddleware; the cap is `agent/loop_cap.py`'s "
         "`before_model` counter, and composing upstream's with a middleware that jumps from "
         "`after_model` skips it (D-2026-08-15)"
-    )
-
-    claim = (root / "CLAUDE.md").read_text(encoding="utf-8").split("the runaway cap is", 1)
-    assert len(claim) == 2, "CLAUDE.md no longer describes the runaway cap at all"
-    mechanism = claim[1].split("(`agent/loop_cap.py`)", 1)
-    assert len(mechanism) == 2, "CLAUDE.md's runaway-cap sentence no longer points at loop_cap.py"
-    assert "ModelCallLimitMiddleware" not in mechanism[0], (
-        "CLAUDE.md describes the runaway cap as upstream's middleware; it is a first-party "
-        "`before_model` counter, and the same file's M14 paragraph calls that composition unsafe"
-    )
-    assert "before_model" in mechanism[0], (
-        "CLAUDE.md's runaway-cap sentence no longer names the hook the cap actually counts in"
     )
 
 

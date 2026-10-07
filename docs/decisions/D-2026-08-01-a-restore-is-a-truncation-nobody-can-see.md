@@ -5,6 +5,8 @@ F10-G1 / `infra/sql/011` (the audit hash chain),
 D-2026-07-31-the-audit-chain-is-versioned · **Partially closes:** the `DEFERRED.md` row *"Audit
 chain: provable tail completeness and disposal"*, whose disposal half stays open
 
+**Superseded-by:** [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md)
+
 ## Context
 
 The readiness review found zero occurrences of backup, `pg_dump`, PITR, RPO or RTO anywhere under

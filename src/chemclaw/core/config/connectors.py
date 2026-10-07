@@ -1,9 +1,7 @@
 """The connector seam: which capability bundles this deployment runs, and how it reaches them.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 import os
@@ -17,301 +15,142 @@ from chemclaw.core.config.shipped import _shipped
 class ConnectorSettings(BaseSettings):
     """The connector seam: which capability bundles this deployment runs, and how it reaches them.
 
-    Its own section because a connector is the one mechanism for adding *any* capability — the
-    MCP tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills
-    and agent profiles that come with them (`connectors/`,
-    `docs/archive/plans/connector-plan.md`). It replaces the old `mcp_servers` list, which could
-    only describe the first of those four.
+    A connector is the one mechanism for adding any capability: MCP tools, durable jobs, and the
+    skills and agent profiles that come with them.
     """
 
-    # Where connector bundles are discovered: one or more directories, OS-path-separator
-    # delimited like `PATH` (and like `skills_dir`), so an operator can add a private bundle
-    # directory without code changes. A bundle is any subdirectory containing `connector.yaml`.
-    # Read it through the `connectors_dirs` property, never raw. Earlier directories win a name
-    # collision, so a private bundle can override a shipped one.
+    # OS-pathsep list of directories holding bundles (any subdirectory with `connector.yaml`); read
+    # via `connectors_dirs`. Earlier directories win a name collision.
     connectors_dir: str = Field(default_factory=lambda: _shipped("connectors"))
 
-    # Which discovered connectors are actually enabled — discovery is not enablement. Empty (the
-    # default) means every discovered bundle, so a fresh checkout runs the full shipped surface.
-    # A non-empty pathsep list narrows to exactly those names *in that order* (tool order is
-    # part of the prompt, so it is configuration, not chance). A name here that no bundle
-    # provides is a startup error rather than a capability that silently stops working.
+    # Enabled connectors, pathsep-delimited and in tool order (order is part of the prompt). Empty
+    # means every discovered bundle. An unknown name is a startup error.
     connectors_enabled: str = ""
 
-    # Per-connector endpoint override, by connector name. A bundle's manifest ships a working
-    # dev default (a loopback URL); a cluster's address belongs to the deployment, so Helm sets
-    # this instead of patching a file in the repo. ENV override is JSON, e.g.
-    # CHEMCLAW_CONNECTOR_URLS='{"molfp":"http://chemclaw-connector-molfp:8080/mcp"}'.
+    # Per-connector endpoint override by name; Helm sets it rather than patching a manifest. JSON in
+    # the env, e.g. CHEMCLAW_CONNECTOR_URLS='{"molfp":"http://chemclaw-connector-molfp:8080/mcp"}'.
     connector_urls: dict[str, str] = Field(default_factory=dict)
 
-    # Connectors that are served, on this deployment, by a **stand-in** — a deterministic test
-    # double that answers every input with the same fixed output — rather than by the capability
-    # their manifest describes. Pathsep-delimited names, empty by default (production serves the
-    # real thing). The live lane sets it when it starts `rxnpredict` on its `fake_a`/`fake_c`
-    # doubles (`infra/live/processes.sh`): measured on 2026-10-02, the model read a double's fixed
-    # acetanilide as a forward prediction and told the chemist "the forward reaction prediction
-    # confirms" a product. Nothing in the result said it came from a double, so nothing could stop
-    # it. A name here makes `agent/tool_framing.py` say so, as this system's own sentence, on every
-    # successful result that connector returns. Read through `connector_stand_ins_list`.
+    # Connectors served here by a stand-in (a deterministic test double), pathsep-delimited; empty
+    # in production. A name makes `agent/tool_framing.py` mark every successful result from it as
+    # coming from a double, so a fixed output is not read as a prediction. Read via
+    # `connector_stand_ins_list`.
     connector_stand_ins: str = ""
 
-    # What an unreachable enabled connector means. Default (`false`) is *degrade loudly*: the
-    # service still starts, the failure is logged, reported by `/readyz` and counted by the
-    # `chemclaw_connectors_unhealthy` gauge, and that connector's tools are simply not
-    # reachable. `true` is fail-fast for a deployment where serving with a silently reduced tool
-    # surface is worse than not serving at all (the fail-fast posture).
+    # What an unreachable enabled connector means: `false` degrades loudly (logged, `/readyz`,
+    # `chemclaw_connectors_unhealthy`, its tools unreachable); `true` fails fast at startup.
     connectors_required: bool = False
 
-    # Bound on one connector's health probe on the *hot* path — every `/readyz`, every 10 seconds
-    # per pod. Small deliberately: this is what the kubelet waits for, and the chart's
-    # `probes.service.readiness.timeoutSeconds` is derived from it (`deployment-service.yaml`), so
-    # it is the number that decides whether somebody else's outage takes a serving front door out
-    # of its Service. It bounds each half whole — connect plus RPC, or connect plus read — rather
-    # than each step in it; see `connectors/health.py`.
+    # Bound on one connector's health probe on the hot `/readyz` path; the chart derives the
+    # kubelet's readiness `timeoutSeconds` from it. Bounds each half (connect plus RPC/read) whole;
+    # see `connectors/health.py`.
     connector_health_timeout_seconds: float = Field(default=2.0, gt=0)
 
-    # The same probe at **startup**, where it is a one-time cost rather than a per-poll one.
-    #
-    # `check_connectors_at_startup` runs this sweep once and its verdict is final for the boot:
-    # under `connectors_required` it decides whether the process serves at all. The poll's budget
-    # is sized against a kubelet stopwatch and against a *cached* Temporal client; the first check
-    # after process start has neither, and pays a cold connect — PEM files parsed, an mTLS
-    # handshake — out of the same budget the `DescribeTaskQueue` RPC needs to come back. What that
-    # costs is not a slow boot but a wrong one: the RPC runs out of budget, the sweep reports
-    # `unknown`, and `unknown` neither counts in the gauge nor trips the gate — so a bundle whose
-    # queue has no poller (a worker fleet at zero replicas, jobs accepted and never run) clears the
-    # fail-fast posture that exists to refuse exactly that.
-    #
-    # 10 s: five times the poll's budget, and bounded by what a startup probe already grants — the
-    # chart gives the front door 30 x 10 s to finish its lifespan (`probes.service.startup`), which
-    # this is a small share of. Raising it delays a boot in the worst case and buys a verdict that
-    # is right; the poll's 2 s cannot be raised for the same benefit without moving the kubelet
-    # timeout with it, which is the coupling the derivation in the chart makes visible.
+    # The same probe at startup, whose verdict is final for the boot. Larger than the poll's because
+    # the first check pays a cold connect (PEM parse, mTLS handshake); too small a budget reports
+    # `unknown`, which neither counts nor trips `connectors_required`. Fits within the chart's
+    # startup probe window.
     connector_startup_health_timeout_seconds: float = Field(default=10.0, gt=0)
 
-    # Bound on one connector's whole *open* — TCP dial, `initialize`, `tools/list` — per turn
-    # (`connectors.transport.HeldConnectorSession.__aenter__`). Not redundant with the 5 s connect
-    # timeout, which covers only the dial: the handshake is otherwise bounded by the session's
-    # read timeout, sized for the slowest tool call (600 s for `calc`), so a connector that
-    # accepted the socket and then went mute held every turn for that long before the first token.
-    # Generous against a healthy fleet (a handshake is two round trips) and small against a turn.
+    # Bound on one connector's whole open per turn (dial, `initialize`, `tools/list`). The connect
+    # timeout covers only the dial; without this a mute server holds the turn for its read timeout.
     connector_open_timeout_seconds: float = Field(default=15.0, gt=0)
-    # Bound on one connector session's close at turn teardown (`_shut_down`). Past it the holder
-    # task is cancelled rather than awaited, so the slowest session close cannot hold the end of
-    # every turn — the unbounded form made teardown hostage to a session that would not unwind.
+    # Bound on one session's close at turn teardown; past it the holder task is cancelled.
     connector_teardown_timeout_seconds: float = Field(default=5.0, gt=0)
 
-    # How long a verdict of "this connector is unreachable" is trusted, so a turn does not pay the
-    # open bound above against a host already known to be down
-    # (`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`).
-    #
-    # The state this reads is not new: `connectors.health` probes every enabled bundle at startup
-    # and again on every `/readyz`, and until now the per-turn open path ignored it entirely — so a
-    # dark connector cost `connector_open_timeout_seconds` on *every* turn for the whole outage,
-    # with no backoff, while the answer was already sitting in the readiness snapshot.
-    #
-    # 30 s, and the number is a recovery bound rather than a savings one. Recovery has two paths and
-    # this bounds the slower: the readiness sweep re-probes a recovered connector and records it
-    # healthy, which readmits it on the next turn (≤ one kubelet interval plus
-    # `service_readiness_cache_seconds`), and a deployment whose sweep does not run — the CLI, a
-    # template activity in a worker — falls back to this window expiring and dialling for real. A
-    # breaker with no recovery path amplifies the outage it was added for, so the expiry is the
-    # half that must not be omitted.
-    #
-    # 0 disables it: every turn dials every connector, which is the behaviour before this existed.
+    # How long an "unreachable" readiness verdict is trusted, so a turn skips the open bound against
+    # a host already known to be down. A recovery bound: the readiness sweep readmits a recovered
+    # connector sooner, and where no sweep runs (CLI, worker) this expiry is the only recovery path.
+    # 0 disables it.
     connector_breaker_window_seconds: float = Field(default=30.0, ge=0)
 
-    # Whole-run **maximum** for one connector job's child workflow (`ConnectorJobWorkflow`).
-    # Generous, because a connector job is by definition the long-running kind, but bounded so a
-    # wedged connector workflow eventually fails instead of pinning a run forever.
+    # Whole-run maximum for one connector job's child workflow (`ConnectorJobWorkflow`), covering
+    # one attempt. A bundle may lower it for its own job (`JobSpec.timeout_seconds`, applied as a
+    # `min`) and may not raise it. It must exceed the longest child activity
+    # (`_the_job_ceiling_covers_the_activity_it_bounds`), and its headroom is the activity's queue
+    # wait (`connector_queue_wait_timeout()`; arithmetic in `durable/publish.py`):
     #
-    # **A bundle may lower this for one of its own jobs and may not raise it**
-    # (`JobSpec.timeout_seconds`, applied as a `min` by
-    # `durable/connector_job.py::child_execution_timeout`). This used to be one global ceiling with
-    # no per-manifest field at all, on the reasoning that a bundle in the repo must not be able to
-    # grant itself unlimited runtime — which is right about the direction and was over-applied to
-    # both. What it cost: one number bounds a twenty-second job and a four-hour job identically, so
-    # with a bundle's worker down the short job sat `running` for the whole ceiling with nothing
-    # said. A bound that can only move downward gives the deployment's call away in neither
-    # direction (`D-2026-08-27-a-bundle-may-lower-its-own-ceiling`).
-    #
-    # It is a ceiling over the *whole* child, so it must exceed the longest activity that child
-    # runs. `_the_job_ceiling_covers_the_activity_it_bounds` enforces that; raise this whenever you
-    # raise that activity's budget.
-    #
-    # **The number is derived from the longest job this system runs, and that job changed.** It was
-    # 90_000 — the 24 h DFT poll (`hpc_run_timeout_seconds`) plus an hour — and the DFT tier is gone
-    # (`D-2026-08-26-semiempirical-is-the-whole-tier`). The longest child activity is now
-    # `run_xtb_calculation`, a CREST search at `xtb_job_timeout_seconds` (4 h), so the default is
-    # that plus an hour on the same reasoning: an hour of headroom rather than equality, because two
-    # equal defaults make the ceiling the tighter of the two on the path the deployment runs.
-    #
-    # It covers **one attempt**, not `activity_max_attempts` of them — as the DFT-sized number did
-    # not either. A job that exhausts its whole budget and is retried is bounded by this ceiling,
-    # so the retry is cut short; a deployment that wants the retry budget to be reachable raises
-    # this above `activity_max_attempts * xtb_job_timeout_seconds`.
-    #
-    # **It funds the queue wait as well as the work, which is what sets the default.** A bundle
-    # activity's `schedule_to_start_timeout` is this ceiling's *headroom* —
-    # `connector_queue_wait_timeout()` = this minus `longest_bundle_activity` minus
-    # `activity_timeout_seconds` — because the wait precedes the work and the ceiling has to
-    # contain both (`durable/publish.py` carries the arithmetic and what it replaced). So the
-    # number is the sum of three measured quantities rather than one budget plus a round hour:
-    #
-    #     15,000  one CREST search at `xtb_job_timeout_seconds`, the longest activity a child runs
-    #         30  the child's own overhead, `activity_timeout_seconds`
-    #     10,170  the queue wait that leaves, ~1.4x the measured p95 backpressure on
-    #             `connector-calc` at target load (p50 ~3,744 s, p95 ~7,128 s)
+    #     15,000  one CREST search at `xtb_job_timeout_seconds`
+    #         30  the child's overhead, `activity_timeout_seconds`
+    #     10,170  queue wait, ~1.4x the measured p95 backpressure on `connector-calc`
     #     ------
     #     25,200  = 7 h
     #
-    # Lower it and the queue bound tightens with it, which is the honest direction: a site that
-    # funds less runtime is also declaring less patience for a job that never gets a slot. Raise
-    # it and `template_run_timeout_seconds` must rise too, or startup refuses the pair
+    # Raising it requires raising `template_run_timeout_seconds`
     # (`_the_template_run_ceiling_covers_one_step`).
     connector_job_timeout_seconds: float = Field(default=25_200.0, gt=0)
 
-    # **How long a queued tool call may wait for a slot and run, in all** — the `schedule_to_close`
-    # of its one activity (`connectors/queued_workflow.py`). A queued call is seconds-class work
-    # that a burst made wait, not a durable job, so its patience is an hour rather than
-    # `connector_job_timeout_seconds`' seven: a call still queued after that is load this
-    # deployment is not sized for, and failing it tells the chemist so instead of answering
-    # tomorrow. The in-turn part of the wait is each endpoint's own `queued.inline_wait_seconds`.
+    # Total wait plus run for a queued tool call (`schedule_to_close` of its activity,
+    # `connectors/queued_workflow.py`). An hour: a call still queued after that is load the
+    # deployment is not sized for. The in-turn wait is each endpoint's `queued.inline_wait_seconds`.
     queued_tool_timeout_seconds: float = Field(default=3_600.0, gt=0)
-    # The ceiling on the pause between two asks of a full server. Seconds, not the minutes
-    # `calculation_retry` spaces a durable job by: the worker that dispatches a queued call is sized
-    # to the server's slots, so a refusal means a slot is freeing within one call's duration, and
-    # the chemist is usually still watching.
+    # Ceiling on the pause between two asks of a full server; seconds, because the dispatching
+    # worker is sized to the server's slots.
     queued_tool_retry_max_seconds: float = Field(default=10.0, gt=0)
-    # How many times a queued call is re-sent after a fault that is *not* a full server — a
-    # connector that did not answer, a transport error. A few, because a rolling pod is the common
-    # cause; not unbounded, because an outage is news the chemist should get now.
+    # Re-sends of a queued call after a fault other than a full server (a rolling pod, a transport
+    # error); bounded so an outage is reported promptly.
     queued_tool_fault_attempts: int = Field(default=3, ge=1)
-    # How often a waiting turn asks where its queued call is, to tell the chemist "queued" or
-    # "running" (`connectors/queued.py::_wait_reporting`). One describe per tick per waiting turn,
-    # plus one backlog read per tick per connector shared by every turn waiting on it, so seconds
-    # rather than sub-second; the answer only changes when a slot frees. The backlog count needs a
-    # server that reports task-queue stats; on one that does not (1.25.2, measured) the card says
-    # "queued" without a count and the process stops asking.
+    # How often a waiting turn asks where its queued call is ("queued"/"running",
+    # `connectors/queued.py::_wait_reporting`). On a server without task-queue stats the count is
+    # omitted and the backlog is no longer read.
     queued_tool_progress_seconds: float = Field(default=2.0, gt=0)
 
-    # Hard ceiling on a connector's request body, refused with 413 before anything reads it
-    # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting
-    # rather than reusing `service_max_request_bytes`: that one is sized for the front door's
-    # multipart attachment upload, a shape a connector's `/mcp` never carries — every request there
-    # is one MCP JSON-RPC call, whose arguments are chemistry-sized (a SMILES string, a job spec, a
-    # batch of candidates), not a file. A smaller default follows from that difference in what a
-    # legitimate request looks like, not from copying the front door's number. 0 disables, matching
-    # the front door's knob.
+    # Ceiling on a connector's request body, refused with 413 before reading
+    # (`core.asgi.BodySizeLimit`). Smaller than the front door's because an `/mcp` request is one
+    # JSON-RPC call, never a file upload. 0 disables.
     connector_max_request_bytes: int = Field(default=1_000_000, ge=0)
 
-    # How much of one tool's *description* this deployment will carry, per tool, per model call.
-    #
-    # A connector's description is untrusted text in the highest-trust region of the request:
-    # `load_mcp_tools` takes it from the live server's `tools/list`, `_allowed` filters names only,
-    # and it is serialised into the `tools` block ahead of the system message on **every** model
-    # call. `chemclaw_connector_tool_schema_tokens` measured that cost and nothing bounded it, so
-    # a server this repository neither builds nor watches set the deployment's per-turn spend —
-    # and CLAUDE.md's whole prefix arithmetic rests on a ratchet that cannot see an out-of-tree
-    # bundle at all.
-    #
-    # Per description rather than per connector, because the manifest's own `tools:` list bounds
-    # how many descriptions there are: the product is a number both halves of which this
-    # repository controls. Measured 2026-09-06 against the sibling checkout — 27 tools across
-    # `chem`, `rxnpredict`, `safety` and `props` — the largest real description is
-    # `chem.describe_sites` at 2,950 characters and the whole fleet sums to 42,251. 6,000 is
-    # ~2x the largest, so a cut is a signal that something is wrong rather than a tax on a
-    # thorough docstring; past it the description is cut head-and-tail with a system-authored
-    # notice and a WARNING naming the connector and the tool. 0 disables, matching the other
-    # ceilings in this section.
+    # Characters of one tool's description carried per model call. A description is untrusted text
+    # from the server's `tools/list`, sent ahead of the system message on every call; bounding it
+    # per tool (the manifest bounds the tool count) keeps an out-of-tree server from setting
+    # per-turn spend. 6,000 is about twice the largest real description; past it the text is cut
+    # head-and-tail with a notice and a WARNING. 0 disables.
     connector_max_tool_description_chars: int = Field(default=6_000, ge=0)
 
-    # Bound on the record write every finished connector job performs (D-157). Small: it is one
-    # upsert of a row the job has already earned, and a database that cannot take it in this long
-    # is down — in which case the retries, and then the log line, are the right outcome.
+    # Bound on the record write a finished connector job performs (one upsert).
     job_record_timeout_seconds: float = Field(default=30.0, gt=0)
-    # How long the *model's* `get_durable_job_status` poll long-polls before answering `running`.
-    # A poll from the model costs a whole conversation turn (connector open, graph compile, model
-    # call), so answering `running` for a job finishing two seconds later spends another full turn
-    # learning what this short wait delivers now. Temporal's own long-poll, never a sleep loop;
-    # the HTTP job route deliberately does not wait (a browser's poll is cheap). Below the calc
-    # bundle's 20 s inline wait, because this is a *re*-check, not the first wait. 0 disables.
+    # How long the model's `get_durable_job_status` long-polls (Temporal's long-poll) before
+    # answering `running`, since each model poll costs a whole turn. Below the calc bundle's inline
+    # wait; the HTTP route does not wait. 0 disables.
     job_status_wait_seconds: float = Field(default=10.0, ge=0)
-    # How many past runs `find_past_jobs` returns by default. Bounded because the results land in
-    # the model's context: enough to recognise the campaign being looked for, not a table dump.
+    # Default number of past runs `find_past_jobs` returns; results land in the model's context.
     job_record_search_limit: int = Field(default=20, ge=1)
 
-    # Whether a discovered manifest may launch a subprocess (`endpoint: transport: stdio`).
-    # **Default off, because a manifest is data and this field is the one that executes.** A
-    # bundle directory is discovered by existing — any subdirectory of `connectors_dir` holding a
-    # `connector.yaml` — and discovery is enablement unless `connectors_enabled` narrows it, so a
-    # YAML file appearing on that path used to run its `command:` in the chat process, before the
-    # MCP handshake, under the identity holding every connector token and the database pool. The
-    # spawn happened even when the connector was then reported unreachable, which is what made it
-    # quiet. No shipped bundle declares stdio; it is the zero-infrastructure path for local
-    # development and for the transport's own tests, and those set this explicitly.
+    # Whether a discovered manifest may launch a subprocess (`endpoint: transport: stdio`). Off by
+    # default: a manifest is data, discovery is enablement, and a spawn would run in the chat
+    # process with every token and the database pool. No shipped bundle uses stdio; dev and
+    # transport tests set it.
     connector_stdio_enabled: bool = False
 
-    # Which top-level packages a manifest may name in a field that is **imported and called**:
-    # `params_model`, `precondition`, `unavailable_reason`, `ingest`, `retrieve`, `commitments`,
-    # `driver`. Comma separated; `chemclaw` is always allowed and does not need listing.
-    #
-    # **The same sentence as the setting above, applied to the other field family that executes.**
-    # `connector_stdio_enabled` refuses `command:` because "a manifest is data"; the
-    # `module:callable` family has the same reach in the same process and was on by default.
-    # Measured, a manifest
-    # naming a module ran that module's top-level code inside `job_tools()` — the per-turn
-    # agent-build path — with `connector-validate`, `sink-validate` and `datasource-validate` all
-    # exiting 0, and the sink and channel seams then *call* what they resolved with the manifest's
-    # own `config:` as keyword arguments.
-    #
-    # The bundle property D-118/D-120 sell is untouched: a driver living in this tree needs nothing
-    # here, and a third-party driver is one deliberate env var set by the operator who mounted the
-    # directory the manifest arrived in — which is the threat, because discovery is enablement.
+    # Top-level packages a manifest may name in an imported-and-called field (`params_model`,
+    # `precondition`, `unavailable_reason`, `ingest`, `retrieve`, `commitments`, `driver`). Comma
+    # separated; `chemclaw` is always allowed. Same reasoning as `connector_stdio_enabled`:
+    # importing a module runs its code in-process, and a third-party driver is one deliberate
+    # operator setting.
     manifest_driver_packages: str = ""
 
     @property
     def manifest_driver_package_list(self) -> frozenset[str]:
         """The packages a manifest may import from, always including this tree's own.
 
-        Stripped and empties dropped, for the reason `connector_jobs_awaiting_answer_list` gives:
-        this list grants an entitlement, and a stray space would silently withhold one rather than
-        widen it — a refusal an operator would read as a broken driver.
+        Stripped and empties dropped: a stray space would silently withhold an entitlement.
         """
         named = (part.strip() for part in self.manifest_driver_packages.split(","))
         return frozenset({"chemclaw", *(part for part in named if part)})
 
-    # Which jobs may declare `awaits_answer: true` and so run with **no wall-clock ceiling at all**
-    # (`durable/connector_job.py::child_execution_timeout`), as `<bundle>.<job>` names separated by
-    # the OS path separator.
-    #
-    # **The branch is right and the declaration needed a gate.** A job that suspends on a person
-    # spends wall clock without doing work, and no finite ceiling is correct for it — a measured
-    # campaign is `(n_rounds + 1)` waits and the shipped spec alone spans 154 days, so any ceiling
-    # wide enough is a ceiling that reaps nothing. That argument is unchanged. What it does not
-    # answer is *who decides a job has that shape*, and the answer was "whoever wrote the file":
-    # `child_execution_timeout`'s own docstring states the invariant that "a manifest in this
-    # repository still cannot grant itself runtime the operator did not fund", and this was the one
-    # field that could. Measured — a manifest naming a bundle nobody vetted, no setting changed —
-    # an 18,000 s fleet ceiling became `None`.
-    #
-    # Default off for a manifest, on for the one bundle that ships with the shape, which is the
-    # same posture `connector_stdio_enabled` takes and for the same stated reason: a manifest is
-    # data. The consequence a site accepts by adding a name here is the one
-    # `child_execution_timeout` writes down — for that job the wall-clock reaper is gone, so a
-    # bundle worker that never returns leaves the run `running` rather than failing it in hours.
+    # Jobs (`<bundle>.<job>`, pathsep-separated) allowed to declare `awaits_answer: true` and run
+    # with no wall-clock ceiling (`durable/connector_job.py::child_execution_timeout`). A job
+    # waiting on a person has no correct finite ceiling, but a manifest must not grant itself
+    # unfunded runtime, so the operator lists it. For a listed job a worker that never returns
+    # leaves the run `running`.
     connector_jobs_awaiting_answer: str = "bo.start_optimization_campaign"
 
     @property
     def connector_jobs_awaiting_answer_list(self) -> list[str]:
         """The `<bundle>.<job>` names allowed to run without a wall-clock ceiling.
 
-        Stripped, because this list grants an *entitlement* and the cost of a stray space is not
-        one unfunded job: `require_funded_ceiling` refuses the launch, so a typo silently removes a
-        grant the release ships with. The repository has two list idioms — `os.pathsep` without
-        stripping (`connectors_dir`, `skills_dir`) and comma-plus-strip (`data_sources`,
-        `entra_privileged_roles`) — and this is the second family wearing the first's separator.
-        The separator stays for compatibility with anything already set; the stripping does not.
+        Stripped, because a stray space would make `require_funded_ceiling` refuse a shipped grant.
+        The `os.pathsep` separator is kept for compatibility.
         """
         entries = self.connector_jobs_awaiting_answer.split(os.pathsep)
         return [name for name in (entry.strip() for entry in entries) if name]
@@ -331,16 +170,11 @@ class ConnectorSettings(BaseSettings):
         """The explicitly enabled connector names; empty means "every discovered bundle"."""
         return [c for c in self.connectors_enabled.split(os.pathsep) if c]
 
-    # How long an irreversible effect's per-call approval stays open before the job gives up
-    # (`D-2026-08-29-an-effect-declares-whether-it-can-be-undone`). Deliberately short beside the
-    # durable wait's 90-day ceiling: an approval nobody answered in three days is a decision that
-    # was not taken, and the arguments a chemist approved a week ago describe a situation that has
-    # moved. An expiry fails the job and attempts nothing, which is the safe direction.
+    # Days an irreversible effect's per-call approval stays open before the job gives up; short,
+    # since an old approval describes a situation that has moved. Expiry fails the job and attempts
+    # nothing.
     effect_approval_deadline_days: float = Field(default=3.0, gt=0)
-    #: The entitlement that may approve an irreversible effect — a role or security-group name, as
-    #: `asked_of` carries elsewhere. **Empty is not "anybody"**: under `entra_required` a job
-    #: declaring an irreversible effect refuses to run until a deployment names an approver, because
-    #: an unrouted approval request is answerable by every authenticated principal, and the first
-    #: version of this seam shipped exactly that — the requester could approve their own
-    #: irreversible change. Off enforcement it stays open, as every other gate degrades in dev.
+    # The role or security group that may approve an irreversible effect. Empty is not "anybody":
+    # under `entra_required` such a job refuses to run until an approver is named, since otherwise
+    # the requester could approve their own change. Without enforcement it stays open, as in dev.
     effect_approval_role: str = ""

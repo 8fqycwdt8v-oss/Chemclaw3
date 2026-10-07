@@ -1,18 +1,12 @@
 """One facet query, and the honest denominator every answer over it must carry.
 
-The six precedent questions look like six searches and are one, asked with different fields filled
-in. "Has this substrate been used as starting material" is a species plus a role. "Which ligands
-for Buchwald couplings" is a name plus a role. "Workhorse conditions for a Buchwald whose product
-carries this group" is a name plus a functional group. "How do we work this up with this reagent"
-is a species. So there is one `Facet`, one selection over it, and five presentations above — which
-is the difference between five queries that agree and five that drift.
+The precedent questions are one search with different fields filled in (species, role, named
+reaction, functional group), so there is one `Facet`, one selection over it, and several
+presentations, rather than several queries that drift.
 
-**Every answer carries `CorpusCoverage`, and it is scoped to the facet's rows.** A count over a
-half-labelled corpus is a lower bound, and a lower bound presented as a total is the failure mode
-this whole subsystem is most exposed to: "which ligands were used for Buchwald couplings" answered
-from 3% of the corpus reads exactly like the complete answer. Scoping to the corpus rather than to
-the facet would be a different lie, because the drain does not proceed uniformly across reaction
-types.
+Every answer carries `CorpusCoverage` scoped to the facet's rows: a count over a half-labelled
+corpus is a lower bound, and the drain does not proceed uniformly across reaction types, so
+corpus-wide coverage would mislead.
 """
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -131,9 +125,7 @@ class FrequencyReport(BaseModel):
     def verdict(self) -> str:
         """What the reader must know before quoting a number from this table.
 
-        A `computed_field` and not a bare property, the same call `FingerprintSearch.verdict` makes
-        and for the same measured reason: a plain property is not serialized, so the sentence
-        explaining what the counts mean never leaves this process.
+        A `computed_field` so the sentence is serialized with the result.
         """
         if not self.agents:
             return (

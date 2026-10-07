@@ -1,19 +1,8 @@
 """The agent tool over the evidence pack — how a piece of work came to be, from the record.
 
-**A read, and the only one here that returns free text.** `chemclaw.operations.activity` is bounded
-to counts and identifiers because an aggregate is visible to everyone who can reach the agent. A
-pack is different in exactly the way that matters: it is scoped to *one conversation*, and a
-rationale, a plan hash and an external reference are the substance of it rather than a leak.
-
-**The scoping is the control, and this file used to only say so.** An earlier version of this
-docstring claimed "the route to another person's session is `CurrentSession`'s ownership check, not
-this tool" — but `CurrentSession` is a FastAPI dependency on `/sessions/{id}/…` routes and is not on
-this path at all, while `session_id` is a plain argument the model can set to any value. Worse, the
-ids were discoverable: `check_pending_requests` returned every open request in the deployment with
-its `session_id` attached. So Alice could ask what was outstanding, read Bob's session id out of the
-answer, and assemble Bob's every tool call, job rationale, approval and external effect. The gate is
-now here, against the same `participant_permits` rule the routes use, and a session the caller is
-not in is refused with the wording an unknown one gets — no existence leak, as at the front door.
+A pack is scoped to one conversation and returns free text (rationales, plan hashes, external
+references). `session_id` is model-controlled, so this tool enforces the same participant rule as
+the `/sessions/{id}` routes, and refuses a foreign session with the unknown-session wording.
 """
 
 from chemclaw.agent.framing import defang
@@ -29,11 +18,8 @@ from chemclaw.operations import assemble
 async def _may_read(session_id: str) -> bool:
     """Whether this turn's actor may assemble a pack for a session that is not their own.
 
-    The same rule `/sessions/{id}/…` resolves — the owner, or a member the owner let in
-    (`session_members.participant_permits`) — so the tool and the route cannot disagree about who is
-    in a conversation. A session with no ownership row at all is refused under
-    enforcement and allowed in dev, which is what `owner_permits` already decides for a row whose
-    owner is absent — an unknown session and an owner-less one are the same claim about the record.
+    Same rule as the `/sessions/{id}/…` routes: the owner or an admitted member. A session with no
+    ownership row is refused under enforcement and allowed in dev.
     """
     found, owner, _ = await SessionOwnerStore().lookup(session_id)
     if not found:
@@ -76,26 +62,16 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
             ),
         }
     if target != own and not await _may_read(target):
-        # The wording an unknown session gets, deliberately: telling a caller that a session exists
-        # but is somebody else's confirms the id, which is the leak the front door's shared 404 rule
-        # exists to prevent.
+        # Same wording as an unknown session: confirming the id exists would leak it.
         return {
             "empty": True,
             "reason": f"no conversation {target!r} to assemble",
         }
     pack = await assemble(target)
     payload = pack.model_dump(mode="json")
-    # A rationale and a job summary are text a person wrote and a tool returned; they reach the
-    # model exactly as a retrieved chunk does. So are two fields this loop used to walk straight
-    # past while the comment beside it called the rest "identifiers, outcomes and timestamps from
-    # bounded vocabularies": a failed run's `failure_reason` is the far side's own sentence —
-    # `durable/connector_job.failure_reason` walks the Temporal chain and returns whatever the
-    # connector said, its own worked example being a tblite message quoting a solvent name the
-    # model supplied — and an effect's `external_ref` is a handle a *foreign* system chose. Neither
-    # is this deployment's text, and both landed in the pack raw.
-    #
-    # `ToolCall.detail` stays out of it deliberately: `evidence_pack.py` restricts that column to
-    # `outcome == "refused"`, which is this system's own refusal wording.
+    # Rationales, summaries, failure reasons and external refs are foreign text and reach the model
+    # like a retrieved chunk, so they are defanged. `ToolCall.detail` is excluded: it is only ever
+    # this system's own refusal wording.
     for job in payload.get("jobs", []):
         job["rationale"] = defang(str(job.get("rationale", "")))
         job["summary"] = defang(str(job.get("summary", "")))
@@ -103,23 +79,12 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
     for effect in payload.get("effects", []):
         effect["external_ref"] = defang(str(effect.get("external_ref", "")))
     payload["empty"] = pack.is_empty
-    # A lower bound when the section was truncated, and said so rather than implied: a count of
-    # refusals over a prefix reads as "there were none" to anyone who does not know about the cap,
-    # which is exactly how a session whose refusals all fell after row 200 reported zero to an
-    # auditor.
+    # A lower bound when the section was truncated, flagged so a capped count never reads as "none".
     payload["refusals"] = len(pack.refusals)
     if "tool_calls" in pack.truncated:
         payload["refusals_are_a_lower_bound"] = True
-    # `degraded_turns` calls itself "the pack's own headline" and "a reader who checks nothing else
-    # must be able to check this" — and until this line it had **no reader in `src/` at all**: one
-    # grep hit, its own `def`, with only three test assertions calling it. A plain `@property` is
-    # not a `computed_field`, so it is absent from `model_dump()` too, while its two siblings
-    # (`is_empty`, `refusals`) were surfaced here. That is the shape this repository deletes on
-    # sight — a member kept alive by a test that calls it directly — wearing a present-tense claim
-    # about a control. Surfaced rather than deleted because wave 14's finding was "a degraded
-    # answer that reads as complete", and this pack is where that is supposed to stop being true.
-    #
-    # The correlation ids rather than the turns: `PackTurn`'s four fields are already in
-    # `payload["turns"]`, so this is a pointer into what the reader already has, not a second copy.
+    # Surface degraded turns as correlation ids pointing into `payload["turns"]`, so a degraded
+    # answer
+    # never reads as complete.
     payload["degraded_turns"] = [turn.correlation_id for turn in pack.degraded_turns]
     return payload

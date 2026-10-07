@@ -1,38 +1,19 @@
 """Databricks Mosaic AI Vector Search as a `VectorStore`, with the vendor client late-bound.
 
-The second adapter on the seam `D-2026-08-08-a-vector-store-is-not-a-catalogue` opened, and built
-the way the first one is: the client package is imported at first use rather than at import time, it
-is **not** in `pyproject.toml` (a store nobody has configured must not weigh on every pod), and the
-whole adapter is exercised in CI against a fake injected through the constructor.
+The client package is imported at first use and is not a project dependency; CI exercises the
+adapter against an injected fake.
 
-Two things here are *not* copied from `qdrant.py`, because getting either wrong is a silent wrong
-answer rather than a crash.
-
-**The score is not a cosine, and this seam's contract says it is.** Databricks ranks by
-`1 / (1 + d²)` over *Euclidean* distance — not by cosine — while `VectorMatch.score` is documented
-as a cosine in [0, 1] and `retrieval/hybrid.py` fuses on it. Passing the raw number through would
-mis-rank exactly as a Qdrant collection built with `Distance.DOT` would. The conversion is exact
-**iff both sides are unit length**, so this adapter normalises on write *and* on query and then
-inverts the transform:
+**The score is not a cosine.** Databricks scores `1 / (1 + d²)` over Euclidean distance, while
+`VectorMatch.score` is a cosine. Normalising both sides to unit length makes the L2 order equal the
+cosine order and the conversion exact:
 
     unit vectors  ->  d² = 2 - 2cos  ->  score = 1/(3 - 2cos)  ->  cos = 1.5 - 0.5/score
 
-which checks at all three boundaries: identical (`d=0`, `score=1`) gives 1.0, orthogonal (`d²=2`,
-`score=1/3`) gives 0.0, and opposing (`d²=4`, `score=0.2`) gives -1.0 and is dropped by the `> 0`
-floor `base.py` requires. Normalising is also what makes Databricks' L2 ranking *order* the same as
-cosine ranking in the first place; without it this store would disagree with pgvector on which
-document is nearest, and nothing would fail.
+**The client blocks**, so every call goes through `asyncio.to_thread` to keep the retrieval
+fan-out's event loop free.
 
-**The client blocks.** `databricks-vectorsearch` is synchronous, so every call crosses
-`asyncio.to_thread` — the reason `ingest/eln/warehouse/databricks.py` gives for the same treatment:
-a retriever runs inside a `gather`, and a blocking call on the event loop stalls every other leg of
-the fan-out for the length of a network round trip. `tests/test_event_loop_offload.py` is the guard.
-
-**The index is created by the operator, not from here**, and it must be a *Direct Vector Access*
-index: a Delta Sync index computes its own embeddings from a source table and cannot be upserted or
-deleted into, which is the whole of what this seam writes. Its required schema is the three columns
-below. `retrieval/vectors/README.md` states this as an operator requirement, the way it states
-Qdrant's cosine-distance requirement.
+**The index is created by the operator** and must be a Direct Vector Access index with the three
+columns below; a Delta Sync index cannot be upserted into.
 """
 
 import asyncio
@@ -51,17 +32,14 @@ from chemclaw.retrieval.vectors.base import (
 
 logger = logging.getLogger(__name__)
 
-# The three columns a Direct Vector Access index must declare. Constants rather than settings: they
-# have to match what the adapter writes, so an operator who could change one here would only be able
-# to break it. `group_key` rather than `group` because `GROUP` is a SQL keyword and this column is
-# queryable from Databricks SQL, where an unquoted `group` is a syntax error.
+# The three columns a Direct Vector Access index must declare; constants because they must match
+# what the adapter writes. `group_key` because `group` is a SQL keyword.
 ID_COLUMN = "id"
 VECTOR_COLUMN = "embedding"
 GROUP_COLUMN = "group_key"
 
-# The score Databricks returns for two orthogonal unit vectors: `1/(1 + 2)`. The `> 0` cosine floor
-# every index on this seam applies, expressed in the store's own units so it can be pushed to the
-# server instead of costing a slot in the top-k.
+# Databricks' score for two orthogonal unit vectors, `1/(1 + 2)`: the `> 0` cosine floor in the
+# store's own units, so it can be pushed to the server.
 ORTHOGONAL_SCORE = 1.0 / 3.0
 
 
@@ -69,8 +47,7 @@ ORTHOGONAL_SCORE = 1.0 / 3.0
 class DatabricksIndex(Protocol):
     """The slice of a Vector Search index this adapter uses, so a fake is three methods.
 
-    Declared rather than imported, which is the point: `databricks-vectorsearch` is not a dependency
-    of this repository, and a Protocol is how the adapter is type-checked and tested without one.
+    Declared rather than imported because `databricks-vectorsearch` is not a dependency.
     """
 
     def upsert(self, inputs: list[dict[str, Any]]) -> Any:
@@ -106,14 +83,9 @@ class DatabricksSearchClient(Protocol):
 def _client_class() -> Any:
     """Import the Vector Search client, or say which package to install.
 
-    Imported through `importlib` with a string rather than an `import` statement, which is the
-    construction `qdrant.py` uses and it is load-bearing twice over: the package is genuinely not
-    installed here, and `tests/test_third_party_layering.py` walks the AST for third-party imports —
-    a name it cannot resolve is a dependency this package does not declare, which is the truth.
-
-    The SDK is mid-rename (`databricks.vector_search` -> `databricks.ai_search`), so both are tried
-    before giving up. A `VectorStoreConfigError` because no retry can install a package: the
-    operator has to act, and the message is the action.
+    Imported via `importlib` by string, since the package is not a declared dependency. Both the old
+    (`databricks.vector_search`) and new (`databricks.ai_search`) module names are tried. A
+    `VectorStoreConfigError` because no retry can install a package.
     """
     refused: list[str] = []
     for module_name, attribute in (
@@ -123,12 +95,8 @@ def _client_class() -> Any:
         try:
             module = importlib.import_module(module_name)
         except ImportError as exc:
-            # **Why each import failed is kept**, because "not installed" is only one of the
-            # reasons an `ImportError` reaches here. A package that *is* installed but whose own
-            # dependency is missing or ABI-incompatible raises `ImportError` from inside itself,
-            # and swallowing it produced an error message telling the operator to install
-            # something they had already installed — sending them to fix the wrong thing while the
-            # search leg stayed dark.
+            # Keep why each import failed: an installed package with a broken dependency also raises
+            # `ImportError`, and "install X" would then point the operator at the wrong fix.
             refused.append(f"{module_name}: {exc}")
             continue
         client = getattr(module, attribute, None)
@@ -147,14 +115,8 @@ def _client_class() -> Any:
 def open_databricks_client() -> DatabricksSearchClient:
     """Build the Vector Search client this deployment is configured for.
 
-    Reads the workspace URL and the token from settings rather than taking them as arguments,
-    because this is the one production entry point and the alternative is a second place that
-    decides what "the vector store" means.
-
-    The token is registered with the log-redaction inventory **here, where it is read** — the
-    placement `open_qdrant_client` uses and the one that cannot drift from the value it protects.
-    The field is also a `SecretStr` in `_SECRET_SETTINGS`, which is what covers it whatever
-    configuration source supplied it; see the fuller note beside the Qdrant client.
+    Reads the workspace URL and token from settings, the one production entry point. The token is
+    registered for log redaction here, where it is read.
     """
     client_class = _client_class()
     register_secret_env("CHEMCLAW_VECTOR_STORE_API_KEY")
@@ -171,10 +133,8 @@ def open_databricks_client() -> DatabricksSearchClient:
 def _unit(vector: list[float]) -> list[float]:
     """Scale `vector` to length 1, so Databricks' L2 ranking *is* cosine ranking.
 
-    A zero vector has no direction to preserve and is returned unchanged; `search` short-circuits on
-    one before it ever reaches here, and an all-zero *point* is meaningless to rank against either
-    way. Returning it rather than raising keeps a degenerate embedding a bad hit instead of a failed
-    sync.
+    A zero vector is returned unchanged rather than raising, so a degenerate embedding is a bad hit
+    instead of a failed sync.
     """
     magnitude = sum(component * component for component in vector) ** 0.5
     if magnitude == 0.0:
@@ -185,15 +145,9 @@ def _unit(vector: list[float]) -> list[float]:
 def cosine_from_score(score: float) -> float:
     """Invert Databricks' `1/(1 + d²)` back to the cosine this seam's contract promises.
 
-    Exact for unit vectors, which is why `_unit` is applied on both sides.
-
-    Clamped into [0, 1] after the conversion rather than instead of it. At the top end the clamp
-    absorbs floating-point rounding, where `VectorMatch` would otherwise reject a self-similarity a
-    hair over 1.0. At the bottom it floors a negative cosine to exactly `0.0` — so what reaches the
-    caller is not the negative number itself but a zero, which `_matches` then drops on its `> 0`
-    test. The outcome is the one `base.py` specifies (non-positive similarity is not a hit); this
-    docstring used to describe the mechanism as a negative surviving the conversion, which its own
-    clamp made false.
+    Exact for unit vectors, which is why `_unit` is applied on both sides. Clamped into [0, 1] after
+    conversion: the top absorbs rounding, and a negative cosine becomes `0.0`, which `_matches`
+    drops.
     """
     if score <= 0.0:
         return 0.0
@@ -208,9 +162,7 @@ class DatabricksVectorStore:
     ) -> None:
         """Bind to a client, or resolve the configured one lazily on first use.
 
-        Lazy for the reason `QdrantVectorStore` is: the data-source registry builds retrieve halves
-        in the chat pod at startup, and a store that dialled out from its constructor would make an
-        unreachable workspace a failure to *boot* rather than a failure to search.
+        Lazy so an unreachable workspace is a failure to search, not a failure to boot.
         """
         self._client = client
         self._endpoint = endpoint if endpoint is not None else settings.vector_store_endpoint_name
@@ -218,8 +170,8 @@ class DatabricksVectorStore:
     def _index(self, collection: str) -> DatabricksIndex:
         """The index object for `collection`, resolving the client on first use.
 
-        `collection` is a three-level Unity Catalog name (`catalog.schema.index`); the endpoint it
-        is served by is a deployment fact and comes from settings.
+        `collection` is a Unity Catalog name (`catalog.schema.index`); the endpoint comes from
+        settings.
         """
         if self._client is None:
             self._client = open_databricks_client()
@@ -295,11 +247,10 @@ class DatabricksVectorStore:
 def _matches(response: Any) -> list[VectorMatch]:
     """Read a `similarity_search` response into `VectorMatch`es, dropping anything unusable.
 
-    Tolerant of shape on purpose, the way `qdrant._matches` is tolerant of two client generations —
-    and with more reason, because this response format is not published as API. Two forms are read:
-    the documented envelope (`{"result": {"data_array": [[id, group, score], ...]},
-    "manifest": {"columns": [{"name": ...}, ...]}}`) and a plain sequence of mappings. A row whose
-    id did not come back cannot be rejoined to the catalogue and is dropped rather than guessed at.
+    Tolerant of shape because the format is not published API. Reads the documented envelope
+    (`{"result": {"data_array": [[id, group, score], ...]}, "manifest": {"columns": [{"name": ...},
+    ...]}}`) and a plain sequence of mappings. A row without an id cannot be rejoined to the
+    catalogue and is dropped.
     """
     rows = _rows(response)
     matches: list[VectorMatch] = []
@@ -321,9 +272,7 @@ def _matches(response: Any) -> list[VectorMatch]:
 def _rows(response: Any) -> list[dict[str, Any]]:
     """Normalise either response form into column-keyed rows.
 
-    `similarity_search` returns the column values positionally with the names alongside, so the two
-    have to be zipped back together; the score is appended as a trailing column that the `columns`
-    request does not name.
+    Values come back positionally with names alongside; the score is a trailing, unnamed column.
     """
     if isinstance(response, dict):
         result = response.get("result") or {}
@@ -332,9 +281,9 @@ def _rows(response: Any) -> list[dict[str, Any]]:
             column.get("name") for column in (response.get("manifest") or {}).get("columns", [])
         ]
         if not names:
-            # The likelier client-version change of the two, and until now the quietest: an envelope
-            # this adapter recognises whose *column* metadata moved. `data_array` cannot be read
-            # without names, and an empty result here is indistinguishable from an empty corpus.
+            # A recognised envelope whose column metadata moved: `data_array` cannot be read without
+            # names,
+            # and an empty result would be indistinguishable from an empty corpus.
             logger.warning(
                 "databricks returned %d row(s) with no readable column names; the manifest shape "
                 "has moved and `_rows` in this module is what needs teaching",
@@ -351,10 +300,7 @@ def _rows(response: Any) -> list[dict[str, Any]]:
                 len(response) - len(rows),
             )
         return rows
-    # Never silently: tolerant parsing is here to absorb a client-version change, and returning an
-    # empty list without a word would turn one into "this corpus has no matches" on every search —
-    # the failure the tolerance exists to prevent, inverted. `qdrant._matches` warns per dropped
-    # point for the same reason.
+    # Never silently: an unrecognised response would otherwise read as "no matches" on every search.
     logger.warning(
         "databricks returned a response shape this adapter does not read (%s); treating it as no "
         "matches. If the client was upgraded, `_rows` in this module is what needs teaching",

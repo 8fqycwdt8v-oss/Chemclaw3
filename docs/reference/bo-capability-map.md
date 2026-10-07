@@ -33,7 +33,7 @@ plus `tests/test_workflow_registry.py` keep `bofire`/`botorch`/`torch` out of ev
 `bofire[optimization,cheminfo]>=0.4.1` is declared (`pyproject.toml`, `[project].dependencies`), so both heavy extras are
 installed: the BoTorch strategies are now substantially in use, the RDKit/Mordred featurisers are
 deliberately not (`science/bo/featurize.py` uses cached GFN2-xTB descriptors instead, so a
-suggestion can cite the calculations behind its search space — see the `DEFERRED.md` row).
+suggestion can cite the calculations behind its search space — see the `BACKLOG.md` row).
 
 **This section is dated.** It describes the wiring as it stood *before* W1–W5, which is what makes
 it worth keeping: the roadmap below is read against it. The table's third column is therefore a
@@ -154,7 +154,7 @@ permanently. Reading the fit back was the gap, and **W5 closed it without naming
 `predict_outcome` answers a chemist's what-if from `strategy.predict()` and reports
 `cross_validate`'s score off the surrogate `strategy.surrogate_specs` says BoFire chose, so the
 number describes the model that made the recommendation. `permutation_importance` is reachable the
-same way and stays unbuilt (`DEFERRED.md`). `IterativeTrimming` (outlier-robust GP),
+same way and stays unbuilt (`BACKLOG.md`). `IterativeTrimming` (outlier-robust GP),
 `PairwiseGPSurrogate` (preference learning), `RobustSingleTaskGPSurrogate`: no caller.
 
 **Strategies with no caller at all** — `ActiveLearningStrategy`, `MultiFidelity*`,

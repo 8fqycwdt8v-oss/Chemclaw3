@@ -1,24 +1,12 @@
 """The objects a hypothesis tournament moves between its stages.
 
-**A hypothesis here is not a sentence; it is a claim with a stated way to be wrong.** `refuted_if`
-is required and non-empty at the schema level, which is the one structural commitment this whole
-feature rests on. `skills/experiment-progression/SKILL.md` already asks for it in prose — "A
-proposal that no outcome could contradict has told the chemist nothing" — and a model asked for
-free-form hypotheses will cheerfully produce twelve unfalsifiable ones. Making the field required
-means the generator cannot return that shape at all, rather than the screen having to catch it
-afterwards.
+A hypothesis is a claim with a stated way to be wrong: `refuted_if` is required and non-empty, so
+the generator cannot return an unfalsifiable one. That field is also the hypothesis's identity for
+`screen.py`'s de-duplication — two statements refuted by the same observation are one hypothesis,
+however differently phrased.
 
-That same field is also the hypothesis's *identity*, which is what `screen.py` de-duplicates on.
-Two statements that differ only in phrasing but would be refuted by the same observation are one
-hypothesis; two that share vocabulary but are refuted by different observations are two, however
-similar they read. That rule is what keeps prose similarity from quietly deleting a real
-alternative — the failure `D-162` names when it refuses to mint findings out of phrasing.
-
-**An objection carries a rationale or it does not count.** `runner_answer` already applies this rule
-to corroborations ("a flag a reviewer cannot act on is not a finding") and the reason is sharper
-here: a critic that can reject a hypothesis by saying "weak" is a critic scored on rejection, and
-`D-2026-08-16` measured where that ends — eight of ten apparent improvements were deletions. So an
-`Objection` is evidence entered into the tournament, never a verdict that removes anything.
+An `Objection` carries a rationale or it does not count; it is evidence entered into the
+tournament, never a verdict that removes anything.
 """
 
 from __future__ import annotations
@@ -89,45 +77,30 @@ class CheckCall(BaseModel):
     tool: str = Field(default="")
     subject_note_id: str = Field(default="")
 
-    # A durable-job call: the expensive half, and the one that can *vary* something.
-    # `subjects` maps a params field of the job's declared model — `reactants`, `products`,
-    # `smiles` — to the note ids that fill it. The model still writes no structure: each id is
-    # resolved against the corpus and the SMILES comes off the note.
+    # A durable-job call. `subjects` maps a params field of the job's model (`reactants`,
+    # `products`, `smiles`) to note ids; each id is resolved against the corpus, so the model
+    # writes no structure.
     job: str = Field(default="")
     subjects: dict[str, list[str]] = Field(default_factory=dict)
-    # The axis this check varies, and the values it varies over — a solvent screen is
-    # `sweep_parameter="solvents"`. Flat rather than a nested model because it crosses the Temporal
-    # wire and rides in a structured-output schema, and two scalars are a smaller surface than a
-    # sub-object for a model to fill wrongly.
-    #
-    # **A swept axis is not an invented argument**, which is the distinction the whole dispatcher
-    # turns on: it is reported beside every result it produced rather than assumed behind one, and
-    # its values are checked against the job's own declared `precondition` before anything runs.
+    # The axis this check varies and its values (a solvent screen is `sweep_parameter="solvents"`).
+    # Flat scalars because they cross the Temporal wire inside a structured-output schema. The
+    # values are checked against the job's `precondition` before anything runs and reported beside
+    # each result.
     sweep_parameter: str = Field(default="")
     sweep_values: list[str] = Field(default_factory=list)
 
-    # A template call: a reviewed, git-committed procedure that chains an enumerator into a
-    # calculation. This is the only shape that can ask about structures **nobody wrote down** — a
-    # molecule's tautomers, its protonation states, its breakable bonds — because the enumeration
-    # produces them and the template passes them on by value. The subject is `subject_note_id`,
-    # the same pointer the tool half uses, and every other declared input stays unset so the
-    # template's own measured defaults apply.
+    # A template call: a reviewed procedure chaining an enumerator into a calculation — the only
+    # shape that can ask about structures nobody wrote down (tautomers, protonation states). The
+    # subject is `subject_note_id`; other inputs stay unset so the template's defaults apply.
     template: str = Field(default="")
 
     @property
     def named_targets(self) -> list[str]:
         """The targets this call names — one for a well-formed call, none for a `physical` check.
 
-        **A property rather than a validator that raises, which was the first attempt and was
-        wrong.** These calls arrive as a model's structured output, and the JSON schema declares
-        `tool`, `job` and `template` as three independent defaulted strings — mutual exclusion is
-        not expressible there, so the only thing between the model and an ambiguous call is one
-        sentence of prompt. Raising made `derive_check` fail with a `ValidationError`, which is
-        non-retryable bad data, so the hypothesis lost its check *entirely*: no outcome, no
-        refusal code, no row — indistinguishable from the model never having answered.
-
-        The dispatcher refuses it instead, with a code, which is the rule every other grounding
-        failure here follows: reported, never raised.
+        A property rather than a raising validator: the structured-output schema cannot express
+        mutual exclusion of `tool`/`job`/`template`, and raising would drop the hypothesis's check
+        silently. The dispatcher refuses an ambiguous call with a code instead.
         """
         return [name for name in (self.tool, self.job, self.template) if name]
 
@@ -170,14 +143,11 @@ class CheckOutcome(BaseModel):
     verdict: CheckVerdict = "not-run"
     detail: str = Field(default="")
     calc_refs: list[str] = Field(default_factory=list)
-    # The closed refusal vocabulary from `hypotheses/dispatch.Refusal`, empty when the check ran.
-    # Separate from `detail` so a deployment can count *why* checks are not running — a generator
-    # that stops grounding its subjects and one whose tools went unreachable look identical in
-    # prose and want different fixes.
+    # The refusal vocabulary from `hypotheses/dispatch.Refusal`, empty when the check ran; separate
+    # from `detail` so a deployment can count why checks are not running.
     refusal_code: str = Field(default="")
-    # What the tool was asked, as it was asked, and what was left at its default. A number computed
-    # in the default solvent answers a different question from one computed in DMF, and a reader
-    # who cannot see which knobs were untouched cannot tell the two apart.
+    # What the tool was asked and what was left at its default, so a reader can tell which
+    # conditions (e.g. solvent) the number was computed under.
     ran: str = Field(default="")
 
 

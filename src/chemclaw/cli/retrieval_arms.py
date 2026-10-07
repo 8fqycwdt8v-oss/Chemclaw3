@@ -1,31 +1,14 @@
 """`python -m chemclaw.cli.retrieval_arms` — score retrieval configurations against the gold set.
 
-The instrument behind `BACKLOG.md`'s correlation row. That row has now accumulated four measured
-no-ops, each found by somebody building this measurement from scratch and each recorded as prose
-afterwards — so the next person reaches for the prose, finds a number attached to a commit that has
-moved, and rebuilds the harness to check it. This module is that harness, kept.
+Every probe in `data/evals/probes/` declaring `expects_notes` is asked of the real
+`gather_evidence`, and each labelled note's position in the merged list is recorded. Reported per
+arm: gold notes found, mean and median rank, top-3 and top-5 counts, and — against a baseline arm —
+how many moved up or down. Recall and rank are both reported because `retrieval_recall` is the
+gated metric: an arm that ranks better but finds fewer gold notes is worse.
 
-**What it measures.** Every probe in `data/evals/probes/` that declares `expects_notes` is asked of
-the real `gather_evidence`, and each labelled note's position in the merged list is recorded. The
-outputs are the figures the row is argued in: how many gold notes were found at all, their mean and
-median rank, how many landed in the top 3 and top 5, and — against a named baseline arm — how many
-moved up and how many moved down.
-
-**Why rank rather than recall alone.** Both, and the distinction decides things: `retrieval_recall`
-is the gated metric (`evals/retrieval.py`), so a configuration that finds fewer gold notes is worse
-however well it ranks the ones it finds. Measured on 2026-09-15, dropping the dense leg took mean
-gold rank from 4.69 to 3.69 — the first configuration ever measured to beat the shipped default —
-and lost 3 of 39 gold notes, one of them at rank 3. Printing only the rank would have made that read
-as a win.
-
-**It needs Postgres and a built note index**, because an arm naming `vector` reindexes the shipped
-corpus before it asks anything. That is the whole reason this measurement kept being deferred; the
-sandbox runs Postgres (`make up`), so it is not a reason any more.
-
-Each arm runs in a **subprocess**, not in a loop here: `CHEMCLAW_DATA_SOURCES` is read when
-`Settings()` is constructed and the capability-tool registry refuses a second registration, so
-reloading the modules in-process raises rather than re-reading the environment. A subprocess per arm
-is the honest way to vary a setting that is read at import.
+Needs Postgres and a built note index (`make up`). Each arm runs in a subprocess because
+`CHEMCLAW_DATA_SOURCES` is read at `Settings()` construction and the capability-tool registry
+refuses a second registration, so arms cannot be varied in-process.
 """
 
 from __future__ import annotations
@@ -44,9 +27,8 @@ import yaml
 from chemclaw.core.config import settings
 from chemclaw.evals.probe import Probe, ProbeSet
 
-#: The arms this reproduces by default: the shipped merge, the fusion, and the two remedies that
-#: `BACKLOG.md` argues about. Named rather than generated, because each one is a claim somebody made
-#: and the point of the default set is that running it re-checks every one of them at once.
+# : The default arms: the shipped merge, the fusion, and the two remedies `BACKLOG.md` argues about.
+# : Named so one run re-checks each claim.
 DEFAULT_ARMS: tuple[tuple[str, str, str, str], ...] = (
     ("round-robin, 3 legs (shipped)", "graph,lexical,vector", "graph", ""),
     ("RRF, 3 legs", "graph,lexical,vector", "hybrid", ""),
@@ -60,8 +42,7 @@ DEFAULT_ARMS: tuple[tuple[str, str, str, str], ...] = (
 def probes_with_labels() -> list[Probe]:
     """Every probe declaring `expects_notes`, parsed through `ProbeSet` rather than as loose dicts.
 
-    Validated on the way in for the reason `tests/test_probe_coverage.py` gives: a malformed probe
-    would otherwise sit in the corpus being counted and never asked.
+    Validated on the way in so a malformed probe fails loudly instead of being silently skipped.
     """
     found: list[Probe] = []
     for path in sorted(Path(settings.live_probe_dir).rglob("*.yaml")):
@@ -73,9 +54,8 @@ def probes_with_labels() -> list[Probe]:
 async def _measure_this_arm() -> dict[str, int | None]:
     """Ask every labelled probe and record where each expected note landed. Runs in the child.
 
-    A note the merged list does not contain is `None` rather than a large rank: it was not found,
-    which is a different failure from being found late, and averaging a sentinel would hide it in
-    the mean.
+    A note not found is `None`, not a large rank: not-found differs from found-late, and a sentinel
+    would hide in the mean.
     """
     from chemclaw.agent.research_tools import gather_evidence
 
@@ -98,8 +78,8 @@ def run_arm(sources: str, mode: str, weights: str) -> dict[str, int | None]:
     """Run one arm in a subprocess and return its rank map.
 
     Raises:
-        RuntimeError: the child produced no result line — its stderr is included, because a silent
-            empty arm would otherwise be averaged as though it had answered.
+        RuntimeError: the child produced no result line (its stderr is included), so an empty arm is
+            never averaged as though it had answered.
     """
     environment = dict(os.environ, CHEMCLAW_DATA_SOURCES=sources, CHEMCLAW_RETRIEVAL_MODE=mode)
     if weights:
@@ -125,9 +105,8 @@ def _summarise(label: str, ranks: dict[str, int | None], baseline: dict[str, int
     def moved(direction: int) -> int:
         """Pairs this arm ranks `direction` (-1 better, +1 worse) than the baseline does.
 
-        Only pairs both arms found are counted: a note one arm misses entirely is a recall change,
-        which `lost` reports separately, and folding it in here would let a configuration that
-        stops finding a note read as having improved its rank.
+        Only pairs both arms found count; a note one arm misses is a recall change reported by
+        `lost`.
         """
         count = 0
         for key, rank in ranks.items():

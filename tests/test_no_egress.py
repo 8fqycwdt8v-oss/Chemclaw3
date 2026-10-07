@@ -2,8 +2,8 @@
 
 The PubChem literature retriever was built, reviewed, and then rejected on scope: **this system
 takes no external sources**. Deleting the module records that as of today; it does not stop the next
-connector. The reason a guard is warranted rather than a `docs/planning/DEFERRED.md` line is that
-the original decision *was* already written down — TOOL-6 sat in `docs/planning/DEFERRED.md` as
+connector. The reason a guard is warranted rather than a `docs/planning/BACKLOG.md` line is that
+the original decision *was* already written down — TOOL-6 sat in `docs/planning/BACKLOG.md` as
 "blocked on choosing a source", which reads as an invitation, and duly got built. Prose stated the
 constraint; nothing enforced it.
 
@@ -164,7 +164,7 @@ def test_the_vendored_source_cannot_make_a_request() -> None:
 
     D-089's real subject is a *runtime* dependency on somebody else's service. A build-time dataset
     has none — but "we intend to only read from disk" is prose, and prose is exactly what D-089
-    already learned does not hold (TOOL-6 sat in `docs/planning/DEFERRED.md` as an invitation and
+    already learned does not hold (TOOL-6 sat in `docs/planning/BACKLOG.md` as an invitation and
     duly got built). So the constraint is enforced: the module may not import an HTTP client, which
     means it cannot acquire one by accident during a later edit either.
     """

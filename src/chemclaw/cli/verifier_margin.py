@@ -1,27 +1,15 @@
 """Measure the judge's roll-to-roll margin at the review threshold.
 
-The DEFERRED row this exists to close: re-scoring 39 unchanged answers cleared 5.1% of flags per
-roll (D-2026-08-16's null control), so a `review_required` flip can mean the judge rolled again
-rather than that anything changed — and the hysteresis band that would absorb it had "a magic
-number" for a width until somebody re-rolled the judge and measured the spread. This is the
-re-roll.
+Sizes the verifier's hysteresis band: a `review_required` flip can mean the judge rolled again
+rather than that anything changed. Each (answer, evidence) pair is scored `--rolls` times through
+`agent.verifier.judge_once` — one raw roll, no band, since the band is what is being sized.
 
-What is measured is exactly the call the turn makes: `agent.verifier.judge_once` — one structured
-scoring roll, no band, no degrade — repeated `--rolls` times per (answer, evidence) pair. The band
-must not be in the loop, because the band is the thing the measurement sizes.
+Pairs are generated over the repository's own knowledge notes, with answers in three classes
+(grounded, drifting, contradicted). This measures per-answer stability, not how often a
+deployment's answers land near the threshold; pass a `--pairs` file of real answers for that.
 
-The corpus is generated over the repository's **own knowledge notes**: each pair takes a real note
-body as its evidence and asks the same model for an answer in one of three classes — grounded,
-drifting (one specific number the evidence does not carry) and contradicted — because those are
-the flag classes the 2026-08-16 run observed on live answers. Stated plainly so nobody over-reads
-the number: this measures the judge's *stability per answer* (the spread of repeated rolls on one
-input, which is what a band width is made of), not the deployment's *distribution* of answers near
-the threshold (how often the band is entered — that needs a deployment's own answers, and re-running
-this command against a `--pairs` file of them is the standing way to re-fit).
-
-Needs a model credential; refuses without one rather than measuring a mock. The output is JSON on
-stdout — per-pair rolls plus the summary the ADR cites — so the artifact a decision rests on is
-the run's own record rather than prose about it.
+Needs a model credential and refuses without one rather than measuring a mock. Output is JSON on
+stdout: per-pair rolls plus the summary.
 """
 
 import argparse
@@ -39,9 +27,8 @@ from chemclaw.core.config import settings
 from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.retrieval.evidence import EvidenceChunk
 
-# The three answer classes, named after what the 2026-08-16 live run actually flagged. Each prompt
-# asks for the *answer only*, so the generated text is prose over the evidence rather than a
-# meta-discussion of the task.
+# The three answer classes. Each prompt asks for the answer only, so the generated text is prose
+# over the evidence rather than a discussion of the task.
 _CLASSES: dict[str, str] = {
     "grounded": (
         "Write a 3-5 sentence answer to a colleague's question about the topic below, using ONLY "
@@ -162,13 +149,12 @@ def _flips(confidences: list[float], threshold: float) -> int:
 
 
 def _summary(results: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
-    """The two numbers the band is sized from, plus the honesty counters around them.
+    """The two numbers the band is sized from, plus the counters around them.
 
-    `recommended_band` is the width that would have absorbed every observed roll of every pair
-    whose median sits near the threshold (within 0.25): the max deviation-from-median there,
-    rounded up to 0.05. Pairs far from the threshold do not size the band — the DEFERRED row's own
-    finding is that the judge is stable there — but their spread is reported so that claim stays
-    re-checkable.
+    `recommended_band` is the max deviation-from-median over pairs whose median lies within 0.25 of
+    the threshold, rounded up to 0.05. Far-from-threshold pairs do not size the band, but their
+    spread
+    is reported.
     """
     scored = [r for r in results if r.get("rolls")]
     near = [r for r in scored if abs(r["median"] - threshold) <= 0.25]
@@ -190,10 +176,8 @@ def _summary(results: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
 def main() -> None:
     """Generate (or load) the pair corpus, roll the raw judge, and print the measurement.
 
-    The gateway guard runs first, because this module's own contract is that it "needs a model
-    credential; refuses without one rather than measuring a mock" — and the shipped
-    `CHEMCLAW_LLM_BASE_URL` *is* the mock. Without this the promise was prose: the measurement a
-    band width is fitted from would have been the mock's spread, reported as the judge's.
+    The gateway guard runs first: the shipped `CHEMCLAW_LLM_BASE_URL` is the mock, and measuring its
+    spread would be reported as the judge's.
     """
     refuse_unconfigured_llm_gateway()
     parser = argparse.ArgumentParser(description=__doc__)

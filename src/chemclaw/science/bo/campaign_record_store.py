@@ -1,14 +1,8 @@
 """Postgres backing for the BO campaign record (`infra/sql/031_bo_campaigns.sql`).
 
-Kept separate from `chemclaw.science.bo.campaign_record` for the reason
-`chemclaw.kg.record` is kept separate from `proposal`: the module the connector tool
-imports carries no database dependency, so a process running without Postgres never pulls psycopg
-for a store it will not use.
-
-The campaign upsert refreshes the problem and `last_asked_at` and **never** the opener: whoever
-framed a campaign framed it, and a second chemist asking about the same space does not become its
-author. Suggestions are a plain insert — the sequence is the campaign's history, and an upsert
-would destroy the record of what was proposed before the latest data arrived.
+Separate so the module the connector tool imports carries no database dependency. The campaign
+upsert refreshes the problem and `last_asked_at` and **never** the opener. Suggestions are a plain
+insert: the sequence is the campaign's history.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -21,13 +15,8 @@ from chemclaw.core.config import settings
 from chemclaw.core.jsonb import json_column
 from chemclaw.science.bo.campaign_record import Campaign, Suggestion
 
-# `xmax = 0` is Postgres's own answer to "did this upsert insert, or update?" — on a freshly
-# inserted tuple the system column is zero, on one updated by this statement it carries the
-# updating transaction's id. It is read here because the alternative is a `SELECT` before the
-# `INSERT`, and that read is a race: two turns opening the same decision space concurrently both
-# see no row and both report having opened a new campaign. The upsert already serializes on the
-# primary key, so asking *it* what happened is the only answer that cannot disagree with what was
-# written.
+# `xmax = 0` tells whether the upsert inserted (zero) or updated. Asking the upsert, which
+# serializes on the primary key, avoids the race a prior `SELECT` would have.
 _UPSERT_CAMPAIGN = """
     INSERT INTO bo_campaigns (campaign_id, objective, direction, problem, opened_by)
     VALUES (%s, %s, %s, %s, %s)
@@ -46,9 +35,8 @@ _INSERT_SUGGESTION = """
     RETURNING id
 """
 
-# What a retried durable run already wrote. Read only when the insert above hit the partial unique
-# index, so the caller still gets the suggestion id it would have got the first time — a retry must
-# be invisible, not merely harmless.
+# What a retried durable run already wrote; read only when the insert hit the partial unique
+# index, so a retry returns the original suggestion id.
 _SELECT_SUGGESTION_BY_JOB = "SELECT id FROM bo_suggestions WHERE campaign_id = %s AND job_id = %s"
 
 _SELECT_CAMPAIGN = (
@@ -77,20 +65,10 @@ class PostgresCampaignStore:
     async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
         """Upsert the campaign and append its suggestion **atomically**.
 
-        Returns the suggestion id and whether this call is what *created* the campaign.
-
-        One method, one connection, one transaction — because the two writes were never
-        independent. The upsert sets `problem = EXCLUDED.problem`, so a failure between them left
-        the campaign row holding the **new** decision space while the surviving suggestions held
-        the **old** space's observations, and `read_campaign_thread` would hand a later session
-        that mismatched pair. That is exactly the "seeded with observations from a different
-        campaign" failure its own docstring says the design prevents.
-
-        This is atomicity, not an abstraction, so the Rule of Three does not gate it: two
-        statements that must both land or neither belong in one transaction.
-
-        The created flag comes out of the upsert rather than from a `SELECT` before it, because
-        that read was a race — see `_UPSERT_CAMPAIGN`.
+        Returns the suggestion id and whether this call created the campaign. One transaction
+        because the upsert replaces `problem`, and a failure between the writes would pair the new
+        space with the old observations. The created flag comes from the upsert (see
+        `_UPSERT_CAMPAIGN`).
         """
         async with _connect() as conn, conn.transaction():
             cursor = await conn.execute(
@@ -126,11 +104,9 @@ class PostgresCampaignStore:
                     suggestion.correlation_id,
                 ),
             )
-            # `BIGSERIAL` + `RETURNING id` cannot yield no row on a successful insert — but
-            # `DO NOTHING` inserts no row at all when a retried durable run already wrote this
-            # suggestion, and that is the one case where no row is the correct answer rather than
-            # an anomaly. Read back the id the first attempt got, so a retry is invisible to the
-            # caller instead of merely harmless.
+            # `DO NOTHING` yields no row when a retried durable run already wrote this suggestion;
+            # read
+            # back the original id so the retry is invisible to the caller.
             row = await cursor.fetchone()
             if row is None:
                 cursor = await conn.execute(

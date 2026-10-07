@@ -1,72 +1,18 @@
 """A chemist's own skills: judgment that shapes their turns and nobody else's.
 
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` §3 designed this tier and recorded it
-unbuilt, with the reason it was blocked: *"there is no distiller, so nothing writes into a per-actor
-directory and nobody can populate one."* That is still true of a *distiller* — `make
-trajectory-census` reports zero on a database that has never served a user — so the tier ships with
-the other writer that argument overlooked: **the chemist**. They ask for a procedure to be
-remembered, the agent drafts the text into its answer, and the person posts it through a route.
+The chemist writes this tier through `POST /skills/mine` (or by accepting a proposal); no agent
+path writes a skill, and `agent/skill_store.PermittedStoreBackend` raises `SkillsReadOnlyRefusal`
+on every write verb. Invariants:
 
-**No agent path writes a skill, and that is unchanged rather than relaxed.** `SkillsReadOnlyRefusal`
-still refuses every write verb, here as on the shared tree — `_LOCAL_READ_ONLY` below is the same
-refusal worded for this root, and `agent/skill_store.PermittedStoreBackend` is what raises it. The
-write is an HTTP route a person calls, which is the same shape `api/routes/plan.py` uses for exactly
-the same reason: a model must never be able to authorize its own behaviour change.
+- **Per-actor, resolved per turn.** The namespace closes over the turn's actor when
+  `build_langgraph_agent` builds the backend, so another chemist's turn cannot reach it.
+- **Never a source of shared truth.** Nothing promotes or cites one.
+- **Inspectable.** `api/routes/skills.py` lists, reads and deletes.
 
-**The read half moved out, and the tier gained the gate it was missing.** This module used to hold
-its own `ReadOnlyStoreBackend`, narrowed in the prompt and not at the backend — so the eval control
-arm that removes every skill still handed over the bodies. The backend is now shared with the
-organisation's tier and takes a `permits` predicate; `local_skills_backend` below is where this
-tier's half of it is decided.
-
-**The invariants this tier owes**, from that ADR, and where each one lives:
-
-- **Per-actor, resolved per turn.** The namespace closes over `get_current_actor()` at backend
-  construction, which happens inside `build_langgraph_agent` — per turn, because the graph is. A
-  directory resolved once at startup would be one chemist's skills served to everyone.
-- **Never a source of shared truth.** Nothing promotes one, nothing cites one, and no other actor's
-  turn can name the namespace: `local_skills_namespace` takes the actor and the route is only
-  mounted when a turn has one.
-- **The user can see what it does.** `api/routes/skills.py` lists, reads and deletes; a behaviour
-  change nobody can inspect is the property that makes the *shared* tree need a gate, and this tier
-  earns its exemption by being visible to the one person it affects.
-- **`SkillsReadOnlyRefusal` unchanged.** See above.
-
-**Storage is the store rather than a directory, and this is the one place that ADR's text is
-departed from.** It says "the chemist's own skills directory", and a directory is wrong for the
-deployment this ships into: a pod's filesystem is ephemeral and the chart runs `serverReplicas` of
-them, so a local skill written to disk would vanish on the next restart and differ between replicas
-answering the same chemist. `StoreBackend` over the `AsyncPostgresStore` that already serves
-`/memories/` is multi-replica-safe, and — the reason that matters most here — its namespace is the
-erasure key `agent/leaver.py` already sweeps by prefix, so a departing person's local skills leave
-with their memories instead of needing a second mechanism that could disagree.
-
-**Which narrowings apply here is now `skill_access.SkillNarrowing.stored`, and this paragraph used
-to be wrong about all four of them.** It said none applied and that three must not; measured,
-`EnabledSkills`, `ProfileScopedSkills` and `RoleScopedSkills` all did, and the one it wanted —
-`ToolScopedSkills` — did not. Each half mattered on its own:
-
-- **`EnabledSkills` deleted the tier outright, exactly as this paragraph predicted while claiming it
-  did not.** Driven with `CHEMCLAW_SKILLS_ENABLED=development-report`, `ls('/mine/')` came back
-  empty. A deployment that sets it is naming *shared* skills — `make skill-validate` checks every
-  name in it against the discovered trees, so a personal name cannot legally appear there — and a
-  narrowing whose basis cannot name a member of a set can only empty that set. It is excluded now.
-- **`ProfileScopedSkills` applies, and must.** `skill_names: frozenset()` is a profile author
-  writing down that this agent reaches no skill at all, which is what the `skills-removed.yaml`
-  control arm is; a tier escaping it would silently measure a system that still had skills, which is
-  the defect this tier's own backend predicate was added to close.
-- **`RoleScopedSkills` applies and is a no-op**, because its keys are validated against the filed
-  trees too. The one name where it could bite is a name both a filed tree and this tier hold, and
-  `UnreservedNames` removes that case from the listing regardless.
-- **`ToolScopedSkills` applies now**, which is what the row asked for. It asks whether this agent
-  can do any of what a skill teaches — as true of a personal skill as of a shipped one — and a
-  local skill about tools the turn cannot reach is misleading in exactly the way that narrowing
-  exists to prevent. What was in the way is real and is not solved by parsing inside a synchronous
-  `ls`: `agent/stored_skill_tools.py` reads the bodies in the *async caller*, the same hoisted-await
-  seam the store and the checkpointer already use, and hands the declarations to the builder.
-
-What bounds this tier *beyond* any of them is structural and stronger than a predicate — the
-namespace closes over one actor, so another chemist's turn cannot reach it at all.
+Storage is the Postgres store, not a directory, because pod filesystems are ephemeral and
+replicated; its namespace is the erasure key `agent/leaver.py` sweeps by prefix. The tier is
+narrowed by the stored half of `skill_access.SkillNarrowing` (profile, role and tool scope, not
+`EnabledSkills`, which names shipped skills and would empty it).
 """
 
 import logging
@@ -98,20 +44,14 @@ from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
-#: The root a chemist's own skills are mounted at, and the label the model sees in their paths.
-#:
-#: `mine` rather than the actor's digest, which is what the namespace uses: a digest in a path is a
-#: stable identifier for a person appearing in the system prompt of every turn and in every log line
-#: that quotes one. The route is per-actor by construction — the namespace closes over the turn's
-#: own actor — so the path needs to carry no identity at all.
+# The root a chemist's own skills are mounted at, and the label the model sees in their paths.
+# `mine` rather than an actor digest, so no person identifier appears in prompts or logs.
 LOCAL_SKILLS_ROOT = "/mine/"
 
 #: The same label without its slashes, for the skills middleware's source list.
 LOCAL_SKILLS_LABEL = "mine"
 
-#: What a refused *write* to this tier says. The shared tree's wording names a reviewed commit as
-#: the way in, which is wrong here — a local skill changes through a route its owner calls — so the
-#: sanctioned path differs while the refusal does not.
+# What a refused write to this tier says; the sanctioned path is the owner's route.
 _LOCAL_READ_ONLY = routed(
     "your own skills are read-only to a turn — a skill is judgment that reshapes later answers, "
     "so it changes only when you decide it does, not when a turn decides. Nothing was changed.",
@@ -125,9 +65,7 @@ _LOCAL_READ_ONLY = routed(
 class SkillRefused(ChemclawError):
     """A document this tier will not keep, and whether the reason is a conflict or a fault.
 
-    One exception rather than two, carrying `conflict`, because every caller has to translate it to
-    its own surface anyway — a 409 or a 422 at a route, prose at a tool — and two classes would be
-    two things to keep in step for one branch.
+    One exception carrying `conflict`, since every caller translates it (409/422, or prose) anyway.
     """
 
     def __init__(self, message: str, *, conflict: bool = False) -> None:
@@ -139,31 +77,14 @@ class SkillRefused(ChemclawError):
 def validated_skill(body: str, *, expected_name: str | None = None) -> str:
     """The name this body declares, or a refusal naming what is wrong with it.
 
-    **Every door into this tier goes through here, and the reason is a hole that was measured.**
-    `POST /skills/mine` had these checks and the *acceptance* of a proposal did not, so a document
-    refused at one door was written at the other. Driven before this function existed, all three
-    refused bodies landed: a skill taking a shipped skill's name, a body that is not a `SKILL.md`
-    at all, and one at 40,000 characters against a 16,000 cap — 409, 422, 422 at the save route and
-    **200, written** at the accept route. The module that opened the second door argued in its own
-    docstring that "a second door into one bound is a hole in it" and then closed one bound of four.
-
-    So the admission rules live with the tier rather than with a surface, and a new way in gets them
-    by calling this. The callers are the save route, the accept route, `propose_skill`, the
-    distiller before it files, and — since the organisation's tier shipped — its publish and revert
-    routes too.
-
-    **It is deliberately not per tier.** `agent_local_skill_max_chars` reads as the personal tier's
-    number and bounds what a *skill* is — judgment rather than a transcript — which is as true of
-    one an administrator publishes as of one a chemist keeps. A second char cap for the second tier
-    would be the second door into one bound that this function exists to prevent, so the wording
-    above names no tier.
+    Every door into a stored skills tier goes through here (save, proposal acceptance,
+    `propose_skill`, the distiller, org publish and revert), so the admission rules belong to the
+    tier rather than to a surface. The size bound is not per tier: it bounds what a skill is.
 
     Args:
         body: The whole `SKILL.md`, frontmatter included.
-        expected_name: What the caller believes the name is, when it has an independent opinion —
-            `propose_skill` takes a `name` argument beside the body. Two sources of one name can
-            disagree and the reader believes whichever the code consults, so they are compared
-            rather than one being preferred.
+        expected_name: The caller's independent opinion of the name, if any (`propose_skill`'s
+            `name` argument); compared rather than preferred.
 
     Returns:
         The validated name, which is also the skill's directory and its store key.
@@ -204,9 +125,7 @@ def validated_skill(body: str, *, expected_name: str | None = None) -> str:
         raise SkillRefused(
             "a skill name may not contain whitespace or control characters — use hyphens."
         )
-    # Imported here rather than at module scope because `langgraph_agent` imports *this* module —
-    # the cycle is real, and the call is per save rather than per turn. `declared_tools` is cached
-    # on the directory tuple, so the cost is one `Path.is_dir()` fan-out.
+    # Imported lazily: `langgraph_agent` imports this module.
     from chemclaw.agent.langgraph_agent import shipped_skill_names
 
     if manifest.name in shipped_skill_names():
@@ -218,34 +137,17 @@ def validated_skill(body: str, *, expected_name: str | None = None) -> str:
     return manifest.name
 
 
-#: The in-process tools whose only outcome is a personal skill, and which are therefore not bound
-#: where `personal_skills_available()` is false. A name rather than a literal in the builder,
-#: because the set belongs to the tier: whoever adds the second such tool adds it here and the
-#: builder needs no edit.
+# In-process tools whose only outcome is a personal skill, so they are not bound where
+# `personal_skills_available()` is false.
 PERSONAL_TIER_TOOLS = frozenset({"propose_skill"})
 
 
 def personal_skills_available() -> bool:
     """Whether this deployment can keep a chemist's own skill at all.
 
-    Two gates, both necessary. `agent_memory_enabled` is the deployment's decision that
-    agent-authored files may outlive a session; `session_store` is the same condition the
-    checkpointer reads, because the store shares its pool and a process on the in-memory store has
-    no Postgres to put one in.
-
-    **One function because three surfaces read it, and the third read it by not reading it.**
-    `api/runner.turn_store` mounts `/mine` on these conditions and `api/routes/skills.py` refuses on
-    them, but `propose_skill` was bound on every model call with no condition at all — so under the
-    shipped defaults of the day (`agent_memory_enabled` was False) the model spent the tool's schema
-    on every request, wrote a row into a store that dies with the process, and told the chemist to
-    go accept something `POST /proposals/...` answers 503 to. A tool whose only outcome is
-    unreachable is not a capability, and this is the predicate that says so.
-
-    **Both halves are now True on the shipped configuration**
-    (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` flipped the first; the chart has
-    always pinned the second), so what this predicate guards today is a deployment that turned
-    durable memory *off* — which loses the whole human gate on agent-proposed behaviour with it, and
-    is why the chart states the posture rather than inheriting it.
+    Requires `agent_memory_enabled` (agent-authored files may outlive a session) and a Postgres
+    `session_store` (the store shares its pool). One predicate for the mount, the route and the
+    binding of `PERSONAL_TIER_TOOLS`, so a tool whose only outcome is unreachable is not offered.
 
     Returns:
         True where a proposal has somewhere durable to land and a route that can accept it.
@@ -256,13 +158,9 @@ def personal_skills_available() -> bool:
 def local_skills_namespace(actor: str) -> tuple[str, ...]:
     """The store namespace one person's own skills live under.
 
-    Digested for the two reasons `scratchpad.memory_namespace` gives and shares its shape with:
-    `store` validates namespace components against a character class that rejects most punctuation,
-    and an actor has more than one spelling in this system (`unverified:<id>` is the other), so a
-    digest is always legal and collapses neither spelling into the other.
-
-    A **different first component** from `memories`, so the two tiers are separately erasable and
-    separately countable, and so a bug in one cannot serve the other's rows.
+    Digested like `scratchpad.memory_namespace`: always a legal namespace component, and an actor's
+    two spellings stay distinct. A different first component from `memories`, so the tiers are
+    separately erasable and countable.
 
     Args:
         actor: The turn's actor id, in whichever spelling the caller holds.
@@ -276,14 +174,7 @@ def local_skills_namespace(actor: str) -> tuple[str, ...]:
 def local_skills_prefix(actor: str) -> str:
     """The `store.prefix` value naming one person's own skills, for the erasure sweep.
 
-    Exposed so `agent/leaver.py` builds the same string this module writes under rather than
-    re-deriving the join — the defect class where two modules agree about a key until one is edited.
-
-    Args:
-        actor: The departing person's id.
-
-    Returns:
-        The dotted prefix under which every local skill of theirs is stored.
+    Exposed so `agent/leaver.py` uses this module's key rather than re-deriving it.
     """
     return ".".join(local_skills_namespace(actor))
 
@@ -291,14 +182,10 @@ def local_skills_prefix(actor: str) -> str:
 def _count_a_local_load(name: str) -> None:
     """Book one delivered personal-skill body, on the two channels this tier may use.
 
-    **A separate bare counter rather than the labelled one**, for the reason the metric's own HELP
-    gives: a local skill's name is a person's words, and a label would mint a series per private
-    project name in a shared exposition that no erasure reaches.
-
-    `record_skill_loaded` carries the name in process only — the ledger digests it before it reaches
-    `turn_costs` (`agent/skill_fingerprint.py`), because that row is retained through erasure. It is
-    what `agent/distiller.py`'s self-confirmation guard reads, so a tier that did not call it would
-    let a trajectory this skill was already teaching count as evidence for proposing it.
+    A bare counter, because a personal skill's name is private vocabulary and a label would put it
+    in
+    a shared exposition. `record_skill_loaded` carries the name in process only (digested before it
+    reaches `turn_costs`) for the distiller's self-confirmation guard.
     """
     record_metric(lambda m: m.increment("chemclaw_local_skill_loads_total"))
     record_skill_loaded(name)
@@ -309,18 +196,13 @@ def local_skills_backend(
 ) -> PermittedStoreBackend:
     """The mounted read half of one chemist's own tier.
 
-    A factory rather than a constructor call at the mount point, because three of the five arguments
-    are *this tier's* rather than the caller's — the namespace, the refusal wording and which
-    counter a load books against. `agent/scratchpad.py` composes routes; it should not also be the
-    place that knows a personal skill's name is private.
+    A factory because the namespace, refusal wording and counter are this tier's knowledge.
 
     Args:
         store: The process's store.
         actor: Whose tier this is, in the turn's own actor spelling.
-        permits: `agent/skill_access.SkillNarrowing.stored` — the **stored** half of this
-            turn's narrowing, applied per reach. A half rather than the whole composition,
-            because `EnabledSkills` names shipped skills and applying it here emptied this
-            tier rather than narrowing it; `SkillNarrowing` carries that measurement.
+        permits: `agent/skill_access.SkillNarrowing.stored`, the stored half of this turn's
+            narrowing, applied per reach.
     """
     namespace = local_skills_namespace(actor)
     return PermittedStoreBackend(
@@ -335,10 +217,7 @@ def local_skills_backend(
 def _one_writer_per_chemist(actor: str) -> AbstractAsyncContextManager[None]:
     """Serialize this chemist's saves, so the row cap is a bound rather than a suggestion.
 
-    Per chemist, so two people never contend. The mechanism, and the measurement that made it
-    necessary (twelve concurrent saves at a cap of 3, all twelve written), are
-    `skill_store.advisory_writer_lock`'s; `agent/behaviour_proposals.py` uses the same shape one
-    table over.
+    Per chemist via `skill_store.advisory_writer_lock`, so two people never contend.
     """
     return advisory_writer_lock(f"local-skills\x1f{actor}")
 
@@ -346,25 +225,10 @@ def _one_writer_per_chemist(actor: str) -> AbstractAsyncContextManager[None]:
 async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None:
     """Write one of a chemist's own skills, replacing any earlier version of that name.
 
-    No merge and no version history: a skill is judgment its owner is asserting *now*, and a tier
-    that accumulated every draft would make "what is acting on my turns" a question with a list for
-    an answer. The route validates `body` as a `SkillManifest` before calling this, so a malformed
-    skill is a 422 rather than a file the listing then skips.
-
-    **This write is outside the tool-call chain, and what stands in its place is stated rather than
-    assumed.** `tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly`
-    holds that every store write arrives as a `write_file` tool call, because that is what crosses
-    the audit row, the authorization gate, the dry-run refusal and the repeat guard — and the reason
-    it gives is that a direct write "would do so silently: nothing fails, the memory is simply
-    written with no record that it was."
-
-    There is no tool call here to cross anything: the write comes from an HTTP route a *person*
-    calls, which is the whole design (`D-2026-09-18-…`), and three of those four controls have no
-    subject without a turn. The fourth — authorization — is the route's `CurrentUser` plus the fact
-    that the namespace is derived from the caller rather than taken from them, so there is no
-    decision here to get wrong. What would otherwise be lost is the *record*, so it is written: an
-    INFO naming who changed which skill, which is the same thing `skill_backend.read` does for the
-    other direction and the only reason this write is not silent.
+    No version history: a skill is what its owner asserts now. This write comes from a route a
+    person calls, not a tool call, so it crosses no audit middleware; authorization is the route's
+    `CurrentUser` plus a namespace derived from the caller, and an INFO line records who changed
+    which skill.
 
     Args:
         store: The process's store.
@@ -374,10 +238,9 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
     """
     async with _one_writer_per_chemist(actor):
         held = await list_local_skills(store, actor)
-        # Refused rather than evicted, and counted inside the lock so the cap binds the tier rather
-        # than trailing it by however many requests arrived together. Replacing a skill already held
-        # is not a new row, so it is allowed at the cap — otherwise a chemist at the limit could not
-        # correct any of them.
+        # Refused rather than evicted, counted inside the lock. Replacing a held skill is allowed at
+        # the cap
+        # so one can always be corrected.
         if name not in held and len(held) >= settings.agent_local_skills_max:
             raise SkillRefused(
                 f"you already keep {len(held)} personal skills, which is this deployment's limit "
@@ -385,14 +248,11 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
                 "every turn you take, so remove one before adding another",
                 conflict=True,
             )
-        # **A name the organisation already publishes is refused here, and the reverse is not.**
-        # The two tiers mount side by side and a collision resolves by source order, so one of them
-        # loses silently; this makes the direction a decision instead of an accident. A person
-        # cannot take a name the whole deployment is using — they would be writing judgment that
-        # never acts, since `_skills_middleware` puts `/org` after `/mine`. An administrator *can*
-        # take a name somebody already uses privately, because the alternative is a deployment-wide
-        # publication blocked by one person's private vocabulary, which nobody could have seen
-        # coming and nobody can resolve without being told whose it is.
+        # A name the organisation already publishes is refused here (it would never act, since
+        # `/org` is
+        # mounted after `/mine`). The reverse is allowed, so one person's private name cannot block
+        # a
+        # deployment-wide publication.
         from chemclaw.agent.org_skills import list_org_skills
 
         if name in await list_org_skills(store):
@@ -417,19 +277,10 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
 async def list_local_skills(store: Any, actor: str) -> list[str]:
     """The names of one chemist's own skills, sorted — **all** of them.
 
-    Read off the store rather than off the mounted backend, because this answers a *route's*
-    question — "what is acting on my turns" — and the route has no turn and therefore no mount.
-
-    **Paged, because the un-paged spelling answered ten.** `store.asearch(namespace)` with no
-    `limit` is not "everything", it is `BaseStore.asearch`'s default of 10 — so a chemist with
-    twelve saved skills was listed ten while the prompt carried twelve, and the two beyond the page
-    were undeletable through the route that exists to remove them. That falsifies the licence this
-    tier holds its exemption under: the ADR grants it *on the condition* that a person can see what
-    is acting on their turns and withdraw it. A listing that is confidently short is worse than no
-    listing, because it answers the question wrongly rather than not at all.
-
-    The walk and the key parsing are `skill_store.list_skill_names`, shared with the organisation's
-    tier — the two listings were copies of each other down to the suffix slice.
+    Read off the store because the route has no turn and so no mount. Paged
+    (`skill_store.list_skill_names`), since the store's default page is 10 and a chemist must be
+    able
+    to see and delete every skill acting on their turns.
     """
     return await list_skill_names(store, local_skills_namespace(actor))
 
@@ -437,27 +288,19 @@ async def list_local_skills(store: Any, actor: str) -> list[str]:
 async def read_local_skill(store: Any, actor: str, name: str) -> str | None:
     """One of a chemist's own skills, verbatim, or `None` if they have no skill by that name.
 
-    A name the writer would have refused is answered as absent rather than passed to the store —
-    see `storable_name`, which measured a 500 on the shipped backend for a name that cannot exist.
+    A name the writer would refuse is answered as absent (see `storable_name`).
     """
     return await read_skill_body(store, local_skills_namespace(actor), name)
 
 
 async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
-    """Remove one of a chemist's own skills. Returns whether there was one to remove.
-
-    The half of "the user can see what it does" that makes the rest worth having: an inspectable
-    behaviour change nobody can withdraw is a worse bargain than one nobody can see, because the
-    person has learned there is something acting on them and still cannot stop it.
-    """
+    """Remove one of a chemist's own skills. Returns whether there was one to remove."""
     if not storable_name(name) or (
         await store.aget(local_skills_namespace(actor), skill_key(name)) is None
     ):
         return False
-    # Through the same backend the write uses rather than `store.adelete`, so both halves of this
-    # tier's lifecycle go through upstream's own code and the stored shape keeps one definition.
-    # It is also what `tests/test_scratchpad.py` asks for structurally — no first-party module
-    # reaches past the backend to the store's write verbs.
+    # Through the same backend the write uses, so no first-party module reaches the store's write
+    # verbs directly.
     await store_writer(store, local_skills_namespace(actor)).adelete(skill_key(name))
     log_event(
         logger,
@@ -471,12 +314,5 @@ async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
     return True
 
 
-# **The tier's two bounds are `agent_local_skill_max_chars` and `agent_local_skills_max`**, and
-# they live in `core/config/agent.py` with their arithmetic rather than here, because this
-# repository's rule is that a threshold is a setting. The route enforces both, and the second one
-# is the one that was missing: `agent_memory_max_files` is enforced by
-# `scratchpad.BoundedStoreBackend`, which mounts `/memories/` and not this root, so nothing on
-# either half of this tier ever counted a row. The row cap is a bound on **prefix** spend rather
-# than on storage — a local skill's name and description sit in the system message of every model
-# call its owner makes — and it is refused rather than evicted, because judgment a person authored
-# may not vanish because they wrote one more.
+# The tier's bounds, `agent_local_skill_max_chars` and `agent_local_skills_max`, live in
+# `core/config/agent.py`. The row cap bounds prefix spend and is refused rather than evicted.

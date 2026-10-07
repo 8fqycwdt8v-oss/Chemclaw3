@@ -1,26 +1,13 @@
-"""Turn categorical BO choices into a continuous descriptor space via GFN2-xTB (U1).
+"""Turn categorical BO choices into a continuous descriptor space via GFN2-xTB.
 
-The problem this solves. A BoFire campaign over "which ligand / base / solvent" treats the
-choice as a bare **category**: the surrogate learns a separate effect per label and can say
-nothing about an option nobody has run yet. With eight ligands and a budget of twelve
-experiments that is most of the budget spent discovering that the model has no opinion.
+A bare categorical makes the surrogate learn one effect per label and say nothing about an untried
+option. A descriptor vector gives each option a position in chemical space, so evidence about two
+electron-rich phosphines informs a third.
 
-Giving each category a numeric descriptor vector replaces the label with a *position in
-chemical space*, so the surrogate interpolates: evidence about two electron-rich phosphines
-informs a third. This module computes those descriptors from the electronic properties
-the calculation server already provides — no new xTB capability, only wiring.
-
-Descriptor choice, and one deliberate omission. The five descriptors below are the electronic
-axes a reagent choice usually turns on: donor strength (HOMO), acceptor strength (LUMO),
-polarity (dipole), and the electrostatic extremes (most positive / most negative partial
-charge, which carry H-bond donor and acceptor character). The HOMO-LUMO **gap is deliberately
-excluded**: it is exactly `lumo - homo`, so including it alongside both would hand the GP a
-perfectly collinear column — redundancy that costs kernel conditioning and buys nothing.
-
-What this does not capture: sterics. Cone angles and buried volume need a 3D geometry, so a
-purely electronic featurization cannot distinguish two ligands that differ mainly in bulk.
-That is a real limitation for phosphine selection specifically, and it is what the geometry
-tasks (plan X3) would add.
+The five descriptors are the electronic axes a reagent choice turns on: HOMO (donor), LUMO
+(acceptor), dipole, and the most positive / most negative partial charge (H-bond character). The
+HOMO-LUMO gap is excluded because it is exactly `lumo - homo` and would be a collinear column.
+Sterics are not captured: cone angles and buried volume need 3D geometry.
 """
 
 from collections.abc import Awaitable, Callable
@@ -34,19 +21,12 @@ from chemclaw.science.bo.problem import (
 from chemclaw.science.calc.models import ElectronicProperties
 
 # How this module obtains one molecule's electronic properties: given a SMILES, the properties and
-# the `calc_ref` they can be cited by.
-#
-# **Injected rather than imported, because of where the physics went.** The engines moved to
-# `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`) and the client that reaches
-# them lives in `connectors/calc/remote.py` — one package *above* this one. `science` may depend on
-# `core` and nothing else (`tests/test_layering.py`), and excusing an edge here would declare a
-# `science <-> connectors` cycle to save one argument. So the caller passes the calculator in;
-# `connectors/bo/calculators.py` is the one that does, for all three call sites.
+# the `calc_ref` they can be cited by. Injected because the client lives in `connectors/calc`,
+# which `science` may not import; `connectors/bo/calculators.py` supplies it.
 PropertiesFor = Callable[[str], Awaitable[tuple[ElectronicProperties, str]]]
 
-# The descriptor names, in the order they are reported. Fixed rather than configurable: the
-# values are stored in the campaign spec, so a campaign always sees the set it was built with,
-# and a fixed vocabulary keeps two campaigns comparable.
+# The descriptor names, in reported order. Fixed: values are stored in the campaign spec, and a
+# fixed vocabulary keeps campaigns comparable.
 DESCRIPTOR_NAMES = (
     "homo_ev",
     "lumo_ev",
@@ -59,9 +39,8 @@ DESCRIPTOR_NAMES = (
 def descriptors_from_properties(properties: ElectronicProperties) -> dict[str, float]:
     """Project one molecule's electronic properties onto `DESCRIPTOR_NAMES`.
 
-    Raises `ValueError` when the molecule has no virtual orbital and therefore no LUMO —
-    a descriptor row with a missing entry would make the matrix ragged, and substituting a
-    placeholder would put a fictional molecule into the surrogate's input space (gate G4).
+    Raises `ValueError` when the molecule has no LUMO: a missing entry would make the matrix ragged,
+    and a placeholder would put a fictional molecule into the surrogate's input space.
     """
     if properties.lumo_ev is None:
         raise ValueError(
@@ -80,14 +59,8 @@ def descriptors_from_properties(properties: ElectronicProperties) -> dict[str, f
 class Featurized(NamedTuple):
     """A featurized problem and the calculation keys its descriptors came from.
 
-    The keys are what lets a suggestion cite its own evidence. Descriptors are real xTB results
-    from the shared calculation cache, and until now their identity was derived inside
-    the calculator and discarded — so an `experiment-proposal` note could describe the
-    conditions a surrogate recommended and could not point at the calculations that shaped the
-    space it searched. D-158 plumbed exactly this out of the QM activity for the same reason.
-
-    Sorted and deduplicated, because two categories may resolve to one molecule and the order a
-    dict happens to iterate in is not a property of the campaign.
+    The keys let a suggestion cite the calculations that shaped its space. Sorted and deduplicated,
+    since two categories may resolve to one molecule.
     """
 
     problem: OptimizationProblem
@@ -99,17 +72,11 @@ async def featurize_parameter(
 ) -> tuple[CategoricalParameter, list[str]]:
     """Return `parameter` with `descriptors` computed from its `structures`.
 
-    A parameter with no `structures` is returned unchanged — featurization is opt-in, and a
-    campaign over categories that are not molecules (a stirrer type, a vendor) has nothing to
-    compute. Results come from the calculation cache, so re-featurizing a parameter whose
-    molecules were seen before costs nothing.
-
-    Also returns the calculation keys the descriptors came from, so a suggestion built on them can
-    say so (`Featurized`).
+    A parameter with no `structures` is returned unchanged (featurization is opt-in). Results come
+    from the calculation cache. Also returns the calculation keys used (`Featurized`).
 
     Raises:
-        ValueError: When one of the structures cannot be featurized. The category is named,
-            because "which one" is the only useful part of that message.
+        ValueError: When one of the structures cannot be featurized; the category is named.
     """
     if parameter.structures is None:
         return parameter, []
@@ -134,13 +101,9 @@ async def featurize_problem(
 ) -> Featurized:
     """Return `problem` with every structure-carrying categorical parameter featurized.
 
-    The one entry point a caller needs: continuous parameters and categoricals without
-    structures pass through untouched, so it is safe to call on any problem. Call it once,
-    before the campaign starts — the descriptors then travel with the spec, which is what
-    keeps a durable campaign's featurization stable across rounds and worker restarts.
-
-    Returns the calculation keys alongside, so a persisted suggestion can cite the evidence its
-    decision space was built from.
+    Safe on any problem: other parameters pass through. Call once before the campaign starts, so the
+    descriptors travel with the spec and stay stable across rounds and restarts. Returns the
+    calculation keys alongside.
     """
     parameters: list[Parameter] = []
     calc_refs: set[str] = set()

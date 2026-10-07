@@ -134,7 +134,7 @@ def test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool(
 ) -> None:
     """The regioselectivity question over a whole ensemble rather than over one embedding.
 
-    It must reach `compute_fukui_at` — the primitive whose absence was a `DEFERRED.md` row — and
+    It must reach `compute_fukui_at` — the primitive whose absence was a `BACKLOG.md` row — and
     average per atom rather than per molecule, because "which site" is a per-atom question.
     """
     server = install(monkeypatch, FakeCalcServer())

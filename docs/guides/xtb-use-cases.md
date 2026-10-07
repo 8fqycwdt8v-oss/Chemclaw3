@@ -203,7 +203,7 @@ it. None is a new calculator; each is a connection between layers.
 4. **X4 reaction energies and solvent screening** — built.
 5. **X5/X6** — CREST ensembles, tautomer and NCI searches built (X6/X11). What remains open is a
    transition-state search, and explicit-solvent treatment for the aliphatic-amine residual
-   (`docs/planning/DEFERRED.md`, "CREST's other run types" and "ML interatomic potentials").
+   (`docs/planning/BACKLOG.md`, "CREST's other run types" and "ML interatomic potentials").
 
 ---
 

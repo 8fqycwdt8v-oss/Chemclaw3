@@ -1,29 +1,18 @@
 """The reaction-label index: a derived, versioned, rebuildable view of every reaction corpus.
 
-**Not the record of truth.** For an ELN reaction that is its `reaction_records` row and the entry
-upstream it was transcribed from; for a patent corpus it is the source table. Both tables here can
-be dropped and refilled from those, and the only thing lost is the time it takes. That is what
-lets the schema change without a migration argument, and why nothing reads a label as evidence
-without also reading its citation.
+Not the record of truth: both tables can be dropped and refilled from `reaction_records` or the
+source table, and nothing reads a label as evidence without its citation.
 
-Two write paths, and keeping them apart is the invariant this module exists to hold:
+Two write paths, kept apart:
 
-* `record()` writes the record phase and **only** the record phase. Re-ingesting an amended ELN
-  entry must not silently discard the labels a two-day backfill derived, so the upsert names its
-  columns rather than replacing the row.
-* `store_labels()` writes the derived phase and **only** the derived phase, stamping
-  `labeller_version`. It never touches `record_smiles`, the conditions or the recorded roles.
+* `record()` writes only the record phase; the upsert names its columns so re-ingesting an amended
+  entry does not discard derived labels.
+* `store_labels()` writes only the derived phase and stamps `labeller_version`.
 
-**A stamp says two things, and one marker separates them.** The drain has to advance past a
-reaction the labelling server cannot answer for, so such a row is stamped too — with the marker
-`underived_stamp` appends. `stale()` treats both forms as done; `coverage`, `select` and
-`current_version` treat only the plain form as labelled. Without that split a re-label pass that
-derived *nothing* left every row claiming currency under a standardization its content predates,
-and the coverage verdict read "COMPLETE: … totals rather than lower bounds".
-
-`stale()` is the query that makes the background service possible: a row whose `labeller_version`
-is NULL (never derived) or different from the current one (derived by a superseded labeller) is
-work to do. Nothing has to remember to mark anything.
+`stale()` returns rows whose `labeller_version` is NULL or differs from the current one, so nothing
+has to remember to mark work. A row the labelling server could not answer for is stamped with
+`underived_stamp`, which `stale()` treats as done while `coverage`, `select` and `current_version`
+do not treat it as labelled.
 """
 
 import logging
@@ -49,21 +38,10 @@ class LabelIndexError(ChemclawError):
     """A label row could not be written or read back."""
 
 
-# The marker that splits the two things `labeller_version` has to say, and it exists because the
-# drain has to advance over a reaction the labelling server cannot answer for. Stamping such a row
-# with the plain current version is what lets `stale()` move on — and it also told every reader the
-# row's derived phase was current for that version, which it is not: `merge` keeps whatever the
-# *previous* labeller derived, so after a `std6`→`std7` re-label a degraded window left rows
-# carrying std6 content stamped std7, and `coverage` — `count(*) FILTER (WHERE labeller_version =
-# version)` — reported them COMPLETE ("counts over this facet are totals rather than lower
-# bounds"). Measured on one such row: `('Oxidation', 'RXNO:1', 'smirks', 'srv:std7:v1')` derived
-# under std6, and `stale()` would never return it again.
-#
-# A suffix on the one column rather than a second column, deliberately: staleness and currency are
-# the same question asked of the same value, and two columns is two places for that answer to
-# drift. It is a **tagged** value, not free text — nothing outside this module composes or reads
-# the tag, `store_labels` refuses a version that already carries it, and the three statements that
-# care handle it explicitly.
+# Marks a stamp for a row the drain passed over without deriving anything. The drain must advance
+# past it, but the row keeps the previous labeller's content, so it must not count as labelled at
+# this version. A suffix on the one column rather than a second column, so staleness and currency
+# cannot drift; only this module composes or reads the tag.
 _UNDERIVED_SUFFIX = "+underived"
 
 
@@ -80,12 +58,9 @@ def is_underived_stamp(labeller_version: str | None) -> bool:
 def _stamp(version: str, derived: bool) -> str:
     """The value `labeller_version` takes for one `store_labels` call.
 
-    One place decides it, so the two backends cannot disagree about what a row means — the same
-    reason `_searchable` exists one module over. The refusal is here rather than at each call site
-    because a `version` already carrying the marker would make a genuinely derived row
-    indistinguishable from an un-derived one, and the version string is composed from a *remote*
-    server's answer (`ingest.labels.labeller.RxnLabelServer.version`), which this repository does
-    not get to constrain at its source.
+    One place, so both backends agree. Refuses a `version` already carrying the marker, since the
+    version string comes from a remote server and would otherwise make a derived row
+    indistinguishable from an underived one.
     """
     if _UNDERIVED_SUFFIX in version:
         raise LabelIndexError(
@@ -99,9 +74,8 @@ def _stamp(version: str, derived: bool) -> str:
 class LabelIndex:
     """The read/write contract both backends implement.
 
-    A plain base class rather than a `Protocol`, unlike `FingerprintStore`: every method here is
-    abstract and there is no third implementation in prospect, so a Protocol would buy structural
-    typing nobody uses and cost a second declaration to keep in step.
+    A plain base class rather than a `Protocol`: every method is abstract and there is no third
+    implementation, so structural typing would buy nothing.
     """
 
     async def record(self, label: ReactionLabel) -> None:
@@ -113,18 +87,12 @@ class LabelIndex:
     ) -> list[ReactionLabel]:
         """Rows never derived, or derived under a version other than `version`, oldest key first.
 
-        Deterministic order, so a drain that dies mid-batch resumes on the same rows — and so a
-        row the labeller cannot process is the *same* row on every attempt, which is exactly why
-        the drain retries the batch item by item before giving up on it.
+        Deterministic order, so a drain that dies mid-batch resumes on the same rows and an
+        unprocessable row is the same row on every attempt.
 
-        **`sources` is a scoping affordance for tests, and the drain must not use it.** It exists
-        because the durable index is one schema shared by every test file, so a test asserting the
-        `LIMIT` and ordering contract needs a row set it controls. `enrich.label_stale` passes the
-        sources that declared a `labels:` block once, and the result was that an ELN corpus — which
-        declares none — was never labelled under any configuration, while the pass reported
-        `has_more=False`. A `labels:` block says what a source *carries*; the policy is looked up
-        per row, and which rows are stale is not a function of it.
-        `tests/test_label_enrichment.py` pins that the drain reads every source.
+        `sources` is a scoping affordance for tests only; the drain must read every source, because
+        a source without a `labels:` block still needs labelling (`tests/test_label_enrichment.py`
+        pins it).
         """
         raise NotImplementedError
 
@@ -133,12 +101,9 @@ class LabelIndex:
     ) -> None:
         """Write the derived phase of one reaction and stamp it for `version`.
 
-        `derived` says whether the labeller actually answered for this row. It defaults to True
-        because that is what a caller writing a derived phase means, and because the alternative —
-        no default — puts `derived=True` on every call in the tree to say the ordinary thing. What
-        it must never default *into* is the other case: a row the server could not answer for is
-        stamped so it leaves `stale()`, and stamping it as though it had been derived is what made
-        `coverage` call a corpus of superseded content COMPLETE.
+        `derived` says whether the labeller actually answered for this row. A row the server could
+        not answer for is passed `derived=False`, so it leaves `stale()` without being counted as
+        labelled.
         """
         raise NotImplementedError
 
@@ -155,27 +120,19 @@ class LabelIndex:
     async def current_version(self) -> str | None:
         """The labeller version the index is *currently* labelled at, or `None` if nothing is.
 
-        Defined as the version of the most recently labelled row, which is the only definition that
-        behaves during an upgrade: mid-drain the index holds two versions, and this names the new
-        one — so a search answers from the rows labelled by the labeller now in service, and
-        `CorpusCoverage` correctly reports the rest as not yet labelled. Taking the *most common*
-        version instead would answer from the old labeller for as long as the backfill took, and
-        report full coverage while doing it.
-
-        A search tool asks the index rather than the labelling server: the question "what is this
-        corpus labelled at" is about our data, and putting a remote call on the read path would
-        make every search depend on a background service being up.
+        The version of the most recently labelled row: mid-upgrade this names the new labeller, so
+        searches answer from its rows and `CorpusCoverage` reports the rest as unlabelled. Read from
+        the index, not the labelling server, so searches do not depend on a background service being
+        up.
         """
         raise NotImplementedError
 
     async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
         """The labelled reactions this facet selects, with the coverage of its own row set.
 
-        Only rows labelled at `version` are returned, and that is the honest choice rather than the
-        convenient one: an unlabelled row has no roles, no name and no functional groups, so it can
-        satisfy no facet — including a facet that names none of them, because presenting it beside
-        labelled rows would imply it had been checked. What it does count towards is `coverage`,
-        whose whole job is to say how many were left out.
+        Only rows labelled at `version` are returned: an unlabelled row cannot satisfy any facet,
+        and showing it beside labelled rows would imply it was checked. It counts towards `coverage`
+        instead.
         """
         raise NotImplementedError
 
@@ -189,12 +146,8 @@ class LabelIndex:
 class InMemoryLabelIndex(LabelIndex):
     """Process-local reference ranking; the SQL one is written to match it.
 
-    **A differential oracle, not a deployment backend.** No configuration returns it — every
-    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
-    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
-    `src/` because it is the executable statement of the contract its Postgres sibling is written
-    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
-    halves of that — the absence of a shipped caller, and the absence of this claim.
+    A differential oracle, not a deployment backend: no configuration returns it
+    (`tests/test_reference_stores.py` holds that).
     """
 
     def __init__(self) -> None:
@@ -204,11 +157,9 @@ class InMemoryLabelIndex(LabelIndex):
     async def record(self, label: ReactionLabel) -> None:
         """Upsert the record phase, carrying an already-derived phase across where it still holds.
 
-        "Still holds" is the whole subtlety. An amended entry whose `record_smiles` changed is a
-        different reaction, so its name, class and atom map are about something else and are
-        dropped — which also clears `labeller_version`, putting the row back in `stale()` where it
-        belongs. An entry whose structures are unchanged keeps everything, because re-ingesting a
-        note edit must not silently discard a backfill that took days.
+        If `record_smiles` changed, the entry is a different reaction: its derived phase is dropped
+        and `labeller_version` cleared, putting it back in `stale()`. Otherwise everything is kept,
+        so a note edit does not discard a backfill.
         """
         key = (label.source, label.reaction_id)
         existing = self._rows.get(key)
@@ -224,10 +175,8 @@ class InMemoryLabelIndex(LabelIndex):
     ) -> list[ReactionLabel]:
         """Rows whose stamp differs from `version`, in key order, capped at `limit`.
 
-        "Differs from" spans both stamps this pass can leave: a row the drain already passed over
-        at this version without deriving anything is *not* work to do again, or the batch that
-        could not be labelled would be re-read on every pass forever — which is the whole reason
-        the stamp is written at all.
+        An underived stamp at this version also counts as done, or an unlabellable batch would be
+        re-read on every pass.
         """
         allowed = frozenset(sources) if sources is not None else None
         current = {version, underived_stamp(version)}
@@ -244,18 +193,12 @@ class InMemoryLabelIndex(LabelIndex):
     ) -> None:
         """Write the derived phase over the stored record phase, stamped for `version`.
 
-        `derived=False` says the labeller answered for neither half of this row, so the stamp
-        carries the marker and `labelled_at` is left where it was: the row leaves the stale set,
-        and every reader that asks "is this labelled at the current version" — `coverage`,
-        `select`, `current_version` — correctly says no.
+        `derived=False` puts the marker on the stamp and leaves `labelled_at` unchanged, so the row
+        leaves the stale set but is not reported as labelled.
 
-        Species are paired by **`ordinal`**, which is the row key
-        `PostgresLabelIndex._STORE_SPECIES` matches on and the identity `_carry_species` already
-        matches the record phase by. Pairing them by *position* — `zip(..., strict=False)` — made
-        the two backends disagree about the same answer: a labeller handing four species back in a
-        different order gave bromobenzene `PRODUCT` here and `STARTING_MATERIAL` in Postgres, and a
-        short answer was truncated in one and applied in the other. An ordinal the stored row does
-        not carry is ignored, which is what the SQL `UPDATE ... WHERE ordinal = %s` does with one.
+        Species are paired by `ordinal`, the key the Postgres backend's `UPDATE ... WHERE ordinal =
+        %s` matches on, so both backends agree regardless of answer order; an ordinal the stored row
+        lacks is ignored.
         """
         key = (label.source, label.reaction_id)
         existing = self._rows.get(key)
@@ -299,11 +242,8 @@ class InMemoryLabelIndex(LabelIndex):
     async def current_version(self) -> str | None:
         """The version of the most recently *derived* row.
 
-        An un-derived stamp is skipped, and both halves of that matter. A row derived at std6 and
-        then passed over at std7 keeps its old `labelled_at`, so it is normally outranked by any
-        genuinely derived row; but a corpus where the whole re-label found the server down has
-        nothing newer, and answering `…+underived` here would send every tool a version no row's
-        *content* was derived under.
+        Underived stamps are skipped, so a corpus whose whole re-label found the server down does
+        not report a version no row's content was derived under.
         """
         labelled = [
             r
@@ -338,8 +278,8 @@ class InMemoryLabelIndex(LabelIndex):
         return _roll_up(selection, roles)
 
 
-# The reaction-row columns `store_labels` may write and `record` must never touch. One tuple, read
-# by both, so the two halves of the split cannot drift into overlapping.
+# The reaction-row columns `store_labels` may write and `record` must never touch; shared by both so
+# the split cannot overlap.
 _DERIVED_FIELDS = {
     "mapped_smiles",
     "named_reaction",
@@ -349,8 +289,8 @@ _DERIVED_FIELDS = {
     "method",
 }
 
-# The stamp itself. Separate from `_DERIVED_FIELDS` because `store_labels` sets it explicitly from
-# its `version` argument rather than from the payload, while `record` carries it across verbatim.
+# The stamp: `store_labels` sets it from its `version` argument, while `record` carries it across
+# verbatim.
 _STAMP_FIELDS = {"labeller_version", "labelled_at"}
 
 
@@ -366,9 +306,8 @@ def _derived_species(species: SpeciesLabel) -> dict[str, Any]:
 def _carry_species(new: SpeciesLabel, stored: Sequence[SpeciesLabel]) -> SpeciesLabel:
     """Re-apply an already-derived species phase to a freshly recorded species of the same ordinal.
 
-    Matched on `ordinal` *and* `smiles`: an amended ELN entry may have re-ordered or replaced a
-    charge, and inheriting a ligand classification onto a different structure would be worse than
-    re-deriving it.
+    Matched on `ordinal` and `smiles`, so a classification is never inherited onto a different
+    structure.
     """
     for old in stored:
         if old.ordinal == new.ordinal and old.smiles == new.smiles:
@@ -379,18 +318,14 @@ def _carry_species(new: SpeciesLabel, stored: Sequence[SpeciesLabel]) -> Species
 class PostgresLabelIndex(LabelIndex):
     """Durable backend over `reaction_labels` + `reaction_species`.
 
-    A short-lived (pooled) connection per call, the choice both the calculation store and the
-    fingerprint store made — KISS, and the pool means it costs no handshake in a worker.
-
-    Every statement here names its columns. That is not style: the record phase and the derived
-    phase share a row, and `SELECT *`/`DO UPDATE SET (...) = ROW(EXCLUDED.*)` would let one write
-    path silently clobber the other's columns the first time somebody adds a field.
+    A pooled connection per call. Every statement names its columns: the record and derived phases
+    share a row, and `SELECT *` or a whole-row update would let one write path clobber the other's
+    columns.
     """
 
-    # Record phase. `ON CONFLICT` names only the record columns, so a re-ingest cannot discard a
-    # derived phase — except deliberately: when `record_smiles` changed the reaction is a different
-    # one, so its derived phase is cleared and `labeller_version` goes back to NULL, which puts the
-    # row into `stale()` on the next drain. Exactly the in-memory backend's rule, in SQL.
+    # Record phase. `ON CONFLICT` names only the record columns, so a re-ingest keeps the derived
+    # phase, unless `record_smiles` changed: then the derived phase is cleared and
+    # `labeller_version` reset to NULL, returning the row to `stale()`.
     _RECORD = """
         INSERT INTO reaction_labels (
             source, reaction_id, record_smiles, citation, performed_on,
@@ -425,9 +360,8 @@ class PostgresLabelIndex(LabelIndex):
                 THEN reaction_labels.labelled_at END
     """
 
-    # Same shape one level down: a species whose structure at this ordinal is unchanged keeps its
-    # derived role and features; a replaced structure loses them, because inheriting a "ligand"
-    # verdict onto a different molecule is worse than re-deriving it.
+    # Same rule per species: an unchanged structure at this ordinal keeps its derived role and
+    # features; a replaced one loses them.
     _RECORD_SPECIES = """
         INSERT INTO reaction_species (source, reaction_id, ordinal, smiles, role)
         VALUES (%(source)s, %(reaction_id)s, %(ordinal)s, %(smiles)s, %(role)s)
@@ -442,19 +376,15 @@ class PostgresLabelIndex(LabelIndex):
                 THEN reaction_species.functional_groups END
     """
 
-    # An amendment that removed a charge leaves a higher ordinal behind; without this the index
-    # would answer "this reaction used TEA" from a species the current record no longer has.
+    # Removes species past the current record's last ordinal, so the index does not answer from a
+    # species the amended record no longer has.
     _TRIM_SPECIES = """
         DELETE FROM reaction_species
         WHERE source = %(source)s AND reaction_id = %(reaction_id)s AND ordinal >= %(kept)s
     """
 
-    # `IS DISTINCT FROM`, not `<>`: NULL means never derived and is the commonest stale row on a
-    # fresh corpus, and `<>` would exclude precisely those.
-    # Two stamps leave this pass, so two of them are "not stale": the plain version, and the
-    # marked one a row gets when the labeller answered for neither half of it. Without the second
-    # predicate that row is stale again on the very next pass, which is the permanent re-read the
-    # stamp exists to stop.
+    # `IS DISTINCT FROM`, not `<>`, so NULL (never derived) rows are stale. The underived stamp for
+    # this version is also not stale, or the row would be re-read every pass.
     _STALE = """
         SELECT source, reaction_id, record_smiles, citation, performed_on, temperature_c,
                time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class,
@@ -496,11 +426,8 @@ class PostgresLabelIndex(LabelIndex):
         WHERE source = %(source)s AND reaction_id = %(reaction_id)s AND ordinal = %(ordinal)s
     """
 
-    # The one coverage projection, written once. All three coverage reads answer the same three
-    # numbers — labelled at this version, total, and the sources present — and differ only in what
-    # they are counted over, so the *columns* are shared and each caller appends its own scope.
-    # They were three copies before, and one of them was an inline f-string that had already drifted
-    # into its own spelling of the same `SELECT`.
+    # The one coverage projection (labelled at this version, total, sources present); each coverage
+    # read appends its own scope.
     _COVERAGE_COLUMNS = """
         SELECT count(*) FILTER (WHERE labeller_version = %(version)s), count(*),
                array_agg(DISTINCT source)
@@ -519,21 +446,10 @@ class PostgresLabelIndex(LabelIndex):
 
     _COUNT = "SELECT count(*) FROM reaction_labels"
 
-    # The newest labelling's version. A class constant rather than a literal inside the method, for
-    # the reason `_SELECT_OPEN` in `memory/observations.py` is one: the statement and the index
-    # underneath it are a single decision, and a test can only pin a shape it can read.
-    # `086_reaction_labels_current_version.sql` is `(labelled_at DESC, source, reaction_id) WHERE
-    # labelled_at IS NOT NULL`, which is this `WHERE` and this `ORDER BY` exactly — change either
-    # and the plan silently falls back to the parallel sequential scan plus top-N sort that
-    # migration measures at 118 ms over a million rows, once per rxnfp tool call, inside a turn.
-    #
-    # The `NOT LIKE` is the second half of the same rule `_STALE` states: an un-derived stamp names
-    # a version this row's *content* was never produced under, and handing it back here would send
-    # every rxnfp tool a version `coverage` then finds nothing labelled at. `labelled_at` is not
-    # advanced for such a row, so any genuinely derived row already outranks it — this covers the
-    # case where there is no such row, a whole corpus re-labelled against a server that was down.
-    # It filters the same index rather than defeating it: the scan stops at the first row that
-    # passes, which is the first derived one.
+    # The newest labelling's version. Its `WHERE` and `ORDER BY` match
+    # `reaction_labels_current_version_idx` (migration 086) exactly; changing either falls back to a
+    # sequential scan on every rxnfp tool call. The `NOT LIKE` skips underived stamps, as `_STALE`
+    # does, and filters the same index scan rather than defeating it.
     _CURRENT_VERSION = (
         "SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL "
         f"AND labeller_version NOT LIKE '%{_UNDERIVED_SUFFIX}' "
@@ -553,8 +469,7 @@ class PostgresLabelIndex(LabelIndex):
     async def record(self, label: ReactionLabel) -> None:
         """Write the record phase of one reaction and its species, in one transaction.
 
-        One transaction because a reaction whose species were replaced but whose row was not — or
-        the reverse — is a row that answers questions about a flask that never existed.
+        One transaction so the row and its species never describe different reactions.
         """
         async with self._connection() as conn:
             await conn.execute(self._RECORD, _record_params(label))
@@ -584,8 +499,7 @@ class PostgresLabelIndex(LabelIndex):
     ) -> list[ReactionLabel]:
         """Rows never derived or derived under another version, with their species attached.
 
-        A row this drain already passed over at `version` without deriving anything is not one of
-        them — see `_STALE`.
+        A row already passed over at `version` without deriving anything is excluded (see `_STALE`).
         """
         async with self._connection() as conn, conn.cursor() as cur:
             await cur.execute(
@@ -616,10 +530,8 @@ class PostgresLabelIndex(LabelIndex):
     ) -> None:
         """Write the derived phase of one reaction and its species, stamped for `version`.
 
-        `derived=False` marks the stamp and holds `labelled_at` where it was — see the base
-        class. The species half is still written, because a row the naming and representation
-        calls both failed for can still have its roles fall back to the source's coarse map, and
-        that write is what `merge._species` calls a floor.
+        `derived=False` marks the stamp and holds `labelled_at`. The species half is still written,
+        since roles can fall back to the source's coarse map.
         """
         async with self._connection() as conn:
             params = label.model_dump(include=_DERIVED_FIELDS)
@@ -682,11 +594,9 @@ class PostgresLabelIndex(LabelIndex):
     async def current_version(self) -> str | None:
         """The version of the most recently *derived* row — see the in-memory twin for why.
 
-        Served by `reaction_labels_current_version_idx` (086) rather than by a scan: every rxnfp
-        tool calls this before it does anything else, so it is paid once per tool call on the turn
-        path, over a table sized by the corpus. Executed with **no parameters**, which is what
-        lets `_CURRENT_VERSION` carry a literal `'%…'` LIKE pattern: psycopg interpolates only when
-        params are passed, so the `%` needs no doubling here and would be wrong doubled.
+        Served by `reaction_labels_current_version_idx`, since every rxnfp tool calls it. Executed
+        with no parameters, so the literal `%` in `_CURRENT_VERSION`'s LIKE pattern must not be
+        doubled.
         """
         async with self._connection() as conn, conn.cursor() as cur:
             await cur.execute(self._CURRENT_VERSION)
@@ -696,13 +606,9 @@ class PostgresLabelIndex(LabelIndex):
     async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
         """The facet's labelled reactions, plus the coverage of the row set it drew them from.
 
-        Two statements and not one, because they answer questions with different denominators: the
-        selection is over *labelled* rows that satisfy every narrowing, and the coverage is over
-        every row in scope whether labelled or not. A single query cannot produce both without
-        counting the rows it filtered out.
-
-        One row over `limit` is asked for and dropped — the same probe `find_matches` uses — so a
-        page that exactly fills the cap is distinguishable from one that merely reached it.
+        Two statements because the denominators differ: the selection is over labelled rows matching
+        every narrowing, coverage over every row in scope. One row over `limit` is fetched and
+        dropped, so a page that exactly fills the cap is distinguishable from a truncated one.
         """
         where, params = _facet_sql(facet)
         params["version"] = version
@@ -733,13 +639,9 @@ class PostgresLabelIndex(LabelIndex):
     ) -> FrequencyReport:
         """Roll the facet's species up by role.
 
-        Rolled up in Python over a bounded selection rather than aggregated in SQL, and that is a
-        deliberate trade rather than an oversight: the counting rules are not expressible as a
-        plain `GROUP BY` — a species charged twice in one run is one reaction's worth of evidence,
-        the denominator is reactions that named *that role* rather than all matching reactions, and
-        the median yield is over the recorded values only. Writing them twice, once here and once
-        in `_roll_up`, is how the two answers come to disagree. The cost is a cap, and the cap is
-        reported: `truncated` rides into the verdict, so a sample is never read as a total.
+        In Python over a bounded selection, sharing `_roll_up` with the in-memory backend, because
+        the counting rules (one count per reaction, per-role denominator, median over recorded
+        yields) are not a plain `GROUP BY`. The cap is reported via `truncated`.
         """
         selection = await self.select(facet, version, limit)
         return _roll_up(selection, roles)
@@ -762,12 +664,8 @@ class PostgresLabelIndex(LabelIndex):
     async def _scope_coverage(self, cur: Any, facet: Facet, version: str) -> CorpusCoverage:
         """Labelled-vs-total over the facet's *scope* — see `_in_scope` for why that is narrower.
 
-        **Every narrowing `_in_scope` applies has to be restated here**, and that duplication is
-        the hazard this method carries: the two are one condition written twice, so a field added
-        to one and not the other makes the denominator disagree between the backends. It was
-        measured going wrong exactly that way — `reaction_keys` in `_in_scope` and not here
-        reported `total=10` against the in-memory backend's `3`, because the SQL counted every row
-        in the table rather than the neighbour set.
+        Every narrowing `_in_scope` applies must be restated here, or the denominator disagrees
+        between backends.
         """
         params: dict[str, Any] = {"version": version}
         clauses: list[str] = []
@@ -799,12 +697,8 @@ def _labelled_key(row: ReactionLabel) -> tuple[datetime, str, str]:
 def _facet_sql(facet: Facet) -> tuple[str, dict[str, Any]]:
     """The facet as an SQL fragment ANDed onto the version filter, plus its bound parameters.
 
-    Every narrowing that involves a species is an `EXISTS` over `reaction_species` rather than a
-    join, so a reaction with three matching products is one row rather than three — a join would
-    silently multiply a reaction's weight in any count taken over the result.
-
-    No value reaches the statement text. The facet's fields are model-supplied (a tool argument a
-    chemist typed), and this is the only place they meet SQL.
+    Species narrowings are `EXISTS` subqueries, not joins, so a reaction with several matching
+    species counts once. No value reaches the statement text; the facet's fields are model-supplied.
     """
     clauses: list[str] = []
     params: dict[str, Any] = {}
@@ -812,11 +706,9 @@ def _facet_sql(facet: Facet) -> tuple[str, dict[str, Any]]:
         clauses.append("r.source = ANY(%(sources)s::text[])")
         params["sources"] = sorted(facet.sources)
     if facet.reaction_keys:
-        # Two parallel arrays zipped by `unnest`, matching the pair against the table's own two
-        # columns — never a `source || ':' || id` string, which would be an expression no index can
-        # serve and a second spelling of a key the schema already has. Not indexed either way: the
-        # set comes from a fingerprint page bounded by `fingerprint_max_top_k`, so this narrows
-        # tens of rows off a version scan the planner is already doing.
+        # Two parallel arrays zipped by `unnest`, matched against the table's own key columns rather
+        # than a concatenated string. The set is bounded by `fingerprint_max_top_k`, so no index is
+        # needed.
         pairs = sorted(facet.reaction_keys)
         clauses.append(
             "EXISTS (SELECT 1 FROM unnest(%(rk_sources)s::text[], %(rk_ids)s::text[]) AS k(s, i) "
@@ -860,16 +752,13 @@ def _facet_sql(facet: Facet) -> tuple[str, dict[str, Any]]:
 def _in_scope(row: ReactionLabel, facet: Facet) -> bool:
     """Whether this row belongs to the facet's *denominator* — the coverage question.
 
-    Deliberately narrower than `_matches`: only the narrowings an unlabelled row can still answer
-    count here. A row with no derived roles cannot be excluded for holding the wrong ligand, and
-    counting it out of the denominator would hide exactly the reactions the coverage sentence
-    exists to warn about.
+    Narrower than `_matches`: only narrowings an unlabelled row can answer count, so unlabelled
+    reactions are not hidden from the coverage warning.
     """
     if facet.sources and row.source not in facet.sources:
         return False
-    # In scope, unlike `product_smiles` one function down: this narrowing reads the reaction's own
-    # key, which an unlabelled row has. Leaving it out would take the coverage denominator over the
-    # whole corpus while the numerator is a handful of neighbours, and report ~0% labelled.
+    # In scope because it reads the reaction's own key, which an unlabelled row has; without it the
+    # denominator would be the whole corpus against a handful of neighbours.
     return not facet.reaction_keys or (row.source, row.reaction_id) in facet.reaction_keys
 
 
@@ -900,9 +789,8 @@ def _matches(row: ReactionLabel, facet: Facet) -> bool:
 def _roll_up(selection: FacetSelection, roles: frozenset[SpeciesRole]) -> FrequencyReport:
     """Count species by role over a selection, and attach the yields that go with them.
 
-    The denominator is *reactions that named a species in this role*, not every matching reaction:
-    a run whose ligand nobody recorded is not evidence that no ligand was used, so counting it
-    would make every ligand look rarer than it is.
+    The denominator is reactions that named a species in this role: an unrecorded ligand is not
+    evidence that none was used.
     """
     counts: dict[tuple[SpeciesRole, str], list[float | None]] = {}
     denominator: dict[SpeciesRole, int] = {}
@@ -914,8 +802,7 @@ def _roll_up(selection: FacetSelection, roles: frozenset[SpeciesRole]) -> Freque
                 continue
             key = (role, species.smiles)
             if key in seen:
-                # A species charged twice in one run is one reaction's worth of evidence for it,
-                # not two — otherwise a two-portion addition doubles that reagent's popularity.
+                # A species charged twice in one run counts once for that reaction.
                 continue
             seen.add(key)
             counts.setdefault(key, []).append(row.yield_percent)
@@ -943,8 +830,7 @@ def _roll_up(selection: FacetSelection, roles: frozenset[SpeciesRole]) -> Freque
 def _median(values: list[float]) -> float | None:
     """The median of what was recorded, or `None` when nothing was.
 
-    `None` rather than 0.0, because a yield nobody wrote down is not a yield of zero and a
-    frequency table that says so is worse than one that admits it does not know.
+    `None`, not 0.0: an unrecorded yield is not a yield of zero.
     """
     if not values:
         return None

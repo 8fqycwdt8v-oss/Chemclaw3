@@ -1,31 +1,12 @@
-"""Run one bundle's MCP server as a process — the entrypoint connector servers did not have.
+"""Run one bundle's MCP server as a process, with the process setup every other role gets.
 
-Every other process role has a module that owns its startup: the front door has `api/app.py`'s
-`create_app`, each Temporal worker has `connectors/worker.py` or `durable/background_worker.py`,
-and every CLI has its own `main`. Each of them calls `configure_logging()` and
-`configure_telemetry()` there, because those are *process* setup and belong at a process boundary.
+Calls `configure_logging()` and `configure_telemetry()` before serving, which gives connector
+servers secret redaction (they hold bearer tokens), correlation id and actor on every log line,
+and the no-op meter provider that prevents the OpenTelemetry proxy leak.
 
-A connector server had no such module. `deploy/entrypoint.sh` execed `uvicorn
-chemclaw.connectors.<name>.server.app:app` straight at the app object, so the bundle's `app.py`
-was the entrypoint by accident — and nothing in it did the setup. The consequences were real and
-one-sided:
-
-- **No secret redaction.** This is the one process family that holds per-connector bearer tokens,
-  and the one whose whole job is talking to things over HTTP with a credential
-  (`D-2026-08-06-a-redactor-that-only-reads-the-message`).
-- **No correlation id or actor** on any line, so a connector's logs could not be joined to the
-  turn that caused them — the thing `ContextFilter` exists to guarantee.
-- **No no-op meter provider.** "Telemetry off" is not the same as no provider: with none set, the
-  OpenTelemetry API proxies every instrument call and retains the proxy forever. That is the front
-  door's measured memory leak (`_install_noop_meter_provider`), and connector servers were running
-  in exactly the configuration that leaks.
-
-The setup cannot go in `connector_app` instead, and the reason is worth recording because it was
-tried first: `configure_logging()` is `logging.basicConfig(force=True)`, which *removes every
-existing root handler*. `connector_app` is called at import time by seven bundle modules that
-tests, the dev composite and anything else import freely — so putting it there tore out pytest's
-capture handler and broke two audit-trail tests that had nothing to do with logging. A
-process-wide side effect belongs at the process boundary, not in a composition helper.
+The setup is here, not in `connector_app`, because `configure_logging()` removes every root
+handler and `connector_app` runs at import time in modules tests and the dev composite import
+freely. A process-wide side effect belongs at the process boundary.
 """
 
 import logging
@@ -42,9 +23,8 @@ logger = logging.getLogger(__name__)
 def main(connector: str) -> None:
     """Configure this process, then serve `connector`'s app.
 
-    The import target is passed to uvicorn as a string rather than imported here, so the app is
-    built *after* logging is configured — otherwise a bundle's import-time logging would go to an
-    unconfigured, unredacted root logger, which is most of what this module exists to prevent.
+    The app is passed to uvicorn as an import string so it is built after logging is configured;
+    otherwise import-time log lines would go to an unredacted root logger.
     """
     configure_logging()
     configure_telemetry()

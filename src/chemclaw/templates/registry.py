@@ -1,15 +1,10 @@
 """Templates as files: discovery, validation, and the tool that starts one.
 
-The same shape as every other extension seam here, deliberately — discovered by folder, validated by
-a pydantic model, enabled by one config token, checked in CI — so a template is one more thing an
-author drops in a directory rather than a new mechanism to learn.
-
-Starting a template reuses the durable-job machinery rather than inventing a second one: each
-template becomes a generated `run_<name>` tool that starts `TemplateWorkflow`, with the same
-deterministic id, the same `require_actor`, the same dry-run gate and the same launch signal a
-connector job gets. The one thing it does *not* reuse is `ConnectorJobWorkflow` — a template is
-not a connector's job, it is core's own sequencer, so wrapping one in the other would be a wrapper
-around a wrapper with nothing in between.
+The same shape as every other extension seam: discovered by folder, validated by a pydantic model,
+enabled by config, checked in CI. Each template becomes a generated `run_<name>` tool that starts
+`TemplateWorkflow` with the same deterministic id, `require_actor`, dry-run gate and launch signal a
+connector job gets. It is not wrapped in `ConnectorJobWorkflow`, because a template is core's own
+sequencer, not a connector's job.
 """
 
 import logging
@@ -40,8 +35,8 @@ from chemclaw.templates.manifest import InputType, Template
 
 logger = logging.getLogger(__name__)
 
-# The declared input types, mapped to annotations for the generated tool's params model — the same
-# closed set a connector job's inline params use, so an author meets one vocabulary, not two.
+# Declared input types mapped to annotations for the generated tool's params model; the same closed
+# set connector job params use.
 _INPUT_ANNOTATIONS: dict[InputType, Any] = {
     "string": str,
     "integer": int,
@@ -56,10 +51,8 @@ _INPUT_ANNOTATIONS: dict[InputType, Any] = {
 class TemplateError(ChemclawError):
     """A template file is malformed, or an enabled template does not exist.
 
-    A `ChemclawError` (so a `ValueError`) and registered in
-    `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class name: Temporal matches
-    non-retryable error types by exact name, not isinstance, so a raw `ValueError` subclass would
-    still retry across an activity boundary.
+    Registered by class name in `chemclaw.durable.publish._BAD_DATA_TYPES`, because Temporal matches
+    non-retryable error types by exact name.
     """
 
 
@@ -81,18 +74,12 @@ def _load(path: Path) -> Template:
 def _discovered_in(dirs: tuple[str, ...]) -> dict[str, Template]:
     """Every template found under `dirs`, by name, validated. Cached on `dirs`, like connectors.
 
-    **Keyed on the directories because they are the input.** This was `@cache` on a zero-argument
-    `discovered()` reading `settings.templates_dirs` itself, so the key omitted the only thing the
-    answer depends on and a test repointing `templates_dir` poisoned every later test in the
-    process. See `chemclaw.connectors.registry._discovered_in`, which carries the whole argument.
+    Keyed on the directories because they are the input, so repointing `templates_dir` is a
+    different cache entry.
 
-    Two distinctness rules, because the file name and the *tool* name are different namespaces and
-    only the second is the one a turn uses. `tool_name` folds a hyphen to an underscore, so
-    `probe-x.yaml` and `probe_x.yaml` are two templates and one `run_probe_x` — distinct by the
-    first rule, colliding under the second. Left to be discovered at build time, that is not a
-    mis-run template but a dead deployment: `register_tool` raises the first time the agent is
-    built, so **every** turn fails, with a message naming neither file. It is refused here instead,
-    where both files can be named.
+    File names and tool names are both checked for distinctness: `tool_name` folds hyphens to
+    underscores, so `probe-x.yaml` and `probe_x.yaml` would collide as `run_probe_x` and make
+    `register_tool` fail every turn. It is refused here, where both files can be named.
     """
     found: dict[str, Template] = {}
     claimed: dict[str, str] = {}
@@ -120,8 +107,7 @@ def _discovered_in(dirs: tuple[str, ...]) -> dict[str, Template]:
 def discovered() -> dict[str, Template]:
     """Every discovered template by name, validated.
 
-    The settings read is here rather than inside the cache, so a `templates_dir` changed
-    mid-process is seen on the next call instead of being answered from the old directory's entry.
+    Settings are read outside the cache, so a changed `templates_dir` is seen on the next call.
     """
     return _discovered_in(tuple(settings.templates_dirs))
 
@@ -129,17 +115,9 @@ def discovered() -> dict[str, Template]:
 def forget_discovered() -> None:
     """Drop the cache so the next `discovered()` re-reads templates from disk.
 
-    **The one case a directory-keyed cache cannot see on its own**: new manifests written into a
-    directory this registry has *already* discovered. The key is the directory tuple, so it is
-    unchanged and the entry still answers. Repointing `templates_dir` needs no clearing at all,
-    because that is a different key.
-
-    A named function rather than `discovered.cache_clear`, which is what this was for a few hours.
-    An attribute assigned onto a function object is invisible to `mypy`: the definition needed a
-    `# type: ignore[attr-defined]` and **every one of the 35 call sites became an error**, so the
-    suppression at the definition bought silence in one place and noise in thirty-five. The tree
-    already had the right idiom for a test-isolation reset — `forget_reachability`,
-    `forget_vector_store`, `forget_open_warehouses` — and this is it.
+    Needed only when new manifests are written into an already-discovered directory; repointing
+    `templates_dir` is a different key. A named function, like `forget_reachability`, rather than
+    exposing `cache_clear`, which mypy cannot see on the wrapper.
     """
     _discovered_in.cache_clear()
 
@@ -147,9 +125,8 @@ def forget_discovered() -> None:
 def enabled() -> list[Template]:
     """The templates this deployment turns on; empty enable-list means every discovered one.
 
-    **`templates_enabled` is the only filter here, and deliberately still is.** This is the set a
-    validator and the prose contract read — every launcher this tree can bind — and which of them
-    a turn actually binds is `bound()`'s narrower question.
+    Filters on `templates_enabled` only: this is every launcher the tree can bind, read by
+    validators and the prose contract. Which a turn actually binds is `bound()`.
     """
     found = discovered()
     names = settings.templates_enabled_list
@@ -166,39 +143,17 @@ def enabled() -> list[Template]:
 def withheld_reason(template: Template) -> list[str]:
     """The opt-in capabilities whose absence withholds `template`'s launcher, or `[]` to bind it.
 
-    **A launcher is withheld when both halves hold, and only then**
-    (`D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off`):
-
-    1. Its steps name a tool or job that a bundle here *declares* and this deployment does not
-       bind (`agent/template_surface.unbound_opt_in_references`) — the template belongs to an
-       opt-in capability that is off.
-    2. No profile lists the launcher (`agent/template_surface.profile_named_tools`).
-
-    The first is why it is worth doing: a launcher is ~560 tokens of prefix on every model call
-    (`scale-up-thermal-envelope`, measured), and binding one that `unrunnable_reason` refuses at
-    launch is paying that for a capability the deployment cannot use. The second is why it is not
-    done more widely: `unrunnable_reason`'s docstring measured that withdrawing a launcher a
-    profile *names* turns "one procedure is unavailable" into "every turn on this profile fails at
-    build", and that measurement still stands for every launcher it was about.
-
-    Everything else keeps its launcher and its refusal-at-launch, including a template that names
-    a tool *nothing* declares — that is a broken template, not an opt-in one, and a refusal naming
-    the missing tool is the more useful answer to it.
-
-    Imported lazily, as `unrunnable_reason` does it: `chemclaw.agent.chemclaw_agent` imports this
-    module at import time, so a module-scope `templates -> agent` import would be a cycle.
-
-    Args:
-        template: An enabled template.
-
-    Returns:
-        The declared-but-unbound tool and job names that withhold it, sorted; `[]` when it is bound.
+    Withheld only when its steps name a tool or job a bundle declares but this deployment does not
+    bind (`agent/template_surface.unbound_opt_in_references`) and no profile lists the launcher. The
+    first saves prompt prefix for an unusable capability; the second matters because withdrawing a
+    profile-named launcher makes every turn on that profile fail at build. A tool nothing declares
+    is a broken template and keeps its refusal-at-launch. Imported lazily to avoid an import cycle
+    with `chemclaw.agent.chemclaw_agent`.
     """
     from chemclaw.agent.template_surface import profile_named_tools, unbound_opt_in_references
 
     missing = unbound_opt_in_references(template)
-    # The profile half is asked only when the first half fires, which is rare: it reads every
-    # profile file, and nearly every template is decided without needing to.
+    # The profile half is asked only when the first fires, since it reads every profile file.
     if not missing or tool_name(template) in profile_named_tools():
         return []
     return missing
@@ -207,10 +162,8 @@ def withheld_reason(template: Template) -> list[str]:
 def bound() -> list[Template]:
     """The enabled templates whose launchers this deployment binds — `enabled()` minus the withheld.
 
-    Recomputed on every call rather than cached: the connector enable-list and the profile files
-    are both configuration a test (or a reloaded process) can change, and the one caller that runs
-    per turn (`chemclaw_agent._register_generated_tools`) is already bounded by its own
-    once-per-process registry.
+    Not cached: the connector enable-list and profile files can change, and the per-turn caller is
+    already bounded by its own once-per-process registry.
     """
     return [template for template in enabled() if not withheld_reason(template)]
 
@@ -218,12 +171,8 @@ def bound() -> list[Template]:
 def tool_name(template: Template) -> str:
     """The advertised name of the tool that runs `template`.
 
-    Prefixed rather than bare so a template cannot collide with a tool or a connector job — those
-    share one namespace (it is the authorization key), and a template named `screen_hazards`
-    silently shadowing the real screen is not a failure anyone would enjoy debugging.
-
-    It is **not** injective over template names: the hyphen-to-underscore fold means two distinct
-    templates can generate one tool. `discovered` is where that is refused.
+    Prefixed so a template cannot shadow a tool or connector job, which share the authorization
+    namespace. Not injective (hyphens fold to underscores); `discovered` refuses collisions.
     """
     return f"run_{template.name.replace('-', '_')}"
 
@@ -243,11 +192,7 @@ def _params_model(template: Template) -> type[BaseModel]:
     camel = "".join(part.capitalize() for part in template.name.replace("-", "_").split("_"))
     return create_model(
         f"{camel}Inputs",
-        # **`forbid`, because the silent direction here is a run that quietly does something else.**
-        # pydantic's default is `ignore`, so `solvant="MeCN"` for a declared `solvent` was
-        # accepted, dropped, and the procedure ran gas-phase — a misspelling of an *optional*
-        # input is invisible in a way a missing required one is not. The published schema names
-        # exactly these fields, so a caller sending anything else is already wrong.
+        # `forbid`, so a misspelled optional input is refused instead of silently dropped.
         __config__=ConfigDict(extra="forbid"),
         __doc__=f"Inputs for the {template.name!r} template.",
         **fields,
@@ -283,30 +228,11 @@ def _docstring(template: Template) -> str:
 def run_workflow_id(template: Template, inputs: dict[str, Any], scope: str = "") -> str:
     """The deterministic id of one template run — the idempotency key, as for a connector job.
 
-    **`scope` is what keeps a name from being an identity it is not.** For a `data/templates/`
-    file the name *is* the procedure: it is reviewed, global and the same for everybody, so
-    name-plus-inputs is the right key and two people asking the same question rightly share one
-    run (`D-2026-08-01-a-running-job-has-no-owner`). A composed workflow breaks both halves of that
-    premise — the name is one chemist's, and its steps change whenever they re-compose it.
-
-    Measured before this argument took: two documents with *nothing* in common but the name
-    `triage` produced the same id `template-triage-65f5e26304a2c36c`, and because the launcher
-    rejoins an already-started id, running the second returned the **first's** completed result and
-    its step outputs, with a summary that reads correct. Two chemists collide the same way, and the
-    second is denied their own workflow for as long as the first's run is retained.
-
-    Empty `scope` reproduces the old id exactly, so a file template's id — and every archived
-    history and test that names one — is unchanged.
-
-    Args:
-        template: The resolved template.
-        inputs: The validated inputs.
-        scope: What else distinguishes this document from another of the same name. Empty for a
-            reviewed file; owner and fingerprint for a composed workflow.
-
-    Returns:
-        The workflow id, prefixed `composed-` when a scope narrows it so a reader can tell the two
-        kinds of run apart in a job listing.
+    For a `data/templates/` file the name is the procedure, so name plus inputs is the key and
+    identical requests share one run. A composed workflow's name is one chemist's and its steps
+    change, so `scope` (owner and fingerprint) enters the id, prefixed `composed-`; otherwise a
+    different document with the same name would rejoin another's run. Empty `scope` gives the
+    unscoped id.
     """
     if not scope:
         return f"template-{template.name}-{stable_hash([template.name, inputs])}"
@@ -316,9 +242,8 @@ def run_workflow_id(template: Template, inputs: dict[str, Any], scope: str = "")
 def _family(scope: str) -> str:
     """What a run of this kind is called on the session's started-jobs list.
 
-    A composed run says so: the two are the same machinery and not the same thing to a reader, and
-    a listing that called them both "template" would make a document the model wrote a moment ago
-    indistinguishable from a reviewed file with the same name.
+    Composed runs are labelled as such, so a document the model just wrote is not mistaken for a
+    reviewed file of the same name.
     """
     return "composed" if scope else "template"
 
@@ -326,16 +251,9 @@ def _family(scope: str) -> str:
 async def _still_running(handle: Any) -> bool:
     """Whether a run this launcher rejoined is still executing, per the server.
 
-    Best-effort by construction: this is asked only to decide whether to *announce* a rejoined run,
-    so a describe that fails means the announcement is skipped and the caller still returns the id.
-    Raising here would turn a successful idempotent rejoin into a tool error over a question the
-    caller could live without an answer to.
-
-    **The same question `connectors/jobs.py` asks, and deliberately not the same function.**
-    `templates -> connectors` is not an edge this architecture has (`tests/test_layering.py`), and
-    a template launcher must not acquire one to ask a broker whether a run is open; the shared home
-    for it would be `core` or `durable`, which is a move rather than a fix and is recorded as such.
-    The counter is shared, because it counts the same event on the same dashboard.
+    Best-effort: it only decides whether to announce a rejoined run, so a failed describe skips the
+    announcement rather than failing the tool. Not shared with `connectors/jobs.py` because
+    `templates -> connectors` is not a permitted import edge; the counter is shared.
     """
     try:
         description = await handle.describe()
@@ -349,52 +267,11 @@ async def _still_running(handle: Any) -> bool:
 def unrunnable_reason(template: Template) -> str:
     """Why this deployment cannot run `template`, or `""` when it can.
 
-    **The runtime half of `make template-validate`.** That gate has always been able to say a
-    template names a tool, a job or a profile that does not exist — at a deployment with no `calc`
-    bundle it reports *"template 'bond-strength-survey' step 'survey' runs unknown job
-    'survey_bond_strengths'; declared jobs: []"* and exits 1 — and nothing at run time asked it.
-    `enabled()` filters on `templates_enabled` alone, so all nine `run_*` launchers were bound
-    whatever the connector set, a chemist could start a bond-dissociation survey into a fleet that
-    does not exist, and the system prompt then told the model to report the id as work in progress
-    and poll it.
-
-    **How badly that ends depends on who polls the queue, and both endings are bad.** Where nothing
-    polls `background-jobs` — a dev process with no worker, or a fleet scaled to zero — the run
-    reports `running` for as long as anybody asks, and `find_past_jobs` finds nothing, because a
-    run that reaches no step records none. Under the Helm chart it does not: measured on the
-    rendered manifests, `deployment-workers.yaml` always emits a background worker at
-    `workers.background.replicas` (1, pinned), so the run starts, reaches the step, and
-    `authorize_job_step` fails it non-retryably — a wasted launch and a named failure some minutes
-    later rather than a promise that never resolves. Neither is worth starting.
-
-    **This refuses the launch; it does not withdraw the tool** — except in the one case
-    `withheld_reason` decides, a launcher no profile names for a capability that is off, which was
-    never what the measurement below was about. Not registering an unrunnable launcher in general
-    is the obvious answer and it is measurably worse: `data/profiles/computation.yaml`
-    names eight of them and `safety.yaml` names the ninth, and `chemclaw_agent`'s
-    `_reject_unknown_tool_names` *raises* when a profile lists a tool the surface does not provide.
-    Measured with only the `results` bundle enabled, withdrawing them takes two shipped profiles
-    from "one procedure is unavailable" to "every turn on this profile fails at build" — the dead
-    deployment `discovered()`'s own docstring argues against, arrived at from the other side. A
-    refusal that names the missing job is also the more useful answer: absence tells the model
-    nothing, and this tells it (and the operator reading the log) exactly which capability is
-    missing.
-
-    `step_problems` is the gate's own function rather than a second reading of the same rule —
-    two copies of "what resolves" is the defect class this repository keeps finding. Resolved
-    without signatures, because the argument half of that check imports every bundle's server
-    module for 14 s and a launch must not pay it; an empty signature map makes the argument check
-    silent, which is what it already is for every tool it cannot resolve.
-
-    Imported lazily because `chemclaw.agent.chemclaw_agent` imports this module at import time —
-    the edge is `templates -> agent`, which the architecture has, and taking it at module scope
-    would be a cycle rather than a layering violation.
-
-    Args:
-        template: The template a launcher is about to start.
-
-    Returns:
-        The problems, one per line, or `""` when every step resolves.
+    The runtime half of `make template-validate`, using the gate's own `step_problems` (without
+    signatures, which would import every bundle's server module) plus `run_ceiling_problems`. It
+    refuses the launch rather than withdrawing the tool, because withdrawing a profile-named
+    launcher fails every turn on that profile, and a refusal naming the missing capability is more
+    useful than absence. Imported lazily to avoid an import cycle.
     """
     from chemclaw.agent.template_surface import (
         TemplateSurface,
@@ -402,13 +279,10 @@ def unrunnable_reason(template: Template) -> str:
         step_problems,
     )
 
-    # Two questions, and the second is not about the surface at all. `step_problems` asks whether
-    # the steps resolve here; `run_ceiling_problems` asks whether this deployment's
-    # `template_run_timeout_seconds` can hold them. Both are deployment facts and both make the
-    # launch pointless, but they fail differently: an unresolvable step fails the run loudly some
-    # minutes in, while a procedure that outlives the run ceiling is terminated by Temporal
-    # *without its workflow code running* — no failure row, no push-back, nothing on the session
-    # stream. The quieter one is the better reason to refuse before anything is queued.
+    # Two deployment facts: whether the steps resolve here, and whether
+    # `template_run_timeout_seconds` can hold them. The second matters more because Temporal
+    # terminates an over-ceiling run without its workflow code running, leaving no failure row or
+    # session event.
     problems = [
         *step_problems(template, TemplateSurface.resolve(with_signatures=False)),
         *run_ceiling_problems(template),
@@ -421,40 +295,14 @@ async def start_template_run(
 ) -> str:
     """Start one run of `template` and return its job id, rejoining an identical run in flight.
 
-    **Extracted so the two launchers cannot drift.** A `data/templates/` file reaches this through
-    its generated `run_<name>` tool; a workflow the agent composed reaches it through
-    `agent/workflow_tools.run_composed_workflow`. Everything that makes a template run *a template
-    run* — the refusal when its steps do not resolve here, the deterministic id, the run ceiling,
-    the idempotent rejoin, the `JobSignal` that lets the turn wait on it — belongs to the run and
-    not to either caller, and a second copy of it is how one of them would quietly lose the rejoin
-    or the ceiling.
-
-    **Validation belongs here too, and did not**, which is the same drift this extraction exists to
-    stop. `build_template_tool.launch` validated against the template's own params model — the
-    D-138 fix — and `run_composed_workflow` called this with a raw dict, so a composed run carried
-    an undeclared key verbatim into the run's scope and accepted a *missing required* one, failing
-    on `${inputs.x}` deep inside a durable run rather than at the launch `unrunnable_reason` exists
-    to refuse. A check one of two callers performs is a check this seam does not have.
-
-    The params model is `extra="forbid"`, so a misspelled *optional* input is refused too. That is
-    the half a required-field check cannot reach: `solvant` for `solvent` was dropped in silence and
-    the procedure ran gas-phase.
-
-    Args:
-        template: The resolved template to run. Pinned into the workflow input, so an edit
-            afterwards cannot change a run already executing.
-        inputs: The caller's inputs, validated here against the template's declared ones.
-        scope: What distinguishes this document from another of the same name — see
-            `run_workflow_id`. Empty for a reviewed `data/templates/` file, whose name is the
-            procedure; owner and fingerprint for a composed workflow, whose name is neither
-            global nor fixed.
-
-    Returns:
-        The workflow id to poll with `get_durable_job_status`.
+    Shared by the generated `run_<name>` tools and `agent/workflow_tools.run_composed_workflow`, so
+    both get the same resolvability refusal, input validation (`extra="forbid"`), deterministic id
+    (see `run_workflow_id` for `scope`), run ceiling, idempotent rejoin and `JobSignal`. The
+    template is pinned into the workflow input, so a later edit cannot change a running run.
 
     Raises:
-        TemplateError: When this deployment cannot run the template, or the broker could not
-            confirm the start.
+        TemplateError: When this deployment cannot run the template, or the broker could not confirm
+        the start.
     """
     blocked = unrunnable_reason(template)
     if blocked:
@@ -470,11 +318,8 @@ async def start_template_run(
             "use the tools that are available, or ask for the missing capability to be "
             "enabled."
         )
-    # **Dumped first when it is already a model**, because `_params_model` builds a *new* class on
-    # every call: a `ProbeInputs` instance built by the generated tool is not an instance of the
-    # `ProbeInputs` built here, and `model_validate` rejects it on class identity. One shape in — a
-    # plain mapping — so the check below is about the values rather than about which `create_model`
-    # call made the object.
+    # Dumped to a mapping first: `_params_model` builds a new class on every call, and
+    # `model_validate` rejects an instance of another call's class.
     raw = inputs.model_dump(mode="json") if isinstance(inputs, BaseModel) else dict(inputs)
     try:
         resolved = (
@@ -497,50 +342,34 @@ async def start_template_run(
         handle = await client.start_workflow(
             TemplateWorkflow.run,
             TemplateRunInput(
-                # The resolved template, pinned into the run — an edit afterwards cannot change
-                # what is already executing (`workflows.template_job`).
+                # Pinned into the run, so a later edit cannot change what is executing.
                 template=template,
                 inputs=resolved,
                 requested_by=requested_by,
                 roles=sorted(get_current_roles()),
                 session_id=get_current_session_id() or "",
-                # Pinned here rather than read inside the workflow, so the bound the run enforces
-                # and the bound `run_ceiling_problems` sized it with are one number — see
-                # `TemplateRunInput.max_parallel_steps`.
+                # Pinned here so the bound the run enforces is the one `run_ceiling_problems` sized
+                # it with.
                 max_parallel_steps=settings.orchestrator_max_parallel_children,
             ),
             id=workflow_id,
             task_queue=settings.background_task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
-            # The run-level ceiling, the same one `ConnectorJobWorkflow` gives the children it
-            # starts (`durable/connector_job.py`) and for the same reason. There was none, so
-            # an N-step template's only bound was `template_step_timeout_seconds` × N — a
-            # product nothing declares, that grows silently when an author adds a step, and
-            # that no operator can read off any setting. A per-step timeout bounds a wedged
-            # *step*; only this bounds a wedged *procedure*.
+            # The run-level ceiling, as `ConnectorJobWorkflow` gives its children: a per-step
+            # timeout bounds a wedged step; only this bounds a wedged procedure.
             execution_timeout=timedelta(seconds=settings.template_run_timeout_seconds),
         )
     except WorkflowAlreadyStartedError:
-        # The identical run is already going, or already done: the idempotency contract
-        # succeeding. **Announced when it is still going**, which is the half this branch used
-        # to skip — it returned the id and told nobody, so no `JobSignal` reached the turn, the
-        # session's `started_jobs` stayed empty, `agent/job_results.py` had nothing to wait on,
-        # and the second chemist to ask for a running template was told "in progress" with no
-        # row a later `job_completed` could clear. That is the defect `connectors/jobs.py`
-        # documents having fixed for jobs, one seam over, unfixed here.
-        #
-        # `RUNNING` and not "not completed", for that launcher's reason: a run that failed, was
-        # cancelled or timed out will never emit the completion an announced row waits for.
+        # The identical run is already going or done: idempotency succeeding. Still announced while
+        # `RUNNING`, so the turn gets a `JobSignal` and a later `job_completed` has a row to clear.
+        # Not for failed, cancelled or timed-out runs, which will never complete.
         if await _still_running(client.get_workflow_handle(workflow_id)):
             record_job_started(workflow_id, f"{_family(scope)}:{template.name}")
         return workflow_id
     except Exception as exc:
-        # `connect()` above frames an unreachable broker; this is the call *after* it — a
-        # queue with no worker, a transient RPC timeout, a serialization error — which escaped
-        # raw, so `surface_domain_errors` classified an `RPCError` as neither a `ChemclawError`
-        # nor a transport failure and the model was handed `unexpected_error_result()`. The
-        # sibling launcher's framing, with its promise kept as narrow: a connected client may
-        # have reached the server before failing, so this cannot say nothing started.
+        # Frames a failure after `connect()` (no worker, RPC timeout, serialization error) as a
+        # domain error. A connected client may have reached the server, so this cannot claim nothing
+        # started.
         raise TemplateError(
             f"the {template.name!r} template could not be confirmed as started "
             f"({type(exc).__name__}); most likely nothing was queued, but this call cannot "
@@ -558,15 +387,8 @@ def build_template_tool(template: Template) -> CapabilityTool:
     params_model = _params_model(template)
 
     async def launch(params: params_model) -> str:  # type: ignore[valid-type]
-        # **The validation this used to do moved into `start_template_run`**, because the other
-        # caller did not do it. The annotation above is a pydantic model and its JSON schema is
-        # published, but the body is handed the decoded JSON *object* — a plain `dict` — so the
-        # `cast` that once stood here was a static no-op and every template run died on
-        # `'dict' object has no attribute 'model_dump'` the first time a chemist asked for one
-        # (D-138, learned at `connectors/jobs.py` and applied here only where the bug was seen).
-        # Doing it one level down is what stops the same hole reopening at the *next* caller:
-        # `model_validate` there accepts a dict or an already-built model, so a test holding one is
-        # still not wrong.
+        # The body receives decoded JSON (a plain dict), not the annotated model;
+        # `start_template_run` validates it, so every caller is covered.
         return await start_template_run(template, params)
 
     launch.__name__ = tool_name(template)
@@ -578,14 +400,12 @@ def build_template_tool(template: Template) -> CapabilityTool:
 def template_tools(*, declared: bool = False) -> list[CapabilityTool]:
     """One generated launcher per bound template, each refusing what it cannot run.
 
-    A launcher is bound unless `withheld_reason` withholds it, and a bound one still checks
-    `unrunnable_reason` before it queues anything.
+    A launcher is bound unless `withheld_reason` withholds it, and still checks `unrunnable_reason`
+    before queueing.
 
     Args:
-        declared: Build every *enabled* template's launcher, withheld or not. For a reader whose
-            question is about the tree rather than this deployment — the prose contract checks a
-            launcher's docstring whether or not this checkout binds it, the way
-            `chemclaw_agent.declared_tool_names` checks a reference to an opt-in tool.
+        declared: Build every enabled template's launcher, withheld or not, for readers asking about
+        the tree rather than this deployment (the prose contract).
     """
     return [build_template_tool(template) for template in (enabled() if declared else bound())]
 

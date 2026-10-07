@@ -767,14 +767,10 @@ def test_the_allowlist_is_small_and_deliberate() -> None:
     assert len(_ALLOWED_NON_TOOLS) <= 3
 
 
-# Built from a variable rather than written inline: `tests/test_docstring_paths.py` scans this file
-# too, and a literal backticked path that does not resolve is exactly what it fails on — which is
-# the same rule, one corpus over.
+# Built from a variable so no literal dangling path appears in this file.
 _MISSING = "/".join(("vanished", "module.py"))
 # A second one, for the Makefile tests below that need two distinct nonexistent paths in the same
-# fixture (one in a comment, one in a recipe command) to tell which was scanned. Same reason as
-# `_MISSING`: joined, not written contiguously, so `test_docstring_paths.py`'s whole-file scan
-# does not read it as a dangling pointer of its own.
+# fixture (one in a comment, one in a recipe command) to tell which was scanned.
 _MISSING_RECIPE = "/".join(("nonexistent", "recipe.py"))
 
 

@@ -176,7 +176,7 @@ def test_concurrent_misses_on_one_key_share_one_computation() -> None:
     number), benign while a compute was milliseconds and not once a CREST search is 19 minutes of
     CPU. The first miss computes; every concurrent second miss awaits the same future and reports
     `was_cached=True`, because from its side the answer arrived with no computation started. The
-    cross-process half stays deferred with its own trigger (`docs/planning/DEFERRED.md`).
+    cross-process half stays deferred with its own trigger (`docs/planning/BACKLOG.md`).
     """
     computes = 0
     release = asyncio.Event()

@@ -1,47 +1,14 @@
 """Walking the stored corpus and queueing what has not been published yet.
 
-**Why this is not in `cli/`, where it started.** Two callers need it — an operator running
-`python -m chemclaw.cli.backfill_publications`, and a chemist launching the `results` bundle's
-`republish_calculations` job — and a connector may not import a CLI module. That is not a
-formality: `tests/test_layering.py` caught the inversion, and the rule behind it is the one
-`cli/schedules.py` already records, that a terminal entrypoint is a thin `main()` over an
-implementation that lives in the layer that owns the work.
+One walk shared by the operator CLI and the `results` bundle's `republish_calculations` job, so
+both cover exactly the same rows (it lives here because a connector may not import a CLI).
 
-Keeping one walk rather than two is the point. An operator and a chemist must cover exactly the
-same rows; two implementations that agreed today would diverge on the next table added to either
-store.
-
-**Rows this release has no projector for are skipped, not failed.** `calculation_results` is never
-pruned, so a deployment legitimately holds results from calculators that no longer ship, and a walk
-that aborted on the first one would never reach the rest.
-
-**Every row visited lands in exactly one bucket, and that is the property this module owes its
-caller.** `seen == queued + skipped + failed` is what makes "the backfill is done" a statement
-about the whole corpus rather than about the part of it the walk happened to understand. It did not
-hold: `outbox.enqueue_payload` returns 0 both for a row it queued nothing for *and* for a row whose
-projector raised, and this module added that 0 to `queued` and touched nothing else — so a row
-written by an older calculator was seen, not queued, not skipped, and named in no line of the
-report. Measured on a four-row corpus holding one such row, the dry run reported
-`(seen=4, queued=3, skipped=1)` and the real pass `(seen=4, queued=2, skipped=1)`; subtracting
-`skipped` from `seen` could not recover the loss either, because `queued` counted outbox *rows*
-while `seen` counted table rows, so a walk over a shape that decomposes reported more queued than
-seen. `WalkCounts` is that partition, and `records` is the record count kept apart from it.
-
-**A dry run projects.** It used to count a row as queueable the moment `projector_for` returned
-something, which is a *route* rather than an attempt — so the number an operator previewed was the
-number the real pass would produce only when no row in the corpus was unreadable, which is exactly
-the case the preview exists to find. It now runs the same `project_payload` the real pass runs and
-stops one step short of the write. **The measurement that says it can afford to**: reading a page
-and skipping the projection costs 54.4 us/row, projecting costs a further ~274 us, and the pass
-being previewed costs 19,241 us/row — so a projecting dry run is ~6x the old preview and 1.7% of
-the run it describes (1M rows: ~5.5 min against ~5.3 h). The two passes therefore agree on all four
-row counts exactly, in both directions.
-
-**`records` is what the walk *projected*, not what the outbox wrote**, and that is deliberate: the
-outbox is an upsert over `(sink, calc_ref, schema_version)`, so a second pass writes nothing while
-covering everything, and it writes one row *per enabled sink*, so a two-sink deployment would make
-a dry run and a real pass disagree by a factor nobody asked about. `chemclaw_results_queued_total`
-is where rows written are metered.
+Every visited row lands in exactly one bucket: `seen == queued + skipped + failed` (see
+`WalkCounts`). Rows with no projector in this release are skipped, not failed, since the cache
+is never pruned and may hold results from retired calculators. A dry run runs the same
+projection as the real pass and stops before the write, so the preview's counts match the run's.
+`records` counts what was projected, not outbox rows (the outbox upserts once per enabled sink;
+`chemclaw_results_queued_total` meters writes).
 """
 
 from datetime import UTC, datetime
@@ -57,22 +24,13 @@ from chemclaw.publish.record import Publication
 class WalkCounts(NamedTuple):
     """What one walk did. `seen == queued + skipped + failed`, always.
 
-    Four row counts that partition the corpus and one record count that does not, kept apart
-    because they are in different units and a report that mixed them could say "4 row(s) seen, 5
-    queued".
-
-    - `seen` — rows the walk visited.
-    - `queued` — rows whose records reached the outbox. "Reached", not "were written": the enqueue
-      is an upsert, so a re-run re-covers a row rather than re-writing it, and a row already queued
-      is covered rather than lost.
-    - `skipped` — rows this release has no projector for at all. A deployment legitimately holds
-      results from calculators that no longer ship.
-    - `failed` — rows this release *has* a projector for, which could not read them. A different
-      question with a different answer: a skip is a corpus this release never claimed to cover,
-      while a failure is a shape it claims to cover and cannot, and it will fail identically on
-      every pass until code changes.
-    - `records` — the scientific records those `queued` rows project into. Not a row count: one
-      solvent screen decomposes into an aggregate and its parts.
+    - `seen`: rows the walk visited.
+    - `queued`: rows whose records reached the outbox (an upsert, so a re-run re-covers a row).
+    - `skipped`: rows this release has no projector for at all.
+    - `failed`: rows a projector exists for but could not read; these fail identically on every
+      pass until code changes.
+    - `records`: the scientific records the `queued` rows project into, a different unit (one
+      solvent screen decomposes into an aggregate and its parts).
     """
 
     seen: int = 0
@@ -82,29 +40,17 @@ class WalkCounts(NamedTuple):
     records: int = 0
 
 
-# The keyset cursor before the first row: earlier than any stored timestamp, and the empty string
-# sorts before every key and job id. A sentinel rather than a second "first page" statement,
-# because two statements for one walk is where the projection and the ordering drift apart.
+# The keyset cursor before the first row: earlier than any timestamp, with `""` sorting before every
+# key, so one statement serves every page.
 _WALK_START = (datetime.min.replace(tzinfo=UTC), "")
 
 
-# Oldest first, so a run that is interrupted has made contiguous progress rather than a scatter.
+# Oldest first, so an interrupted run has made contiguous progress. `key` (the primary key) breaks
+# ties on the non-unique `created_at`, so every row is fetched exactly once.
 #
-# `key` breaks ties on `created_at`, which is not unique: microsecond resolution lets concurrent
-# calculator workers share a value, and `_UPSERT` stamps `created_at = now()` on every row of a
-# bulk import in one transaction, giving each of them the identical instant. `key` is this table's
-# primary key, so `(created_at, key)` is a total order and every row is fetched exactly once.
-#
-# **Keyset, not `OFFSET`.** `OFFSET n` makes the server produce and discard the first `n` rows on
-# every page, so the walk is O(n²/batch): measured on 500 000 rows, `LIMIT 1000 OFFSET 0` is
-# 1.4 ms and `LIMIT 1000 OFFSET 400000` is **388.7 ms** — 500k rows in 1 000-row pages is ~90 s of
-# pure skipping, and `docs/planning/BACKLOG.md` asks an operator to run exactly this against a
-# populated deployment. The row comparison below is the same total order expressed as a *predicate*
-# — `calc_results_created_at_idx` already exists — so every page costs what page 1 costs.
-#
-# The tuple comparison is one predicate rather than the three-way `a > x OR (a = x AND b > y)`
-# expansion because Postgres can drive a composite index scan from a row constructor directly, and
-# because a hand-expanded version is where an off-by-one silently drops or repeats a row.
+# Keyset rather than `OFFSET`, which re-scans every skipped row and makes the walk quadratic; the
+# row-constructor comparison drives `calc_results_created_at_idx` directly and avoids a
+# hand-expanded predicate's off-by-one.
 _CACHED = """
     SELECT key, calc_type, calc_version, input_hash, params_hash, result, structure_id,
            compute_seconds, created_at
@@ -114,11 +60,8 @@ _CACHED = """
     LIMIT %s
 """
 
-# The composites. `job_records.result` is the envelope's own data - the shape that has no cache row
-# and therefore reaches a results store through no other path.
-#
-# `job_id` breaks ties on `completed_at`, and the walk is keyset-paginated, both for the reasons
-# `_CACHED` states — the 388.7 ms page-400 measurement above is this table's.
+# The composites: `job_records.result` is the envelope's data, which has no cache row and no other
+# route to a results store. Keyset-paginated on `(completed_at, job_id)` for `_CACHED`'s reasons.
 _JOBS = """
     SELECT job_id, connector, job, result, calc_refs, requested_by, session_id, correlation_id,
            rationale, completed_at, payload_kind, note_id
@@ -152,9 +95,9 @@ async def backfill_cached(*, dry_run: bool, batch: int) -> WalkCounts:
             rows = list(await cursor.fetchall())
         if not rows:
             return WalkCounts(seen, queued, skipped, failed, records)
-        # Advance before the page is worked: the cursor is the *last row read*, so an exception
-        # mid-page re-reads that page on the next run rather than skipping it, and the enqueue
-        # is an upsert on the calc ref, so re-reading costs nothing.
+        # Advance before the page is worked: an exception mid-page re-reads it next run, and the
+        # upsert
+        # makes re-reading free.
         cursor_key = (rows[-1][8], rows[-1][0])
         for row in rows:
             seen += 1
@@ -209,11 +152,9 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> WalkCounts:
             requested_by, session_id, correlation_id, rationale, completed_at = row[5:10]
             payload_kind = row[10] or ""
             note_id = row[11] or ""
-            # `<connector>.<job>` is a *route*, and no projector prefix matches one — so before
-            # `payload_kind` existed this skipped every composite in the table. It is still passed
-            # as the `calc_type` because that is what the row is addressed by; `payload_kind` is
-            # what routes it, and an empty one (a row written before migration 055) falls back to
-            # the prefix inference exactly as it did before.
+            # `<connector>.<job>` addresses the row; `payload_kind` routes it, and an empty one
+            # (older rows)
+            # falls back to prefix inference.
             calc_type = f"{connector}.{job}"
             if projector_for(calc_type, payload_kind) is None:
                 skipped += 1
@@ -247,16 +188,10 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> WalkCounts:
 async def requeue_failed(*, dry_run: bool = False) -> int:
     """Return retired rows to the queue. Returns how many were reset, or would be under `dry_run`.
 
-    A row that spent its attempt budget is kept rather than deleted, precisely so this is possible:
-    once the cause is fixed — the site ran the DDL, the credential was rotated — an operator puts
-    them back rather than re-deriving them.
-
-    `dry_run` counts instead of resetting, because this is the one write a preview must not make:
-    the CLI ran it unconditionally and then printed "dry run: nothing was written", so previewing a
-    backfill un-retired every dead-lettered publication in the deployment — clearing the recorded
-    error that *is* the record of what did not publish, and redelivering the rows on the next
-    drain. Defaulted rather than required, unlike the walks' own `dry_run`: the durable republish
-    job has no preview mode and asks for the write.
+    Retired rows are kept so that once the cause is fixed an operator can requeue them. `dry_run`
+    counts instead of resetting, so a preview never clears the recorded errors. Defaulted because
+    the
+    durable republish job has no preview mode.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         if dry_run:

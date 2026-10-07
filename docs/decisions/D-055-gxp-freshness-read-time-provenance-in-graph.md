@@ -1,5 +1,7 @@
 # D-055 — GxP freshness + read-time provenance in graph retrieval (audit KM-6, KM-7)
 
+**Superseded-by:** [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) (in part)
+
 **Context.** The knowledge-management gap analysis (`docs/audit/09-knowledge-management-gaps.md`)
 found two read-path gaps that are cheap, offline, and central to the GxP posture — no infra, no
 schema migration, no curated artifact, no chosen threshold:

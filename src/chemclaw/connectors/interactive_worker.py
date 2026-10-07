@@ -1,20 +1,14 @@
-"""Run one connector's interactive worker — the process that makes its queued tool calls.
+"""Run one connector's interactive worker: the process that makes its queued tool calls.
 
-`python -m chemclaw.connectors.interactive_worker <connector>`. It polls
-`connectors.queues.interactive_queue(<connector>)`, where the turn puts every call to a tool the
-manifest lists under `queued:`, and serves the one workflow and the one activity that make such a
-call (`connectors/queued_workflow.py`, `connectors/queued_call.py`).
+`python -m chemclaw.connectors.interactive_worker <connector>`. Polls
+`connectors.queues.interactive_queue(<connector>)`, where a turn puts every call to a tool the
+manifest lists under `queued:`, and serves `connectors/queued_workflow.py` and
+`connectors/queued_call.py`.
 
-**Its concurrency is the backpressure, so size it to the server, not to the worker.**
-`worker_max_concurrent_activities` here is how many calls this process sends at once; the right
-number is the server's slots divided by this Deployment's replicas, so the total in flight matches
-what the server admits and the rest waits in the queue — globally, first come first served — rather
-than being refused by a full pod. Too high costs a refusal and a retry within seconds
-(`durable.publish.queued_tool_retry`); too low leaves slots idle. The chart sets it per connector.
-
-Its own process rather than a mode of the bundle worker for the reason it has its own queue: an
-hour-long job must never hold the slot a seconds-long answer is waiting for, and the two are scaled
-on different signals.
+Its concurrency is the backpressure: set `worker_max_concurrent_activities` to the server's slots
+divided by this Deployment's replicas, so the rest waits in the queue in arrival order rather than
+being refused by a full pod. A separate process from the bundle worker so an hour-long job never
+holds a slot a seconds-long answer is waiting for.
 """
 
 import asyncio
@@ -43,8 +37,8 @@ logger = logging.getLogger(__name__)
 async def run_interactive_worker(connector: str) -> None:
     """Poll `connector`'s interactive queue and make its queued calls.
 
-    Refuses to start for a connector that is not enabled here or queues nothing: a worker polling a
-    queue no turn writes to is a Deployment that looks like capacity and serves nothing.
+    Refuses to start for a connector that is not enabled here or queues nothing, rather than run as
+    capacity that serves nothing.
     """
     configure_logging()
     configure_telemetry()

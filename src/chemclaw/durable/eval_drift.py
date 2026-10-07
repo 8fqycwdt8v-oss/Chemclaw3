@@ -1,18 +1,12 @@
-"""Durable eval-drift workflow (plan F10-F2) on the background queue.
+"""Durable eval-drift workflow on the background queue.
 
-Re-runs the committed eval case-set on a cadence, aggregates each metric, and compares it to the
-Git-committed baseline; any metric that moved beyond the relative noise band is pushed to a system
-channel so an operator sees a regression instead of it going unnoticed.
+Re-runs the committed eval case-set on a cadence, compares each metric to the Git-committed
+baseline, and pushes any metric outside the relative noise band to a system channel.
 
-Scope note (honesty about what this catches): the committed case-set is deterministic, so over it
-this is a *deployment-consistency tripwire* — it fires only if the deployed baseline, code, and
-cases were committed inconsistently (the same condition the CI guard catches at merge). Real runtime
-*quality* drift needs a non-deterministic eval (retrieval P/R/F1 over the deployment's own live
-graph), which is deployment-local and deferred — see docs/planning/DEFERRED.md. The scoring work —
-run + aggregate + compare — is pure and lives in `chemclaw.evals.baseline` (fully unit-tested);
-this file is
-only the Temporal shell: one activity does the file I/O, the workflow delivers each alert via the
-`notify` seam. Durability of the *schedule* lives in Temporal (D-035), not host cron.
+The committed case-set is deterministic, so this is a deployment-consistency tripwire: it fires
+only when baseline, code and cases were committed inconsistently. Runtime quality drift needs a
+live-graph eval, which is deferred (docs/planning/DEFERRED.md). Scoring is pure and lives in
+`chemclaw.evals.baseline`; this file is only the Temporal shell.
 """
 
 import asyncio
@@ -35,9 +29,8 @@ with workflow.unsafe.imports_passed_through():
 from chemclaw.durable.notify import notify_session
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
-# The well-known system push-back channel a drift alert lands on (a `session_events` "session" an
-# operator surface tails). A fixed internal id, not a tunable threshold — analogous to the schedule
-# ids in `durable/schedules.py` — so it is a constant here, not a config knob.
+# The system push-back channel a drift alert lands on (a `session_events` "session" an operator
+# surface tails). A fixed internal id, not a tunable.
 DRIFT_ALERT_CHANNEL = "system-eval-drift"
 
 logger = logging.getLogger(__name__)
@@ -48,15 +41,10 @@ logger = logging.getLogger(__name__)
 async def check_eval_drift() -> list[DriftAlert]:
     """Score the committed case-set and return the metrics that drifted from the baseline.
 
-    All the I/O (reading cases + the baseline file) and the pure comparison run in this one
-    activity, so the workflow stays deterministic and this is the single side-effecting step.
-    Scoring runs in a worker thread: some case metrics (the KM-13 retrieval gold set) drive a live
-    retriever via `asyncio.run`, which cannot nest inside this activity's own event loop.
-
-    Each detected alert is also logged at WARNING here. Delivery to the system channel is
-    guaranteed (must-deliver, see the workflow) but *visibility* is not: nothing consumes that
-    channel today, so without this line a regression is durably recorded where no one looks. The
-    log is the operator's surface until a deployment gives the channel a consumer.
+    All the I/O and the pure comparison run in this one activity so the workflow stays
+    deterministic. Scoring runs in a worker thread because some case metrics drive a retriever via
+    `asyncio.run`, which cannot nest in this loop. Each alert is also logged at WARNING, since
+    nothing consumes the system channel yet.
     """
     report = await asyncio.to_thread(
         run_eval, load_eval_cases(settings.eval_case_dir), "drift-check"
@@ -84,14 +72,9 @@ async def check_eval_drift() -> list[DriftAlert]:
 
 
 @durable_workflow("background")
-# Declared, and it is the one scheduled job here that is: its output is a claim about a moment.
-# The other periodic jobs re-do their work on the next fire, so a parked run that unblocks a
-# day later is still doing the right thing. This one computed its alerts *before* it parked —
-# the activity result is replayed from history, not recomputed — so a resumed run delivers a
-# day-old regression verdict onto the operator channel as though it were current, including
-# one the deployment has since fixed. That is worse than no alert, and it also defeats the
-# must-deliver stance `run()` below already states: delivery failure is meant to be *visible*
-# as a failed run, which a park is not. D-2026-08-27.
+# Fails rather than parks: the alerts are computed before a park and replayed from history, so a
+# resumed run would deliver a stale verdict as current. A failed run also keeps delivery failure
+# visible.
 @workflow.defn(failure_exception_types=[Exception])
 class EvalDriftWorkflow:
     """Run a drift check and deliver one alert per drifted metric to the system channel."""
@@ -100,8 +83,7 @@ class EvalDriftWorkflow:
     async def run(self) -> int:
         """Check for drift; deliver each alert (must-deliver). Returns the number of alerts raised.
 
-        The alert is this workflow's only operator-facing output, so delivery is *not* best-effort:
-        a failed `session_events` write fails the workflow (visible as a failed run) rather than
+        Delivery is not best-effort: a failed `session_events` write fails the workflow rather than
         silently dropping a regression alert.
         """
         alerts = await workflow.execute_activity(

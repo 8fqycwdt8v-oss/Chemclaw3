@@ -1,71 +1,30 @@
 """Where a turn puts intermediate work: a scratchpad, and memories that outlive the session.
 
-**The gap this closes is structural rather than promptable.** Until now the only backend a turn
-could reach was the narrowed skills tree — read-only, one verb. Every tool result therefore landed
-in the context window and was reclaimed from it by `agent/compaction.py`, so a research turn that
-pulled six sources could not hold six sources: the earliest were replaced by a placeholder before
-the answer was written. That is not a prompt problem and no instruction fixes it. A hard research
-task — pull several sources, launch calculations, merge the lot into a report or a draft procedure —
-needs somewhere to put work that is neither the context window nor the knowledge graph.
+Without it every tool result lives only in the context window, where compaction reclaims it. Three
+routes over one `CompositeBackend`:
 
-Three routes over one `CompositeBackend`, and each boundary is a decision:
+- **`/scratch/…` → `StateBackend`.** Per-thread files in the graph's state; never on disk, gone with
+  the checkpoint.
+- **`/skills/…` → `NarrowedSkillsBackend`.** Read-only; writes are refused by the backend
+  (`agent/skill_backend.py`).
+- **`/memories/…` → `StoreBackend`** over `AsyncPostgresStore`, when the deployment enables it *and*
+  the turn has an actor. The only route that outlives the session.
 
-- **`/scratch/…` → `StateBackend`.** Files live in the graph's own state, so they are per-thread,
-  never touch a disk, and die with the checkpoint. This is the working surface: a turn writes its
-  running notes here and re-reads them after a calculation returns.
-- **`/skills/…` → `NarrowedSkillsBackend`,** exactly as before. Read-only, three predicates, writes
-  refused by the backend rather than by a listing filter (`agent/skill_backend.py` says why that
-  difference is a security property).
-- **`/memories/…` → `StoreBackend`** over `AsyncPostgresStore`, when a deployment enables it *and*
-  the turn has an actor. This is the only route that outlives the session.
+**The namespace is the erasure key**
+(`D-2026-08-10-basestore-is-not-where-this-systems-memory-lives`): `store` has no actor column, so
+the actor digest goes in the namespace and erasure is a prefix match on `store.prefix`, like every
+other table in `agent/leaver.py`. It is computed when the backend is built (the graph is compiled
+per turn), not from the runtime. With no actor there is no memories route at all, rather than a
+shared namespace nobody could erase.
 
-**The namespace is the erasure key, and that is the whole reason this module chooses it rather than
-letting upstream default it.** `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives`
-rejected `BaseStore` on four grounds, and the decisive one was not about capability: `store` has no
-actor column, so `tests/test_leaver.py`'s derived right-to-erasure check would report a departing
-person's memories as absent while they remained. *A safety net that returns a false green is worse
-than no safety net, because it is trusted.* That objection is GDPR, not GxP — it survives the
-retirement of the regulated framing and had to be answered rather than waived.
+This is a working surface, not knowledge: a conclusion worth keeping goes through
+`record_knowledge_note`, and nothing under `/memories/` is evidence a citation resolves to.
 
-The answer is to put the actor in the namespace. `store.prefix` is a plain text column holding the
-dotted namespace, so `("memories", <actor digest>)` makes erasure a prefix match — the same shape
-every other table in `agent/leaver.py` already uses — and makes the derived completeness test able
-to see it.
-
-**Computed at build time, not from the runtime.** Upstream's `NamespaceFactory` takes a runtime so
-a namespace can vary per call, which this deliberately does not use: the graph is already compiled
-per turn (connectors bind at construction and a session belongs to one turn), so the actor is known
-when the backend is built. A closure over a value beats a lookup through somebody else's context —
-it is a pure function a test can assert, and it cannot silently resolve to a different person.
-
-**No actor means no route at all**, rather than a shared namespace. The CLI, a template step and the
-eval harness all run without ambient identity, and a memory written under an "anonymous" prefix
-would be a memory nobody can erase and everybody can read. Those paths fall through to
-`StateBackend`, which is turn-scoped — they get a scratchpad and no memory, which is correct.
-
-**What this is not.** It is a working surface, not knowledge. Layer 4 stays Git plus Markdown, and
-a conclusion worth keeping still goes through `record_knowledge_note` — which cites its evidence,
-carries `created_by: agent` and can be contradicted. A scratchpad file has none of that.
-Nothing under `/memories/` is evidence a citation can resolve to — `verifier.turn_evidence` scores
-against tool outputs, and a file the model wrote itself is not one.
-
-**The audit objection answers itself here, which is worth stating because the same ADR raised it.**
-It observed that a store write "passes through none of the six tool middlewares including
-`audit._recording`". True of a direct `store.aput`; false of this design, because the only path to
-the store is `write_file`/`edit_file`/`delete`, which are *tools* — they cross the same
-`wrap_tool_call` chain as every other call, so they are audited, authorized, refused on a dry run
-and counted by the repeat guard. `tests/test_scratchpad.py` asserts that no first-party module calls
-`aput`/`adelete` on a store directly, so the property is enforced rather than described.
-
-**Three of those four were true when written and the fourth was not**, which is worth keeping
-because the reason generalises. Auditing, authorization and the repeat guard key on the tool *name*
-and so covered these the day they were registered. The dry-run refusal and the plan gate key on
-`side_effecting_tools()`, which is assembled from the tool registry, every connector's
-`state_changing` declaration and every template launcher — and `FilesystemMiddleware` registers its
-verbs with none of those, so a `dry_run=true` turn could write a durable row past a promise that
-nothing had been started. The fix is not a name added to that set: `write_file` is durable under
-`/memories/` and turn-local under `/scratch/`, so gating the name would deny a turn its own notepad.
-`authz.side_effecting_call` reads the call's `file_path` instead, and both gates ask it.
+The only path to the store is the `write_file`/`edit_file` tools, so every write crosses the
+`wrap_tool_call` chain (audit, authorization, repeat guard); `tests/test_scratchpad.py` asserts no
+module calls `aput`/`adelete` directly. Whether a write is side-effecting depends on its path
+(`/memories/` is durable, `/scratch/` is not), so `authz.side_effecting_call` reads the call's
+`file_path` for the dry-run and plan gates.
 """
 
 import logging
@@ -99,34 +58,19 @@ logger = logging.getLogger(__name__)
 
 _store: AsyncPostgresStore | None = None
 
-# The tables `AsyncPostgresStore.setup()` creates, named here for the reason `CHECKPOINT_TABLES` is
-# named in `agent/checkpointer.py`: these tables are upstream's and appear in no migration in
-# `infra/sql`, so no schema scan can find them. The erasure sweep has to reach a departing person's
-# memories, and it spells both names itself (`agent/leaver.py`, one `DELETE` per table, dependent
-# side first).
+# The tables `AsyncPostgresStore.setup()` may create. They are upstream's and appear in no
+# migration, so the erasure sweep (`agent/leaver.py`) spells them from here;
+# `tests/test_scratchpad.py` checks them against upstream's migration constants.
 #
-# **They are hand-written and they are checked**, which is the half the previous version of this
-# comment got wrong — it said "nothing can derive the list", and upstream's own migration constants
-# derive it exactly. `tests/test_scratchpad.py` reads them, as the checkpointer's twin has done
-# since it was written, so a LangGraph minor adding a store table turns a test red instead of
-# landing a table that escapes both this sweep and the disposal register.
+# `store_vectors` exists only for a store built with an `index_config` (none is passed here); it
+# stays listed so erasure reaches it wherever a site sets one.
 #
-# `store_vectors` carries the embeddings and is keyed on `(prefix, key)`. It comes from
-# `VECTOR_MIGRATIONS`, which `setup()` runs only for a store built with an `index_config` — none is
-# passed below — so this deployment holds `store` alone. Both names stay because erasure must reach
-# the second wherever a site does set one.
-#
-# **The retention sweep does not touch either table**, and an earlier version of this comment said
-# it "has to prune them by age", which was never true. The omission is the design — a memory is
-# written to persist, so disposing of one is a capability decision with its own policy, not
-# something an age cutoff may decide. Turn state is the opposite and is pruned; that is
-# `checkpoints`, not `store`. (`_PRUNABLE`'s membership is not restated here: this comment used to
-# list it, the list gained two entries, and the sentence went stale in the usual direction.)
+# The retention sweep deliberately touches neither table: a memory is written to persist, so
+# disposing of one is not an age cutoff's decision.
 STORE_TABLES: tuple[str, ...] = ("store", "store_vectors")
 
-# The root the memories route is mounted at. A constant because three places spell it — the route
-# key, the permission rules that allow writes under it, and the erasure prefix — and a fourth that
-# disagreed would be a route nobody can erase.
+# The memories route's root, shared by the route key, the write-permission rules and the erasure
+# prefix so they cannot disagree.
 MEMORY_ROOT = "/memories/"
 
 # The scratchpad root. Unrouted, so it resolves to the composite's default `StateBackend`; named
@@ -137,11 +81,9 @@ SCRATCH_ROOT = "/scratch/"
 def memory_namespace(actor: str) -> tuple[str, ...]:
     """The store namespace one person's memories live under.
 
-    Digested rather than raw, for two reasons that both matter. `store`'s namespace components are
-    validated against a character class that rejects most punctuation, and an Entra `oid` is not the
-    only actor spelling this system holds — `unverified:<id>` is the other (`agent/leaver.py`
-    explains why). A digest is always a legal component and collapses neither spelling into the
-    other, so `_actor_forms` can hash each and erase both.
+    Digested because namespace components reject most punctuation and an actor may be spelled either
+    as an Entra `oid` or `unverified:<id>`; a digest is always legal and keeps the spellings
+    distinct, so erasure can hash and remove both.
 
     Args:
         actor: The turn's actor id, in whichever spelling the caller holds.
@@ -155,10 +97,8 @@ def memory_namespace(actor: str) -> tuple[str, ...]:
 def memory_prefix(actor: str) -> str:
     """The `store.prefix` value that names one person's memories, for the erasure sweep.
 
-    `store` stores a namespace as its components joined by `.`, which is what makes a prefix match
-    the right shape for erasure. Exposed so `agent/leaver.py` builds the same string this module
-    writes under rather than re-deriving the join — the defect class where two modules agree about a
-    key until one of them is edited.
+    Exposed so `agent/leaver.py` uses the same dotted join this module writes under rather than
+    re-deriving it.
 
     Args:
         actor: The departing person's id.
@@ -172,28 +112,13 @@ def memory_prefix(actor: str) -> str:
 async def memory_store() -> AsyncPostgresStore:
     """The process's memory store, created and migrated on first use.
 
-    Shares the checkpointer's pool deliberately. That pool is autocommit and `min_size=0` for three
-    measured reasons recorded in `agent/checkpointer.py` — `CREATE INDEX CONCURRENTLY` cannot run
-    inside a transaction, one `asyncio.Lock` per saver, and pipeline mode — and every one of them
-    applies to this store's own `setup()` for the same reason. A second pool against the same DSN
-    would double the connection budget to buy nothing.
+    Shares the checkpointer's autocommit pool, whose reasons (see `agent/checkpointer.py`) apply
+    equally to this store's `setup()`.
 
-    **Published only once it is usable, under the checkpointer's `_init_lock`.** This was a
-    check-then-*await*-then-act that assigned `_store` *before* awaiting `setup()` — the exact
-    defect `checkpointer()` was fixed for, failing the same way: a second turn arriving inside that
-    await saw a non-`None` global and got a store whose two tables do not exist yet (`relation
-    "store" does not exist` on a cold start with traffic). It also called `_checkpoint_pool()` with
-    no lock held, which that function then documented as safe only because its *one* caller held
-    `_init_lock` first; two coroutines racing it could each pass the pool's `if _pool is None` check
-    and construct a distinct `AsyncConnectionPool` against the same DSN, so one opened pool was
-    overwritten and leaked its connections for the life of the process.
-
-    That second half is now closed inside `_checkpoint_pool` itself rather than here, because a
-    guarantee that depends on every caller remembering to hold a lock is the guarantee that just
-    failed. The consequence is the ordering below: the pool is awaited *outside* the lock, since
-    `_checkpoint_pool` takes the same one and `asyncio.Lock` is not reentrant. The lock is the
-    checkpointer's rather than a second of this module's own, because both initializations sit on
-    that one pool and one lock is what lets `close_checkpointer` drop the pair together.
+    The store is published only after `setup()` completes, under the checkpointer's `_init_lock`, so
+    a concurrent turn never sees a store whose tables do not exist yet. The pool is awaited outside
+    the lock because `_checkpoint_pool` takes the same non-reentrant lock; sharing one lock lets
+    `close_checkpointer` drop both together.
 
     Returns:
         A ready store over this process's session pool.
@@ -213,12 +138,8 @@ async def memory_store() -> AsyncPostgresStore:
             store = AsyncPostgresStore(pool)
             await store.setup()
             _store = store
-            # No count. `STORE_TABLES` names both tables the store *may* create, and this build
-            # creates one of them: `store_vectors` comes from `VECTOR_MIGRATIONS`, which `setup()`
-            # runs only for a store constructed with an `index_config`, and none is passed above.
-            # So the line said "2 tables" over a schema holding one, for as long as it existed. The
-            # constant stays at two names because erasure must reach both wherever a site does set
-            # one; what was wrong is asserting a number about *this* process.
+            # No table count: `STORE_TABLES` names both tables the store may create, and this build
+            # creates only `store`.
             logger.info("memory store ready")
     return _store
 
@@ -226,69 +147,42 @@ async def memory_store() -> AsyncPostgresStore:
 async def close_memory_store() -> None:
     """Drop the process's store — called by `close_checkpointer`, which owns the pool beneath it.
 
-    The pool belongs to the checkpointer, so this releases the store and leaves the pool to
-    `close_checkpointer`. Closing it here would pull the connections out from under the saver.
-
-    **Its caller is `close_checkpointer`, and the ordering is the point**: the store is dropped
-    *before* the pool it sits on is closed, so nothing can be handed a store over closed
-    connections. It had no caller at all, which left `close_checkpointer` closing the pool while
-    `_store` still pointed at it — the next `memory_store()` would have returned that store and
-    every operation on it would have failed against a closed pool.
+    The store is dropped before its pool is closed, so nothing is handed a store over closed
+    connections. The pool itself is left to `close_checkpointer`.
     """
     global _store
     _store = None
 
 
 class BoundedStoreBackend(StoreBackend):
-    """`StoreBackend` with a row cap per namespace — the bound `store` did not have.
+    """`StoreBackend` with a row cap per namespace.
 
-    **The table was unbounded and agent-writable, which is a combination this repository has one
-    other instance of and already answered.** `durable/retention.py`'s disposal register said of
-    `store`, in as many words, "**nothing bounds it**": no size cap, no window, no clock, and a
-    retention sweep that deliberately does not touch it because a memory is written *to persist*.
-    Driven before this, 2,000 writes of 5 kB under one namespace left `(2000, '816 kB')` with
-    nothing evicted and nothing counted.
+    `store` is agent-writable and no retention sweep touches it, so without a cap memories
+    accumulate across turns for the life of the deployment; this is the per-actor twin of
+    `ingest/rejections.py`'s `_MAX_ROWS_PER_SOURCE`.
 
-    The runaway is **not** a looping turn. `harness_max_loop_iterations` x
-    `agent_max_parallel_tool_calls` is a hard ceiling on how many writes one turn can make. It is
-    accumulation *across* turns, over a deployment's life, because nothing ever removed a row —
-    which is the same shape `ingest/rejections.py` answers with `_MAX_ROWS_PER_SOURCE`, and this is
-    its per-actor twin.
+    The cap lives in the backend, not in a `BaseStore` wrapper, so every write still arrives as a
+    tool call through the `wrap_tool_call` chain. This class is the one module allowed to delete
+    from the store directly, and only to evict in the same call.
 
-    **Here rather than in a `BaseStore` wrapper, and that is what keeps the audit property true.**
-    `tests/test_scratchpad.py` asserts that no first-party module calls `aput`/`adelete` on a store,
-    because every memory write has to arrive as a `write_file`/`edit_file` *tool* call — that is
-    what crosses the `wrap_tool_call` chain and produces the audit row, the authorization decision
-    and the dry-run refusal. This class is the one exemption and it is an eviction rather than a
-    write: it removes what the cap says may not stay, in the same call the tool made, so nothing
-    enters the store outside the chain. That rule is refined rather than deleted, in the shape
-    `kg/record.py` already has — exactly one module may, and a test names it.
-
-    **The invariant is eventual, not atomic, and the reason is the pool.** The memory store shares
-    the checkpointer's **autocommit** pool (`memory_store`, and `agent/checkpointer.py` for why it
-    is autocommit), so the write and the eviction are two statements rather than one transaction.
-    What holds is therefore "at most the cap, plus whatever is in flight" — two turns writing the
-    same namespace at the same instant can both see the count at the cap and both evict one, or
-    both land before either evicts. Neither outcome is a leak: the next write converges. Saying so
-    is the point; `ingest_rejections` can promise atomicity because its writer owns a transaction,
-    and claiming the same here would be claiming a property the pool cannot give.
+    The bound is eventual, not atomic: the store shares an autocommit pool, so the write and the
+    eviction are two statements, and concurrent writers may briefly overshoot. The next write
+    converges.
     """
 
     async def awrite(self, file_path: str, content: str) -> WriteResult:
         """Write, then evict whatever the cap no longer has room for.
 
-        After rather than before, because a write of an *existing* key replaces a row instead of
-        adding one — checking first would evict on every overwrite of a namespace sitting exactly
-        at the cap, which is a memory lost to a write that added nothing.
+        Evicting after rather than before, because overwriting an existing key adds no row and must
+        not cost a memory.
 
         Args:
             file_path: The memory's path under `/memories/`.
             content: What to store.
 
         Returns:
-            Upstream's result, unchanged — the cap is about what stays, not about what a turn is
-            told it wrote — or a refusal when `content` is past `agent_scratch_file_max_chars`,
-            checked first so an oversized memory never lands and is never counted.
+            Upstream's result, unchanged, or a refusal when `content` is past
+            `agent_scratch_file_max_chars` (checked first, so an oversized memory never lands).
         """
         refusal = oversized_file(file_path, content)
         if refusal is not None:
@@ -302,37 +196,14 @@ class BoundedStoreBackend(StoreBackend):
     ) -> EditResult:
         """Edit, unless this edit has already been applied and applying it again would duplicate.
 
-        **The one write in this system that a resumed turn can silently double, and the reason it is
-        this one.** `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up`
-        measured that a tool killed mid-call is re-run on resume with its original arguments,
-        because the checkpoint holds no result for it — only the `__pregel_tasks` `Send` that
-        enqueued it. Nearly every side-effecting tool survives that: the durable launchers derive a
-        workflow id with `stable_hash` over their arguments, the knowledge writes take a
-        deterministic note id and stage byte-identical content that produces no commit, and the
-        tabular writes are upserts or `ON CONFLICT DO NOTHING`.
+        A tool killed mid-call is re-run on resume with its original arguments. `/scratch/` is safe
+        because its backend is the checkpoint; a `/memories/` edit is a read-modify-write against a
+        store outside the checkpoint, so a replay would apply it twice. The breaking shape is an
+        insert that keeps its anchor: when `new_string` contains `old_string` and is already
+        present, the edit is refused. A plain substitution needs no guard, since its replay fails
+        with upstream's "String not found".
 
-        A `/memories/` edit survives none of it, because it is a **read-modify-write against live
-        content** and its store sits *outside* the checkpoint. `/scratch/` is safe for exactly the
-        reason this is not: its backend is the checkpoint, so a killed tool left no write to replay
-        over. Here the write lands in Postgres, the checkpoint has no record of it, and the replay
-        applies the edit to content that already carries it.
-
-        The commonest edit a model writes is the shape that breaks: an insert under a heading it
-        names as the anchor, so that the replacement opens with the anchor and adds a line under
-        it. Measured over three applications: each inserts another copy and reports **one**
-        replacement every time. No error,
-        no counter, nothing versioning it, and `BoundedStoreBackend`'s only bound is a row count, so
-        the duplicated content does not even show up as an extra row.
-
-        So the guard is narrow and targets exactly that shape: an edit whose `new_string` *contains*
-        its `old_string` is not idempotent, and if `new_string` is already present the previous
-        application is visible. A plain substitution needs no guard — the second application fails
-        loudly with upstream's own "String not found", which is the right answer.
-
-        What it costs is stated rather than hidden: a chemist deliberately inserting the identical
-        block twice is refused, and so is a first edit whose `new_string` already happens to appear
-        elsewhere in the file. Both are refusals with a reason, against a silent corruption of
-        memory that outlives the deployment.
+        The cost is that deliberately inserting an identical block twice is refused, with a reason.
 
         Args:
             file_path: The memory's path under `/memories/`.
@@ -352,10 +223,8 @@ class BoundedStoreBackend(StoreBackend):
             if refusal is not None:
                 return EditResult(error=refusal)
         if old_string and old_string in new_string:
-            # The raw store value, not `aread`: that method paginates at 2,000 lines by default, so
-            # a long memory would come back truncated and `new_string in content` would answer
-            # False for an edit that *is* already applied — a guard failing open on exactly the
-            # files big enough to have been edited before. Read the way `super().aedit` reads.
+            # The raw store value, not `aread`, which paginates and would let the guard fail open on
+            # long memories.
             content = await self._current_content(file_path)
             if content is not None and new_string in content:
                 return EditResult(
@@ -371,10 +240,8 @@ class BoundedStoreBackend(StoreBackend):
     async def _current_content(self, file_path: str) -> str | None:
         """This memory's whole text, or `None` when there is none — the way `aedit` itself reads it.
 
-        Deliberately the same two calls `StoreBackend.aedit` makes (`store.aget`, then
-        `file_data_to_string`) rather than a paginated read, so the guard above sees exactly the
-        content the replacement would be applied to. A malformed stored value answers `None`, which
-        sends the caller to upstream's own error rather than inventing a second one here.
+        Uses the same calls as `StoreBackend.aedit` so the guard sees exactly the content the
+        replacement applies to. A malformed value answers `None`, leaving the error to upstream.
         """
         from deepagents.backends.utils import file_data_to_string
 
@@ -389,37 +256,11 @@ class BoundedStoreBackend(StoreBackend):
     async def _evict_past_the_cap(self) -> None:
         """Drop the least recently updated memories until this namespace is inside the cap.
 
-        `updated_at` is a tiebreak rather than a policy. The bound is a *count*; when it is reached
-        something has to go, and the store carries exactly one ordering that is not arbitrary. It
-        is deliberately not an age cutoff: the oldest memory is as likely to be the one worth
-        keeping as the newest, which is why the retention sweep leaves this table alone.
-
-        **The whole surplus goes, and reading one page over the cap was what made it the wrong
-        surplus.** Against `AsyncPostgresStore` a query-less `asearch` resolves to
-        `ORDER BY updated_at DESC LIMIT …` — most recently updated *first* — so reading
-        `cap + _EVICTION_PAGE` rows and then taking the oldest of that page takes a middle band:
-        the newest of the surplus, and never the tail. Driven on real Postgres with 89 files
-        written oldest-first, a cap of 5 and one bounded write, it deleted **021-084** and kept
-        **000-020** — every one of the twenty-one files the stated policy says go first, retained,
-        while the twenty-one *most recent* of the surplus were destroyed. Both spellings converge
-        to the same steady state over later writes, which is why this survived review; what differs
-        is the state a deployment is left in when the writes stop, and it is the exact inverse of
-        the policy. The case is the one this docstring already addressed — a deployment lowering
-        the cap under a large namespace — and it is the measured pre-fix state (2,000 files,
-        cap 200).
-
-        **So the namespace is paged whole and ordered here, rather than sampled and trusted.**
-        Fixing it by asking for `offset=cap` instead looks like the small change and is the same
-        bug: that page is the *newest* of the surplus, not the oldest, and it is also a bet on an
-        ordering `BaseStore` does not promise — measured, `InMemoryStore` answers a query-less
-        search in *insertion* order, so the two shipped store implementations disagree and the
-        Postgres one is the only reason the old spelling converged at all. Sorting by `updated_at`
-        over every row in the namespace depends on nothing but the field `Item` documents, and it
-        reaches the whole surplus in one write rather than a page of it.
-
-        `_EVICTION_PAGE` is the page size of that walk rather than a bound on the deletion. In
-        steady state — a namespace at most one over its cap — the walk is one query for
-        `cap + 1` rows, fewer than the `cap + _EVICTION_PAGE` this replaced.
+        The bound is a count; `updated_at` only decides which rows go. The whole namespace is paged
+        and sorted here by `updated_at` rather than trusting the store's search order, which
+        `BaseStore` does not promise (Postgres and the in-memory store differ), so the oldest
+        surplus is removed in one write. `_EVICTION_PAGE` sizes each page of the walk, never the
+        deletion.
         """
         cap = settings.agent_memory_max_files
         store = self._get_store()
@@ -449,26 +290,17 @@ class BoundedStoreBackend(StoreBackend):
         )
 
 
-#: How many rows one page of the surplus walk reads. Not a `Settings` field, for the reason
-#: `_EVICTED_NAMES_REMEMBERED` in `agent/attachments.py` is not one: it is the page size of a walk,
-#: not a posture a deployment states. It bounds one *query*, never the deletion — a page that
-#: bounded the deletion is what made eviction take the newest of the surplus. See
-#: `_evict_past_the_cap`.
+# How many rows one page of the surplus walk reads. A page size, not a deployment posture, so not a
+# `Settings` field; it bounds one query, never the deletion.
 _EVICTION_PAGE = 64
 
 
 def oversized_file(file_path: str, content: str) -> str | None:
     """The refusal for a file a turn is about to store past `agent_scratch_file_max_chars`, if any.
 
-    **A refusal, never a cut** (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). A
-    helper's file is cut on its way into the caller (`tool_result_size._bounded_file`), because
-    nobody is there to be told; this is the caller's *own* document, written by a model that can
-    act on a sentence, and a truncated file would hand the chemist a document that simply stops.
-    So the write does not happen and the model is told the limit, which leaves splitting the file
-    or writing less as its choices.
-
-    One function for both routes that take a `write_file` — `/scratch/` and `/memories/` — so the
-    two cannot disagree about the number or the wording.
+    A refusal, never a cut: this is the caller's own document, and the model can act on the message
+    by splitting the file or writing less. One function for both `/scratch/` and `/memories/` so the
+    number and wording agree.
 
     Args:
         file_path: The path the turn named, for the message.
@@ -492,9 +324,8 @@ def _edited_content(
 ) -> str | None:
     """The text an edit would leave, computed the way upstream's own `edit` computes it.
 
-    `perform_string_replacement` is the function both upstream backends call, so the size checked
-    is the size that would be stored. `None` when there is no file or the replacement would fail —
-    upstream's own error is the right answer then, and this returns nothing to check.
+    `None` when there is no file or the replacement would fail, leaving upstream's error as the
+    answer.
     """
     if current is None:
         return None
@@ -505,16 +336,9 @@ def _edited_content(
 class BoundedStateBackend(StateBackend):
     """`StateBackend` whose `write`/`edit` refuse a file past `agent_scratch_file_max_chars`.
 
-    **Why here and not in a middleware.** A caller's `write_file` and `edit_file` reach this backend
-    and it writes the `files` channel directly through `CONFIG_KEY_SEND` — a channel write, not a
-    tool result — so no `wrap_tool_call` middleware ever sees the content, and
-    `tool_result_shape.rewritten_command_files` (which bounds a *helper's* files) is never on the
-    path. Everything stored here is charged against every later helper's share of
-    `agent_subagent_files_max_chars` (`tool_result_size._files_already_held`), so the arm nobody
-    bounded was spending the budget the bounded arm is measured against.
-
-    Only the two write verbs. `awrite`/`aedit` are upstream's `to_thread` over these, so the async
-    path a turn takes is covered by the same override.
+    Bounded here rather than in a middleware: this backend writes the `files` channel directly, so
+    no `wrap_tool_call` middleware sees the content. Only the sync verbs are overridden; upstream's
+    `awrite`/`aedit` wrap them.
     """
 
     def write(self, file_path: str, content: str) -> WriteResult:
@@ -529,9 +353,7 @@ class BoundedStateBackend(StateBackend):
     ) -> EditResult:
         """Edit, unless the edited file would be past the cap — then refuse and change nothing.
 
-        The size checked is the *result's*, because an edit is how a file grows past any bound a
-        write alone was held to: one `edit_file` per call, each appending, would otherwise walk a
-        file past the cap in steps the write check never sees.
+        The result's size is checked, so repeated appending edits cannot walk a file past the cap.
         """
         stored = self._read_files().get(file_path)
         current = file_data_to_string(stored) if stored is not None else None
@@ -546,11 +368,8 @@ class BoundedStateBackend(StateBackend):
 def _stale_files(files: Mapping[str, Any], cutoff: datetime) -> list[str]:
     """The paths in a `files` channel whose last write is older than `cutoff`.
 
-    Dated by upstream's own `modified_at`, which `create_file_data` stamps and `update_file_data`
-    restamps on every write and edit, so "last written" is the channel's own record rather than a
-    second clock this module keeps. A file that carries no parseable `modified_at` is **kept**: it
-    predates the stamp, and deleting what cannot be dated would be a retention policy applied to
-    an unknown age.
+    Dated by upstream's `modified_at`, stamped on every write and edit. A file with no parseable
+    `modified_at` is kept rather than deleted at an unknown age.
     """
     stale = []
     for path, data in files.items():
@@ -572,19 +391,10 @@ def _stale_files(files: Mapping[str, Any], cutoff: datetime) -> list[str]:
 def expire_stale_scratch(state: FilesystemState, runtime: Runtime[Any]) -> dict[str, Any] | None:
     """Drop every file this thread has not written for `agent_scratch_retention_days`.
 
-    **At the start of a turn, through the channel's own reducer, and that is the whole design**
-    (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). `files` is a `DeltaChannel`
-    checkpointed under the thread: there is no row a sweep could delete a single file from, and
-    rewriting a checkpoint by hand would mean re-deriving a beta on-disk format and every other
-    channel of the graph. A `{path: None}` update is how the channel's reducer deletes a key, so the
-    graph's own write path does the disposal and the next checkpoint is simply the thread without
-    them; `checkpoint_retain_per_thread` then prunes the superseded copies that still held them.
-
-    **What it does not reach**: a thread nobody returns to runs no turn, so its files stay until the
-    thread itself is disposed of by `retention_checkpoints_days` — a stated policy, off by default,
-    which is where a deployment decides how long an idle conversation is kept.
-
-    `agent_scratch_retention_days = 0` keeps every file — how a deployment states "for ever".
+    Runs at the start of a turn and deletes through the channel's own reducer (`{path: None}`),
+    since `files` is a checkpointed channel with no row to delete; superseded checkpoints are pruned
+    by `checkpoint_retain_per_thread`. A thread nobody returns to keeps its files until
+    `retention_checkpoints_days` disposes of the thread. `0` keeps every file.
     """
     del runtime  # the hook's signature; nothing here depends on the run
     days = settings.agent_scratch_retention_days
@@ -611,39 +421,22 @@ def scratchpad_backend(
 ) -> CompositeBackend:
     """Extend a turn's skills backend with a scratchpad and, when enabled, durable memories.
 
-    Takes the skills backend rather than rebuilding it, because the caller already holds it — the
-    skills middleware and this backend must be the *same* object, or a role-gated narrowing computed
-    for one would not apply to the other.
-
-    **The store arrives as an argument rather than being built here, and that is deliberate.**
-    Creating it is `await`, and making this function async would make `build_langgraph_agent` async
-    and every one of its callers with it. The checkpointer already solved the same problem the same
-    way — it is a parameter, built by the async caller that has a running loop — so the store
-    follows the established seam instead of inventing a second one.
-
-    The memories route is added only when a store was passed **and** the turn has an actor. Neither
-    condition is a preference: without the setting a deployment has no `store` tables, and without
-    an actor there is no namespace that could be erased.
+    Takes the skills backend rather than rebuilding it, so the skills middleware and this backend
+    share one narrowing. The store is passed in (created by the async caller) so this function, and
+    `build_langgraph_agent`, stay synchronous.
 
     Args:
         skills: The narrowed skills backend for this profile (`langgraph_agent.skills_backend`).
         store: This process's `AsyncPostgresStore` from `memory_store()`, or `None` for a turn with
-            no durable memory.
-        permits: The narrowing this turn computed (`langgraph_agent.skill_narrowing`). **Its
-            `stored` half is what the two stored tiers get** — a different predicate from the one
-            the filed trees get, and not an oversight: `EnabledSkills` names *shipped* skills, so
-            applying it here deleted both tiers outright rather than narrowing them, which is what
-            `skill_access.SkillNarrowing` carries the measurement for. Taking the whole value rather
-            than a bare predicate is what makes the two impossible to swap at this call site.
-            **Required rather than defaulted**, because the personal tier shipped with no backend
-            predicate at all — it was narrowed in the prompt and served every body to anyone who
-            guessed a path — and a default here is how that reopens by omission.
+        no durable memory.
+        permits: The narrowing this turn computed (`langgraph_agent.skill_narrowing`); its `stored`
+        half gates the two stored tiers. Required, so the personal tier can never be mounted
+        unnarrowed by omission.
 
     Returns:
         A backend routing `/skills/…` as given, `/org/…` to the store whenever there is one,
-        `/memories/…` and `/mine/…` to the store when there is also an actor, and everything else —
-        `/scratch/…` included — to graph state, through `BoundedStateBackend` so a turn's own
-        write is held to `agent_scratch_file_max_chars`.
+        `/memories/…` and `/mine/…` to the store when there is also an actor, and everything else
+        (`/scratch/…` included) to graph state through `BoundedStateBackend`.
     """
     routes = dict(skills.routes)
     actor = get_current_actor()
@@ -652,16 +445,11 @@ def scratchpad_backend(
         # A closure over the value, not a read through the runtime: see the module docstring. The
         # lambda takes the runtime upstream passes and ignores it, which is the whole point.
         routes[MEMORY_ROOT] = BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
-        # The chemist's own skills, on the same two conditions and for the same reason: a store to
-        # hold them and an actor to own them. A *different* first namespace component, so the
-        # tiers are separately erasable and a bug in one cannot serve another's rows — see
-        # `agent/local_skills.py`, which also says why this is stored rather than filed.
+        # The chemist's own skills need a store and an actor too; a separate first namespace
+        # component keeps the tiers separately erasable (see `agent/local_skills.py`).
         routes[LOCAL_SKILLS_ROOT] = local_skills_backend(store, actor, permits.stored)
-    # **The organisation's tier needs a store and no actor**, which is why it is mounted here rather
-    # than in the branch above. It is nobody's namespace: every turn resolves the same one, so an
-    # unauthenticated turn is still entitled to the deployment's own judgment — and there is no
-    # per-actor prefix to erase, which `agent/org_skills.py` states as a decision rather than
-    # leaving as an absence.
+    # The organisation's tier needs a store but no actor: it is one shared namespace every turn
+    # resolves, with no per-actor prefix to erase (see `agent/org_skills.py`).
     if store is not None:
         routes[ORG_SKILLS_ROOT] = org_skills_backend(store, permits.stored)
     return CompositeBackend(default=BoundedStateBackend(), routes=routes)
@@ -671,26 +459,16 @@ def scratchpad_backend(
 def scratchpad_tools() -> tuple[FsToolName, ...]:
     """The filesystem verbs this deployment lets a turn reach, in one place.
 
-    Read off the middleware rather than spelled out — the same rule
-    `chemclaw_agent.harness_tool_names` follows for `write_todos` — so an upstream rename becomes a
-    changed value instead of a silently stale allow-list. Two are withheld and each has its own
-    argument:
+    Read off the middleware so an upstream rename changes the value rather than staling an
+    allow-list. Two are withheld:
 
-    - **`execute`** would be a shell. deepagents 0.7 ships exactly one concrete sandbox
-      (`LangSmithSandbox`), which this repository declines on content-egress grounds, and
-      `LocalShellBackend` is documented as unrestricted. A shell acquired as a side effect of
-      wanting a scratchpad is the objection `D-2026-08-11` raised against the whole harness, and it
-      is the one part of that objection that still stands.
-    - **`delete`** is withheld on `D-2026-08-12`'s argument, which GxP's retirement does not touch:
-      a turn that cannot rewrite a `SKILL.md` but can remove it still decides what judgment the next
-      turn is able to load.
+    - **`execute`** would be a shell; no sandbox here is acceptable and a local shell is
+      unrestricted.
+    - **`delete`**, because a turn that can remove a `SKILL.md` decides what judgment the next turn
+      can load.
 
-    **Cached, because it answers a question about the installed package rather than about this
-    deployment**, and it answers it by *building* a `FilesystemMiddleware` — cheap once, wasteful on
-    a path that runs per tool call, which `agent/tool_framing.py` now is.
-    `chemclaw_agent.subagent_tool_names` is cached for the same reason and states it the same way;
-    like that one this depends on no discovery, so `tests/conftest.py` has nothing to clear, and
-    nothing in this repository monkeypatches it.
+    Cached: it builds a `FilesystemMiddleware` to answer a question about the installed package, and
+    runs on a per-tool-call path.
 
     Returns:
         The tool names to hand `FilesystemMiddleware`, sorted so the prompt order is stable.
@@ -699,37 +477,23 @@ def scratchpad_tools() -> tuple[FsToolName, ...]:
 
     withheld = {"execute", "delete"}
     every = {tool.name for tool in FilesystemMiddleware(backend=StateBackend()).tools}
-    # `cast` rather than a hand-written literal list: the *names* come from upstream so a rename is
-    # caught, and `FsToolName` is upstream's own alias for exactly this set, so the annotation
-    # cannot drift from the values either.
+    # `cast` over upstream-derived names: `FsToolName` is upstream's alias for exactly this set.
     return cast("tuple[FsToolName, ...]", tuple(sorted(every - withheld)))
 
 
 def filesystem_permissions() -> list[Any]:
     """Deny-rules bounding where a turn may write, evaluated before any filesystem operation.
 
-    The allow-list above decides which *verbs* exist; this decides where they may point. Writes are
-    denied everywhere and then allowed back under the two roots that are meant to be written — the
-    order matters because `FilesystemPermission` is first-match-wins, so the allows are declared
-    first and the blanket deny closes the surface behind them.
+    `FilesystemPermission` is first-match-wins, so the allows under the writable roots come first
+    and a blanket write-deny closes the rest.
 
-    **Where they are enforced is not where they are passed, and getting that wrong made them
-    inert.** `create_deep_agent(permissions=…)` only ever hands them to the `FilesystemMiddleware`
-    *it* constructs, and `langgraph_agent._middleware` substitutes an instance of its own under the
-    same name — so the rules have to be handed to that instance too, as `_permissions=`. They were
-    not, and for as long as they were not a `write_file` to *any* path succeeded while this
-    docstring said they were evaluated first. `langgraph_agent._middleware` carries the
-    measurement.
+    The rules must also be handed to the `FilesystemMiddleware` instance
+    `langgraph_agent._middleware` substitutes (as `_permissions=`);
+    `create_deep_agent(permissions=…)` reaches only its own instance. Riding the middleware list
+    also carries them into helpers.
 
-    Riding the middleware list is also what carries them into a helper, which
-    `create_deep_agent`'s own argument could not: a helper is compiled by `create_agent`, which
-    takes no `permissions` at all, and it is handed the same middleware.
-
-    **`/skills/` is refused twice, and that is deliberate rather than redundant.** These rules are
-    the outer half; `NarrowedSkillsBackend` refuses the write itself on every call. A security
-    property that arrives as somebody else's default can leave the same way — a splice rule, a
-    private keyword, a release — so the backend keeps its own refusal, worded as a refusal
-    (`agent/skill_backend.SkillsReadOnlyRefusal`) rather than as a crash.
+    `/skills/` is refused here and again by `NarrowedSkillsBackend`, deliberately, so the property
+    does not rest on upstream's defaults alone.
 
     Returns:
         The rules to pass `create_deep_agent(permissions=…)` **and** the `FilesystemMiddleware` that

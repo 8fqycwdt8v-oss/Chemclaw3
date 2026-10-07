@@ -1,29 +1,15 @@
 """Where the chunked share lives: content-addressed documents, path-addressed files.
 
-Two backends behind one `DocumentIndex`, exactly as `retrieval/vector_index.py` does it —
-`InMemoryDocumentIndex` computes the ranking in Python (the reference the tests use, no database)
-and `PostgresDocumentIndex` persists to `document_files` / `document_chunks` (`infra/sql/037`) and
-ranks in SQL.
+`InMemoryDocumentIndex` is the Python reference ranking (a test oracle); `PostgresDocumentIndex`
+persists to `document_files` / `document_chunks` and ranks in SQL.
 
-**Why two tables.** A classical share is full of the same document in four project folders. Keying
-the chunks by `doc_id` — the stable hash of the parsed text — and the files by path means those
-four copies share one set of chunks and one embedding call. On a TB share that is not an
-optimization, it is the difference between an affordable corpus and an unaffordable one. It is also
-the rule `chemclaw.cli.backfill_corpus` already follows ("the id is derived from the content, not
-the filename"), so a renamed or moved file costs nothing either.
+Files are keyed by path and chunks by `doc_id` (hash of the parsed text), so copies of one document
+across folders share one set of chunks and one embedding call, and a moved file costs nothing. A
+chunk's identity also includes its `chunking_key`, so two shares cutting one document differently
+coexist; a cutting no file row claims is an orphan and is swept.
 
-**A chunk's identity is its content *and* its boundaries.** `doc_id` says which text a chunk came
-from; `chunking_key` says where it was cut. Both are in the chunk row's key (`infra/sql/041`),
-because two shares can hold one document and chunk it differently, and keying on the content alone
-made them fight over the same rows — the coarser share's write took ordinal 0 and deleted the finer
-share's remaining fifteen. Two chunkings of one document coexist; four copies at *one* chunking
-still share one set of chunks and one embedding call, which is the property the two-table split
-exists for. A cutting no file row claims any more is an orphan, and is swept.
-
-**A hit is cited by path, not by hash.** `doc-9f2a...` is not something a chemist can open, so the
-search resolves each hit back to a file path. When several paths hold the same content the smallest
-one is cited deterministically — an arbitrary choice, but a stable one, which is what a citation
-needs.
+A hit is cited by path, not hash: when several paths hold the same content, the smallest is cited,
+deterministically.
 """
 
 import math
@@ -53,15 +39,9 @@ from chemclaw.ingest.documents.chunk import Chunk
 class DocumentIndexError(SubsystemUnavailableError):
     """The document index could not be reached, so the search never ran.
 
-    A `SubsystemUnavailableError` and deliberately **not** a `ChemclawError`, which is this
-    repository's *non-retryable bad-data* contract: a statement timeout says nothing about the
-    query, and the identical call succeeds once the database is back. Registering it as bad data
-    would make an activity give up on a blip it would otherwise ride out — the argument
-    `SubsystemUnavailableError` was created for, and the reason `tests/test_publish.py` asserts
-    that hierarchy's *absence* from `_BAD_DATA_TYPES`.
-
-    The message stays free of hostnames and driver text; the underlying `psycopg.Error` carries
-    those as `__cause__`, for the log and the operator.
+    A `SubsystemUnavailableError`, not a `ChemclawError` (non-retryable bad data): a timeout says
+    nothing about the query, and the call succeeds once the database is back. The message carries no
+    hostnames or driver text; the `psycopg.Error` is the `__cause__`.
     """
 
 
@@ -78,10 +58,9 @@ class FileRecord(BaseModel):
     chunking_key: str = Field(min_length=1)
     tags: list[str] = Field(default_factory=list)
     modified_at: datetime | None = None
-    # When this run saw the file — the mark half of `prune_stale`'s mark-and-sweep. The Postgres
-    # backend stamps its `indexed_at` column server-side with `now()` and ignores this value, so
-    # the sweep compares one clock (the database's) rather than the worker's against it; the
-    # in-memory backend has only this one.
+    # When this run saw the file — the mark half of `prune_stale`'s mark-and-sweep. Postgres stamps
+    # `indexed_at` server-side with `now()` and ignores this, so the sweep compares against one
+    # clock; the in-memory backend uses this value.
     indexed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -130,9 +109,8 @@ class StoredDocument(BaseModel):
     path: str = Field(min_length=1)
     pieces: list[Chunk] = Field(default_factory=list)
     modified_at: datetime | None = None
-    # Whether the backend stopped before the document ended. The honest source for
-    # `DocumentText.truncated`, which used to be inferred from a fully-assembled string — that is,
-    # from having already built the thing the ceiling exists to avoid building.
+    # Whether the backend stopped before the document ended; the source for
+    # `DocumentText.truncated`.
     truncated: bool = False
 
     model_config = {"arbitrary_types_allowed": True}
@@ -141,12 +119,8 @@ class StoredDocument(BaseModel):
 def _within_chars(pieces: list[Chunk], max_chars: int) -> tuple[list[Chunk], bool]:
     """Keep pieces until their cumulative length reaches `max_chars`, plus the one that crosses it.
 
-    The in-memory mirror of the Postgres window below, written once so the two backends cut at the
-    same piece — `tests/test_document_share.py` asserts they agree about a stored document, and a
-    bound applied differently on each side would quietly make that assertion about two things.
-
-    The crossing piece is kept rather than dropped, so a document whose text ends exactly at the
-    ceiling is not reported as truncated; `truncated` is decided by what is left *after* it.
+    The in-memory mirror of the Postgres window, so both backends cut at the same piece. The
+    crossing piece is kept so a document ending exactly at the ceiling is not reported truncated.
     """
     kept: list[Chunk] = []
     spent = 0
@@ -202,10 +176,8 @@ class DocumentHit(BaseModel):
     content: str
     coordinate: str
     path: str
-    # Bounded here rather than trusted, because this is where two backends with different scoring
-    # meet one `EvidenceChunk` contract that requires [0, 1]. The in-memory reference counted
-    # shared tokens and produced 2.0, which a caller only found out about as a validation error
-    # three layers up; a cosine and a `ts_rank` happen to be in range and hid it.
+    # Bounded here because this is where backends with different scoring meet the `EvidenceChunk`
+    # contract, which requires [0, 1].
     score: float = Field(ge=0.0, le=1.0)
 
 
@@ -218,70 +190,38 @@ class DocumentIndex(Protocol):
     ) -> dict[str, str]:
         """The stored `path -> fingerprint` for these paths of `source`, chunked as `chunking_key`.
 
-        What the sync diffs the current filesystem stat against to decide which files must be
-        re-read. A path with no entry reads as "changed", exactly like a real mismatch. Scoped to
-        the paths one bounded chunk actually crawled, because on a 500k-file share the unscoped
-        answer is a dictionary nobody needs and every chunk would rebuild it.
-
-        Scoped to the chunking too, because that is the only gate that can see a chunk-size change:
-        the file's `mtime_ns:size` does not move when a setting does, so a row cut under different
-        boundaries has to read as "changed" or the document is never re-chunked at all.
+        The sync diffs the current stat against this to decide what to re-read; a missing path reads
+        as changed. Scoped to one crawl chunk's paths, and to the chunking, because a chunk-size
+        change does not move `mtime_ns:size` and must still force a re-cut.
         """
         ...
 
     async def known_documents(self, doc_ids: set[str], key: str, chunking_key: str) -> set[str]:
         """Which of these documents have **at least one** chunk under both configurations.
 
-        Keyed on the embedding configuration, not merely on presence: a document indexed by a
-        previous model must be re-embedded even though its content is unchanged, or a copy arriving
-        under a new path would inherit a vector nothing else in the corpus is comparable to. And on
-        the chunking, because the boundaries decide what each vector describes — a document whose
-        content hash is unchanged still needs cutting again when they move.
-
-        "At least one", not "all", and both backends agree on that: measured, a document with one
-        of five chunks moved to a new key reports as known, leaving four stale. That is correct
-        *here* because this gate answers "must the crawl re-read and re-embed this file", and the
-        remaining four are the per-chunk drain's job — `stale_chunks` found exactly those four, and
-        `DocumentSyncWorkflow` drains before it crawls. A caller that reordered the two phases, or
-        made the drain partial, would inherit a real bug; that is a `docs/planning/BACKLOG.md` row
-        with a trigger rather than a stronger predicate here, because per-document completeness
-        would re-embed a whole file to fix one chunk.
+        Keyed on the embedding and chunking configuration, so a changed model or chunk size forces a
+        re-read even for unchanged content. "At least one" rather than "all": remaining stale chunks
+        are `stale_chunks`' job, and `DocumentSyncWorkflow` drains before it crawls; per-document
+        completeness would re-embed a whole file to fix one chunk.
         """
         ...
 
     async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Insert or replace file rows by path and chunk rows by `(doc_id, chunking_key, ordinal)`.
 
-        `key` is the embedding configuration these vectors were produced by
-        (`chemclaw.core.embeddings.embedding_config_key`) and is stored with each chunk, so a later
-        run can tell whether it is still comparable to a fresh query. The chunking is on the rows
-        themselves, because it is part of which row each one *is*.
-
-        **A cutting nothing claims any more is deleted, in the same write.** After the file rows
-        land, every chunk set of the documents just written that no file row names is removed:
-        re-chunking a document leaves its previous cutting behind otherwise — rows nothing points
-        at, which `reembed_stale` then re-embeds under the current key and makes indistinguishable
-        from live ones. Measured: re-cutting one document at 400 → 4000 chars left 19 such rows
-        beside its 2 real ones. Scoped to *unclaimed* cuttings rather than to "this document's
-        other ordinals", because another share may hold the same document at its own chunk size and
-        deleting by content alone destroyed that share's chunks permanently.
+        `key` is the embedding configuration (`embedding_config_key`) stored with each chunk. After
+        the file rows land, every cutting of the written documents that no file row claims is
+        deleted in the same write, so a re-chunk leaves nothing behind for `reembed_stale` to adopt.
+        Only unclaimed cuttings: another share may hold the same document at its own chunk size.
         """
         ...
 
     async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
         """Up to `limit` chunks cut by one of `chunkings` whose vector was not made by `key`.
 
-        NULL counts as stale — a row written before the key column existed is "unknown", and
-        unknown must never read as "current" (the argument `infra/sql/035` makes for its own
-        added column).
-
-        `chunkings` is the set of chunkings the *enabled* shares currently use, and it is what
-        keeps an upgrade from paying twice. A row cut under any other chunking is already going to
-        be re-parsed, re-cut and re-embedded by the crawl, so re-embedding it here is work that is
-        then thrown away — measured at 17 embedding calls for a document worth 1 on a run where
-        both the model and the chunk size moved, which is exactly what 038 and 040 do together.
-        It is not fixable by stamping the chunking during a re-embed: the chunking is part of the
-        row's identity (041) and a re-embed does not re-cut anything.
+        NULL counts as stale: unknown must never read as current. `chunkings` is what the enabled
+        shares currently use; a row under any other chunking will be re-cut and re-embedded by the
+        crawl, so re-embedding it here would be wasted work.
         """
         ...
 
@@ -294,50 +234,35 @@ class DocumentIndex(Protocol):
     ) -> StoredDocument | None:
         """This document as stored under one cutting, or `None` when this share does not hold it.
 
-        `max_chars` bounds the read **here**, at the fetch, rather than after assembly. A binding
-        allows a 52 MB file, so a caller that trimmed afterwards would already have pulled every
-        row over the wire and built the whole string — which is precisely what
-        `document_read_max_chars` exists to prevent and, before this parameter, did not. Pieces are
-        returned until their cumulative length reaches `max_chars`, plus the one that crosses it,
-        and `truncated` says whether more existed.
-
-        The read half of what `upsert` writes, and the only way back to a whole protocol: the
-        parsed text is discarded once `doc_id` is taken from it, so these rows *are* the document.
-        Scoped by `source` and gated on the same file-row eligibility a search uses, so a caller
-        cannot read a document out of a share it was never entitled to search.
-
-        Pieces are `chunk.Chunk` rather than `ChunkRecord` — the same shape the cutter produced,
-        and deliberately without the vector. A whole-document read wants text; carrying 1,536
-        floats a piece for it would be the largest part of the payload and none of the answer.
+        `max_chars` bounds the read at the fetch, not after assembly: pieces up to the cumulative
+        cap plus the one crossing it, with `truncated` saying whether more existed. These rows are
+        the only stored copy of the text. Scoped by `source` and gated on the same eligibility a
+        search uses, so a caller cannot read a document from a share it may not search. Pieces carry
+        no vector.
         """
         ...
 
     async def touch(self, source: str, paths: list[str]) -> None:
         """Mark these already-current paths as seen by this run, without re-reading them.
 
-        The mark half of the mark-and-sweep `prune_stale` completes. It is one statement per
-        crawl chunk rather than a fingerprint dictionary held across a whole drain, which is what
-        keeps the sweep affordable on a share far larger than memory.
+        The mark half of `prune_stale`'s mark-and-sweep, one statement per crawl chunk so the sweep
+        scales past memory.
         """
         ...
 
     async def prune_stale(self, source: str, before: datetime) -> int:
         """Delete `source` rows not seen since `before`, and any chunk set no file row claims.
 
-        The sweep half. **Only ever called after a complete crawl with no failed roots** — see the
-        prune-safety rule in `sync.py`, because an unmounted share presents as an empty one and
-        would otherwise sweep the entire corpus.
+        Only ever called after a complete crawl with no failed roots: an unmounted share looks empty
+        and would otherwise sweep the whole corpus.
         """
         ...
 
     async def clock(self) -> datetime:
         """This backend's own current time — the reference a later `prune_stale` is measured from.
 
-        The mark is written with the backend's clock (`now()` in Postgres) and the sweep compares
-        against it, so both sides must come from the same clock. Taking the run's start time from
-        the worker instead would make the sweep depend on worker-versus-database skew: a database
-        running a minute behind would leave freshly-marked rows looking older than the run that
-        marked them, and the sweep would delete files nobody touched.
+        The mark uses the backend's clock, so the sweep must too; the worker's clock would make the
+        sweep depend on clock skew and could delete freshly marked rows.
         """
         ...
 
@@ -352,12 +277,9 @@ class DocumentIndex(Protocol):
     ) -> list[DocumentHit]:
         """Return up to `top_k` chunks best matching the terms in `query`, best first.
 
-        **The same one boolean rule the note index states** (`chemclaw.core.fulltext`): a chunk
-        matching every term outranks one matching some, a chunk matching some is still a hit, and a
-        chunk carrying a `-excluded` term is not a hit at all. Both backends, because this is the
-        divergence PR #173 fixed for notes and left standing here — the durable statement ANDed the
-        terms while the in-memory reference OR'd them, so an ordinary multi-word question about the
-        share returned nothing from the database and everything from the tests.
+        The boolean rule `chemclaw.core.fulltext` states, in both backends: a chunk matching every
+        term outranks one matching some, a partial match is still a hit, and a chunk carrying a
+        `-excluded` term is not a hit.
         """
         ...
 
@@ -365,25 +287,15 @@ class DocumentIndex(Protocol):
 def require_schema_vector_width() -> None:
     """Refuse a deployment whose `embedding_dim` cannot fit the column it would write.
 
-    **Why here and not in the config validator.** `note_index`'s equivalent check lives there
-    because `vector`/`lexical` are *shipped* source names, so `NOTE_INDEX_SOURCES` can enumerate
-    them. A document share's name is chosen by the deployment — `sharedrive` is only the shipped
-    example, and a site mounts its own manifest folder under whatever name it likes — so no name
-    set can identify one. Answering "is a share enabled?" means importing its retrieve half, and
-    `chemclaw.core` may import no sibling (`tests/test_layering.py`).
-
-    So the guard sits on the two constructors instead, which between them cover every path that
-    can reach the column: the first query, the first crawl, and
-    `validate_datasources --construct`. It fires at first use rather than at process start — a
-    stated residual, and still a message naming both numbers instead of a pgvector type error
-    surfacing from inside a worker hours after a clean-looking deploy.
+    Not in the config validator: a share's name is the deployment's choice, so config cannot tell
+    whether one is enabled, and `chemclaw.core` may not import this package. The guard sits on the
+    constructors instead, covering the first query, the first crawl and `validate_datasources
+    --construct`; it fires at first use rather than at startup.
 
     Raises:
         DocumentShareError: `embedding_dim` disagrees with the migrated column width.
     """
-    # Inert wherever the vectors do not live in that column. An external store's deployment may
-    # legitimately run a 768-wide model, and refusing it over a column nothing writes would be this
-    # check inventing a constraint instead of reporting one.
+    # Inert wherever the vectors do not live in that column: an external store may run any width.
     if settings.vector_store_provider != "pgvector":
         return
     if settings.embedding_dim != SCHEMA_VECTOR_DIM:
@@ -397,16 +309,9 @@ def require_schema_vector_width() -> None:
 def _cosine(a: list[float], b: list[float], *, a_norm: float | None = None) -> float:
     """Cosine similarity of two equal-length vectors; 0.0 if either is a zero vector.
 
-    `a_norm` lets a caller scanning many `b`s against one fixed `a` hand in the norm it already
-    computed, instead of this recomputing it per comparison (`search_dense`). Omitted, it is
-    computed here, so every other caller is unchanged.
-
-    Clamped to [0, 1] like the Postgres backend does (`_run`), because floating-point rounding puts
-    the *identical* vector's self-similarity above 1.0 about half the time — the denominator is two
-    square roots and rounds below the numerator. Measured: 996 of 2000 random normalised vectors,
-    worst 1.0000000000000002. `DocumentHit.score` is bounded `le=1.0`, so an exact match (a chemist
-    pasting a sentence back, or any token-set collision under the `hash` embedder) raised
-    `ValidationError` from inside the reference implementation every test validates against.
+    `a_norm` lets a caller scanning many `b`s against one `a` pass its norm in once. Clamped to [0,
+    1] like the Postgres backend, because rounding can put a vector's self-similarity just above
+    1.0, which `DocumentHit.score` rejects.
     """
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     left = a_norm if a_norm is not None else math.sqrt(sum(x * x for x in a))
@@ -417,16 +322,10 @@ def _cosine(a: list[float], b: list[float], *, a_norm: float | None = None) -> f
 class InMemoryDocumentIndex:
     """Process-local `DocumentIndex` computing the reference ranking in Python.
 
-    **A differential oracle, not a deployment backend.** No configuration returns it — every
-    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
-    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
-    `src/` because it is the executable statement of the contract its Postgres sibling is written
-    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
-    halves of that — the absence of a shipped caller, and the absence of this claim.
-
-    Dense search is exact cosine — the ordering `PostgresDocumentIndex` produces with pgvector's
-    `<=>` (up to HNSW recall). Lexical search is a shared-token count, a deterministic proxy of
-    `ts_rank`: the intent (more shared terms rank higher) matches, the exact scores do not.
+    A differential test oracle, not a deployment backend: no configuration returns it
+    (D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend). Dense search is exact
+    cosine, the ordering pgvector's `<=>` produces up to HNSW recall; lexical search is a
+    shared-term fraction, matching `ts_rank`'s intent but not its scores.
     """
 
     def __init__(self) -> None:
@@ -449,8 +348,7 @@ class InMemoryDocumentIndex:
     def _claimed(self) -> set[tuple[str, str]]:
         """Every `(doc_id, chunking_key)` some file row names — the live chunk sets.
 
-        The in-memory mirror of `CLAIMED_SQL`. A chunk set outside it belongs to no path on any
-        share: a superseded chunk size, or a document whose last file row was swept.
+        The in-memory mirror of `CLAIMED_SQL`.
         """
         return {(f.doc_id, f.chunking_key) for f in self._files.values()}
 
@@ -481,9 +379,8 @@ class InMemoryDocumentIndex:
             self._keys[self._row(chunk)] = key
         for file in files:
             self._files[(file.source, file.path)] = file
-        # Written *after* the file rows, so "claimed" is read against what this write just said.
-        # Scoped to the documents it touched: a re-chunk supersedes its own previous cutting, and
-        # every other share's cutting of the same document is still claimed and survives.
+        # After the file rows, so "claimed" reflects this write. Scoped to the touched documents;
+        # other shares' cuttings of the same document stay claimed.
         touched = {file.doc_id for file in files} | {chunk.doc_id for chunk in chunks}
         claimed = self._claimed()
         for row in [k for k in self._chunks if k[0] in touched and (k[0], k[1]) not in claimed]:
@@ -518,11 +415,8 @@ class InMemoryDocumentIndex:
             # `min` mirrors `CITATION_SQL`, so the reference backend cites what Postgres cites.
             path=paths[0],
             pieces=kept,
-            # `max` across every matching file row, mirroring `_MODIFIED_BY_DOC` — a document
-            # copied into several folders is as recent as the most recently touched copy of it.
-            # This read the cited path's own mtime instead, so the two backends disagreed whenever
-            # a document had more than one copy with different times; the cross-backend test could
-            # not see it, because its fixture had one file row and no mtime at all.
+            # `max` across every matching file row, mirroring `_MODIFIED_BY_DOC`: a document copied
+            # into several folders is as recent as its most recently touched copy.
             modified_at=max(
                 (
                     f.modified_at
@@ -596,8 +490,7 @@ class InMemoryDocumentIndex:
     ) -> str:
         """The smallest path in `source` holding this cutting of this document, or `""`.
 
-        The chunking is part of the match, not only the document: a share that cuts a document at
-        its own size must cite its own chunks, never another share's cutting of the same text.
+        Matches the chunking too, so a share cites its own cutting, never another share's.
         """
         candidates = sorted(
             f.path
@@ -614,11 +507,8 @@ class InMemoryDocumentIndex:
     ) -> list[DocumentHit]:
         """Resolve each scored chunk to a citation path, drop the unresolvable, take the best k.
 
-        The citation is resolved once per *document cutting*, not once per chunk: `_citation` scans
-        and sorts every known file, and a document contributes many chunks that all resolve to the
-        same path — so this was O(chunks × files · log files) where it is O(cuttings × files ·
-        log files). The resolution has to happen before the sort rather than after `[:k]`, because a
-        chunk with no citable path is *dropped* and the next best hit takes its place.
+        Citations are resolved once per document cutting rather than per chunk, and before the cut
+        to k, so a dropped chunk's slot goes to the next best hit.
         """
         hits: list[DocumentHit] = []
         resolved: dict[tuple[str, str], str] = {}
@@ -651,13 +541,8 @@ class InMemoryDocumentIndex:
     ) -> list[DocumentHit]:
         """Rank chunks by cosine similarity to the query; drop zero similarity.
 
-        The query's norm is computed once here rather than inside `_cosine` per chunk — that is a
-        1,536-element pure-Python pass repeated for every chunk in the index, for a value that
-        cannot change during the scan.
-
-        Scoped to the live embedding configuration, as `PostgresDocumentIndex` is: a reference that
-        ranked a superseded generation while the backend did not would be a reference for the wrong
-        backend.
+        The query norm is computed once for the scan. Scoped to the live embedding configuration, as
+        the Postgres backend is.
         """
         query_norm = math.sqrt(sum(x * x for x in query_embedding))
         current = embedding_config_key()
@@ -673,15 +558,9 @@ class InMemoryDocumentIndex:
     ) -> list[DocumentHit]:
         """Rank chunks by how much of the query they carry; drop non-matches and exclusions.
 
-        The *fraction* of the query's wanted terms this chunk carries, not the raw count: a score is
-        contractually in [0, 1], and a count is only a ranking within one query length. The fraction
-        is also what makes "a complete match first" fall out of the ordering rather than needing its
-        own sort key — a chunk holding every term scores 1.0.
-
-        A query that only excludes (`-solvent`) has no wanted terms to be a fraction of, so every
-        surviving chunk carries all zero of them: a complete match, scored 1.0. Anything less would
-        be dropped by `_rank`'s zero floor and the durable backend — which does return those rows —
-        would be answering a different question again.
+        The score is the fraction of wanted terms present, keeping it in [0, 1] and putting complete
+        matches first. A query that only excludes terms scores every surviving chunk 1.0, as the
+        durable backend returns those rows too.
         """
         wanted, excluded = reference_terms(query)
         if not wanted and not excluded:
@@ -716,25 +595,17 @@ def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(str(component) for component in embedding) + "]"
 
 
-# What makes a chunk row live at all: some file row, on any share, names both its document *and*
-# its cutting. One definition, used by the sweep and by the per-write cleanup, because "orphan"
-# has to mean the same thing in both or one of them deletes rows the other keeps. Public because
-# `external_index.py`'s sweep must delete exactly the same rows, and then remove their vectors from
-# the other system — two spellings of "orphan" across two stores is how they come to disagree.
+# What makes a chunk row live: some file row, on any share, names both its document and its cutting.
+# One definition for the sweep and the per-write cleanup; public because `external_index.py` must
+# delete exactly the same rows and their vectors.
 CLAIMED_SQL = (
     "EXISTS (SELECT 1 FROM document_files f "
     "WHERE f.doc_id = c.doc_id AND f.chunking_key = c.chunking_key)"
 )
-# The file-row predicate both searches share: a chunk is eligible when at least one path in this
-# source holds it, was indexed under the same chunking, and satisfies the filters. `EXISTS` rather
-# than a join, so a document copied into four folders contributes one row rather than four
-# competing for the same top-k slots. The chunking clause is what keeps a share citing its own
-# cutting when another share holds the same document at a different chunk size.
-#
-# Written once and shared by both, rather than spelled twice: eligibility and citation must select
-# over the *same* file rows or a chunk becomes searchable while citing a path that no longer
-# satisfies the filters. Two copies of a five-clause predicate is a divergence waiting for whichever
-# of them gets a sixth clause first.
+# The file-row predicate eligibility and citation share: some path in this source holds the chunk,
+# under the same chunking, and satisfies the filters. `EXISTS` rather than a join so a document
+# copied into several folders is one candidate, not several. Shared so a chunk is never searchable
+# while citing a path that fails the filters.
 _FILE_MATCH = (
     "FROM document_files f WHERE f.doc_id = c.doc_id AND f.source = %(src)s "
     "AND f.chunking_key = c.chunking_key "
@@ -743,18 +614,12 @@ _FILE_MATCH = (
     "AND (%(until)s::timestamptz IS NULL OR f.modified_at <= %(until)s)"
 )
 _ELIGIBLE = f"EXISTS (SELECT 1 {_FILE_MATCH}) "
-# The citation, resolved in the same statement: the smallest matching path. Deterministic, so a
-# repeated question cites the same file rather than alternating between copies.
-#
-# Public because `external_index.py` resolves its hits with the identical rule after searching an
-# external store. Two spellings of "which path does this content get cited as" would be two
-# citation policies, and they would diverge the first time either was tuned.
+# The citation, resolved in the same statement: the smallest matching path, so a repeated question
+# cites the same file. Public because `external_index.py` resolves its hits with this identical
+# rule.
 CITATION_SQL = f"(SELECT min(f.path) {_FILE_MATCH}) AS path "
-# The same two facts for a *whole-document* read, keyed on the bound parameters rather than on a
-# chunk row. `CITATION_SQL` and `_MODIFIED_SQL` above correlate on `c.doc_id`/`c.chunking_key` so a
-# reader must evaluate them per row; here the document is already named, so one evaluation answers
-# for the whole result and the expression can sit outside a window that would otherwise force it to
-# run once per eligible chunk. Same rule, same rows, addressed differently — see `_document`.
+# The same two facts for a whole-document read, keyed on bound parameters rather than the chunk row,
+# so they are evaluated once for the result instead of per row inside the window (see `_document`).
 _FILE_MATCH_BY_DOC = _FILE_MATCH.replace("f.doc_id = c.doc_id", "f.doc_id = %(doc)s").replace(
     "f.chunking_key = c.chunking_key", "f.chunking_key = %(chunking)s"
 )
@@ -768,11 +633,9 @@ _MODIFIED_SQL = f"SELECT max(f.modified_at) {_FILE_MATCH}"
 class PostgresDocumentIndex:
     """Durable `DocumentIndex` over `document_files` + `document_chunks` (`infra/sql/037`).
 
-    Dense search is cosine distance (`<=>`) accelerated by the HNSW `vector_cosine_ops` index;
-    lexical search is `ts_rank` over the GIN-indexed `tsvector`. The embedding width is
-    `settings.embedding_dim`, which must equal the table's `vector(N)` column —
-    `require_schema_vector_width` refuses a mismatch here rather than letting pgvector reject
-    every write later.
+    Dense search is cosine distance (`<=>`) over the HNSW index; lexical search is `ts_rank` over
+    the GIN-indexed `tsvector`. `settings.embedding_dim` must equal the `vector(N)` column;
+    `require_schema_vector_width` refuses a mismatch up front.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -801,46 +664,28 @@ class PostgresDocumentIndex:
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
             "embedding_key = EXCLUDED.embedding_key"
         )
-        # The previous cutting of a document this write re-chunked. Run once at the end of the same
-        # transaction — *after* the file rows, so `CLAIMED_SQL` reads what this write just said —
-        # so a re-chunk cannot leave rows behind that nothing points at and `reembed_stale` would
-        # then adopt as current. Scoped to the documents written, so it is a primary-key range
-        # rather than the table scan the sweep does.
+        # The previous cutting of a document this write re-chunked, deleted at the end of the same
+        # transaction (after the file rows, so `CLAIMED_SQL` sees them). Scoped to the written
+        # documents: a primary-key range, not a table scan.
         self._drop_unclaimed = (
             f"DELETE FROM document_chunks c WHERE c.doc_id = ANY(%(docs)s) AND NOT {CLAIMED_SQL}"
         )
-        # Re-embedding touches the vector and its key and nothing else: the content and coordinate
-        # came from the document and did not change, and rewriting the tsvector would be work for
-        # an identical result. Addressed by the whole primary key, so re-embedding one share's
-        # cutting cannot overwrite another share's row for the same text.
+        # Re-embedding touches only the vector and its key; content and tsvector are unchanged.
+        # Addressed by the full primary key so one share's re-embed cannot overwrite another share's
+        # row.
         self._store_embedding = (
             f"UPDATE document_chunks SET embedding = %(emb)s::vector({width}), "
             "embedding_key = %(key)s "
             "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s"
         )
-        # The whole document, in document order, gated on the same file-row eligibility a search
-        # uses — `%(tag)s`/`%(since)s`/`%(until)s` are bound NULL here because a whole-document read
-        # is addressed by id rather than filtered, but the *source* and *chunking* clauses of
-        # `_ELIGIBLE` still apply: a document is readable from the share that indexed it, under the
-        # cutting that share uses, and from nowhere else.
-        # **Bounded in SQL, not after assembly.** A binding allows a 52 MB file, so fetching every
-        # row and trimming afterwards would pull the whole document over the wire and into the chat
-        # pod — the thing `document_read_max_chars` exists to prevent. The window sums content
-        # length in `ordinal` order and keeps every piece whose *preceding* total is under the cap,
-        # which is the piece set `_within_chars` keeps: everything up to the cap, plus the one that
-        # crosses it. `remaining` is how the caller learns more existed without reading it.
-        # **The citation and the modification time are resolved once, outside the window.** Both
-        # are correlated on `c.doc_id` and `c.chunking_key`, which the `WHERE` pins to a single
-        # value — so they are invariant across every row of this result and were being computed per
-        # row anyway. Inside the windowed subquery that is worse than merely redundant: a window
-        # must see every eligible row before the outer filter can drop any, so the planner cannot
-        # push the cut down. Measured with `EXPLAIN (ANALYZE, BUFFERS)` on 400 chunks with a cap
-        # that keeps two: `loops=400` on both subplans and 854 buffer hits, against 54 for the scan
-        # itself — 800 of them spent resolving one path and one timestamp four hundred times.
-        #
-        # Hoisted into the outer `SELECT`, they run once each. The window still visits every row,
-        # which is inherent to a running total and is what bounds the *transfer*; what this removes
-        # is the per-row work that had nothing to do with the bound.
+        # The whole document in order, gated on the same eligibility a search uses (tag and time
+        # filters bound NULL; source and chunking still apply), so a document is readable only from
+        # the share that indexed it.
+        # Bounded in SQL: the window sums content length in `ordinal` order and keeps every piece
+        # whose preceding total is under the cap — the same set `_within_chars` keeps — and
+        # `remaining` says whether more existed.
+        # The citation and modification time are invariant across the result, so they are resolved
+        # once in the outer `SELECT`; inside the window they would run per eligible row.
         self._document = (
             f"SELECT ordinal, content, coordinate, remaining, ({_CITATION_BY_DOC}) AS path, "
             f"({_MODIFIED_BY_DOC}) AS modified_at FROM ("
@@ -859,28 +704,13 @@ class PostgresDocumentIndex:
             "AND chunking_key = ANY(%(chunkings)s) "
             "ORDER BY doc_id, chunking_key, ordinal LIMIT %(k)s"
         )
-        # The `> 0` floor mirrors the in-memory reference: a zero or negatively-correlated chunk is
-        # not a hit. Without it pgvector returns the top-k nearest unconditionally, so a narrow
-        # corpus would surface unrelated documents as cited evidence.
-        # **The tie-break sorts the k rows, not the table** — the same correction `note_index`
-        # needed, and it matters more here: this is the table designed to hold millions of chunks
-        # from a 500k-file share, where `note_index` holds thousands. `(doc_id, ordinal)` as a
-        # secondary key mirrors the in-memory reference's ordering so the two backends agree, but
-        # written into the *inner* `ORDER BY` it makes the ordering underivable from the vector
-        # index and the planner abandons `document_chunks_embedding_idx` for a Seq Scan + Sort.
-        # As an outer sort over the k rows the inner query already returned, the HNSW index is used
-        # and ten rows are quicksorted. Measured on a synthetic 20,000-chunk corpus (one file row
-        # each, migrations applied), median of 5: `Limit → Sort → Seq Scan` **228.25 ms** →
-        # `Sort → Limit → Index Scan` **2.47 ms**, returning the same ids in the same order on that
-        # corpus. "The same ids" is a measurement, not a guarantee: HNSW is approximate, so what the
-        # tie-break pins is that the two backends agree on the order of the hits they *do* return,
-        # never which rows win a tie at the k-th place — and the inner form did not pin that either.
-        # **`embedding_key` is a predicate on the read, too.** The column decides what
-        # `reembed_stale` picks up and it decided nothing else, so repointing `embedding_model` at
-        # another model of the same width left this statement ranking model-A vectors against a
-        # model-B query — positive cosines, so the `> 0` floor does not drop them, and the chunks
-        # that come back are arbitrary while reading as cited evidence from the share. The note
-        # index carries the same predicate for the same reason; see its `_dense`.
+        # The `> 0` floor mirrors the in-memory reference: a zero or negatively correlated chunk is
+        # not a hit, and pgvector would otherwise return the top k unconditionally.
+        # The `(doc_id, ordinal)` tie-break sorts the k returned rows in an outer query; put in the
+        # inner `ORDER BY` it would stop the planner using the HNSW index. HNSW is approximate, so
+        # this pins the order of returned hits, not which rows win a tie at place k.
+        # `embedding_key` is a read predicate so a different model of the same width never ranks old
+        # vectors against a new query.
         self._dense = (
             "SELECT doc_id, ordinal, content, coordinate, score, path FROM ("
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
@@ -891,15 +721,9 @@ class PostgresDocumentIndex:
             f"ORDER BY c.embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
             ") AS hits ORDER BY score DESC, doc_id, ordinal"
         )
-        # **The same one boolean rule the note index runs** — `chemclaw.core.fulltext.TSQUERY_TERMS`
-        # builds both forms of the query, `any_terms` deciding which chunks match and `all_terms`
-        # putting the complete matches on top. This statement was `websearch_to_tsquery` alone,
-        # which ANDs, while `InMemoryDocumentIndex` — the reference every share test stands on —
-        # scored any chunk sharing a token. That is the identical divergence PR #173 fixed for
-        # notes, left in place on the backend that carries the mounted share's evidence, so the
-        # one-legged RRF fusion it measured for notes was still happening here. Measured on a
-        # four-document corpus, live PostgreSQL 16 / pgvector 0.8.0, "amide coupling solvent
-        # screen": this backend returned **0 rows** where the reference returned all four.
+        # The boolean rule the note index runs: `chemclaw.core.fulltext.TSQUERY_TERMS` builds both
+        # query forms, `any_terms` deciding which chunks match and `all_terms` ranking complete
+        # matches first, matching `InMemoryDocumentIndex`.
         self._lexical = (
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
             f"ts_rank(c.lexeme, any_terms) AS score, {CITATION_SQL}"
@@ -911,30 +735,22 @@ class PostgresDocumentIndex:
     def _require_vector_column(self) -> None:
         """Refuse a deployment whose `embedding_dim` cannot fit the column this index writes.
 
-        A hook rather than a direct call because it is only true of *this* index. The external-store
-        variant writes NULL into that column and reads it never, so the width it was migrated with
-        cannot reject anything — and running the check there would refuse a perfectly good 768-wide
-        deployment for a column it does not use.
+        A hook because the external-store subclass never writes that column.
         """
         require_schema_vector_width()
 
     async def _forget_vectors(self, keys: list[tuple[str, str, int]]) -> None:
         """Told which chunk rows a re-chunk just superseded, so a subclass can drop their vectors.
 
-        A no-op here, because this index's vectors are *in* the rows that were deleted. The hook
-        exists for `ExternalVectorDocumentIndex`, whose vectors live in another system and would
-        otherwise accumulate forever: every re-chunk deletes the catalogue rows and left the points
-        behind, unreachable but never reclaimed. Called after the commit, so a subclass never
-        removes vectors for a transaction that then rolled back.
+        A no-op here, since the vectors are in the deleted rows. Called after the commit, so a
+        subclass never removes vectors for a rolled-back transaction.
         """
 
     def _chunk_vector(self, chunk: ChunkRecord) -> str | None:
         """The pgvector literal to store for this chunk, or `None` to leave the column NULL.
 
-        The one place `upsert` decides whether the embedding lands in Postgres at all. The
-        external-store variant returns `None` — `NULL::vector(N)` is valid whatever `N` is — so it
-        inherits the transaction, its ordering rationale and the file-row write without copying
-        twenty lines of it.
+        The external-store subclass returns `None` (`NULL::vector(N)` is valid at any `N`) and
+        inherits the rest of `upsert`.
         """
         return _vector_literal(chunk.embedding)
 
@@ -949,11 +765,8 @@ class PostgresDocumentIndex:
     ) -> dict[str, str]:
         """The stat signature each of these paths was last read at, for the ones on record.
 
-        Scoped to the crawl chunk's own paths rather than to the whole source: the unscoped query
-        on a 500k-file share returns a dictionary the caller has no use for and would rebuild on
-        every chunk of the drain. And to the chunking those rows were cut under, so a file whose
-        chunk boundaries are superseded reads as changed and is re-read (NULL — every row written
-        before migration 040 — matches no key, which is why the first sync after it re-parses).
+        Scoped to the crawl chunk's paths and to the chunking, so a file whose boundaries are
+        superseded reads as changed; a NULL chunking matches no key.
         """
         if not paths:
             return {}
@@ -984,11 +797,9 @@ class PostgresDocumentIndex:
     async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Write the chunks first, then the file rows, then sweep unclaimed cuttings — one txn.
 
-        Order matters on a crash: a file row whose chunks are missing would be skipped by the next
-        crawl (its fingerprint matches) and would contribute nothing forever. Chunks with no file
-        row are merely invisible until the file row lands. The cleanup comes last for a different
-        reason — it asks which cuttings are still claimed, and the answer must include the file
-        rows this very write moved to a new chunking.
+        Order matters on a crash: a file row whose chunks are missing would match its fingerprint
+        and be skipped forever, while chunks without a file row are only invisible until it lands.
+        The cleanup is last so "claimed" includes the file rows this write moved.
         """
         if not files and not chunks:
             return
@@ -999,16 +810,12 @@ class PostgresDocumentIndex:
                     {
                         "doc": chunk.doc_id,
                         "ord": chunk.ordinal,
-                        # The document's own text, byte for byte: `content` is what a reader
-                        # gets back — the excerpt a chemist cites, a whole SOP read through
-                        # `stored_document`, the text `reembed_stale` re-embeds. Only the
-                        # *derivation* is normalised, on the next line.
+                        # The document's own text, unchanged: what a reader gets back and what
+                        # `reembed_stale` re-embeds.
                         "content": chunk.content,
-                        # Normalised on the way in, exactly as the query is on the way out:
-                        # `chemclaw.core.fulltext` owns that rule and both sides must apply it.
-                        # Bound separately from `content` because the rule detaches a sign from
-                        # the number it precedes, which is right for a lexeme and destructive for
-                        # stored prose — one parameter for both served `-78 °C` as ` 78 °C`.
+                        # Normalised exactly as the query is (`chemclaw.core.fulltext`). Bound
+                        # separately from `content` because normalisation detaches signs from
+                        # numbers, right for a lexeme and wrong for stored prose.
                         "search": normalize_search_text(chunk.content),
                         "coord": chunk.coordinate,
                         "emb": self._chunk_vector(chunk),
@@ -1101,18 +908,16 @@ class PostgresDocumentIndex:
                 )
                 removed = cur.rowcount
                 # Orphans, not "chunks of the deleted documents": the same content may still be
-                # reachable through a copy elsewhere on the share, and deleting by `doc_id` would
-                # silently un-index a file nobody touched — the write path's own predicate.
+                # reachable through a copy elsewhere.
                 await cur.execute(f"DELETE FROM document_chunks c WHERE NOT {CLAIMED_SQL}")
             await conn.commit()
         return removed
 
     def _read_key(self) -> str:
-        """The `embedding_key` a *read* must match — the live configuration, as stored.
+        """The `embedding_key` a read must match — the live configuration, as stored.
 
-        A hook for `_stored_key`'s reason: `ExternalVectorDocumentIndex` namespaces every key it
-        writes by store and collection, so a shared spelling is the only thing that keeps a read
-        and a write agreeing about which generation a vector belongs to.
+        A hook because `ExternalVectorDocumentIndex` namespaces the keys it writes, and reads must
+        use the same spelling.
         """
         return embedding_config_key()
 
@@ -1131,15 +936,9 @@ class PostgresDocumentIndex:
     ) -> list[DocumentHit]:
         """Execute a ranked search and build hits, dropping any whose citation resolved to NULL.
 
-        `vector_recall` puts the configured pgvector recall parameters on this statement's own
-        transaction (`db.apply_vector_recall_settings`). Off for the lexical leg, whose `ts_rank`
-        over a GIN index is exact and has no such parameter, and on for the dense one — which is
-        the path those knobs were named for and, until now, the one path that never read them.
-        `settings.hnsw_ef_search`'s own documentation cites a residual on *this* index, so a knob
-        wired only into the note index left its stated reason untouched. What it governs here is
-        real and measured (the eligibility `EXISTS` stays a semi join *above* the HNSW scan); the
-        residual itself did not reproduce on a 20,000-chunk corpus. Both measurements are in
-        `db.apply_vector_recall_settings`.
+        `vector_recall` applies the configured pgvector recall parameters to this statement's
+        transaction (`db.apply_vector_recall_settings`); on for the dense leg, off for the exact
+        lexical one.
 
         Args:
             statement: The ranked search to run.
@@ -1147,28 +946,10 @@ class PostgresDocumentIndex:
             vector_recall: Whether this statement takes an HNSW scan worth parametrizing.
 
         Raises:
-            DocumentIndexError: The backend could not answer. Wrapped rather than left as
-                `psycopg.Error`, which descends from `Exception` and not from `OSError`, so the
-                retriever's enumerated handlers did not catch it: a statement timeout on a large
-                share propagated out through `gather_evidence`'s `asyncio.gather` and failed the
-                whole turn, taking the knowledge graph's answer with it. `db.connection` converts
-                only *connect-time* failures to `ConnectionError`; anything `execute` raises came
-                straight through. Those handlers are gone — `retrieval.fanout._sweep` degrades the
-                one branch now, and a retriever that answered `[]` here was telling a chemist the
-                share holds no precedent while its database was down. What the wrapper still buys
-                is a type that names the subsystem rather than the driver. This is the type
-                `WarehouseQueryError` mirrors for the retriever that copied this pattern.
-
-                **The message carries none of the driver's text**, which is the contract
-                `SubsystemUnavailableError` states and this raiser did not keep: it was
-                `f"document search failed: {exc}"` around a `psycopg.Error`, whose string is
-                "connection to server at "…", port 5432 failed: …". `api/middleware`'s handler
-                relays a `SubsystemUnavailableError`'s message to the HTTP client verbatim,
-                precisely *because* the contract says there is nothing in it to leak. It was a
-                contract this raiser did not keep rather than a live leak while both retrievers
-                caught this type; they no longer do, so the promise now has to hold. The detail is
-                not lost: it is the `__cause__`, which every handler that sees this type logs with
-                `exc_info` — `fanout._sweep` at DEBUG, `api/middleware` at WARNING.
+            DocumentIndexError: The backend could not answer. Wraps any `psycopg.Error` so the
+            caller sees a subsystem type that `retrieval.fanout._sweep` degrades; the message
+            carries no driver text because `api/middleware` relays it to the client verbatim, and
+            the detail stays on `__cause__`.
         """
         try:
             async with self._connection() as conn:
@@ -1187,9 +968,8 @@ class PostgresDocumentIndex:
                 ordinal=row[1],
                 content=row[2],
                 coordinate=row[3],
-                # Clamped: cosine similarity is already in range, but `ts_rank` sums per-term
-                # weights and is only *usually* below 1. A score is a ranking within this source,
-                # so clipping the rare outlier changes no order and keeps the DTO's contract.
+                # Clamped: `ts_rank` sums per-term weights and is only usually below 1; clipping
+                # changes no order.
                 score=min(1.0, max(0.0, float(row[4]))),
                 path=row[5],
             )
@@ -1257,13 +1037,10 @@ class PostgresDocumentIndex:
 def default_document_index() -> DocumentIndex:
     """The production document index — one place the retriever and the sync get their backend.
 
-    Two shapes, chosen by `vector_store_provider`. `pgvector` (the default) keeps the vectors in the
-    same statement that resolves the citation, which is the fastest arrangement and the one every
-    existing deployment runs. Any other provider composes the same Postgres catalogue with an
-    external vector store — see `external_index.py` for what moves and what deliberately does not.
-
-    The external branch is imported inside it, so a default deployment never loads the adapter and
-    never needs the client package it would ask for.
+    `vector_store_provider == "pgvector"` (the default) keeps vectors in the same statement that
+    resolves the citation; any other provider composes the Postgres catalogue with an external
+    store. The external branch is imported lazily so a default deployment never needs its client
+    package.
     """
     if settings.vector_store_provider == "pgvector":
         return PostgresDocumentIndex()

@@ -1,22 +1,12 @@
 """Re-fingerprint the rows a definition bump shelved, from what each row already stores.
 
-A `STANDARDIZATION_VERSION` bump is a token in `molecule_definition()` and `reaction_definition()`,
-so every row fingerprinted under the old one falls out of similarity search the moment the code
-ships (`store.py` refuses to rank across definitions). Until this module the only way back was the
-runbook's: delete the corpus's `corpus_cursors` row and re-sync the whole ELN, re-reading every
-entry from its source to recover structures the index already holds.
+A `STANDARDIZATION_VERSION` bump drops every old-definition row out of similarity search. This
+rebuilds them without re-reading the source: a reaction row's `label` is the transformation SMILES
+as ingested, and a molecule row's `label` is its standardized structure, which standardizes again
+under the new version (its id moves exactly when `compound_id` moves). A bump that needs what the
+old standard form dropped still needs the source.
 
-**The row is enough.** A reaction row's `label` is the transformation SMILES as ingested — DRFP
-standardizes its species while hashing — so re-fingerprinting the label under the new definition is
-the row the next sync would write. A molecule row's `id` and `label` are the structure standardized
-under the old version, and standardizing that again under the new one gives the new row: its id
-moves exactly when `compound_id` moves, which is what makes the two indexes and the compound notes
-agree after a re-key (`memory.compound_rekey` does the notes). Both hold for a bump that discards or
-neutralizes more than before; one that needs what the old standard form dropped needs the source.
-
-**Insert-only, like every write the runtime role may make on these tables.** The shelved rows stay
-where they are — `durable/retention.py` records why nothing reclaims them — and a re-keyed row is an
-ordinary upsert under the current definition, so a second run finds every key current and writes
+Insert-only: shelved rows stay, a re-keyed row is an ordinary upsert, so a second run writes
 nothing.
 """
 

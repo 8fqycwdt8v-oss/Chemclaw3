@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-08-15 · Applies `D-2026-08-09-a-connector-we-do-not-run` to the first shipped bundle, and sets the rule the rest of the migration follows.
 
+**Superseded-by:** [D-2026-08-16-the-physics-leaves-the-cache-stays](D-2026-08-16-the-physics-leaves-the-cache-stays.md) (in part)
+
 ## Context
 
 Scientific capability is moving to [`Chemclaw3-mcp`](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp);

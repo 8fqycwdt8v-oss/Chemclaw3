@@ -1,23 +1,13 @@
 """Turn a document's bytes into text, structurally and offline. The one parsing implementation.
 
-These parsers began life inside `chemclaw.agent.attachments`, serving a chemist handing the agent a
-file. They live here now because reading a PDF is an *ingest* concern that an upload happens to
-use, not the other way round — and because `chemclaw.ingest` may not import `chemclaw.agent`
-(`tests/test_layering.py`), so a mounted-share crawler could otherwise only have got at them by
-growing a second copy. One implementation, two callers, no drift.
+Shared by the share crawler and chat uploads; it lives in `ingest` because `ingest` may not import
+`chemclaw.agent`.
 
-**The honesty rule that governs every parser here.** Extraction is *structural*, never heuristic:
-page, slide, sheet and cell boundaries come from each format's own document model, and a file the
-library cannot open is refused rather than salvaged. A PDF "parsed" by scraping text-like bytes
-yields confident nonsense a chemist cannot distinguish from a real reading.
-
-That rule is why a **scanned** PDF is refused by name (`ScannedDocumentError`) rather than returned
-as an empty document. Silence must never read as "the file was blank"; the failure mode being
-avoided is a chemist concluding a CoA had nothing in it. On a decade-old file share this is not a
-corner case — it is a population, which is why the refusal has its own exception type: the share
-sync counts scans separately and reports how much of the corpus is invisible.
-
-No format is accepted whose reading needs a network service (D-089).
+Extraction is structural, never heuristic: page, slide, sheet and cell boundaries come from each
+format's own document model, and a file the library cannot open is refused rather than salvaged. A
+scanned PDF is refused by name (`ScannedDocumentError`) rather than returned empty, so silence never
+reads as "the file was blank" and the sync can count scans separately. No format needs a network
+service (D-089).
 """
 
 import csv
@@ -46,32 +36,19 @@ class DocumentParseError(ValueError):
 class UnclassifiedParseError(DocumentParseError):
     """A third-party parser failed and **this system does not know why**.
 
-    Its own type because "we could not read it" and "we read it and it is over the limit" are
-    different facts, and only the first one can be a *memory* failure wearing a parse error's
-    clothes. A C parser that reports its own allocation failure never lets CPython raise
-    `MemoryError` — lxml does exactly that — so a legal markup-heavy `.docx` arrives here as
-    `unknown error (<string>, line 0)`, indistinguishable from a genuinely broken file.
-
-    `ingest/documents/isolate._at_ceiling` is what separates the two populations, and it can only do
-    so where a ceiling was set. So the distinction has to be *in the type* rather than in the
-    message: a caller that parses without a ceiling has no way to sniff an allocation failure out of
-    the string, and every reading of the string it might try is one the next parser version breaks.
-    `agent/attachments.parse_attachment` is that caller, and
-    `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document` is why it does not simply grow a
-    forkserver.
-
-    A `DocumentParseError` by inheritance, so every existing `except` arm — the share sync's
-    reject-and-continue net, the upload route, the isolate child — is unchanged.
+    A C parser (lxml) can report its own allocation failure as an ordinary parse error, so "could
+    not read" may really be "out of memory". The distinction lives in the type rather than the
+    message: `isolate._at_ceiling` can resolve it where a ceiling was set, and an unbounded caller
+    (`agent/attachments.parse_attachment`) uses `read_without_a_ceiling`. A `DocumentParseError`
+    subclass, so existing handlers are unchanged.
     """
 
 
 class ScannedDocumentError(DocumentParseError):
     """A PDF with no text layer at all — a scan or an image-only export.
 
-    Its own type because it is the one refusal that is about the *document* rather than about this
-    system's format support: the file is a perfectly good PDF that simply contains no text. A share
-    sync counts these apart from unsupported formats so an operator can see how much of the corpus
-    would need OCR, instead of one undifferentiated "skipped" number.
+    Its own type because it is about the document rather than format support; the share sync counts
+    these separately so an operator can see how much of the corpus would need OCR.
     """
 
 
@@ -87,27 +64,11 @@ class ParsedDocument(BaseModel):
 def _refuse_a_bomb(name: str, raw: bytes) -> None:
     """Refuse an OOXML container whose parts expand past the configured ceiling.
 
-    `.docx`/`.xlsx`/`.pptx` are zip archives, so every size limit upstream of here — a share's
-    `max_file_bytes`, an upload's `attachment_max_bytes` — bounds only the *compressed* bytes. A
-    110 KB workbook holding 31 MB of sheet XML is a 282× ratio, measured; at the share's 50 MB
-    default that is ~14 GB of XML and multiple GB of Python strings, and the worker is OOM-killed
-    with no counter, no log line and no report.
-
-    Read from the central directory, so it costs no decompression. **The residual is stated:** a
-    hand-crafted archive can understate `file_size`, and this check believes it. That is a bound on
-    the realistic case — a real generator writes true sizes — not a defence against a crafted one.
-
-    **What that residual costs stopped being the pod**
-    (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`). This ceiling was the
-    thing the chart's memory budget rested on, so an archive that lied about `file_size` moved a
-    declared bound rather than a real one. It no longer is: `document_parse_memory_bytes` is
-    enforced by the kernel on the process doing the parsing, and it cannot be moved by anything
-    written in a file. That also settles the question this check could never answer honestly — an
-    *honest* archive is as unbounded as a lying one, because a shared string is stored once and
-    read N times and because markup costs memory that no count of text can see. So what is left
-    here is a cheap, early, well-worded refusal: a document refused from its central directory
-    costs no decompression, where the same document refused by the allocation ceiling costs a
-    minute of CPU first.
+    `.docx`/`.xlsx`/`.pptx` are zip archives, so upstream size limits bound only the compressed
+    bytes. Read from the central directory, so it costs no decompression. A crafted archive can
+    understate `file_size`; the real memory bound is the kernel ceiling
+    `document_parse_memory_bytes` set in `isolate.py`, and this is a cheap, early, well-worded
+    refusal for the realistic case.
 
     Raises:
         DocumentParseError: The declared expansion exceeds `document_max_expanded_bytes`.
@@ -117,11 +78,8 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
         with zipfile.ZipFile(io.BytesIO(raw)) as container:
             expanded = sum(item.file_size for item in container.infolist())
     except zipfile.BadZipFile as exc:
-        # `DocumentParseError`, not `UnclassifiedParseError`: this is a *classified* fact about the
-        # document — its central directory is not a zip's — and it is not an allocation failure
-        # wearing a parse error's clothes, because `zipfile` reading a central directory raises
-        # `MemoryError` when it runs out. A caveat about memory here would bury a refusal that is
-        # already precise, which is what `read_without_a_ceiling` exists not to do.
+        # `DocumentParseError`, not `UnclassifiedParseError`: a central directory that is not a
+        # zip's is a classified fact about the document, not a disguised allocation failure.
         raise DocumentParseError(f"could not read {name}: {exc}") from exc
     if expanded > ceiling:
         raise DocumentParseError(
@@ -134,21 +92,9 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
 def too_large_to_read(name: str) -> DocumentParseError:
     """The refusal a document earns by exhausting `document_parse_memory_bytes`.
 
-    One function because the ceiling is hit in three places and a chemist must not be able to tell
-    which: inside `parse_document`, where extraction allocates; inside
-    `ingest/documents/isolate._parse_into`, where the answer is pickled onto the pipe back — which
-    is real memory spent on this document and is deliberately inside the same budget; and wherever
-    a C parser reported the exhaustion as its own error, which the paragraph below is about. Three
-    arms wording one event separately is how the wordings drift.
-
-    **That residual is closed, and it was larger than it read.** A C parser that reports its own
-    allocation failure rather than letting CPython raise reaches neither arm on its own — lxml does
-    exactly that, so a markup-heavy but entirely legal `.docx` was refused as
-    `unknown error (<string>, line 0)`, which does not merely omit the reason: it tells a chemist
-    their document is malformed at line 0, which is worse than the generic wording this function
-    exists to replace. `ingest/documents/isolate._at_ceiling` now renames any failure that happened
-    with the budget spent, so all three arms arrive here. It is a third caller and the reason this
-    is a function stands unchanged.
+    One function because the ceiling is hit in three places — extraction in `parse_document`,
+    pickling the answer in `isolate._parse_into`, and a C parser's own failure renamed by
+    `isolate._at_ceiling` — and all three must read identically.
 
     Args:
         name: The document name, for the message.
@@ -167,32 +113,18 @@ def too_large_to_read(name: str) -> DocumentParseError:
 def read_without_a_ceiling(cause: UnclassifiedParseError) -> UnclassifiedParseError:
     """The refusal an unclassified failure earns on a path that set **no** memory ceiling.
 
-    **Where `too_large_to_read` above says "this document is too big", this says "we do not know".**
-    Those are the only two honest sentences available, and which one a caller may use is decided by
-    whether it bounded the parse. `isolate._at_ceiling` can pick the first because it knows the
-    ceiling it set; `agent/attachments.parse_attachment` parses in-process with no `RLIMIT_DATA` at
-    all, so for it an allocation failure and a malformed file are the *same observation* — and the
-    parser's own words for the first ("unknown error (<string>, line 0)", "Unable to allocate output
-    buffer") read as an accusation against the document.
-
-    So this keeps the parser's message, because an operator debugging a share needs it, and states
-    plainly what the message cannot establish. It does not guess: no string in `cause` is inspected,
-    for the reason `UnclassifiedParseError` exists as a type.
-
-    `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document` is why the path stays unbounded
-    rather than growing a forkserver, and carries the trigger for revisiting that.
-
-    **It takes no `name`**, because `cause` already carries the sanitized one — this is raised only
-    from `UnclassifiedParseError`'s single construction site, whose message opens "could not read
-    <name>". A `name` parameter beside that put the document in the sentence twice.
+    Without a ceiling, an allocation failure and a malformed file are the same observation, so this
+    keeps the parser's message for the operator and states that it cannot establish the cause,
+    rather than blaming the document. No string in `cause` is inspected. Takes no `name` because
+    `cause`'s message already carries it
+    (D-2026-09-22-an-unbounded-parse-may-not-blame-the-document).
 
     Args:
         cause: The unclassified failure, whose own words are kept verbatim.
 
     Returns:
-        The refusal to raise — still an `UnclassifiedParseError`, so the caveat does not *erase* the
-        distinction the type carries. Rewrapping as the base class would leave the unbounded path
-        unable to tell its two populations apart, which is the thing this whole change is about.
+        The refusal to raise — still an `UnclassifiedParseError`, so the distinction the type
+        carries survives.
     """
     # The trailing period goes because `cause` may or may not end in one — a parser's own wording is
     # not ours to predict — and "zip file.. This parse" is how that reads when it does.
@@ -207,57 +139,19 @@ def read_without_a_ceiling(cause: UnclassifiedParseError) -> UnclassifiedParseEr
 def _decode(raw: bytes) -> str:
     """Turn a text document's bytes into characters: strict UTF-8 first, detection only after it.
 
-    The policy this replaces was `raw.decode("utf-8", errors="replace")`, one encoding, over a
-    decade-old Windows/CIFS share and over whatever a chemist uploads. Three things it did, each
-    re-measured on this commit rather than transcribed:
-
-    * **cp1252 became mojibake that is indexed and citable.** `Reaction held at 60 °C; yield 87 %.`
-      written by Excel or Notepad decodes to `Reaction held at 60 <U+FFFD>C; yield 87 %.` — the
-      degree sign becomes a replacement character and nothing counts it, so that text is chunked,
-      embedded, retrieved and cited exactly like a correct reading. `errors="replace"` never fails,
-      which is why this was invisible rather than rare.
-    * **A UTF-8 BOM landed inside the first CSV cell.** A BOM is valid UTF-8, so it survived the
-      decode intact and `_parse_csv` rendered the first header cell as `<U+FEFF>Compound` — a column
-      name that matches nothing anybody can type or configure.
-    * **UTF-16 was refused with the wrong reason.** `"…".encode("utf-16")` — Notepad's "Unicode" —
-      keeps its NUL bytes through `errors="replace"`, so `sync._read_and_parse`'s NUL guard caught
-      it at position 3 and filed it as `skipped_unreadable` saying a Postgres `text` column cannot
-      hold a NUL. True, and not why that file was unreadable; an operator reading the report learns
-      nothing about the encoding.
-
-    **Strict UTF-8 first is what makes this additive, and it is the whole safety argument.**
-    `utf-8-sig` accepts exactly the byte strings strict `utf-8` accepts, so every file that decodes
-    cleanly today decodes to the same characters — no detector is consulted and nothing can be
-    re-labelled. The one deliberate difference is the BOM it strips, which is the second defect
-    above. `tests/test_document_formats.py` asserts that identity over every text format.
-
-    **Detection is heuristic, and what it is worst on is byte *variety*, not length.** Said that way
-    because the first version of this paragraph said "worst on short files" and measured it over one
-    cp1252 sentence repeated to length — which is the most degenerate input there is, and reads as a
-    multi-byte encoding at any size. Re-measured on the pinned `charset-normalizer` with that same
-    repeated sentence: `big5` at 75, 150 and 225 bytes, `cp949` from 300 bytes to 50 kB, and it
-    never round-trips at any length. Length does not rescue it, and neither codec named here before
-    was one the detector actually produced.
-
-    On realistic mixed prose the same detector is reliable and short is not the problem: a 311-byte
-    cp1252 ELN paragraph carrying `°`, `±`, an em dash and curly quotes is answered `cp1250` from
-    about 70 bytes on and decodes **exactly** — cp1250 and cp1252 agree on every high byte that text
-    uses, so the label is wrong and the characters are right, which is the only property this
-    function is asked for. German accented prose behaves the same way. One 36-byte line on its own
-    does not: too few distinct bytes, and it goes to `big5`.
-
-    So the residual risk is a short, low-variety, non-UTF-8 file, and what bounds it is the
-    *ordering* rather than the detector: a file a detector can damage is a file strict UTF-8 already
-    refused, where the answer today is a replacement character in the same place — so the trade is
-    one wrong reading for another on those, and a right reading for a wrong one on ordinary prose.
+    `utf-8-sig` first accepts exactly what strict UTF-8 accepts (stripping a BOM that would
+    otherwise land in the first CSV header cell), so every file that decodes cleanly is never
+    re-labelled. Only bytes UTF-8 refuses go to `charset-normalizer`, which handles legacy
+    cp1252/UTF-16 files instead of indexing replacement characters. Detection is unreliable on
+    short, low-variety text, but such files were already refused by UTF-8, so at worst one wrong
+    reading replaces another.
 
     Args:
         raw: The document's bytes, as read off the share or off an upload.
 
     Returns:
-        The decoded text. `errors="replace"` is the last resort, for bytes no encoding claims —
-        refusing instead would turn a file that is 99% readable into a document the share does not
-        have, which is the failure mode this package is built around avoiding.
+        The decoded text. `errors="replace"` is the last resort for bytes no encoding claims, since
+        refusing would hide a mostly readable file.
     """
     try:
         return raw.decode("utf-8-sig")
@@ -277,13 +171,9 @@ def _parse_text(raw: bytes) -> tuple[str, int]:
 def _parse_csv(raw: bytes) -> tuple[str, int]:
     """Render a delimited table as aligned text, preserving every cell.
 
-    Rendered rather than handed over as raw CSV because the agent reads prose far more reliably
-    than it reads quoting rules, and because a mangled quote in a raw paste can silently shift a
-    whole column — a wrong number a chemist would have no way to spot.
-
-    The decode is `_decode`'s, which matters more here than anywhere else in this module: a BOM or a
-    cp1252 byte lands in a *header cell*, where it is a column name rather than a stray character in
-    a paragraph.
+    Rendered rather than passed as raw CSV because the agent misreads quoting rules, and a mangled
+    quote can silently shift a column. Decoded by `_decode`, so a BOM or legacy byte does not
+    corrupt a header cell.
     """
     text = _decode(raw)
     dialect_sample = text[:4096]
@@ -295,12 +185,8 @@ def _parse_csv(raw: bytes) -> tuple[str, int]:
     header = next(reader, None)
     if header is None:
         return "", 0
-    # **Rendered row by row, and it used to be `list(csv.reader(...))` first.** Materialising the
-    # reader holds every *cell* as its own object until the last row is read, and a `str` costs
-    # ~50 bytes of header before its characters: measured, a 50 MiB delimited export needed more
-    # than 512 MiB that way, against ~150 MiB here, because six cells a row over 900,000 rows is
-    # 5.4 M objects alive at once. Joining each row as it arrives frees its cells immediately and
-    # changes nothing about the output.
+    # Rendered row by row rather than materialising the reader: holding every cell object at once
+    # multiplies memory several times on a large export.
     lines = [" | ".join(header), "-" * 40]
     rows = 0
     for row in reader:
@@ -312,18 +198,9 @@ def _parse_csv(raw: bytes) -> tuple[str, int]:
 def _parse_pdf(raw: bytes) -> tuple[str, int]:
     """Extract a PDF's text layer page by page; refuse a scan rather than return nothing.
 
-    Pages are labelled and kept in order because a chemist citing "the table on page 3" needs the
-    page to survive ingest — an unlabelled concatenation loses the only coordinate the source
-    document offers.
-
-    A PDF where **no page** yields text is a scan (or an image-only export): `pypdf` reports
-    success and returns nothing, which would present to the agent as an *empty document* and to the
-    chemist as "there was nothing in it". Refused by name instead, since that is a true statement
-    about what this system can read and the empty text is not.
-
-    The test is "did any page produce text at all", deliberately not a minimum length. A one-line
-    CoA is a legitimate upload, and any threshold tuned to document size would refuse it — the
-    thing that distinguishes a scan is that it yields *zero* characters, not few.
+    Pages are labelled and kept in order so a citation can name the page. A PDF where no page yields
+    text is refused as a scan; the test is zero characters, not a minimum length, so a one-line CoA
+    is still read.
     """
     reader = PdfReader(io.BytesIO(raw))
     pages = [(page.extract_text() or "").strip() for page in reader.pages]
@@ -343,8 +220,7 @@ def _parse_pdf(raw: bytes) -> tuple[str, int]:
 def _parse_pptx(raw: bytes) -> tuple[str, int]:
     """Extract a deck's text slide by slide, including tables and speaker notes.
 
-    Notes are included because a project deck's reasoning frequently lives there rather than on the
-    slide, and dropping them would silently discard the most informative half of the file.
+    Notes are included because a deck's reasoning often lives there.
     """
     deck = Presentation(io.BytesIO(raw))
     blocks: list[str] = []
@@ -368,8 +244,8 @@ def _parse_pptx(raw: bytes) -> tuple[str, int]:
 def _parse_docx(raw: bytes) -> tuple[str, int]:
     """Extract a Word document's paragraphs and tables in document order.
 
-    Tables are rendered with the same `|` separator `_parse_csv` uses, so a table reads identically
-    however it reached the system — one representation for the agent to learn, not three.
+    Tables use the same `|` separator as `_parse_csv`, so a table reads identically whatever its
+    source.
     """
     document = Document(io.BytesIO(raw))
     parts = [p.text.strip() for p in document.paragraphs if p.text.strip()]
@@ -384,9 +260,8 @@ def _parse_docx(raw: bytes) -> tuple[str, int]:
 def _parse_xlsx(raw: bytes) -> tuple[str, int]:
     """Extract a workbook sheet by sheet as delimited rows.
 
-    `data_only=True` reads the *cached values* of formula cells rather than the formulas: a chemist
-    attaching a yield sheet means the yields, and `=B2/C2*100` is not an answer. A workbook saved
-    without cached values yields empty cells there, which is visible rather than wrong.
+    `data_only=True` reads cached values of formula cells rather than the formulas; a workbook saved
+    without cached values yields visibly empty cells there.
     """
     book = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
     try:
@@ -429,10 +304,8 @@ _ZIP_CONTAINERS = frozenset(
     }
 )
 
-# The two halves of the allowlist must name the same formats: `formats.EXTENSIONS` decides what a
-# crawl even opens, `_PARSERS` decides what can be read. A format in one and not the other is
-# either a file type that silently never matches or a parser nothing can reach — both invisible at
-# runtime, both caught here at import.
+# `formats.EXTENSIONS` decides what a crawl opens and `_PARSERS` what can be read; a format in one
+# but not the other is caught here at import.
 _UNPARSEABLE = set(EXTENSIONS.values()) - set(_PARSERS)
 _UNREACHABLE = set(_PARSERS) - set(EXTENSIONS.values())
 if _UNPARSEABLE or _UNREACHABLE:  # pragma: no cover - a wiring error, not a runtime state
@@ -475,25 +348,14 @@ def parse_document(name: str, raw: bytes, declared_type: str | None = None) -> P
         # Already precise — a refusal the parser named itself, `ScannedDocumentError` included.
         raise
     except MemoryError as exc:
-        # The parse ran out of the budget `ingest/documents/isolate.py` set on this process. Named
-        # because it is the one failure whose cause is knowable and actionable — the document is
-        # too large to read, not malformed — and because the alternative is the broad arm below
-        # telling a chemist their perfectly good workbook "could not be read".
+        # The parse ran out of the budget `isolate.py` set on this process: the document is too
+        # large, not malformed, so it is named as such.
         raise too_large_to_read(name) from exc
     except Exception as exc:
-        # **One net, at the boundary, around the whole parse.** Each parser used to guard only its
-        # *constructor*, which is the one call that is not where these libraries do their work:
-        # `openpyxl` in `read_only` mode parses the sheet inside `iter_rows`, and `python-pptx`
-        # loads slide parts lazily. A truncated `sheet1.xml` from an interrupted network copy
-        # therefore raised `ElementTree.ParseError` — a `SyntaxError`, caught by nothing — and an
-        # unbalanced quote in an instrument export raised `csv.Error` from the reader, likewise
-        # outside every guard. On the share those escaped the sync's reject-and-continue net, failed
-        # the activity, and since the crawl keeps no cross-run cursor, **every later run restarted
-        # and hit the same file**: one malformed document stopped the whole corpus indexing.
-        #
-        # Broad on purpose, and only here: `raw` is untrusted bytes from a share or an upload, and
-        # every library below is a third-party parser over them. "This file could not be read" is
-        # the honest statement about any failure in that region, and it is the statement the callers
-        # already handle — one counted refusal rather than a dead job.
+        # One broad net around the whole parse: these libraries do their work lazily (`iter_rows`,
+        # lazy slide parts, the CSV reader), so a guard on constructors misses truncated or
+        # malformed input. `raw` is untrusted bytes and every library here is third-party, so any
+        # failure is "could not be read" — one counted refusal rather than a failed sync that
+        # restarts on the same file.
         raise UnclassifiedParseError(f"could not read {name}: {exc}") from exc
     return ParsedDocument(content_type=content_type, text=text, rows=rows)

@@ -1,22 +1,10 @@
-"""What a design looks like to the three readers it has: a model, a browser and a chemist.
+"""What a design looks like to its three readers: a model, a browser and a chemist.
 
-**One payload serves the model and the browser, and it is JSON.** A tool that returned Markdown
-would leave the front end with a blob it cannot parse — `ResultBlock` in `Chemclaw3_ui` does
-`JSON.parse` and falls back to rendering *nothing* — so the choice is not "prose or JSON", it is
-"one payload both readers use, or two serializations of one design that can disagree". The measured
-context argument does not push the other way either:
-`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so` found compact JSON 0.4–0.8%
-*shorter* than the pydantic repr a returned model would
-become, and declined a blanket switch because it would have been an edit to every tool at once —
-not because JSON was worse. This is one tool, choosing its own return.
-
-**The receipt is deliberately not the whole design.** A model that has just authored a protocol
-does not need it echoed back; it needs to know the design was stored, under what id, at what
-revision, and what the checks said. The whole document is one `read_experiment_protocol` away and
-is what `GET /protocols/{id}` serves. That is the difference between a receipt and a reply.
-
-`render_markdown` is the third reader — a chemist reading a protocol as a document, in a report or
-a note body. It is not what a tool returns.
+One JSON payload serves the model and the browser, so the two can never disagree (the front end
+parses JSON and renders nothing on failure). The receipt is deliberately not the whole design: a
+model that just authored a protocol needs the id, revision and check results; the document is
+one `read_experiment_protocol` (or `GET /protocols/{id}`) away. `render_markdown` is the
+third reader, a chemist reading a document, and is never what a tool returns.
 """
 
 from __future__ import annotations
@@ -40,9 +28,8 @@ from chemclaw.protocols.models import (
     Well,
 )
 
-#: How many arms a receipt lists before it stops and says how many are left. A 384-well design's
-#: whole arm table is not what a model needs back from a write it just made, and it is the largest
-#: thing in this payload by an order of magnitude.
+#: How many arms a receipt lists before summarising the rest; the full arm table is the largest
+#: thing in the payload and not what a model needs back from its own write.
 _RECEIPT_ARMS = 12
 
 
@@ -56,12 +43,8 @@ class ArmRow(BaseModel):
     temperature_c: float | None = None
     time_h: float | None = None
     solvent: str = ""
-    # **The four an arm could override with nothing on the page saying so.** `## Conditions` renders
-    # the *body* whenever there is more than one arm, and the run sheet carried only temperature,
-    # time and solvent — so an arm overriding the atmosphere and the pressure rendered byte for byte
-    # like one that did not. Measured: a design running arm A2 at 50 bar H2 printed a page saying
-    # 1 bar N2, with `H2` and `50` appearing nowhere on it and no check firing. This is a document a
-    # chemist runs from.
+    # The overridable setpoints beyond temperature, time and solvent, so an arm's atmosphere or
+    # pressure override is visible on the run sheet.
     atmosphere: str = ""
     pressure_bar: float | None = None
     concentration_molar: float | None = None
@@ -81,14 +64,8 @@ class ProtocolReceipt(BaseModel):
     title: str
     mode: str
     status: DesignStatus
-    # **Whether the checks below were graded against a procedure, which nothing on this payload
-    # could say.** At the request stage the service reports every protocol-only check as a
-    # *passing* note reading "not checked yet — this design holds only the ask", so a reader that
-    # counts passes reports a clearance nobody issued. The browser guarded that on `status ==
-    # "requested"`, which is a *proxy*: `advanced()` decides the status and `has_protocol` decides
-    # the stage, independently — so a `draft` or `approved` design edited back down to the bare ask
-    # keeps its status and got a green "15 checks passed" over a design with no charge table, no
-    # procedure and no evidence. This is the value the stage was actually chosen by.
+    # Whether the checks were graded against a procedure. At the request stage protocol-only checks
+    # are passing "not checked yet" notes, and status is not a reliable proxy for the stage.
     has_protocol: bool = False
     # One sentence a model can quote to the chemist without re-reading the design.
     summary: str
@@ -118,11 +95,8 @@ class ProtocolReadout(BaseModel):
     receipt: ProtocolReceipt
     design: ExperimentDesign
     markdown: str
-    # Where the run sheet is fetched from, as `export.run_sheet_path` spells it. A *path* and not
-    # the CSV itself: a read would otherwise carry the plate twice, once as prose and once as a
-    # table, and the second copy is the one a model is most likely to retype with a digit changed.
-    # Declared here and filled by the caller because `export` imports this module for the run
-    # order, so this module cannot import it back.
+    # The run sheet's path (`export.run_sheet_path`), not the CSV itself, so a model never carries a
+    # second copy of the plate to retype. Filled by the caller because `export` imports this module.
     run_sheet: str = ""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -143,10 +117,8 @@ _RUN_SHEET_ALWAYS: tuple[_Column, ...] = (
     _Column("Solvent", lambda row: row.solvent),
 )
 
-#: The four that appear only when the arms disagree about them. They had no column at all, so an arm
-#: overriding the atmosphere or the pressure rendered byte for byte like one that did not; giving
-#: them a permanent column instead would bury the varying one among three constant columns on a
-#: 96-row plate. What every arm shares is stated once under `## Conditions`.
+#: Columns that appear only when the arms disagree about them, so a varying one is not buried among
+#: constant columns. What every arm shares is stated once under `## Conditions`.
 _RUN_SHEET_WHEN_VARYING: tuple[_Column, ...] = (
     _Column("c /M", lambda row: _number(row.concentration_molar)),
     _Column("Atmosphere", lambda row: row.atmosphere),
@@ -180,20 +152,9 @@ def _arm_row(design: ExperimentDesign, arm: ProtocolArm, wells: dict[str, Well])
 def shared_setpoints(design: ExperimentDesign) -> Setpoints:
     """The conditions **every arm agrees on**, each arm resolved against the shared body first.
 
-    `## Conditions` used to render `design.base.setpoints` — what the body happens to hold, which
-    is not what anybody runs the moment an arm overrides it. The run sheet is the other half and
-    carries a column only when the arms *disagree*, so a field every arm overrode to the same value
-    fell through both: measured on three arms all set to `N2` over a body reading `air`, the page
-    said "Atmosphere: air", the run sheet had no atmosphere column, and the atmosphere the design is
-    actually run under appeared nowhere on a document a chemist runs from.
-
     A field the arms disagree about comes back at its default, so the caller drops it and the run
-    sheet's own rule shows it per row. That makes the two sections complementary by construction:
-    every stated field is in exactly one of them, and neither list has to be kept in step with the
-    other by hand.
-
-    With no arms there is nothing to resolve and the body *is* the answer, which is the intake and
-    the bodies-only protocol.
+    sheet shows it per row: every stated field appears in exactly one of the two sections by
+    construction. With no arms the body is the answer.
     """
     if not design.arms:
         return design.base.setpoints
@@ -222,25 +183,14 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
     failed = [c for c in checks if not c.passed]
     blocking = [c for c in failed if c.severity == "blocker"]
     if not design.has_protocol:
-        # A design holding only the structured ask. Saying "0 arms over 0 factors" here would read
-        # as an empty protocol rather than as an intake nobody has drafted yet. `has_protocol`
-        # rather than the condition spelled out again: this was the fourth caller deciding it
-        # separately, in the release whose own note says that is how the second and third got it
-        # wrong.
+        # A design holding only the structured ask: an intake, not an empty protocol.
         shape = "the structured ask, no procedure yet"
     elif design.is_single_experiment:
-        # **The design, not the ask.** This branched on `request.mode`, so a 4-arm 2-factor plate
-        # whose ask still said `single` summarised as "1 experiment".
-        #
-        # **And a body with no arms declared is not one experiment either.** `summarise` spelled
-        # this condition out as `== 1` for exactly that reason; consolidating the four hand-written
-        # copies onto `ExperimentDesign.is_single_experiment` (D-2026-08-30) put a `<= 1` in its
-        # place and swallowed the zero-arm case a second time — a charge table and a procedure with
-        # no arm declared reported "1 experiment", a count nobody wrote, on the one sentence
-        # `ProtocolReceipt.summary` exists so a model can quote it without re-reading the design.
-        # The predicate stays `<= 1`, which is right for the check exemptions it also drives; the
-        # distinction belongs here, where the number is being *reported* rather than used to decide
-        # that a comparison would be meaningless.
+        # The design's shape, not the ask's mode. A body with no arms declared is not "1
+        # experiment":
+        # `is_single_experiment` is `<= 1` for the check exemptions it drives, but here a count is
+        # being
+        # reported.
         shape = "1 experiment" if design.distinct_arms else "a procedure with no arms declared"
         # The runs are not lost with the word: a triplicate is one experiment and three arms, and
         # a summary saying only "1 experiment" would hide two of them.
@@ -253,10 +203,8 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
             shape += f" plus {controls} control(s)"
         if design.layout:
             shape += f" on a {design.layout.plate_format}-well plate"
-    # **Every failed check that is not a blocker was called a "warning", and the count vanished the
-    # moment a blocker existed.** A failed `note` is not a warning, and a design with one blocker
-    # and four warnings reported only the blocker — on the one sentence `ProtocolReceipt.summary`
-    # exists so a model can quote it without re-reading the design.
+    # Warnings are counted separately from blockers (and failed notes are not warnings), so the
+    # summary a model quotes reports both.
     warnings = [c for c in failed if c.severity == "warning"]
     notes = [c for c in failed if c.severity == "note"]
     counts = [
@@ -302,9 +250,8 @@ def receipt(
 #: Backtick runs, so a code span can be fenced longer than anything inside it.
 _BACKTICKS = re.compile(r"`+")
 
-#: Every character that opens a Markdown block when it starts a line. `` ` `` and `~` open a fenced
-#: code block that swallows the rest of the document; `<` opens a raw HTML block; the other six are
-#: headings, quotes, tables, lists and setext rules.
+#: Every character that opens a Markdown block at the start of a line: headings, quotes, tables,
+#: lists, setext rules, fenced code (`` ` `` and `~`) and raw HTML (`<`).
 _BLOCK_OPENERS = frozenset("#>|-*+=~`<")
 
 #: A leading ordered-list marker. CommonMark takes up to nine digits before the `.` or `)`.
@@ -314,12 +261,9 @@ _ORDERED_MARKER = re.compile(r"^(\d{1,9})([.)])")
 def _code(value: str) -> str:
     """One identifier as an inline code span no run of backticks inside it can close.
 
-    An `EvidenceRef.ref` is free text and a backtick in it closed the span early, so the rest of the
-    citation rendered as prose. **A fixed doubled fence only moved the problem one backtick along**:
-    CommonMark closes a span at the next run of *exactly* the opening length, so `` a``b `` written
-    between two doubled fences closes on its own inner pair and renders `a` as code with `b` beside
-    it as prose. The fence is therefore one longer than the longest run the value contains, and the
-    padding spaces are what let the content itself begin or end with a backtick.
+    CommonMark closes a span at the next run of exactly the opening length, so the fence is one
+    longer than the longest run in the value, with padding spaces so content may begin or end with a
+    backtick.
     """
     flat = " ".join(value.split())
     if "`" not in flat:
@@ -331,23 +275,9 @@ def _code(value: str) -> str:
 def _text(value: str) -> str:
     r"""One piece of a chemist's free text, safe to place in the document's block flow.
 
-    `core.markdown.placeable` keeps free text from restructuring a *table*; nothing protected the
-    block context, and the fields outside tables are the same browser-supplied strings. Measured: a
-    hazard line reading `## Waste\n\nQuench into water.` rendered a second `## Waste` section, so
-    the page carried two waste headings with conflicting disposal instructions — one of them forged
-    from a hazard string. A blank line inside a step ejected the rest of that step into an orphan
-    paragraph between the numbered ones.
-
-    Both come from the same two characters: a newline that ends the block, and a leading marker that
-    starts a new one. Line breaks collapse to spaces (a bullet or a numbered step is one line by
-    construction) and a leading block marker is escaped so it renders as itself. The text a chemist
-    typed is preserved; only its power to open a section is not.
-
-    **The first marker set was the ones a reader thinks of, and it left four openers out.** A
-    leading `` ` `` or `~` opens a *fenced code block*, which swallows every following line of the
-    document until it closes; a leading `<` opens a raw HTML block, which GFM renders; and a
-    leading `1.` opens an ordered list. Each is a block opener on the same terms as `#`, and three
-    of the four do more damage than the heading the set was written for.
+    Browser-supplied text could otherwise forge sections (a hazard reading `## Waste`) or split a
+    step. Line breaks collapse to spaces and a leading block marker (`_BLOCK_OPENERS` or an ordered
+    list `1.`) is escaped. The typed text is preserved; only its power to open a block is not.
     """
     flat = " ".join(value.split())
     if flat[:1] in _BLOCK_OPENERS:
@@ -358,14 +288,8 @@ def _text(value: str) -> str:
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     """A GitHub-flavoured Markdown table, or an empty string when there are no rows.
 
-    The grid and the cell escaping are `core.markdown`'s — this document's tables carry the same
-    chemist free text as the campaign note and the probe reports, and the escaping that keeps a `|`
-    from adding a cell was written here three times over before it had one home.
-
-    The zero-row rule stays here, because it is a claim about *this* document rather than about
-    tables: a run sheet with no charge lines has no charge table, where a probe report with no
-    findings still prints its header to say it asked. `core.markdown` renders the header either
-    way and leaves the choice to whoever knows which sentence is true.
+    Grid and cell escaping are `core.markdown`'s. The zero-row rule is this document's own: a run
+    sheet with no charge lines has no charge table.
     """
     if not rows:
         return ""
@@ -375,20 +299,9 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 def _number(value: float | None) -> str:
     """One number as a chemist reads it, and never in exponent form inside laboratory range.
 
-    `%g` alone turns a kilogram-scale charge into `1.23457e+06` mg. `.10g`, which replaced it,
-    fixed that and bought false precision everywhere else — a 1/6 M concentration rendered
-    `0.1666666667 M` and a 200/3 yield `66.66666667%`, ten significant figures off a balance that
-    reads four, on the document a chemist runs from. A whole number is printed whole (no exponent
-    below 1e15, which is past any laboratory quantity).
-
-    **Six significant figures is what `%.6g` gives and is not what this function gives above 1e6**,
-    and the docstring claimed otherwise for as long as the branch below existed. `1234567.8` comes
-    back as `'1234567.8'` — eight figures — because inside `[1e-4, 1e15)` the number is written out
-    positionally rather than in exponent form. That is deliberate rather than an oversight: `%.6g`
-    prints both 999999.5 and 1000000.5 as `1e+06`, and those are two different weigh-outs on a
-    document somebody weighs from. Six figures is the ceiling below 1e6, where `%.6g` has decimals
-    to spend on it; above 1e6 the integer part is already six figures and trimming further would
-    collide.
+    Six significant figures below 1e6; inside `[1e-4, 1e15)` larger numbers are written out
+    positionally so distinct weigh-outs (999999.5 vs 1000000.5) never collapse to one `1e+06`.
+    Whole numbers print whole. Outside that range an exponent is the honest form.
     """
     if value is None:
         return ""
@@ -397,11 +310,8 @@ def _number(value: float | None) -> str:
     text = f"{value:.6g}"
     if "e" not in text and "E" not in text:
         return text
-    # **`%g`'s exponent is unreadable on a bench sheet, and it collides.** The docstring's own
-    # example still reproduced: a kilogram-scale charge printed `1.23457e+06` mg, and — worse —
-    # 999999.5 and 1000000.5 mg both printed `1e+06`, two different weigh-outs shown as one number
-    # on a document a chemist weighs from. Inside the range a laboratory quantity actually occupies,
-    # print it out; outside it an exponent is the honest form (1e-05 mmol is how that is written).
+    # Positional inside laboratory range: `%g`'s exponent is unreadable on a bench sheet and
+    # collides neighbouring values.
     if 1e-4 <= abs(value) < 1e15:
         return f"{value:.4f}".rstrip("0").rstrip(".")
     return text
@@ -414,12 +324,10 @@ def _common_unit(factor: Factor) -> str:
 
 
 def _level(level: FactorLevel) -> str:
-    """One level as the Factors table shows it — its label, its value, and the value's own unit.
+    """One level as the Factors table shows it: its label, its value, and the value's own unit.
 
-    `FactorLevel.unit` was dropped entirely while the `Unit` column showed `Factor.unit`, so levels
-    of `0` and `100` °C under a factor declaring no unit rendered as bare numbers beside a column
-    truthfully reporting "no unit" — which is exactly the bare-number-reads-as-an-equivalent failure
-    that column was added to prevent.
+    The level's unit is shown because the column shows only `Factor.unit`; a bare number would read
+    as an equivalent.
     """
     if level.value is None:
         return level.label
@@ -438,17 +346,13 @@ def _step_conditions(step: ProtocolStep) -> str:
 
 
 def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None = None) -> str:
-    """The design as a document a chemist reads — the form a report or a note body carries.
+    """The design as a document a chemist reads: the form a report or a note body carries.
 
-    Deliberately not what a tool returns (see the module docstring): this is for a human reader and
-    for anything that renders one, and it is lossy in the direction a document should be — it shows
-    the shared body once and the arms as a table, rather than N protocols.
+    Not what a tool returns. Lossy in the right direction: the shared body once, the arms as a
+    table.
     """
     request = design.request
-    # **Every one of these is browser-supplied free text and none of them was escaped.** Measured,
-    # a title reading "T\n\n## Forged" put a second `## Forged` section on the page and a goal did
-    # it again — `_text` was applied to the steps, the hazards and the waste and to nothing above
-    # them, which is the half of the document a chemist reads first.
+    # Title and goal are browser-supplied free text too, so they go through `_text`.
     parts: list[str] = [f"# {_text(request.title)}", "", f"**Goal.** {_text(request.goal)}", ""]
     if request.reaction_smiles:
         # `_code`, not a bare span: a backtick in a SMILES closes the span and spills the rest.
@@ -460,20 +364,10 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         # chemist reads did not mention.
         parts += ["**Ruled out.** " + ", ".join(_text(f) for f in request.forbidden), ""]
 
-    # **The conditions the arms actually run at, not the ones the body happens to hold.**
-    # `## Conditions` rendered `base.setpoints` unconditionally and the run sheet carries a column
-    # only when the arms disagree, so a value every arm overrode to the *same* thing appeared in
-    # neither place while the body's own value printed as fact. Measured on three arms all set to
-    # N2 over a body reading `air`: the page said "Atmosphere: air", the run sheet had no
-    # atmosphere column, and nothing anywhere named the atmosphere the design is run under.
-    #
-    # The one-arm case was the first half of this and is now the same rule: a single experiment
-    # whose arm overrode the body got neither the body's value nor a run sheet, so the document
-    # said 80 °C / 16 h / dioxane for an arm the design runs at 120 °C / 2 h / toluene.
-    #
-    # So this section shows what every arm agrees on, resolved; a field they disagree about is
-    # dropped here and the run sheet's own rule picks it up. The two are complementary by
-    # construction rather than by two lists somebody keeps in step.
+    # The conditions the arms actually run at (`shared_setpoints`), not what the body holds: a value
+    # every arm overrides identically would otherwise appear nowhere, and a single arm's override
+    # would
+    # be misreported. Fields the arms disagree about are left to the run sheet.
     solo = design.arms[0] if len(design.arms) == 1 else None
     points = shared_setpoints(design)
     stated = [
@@ -505,9 +399,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
     if stated:
         heading = "## Conditions" if solo is None else f"## Conditions ({solo.arm_id})"
         parts += [heading, "", *[f"- **{k}:** {v}" for k, v in stated], ""]
-        # A reader must not take this list for the whole of the conditions when it is not. Said
-        # only when a field was actually dropped, so the ordinary page carries no caveat about a
-        # case it is not in.
+        # Said only when a field was dropped, so this list is never mistaken for all the conditions.
         if any(design.setpoints_for(arm) != points for arm in design.arms):
             parts += ["*The conditions every arm shares; the run sheet carries what varies.*", ""]
         if solo is not None and solo.note:
@@ -546,10 +438,9 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             "## Factors",
             "",
             _table(
-                # `Unit` and the per-level rationale were both dropped. Every other number in this
-                # document carries a unit, which is exactly what makes a bare `1` in a levels
-                # column read as an equivalent — and `FactorLevel.rationale` is what `models.py`
-                # calls "the single most useful sentence on a screening plate".
+                # `Unit` keeps a bare number from reading as an equivalent; the per-level rationale
+                # is the most
+                # useful sentence on a screening plate.
                 ["Factor", "Kind", "Role", "Unit", "Levels", "Why"],
                 [
                     [
@@ -567,10 +458,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         ]
 
     rows = run_sheet_rows(design)
-    # **Every design with arms gets a run sheet, and this comment used to say so over an unchanged
-    # gate.** The gate really was left as it was, so a single-arm design still had no run sheet —
-    # and for a lone *negative control* the words `control` and `negative` then appeared nowhere on
-    # the page. `if rows:` is what the sentence claimed.
+    # Every design with arms gets a run sheet, including a single arm (so a lone control is named).
     if rows:
         factor_names = [f.name for f in design.factors]
         # Always the three a bench sheet carries, plus any of the other four the arms disagree
@@ -684,12 +572,8 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         ]
 
     if checks:
-        # **Failed checks, plus every `note`.** Listing failures only is what made a finding
-        # invisible, and flipping four checks to `_fail` was the wrong half of that fix: a note is
-        # advisory content rather than a verdict, so `coverage_is_stated`'s sentence about what a
-        # reduced design confounds belongs on the page whether or not it "failed". That check is a
-        # passing note again, and a correct fractional plate no longer reports a failure it cannot
-        # clear.
+        # Failed checks plus every `note`: a note is advisory content (such as what a reduced design
+        # confounds), shown whether or not it failed.
         failed = [c for c in checks if not c.passed or c.severity == "note"]
         parts += ["## Checks", ""]
         parts += (

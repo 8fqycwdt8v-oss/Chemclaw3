@@ -4,6 +4,8 @@
 D-2026-07-31-two-spellings-of-one-molecule (the standardization pipeline and its version-bump
 migration) · **Implements:** the full-codebase review's `core/chem.py` finding
 
+**Superseded-by:** [D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken](D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken.md) (in part)
+
 ## Context
 
 D-2026-07-31 introduced `standardize()` to collapse two spellings of one molecule onto one

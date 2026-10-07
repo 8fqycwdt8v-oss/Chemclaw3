@@ -1,47 +1,17 @@
-"""Bounded growth for the artifact store, ordered by what a blob is worth (STO-6).
+"""Bounded growth for the artifact store, ordered by what a blob is worth.
 
-`durable/retention.py` prunes by age and explicitly refuses to touch `calculation_results`,
-because D-011 ("never compute twice") is a correctness and cost guarantee and an age cutoff is the
-wrong instrument for a cache. That refusal stands and this job does not weaken it: **nothing here
-deletes a `calculation_results` row.** It reclaims *blobs* — the by-products in `artifact_blobs` —
-and for a result whose row holds the whole answer with only a by-product offloaded, a reclaimed
-blob costs at most a recomputation of the by-product, while the answer itself stays cached.
+Never deletes a `calculation_results` row (D-011). It reclaims blobs in `artifact_blobs`; for a
+row that holds its answer inline, a reclaimed blob costs at most recomputing a by-product.
+`science.calc.artifacts.ArrayOffloadingStore` is the exception: it treats a missing blob as a
+full cache miss, so reclaiming one evicts that answer — an accepted trade.
 
-That is not every calculation, though, and the one exception is exactly the reason this store
-exists: `science.calc.artifacts.ArrayOffloadingStore` (built for `hessian()`, D-124) stores *only*
-a content hash for each packed array in the row and treats a missing blob as a full cache miss —
-`ArrayOffloadingStore.get` returns `None`, not a partial result — so reclaiming that blob evicts
-the answer along with it, not merely a by-product of it. "The answer itself stays cached forever"
-is the design for a row that carries its answer inline; it is not what this job's own contract
-promises for a row whose answer *is* an offloaded array.
+Blobs are ordered by `compute_seconds` (the cost of the run that produced them) over idle time:
+cheap, long-unread blobs go first. Two independent triggers, each disabled by zero:
 
-A result row is the answer; an ordinary artifact is an optimization on top of it, and
-`chemclaw.science.calc.artifacts` states in its own contract that such an artifact may be absent —
-a reader that finds one gone treats it as a miss and recomputes, so this job can reclaim space
-without any reader having to learn about it. `ArrayOffloadingStore` is the one place that contract
-is load-bearing for the answer rather than for an optimization, and it is a deliberate, accepted
-trade (D-2026-08-16, "the physics leaves, the cache stays") rather than an oversight here.
+- `artifact_store_max_bytes` — a size ceiling; evict the least valuable blobs until it fits.
+- `artifact_evict_idle_days` — an idle floor; a blob unread that long goes regardless.
 
-**Its largest producer left, and the policy is unchanged by that.**
-`D-2026-08-16-the-physics-leaves-the-cache-stays` moved the Hessians — the multi-megabyte blobs this
-job was sized against — to `Chemclaw3-mcp`, which persists nothing and returns them on the wire. So
-what remains here is whatever the QM path and any later producer store. The mechanism is the same
-and the ordering below still applies; what changed is how much there is to reclaim.
-
-**What it orders by.** `compute_seconds` — the wall time of the run that produced the blob, which
-D-124 started recording precisely so this job would not have to guess — divided into how long the
-blob has sat unread. A cheap artifact nobody has opened in months goes first; a Hessian that cost
-four minutes and was read yesterday goes last. This is the cost policy `retention.py` said a cache
-needs and correctly declined to fake.
-
-Two independent triggers, either of which may be disabled by setting it to zero:
-
-- `artifact_store_max_bytes` — a size ceiling. Evict the least valuable blobs until the store fits.
-- `artifact_evict_idle_days` — an idle floor. A blob nobody has opened in that long goes regardless
-  of the ceiling, so a store that never reaches its limit still does not accumulate forever.
-
-A blob is deleted, not its links: `calculation_artifacts.content_hash` is `ON DELETE CASCADE`, so
-the link rows go with it and no dangling reference survives.
+Link rows go with the blob via `ON DELETE CASCADE`, so no dangling reference survives.
 """
 
 from datetime import timedelta
@@ -65,14 +35,10 @@ _EVICT_IDLE = """
     RETURNING stored_bytes
 """
 
-# The size ceiling, least valuable first. `value` is the cost of losing a blob per day it has gone
-# unread: the most expensive calculation feeding it, over its idle time. `COALESCE(..., 0)` puts a
-# blob with no recorded cost at the bottom — it arrived before costs were recorded, or from a path
-# that does not time itself, and either way there is nothing to argue it is worth keeping.
-#
-# The window sums the sizes of everything *more* valuable, so the rows selected are exactly those
-# past the point where the store still fits. One statement, so nothing races between deciding and
-# deleting.
+# The size ceiling, least valuable first. `value` is the most expensive calculation feeding a
+# blob over its idle time; a blob with no recorded cost sorts last-valued. The window sums the
+# sizes of everything more valuable, so the selected rows are exactly those past the ceiling, in
+# one statement so nothing races between deciding and deleting.
 _EVICT_TO_FIT = """
     WITH ranked AS (
         SELECT
@@ -123,21 +89,11 @@ def _reclaimed(rows: list[tuple[int]]) -> tuple[int, int]:
 @durable_activity("background")
 @activity.defn
 async def evict_cold_artifacts() -> EvictionOutcome:
-    """Reclaim artifact blobs, beating while the pass runs so a dead worker is noticed.
+    """Reclaim artifact blobs, heartbeating while the pass runs so a dead worker is noticed.
 
-    The sweep itself is `_evict_cold_artifacts`; this is the wrapper its three siblings on this
-    queue already had and it did not. `prune_expired_rows`, `reindex_notes_activity` and
-    `drain_result_publications` all beat; this ran two `DELETE`s over the whole
-    `artifact_blobs`x`calculation_artifacts` join under a ten-minute `retention_timeout_seconds`
-    and said nothing in between, so a worker that died thirty seconds in was invisible for the
-    remaining nine and a half minutes — on the one job here that runs entirely unattended.
-
-    The "opaque single call" case `durable/heartbeat.py` was extracted for: two statements the
-    database is executing, with no unit boundary to report progress at, so the honest signal is
-    "still running". No setting of its own — the activity is budgeted by `retention_timeout_seconds`
-    and `Settings._the_heartbeat_fits_inside_the_budget_it_reports_within` already keeps
-    `background_activity_heartbeat_timeout_seconds` strictly below it, so the beat cannot drift out
-    of the budget it reports within.
+    The two `DELETE`s have no unit boundary to report progress at, so the beat only says "still
+    running". Budgeted by `retention_timeout_seconds`; settings validation keeps the heartbeat
+    timeout below it.
     """
     return await beating(
         _evict_cold_artifacts(),
@@ -149,9 +105,7 @@ async def evict_cold_artifacts() -> EvictionOutcome:
 async def _evict_cold_artifacts() -> EvictionOutcome:
     """Reclaim artifact blobs by idle time and by size ceiling; return what was removed.
 
-    Idle eviction runs first so the size pass only has to consider blobs still worth ranking. Both
-    are single statements against `artifact_blobs`, and `calculation_results` is never touched —
-    see the module docstring for why that distinction is the whole point.
+    Idle eviction runs first so the size pass only ranks blobs still present.
     """
     outcome = EvictionOutcome()
     idle_days = settings.artifact_evict_idle_days
@@ -177,18 +131,9 @@ async def _evict_cold_artifacts() -> EvictionOutcome:
 
 
 @durable_workflow("background")
-# **Deliberately left able to park** (D-2026-08-27). Reached only from the `artifact-eviction`
-# Schedule, so a parked run is bounded by `schedule_run_timeout_seconds`; nothing reads its
-# result; and one pass is an unconditional policy sweep, so a fire it skips costs a day of
-# blobs that the next pass reclaims with the rest. There is no party a parked run misleads —
-# the harm D-2026-08-16 measured was a chemist told `running`, and no chemist is here — and a
-# parked run is not silent either: `ScheduleHealth.last_outcome` reports the ceiling's kill as
-# `TIMED_OUT` where a declared failure reads `FAILED`, so an operator reading that surface sees a
-# terminal state either way. This comment asserted the opposite — that the field "reports both
-# terminal states alike, so it separates neither" — until it was measured against a live broker:
-# one schedule parked and one raising reported exactly those two names, and
-# `tests/test_schedules.py` now pins both. The stance is unchanged: it never rested on that clause.
-# Changing it because the neighbours changed is how a per-workflow decision turns into a sweep.
+# Deliberately left able to park: reached only from the `artifact-eviction` Schedule, so a run is
+# bounded by `schedule_run_timeout_seconds`, nothing reads its result, and a skipped pass is
+# caught up by the next. `ScheduleHealth.last_outcome` reports a parked run as `TIMED_OUT`.
 @workflow.defn
 class ArtifactEvictionWorkflow:
     """Keep the artifact store within its cost policy on a cadence (STO-6)."""
@@ -200,11 +145,9 @@ class ArtifactEvictionWorkflow:
             evict_cold_artifacts,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            # The beats the activity now sends do nothing for failure detection without this, for
-            # the reason `RetentionWorkflow` states beside the same pair of numbers: a dead worker
-            # would be noticed only when the ten-minute start-to-close budget expired. The beat
-            # interval is derived from this same setting (`durable/heartbeat.py::beating`), so the
-            # two cannot drift apart.
+            # Without a heartbeat timeout the beats detect nothing; a dead worker would surface only
+            # when the
+            # start-to-close budget expired.
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),

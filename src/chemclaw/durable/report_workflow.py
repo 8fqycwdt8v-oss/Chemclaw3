@@ -1,11 +1,8 @@
-"""Durable development-report workflow (plan steps 5b.5, 5b.6) on the background queue.
+"""Durable development-report workflow on the background queue.
 
-The report is a graph of sections; here each section is a Temporal activity, so a
-long report (hundreds of retrievals over years of data) is resumable and survives worker
-restarts — the same fire-and-forget durability as the QM spine (Phase 1). The workflow
-retrieves section by section, then a final activity renders the draft and records it through
-the note-write path (5b.7). Retriever construction (the production sources) lives in the activities;
-the factory is module-level so tests swap it.
+Each report section is its own child workflow, so a long report resumes section by section after
+a worker restart; a final activity renders the draft and records it as a note. The retriever
+factory is module-level so tests swap it.
 """
 
 import asyncio
@@ -77,15 +74,9 @@ logger = logging.getLogger(__name__)
 def default_retrievers() -> list[SourceRetriever]:
     """The production source retrievers: every active text source, plus reaction fingerprint.
 
-    The text half comes from the same config-driven registry `chemclaw.agent.research_tools.
-    gather_evidence` fans out over (`settings.data_sources` — `graph` alone by default, or
-    `graph,vector,lexical` for hybrid retrieval), not a hardcoded `GraphRetriever()`: a report
-    section's query is prose exactly like a conversational turn's, so it needs the same
-    fix for the same literal-substring-match limitation, and a deployment that turns on hybrid
-    retrieval must not have to remember to do it in two places (D-018). The reaction-fingerprint
-    retriever is always appended — harmless on a prose query (it answers only reaction-SMILES
-    queries, `[]` otherwise) and needed when a section's query names a reaction to search by
-    structure.
+    The text half comes from the same `settings.data_sources` registry `gather_evidence` uses, so a
+    deployment that enables hybrid retrieval gets it in reports too. The reaction-fingerprint
+    retriever answers only reaction-SMILES queries and returns `[]` otherwise.
     """
     return [
         *active_retrieve_sources(),
@@ -98,25 +89,15 @@ def default_retrievers() -> list[SourceRetriever]:
 async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
     """Retrieve one report section's evidence across the production sources, as the requester.
 
-    The identity is stamped here because this is where an entitlement is actually checked:
-    `ShareDocumentRetriever._entitled()` reads the ambient actor's roles, and with none set it
-    correctly declines — returning `[]` without reaching the index. `gather_section` only
-    concatenates, so that is indistinguishable from a source with no matches, and `retrieval_failed`
-    stays False. The result was a draft that read as a complete sweep of every internal source while
-    a gated share had been skipped in silence.
-
-    A report is *authored* by a user but *run* by the service, and stamping the requester's roles
-    onto a background run widens what that run can read. That is the right trade here and not a
-    general one: the sections are the requester's own question, the draft goes to them, and the
-    alternative on offer was not "read less" but "read less and say nothing about it". A scheduled
-    report has no requester, stamps nothing, and is bounded exactly as before.
+    The actor is bound here because entitlement-gated retrievers read the ambient identity and
+    decline silently without one, which would read as a source with no matches. A scheduled report
+    has no requester and stamps nothing.
     """
     if not request.requested_by:
         return await gather_section(request.section, default_retrievers())
     # Empty roles, never `request.requested_roles`: a workflow payload is relayed data, not a
-    # verified claim, so binding roles from it would let anyone who can enqueue this workflow read
-    # entitlement-gated sources as any role. The actor is bound for attribution; authorization fails
-    # closed on the empty set (security-review: roles do not cross the durable boundary unsigned).
+    # verified claim. The actor is bound for attribution; authorization fails closed on the empty
+    # set.
     token = set_current_identity(request.requested_by, frozenset())
     try:
         return await gather_section(request.section, default_retrievers())
@@ -131,33 +112,12 @@ async def record_report_note(
 ) -> str:
     """Render the gathered report as a recorded `report` note; return the reference.
 
-    **It was called `propose_report` and it proposed nothing**
-    (`D-2026-09-14-an-activity-name-is-a-wire-name-so-it-is-renamed-in-two-releases`).
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the gate and the proposal queue
-    behind it; wave 15 corrected every docstring on this path and could not correct this, because
-    the name is not prose — it is the string a Temporal history schedules against. `propose_report`
-    below is the compatibility alias that keeps an in-flight history resolvable for one deployment
-    cycle, and the release procedure for removing it is in that ADR.
-
-    `correlation_id` is never read in this body, and that is the shape rather than an oversight:
-    `durable/interceptor.py` binds an activity's ids from its *own* arguments, reading the four
-    activities that carry them as bare strings off the function signature, so declaring the
-    parameter is the whole wiring. What it buys is that the turn's id reaches the log lines this
-    write emits — a draft that could otherwise be joined to the chemist but not to the question
-    they asked.
-
-    `requested_by` stamps the ambient identity for the write, for the same reason
-    `publish_memory_note_activity` takes one, and **the reason is no longer the one written here
-    first**: both stamps existed for the PR-gate's `NoteProposal.actor`, and
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted that record. What reads them now
-    is `core/logging.ContextFilter`, so the stamp is what ties a durable note write's log lines back
-    to the chemist and the turn that asked for it.
+    `correlation_id` is not read in the body: `durable/interceptor.py` binds an activity's ids from
+    its parameters by name, so declaring it is the wiring that puts the turn's id on this write's
+    log lines. `requested_by` stamps the ambient identity so the log lines tie back to the chemist.
     """
-    # `drafted_on` is what gets the note past `durable/digest._is_new`, which reads an absent
-    # `valid_from` as open-ended and therefore as "not news" — so an undated report is delivered
-    # only to a subscriber who has never been told anything. A report's validity date and its
-    # arrival date are the same day by construction, and this is activity code, so it may read a
-    # clock: `workflow_safe_today` is the named seam for exactly that.
+    # `drafted_on` sets `valid_from`; `durable/digest._is_new` treats an undated note as not news.
+    # Activity code may read the clock, through `workflow_safe_today`.
     drafted = report_note(report, drafted_on=workflow_safe_today())
     if not requested_by:
         return await record_note(drafted, default_writer())
@@ -171,22 +131,12 @@ async def record_report_note(
 @durable_activity("background")
 @activity.defn(name="propose_report")
 async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
-    """The old Temporal name for `record_report_note`, kept for exactly one deployment cycle.
+    """The old Temporal name for `record_report_note`, kept for one deployment cycle.
 
-    **A registered activity name is a wire name.** An in-flight `DevelopmentReportWorkflow` history
-    that has scheduled `propose_report` and not yet completed it resolves against whichever worker
-    picks the task up next; a worker that no longer offers the name fails the activity with
-    `NotFoundError` and the workflow retries it forever. So the rename is two releases, not a
-    commit: this release offers **both** names and schedules the new one, and a later release —
-    after `background-jobs` has drained every history that scheduled the old one — deletes this
-    function. `docs/planning/DEFERRED.md` carries the trigger.
-
-    The signature is identical on purpose, including `correlation_id`, which no body reads:
-    `durable/interceptor.py` binds an activity's ids by *parameter name* off the signature, so an
-    alias that dropped it would make a replayed old task the one unattributed write on this path.
-
-    Delegates rather than duplicating: two functions writing a note is two chances for them to
-    disagree about what a `report` note is.
+    A registered activity name is a wire name: an in-flight history that scheduled `propose_report`
+    fails forever on a worker that no longer offers it. Delete once `background-jobs` has drained
+    (trigger in `docs/planning/DEFERRED.md`). The signature, including `correlation_id`, matches so
+    the interceptor binds ids the same way.
     """
     return await record_report_note(report, requested_by, correlation_id)
 
@@ -213,9 +163,8 @@ EXHIBIT_SESSION = "exhibit_session"
 def report_exhibit_id(workflow_id: str) -> str:
     """The artefact id a report run writes: `xb-` and the first 16 hex of sha256(workflow id).
 
-    Deterministic, so a retried activity — and a replayed workflow — names the artefact the first
-    attempt wrote rather than minting a second one; and in the minted shape, so every reader that
-    holds an id to `EXHIBIT_ID` accepts it.
+    Deterministic, so a retried activity or replayed workflow names the same artefact, and in the
+    `EXHIBIT_ID` shape.
     """
     return f"xb-{hashlib.sha256(workflow_id.encode('utf-8')).hexdigest()[:16]}"
 
@@ -225,17 +174,10 @@ def report_exhibit_id(workflow_id: str) -> str:
 async def record_report_exhibit(request: ReportExhibitInput) -> str:
     """Show the finished report in the session that asked, as a `document` artefact; return its id.
 
-    **Idempotent on a retry**: the id is the workflow's, so a second attempt after a committed but
-    unacknowledged first one gets the same artefact back (`ExhibitStore.create`'s create-or-return)
-    and the push lands on the same `dedupe_key`. **Skipped, with a log line and `""`**, when the
-    artefact cannot be shown: no durable session store (an in-memory one lives in the front door's
-    process, not this worker's), the session deleted since it asked, a requester who is not the
-    session's owner or a member of it, the session at its artefact
-    cap, or a draft over the spec cap — the report note is the durable result either way, and the
-    chemist still has it.
-
-    The `exhibit` push on `GET /sessions/{id}/events` is best effort inside the activity, so a
-    mailbox that cannot be written never costs the id the job summary carries.
+    Idempotent on retry (the id derives from the workflow). Returns `""` with a log line when the
+    artefact cannot be shown: no durable session store, session deleted, requester not a
+    participant, session at its artefact cap, or draft over the spec cap. The report note is the
+    durable result either way; the event push is best effort.
     """
     if settings.session_store != "postgres":
         log_event(logger, "report.exhibit_skipped", "no durable session store", reason="memory")
@@ -251,11 +193,8 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
             session=request.session_id,
         )
         return ""
-    # The payload names the session and the requester, and nothing re-checked that the one may
-    # write into the other: anything that can start a workflow on this queue could put a document
-    # into any conversation, authored as anybody. The rule is `resolve_session`'s — the owner or a
-    # member the owner let in — asked of the session as it stands now, so a member removed while
-    # the report ran is refused as the front door would refuse them.
+    # The payload is relayed data, so check that the requester may write into this session as it
+    # stands now (owner or member), as the front door would.
     if not await participant_permits(request.session_id, owner, request.requested_by):
         log_event(
             logger,
@@ -292,9 +231,7 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
             session=request.session_id,
         )
         return ""
-    # Counted on a retry that found the first attempt's artefact too — the store's create-or-return
-    # cannot say which it did, and an over-count on a committed-then-retried attempt is the rare
-    # side of a counter whose question is the agent's share of writes.
+    # Also counted on a retry that found the existing artefact; create-or-return cannot tell which.
     record_write(view, "created")
     announced = ExhibitSignal(
         exhibit_id=view.exhibit_id,
@@ -326,9 +263,7 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
 async def _report_exhibit_best_effort(request: ReportExhibitInput) -> str:
     """Run `record_report_exhibit`, and never fail the report because the artefact did not land.
 
-    The `notify_session_best_effort` discipline: the note is the report's result and the artefact
-    is how it is shown, so a failure to show it is a warning and an empty id — and a cancellation
-    is re-raised as the workflow's own, never swallowed as a failed courtesy.
+    A failure is a warning and an empty id; a cancellation is re-raised, never swallowed.
     """
     try:
         return await workflow.execute_activity(
@@ -351,22 +286,16 @@ async def _report_exhibit_best_effort(request: ReportExhibitInput) -> str:
 
 
 @durable_workflow("background")
-# Declared because the wait a parked section costs is the requesting chemist's. A section that
-# fails is dropped by `fan_out` and `_reconcile` turns the gap into a visible `retrieval_failed`
-# marker; a section that *parks* is dropped only when `fan_out_child_timeout_seconds` expires —
-# an hour per batch — while `DevelopmentReportWorkflow` waits and the requester polls. Same
-# outcome, an hour sooner, and the degradation contract below is what makes it safe.
-# D-2026-08-27.
+# Any exception fails the workflow instead of parking it: a parked section would hold the
+# requester for the whole fan-out timeout, while a failed one is reconciled into a visible
+# `retrieval_failed` marker.
 @workflow.defn(failure_exception_types=[Exception])
 class ReportSectionWorkflow:
-    """Retrieve one report section durably — the fan-out unit of a report (plan F10-D2).
+    """Retrieve one report section durably — the fan-out unit of a report.
 
-    Each section is its own child workflow so a long report resumes section by section after a
-    worker restart. A section whose retrieval exhausts its retries does not fail (and so is not
-    silently dropped) the report: the child degrades to a placeholder section marked
-    `retrieval_failed`, so the assembled draft shows the gap explicitly for the chemist who reads
-    it. The activity carries the single retry boundary (`BAD_DATA_RETRY`); the fan-out does not
-    layer a second child-level retry on top.
+    A section whose retrieval exhausts its retries degrades to a placeholder marked
+    `retrieval_failed` rather than failing the report. The activity carries the single retry
+    boundary (`BAD_DATA_RETRY`); no child-level retry is layered on top.
     """
 
     @workflow.run
@@ -378,12 +307,8 @@ class ReportSectionWorkflow:
                 retrieve_section,
                 request,
                 start_to_close_timeout=timedelta(seconds=settings.report_section_timeout_seconds),
-                # **The fan-out wait, not core's hour**: this child runs under
-                # `fan_out_child_timeout_seconds`, and core's flat hour equalled that ceiling, so
-                # the SCHEDULE_TO_START expiry the `except` below degrades on could never be
-                # reached — the child died as an execution timeout, which is delivered to nobody.
-                # `fan_out_queue_wait_timeout` is the ceiling's headroom, so `q + w` fits it by
-                # construction.
+                # The fan-out queue wait, which fits inside the child's execution timeout so the
+                # SCHEDULE_TO_START expiry the `except` below degrades on is reachable.
                 schedule_to_start_timeout=fan_out_queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
@@ -402,18 +327,9 @@ def _reconcile(
 ) -> list[SynthesizedSection]:
     """One section per requested section, in request order — a gap is marked, never omitted.
 
-    **The degradation contract is enforced here because it is claimed here.**
-    `ReportSectionWorkflow` degrades gracefully for the one failure it catches, `ActivityError`;
-    every other way a child can
-    end — its `execution_timeout` at `fan_out_child_timeout_seconds`, a cancellation, a failure
-    raised outside the `execute_activity` call — is *dropped* by `fan_out`, which is that helper's
-    documented contract and returns a shorter list. The draft then omitted the section while the
-    summary reported the smaller count, so a chemist reading the draft could not tell a missing
-    section from one nobody asked for. Making the invariant depend on which exception a child
-    happened to raise is what made it untrue.
-
-    Matched by heading and consumed in order, so a report that legitimately repeats a heading gets
-    one placeholder for each child that did not come back rather than one for all of them.
+    `fan_out` drops any child that did not return (timeout, cancellation, non-activity failure), so
+    the degradation contract is enforced here rather than in the child. Matched by heading and
+    consumed in order, so a repeated heading gets one placeholder per missing child.
     """
     by_heading: dict[str, list[SynthesizedSection]] = {}
     for synthesized in retrieved:
@@ -424,9 +340,7 @@ def _reconcile(
         if got:
             reconciled.append(got.pop(0))
             continue
-        # Not logged again: `fan_out` already logs and counts every child it drops
-        # (`chemclaw_fan_out_children_dropped_total`). What is missing there is the *report*, and
-        # that is what this returns.
+        # Not logged again: `fan_out` already logs and counts every child it drops.
         reconciled.append(
             SynthesizedSection(
                 heading=section.heading,
@@ -439,12 +353,8 @@ def _reconcile(
 
 
 @durable_workflow("background")
-# Declared: `request_development_report` starts this for a named chemist with no
-# `execution_timeout` and hands back an id to poll, and it returns the `ConnectorJobResult`
-# envelope precisely so `get_durable_job_status` can answer for it — which, for a parked run,
-# means answering `running` for ever. It also runs real logic outside an activity
-# (`_reconcile`), so the plain exception this guards against is not hypothetical.
-# D-2026-08-27.
+# Any exception fails the workflow instead of parking it: it has no `execution_timeout`, so a
+# parked run would poll as `running` forever, and `_reconcile` runs logic outside an activity.
 @workflow.defn(failure_exception_types=[Exception])
 class DevelopmentReportWorkflow:
     """Draft a report durably, fanning sections out to child workflows, then record the draft."""
@@ -453,23 +363,9 @@ class DevelopmentReportWorkflow:
     async def run(self, request: ReportRequest) -> ConnectorJobResult:
         """Fan each section out to a child workflow, then record the assembled draft note.
 
-        Sections are retrieved as independent child workflows (bounded parallelism). Each child owns
-        its own retry (the activity's `BAD_DATA_RETRY`) and degrades a failed section to a visible
-        `retrieval_failed` marker, so every requested section appears in the draft in request order:
-        a failure is shown, never silently missing (F10-D2). No child-level retry is layered here.
-
-        **It returns the connector envelope, though it is not a connector's workflow** (D-115). The
-        envelope is what `get_durable_job_status` reads, so a bare note-ref string made the report
-        the one durable job a chemist could poll to `completed` and then have no tool that hands
-        over the answer. Adopting the shape closes that, and it is the whole benefit the report
-        would have got from moving into a bundle — the isolation half buys nothing, because its
-        closure (the graph, the retrievers, the fingerprint store) is what core keeps for
-        `gather_evidence` regardless.
-
-        It still writes its own note rather than returning one for core to write, and that is
-        correct here for the reason it would be wrong in a bundle: the note *reference* is this
-        workflow's result, so publishing is the work, not a side effect — and this is core's own
-        workflow, on the side of the boundary the note-write path lives on.
+        Every requested section appears in request order, a failed one as a `retrieval_failed`
+        marker. Returns the connector envelope so `get_durable_job_status` can hand over the result.
+        The workflow writes its own note because the note reference is its result.
         """
         sections = await fan_out(
             ReportSectionWorkflow,
@@ -485,21 +381,16 @@ class DevelopmentReportWorkflow:
             id_prefix="section",
         )
         report = Report(title=request.title, sections=_reconcile(request.sections, sections))
-        # Rendered once, and read for both halves: the activity records it as a note, and the
-        # delivery below attaches the same bytes. `report_note` is pure rendering over a value this
-        # workflow already holds, so calling it in workflow code emits no command.
+        # Rendered once and used for both the note and the delivery attachment; `report_note` is
+        # pure, so calling it in workflow code emits no command.
         drafted = report_note(report)
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
         note_ref = await publish_note(
             record_report_note, [report, request.requested_by, request.correlation_id]
         )
-        # **Out of the building too, when a deployment has said where.** A report is the one
-        # durable job whose product is a document a chemist asked for by name, and until this
-        # line the `report` kind `deliver/message.py` declares had no producer at all: the
-        # finished draft reached `session_events` and stopped there, so a chemist who closed
-        # the tab while the fan-out ran learned about it by asking. Best-effort and last,
-        # because the note is the durable handover and this is the courtesy copy.
+        # Deliver the report out of the building when a deployment configured a channel. Best effort
+        # and last: the note is the durable handover, this is the courtesy copy.
         await deliver_best_effort(
             OutboundMessage(
                 recipient=request.requested_by,
@@ -510,25 +401,14 @@ class DevelopmentReportWorkflow:
                 ),
                 kind="report",
                 correlation_id=request.correlation_id,
-                # **The draft itself, because a note id is not a deliverable.** This message went
-                # out saying "recorded as `report-…`" to the one reader who by construction is not
-                # looking at the graph — a chemist who closed the tab while the fan-out ran. The
-                # note stays the durable handover and the citation trail; the attachment is the
-                # document they asked for, in a form they can open.
-                #
-                # Rendered above rather than returned by `propose_report`: the activity's contract
-                # is the note *reference*, and widening its return to carry the body would change
-                # a durable payload for a courtesy copy. This adds a field to an activity argument
-                # and not a new `await`, so no patch is needed (contrast
-                # `D-2026-09-14-the-seam-shipped-a-replay-break-and-the-adr-said-nothing-changes`).
+                # Attach the draft itself: the recipient is by construction not looking at the
+                # graph. Rendered here rather than returned by the activity, whose durable contract
+                # is the note reference.
                 attachments=[
                     OutboundAttachment(
-                        # The note's **id**, not `note_ref`. That reference is the writer's — a
-                        # commit sha, or the unchanged tree — so a file named after it tells a
-                        # chemist nothing and is not this artefact's identity. `_report_id` slugs
-                        # to `[a-z0-9-]` plus a hash, which is inside `Attachment`'s pattern by
-                        # construction; a name that was not would raise inside the activity, where
-                        # it is caught, and cost the whole message rather than the file.
+                        # Named after the note id, not `note_ref` (a writer's commit sha).
+                        # `_report_id` slugs to `[a-z0-9-]` plus a hash, inside `Attachment`'s
+                        # pattern by construction.
                         filename=f"{drafted.id}.md",
                         media_type="text/markdown",
                         content=drafted.body.encode("utf-8"),
@@ -536,17 +416,9 @@ class DevelopmentReportWorkflow:
                 ],
             )
         )
-        # `report.sections`, not the fan-out's return: after reconciliation that is one per
-        # requested section, so the count the chemist is told is the count they asked for. Reading
-        # the short list is how "Drafted 'X' with 2 section(s)" came to be a true sentence about a
-        # report that was missing one.
-        # **"opened for review" until D-2026-09-05 deleted the gate it named.** This is the one
-        # place that claim survived wave 15's sweep, because it is neither a docstring nor the
-        # `propose_report` symbol name the queue already tracks — it is the sentence the chemist
-        # reads in the job result, telling them a person would look before the report counted.
-        # Nobody does: `record_note` writes it, and it is readable beside its own citations the
-        # moment this returns. A control a chemist believes in is worse than one they know they do
-        # not have.
+        # `report.sections` after reconciliation, so the count is the count the chemist asked for.
+        # The note is readable immediately; no review step exists, so the summary must not claim
+        # one.
         summary = (
             f"Drafted {request.title!r} with {len(report.sections)} section(s); "
             f"recorded as {note_ref}."
@@ -556,11 +428,8 @@ class DevelopmentReportWorkflow:
             "title": request.title,
             "sections": len(report.sections),
         }
-        # **Shown where it was asked for**, when it was asked for from a conversation: the draft as
-        # a `document` artefact, and the completion pushed to that session. Only for a request that
-        # names a session, which no history started before `ReportRequest.session_id` existed
-        # does — so an in-flight run replays the commands it recorded and issues these only if it
-        # was launched by this code.
+        # Show the draft as a `document` artefact in the session that asked, and push the completion
+        # there. Only for a request naming a session, so older in-flight histories replay unchanged.
         if request.session_id:
             exhibit_id = await _report_exhibit_best_effort(
                 ReportExhibitInput(
@@ -581,10 +450,9 @@ class DevelopmentReportWorkflow:
             }
             if exhibit_id:
                 data["exhibit_id"] = pushed["exhibit_id"] = exhibit_id
-                # Which session can open it. The run is shared by every session that asks for the
-                # same report (`_report_id` leaves the session out), and only the first gets an
-                # artefact; a status read from any other one drops the id rather than hand over a
-                # link that 404s there (`agent/durable_tools.readable_in_this_session`).
+                # Which session can open it: runs are shared across sessions asking for the same
+                # report, and a status read from another session drops the id rather than hand over
+                # a link that 404s there.
                 data[EXHIBIT_SESSION] = request.session_id
             await notify_session_best_effort(request.session_id, "job_completed", pushed)
         return ConnectorJobResult(summary=summary, data=data)

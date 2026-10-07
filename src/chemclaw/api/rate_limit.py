@@ -1,37 +1,13 @@
-"""A per-principal request budget — the guard the front door had for turns and nothing else.
+"""A per-principal request budget for every authenticated route.
 
-Two admission controls existed and both were scoped to the expensive path: the concurrency cap
-(`service_max_concurrent_turns`) bounds turns in flight, and the budget guard (D-144) meters
-tokens. Everything else was unmetered.
-So one authenticated caller could hold both of those at zero and still drive `GET /proposals`,
-`GET /jobs`, `POST /sessions`, `GET /schedules` and the attachment route as fast as the network
-allowed — every one of which does real work (`/schedules` fans out to Temporal, `/readyz` sweeps the
-connector fleet, `/jobs` queries Postgres). A loop with no LLM call in it was free.
+The concurrency cap and token budget bound turns; this bounds everything else, which also does
+real work (Temporal, Postgres, connector sweeps).
 
-**A token bucket, not a fixed window.** A fixed window lets a caller spend the whole allowance in
-its last millisecond and the next window's in its first, so the observed peak is twice the
-configured rate at exactly the moment a system is least able to absorb it. A bucket refilling
-continuously has no edge to align to, and its `burst` says out loud what a fixed window only
-implies: how much a caller may spend at once.
-
-**Wired inside `require_principal` on purpose, and it is the only thing there that is not
-authentication.** The reason is the one D-2026-07-31 used for the PR-gate: every authenticated route
-already funnels through that one dependency, so one call there is a gate that a new route cannot
-forget, and the alternative — a decorator on twenty routes — is a gate that the twenty-first route
-silently skips. `/healthz`, `/readyz` and `/metrics` do not depend on it and are therefore not
-limited, which is correct: a kubelet probes every ten seconds and a scrape must never be throttled
-into looking like a down target.
-
-**Per process, like the admission cap, and the same caveat applies.** `maxReplicas: 6` multiplies
-the real ceiling by six. That is a property of both guards and of the deployment, not something this
-module can fix by pretending otherwise; a fleet-wide limit belongs at the ingress. The backlog row
-this paragraph used to send a reader to is gone:
-`D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down` closed it for *turns* —
-declaring the product, deriving the replica count
-and alerting on `chemclaw_fleet_turn_ceiling` — and it was deleted on merge, as that register
-requires. **It closed the arithmetic and not the enforcement, and only for turns**: nothing declares
-a fleet-wide ceiling for *requests*, so the multiplication above is stated here and nowhere checked.
-`D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one` carries the live trigger for the enforcement half.
+A token bucket rather than a fixed window, so a caller cannot double the rate across a window
+edge; `burst` states how much may be spent at once. Called from `require_principal`, which every
+authenticated route depends on, so a new route cannot skip it; `/healthz`, `/readyz` and
+`/metrics` are not limited. Per process: the fleet-wide ceiling is the rate times the replica
+count, which belongs at the ingress and is not checked here.
 """
 
 import logging
@@ -67,24 +43,18 @@ class _Bucket:
 class RequestLimiter:
     """Token buckets keyed by principal, bounded in the number of principals it will track.
 
-    The bound is not incidental. A map keyed by caller identity is the classic unbounded-growth
-    bug — this codebase has fixed it three times, most recently for metric label series (D-152) —
-    and here the key is attacker-influenced, since minting tokens for many `oid`s is exactly what
-    someone working around a per-principal limit would do. So it is an LRU
-    (`chemclaw.core.bounded.BoundedLru`, the shared fix for this bug class — S2): past the cap the
-    least-recently-seen principal is evicted and starts fresh, which costs that caller one free
-    burst and costs the process nothing.
+    The key is attacker-influenced, so the map is a `BoundedLru`: past the cap the
+    least-recently-seen
+    principal is evicted and starts with a fresh burst.
     """
 
     def __init__(self, *, per_minute: float, burst: float, max_principals: int) -> None:
         """Configure the refill rate, the ceiling, and how many principals to remember.
 
         Raises:
-            ValueError: When `per_minute` is not positive. A zero rate makes the retry-after
-                arithmetic in `check` a division by zero — reached only after the bucket drains, so
-                it would surface as a 500 on the `burst`-th request rather than at construction.
-                "Unlimited" is the caller's decision not to build a limiter at all, which is what
-                `enforce_request_budget` already does; it is not a rate this class can express.
+            ValueError: When `per_minute` is not positive (a zero rate would divide by zero once the
+                bucket drains). "Unlimited" means not building a limiter, as
+                `enforce_request_budget` does.
         """
         if per_minute <= 0:
             raise ValueError(f"per_minute must be > 0, got {per_minute}; do not build a limiter")
@@ -95,11 +65,9 @@ class RequestLimiter:
     def check(self, principal_id: str, *, now: float | None = None) -> None:
         """Spend one token for `principal_id`, or raise `RateLimited`.
 
-        `now` is injectable so the tests can drive refill without sleeping — a rate limiter tested
-        by sleeping is a rate limiter tested at one rate.
-
-        Monotonic time, not wall clock: an NTP step backwards would otherwise hand out a refill
-        that never elapsed, and a step forwards would refuse requests that should have passed.
+        `now` is injectable so tests drive refill without sleeping. Monotonic time, so a wall-clock
+        step
+        cannot grant or refuse refills.
         """
         moment = time.monotonic() if now is None else now
         bucket = self._buckets.get(principal_id)  # marks the principal recently seen
@@ -120,9 +88,7 @@ _limiter: RequestLimiter | None = None
 def limiter() -> RequestLimiter:
     """The process-wide limiter, built from config on first use.
 
-    Built lazily rather than at import so a test that changes the settings gets the settings it
-    set, and reset by `reset_limiter` between tests. Not a `@cache`, because the reset has to be
-    explicit and visible here rather than reaching into a decorator's internals.
+    Lazy so a test's settings apply; `reset_limiter` clears it explicitly between tests.
     """
     global _limiter
     if _limiter is None:
@@ -143,10 +109,8 @@ def reset_limiter() -> None:
 def enforce_request_budget(principal_id: str) -> None:
     """Spend one request against `principal_id`'s budget; raise `RateLimited` when it is gone.
 
-    A no-op when `service_rate_limit_per_minute` is 0. That is the code default, because a CLI, a
-    test and a single-user dev run have no reason to be throttled and a limiter that fires in those
-    contexts is a limiter people switch off everywhere; the chart turns it on, which is where the
-    shared endpoint actually is — the same shape `budget_enabled` already uses (REV-16).
+    A no-op when `service_rate_limit_per_minute` is 0, the code default for CLI, tests and dev; the
+    chart turns it on.
     """
     if not settings.service_rate_limit_per_minute:
         return

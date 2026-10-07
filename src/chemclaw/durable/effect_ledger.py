@@ -1,33 +1,14 @@
 """Postgres backing for the effect ledger (`infra/sql/075_effects.sql`).
 
-`job_records` says a run happened and what it returned. This says what changed in a system this
-deployment does **not** own — and, crucially, says it *before* the change is attempted.
+Records what changed in a system this deployment does not own, and records it *before* the
+change is attempted: `begin_effect` writes first and `settle_effect` updates, so a row left in
+`attempting` after a crash is the honest "may have happened" state an incident starts from.
 
-**A row in `attempting` after a crash is the honest state**, not a bug in the ledger. This system
-may have filed the deviation and lost the acknowledgement; a ledger that recorded only successes
-would answer "nothing happened" for exactly the case an operator most needs to investigate. So
-`begin_effect` writes first and `settle_effect` updates, and `unsettled` is the query that reads
-the set an incident starts from.
-
-**What reaches an operator today is the per-session half, and only that.**
-`operations/evidence_pack.assemble` selects this table by `session_id` with its own statement, so
-"what did this conversation change outside" is answerable. `unsettled` — "what is in doubt right
-now, across every session" — is served by no route, CLI or tool, so this sentence says *reads*
-rather than claiming a workflow: an operator wanting that set runs the query themselves, and
-`unsettled`'s own docstring carries it so that is a copy-paste rather than a reconstruction. A
-second per-session reader here was deleted on 2026-09-06 rather than left standing as a duplicate
-of the evidence pack's: it had never had a caller, while its docstring named one that has always
-issued its own SQL.
-
-**That absence is a decision and is checked, not merely admitted**
-(`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`). The two accessors here stay because
-they are the write path's read-back under test — deleting them would put raw SQL in a test instead
-of removing a claim — and `effects_unsettled_idx` stays with them because it is *partial*, over
-`state = 'attempting'` only: it holds one entry per in-flight effect and drops it on settle, so a
-never-pruned table does not pay for it, and it is the index the hand-run query below uses. What may
-not happen quietly is the opposite of a deletion: the day a route, CLI or tool serves this set, the
-paragraph above becomes false, so `tests/test_effects.py` fails on the *addition* and makes whoever
-serves it rewrite the sentence in the same change.
+The per-session view is read by `operations/evidence_pack.assemble`. `unsettled` (what is in
+doubt across every session) is served by no route, CLI or tool; an operator runs its query by
+hand (see its docstring). `get_effect` and `unsettled` remain as the write path's read-back
+under test, and `tests/test_effects.py` fails if an operator surface starts calling them
+without this sentence being rewritten.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -48,10 +29,8 @@ class EffectRecord(BaseModel):
     are one declaration rather than two that agree by inspection.
     """
 
-    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
-    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
-    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
-    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    # `extra="forbid"` so a SELECT column with no matching field is an error rather than silently
+    # ignored.
     model_config = ConfigDict(extra="forbid")
 
     effect_id: str
@@ -88,24 +67,10 @@ _BEGIN = """
     WHERE effects.state <> 'applied'
 """
 
-# `WHERE effects.state <> 'applied'` for the same reason `_BEGIN` carries it, and its absence here
-# was the more consequential of the two. `ConnectorJobWorkflow` settles `applied` and then calls
-# `_finish` **inside the same `try`**, whose `except BaseException` settles `failed` — so a
-# `ValidationError` out of the note write, or the cancellation path the workflow documents,
-# overwrote a landed irreversible change with `failed` and blanked its `external_ref`. An operator
-# reading the one ledger of what this system changed outside itself was told the deviation was not
-# filed, and would file it again. `unsettled()` could not surface it either, since that reads
-# `attempting`.
-#
-# `external_ref` is coalesced rather than assigned: a settle that does not carry one must not erase
-# the handle an earlier one recorded, which is the only string an operator can undo the far side by.
-# **`compensated` is the one transition out of `applied` that must still work**, and the first
-# version of this guard blocked it. `075_effects.sql` permits the state, `settle_effect`'s own
-# docstring names it, and `ConnectorManifest` models `reversal: compensating` as "undone by another
-# declared job" — so applied -> compensated is not an edge case, it is the *only* way that state is
-# ever reached. Blocking it left the ledger saying a change was still standing after it had been
-# rolled back: the same lie the guard was added to prevent, told in the other direction. The shipped
-# test asserted failed -> compensated, which the guard always allowed, so it passed either way.
+# `WHERE effects.state <> 'applied'` so a later `failed` settle (e.g. from a cleanup path) cannot
+# overwrite a landed irreversible change — except `compensated`, the one legal transition out of
+# `applied` (`reversal: compensating`). `external_ref` is coalesced so a settle without one never
+# erases the handle an operator needs to undo the far side.
 _SETTLE = """
     UPDATE effects
     SET state = %s,
@@ -125,10 +90,9 @@ _COLUMNS = (
 async def begin_effect(record: EffectRecord) -> None:
     """Record that this system is about to change something outside itself.
 
-    Idempotent on `effect_id`, which is the job's deterministic workflow id — so a retried run
-    re-opens its own row rather than forking one. **It will not re-open an `applied` row**: an
-    effect that has already landed must not be walked back to `attempting` by a replay, or the
-    ledger would say the far side's change is in doubt when it is not.
+    Idempotent on `effect_id` (the job's deterministic workflow id), so a retried run re-opens its
+    own row. It will not re-open an `applied` row: a landed change must not be walked back to
+    `attempting` by a replay.
     """
     async with _connect() as conn:
         await conn.execute(
@@ -152,9 +116,8 @@ async def settle_effect(
 ) -> None:
     """Record how the attempt ended: `applied`, `failed` or `compensated`.
 
-    `external_ref` is stored even on a failure. It is the far side's own handle — a ticket number,
-    a record id — and it is the only thing an operator can undo by hand, so losing it because the
-    call failed *after* creating the record is the worst possible time to lose it.
+    `external_ref` is stored even on a failure: it is the far side's handle, and the only thing an
+    operator can undo by hand.
     """
     async with _connect() as conn:
         await conn.execute(_SETTLE, (state, external_ref, external_ref, detail, effect_id, state))
@@ -164,10 +127,7 @@ async def get_effect(effect_id: str) -> EffectRecord | None:
     """One effect by id, whatever state it is in.
 
     Raises:
-        pydantic.ValidationError: `_COLUMNS` and `EffectRecord` have stopped describing the same
-            row. The fourteen positional subscripts this replaced could not raise that — they
-            renamed the columns by position, so an edit to `_COLUMNS` moved every value one field
-            along and returned a record that looked like a record.
+        pydantic.ValidationError: `_COLUMNS` and `EffectRecord` no longer describe the same row.
     """
     async with _connect() as conn:
         async with conn.cursor(row_factory=class_row(EffectRecord)) as cur:
@@ -178,22 +138,16 @@ async def get_effect(effect_id: str) -> EffectRecord | None:
 async def unsettled(limit: int = 50) -> list[EffectRecord]:
     """Effects that were begun and never settled — where an incident investigation starts.
 
-    Each row means: this system may have changed something outside itself and cannot prove either
-    way. That is a small set in a healthy deployment and the first thing to read in an unhealthy
-    one, which is why it has an index of its own (`effects_unsettled_idx`, partial on exactly this
-    predicate).
-
-    **No route, CLI or tool calls this**, and the module docstring says why that is a decision. An
-    operator during an incident runs the same query by hand, so it is written out here rather than
-    left to be reconstructed from the schema under pressure::
+    Each row means this system may have changed something outside itself and cannot prove either
+    way. Backed by the partial index `effects_unsettled_idx`. No route, CLI or tool calls this; an
+    operator runs the same query by hand::
 
         SELECT effect_id, connector, job, system, reversal, requested_by, session_id,
                correlation_id, approved_by, state, external_ref, detail, attempted_at, settled_at
         FROM effects WHERE state = 'attempting' ORDER BY attempted_at LIMIT 50;
 
     Args:
-        limit: Rows to return, clamped to 1..200 — an incident wants the oldest few, and an
-            unbounded read of a table nothing prunes is not what a person under pressure wants.
+        limit: Rows to return, clamped to 1..200.
     """
     async with _connect() as conn:
         async with conn.cursor(row_factory=class_row(EffectRecord)) as cur:

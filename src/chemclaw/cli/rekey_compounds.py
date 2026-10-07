@@ -4,24 +4,14 @@
     python -m chemclaw.cli.rekey_compounds --apply    # writes
     python -m chemclaw.cli.rekey_compounds --apply --dispose-superseded   # and then disposes
 
-`make rekey-compounds [APPLY=1 [DISPOSE=1]]`. Run it after deploying a bump. The thin shim over
-`chemclaw.memory.compound_rekey.rekey_standardization`, which says what it writes and why;
-`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned` is the decision.
+`make rekey-compounds [APPLY=1 [DISPOSE=1]]`, run after deploying a bump. A shim over
+`chemclaw.memory.compound_rekey.rekey_standardization`; preview by default and idempotent.
 
-A preview by default for the reason `erase_actor` and `rekey_campaigns` give: a run is reviewable
-before it runs only if the bare command writes nothing. It is idempotent, so running it twice is
-safe, and the second run's counts say so.
-
-**The re-key adds the rebuilt generation and keeps the old one** — `094` put the definition in the
-row's key and the runtime role holds no `DELETE` on either fingerprint table — so after a complete
-rebuild every search still reports `index_partial` until the superseded generation is disposed of
-(#526). `--dispose-superseded` is that disposal, run per index and only when that index's rebuild
-was complete (`settle_index`). It is the statement `094`'s header names for an operator under the
-owning principal, so it connects as the migrator (`core.migrate.migration_dsn`, which is the runtime
-credential on a single-principal deployment) and never as the role a chat turn holds;
-`tests/test_database_privileges.py` lists this module as an operator's for that reason. Opt-in
-rather than implied by `--apply`, because it is the one step here that deletes, and the one that is
-wrong while an older image is still writing under the old definition.
+The re-key adds the rebuilt generation and keeps the old one, so searches report `index_partial`
+until `--dispose-superseded` deletes the superseded generation — per index, only when its rebuild
+was complete. Disposal connects as the migrator (`core.migrate.migration_dsn`), never the runtime
+role, and is opt-in because it is the one step that deletes and is wrong while an older image
+still writes under the old definition.
 """
 
 import argparse
@@ -56,10 +46,9 @@ def render(report: StandardizationRekeyReport, seconds: float) -> str:
 
 
 async def rekey(*, apply: bool) -> StandardizationRekeyReport:
-    """The re-key over this deployment's own notes and indexes — the one binding of its arguments.
+    """The re-key over this deployment's own notes and indexes.
 
-    Shared by `main` and by the live lane's index step (`cli/live_index.py`), so the lane runs
-    exactly the job an operator runs rather than a second spelling of it.
+    Shared by `main` and `cli/live_index.py`, so the lane runs exactly the operator's job.
     """
     return await rekey_standardization(
         apply=apply,
@@ -76,10 +65,7 @@ async def rekey(*, apply: bool) -> StandardizationRekeyReport:
 async def dispose_superseded(table: str, definition: str) -> int:
     """Delete `table`'s rows stored under any definition other than `definition`; return how many.
 
-    The statement `infra/sql/094_fingerprint_definition_identity.sql` names for "disposing of a
-    shelved generation after a completed rebuild", under the principal that owns the schema.
-    Interpolated, so `table` is checked to be a plain identifier — every caller passes a constant,
-    and this is the trust boundary `PostgresFingerprintStore` draws for the same reason.
+    Runs under the schema owner. `table` is interpolated, so it is checked to be a plain identifier.
     """
     if not table.isidentifier():
         raise ValueError(f"table must be a plain SQL identifier, got {table!r}")
@@ -95,12 +81,9 @@ async def settle_index(
 ) -> str:
     """Dispose of `table`'s shelved generation when the re-key rebuilt all of it, and say which.
 
-    **Complete means `unreadable == 0`.** Every other shelved row the re-key saw was rebuilt
-    (`rekeyed`) or already had a current row (`already_current`), so deleting the superseded
-    generation loses nothing the current one does not hold. An unreadable row is the one case where
-    it would: its label no longer parses, so it has no current twin, and dropping it would turn a
-    search that honestly says PARTIAL into one that silently never had the row. Then the shelf
-    stays and `index_partial` keeps saying so.
+    Complete means `unreadable == 0`: every other shelved row was rebuilt or already current. An
+    unreadable row has no current twin, so deleting the shelf would lose it silently; it stays and
+    `index_partial` keeps saying so.
     """
     if counts.unreadable:
         return (
@@ -115,10 +98,9 @@ async def settle_index(
 
 
 async def settle_indexes(report: StandardizationRekeyReport) -> list[str]:
-    """`settle_index` for both fingerprint indexes of an *applied* re-key, one line each.
+    """`settle_index` for both fingerprint indexes of an applied re-key, one line each.
 
-    Shared by `main` and by the live lane (`cli/live_index.py`), so the lane disposes exactly as an
-    operator does rather than through a second spelling of the guard.
+    Shared by `main` and `cli/live_index.py`, so the lane disposes under the same guard.
     """
     if not report.applied:
         raise ValueError("a preview rebuilt nothing, so nothing it saw may be disposed of")

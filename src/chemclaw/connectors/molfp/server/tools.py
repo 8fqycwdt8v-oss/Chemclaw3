@@ -1,18 +1,11 @@
-"""The `molfp` bundle's MCP tool surface (plan step 3.1).
+"""The `molfp` bundle's MCP tool surface.
 
-Declaration, not logic: every function here delegates to `chemclaw.science.fingerprints.molfp`,
-over the production (Postgres) molecule table, and adds the one fact that index cannot hold about
-itself — the citation-only ELN records outside it (`ReactionRecordStore.citation_only`). What this
-file otherwise adds is the `@server.tool()` decoration — the argument names, defaults and
-docstrings the agent actually sees — which is why it belongs beside `app.py` in the bundle rather
-than beside the engine.
+Declaration, not logic: every function delegates to `chemclaw.science.fingerprints.molfp` over the
+production molecule table, and adds the citation-only ELN records outside that index. What this
+file owns is the tool names, defaults and docstrings the agent sees. `app.py` serves it over HTTP;
+`main()` runs it over stdio for running one capability by hand.
 
-`app.py` serves this `server` over HTTP, which is how the connector seam reaches it. The `main()`
-below runs the same tools over stdio, the transport MCP defaults to, and is kept for running one
-capability by hand without the FastAPI layer.
-
-Judgment stays out: the tools compute and search; when a similarity counts as precedent is the
-`reaction-search` skill's call (G6).
+Judgment stays out: when a similarity counts as precedent is the `reaction-search` skill's call.
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -32,10 +25,9 @@ from chemclaw.science.fingerprints.store import (
 
 server = FastMCP("mcp-molfp")
 _store: FingerprintStore = default_molecule_store()
-# The transcription store, for what this index cannot hold: the molecules of a citation-only ELN
-# record are never fingerprinted, not even the ones the source drew
-# (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`), so every result says
-# how many such records exist and which of them list the queried structure.
+# The transcription store, for what this index cannot hold: molecules of citation-only ELN records
+# are never fingerprinted, so every result says how many such records exist and which list the
+# queried structure.
 _records: ReactionRecordStore = default_record_store()
 
 
@@ -77,12 +69,9 @@ async def substructure_matches(query: str) -> FingerprintSearch[MoleculeHit]:
 
 
 async def report_index_size() -> None:
-    """Log this connector's index size at startup — the operator half of the empty-index defect.
+    """Log this connector's index size at startup, so an empty index is visible on the first line.
 
-    Wired into the app's lifespan (`src/chemclaw/connectors/molfp/server/app.py`), so the pod
-    that owns `molecule_fingerprints` says on its first line whether it has anything to search.
-    Lives here rather than in the app module because `_store` is this module's, and the transport
-    layer has no business reaching for it.
+    Wired into the app's lifespan; lives here because `_store` is this module's.
     """
     await log_index_size(_store, "molecule")
 

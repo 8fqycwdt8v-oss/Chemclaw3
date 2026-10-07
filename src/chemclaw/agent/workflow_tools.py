@@ -1,27 +1,11 @@
 """Composing a reusable multi-step workflow, and running one.
 
-A chemist asking the same three-step question every week costs three model calls and three
-round-trips every week, and the model has to remember the order. A template makes it one call and
-fixes the order — but a template is a git-committed file, so getting one takes a pull request.
-These two tools are the run-time half: the agent writes the procedure down once, and afterwards it
-is one durable run.
-
-**What keeps that safe is `templates/composed.authored_problems`, not this module**, and the rule
-is worth reading there: an agent-authored workflow may name no side-effecting tool and no
-`write_tools`, ever, and no approval lifts either. Read that file for why the plan gate's exemption
-survives this.
-
-A durable `job` step is the one thing on the other side of that line, and it is withheld rather
-than refused: `templates/composed.unapproved_jobs` keeps it from running until the workflow's owner
-has approved *that version* of the document — at whichever surface they are on, never through a
-tool, because a model must never authorize its own plan. The front door's route and the terminal's
-`/approve-workflow` are the two, and naming only the first was a real defect while it stood: a
-workflow is keyed on the ambient actor, so one composed at the terminal is a 404 at the route.
-
-Two tools and not three. A listing of one owner's workflows is the third thing the model needs and
-it rides on the refusal `run_composed_workflow` gives an unknown name, which names what does exist
-— a tool schema is re-sent on every model call and a listing is needed on the turn a name is
-already wrong.
+The agent writes a procedure down once and afterwards runs it as one durable call, instead of a
+git-committed template. Safety lives in `templates/composed`: `authored_problems` forbids any
+side-effecting or `write_tools` step, and `unapproved_jobs` withholds a durable `job` step until the
+owner approves that version of the document at the front-door route or the terminal's
+`/approve-workflow` — never through a tool. Listing workflows is not a tool: the refusal for an
+unknown name lists the ones that exist.
 """
 
 import logging
@@ -50,9 +34,9 @@ class WorkflowStep(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Short docstrings and `#` comments throughout: pydantic publishes a class docstring as the
-    # JSON-schema `description` on every model call, so rationale lives here where it costs nothing
-    # (`D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`).
+    # Short docstrings here: pydantic publishes a class docstring as the JSON-schema `description`
+    # on
+    # every model call, so rationale goes in comments.
     id: str = Field(min_length=1, description="Unique within the workflow; later steps use it.")
     tool: str = Field(
         default="",
@@ -86,11 +70,8 @@ def _document(
 ) -> Template:
     """The declared steps as a `Template`, so one shape is validated, stored and run.
 
-    Deliberately the *same* model a `data/templates/*.yaml` file parses into rather than a parallel
-    one: every validator a hand-written template gets — unique step ids, well-formed `${…}` spans,
-    no forward references — applies here for free, and `TemplateWorkflow` runs the result without
-    knowing where it came from. A second shape would be a second set of those rules to keep in
-    step.
+    The same model a `data/templates/*.yaml` file parses into, so every template validator applies
+    and `TemplateWorkflow` runs it unchanged.
     """
     contradictory = [
         step.id
@@ -98,12 +79,9 @@ def _document(
         if sum(1 for field in (step.tool, step.job, step.prompt) if field) != 1
     ]
     if contradictory:
-        # **Refused rather than resolved by precedence.** The branch below picks job, then tool,
-        # then prompt, so a step naming both a tool and a job silently became a job step and the
-        # tool was discarded with nothing said — and since the approver is shown the *rendered*
-        # document, nobody downstream could notice either. A step that says two things is a step
-        # whose author is confused about what it does, and guessing for them is how a procedure
-        # comes to do something nobody wrote.
+        # Refused rather than resolved by precedence: the branch below would silently drop the tool,
+        # and
+        # the approver sees only the rendered document.
         raise ComposedWorkflowError(
             f"step(s) {contradictory} each have to be exactly one thing: a `tool` to call, a `job` "
             "to run, or a `prompt` to reason with. Split them, or drop the fields that do not "
@@ -187,9 +165,8 @@ async def compose_workflow(
         raise ComposedWorkflowError(f"that workflow is not well-formed: {exc}") from exc
 
     problems = [
-        # The same three checks a `data/templates/` file passes, plus the one that is only asked of
-        # an agent-authored document. Resolved without signatures, as `unrunnable_reason` does it:
-        # the argument half imports every bundle's server module and a tool call must not pay that.
+        # The checks a `data/templates/` file passes, plus the agent-authored one. Resolved without
+        # signatures, which would import every bundle's server module.
         *step_problems(document, TemplateSurface.resolve(with_signatures=False)),
         *run_ceiling_problems(document),
         *authored_problems(document, side_effecting_tools()),
@@ -202,11 +179,7 @@ async def compose_workflow(
     store = default_composed_store()
     existing = await store.list_for(owner)
     if len(existing) >= MAX_PER_OWNER and not any(row.name == name for row in existing):
-        # **`MAX_PER_OWNER`, never `len(existing)`.** The store fetches one past the cap so the
-        # guard can tell a full page from a clamped one, which means `existing` can read 51 — and
-        # the message said "you already have 51 … which is the limit" over a limit of 50, quoting
-        # a number that is neither the count nor the cap. The names are the page, and the page is
-        # what `not any(...)` above resolved against, so both are stated as the page they are.
+        # Quote `MAX_PER_OWNER`, not `len(existing)`: the store fetches one past the cap.
         raise ComposedWorkflowError(
             f"you are at the limit of {MAX_PER_OWNER} composed workflows. The most recent are: "
             f"{sorted(row.name for row in existing)}. Re-compose one of them under its own name, "
@@ -215,9 +188,7 @@ async def compose_workflow(
     await store.save(ComposedWorkflow(owner=owner, name=name, summary=summary, document=document))
     jobs = job_steps(document)
     if jobs:
-        # Said at the moment it is composed rather than left to the refusal a run would give: the
-        # chemist is in the conversation *now*, and telling them afterwards costs them a turn to
-        # learn something that was knowable when they asked.
+        # Said at composition, while the chemist is in the conversation, rather than on a later run.
         return (
             f"Saved the {name!r} workflow, {len(document.steps)} steps — but it will not run yet. "
             f"Step(s) {jobs} launch durable jobs, so its owner has to approve this version first. "
@@ -266,9 +237,9 @@ async def run_composed_workflow(name: str, inputs: dict[str, str]) -> str:
             + (f"You have: {sorted(available)}." if available else "You have none yet.")
         )
 
-    # **Checked again, and this is not belt-and-braces.** The store was written at a different time
-    # and possibly against a different deployment: `side_effecting_tools()` grows when a bundle is
-    # enabled, so a name that was a read when it was composed can be a write by the time it runs.
+    # Checked again at run time: `side_effecting_tools()` grows when a bundle is enabled, so a step
+    # that
+    # was a read when composed may be a write now.
     problems = [
         *step_problems(workflow.document, TemplateSurface.resolve(with_signatures=False)),
         *run_ceiling_problems(workflow.document),
@@ -280,19 +251,16 @@ async def run_composed_workflow(name: str, inputs: dict[str, str]) -> str:
             + "\n".join(f"  - {p}" for p in problems)
             + "\nCompose it again without those steps."
         )
-    # Asked here and not at the write, because composing is deliberately not the decision: a
-    # workflow nobody may compose is a workflow nobody can put in front of a person to approve.
-    # The fingerprint is recomputed from the document *as stored*, so an approval only ever covers
-    # the steps somebody actually read.
+    # Asked here, not at composition, so a workflow can exist to be approved. The fingerprint is
+    # recomputed from the stored document, so an approval covers only the steps somebody read.
     withheld = unapproved_jobs(
         workflow.document, workflow.approved_fingerprint, template_fingerprint(workflow.document)
     )
     if withheld:
         raise ComposedWorkflowError(f"the {name!r} workflow is not approved to run: {withheld[0]}")
-    # **Scoped, because a composed workflow's name is neither global nor fixed.** The run id is an
-    # idempotency key; unscoped it is `hash([name, inputs])`, so two chemists' `triage` — and two
-    # *versions* of one chemist's — share it, and the launcher's rejoin branch then hands back
-    # somebody else's finished run with a summary that reads correct (`run_workflow_id`).
+    # Scoped by owner and version: the run id is an idempotency key, and unscoped two chemists' (or
+    # two
+    # versions') workflows of one name would rejoin each other's runs.
     return await start_template_run(
         workflow.document,
         dict(inputs),

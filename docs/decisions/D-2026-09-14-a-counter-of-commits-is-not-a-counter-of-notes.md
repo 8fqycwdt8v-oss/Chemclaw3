@@ -2,6 +2,8 @@
 
 **Status**: accepted.
 
+**Superseded-by:** [D-2026-09-22-the-count-belongs-to-the-writer-that-knows-what-the-tree-held](D-2026-09-22-the-count-belongs-to-the-writer-that-knows-what-the-tree-held.md) (in part)
+
 ## Context
 
 `chemclaw_notes_recorded_total` is declared as *"Notes written into the knowledge graph"*, and

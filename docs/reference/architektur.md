@@ -233,7 +233,7 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
   (lint/type/test), die Deklarations-Validatoren, Image-Build + Entrypoint-Smoke und
   `helm template | kubeconform`. **Einen Rollout-Job gibt es nicht**: der Stub, dessen Rumpf ein
   `echo` war, ist mit D-117 gelöscht, und das Ausrollen in den Cluster bleibt bewusst offen
-  (`docs/planning/DEFERRED.md`). `helm lint` läuft nirgends — die Chart-Prüfung ist
+  (`docs/planning/BACKLOG.md`). `helm lint` läuft nirgends — die Chart-Prüfung ist
   `helm template | kubeconform`.
 
 ## 7. Identity & Authentication: Entra ID durchgängig

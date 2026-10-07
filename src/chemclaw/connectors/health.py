@@ -1,61 +1,18 @@
-"""Is each enabled connector actually there? — the startup probe behind `/readyz` and `/metrics`.
+"""Is each enabled connector actually there? The startup probe behind `/readyz` and `/metrics`.
 
-Moving capability out of the agent's process makes it a network dependency, and the honest thing to
-do with a new failure mode is to *report* it rather than to discover it mid-conversation. This
-module answers "which enabled connectors can we reach right now" for three consumers: the readiness
-route (so an operator sees it), the `chemclaw_connectors_unhealthy` gauge (so it alerts), and the
-`connectors_required` fail-fast check (so a deployment that prefers death to degradation gets it).
+Answers "which enabled connectors can we reach right now" for the readiness route, the
+`chemclaw_connectors_unhealthy` gauge, the `connectors_required` fail-fast check, and (through
+`connectors.reachability`) the per-turn breaker. The default posture is degrade loudly: an
+unreachable connector does not stop the service, but its absence is visible.
 
-The default posture is **degrade loudly**: an unreachable connector does not stop the service, its
-tools simply are not reachable that turn and the failure is visible in three places. Silently
-dropping the connector — the availability-maximizing option — is rejected on purpose: an agent that
-quietly loses a capability answers worse without anyone knowing why.
+A bundle is asked one question per half it has, and its verdict is the worse of them (`_folded`):
+an HTTP `health_url` is probed directly; `jobs:` asks whether anything polls the bundle's queue
+(`unpolled` if not); `queued:` tools ask the same of `connector-<name>-interactive`. A bundle with
+none of these is `unprobed`, which is not counted as unhealthy.
 
-A connector with no `health_url` and no durable work is reported `unprobed`, not `healthy`. We
-control our own bundles and give them `/healthz`; a third-party MCP server may expose nothing, and
-guessing a path there would manufacture false alarms. `unprobed` is the truthful state for a bundle
-there is nothing to ask, and it is deliberately not counted as unhealthy.
-
-**A bundle whose capability is durable is asked a different question**
-(`D-2026-08-27-a-queue-with-no-poller-is-unreachable`). `results` declares `jobs:` and no
-`endpoint:`, so `health_url` returns None for it and every sweep since the seam existed reported it
-`unprobed` — whether its worker fleet was at two replicas or at zero. The reachability of a durable
-capability is whether *anything is polling* the queue its jobs run on, so that is what is asked:
-`describe_task_queue(bundle_queue(name))`. No poller is `unpolled`, which counts in the gauge and
-trips `connectors_required` exactly as `unreachable` does, because a job started onto a queue nobody
-polls is not slow — it is a chemist told "running" until the 25-hour job timeout expires.
-
-**A bundle that has both halves is asked both questions**, and its verdict is the worse of the two
-(`_folded`). `calc` and `bo` serve an endpoint *and* own durable jobs, and the question used to be
-an `elif`: their queues — 13 of this fleet's 14 declared jobs — were never asked about at all, so a
-worker fleet at zero replicas read as `healthy` behind a live MCP pod. The two halves fail
-independently and name different deployments, which is why both reasons survive into the detail.
-
-**A bundle that queues tool calls is asked a third question**: whether anything polls
-`connector-<name>-interactive`, where every call to a `queued:` tool waits
-(`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`). It is the same
-question as the durable half, asked of a second queue, and its answer means the same thing: with no
-interactive worker each queued call waits out `inline_wait_seconds`, becomes a job nothing runs, and
-the chemist is told it is waiting for a slot that will never come. A live lane ran exactly that way
-— no interactive worker started, every pKa, xtb and prediction call hung — while this sweep asked
-only about the jobs queue and called the bundle healthy.
-
-**A probe that could not run says so instead of guessing.** A broker outage is not the same fact as
-a queue with no poller, and reporting one as the other would turn every Temporal restart into a boot
-failure (`D-2026-08-08-an-outage-is-not-a-missing-job`). So only a *successful* `DescribeTaskQueue`
-produces a verdict; every failure is `unknown`, which is logged, is distinguishable from `healthy`
-wherever a state is read, and neither counts nor gates. That is not a degraded check clearing the
-gate (`D-2026-08-08-a-degraded-check-must-not-clear-the-gate`): the sin there was a broken judge
-emitting the *same* verdict a working one emits, and `unknown` is a state no working probe returns.
-
-**And there is a fourth consumer now: the per-turn open path**
-(`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`). Every verdict this sweep
-reaches is recorded in `connectors.reachability`, which `connectors.transport` reads before
-dialling — so a connector this pod has just found unreachable does not cost
-`connector_open_timeout_seconds` again on the next turn. That memory lives in its own module rather
-than here because this one imports `connectors.registry`, which imports `connectors.transport`: a
-reader in the transport would close the cycle. **Only the HTTP half feeds it**: the breaker decides
-whether to dial an MCP endpoint, and a bundle's queue verdict says nothing about that socket.
+Only a successful `DescribeTaskQueue` is a verdict; a broker that could not be asked is `unknown`,
+which is logged but neither counts nor gates, so a Temporal restart is not a boot failure. Only
+the HTTP half feeds the breaker, since a queue verdict says nothing about the MCP socket.
 """
 
 import asyncio
@@ -81,17 +38,13 @@ logger = logging.getLogger(__name__)
 
 ConnectorState = Literal["healthy", "unreachable", "unpolled", "unknown", "unprobed"]
 
-#: The states that mean "this connector's capability cannot be used right now". The gauge and the
-#: `connectors_required` gate both read this rather than each naming their own set, because the two
-#: answers must be the same answer — a metric that alerts on one state while startup refuses on
-#: another is two definitions of "down" (D-2026-08-27).
+# The states meaning "this capability cannot be used right now"; the gauge and the
+# `connectors_required` gate share this one definition of down.
 UNHEALTHY_STATES: frozenset[ConnectorState] = frozenset({"unreachable", "unpolled"})
 
-#: Worst first — the order `_folded` resolves two verdicts about one connector in. Membership in
-#: `UNHEALTHY_STATES` is what counts and gates; this is only a tie-break, so the two down states may
-#: sit in either order and do. Down before undetermined before healthy, because a half that could
-#: not be asked is not evidence that the bundle is fine — the same reason `unknown` exists at all —
-#: while `unprobed` is last so it can only ever be the state of a bundle with nothing to ask.
+# Worst first: the tie-break `_folded` uses between two verdicts about one connector. Undetermined
+# ranks above healthy because a half that could not be asked is no evidence of health; `unprobed`
+# is last so it only ever describes a bundle with nothing to ask.
 _SEVERITY: tuple[ConnectorState, ...] = (
     "unreachable",
     "unpolled",
@@ -100,12 +53,8 @@ _SEVERITY: tuple[ConnectorState, ...] = (
     "unprobed",
 )
 
-#: `_SEVERITY` as a lookup, so ranking a state cannot raise. It is a hand-written restatement of
-#: `ConnectorState`'s members, and `tuple.index` raised `ValueError` on anything missing from it —
-#: out of `probe_connectors`, whose docstring promises it never raises and whose callers are the
-#: boot gate and `/readyz`. A sixth state added to the `Literal` would have taken the front door
-#: down rather than reported one connector oddly. `tests/test_connector_health.py` pins the two
-#: together so the drift is caught in CI; this keeps the promise in the meantime.
+# `_SEVERITY` as a lookup, so ranking an unlisted state cannot raise out of `probe_connectors`,
+# which must never raise. `tests/test_connector_health.py` pins it to `ConnectorState`.
 _SEVERITY_RANK: dict[str, int] = {state: rank for rank, state in enumerate(_SEVERITY)}
 
 
@@ -116,18 +65,15 @@ class ConnectorHealth(BaseModel):
 
     name: str
     state: ConnectorState
-    # Why it is unreachable — a bounded message. It reaches the WARNING each failed probe logs and
-    # `connectors_required`'s startup refusal; it is deliberately **not** in `/readyz`'s body, which
-    # is unauthenticated and therefore reports a count rather than naming the fleet. Empty for the
-    # healthy and unprobed states.
+    # Why it is unreachable, bounded. Logged and used in `connectors_required`'s refusal, but not in
+    # `/readyz`'s unauthenticated body. Empty for healthy and unprobed.
     detail: str = ""
 
     @property
     def unhealthy(self) -> bool:
         """Whether this verdict counts as a connector being down, for the gauge and the gate.
 
-        A property rather than a comparison at each reader, so "which states are down" has one
-        definition. `unknown` is deliberately not one of them: see the module docstring.
+        `unknown` is deliberately not down: see the module docstring.
         """
         return self.state in UNHEALTHY_STATES
 
@@ -139,36 +85,13 @@ class ConnectorsUnavailable(RuntimeError):
 async def _probe(client: httpx.AsyncClient, name: str, url: str, budget: float) -> ConnectorHealth:
     """Probe one connector's health endpoint, bounded by `budget` seconds of wall clock.
 
-    Any 2xx counts as healthy: a health route's contract is its status, and demanding a body shape
-    would couple us to every connector's internals — including third-party servers we do not own.
+    Any 2xx is healthy: a health route's contract is its status. The client is shared across the
+    sweep to avoid a TCP/TLS setup per connector per probe.
 
-    The client is passed in rather than built here: one per connector meant six TCP setups (and,
-    behind an mTLS ingress, six handshakes) on every readiness probe, which the kubelet runs every
-    10 seconds per pod.
-
-    **`asyncio.wait_for`, not the client's `timeout=`, is what makes the budget a budget.** httpx's
-    is a *per-operation* timeout: the read leg restarts it on every socket read, so an endpoint
-    trickling one byte at a time is never late and never done — measured against the shipped 2 s
-    budget, a `/healthz` emitting a byte every 1.5 s held this function for **16.6 s** and then
-    reported `healthy`. The connect leg has the same shape one level down, because httpcore charges
-    the connect timeout separately to the TCP connect and to the TLS handshake, so the connect
-    phase alone can be charged more than once — *that* half is unmeasured here and stated as the
-    API's shape rather than as a number: a stalled handshake after an instant loopback connect
-    costs one charge (2.01 s against 2.0 s), and the doubling needs a slow-but-succeeding connect,
-    which is a property of a network rather than of a socket. The wall clock bounds both either
-    way, which is why it is the fix rather than a tighter kwarg. This is the same correction the
-    queue half
-    took (`_probe_queues`), for the same reason: `/readyz` is inside a kubelet probe whose
-    `timeoutSeconds` is *derived* from this number, and a derivation is only honest if the number
-    bounds the whole answer.
-
-    The bound is **per endpoint** here where the queue half bounds its whole leg, and the
-    difference is structural rather than stylistic: the queue half shares one `connect()`, so a
-    per-bundle bound could not describe the time the shared connect already spent, while HTTP
-    probes share only a connection pool and are otherwise independent. Bounding each one keeps the
-    per-connector verdict — a fleet where one endpoint is dark and five answer reports exactly
-    that, rather than one `unreachable` verdict smeared over all six — and the sweep still comes
-    back inside one budget because the probes run concurrently.
+    `asyncio.wait_for`, not httpx's `timeout=`, bounds the answer: httpx's timeout is per operation,
+    so a server trickling bytes is never late, and `/readyz`'s kubelet `timeoutSeconds` is derived
+    from this budget. Bounded per endpoint (the probes run concurrently), so one dark endpoint gets
+    its own verdict.
     """
     try:
         response = await asyncio.wait_for(client.get(url), budget)
@@ -187,9 +110,7 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str, budget: float) 
             name=name, state="unreachable", detail=f"{type(exc).__name__}: {exc}"
         )
     if response.is_success:
-        # The readmission half of the breaker: this sweep runs every readiness probe, so a
-        # connector that came back is dialled again on the very next turn rather than waiting out
-        # `connector_breaker_window_seconds`.
+        # Readmission half of the breaker: a connector that came back is dialled on the next turn.
         record_reachability(name, reachable=True)
         return ConnectorHealth(name=name, state="healthy")
     record_reachability(name, reachable=False)
@@ -198,10 +119,8 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str, budget: float) 
     )
 
 
-#: What an operator scales when a queue has no poller, by which kind of queue it is. The two are
-#: different Deployments in the chart (`deployment-connectors.yaml`'s bundle worker,
-#: `deployment-interactive-workers.yaml`'s interactive one), so naming the wrong one sends the
-#: reader to a fleet that is fine.
+# What an operator scales when a queue has no poller; the bundle worker and the interactive worker
+# are different Deployments in the chart.
 _JOBS_REMEDY = (
     "this bundle's jobs would be accepted and never run — check the connector-worker deployment's "
     "replicas"
@@ -220,21 +139,12 @@ async def _probe_queue(
 ) -> ConnectorHealth:
     """Ask Temporal whether anything is polling this bundle's queue.
 
-    `TASK_QUEUE_TYPE_WORKFLOW` rather than the activity queue: every bundle that declares a job
-    registers a workflow for it (`connector-validate` refuses a job whose workflow its own modules
-    do not register), while a bundle whose activities all live elsewhere would have an idle activity
-    queue and a perfectly healthy fleet — so the activity type can be zero without anything being
-    wrong.
-
-    **Only a successful response is a verdict.** A queue nobody has ever polled is not an error —
-    Temporal answers with an empty poller list — so there is no status code that means `unpolled`
-    and no reason to interpret one. Every failure, RPC or otherwise, is `unknown`: an outage, a
-    namespace that does not exist and a broker that is merely slow are all "we could not measure",
-    and each would be a different lie if reported as "no worker is polling".
-
-    Broad `except` because this function is inside a sweep whose contract is that it never raises,
-    and because every exception here means exactly that one thing. `CancelledError` is a
-    `BaseException` and is deliberately not caught: a cancelled sweep is not a verdict.
+    The workflow queue, because every declared job registers a workflow, while the activity queue
+    can
+    legitimately be idle. Only a successful response is a verdict (an unpolled queue answers with an
+    empty poller list); every failure is `unknown`. Broad `except` because the sweep must never
+    raise;
+    `CancelledError` is not caught, since a cancelled sweep is not a verdict.
     """
     request = DescribeTaskQueueRequest(
         namespace=settings.temporal_namespace,
@@ -263,10 +173,8 @@ async def _probe_queue(
 async def _probe_endpoints(targets: list[tuple[str, str]], budget: float) -> list[ConnectorHealth]:
     """Probe every HTTP health route concurrently, over one client for the whole sweep.
 
-    The client keeps its `timeout=` as well as the per-probe wall clock, and the two are not
-    redundant: the kwarg is what stops a *socket* operation, so a probe that `wait_for` cancels
-    does not leave a half-open connection in the pool for the next sweep to inherit. What it is
-    not — and was relied on to be — is a bound on the answer. See `_probe`.
+    The client's own `timeout=` stays as well, so a probe `wait_for` cancels does not leave a
+    half-open connection in the pool; it is not the bound on the answer (see `_probe`).
     """
     if not targets:
         return []
@@ -279,9 +187,7 @@ async def _probe_endpoints(targets: list[tuple[str, str]], budget: float) -> lis
 async def _describe_queues(targets: list[QueueTarget], budget: float) -> list[ConnectorHealth]:
     """Connect once, then ask every queue concurrently.
 
-    One client for the whole sweep, from the same process-wide `connect()` every durable caller
-    uses — so a front door that already holds a Temporal channel does not open a second one, and a
-    front door that does not gets one channel rather than one per bundle.
+    Uses the process-wide `connect()`, so a process already holding a Temporal channel reuses it.
     """
     client = await connect()
     return list(
@@ -292,44 +198,24 @@ async def _describe_queues(targets: list[QueueTarget], budget: float) -> list[Co
 async def _probe_queues(targets: list[QueueTarget], budget: float) -> list[ConnectorHealth]:
     """Probe every durable bundle's queue, or report them all `unknown` if the broker is not there.
 
-    **`budget` is the bound for this half, not for each step in it.**
-    The connect and the RPC used to carry that bound one each, so a broker reachable enough to
-    accept a connection and then blackhole the RPC cost twice it — and the whole sweep is what
-    `/readyz` waits on, inside a kubelet probe whose *default* timeout is one second. A budget
-    stated once and spent twice is what makes a probe's cost unstatable, which is the property this
-    route needs: the deployment's `timeoutSeconds` is derived from this number
-    (`deploy/helm/chemclaw/values.yaml`, `probes.service.readiness`), and a derivation is only
-    honest if the number bounds the whole answer.
-
-    A broker that refuses fails in milliseconds; one that blackholes the SYN would otherwise hold
-    the readiness route — and startup — for the SDK's own connect timeout. `connect()` caches only
-    successful clients, so a bounded failure here does not poison the singleton for the job tools.
-
-    **Sharing one budget across the connect and the RPC is right for a poll and wrong for a boot**,
-    which is why the budget is an argument rather than a read of the setting. The *first* check
-    after process start pays a cold connect — the PEM files parsed, the mTLS handshake done — and
-    whatever that costs is taken out of the RPC that would have distinguished `unpolled` from
-    `unknown`. On a poll that trade is correct: the client is cached, the connect is free, and the
-    caller is a kubelet with a stopwatch. At startup it is not: `check_connectors_at_startup` runs
-    once, its verdict is irreversible for that boot, and under `connectors_required` a queue with
-    no poller reported `unknown` because the handshake was slow is a fleet at zero replicas that
-    passes the gate whose whole purpose is to refuse it.
+    `budget` bounds the connect and the RPC together, because `/readyz`'s kubelet timeout is derived
+    from it. `connect()` caches only successful clients, so a bounded failure does not poison the
+    singleton. The budget is an argument because the startup sweep needs a larger one: a cold
+    connect
+    (PEM parsing, mTLS handshake) can otherwise leave too little time for the RPC that tells
+    `unpolled` from `unknown`.
     """
     if not targets:
         return []
     try:
         return await asyncio.wait_for(_describe_queues(targets, budget), budget)
     except (SubsystemUnavailableError, TimeoutError) as exc:
-        # Every bundle gets the same verdict because they share the one dependency that failed —
-        # whether it failed at the connect or ran the budget out on the RPC. Both are "we could not
-        # measure", which is what `unknown` says and why neither counts nor gates.
+        # Every bundle shares the failed dependency, so every bundle gets `unknown`.
         return [
             ConnectorHealth(
                 name=name,
                 state="unknown",
-                # The type is named because a `TimeoutError` renders as the empty string, and "the
-                # durable backend could not be reached to ask about 'connector-x': " is a detail
-                # that stops exactly where the reason should start.
+                # Name the type: a `TimeoutError` renders as an empty string.
                 detail=(
                     f"the durable backend could not be reached to ask about {queue!r}: "
                     f"{type(exc).__name__}: {exc}"
@@ -342,23 +228,17 @@ async def _probe_queues(targets: list[QueueTarget], budget: float) -> list[Conne
 def _folded(verdicts: list[ConnectorHealth]) -> list[ConnectorHealth]:
     """One row per connector, worst half first, with every half's reason kept.
 
-    A bundle with an endpoint *and* jobs is probed twice and is only as usable as its worse half,
-    so that is the state reported: a healthy MCP pod does not make a queue nobody polls reachable,
-    and neither does a polled queue make a dark endpoint dialable. `_SEVERITY` is the order that
-    resolves the two, and carries the reasoning for it.
-
-    The details are joined rather than picked, because both halves' reasons are what an operator
-    acts on and they name different deployments: one is a server pod, the other a worker fleet.
-    A connector with a single half folds to itself, unchanged.
+    A bundle with an endpoint and jobs is only as usable as its worse half (`_SEVERITY` orders
+    them).
+    Details are joined, not picked, because the halves name different deployments. A single-half
+    connector folds to itself.
     """
     halves: dict[str, list[ConnectorHealth]] = {}
     for verdict in verdicts:
         halves.setdefault(verdict.name, []).append(verdict)
     folded = []
     for name, both in halves.items():
-        # A state `_SEVERITY` has not been taught sorts with `unknown`: it is not evidence the
-        # bundle is fine, and it is not something `UNHEALTHY_STATES` gates on, which is what
-        # `unknown` already means. The default is what keeps this total — see `_SEVERITY_RANK`.
+        # An unranked state sorts with `unknown`: no evidence of health, and not gated on.
         both.sort(key=lambda health: _SEVERITY_RANK.get(health.state, _SEVERITY_RANK["unknown"]))
         folded.append(
             ConnectorHealth(
@@ -374,39 +254,21 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
     """Probe every enabled connector concurrently; never raises, so a caller can always report.
 
     Args:
-        budget: Seconds one connector's probe may take, in both halves. `None` — every caller on
-            the hot path — is `connector_health_timeout_seconds`, read here rather than defaulted
-            in the signature so a deployment (and a test) that overrides it is honoured. The one
-            caller that passes something else is the startup sweep; see
-            `check_connectors_at_startup`.
+        budget: Seconds one connector's probe may take, in both halves. `None` means
+            `connector_health_timeout_seconds`, read at call time so overrides are honoured; the
+            startup sweep passes its own.
 
-    Concurrent because probes are independent and a serial sweep would make startup wait for the sum
-    of the timeouts rather than the slowest one. That is why the two halves are gathered as well as
-    the probes inside each: a deployment with both kinds of bundle pays the slower of the HTTP fan
-    out and the queue fan out, not their sum.
-
-    **Which halves a bundle is asked about follows from what it *has*, and a bundle can have both.**
-    An HTTP health route is asked as the direct question, and `jobs:` is asked as "does anything
-    poll the queue that work runs on" — *additively*, because a bundle that has both has two ways
-    to be unusable. This used to be an `elif`, so the endpoint answered for the whole bundle and
-    `calc`'s twelve jobs and `bo`'s one — 13 of the 14 this fleet declares — had their queues
-    probed by nobody: `connector-worker-calc` at zero replicas read as `healthy`, the gauge stayed
-    at 0, and `connectors_required` started a service whose CREST searches would sit in a queue
-    until the job ceiling expired. That is verbatim the failure the queue probe was built for
-    (`D-2026-08-27-a-queue-with-no-poller-is-unreachable`, which names this gap as its own
-    follow-up). A manifest that lists `queued:` tools adds a third question of the same kind —
-    does anything poll `connector-<name>-interactive` — because its interactive worker is a
-    separate Deployment that can be missing while both of the others are fine. A bundle with
-    none of the three has nothing to ask and stays `unprobed`.
+    The HTTP and queue halves are gathered together, so a sweep costs the slower fan-out rather than
+    the sum. Each half a bundle has (endpoint, `jobs:` queue, `queued:` interactive queue) is asked
+    additively, because each names a separate Deployment that can be missing on its own.
     """
     bound = settings.connector_health_timeout_seconds if budget is None else budget
     endpoints: list[tuple[str, str]] = []
     queues: list[QueueTarget] = []
     unprobed: list[ConnectorHealth] = []
     for manifest in enabled():
-        # Through the registry, never off the manifest: the deployment's `connector_urls` override
-        # moves where a connector actually is, and reading the declared URL here probed the
-        # loopback dev default in every cluster (D-131).
+        # Through the registry, never off the manifest: `connector_urls` moves where a connector
+        # really is.
         probe_url = health_url(manifest)
         if probe_url:
             endpoints.append((manifest.name, probe_url))
@@ -415,9 +277,9 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
             # serves an endpoint.
             queues.append((manifest.name, bundle_queue(manifest.name), _JOBS_REMEDY))
         if queues_tools(manifest):
-            # Its queued tool calls wait on a queue of their own, polled by a different worker
-            # (`connectors/interactive_worker.py`); that worker can be missing while the endpoint
-            # and the jobs worker are both fine, so it is asked separately.
+            # Queued tool calls wait on their own queue with its own worker, which can be missing
+            # while the rest
+            # is fine.
             queues.append((manifest.name, interactive_queue(manifest.name), _INTERACTIVE_REMEDY))
         if not probe_url and not manifest.jobs and not queues_tools(manifest):
             # Nothing to ask: no endpoint and no durable work, stdio (spawned per turn), or an
@@ -432,25 +294,18 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
 async def check_connectors_at_startup() -> list[ConnectorHealth]:
     """Probe the enabled connectors at startup, logging it and honoring `connectors_required`.
 
-    **On its own budget — `connector_startup_health_timeout_seconds` — and not the poll's.** The
-    two checks look alike and are answering under opposite constraints. A `/readyz` sweep runs
-    every 10 seconds per pod inside a kubelet timeout, reuses a cached Temporal client, and is
-    wrong for at most one period: speed is the property that matters, and `unknown` costs a poll.
-    This sweep runs once, pays the cold connect nothing else will pay again (PEM parsing, the mTLS
-    handshake), and produces a verdict that is final for the boot — under `connectors_required` it
-    is the difference between refusing to serve and serving a fleet whose jobs nothing runs. Its
-    cost is paid once at start, so there is no reason for it to share the poll's tight budget, and
-    one good reason not to: `unpolled` needs the RPC to *answer*, and a cold connect inside a 2 s
-    budget can leave too little for it.
+    Uses `connector_startup_health_timeout_seconds`, not the poll's budget: this sweep runs once,
+    pays
+    the cold Temporal connect, and its verdict is final for the boot, so it must leave the RPC
+    enough
+    time to tell `unpolled` from `unknown`.
 
     Returns:
         Every enabled connector's health, for the readiness route and the unhealthy gauge to read.
 
     Raises:
         ConnectorsUnavailable: When `connectors_required` is set and at least one enabled connector
-            is unreachable — the fail-fast posture a deployment can opt into, where serving with
-            a silently reduced tool surface is worse than not serving. A bundle whose queue has no
-            poller is one of those: its jobs are the capability, and nothing runs them.
+            is unreachable or unpolled.
     """
     health = await probe_connectors(settings.connector_startup_health_timeout_seconds)
     down = [item for item in health if item.unhealthy]
@@ -465,10 +320,8 @@ async def check_connectors_at_startup() -> list[ConnectorHealth]:
                 "connectors_required is set but these connectors are unreachable: "
                 + ", ".join(f"{item.name} ({item.state})" for item in down)
             )
-    # Its own line, and its own sentence, because it is a different fact: the probe did not run, so
-    # nothing here is evidence either way. It never gates — the broker is one dependency shared by
-    # every durable bundle, and refusing to start on it would make a Temporal restart a rollout
-    # outage — but a check that quietly did not happen is what this WARNING exists to prevent.
+    # A separate warning: the probe did not run, so this is no evidence either way. It never gates,
+    # since the broker is shared by every durable bundle.
     unknown = [item for item in health if item.state == "unknown"]
     if unknown:
         logger.warning(

@@ -1,17 +1,7 @@
 """Assembling a turn's final `AnswerEvent` from the verdict about its answer.
 
-The last step of a turn is not "emit the text": it is a judgement about what the text is worth, and
-then the projection of that judgement onto the wire contract a surface reads. This module owns the
-second half; `chemclaw.agent.verifier.score_answer` owns the first.
-
-**The split used to be load-bearing and is now only tidy, which is worth saying rather than
-leaving as an unexplained seam.** `score_answer` lived apart because two callers needed one verdict:
-this module for an ordinary turn, and an in-graph gate that had to decide whether to put the answer
-to a review panel while the turn could still be revised. That gate is gone (D-2026-08-15), so there
-is one caller again. The split stays because the reasoning about *which* checks run and how their
-findings combine belongs beside the checks themselves — not because a second entry point exists.
-
-So what is left here is small on purpose: score the answer and build the event.
+`chemclaw.agent.verifier.score_answer` judges the answer; this module projects that verdict onto the
+wire contract a surface reads.
 """
 
 import logging
@@ -30,39 +20,20 @@ async def build_answer_event(
 ) -> tuple[AnswerEvent, TurnReview]:
     """Assemble the turn's final `AnswerEvent`, scoring the answer first.
 
-    `review_required` is the one routing signal a surface reads to flag an answer rather than
-    present it as authoritative, and there is deliberately no second flag for the checks that can
-    raise it: a reviewer needs to know *that* an answer wants a look, and `unsupported_claims`
-    carries *why*, whichever check spoke.
+    `review_required` is the one signal a surface reads to flag an answer; `unsupported_claims`
+    carries why, whichever check spoke.
 
     Args:
         answer: The finished answer text.
-        tool_outputs: What this turn's tools returned, untruncated. This is the whole point of the
-            checks: verification used to re-resolve an answer's citations from the graph on disk,
-            which asked whether a cited note *exists* rather than whether this turn saw it.
+        tool_outputs: What this turn's tools returned, untruncated, so checks ask what this turn
+        saw.
         tools_called: Every tool this turn invoked, for the promised-but-uncalled scan.
 
     Returns:
-        The event and the verdict it projects.
-
-        **The verdict comes back too, because the wire deliberately merges what a caller that
-        *acts* has to tell apart.** `AnswerEvent.unsupported_claims` is one list for a reviewer to
-        read, carrying both the claims the evidence did not support and the notes saying which
-        check spoke; `TurnReview` keeps those apart (`unsupported` / `review_notes`). The revision
-        loop in `api/runner.py` is the caller that acts — it quotes entries back to the model as
-        claims to re-answer — and off the merged list it quoted "verification did not run" at a
-        model that could do nothing about it. Returning the pair is what lets the loop read the
-        actionable half without recognising a status by its wording.
-
-        The event never carries a flag the caller has to interpret: every *finding* field is
-        either what a check found or the `None`/`False` that says nothing was found — and
-        `checks_run` says which checks were in a position to find anything at all.
-
-        **That last clause is the correction, not decoration.** This docstring claimed the
-        `None`/`False` defaults said "the check did not run", which was true of the verifier
-        (`confidence`/`verified_by` are its own nulls) and false of the shape gate, which produces
-        no score and so had no field of its own: an answer it scanned and cleared came out
-        byte-for-byte identical to one no gate looked at, and both gates ship off.
+        The event and the verdict. The verdict keeps unsupported claims apart from review notes,
+        which the wire merges; the revision loop in `api/runner.py` needs only the actionable half.
+        Every finding field is what a check found or the `None`/`False` meaning nothing was found,
+        and `checks_run` says which checks ran at all.
     """
     review = await score_answer(answer, tool_outputs, tools_called)
     return (
@@ -71,9 +42,7 @@ async def build_answer_event(
             checks_run=review.checks_run,
             confidence=review.confidence,
             verified_by=review.verified_by,
-            # Concatenated in the order the checks appended them, so the wire carries exactly the
-            # bytes it carried when `TurnReview` held one list: the findings first, then the note
-            # saying which check produced the verdict.
+            # Findings first, then the note saying which check produced the verdict.
             unsupported_claims=[*review.unsupported, *review.review_notes],
             review_required=review.review_required,
             challenged=review.challenged,

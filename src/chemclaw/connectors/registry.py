@@ -1,26 +1,13 @@
 """The connector registry: discover bundles, validate them, and build what the agent advertises.
 
-This is the one place that turns folders on disk into agent capability. It deliberately combines
-the two discovery idioms the repo already trusts, each where it fits: **filesystem discovery**
-for the bundles themselves (a connector is a folder, exactly as a skill is), and a **config
-enable-token** for which of the discovered bundles a
-deployment turns on (exactly as `skills_enabled` and `data_sources` do). Discovery is not
-enablement: a repo can ship every connector and a deployment can run the subset it has
-validated.
+Bundles are discovered from the filesystem (a connector is a folder, like a skill) and enabled by
+config (`connectors_enabled`), so a repo can ship every connector and a deployment run a subset.
 
-Two products come out of a manifest, and a turn's graph binds both:
-
-- **MCP tools** — whatever each `endpoint:` advertises over a session held for the turn, carrying
-  the turn's identity headers on every call and our own credential on the connection
-  (`chemclaw.connectors.identity`).
-- **Job tools** — one generated launcher per `jobs:` entry (`chemclaw.connectors.jobs`), registered
-  into the shared tool registry so audit, authorization and profile narrowing address it like any
-  other tool.
-
-Nothing here decides *whether* a call is allowed. The registry only assembles the offered
-surface; the audit and authorization middlewares wrap the assembled list in `build_langgraph_agent`,
-and a profile narrows it afterwards — so a connector can add to what is *offered* and never to what
-is *permitted*.
+A turn binds two products of a manifest: the MCP tools each `endpoint:` advertises over a session
+held for the turn (`chemclaw.connectors.identity`), and one generated launcher per `jobs:` entry
+(`chemclaw.connectors.jobs`). Nothing here decides whether a call is allowed: the authorization
+middlewares and profiles wrap what this assembles, so a connector can add to what is offered and
+never to what is permitted.
 """
 
 import asyncio
@@ -66,19 +53,12 @@ logger = logging.getLogger(__name__)
 # `scripts.validate_connectors`) and a typo in either would report "no connectors found".
 MANIFEST_FILENAME = "connector.yaml"
 
-# The two transport bounds every outbound MCP client shares now live with the client itself
-# (`core/mcp_session.py`), because the reaction labeller became a second caller that needs both.
-# Re-exported under their old private names so this module's own call sites read unchanged.
+# Transport bounds shared by every outbound MCP client live in `core/mcp_session.py`.
 _CONNECT_TIMEOUT_SECONDS = CONNECT_TIMEOUT_SECONDS
 
-# How long a tool call may take when the manifest does not say. `HttpEndpoint.request_timeout`
-# defaults to `None`, and `None` used to mean *unbounded*: nothing set `session_kwargs`, so the MCP
-# client session's `read_timeout_seconds` stayed `None` and `mcp.shared.session` reached
-# `anyio.fail_after(None)` — it waits forever. Measured against a real server: a 4 s tool behind an
-# endpoint declaring `request_timeout: 2` was still blocked at 25 s, and its answer was discarded
-# when it finally arrived. Only the front door's 600 s turn deadline bounded it. Every shipped
-# bundle declares a timeout, so this is the number a *third-party* bundle gets — generous enough
-# that a legitimately slow tool is not cut off, finite so a mute connector cannot hold a turn.
+# How long a tool call may take when the manifest does not say. Without a value the MCP session
+# waits forever; this is what a third-party bundle gets, generous for a slow tool but finite so a
+# mute connector cannot hold a turn.
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 
 _READ_TIMEOUT_GRACE_SECONDS = READ_TIMEOUT_GRACE_SECONDS
@@ -90,13 +70,11 @@ _READ_TIMEOUT_GRACE_SECONDS = READ_TIMEOUT_GRACE_SECONDS
 class ConnectorError(ChemclawError):
     """A connector bundle is malformed, or an enabled connector does not exist.
 
-    A `ChemclawError` (so a `ValueError`) because this is a configuration error surfaced at
-    startup — the same class the config validators and `chemclaw.ingest.sources.registry` raise,
-    so one `except ValueError` at an entry point catches every "this deployment is misconfigured"
-    failure. It is also registered in `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class
-    name, because Temporal matches non-retryable error types by exact name, not isinstance — a
-    template step that names an unknown job (`chemclaw.durable.template_activities`) must fail on
-    its first attempt, not burn the transient-retry budget on a job that will never exist.
+    A `ChemclawError` (so a `ValueError`), like other startup configuration errors. Registered by
+    name
+    in `chemclaw.durable.publish._BAD_DATA_TYPES` (Temporal matches by exact name), so a template
+    step
+    naming an unknown job fails on its first attempt.
     """
 
 
@@ -104,25 +82,11 @@ class ConnectorError(ChemclawError):
 def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
     """Every connector bundle directory found across `dirs`, by name, in path order.
 
-    **Every directory, not only the winner, and that distinction is the whole of
-    `skills_dirs`' fix.** A name collision decides which manifest *describes* the capability —
-    exactly one, because `CHEMCLAW_CONNECTOR_URLS` is keyed by that name and two endpoints under one
-    key are unaddressable. It does not decide which of a deployment's directories exist, and content
-    that ships beside the losing manifest is still on disk. Collapsing the two questions is what let
-    a manifest declaring no skills remove a shadowed bundle's `SKILL.md` with no error, no warning
-    and no log line: see `_bundle_content_dirs`.
-
-    Sorted by name rather than filesystem order so the advertised tool order is identical on every
-    machine — tool order is part of the prompt the model sees, and a surface that reshuffles per
-    pod is a reproducibility problem. *Within* a name the path order is kept, because it is the
-    precedence: first directory wins.
-
-    The directories are an argument rather than a read of `settings.connectors_dirs`, because this
-    is the input `_discovered_in` is cached on and a cached function that reaches past its own
-    parameters for its real input is the defect that made the cache unkeyable (see there). Cached
-    for the same reason `_discovered_in` is — it walks and stats every bundle directory on every
-    configured root, and `_bundle_content_dirs` is called on every agent build — which is why
-    `forget_discovered` clears this one too.
+    Every directory, not only the winner: a name collision decides which manifest describes the
+    capability, not which content exists on disk (see `_bundle_content_dirs`). Sorted by name so
+    tool
+    order (part of the prompt) is identical on every machine; within a name, path order is the
+    precedence. Cached on `dirs`; `forget_discovered` clears it.
     """
     found: dict[str, list[Path]] = {}
     for directory in dirs:
@@ -136,13 +100,12 @@ def _bundle_dirs_by_name(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ...]]:
 
 
 def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
-    """The directory that *wins* each bundle name, sorted by name.
+    """The directory that wins each bundle name, sorted by name.
 
-    First dir wins, so an operator's private connectors dir listed ahead of the repo's can override
-    a shipped bundle — the same precedence a `PATH` entry has. This is what `_discovered_in` loads,
-    so a shadowed manifest is never parsed: that is deliberate rather than incidental, because a
-    shadowed bundle is one an operator has replaced, and refusing to start over a file the running
-    system does not use would turn a working override into an outage.
+    First dir wins, like `PATH`, so an operator's private dir can override a shipped bundle. A
+    shadowed manifest is never parsed, so an override cannot fail startup over a file the system
+    does
+    not use.
     """
     return [paths[0] for paths in _bundle_dirs_by_name(dirs).values()]
 
@@ -150,10 +113,8 @@ def _bundle_dirs(dirs: tuple[str, ...]) -> list[Path]:
 def _load_manifest(bundle: Path) -> ConnectorManifest:
     """Parse and validate one bundle's `connector.yaml`, raising `ConnectorError` on any problem.
 
-    The folder name is authoritative: a manifest whose `name` disagrees with its directory would
-    be enabled under one name and looked up under the other, so the mismatch is rejected here
-    rather than surfacing as a connector that silently never loads (the rule `validate_skills`
-    applies to `SKILL.md`).
+    The folder name is authoritative: a manifest whose `name` disagrees would be enabled under one
+    name and looked up under another.
     """
     path = bundle / MANIFEST_FILENAME
     raw = read_manifest(path, ConnectorError)
@@ -170,29 +131,19 @@ def _load_manifest(bundle: Path) -> ConnectorManifest:
 
 @cache
 def _discovered_in(dirs: tuple[str, ...]) -> dict[str, tuple[Path, ConnectorManifest]]:
-    """Every bundle found under `dirs`, by name, with its directory — validated, cached on `dirs`.
+    """Every bundle found under `dirs`, by name, with its directory: validated, cached on `dirs`.
 
-    Cached because discovery reads and parses every manifest on disk (measured: ~48 ms), while the
-    result is fixed for as long as the directories are — which in a deployment is the process's
-    whole life, config being read once at import.
-
-    **Keyed on the directories because they are the input.** This was `@cache` on a zero-argument
-    `discovered()` that read `settings.connectors_dirs` itself, so the cache key omitted the only
-    thing the answer depends on: a test repointing `connectors_dir` at a `tmp_path` bundle poisoned
-    the result for every later test in the process, and the only available defence was clearing the
-    cache around *every* test in the suite — 5,747 forced re-discoveries to protect against ~21
-    files. With the directories in the key a repointed directory is simply a different entry, so the
-    poisoning cannot happen and the clearing is not needed.
+    Cached because discovery parses every manifest on disk; keyed on the directories because they
+    are
+    its only input, so a repointed directory is simply a different entry.
     """
     return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs(dirs)}
 
 
 def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
-    """Every discovered bundle by name, with its directory — validated, regardless of enablement.
+    """Every discovered bundle by name, with its directory: validated, regardless of enablement.
 
-    The settings read is here rather than inside the cache, so that changing `connectors_dir`
-    mid-process is seen on the next call instead of being answered from the previous directory's
-    entry.
+    Reads the settings outside the cache, so a changed `connectors_dir` is seen on the next call.
     """
     return _discovered_in(tuple(settings.connectors_dirs))
 
@@ -200,44 +151,27 @@ def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
 def forget_discovered() -> None:
     """Drop the cache so the next `discovered()` re-reads bundle manifests from disk.
 
-    **The one case a directory-keyed cache cannot see on its own**: new manifests written into a
-    directory this registry has *already* discovered. The key is the directory tuple, so it is
-    unchanged and the entry still answers. Repointing `connectors_dir` needs no clearing at all,
-    because that is a different key.
-
-    A named function rather than `discovered.cache_clear`, which is what this was for a few hours.
-    An attribute assigned onto a function object is invisible to `mypy`: the definition needed a
-    `# type: ignore[attr-defined]` and **every one of the 35 call sites became an error**, so the
-    suppression at the definition bought silence in one place and noise in thirty-five. The tree
-    already had the right idiom for a test-isolation reset — `forget_reachability`,
-    `forget_vector_store`, `forget_open_warehouses` — and this is it.
+    Needed only when new manifests are written into an already-discovered directory (same key);
+    repointing `connectors_dir` is a different key. A named function, matching the repo's other
+    `forget_*` test-isolation resets, so callers type-check.
     """
     _discovered_in.cache_clear()
-    # The directory walk is cached on the same key and goes stale the same way — a manifest written
-    # into an already-walked directory is invisible to both, and clearing one of two caches is how a
-    # test isolation helper stops isolating half of what it names.
+    # The directory walk is cached on the same key and goes stale the same way.
     _bundle_dirs_by_name.cache_clear()
 
 
 def bearer_token_env_names() -> tuple[str, ...]:
     """Every environment variable holding an enabled connector's bearer token.
 
-    **One definition, because two things scrub with it and a scrub that covers one is worse than
-    none.** `core.logging.SecretRedactingFilter` resolves these so a token cannot reach a log line,
-    and `deliver.message.Message.redacted` needs the same set so a token cannot reach a *webhook* —
-    which is the more consequential of the two, since a log line stays inside the cluster and a
-    delivery does not. `message.py` claimed the same filter ran on it and it did not: the default
-    `redact_secrets` path covers `_SECRET_SETTINGS` and the structural patterns, and an opaque
-    site-issued connector token matches none of them.
+    The one definition used by both scrubs: `core.logging.SecretRedactingFilter` (log lines) and
+    `deliver.message.Message.redacted` (webhooks). An opaque connector token matches no structural
+    pattern, so it must be named.
 
     Returns:
         The variable names.
 
     Raises:
-        Whatever `enabled()` raises on a malformed manifest — this function has no handler and does
-        not swallow. Both callers catch, and each decides how loudly to say so: `core.logging` at
-        ERROR with a counter, `deliver.message` on the path that leaves the cluster. An earlier
-        version of this docstring promised `()` on failure, which no code here delivers.
+        Whatever `enabled()` raises on a malformed manifest; both callers catch and report it.
     """
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
 
@@ -252,18 +186,12 @@ def bearer_token_env_names() -> tuple[str, ...]:
 def enabled() -> list[ConnectorManifest]:
     """The manifests this deployment turns on, in the order the enable-list (or discovery) gives.
 
-    An empty `connectors_enabled` means every discovered connector **that declares
-    `default_enabled`** — the same "discovery is enablement until you say otherwise" default
-    `skills_enabled` uses, narrowed by the one thing a bundle may say about itself. A name in the
-    list that no bundle provides is a loud error: it would otherwise advertise nothing and look
-    like a capability that simply stopped working.
-
-    **An explicit list overrides `default_enabled` rather than being filtered by it**, and that
-    asymmetry is the whole point: the flag decides what *silence* means, not what a deployment is
-    allowed to ask for. A release that names `thermalsafety` gets it, which is how an opt-in
-    bundle is ever reachable; a release that names nothing gets the surface it had before the
-    bundle existed. Filtering the explicit list too would make an opt-in bundle unreachable by any
-    configuration, which is `reject_widening`'s shape — a control whose condition cannot occur.
+    An empty `connectors_enabled` means every discovered bundle that declares `default_enabled`. An
+    explicit list overrides `default_enabled` rather than being filtered by it, which is how an
+    opt-in
+    bundle becomes reachable. A listed name no bundle provides is a loud error, not a capability
+    that
+    silently stops working.
     """
     found = discovered()
     names = settings.connectors_enabled_list
@@ -280,42 +208,13 @@ def enabled() -> list[ConnectorManifest]:
 def server_tools_module(connector: str) -> ModuleType | None:
     """A bundle's `server.tools` module, or `None` when the bundle ships no MCP server at all.
 
-    The one definition of "import a bundle's tool functions", because the two validators that do
-    it — `make connector-validate` (does the served surface match the manifest) and
-    `make template-validate` (does a template step pass arguments the tool takes) — had opposite
-    answers to the same question, and only one of them was right.
-
-    Both callers skip an endpoint-less bundle before asking (that is how `results`, which is
-    jobs-only,
-    never reaches here), so `None` means the narrower thing: a bundle that declares an endpoint and
-    has no module behind it.
-
-    A *transitive* import failure propagates. Only a `ModuleNotFoundError` naming this bundle's own
-    server package or the module inside it means "no server module"; a missing or renamed dependency
-    underneath it means the bundle is broken, and swallowing that leaves a validator checking less
-    and still reporting success — measured, `validate_templates` resolved 46 signatures instead of
-    50 and printed "template validation passed" for a bundle that could not be imported at all.
-
-    **The package name is in that set because a bundle can now be declared and not run.** This used
-    to check the module alone, which was complete while every endpoint-bearing bundle shipped a
-    `server/` directory. `chem`'s capability moved out and its directory went with it, so the
-    *parent* is what is missing and `exc.name` is the package — and this function raised where its
-    own docstring says it should return `None`.
-
-    That it survived a local run is worth recording: a deleted `server/` leaves its `__pycache__`
-    behind, so the directory persists as a PEP 420 namespace package, the import gets one level
-    further, and the error names the module after all. Locally it returned `None` and CI raised, off
-    the same commit.
-
-    **The bundle package is in the set for the same reason, one level higher again.** `chem` is a
-    bundle whose *directory* still ships here; a bundle discovered on an operator's own
-    `connectors_dir` — the `PATH`-style override `_bundle_dirs` implements and `ARCHITECTURE.md`
-    advertises — has no `chemclaw.connectors.<name>` package at all, so the missing name is the
-    bundle rather than its `server` child. Without it, `make connector-validate` failed by
-    construction for every out-of-tree bundle, with a message describing a *broken* server module,
-    and the only way to get CI green was to stop validating that directory. Treated as `chem` is
-    instead: name-checked, and reported by `unverified_tool_surfaces()` as a surface this tree
-    cannot verify.
+    The one definition shared by `make connector-validate` and `make template-validate`. Callers
+    skip
+    endpoint-less bundles, so `None` means an endpoint-declaring bundle with no module here: a
+    `ModuleNotFoundError` naming the bundle package, its `server` package or the module itself (an
+    out-of-tree bundle, or one whose server moved to the fleet). Any other import failure
+    propagates,
+    so a broken dependency cannot make a validator check less and still pass.
     """
     bundle = f"chemclaw.connectors.{connector}"
     package = f"{bundle}.server"
@@ -331,12 +230,9 @@ def server_tools_module(connector: str) -> ModuleType | None:
 def declared_note_types() -> frozenset[str]:
     """Every knowledge-graph note type the enabled bundles declare.
 
-    Read by `chemclaw.kg.note.known_note_types`, which unions it with core's own set to get the
-    vocabulary `make kg-validate` accepts in this deployment. Scoped to *enabled* bundles rather
-    than discovered ones for the same reason every other registry answer is: a bundle a deployment
-    does not run contributes nothing, including vocabulary — and a note whose type came from a
-    since-disabled bundle should fail validation, because nothing in the running system can produce
-    or interpret one.
+    Unioned with core's set by `chemclaw.kg.note.known_note_types`. Enabled bundles only: a note
+    whose
+    type came from a disabled bundle should fail validation.
     """
     return frozenset(name for manifest in enabled() for name in manifest.note_types)
 
@@ -349,22 +245,10 @@ def declared_relations() -> frozenset[str]:
 def skills_dirs() -> list[str]:
     """The `skills/` directory of every enabled connector, wherever on the path it is found.
 
-    A connector's judgment ships with its capability: the `SKILL.md` explaining *when* to trust
-    a similarity hit belongs to the same bundle as the tool that produces one. Appending these
-    to `settings.skills_dirs` means the skills backend discovers them with no new machinery, and
-    the existing enable-list, profile, capability and role gates still narrow them — a bundled skill
-    is an ordinary skill in every respect except where it lives.
-
-    Only directories that exist are returned: a manifest may declare skills whose folder a
-    deployment has not mounted, and `make connector-validate` is where that mismatch is
-    reported, so handing a non-existent path to the skills source here would fail the *agent*
-    for a *packaging* problem.
-
-    **"Every enabled connector" and not "every enabled connector that declares skills", and that
-    change is the fix rather than a loosening** — a bundle whose manifest wins a name collision
-    while declaring fewer skills than the bundle it shadowed used to remove them silently, which is
-    the shipped wiring order for `Chemclaw3-mcp`'s `safety` port. `_bundle_content_dirs` carries the
-    argument and the measurement.
+    A connector's judgment ships with its capability; appended to `settings.skills_dirs`, so bundled
+    skills are ordinary skills under every existing gate. Only existing directories are returned
+    (`make connector-validate` reports missing ones), and a shadowed bundle's directory is included
+    (see `_bundle_content_dirs`).
     """
     return _bundle_content_dirs("skills", enabled())
 
@@ -372,24 +256,20 @@ def skills_dirs() -> list[str]:
 def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
     """The endpoint URL, after any per-deployment override for this connector.
 
-    A manifest ships a working dev default (a loopback port), but a cluster's address belongs to
-    the deployment, not to a file in the repo. `connector_urls` is that override, so Helm points
-    the front door at an in-cluster Service without patching a bundle.
+    A manifest ships a loopback dev default; `connector_urls` lets Helm point at an in-cluster
+    Service
+    without patching a bundle.
     """
     return settings.connector_urls.get(connector, endpoint.url)
 
 
 def request_timeout_seconds(endpoint: Endpoint) -> float:
-    """How long one call to this endpoint may take — the single derivation of that number.
+    """How long one call to this endpoint may take: the single derivation of that number.
 
-    Two independent bounds are built from it (the MCP session's `read_timeout_seconds` and the
-    httpx read timeout), and they must stay in a fixed relationship to each other, so neither may
-    read the manifest on its own. Public because a test proving that relationship has to compare
-    the same number a deployment uses.
-
-    `StdioEndpoint` declares no timeout at all — a subprocess of our own process is not a network
-    dependency — but an unresponsive subprocess hangs a turn exactly as a mute HTTP host does, so
-    it gets the same default rather than an exemption.
+    Both the MCP session's `read_timeout_seconds` and the httpx read timeout derive from it and must
+    keep a fixed relationship, so neither reads the manifest itself. Public so a test can compare
+    the
+    same number. A stdio endpoint gets the same default, since a hung subprocess hangs a turn too.
     """
     if isinstance(endpoint, HttpEndpoint) and endpoint.request_timeout is not None:
         return float(endpoint.request_timeout)
@@ -399,38 +279,24 @@ def request_timeout_seconds(endpoint: Endpoint) -> float:
 def _session_kwargs(endpoint: Endpoint) -> dict[str, Any]:
     """The `ClientSession` arguments that give a tool call a deadline at all.
 
-    This is the bound that actually fires: `mcp.shared.session.send_request` waits inside
-    `anyio.fail_after(read_timeout_seconds)` and raises `McpError` when it expires. Without it the
-    argument is `None` and the wait is unbounded — see `_DEFAULT_REQUEST_TIMEOUT_SECONDS`.
-    `langchain-mcp-adapters` forwards `session_kwargs` verbatim into `ClientSession`, and both
-    transports' connection mappings accept it, so one function serves both branches.
+    This is the bound that fires (`anyio.fail_after(read_timeout_seconds)` raises `McpError`);
+    without it the wait is unbounded. `langchain-mcp-adapters` forwards `session_kwargs` on both
+    transports.
     """
     return {"read_timeout_seconds": timedelta(seconds=request_timeout_seconds(endpoint))}
 
 
 def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.AsyncClient:
-    """The HTTP client one connector endpoint is reached with — the single definition of it.
+    """The HTTP client one connector endpoint is reached with: the single definition of it.
 
-    Public because a test that means to prove something about how a connector is reached has to
-    exercise *this* client rather than a hand-rolled lookalike; three transport tests used to build
-    their own and were free to drift from what a deployment actually runs.
+    Public so tests exercise this client rather than a lookalike. It carries our credential as
+    `auth` (so it is on the MCP handshake too) and the turn's identity as a request hook (a header
+    callback would run in the wrong task and never land).
 
-    One client carries both halves of what travels with a call (`chemclaw.connectors.identity`):
-    our own credential as `auth`, so it is present on the MCP handshake too, and the turn's identity
-    as a request hook, which is the only place that can see the turn's ambient context — a
-    header-provider callback is invoked in the calling task while the request is issued by the MCP
-    transport's writer task, so its headers would never land.
-
-    **Redirects are not followed, and that is a security property rather than a tuning choice.**
-    An httpx request hook runs on every hop and httpx carries the previous request's headers into
-    the redirected one, stripping `Authorization` alone — so a connector (or anything that can bind
-    its Service port; all shipped manifests declare `auth: mode: none`) could answer the MCP POST
-    with a `302` toward an origin it controls and collect the caller's Entra object id and full role
-    set once per turn. MCP streamable-HTTP needs no redirect for any real flow:
-    `FastMCP.streamable_http_app` serves the endpoint as an exact Starlette `Route`, so neither the
-    per-bundle Service address nor the dev composite's `/<name>/mcp` mount ever answers 3xx — proven
-    by the transport tests, which complete the handshake and a tool call over this client.
-    `turn_identity_hook` strips the headers on a foreign origin as the second layer.
+    Redirects are not followed, as a security property: httpx carries headers across a redirect
+    (stripping only `Authorization`), so a connector answering `302` could harvest the caller's
+    identity and roles. MCP streamable-HTTP never needs a redirect; `turn_identity_hook` strips the
+    headers on a foreign origin as a second layer.
 
     Args:
         connector: The bundle's name, for the deployment URL override and the credential error.
@@ -442,29 +308,18 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
     return httpx.AsyncClient(
         auth=auth_for(endpoint.auth, connector),
         follow_redirects=False,
-        # The process's one trust store rather than a fresh parse of the CA bundle per client.
-        # A turn opens one of these per connector; `core.http.default_ssl_context` measures what
-        # that cost on the event loop before this argument was here (156.1 ms -> 0.4 ms per turn).
+        # The process's one trust store, not a fresh CA-bundle parse per client per turn.
         verify=default_ssl_context(),
         # Never inherit an ambient proxy: a connector endpoint is an in-cluster Service, and an
         # HTTPS_PROXY on the pod must not silently reroute a tool call (and its bearer) elsewhere.
         trust_env=False,
         event_hooks={"request": [turn_identity_hook(_endpoint_url(connector, endpoint))]},
-        # Without this, httpx applies its own 5 s default to *every* phase, and the manifest's
-        # `request_timeout` — which this module's docstring credits with "keeping an unreachable
-        # host from hanging a turn" — did the opposite. Measured against a real server: an 8 s tool
-        # call had its HTTP stream torn down at 5 s, the MCP response then never arrived, and the
-        # caller blocked for the full `request_timeout` (60 s for calc, 120 s for bo) before
-        # surfacing an opaque failure — holding an admission permit and an agent lease the whole
-        # time. A tool slower than 5 s is not exotic here: an uncached `predict_pka` runs xTB
-        # inline. Connect stays short so a dead host still degrades fast.
-        #
-        # The read bound is deliberately *looser* than the MCP session's (`_session_kwargs`) rather
-        # than equal to it. The measurement above is what that ordering encodes: this timeout's
-        # firing is invisible — `mcp.client.streamable_http` catches it at debug level and does not
-        # reconnect — so whenever it trips first it converts a merely slow answer into a lost one
-        # with no error to show for it. The session bound is the one that must win, because it is
-        # the one that raises. See `_READ_TIMEOUT_GRACE_SECONDS`.
+        # Without this httpx applies 5 s to every phase and tears down a slow tool call's stream.
+        # Connect
+        # stays short so a dead host degrades fast. The read bound is looser than the MCP session's
+        # (`_session_kwargs`): when the httpx timeout fires first the answer is lost silently, so
+        # the
+        # session bound, which raises, must win. See `_READ_TIMEOUT_GRACE_SECONDS`.
         timeout=httpx.Timeout(
             request_timeout_seconds(endpoint) + _READ_TIMEOUT_GRACE_SECONDS,
             connect=_CONNECT_TIMEOUT_SECONDS,
@@ -475,27 +330,14 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
 def health_url(manifest: ConnectorManifest) -> str | None:
     """Where to probe this connector, moved to wherever its endpoint actually is (D-131).
 
-    Public because the startup probe is a second caller and it must not read `health_url` off the
-    manifest directly — **which is exactly the bug this exists to fix.** `connector_urls` moved the
-    *tool* endpoint to the deployment's real address and left the probe pointed at the manifest's
-    loopback dev default. The shipped chart always sets that override (it computes one Service URL
-    per enabled bundle), so in a cluster the front door probed `127.0.0.1:881x` — its own pod, where
-    nothing listens. Every connector therefore reported `unreachable` on `/readyz` and in
-    `chemclaw_connectors_unhealthy` however healthy it was, and under `connectors_required: true`
-    — the fail-fast posture — startup would have failed every time. Found by re-running the
-    Stage 5e connector-kill scenario, which could not tell "killed" from "never probed correctly".
+    The health probe must not read `health_url` off the manifest: `connector_urls` moves the
+    endpoint
+    in every cluster, and the declared URL is a loopback dev default. The move re-applies the
+    difference between the manifest's health and endpoint URLs at the effective address, because
+    deployments differ in path layout (one Service per bundle vs. the dev composite's `/<name>/`
+    mounts), not just host.
 
-    The move is a suffix replacement rather than an origin swap, because the two deployments that
-    exist put the connector in different *places*, not merely on different hosts: Helm gives each
-    bundle its own Service (`…:8814/mcp` + `…:8814/healthz`) while `chemclaw.cli.connectors_dev`
-    mounts
-    them all under one port by name (`…:8810/chem/mcp` + `…:8810/chem/healthz`). Taking the health
-    path verbatim would be right for the first and wrong for the second. So the manifest's own two
-    URLs define the relationship — whatever distinguishes its health URL from its endpoint URL —
-    and that difference is re-applied at the effective address.
-
-    Returns None when the bundle declares no health route (a third-party MCP server may expose
-    none), which the probe reports as `unprobed` rather than guessing a path.
+    Returns None when the bundle declares no health route, which the probe reports as `unprobed`.
     """
     endpoint = manifest.endpoint
     if not isinstance(endpoint, HttpEndpoint) or endpoint.health_url is None:
@@ -506,9 +348,9 @@ def health_url(manifest: ConnectorManifest) -> str | None:
     shared = len(os.path.commonprefix([endpoint.url, endpoint.health_url]))
     endpoint_tail, health_tail = endpoint.url[shared:], endpoint.health_url[shared:]
     if not effective.endswith(endpoint_tail):
-        # The override does not end the way the manifest's own endpoint does, so there is nothing
-        # to re-root against. Probing the declared URL is the honest fallback: it may be wrong, but
-        # inventing a path from an address we do not understand would be wrong *and* silent.
+        # The override does not share the manifest endpoint's suffix, so there is nothing to
+        # re-root;
+        # probing the declared URL may be wrong but is not silently invented.
         return endpoint.health_url
     return effective.removesuffix(endpoint_tail) + health_tail
 
@@ -516,39 +358,22 @@ def health_url(manifest: ConnectorManifest) -> str | None:
 def queues_tools(manifest: ConnectorManifest) -> bool:
     """Whether this bundle routes tool calls through its interactive queue, and so needs a worker.
 
-    One answer for the two readers that must agree on it: the reachability sweep, which asks
-    whether anything polls `connector-<name>-interactive`, and the live lane, which starts one
-    `interactive_worker` per bundle this is true of — exactly the set the chart renders
-    `deployment-interactive-workers.yaml` for when a release sizes them. A bundle the lane forgot
-    is a queue every heavy call waits on forever, which is how the lane ran until this existed.
+    The one answer for the reachability sweep and the live lane (which starts one
+    `interactive_worker` per such bundle), matching the chart's interactive-worker Deployments.
     """
     endpoint = manifest.endpoint
     return isinstance(endpoint, HttpEndpoint) and endpoint.queued is not None
 
 
 def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorSpec:
-    """Describe one connector endpoint for the LangGraph engine (M7).
+    """Describe one connector endpoint for the LangGraph engine.
 
-    Dispatches on the `Endpoint` union for the reason `request_timeout_seconds` and
-    `_session_kwargs` do: the transports differ only in how the server is *reached*, and everything
-    bounding what the agent may do with it is identical on both. (This docstring called itself "the
-    twin of `_mcp_tool`" from the commit that wrote it — a function that has never been defined in
-    this repository, which made a reader look for a second dispatcher over the union and find one
-    function plus its client factory.)
-
-    **The HTTP client is still ours, and that is what keeps four security properties alive.**
-    `httpx_client_factory` is the seam `langchain-mcp-adapters` exposes, so `connector_http_client`
-    crosses unchanged and with it the refusal to follow redirects (a connector answering `302`
-    would otherwise harvest the caller's Entra oid and role set), `turn_identity_hook`, `auth_for`,
-    and the split connect/read timeout. The library's own `timeout`/`auth`/`headers` arguments are
-    deliberately *not* passed on the connection: the factory ignores what it is handed, and the
-    honest way to ignore an argument is to never let a caller supply one. The adapter closes the
-    client it builds through the factory — `_create_streamable_http_session` enters it with `async
-    with client` — so the D-119-class connection leak cannot arise here.
-
-    `session_kwargs` is the one library argument that *is* passed, on both transports, because it
-    is the only place a tool call can be given a deadline at all (`_session_kwargs`) — the httpx
-    client bounds the bytes, not the JSON-RPC request waiting on them.
+    Dispatches on the `Endpoint` union; transports differ only in how the server is reached. The
+    HTTP
+    client is ours, passed through `httpx_client_factory`, so the redirect refusal, identity hook,
+    credential and split timeouts all survive; the library's `timeout`/`auth`/`headers` are not
+    passed. The adapter closes the client it builds. `session_kwargs` is passed on both transports,
+    since it is the only per-request deadline.
     """
     if isinstance(endpoint, HttpEndpoint):
         return ConnectorSpec(
@@ -564,22 +389,18 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
             request_timeout=request_timeout_seconds(endpoint),
         )
     if isinstance(endpoint, StdioEndpoint):
-        # **Refused unless the deployment asked for it**, because this is the one endpoint field
-        # that executes: `command` is run in the chat process, before the handshake, so a manifest
-        # dropped on `connectors_dir` by anything that can write there (a CI job syncing a sibling
-        # repo, a ConfigMap edit) used to be arbitrary code execution under the identity holding
-        # every connector token. Refusing here rather than at parse time keeps `StdioEndpoint`
-        # constructible — the transport's own tests build one directly — while making a *file* an
-        # inert declaration until an operator turns the transport on.
+        # Refused unless the deployment enables it: `command` executes in the chat process, so a
+        # manifest
+        # written to `connectors_dir` would otherwise be code execution under the identity holding
+        # every
+        # connector token. Checked here, not at parse time, so `StdioEndpoint` stays constructible.
         if not settings.connector_stdio_enabled:
             raise ConnectorError(
                 f"connector {manifest.name!r} declares `transport: stdio`, which launches "
                 f"{endpoint.command!r} in this process; it is disabled by default because a "
                 "manifest is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
             )
-        # No identity headers, for the same reason the HTTP branch above attaches them: a subprocess
-        # of our own process runs under our own identity, with no outbound request to attach them to
-        # (`connectors.identity`).
+        # No identity headers: a subprocess runs under our own identity, with no outbound request.
         return ConnectorSpec(
             name=manifest.name,
             connection=StdioConnection(
@@ -594,13 +415,11 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
 
 
 def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
-    """An `httpx_client_factory` that returns *our* client, ignoring what the library offers.
+    """An `httpx_client_factory` that returns our client, ignoring what the library offers.
 
-    The library calls this with `headers`, `timeout` and `auth` drawn from the connection mapping.
-    `_mcp_connection` sets none of them, so all three arrive empty and there is nothing to drop —
-    the signature exists to satisfy the caller, not to carry configuration. Every one of those
-    concerns is already decided inside `connector_http_client`, which is the one place they may be
-    decided.
+    `_mcp_connection` sets no headers, timeout or auth, so nothing is dropped; all of it is decided
+    in
+    `connector_http_client`.
     """
 
     def factory(**_ignored: Any) -> httpx.AsyncClient:
@@ -612,9 +431,8 @@ def _connector_client_factory(connector: str, endpoint: HttpEndpoint) -> Any:
 def mcp_connections() -> list[ConnectorSpec]:
     """One connection spec per enabled connector that declares an endpoint (unopened).
 
-    The deployment's whole surface; `chemclaw.agent.chemclaw_agent.connector_specs` is the
-    profile-narrowed half. Split that way because enablement is a deployment decision and narrowing
-    is a per-turn one, and a profile must never be able to widen what the deployment enabled.
+    The deployment's whole surface; `chemclaw.agent.chemclaw_agent.connector_specs` narrows it per
+    turn, so a profile can never widen what the deployment enabled.
     """
     return [
         _mcp_connection(manifest, manifest.endpoint)
@@ -624,12 +442,10 @@ def mcp_connections() -> list[ConnectorSpec]:
 
 
 def connector_spec(name: str) -> ConnectorSpec:
-    """How to reach one enabled connector by name — for a process that is not running a turn.
+    """How to reach one enabled connector by name, for a process that is not running a turn.
 
-    The interactive worker (`connectors/interactive_worker.py`) calls a connector's tools on a
-    chemist's behalf without holding that chemist's turn, so it cannot be handed the turn's spec;
-    it builds the same one here, through `_mcp_connection`, so its client carries the identical
-    credential, redirect refusal and timeouts a turn's does.
+    Used by the interactive worker; built through `_mcp_connection` so its client has the same
+    credential, redirect refusal and timeouts as a turn's.
 
     Raises:
         ConnectorError: `name` is not an enabled connector with an endpoint in this deployment.
@@ -645,10 +461,8 @@ def connector_spec(name: str) -> ConnectorSpec:
 def _count_unreachable(connector: str, metrics: Metrics) -> None:
     """Book one connector's absence from one turn, by name.
 
-    A module function rather than a lambda in the loop because a lambda closing over the loop
-    variable is a late-binding bug and the default-argument form that dodges it is untypeable —
-    `mypy --strict` cannot infer a lambda with a defaulted parameter. `partial` binds the name at
-    the call site, which is the same fix without either problem.
+    A function bound with `partial` rather than a loop lambda, avoiding late binding and staying
+    typeable.
     """
     metrics.increment("chemclaw_connectors_unreachable_total", labels={"connector": connector})
 
@@ -658,34 +472,15 @@ async def open_connector_specs(
 ) -> tuple[list[BaseTool], list[str]]:
     """Open every connector for this turn; return the tools that came up and the names that did not.
 
-    The connector lifecycle in one place, used by every caller that runs a turn — the front-door
-    runner, the CLI, the template activities — so "how a turn reaches its connectors" has a single
-    definition rather than several loops that can drift.
+    The single connector lifecycle for every caller that runs a turn. Tools come back with the
+    casualties because a connector's tools only exist once its session is open. Nothing is caught: a
+    failed connect is non-fatal by construction (`chemclaw.connectors.transport`), so an unreachable
+    connector contributes no tools and is retried next turn.
 
-    **The tools come back with the casualties** because a connector's tools do not exist until its
-    session is open: `load_mcp_tools` needs a live session. That is why this returns a pair rather
-    than a list of names, and it is the one structural difference from the process-lived connector
-    objects this replaced.
-
-    Nothing is caught here: a session's `connect` is already non-fatal by construction
-    (`chemclaw.connectors.transport`), so an unreachable connector simply comes back not-connected,
-    contributes no tools to the turn, and is retried on the next one.
-
-    Concurrent, because these are independent hosts and the wait is the *sum* of their latencies
-    otherwise. On the healthy path that is a few hundred milliseconds; the case that matters is the
-    tail, where a dark fleet cost six sequential connect timeouts before the model was called at
-    all. Safe to be concurrent because each `HeldConnectorSession` confines its `anyio` cancel scope
-    to a task of its own, so entering them together does not exit them from the wrong task (see
-    `chemclaw.connectors.transport.HeldConnectorSession`).
-
-    **The degradation is announced here, not left to the caller** (REV-6). The return value once
-    said "for the caller to surface" and all four callers dropped it on the floor, so a turn that
-    lost half its capability answered exactly like one that had all of it — the model simply never
-    saw the tools and reasoned from what remained. Announcing it in the one place every caller
-    passes through means a new caller cannot reintroduce the silence by forgetting to read a return
-    value. A caller that can reach a *human* still reads the list and says so on its own surface
-    (the front door yields `CapabilityDegradedEvent`, the CLI prints to stderr); what is guaranteed
-    here is the operator-visible half.
+    Concurrent, so a dark fleet costs one connect timeout rather than their sum; safe because each
+    `HeldConnectorSession` confines its cancel scope to its own task. The degradation is logged and
+    counted here so no caller can forget the operator-visible half; callers that reach a human also
+    surface the list themselves.
 
     Args:
         stack: The caller's exit stack, which owns tearing the sessions down.
@@ -699,21 +494,16 @@ async def open_connector_specs(
     opened = await asyncio.gather(*(stack.enter_async_context(session) for session in held))
     unreachable = [session.name for session in held if not session.connected]
     if unreachable:
-        # WARNING rather than ERROR: the turn still runs, and a connector that is down for a
-        # deployment is a normal transient. The counter is what makes it alertable — a rate that
-        # stays above zero across turns is a dark connector, not a restart.
+        # WARNING, not ERROR: the turn still runs. A counter rate that stays above zero is a dark
+        # connector.
         logger.warning(
             "%d connector(s) did not come up for this scope and contribute no tools: %s",
             len(unreachable),
             ", ".join(unreachable),
         )
-        # **One increment per connector, carrying its name.** It was one bulk increment of an
-        # unlabelled series, so the only question it could answer was "did anything go dark" — and
-        # the gauge beside it (`chemclaw_connector_unhealthy`) already carries `connector`, so the
-        # two halves of one fact disagreed about whether it was nameable. The name is a bundle from
-        # this registry, never a caller's string, which is what makes it a safe label
-        # (`core/metrics._COUNTER_LABELS`). Driven: a connector answering 500 on `/mcp` while its
-        # `/healthz` said 200 moved this counter and nothing else, and the sample said only `1.0`.
+        # One increment per connector, labelled by name (a registry bundle, never a caller's string,
+        # so a
+        # safe label; see `core/metrics._COUNTER_LABELS`).
         for name in unreachable:
             record_metric(partial(_count_unreachable, name))
     return [tool for tools in opened for tool in tools], unreachable
@@ -722,18 +512,8 @@ async def open_connector_specs(
 def profiles_dirs() -> list[str]:
     """The `profiles/` directory of every enabled connector, wherever on the path it is found.
 
-    The bundle-local half of profile discovery (`chemclaw.agent.profile_discovery`), and the same
-    rule
-    as `skills_dirs`: only directories that exist are returned, because a manifest may declare
-    content a deployment has not mounted and that is `make connector-validate`'s complaint to
-    make, not a reason to fail the agent — and a shadowed bundle's directory is read too, because a
-    name collision decides which manifest describes the capability and not which files exist.
-
-    A profile is the weaker case of the two and is covered by the same mechanism deliberately: what
-    a profile varies is its instructions and its model route, neither of which carries authority
-    (`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`), so a shadowed
-    profile that names tools the winning surface does not serve narrows itself to what that surface
-    binds rather than widening anything.
+    Same rule as `skills_dirs`. A shadowed bundle's profile cannot widen anything: a profile varies
+    only instructions and model route, and narrows itself to the tools the winning surface binds.
     """
     return _bundle_content_dirs("profiles", enabled())
 
@@ -741,56 +521,18 @@ def profiles_dirs() -> list[str]:
 def _bundle_content_dirs(kind: str, manifests: Iterable[ConnectorManifest]) -> list[str]:
     """Every named bundle's `<kind>/` directory, across every directory carrying that name.
 
-    `skills_dirs` and `profiles_dirs` were this function twice, three hundred lines apart, differing
-    in two tokens and each carrying its own copy of the "only directories that exist" paragraph —
-    which is the sentence most likely to be fixed in one copy and not the other. Two callers is the
-    second one, so this is the extraction rather than a speculative one; the third bundle-local
-    content type costs a line instead of another twelve.
+    The winning manifest decides the tool surface; the directories on disk decide the content. For
+    each enabled bundle, every directory carrying its name contributes an existing `<kind>/`, winner
+    first, so a same-name replacement manifest that declares no skills cannot silently delete the
+    shadowed bundle's judgment.
 
-    **A bundle name collision must not silently delete content, and deriving this from the winning
-    manifest alone is what made it do so.** `Chemclaw3-mcp` ports this repository's `safety` bundle
-    under the *same* name — same three tools, same arguments, deliberately, so exactly one of the
-    two answers — and its manifest declares **no** `skills:`, with a comment saying the absence is
-    deliberate and that *"whoever wires this server up must keep that skill reachable"*. The wiring
-    order both that repository's README and its integration doc publish puts `manifests/` first, so
-    that manifest wins the name. This function then asked the winner whether the bundle declares
-    skills, got no, and dropped `connectors/safety/skills/safety-screening/SKILL.md` — 132 lines
-    carrying *why an empty result is never "safe"*, which is the judgment
-    `D-2026-08-15-safety-is-a-tool-not-a-gate` deliberately left out of the deterministic table —
-    with no error, no warning and no log line. Driven through this registry in both orders before
-    the fix: reachable core-first, unreachable fleet-first.
-
-    So the two questions are separated. **The winning manifest decides the tool surface; the
-    directories on disk decide the content.** For each *enabled* bundle, every directory carrying
-    its name contributes its `<kind>/` directory if that directory exists, winner first — which is
-    the
-    precedence the skills and profile backends already resolve by, because both take a list of roots
-    and `settings.skills_dirs` has always been a `PATH`-style list.
-
-    **Why a union rather than a refusal, measured rather than preferred.** The obvious alternative
-    is to refuse to start when a winning manifest declares less content than a shadowed one, and it
-    is
-    the wrong shape here: a genuine replacement — an operator swapping `calc` for their own bundle
-    with a different surface — is a deployment that then cannot start, with no way to say "yes, I
-    meant to drop the judgment too". The risk a union carries instead is publishing a shadowed
-    bundle's judgment about tools the winner does not serve, and that risk is **already covered by a
-    gate built for exactly it**: `agent.skill_access.ToolScopedSkills` hides a skill whose every
-    declared tool is unreachable, on the argument that judgment about absent capability "is not
-    merely useless, it is misleading". `safety-screening` declares precisely the three tools both
-    manifests serve, so it survives that gate here and would not survive it beside a different
-    surface. Measured across the family today the union adds exactly one directory and no skill that
-    gate would hide.
-
-    **The declaration is no longer the gate, and `make connector-validate` is why that is safe.**
-    `cli/validate_connectors._bundle_content_problems` already refuses a bundle in *both* directions
-    — a declared skill with no directory, and a directory no `connector.yaml` declares — so for
-    every bundle this repository ships and validates, "declares it" and "has the directory" are one
-    fact.
-    Using the declaration as the gate bought nothing over reading the disk, and cost the shadowed
-    half of a collision. A `<kind>/` directory that exists is published; whether the manifest beside
-    it says so is a packaging question with a validator of its own, exactly as a *declared*
-    directory that is absent has always been (returning a non-existent path here would fail the
-    agent for a packaging problem).
+    A union rather than a startup refusal, so a deliberate replacement can still start; judgment
+    about
+    tools the winner does not serve is hidden by `agent.skill_access.ToolScopedSkills`. The
+    manifest's
+    declaration is not the gate: `cli/validate_connectors._bundle_content_problems` already holds
+    declarations and directories equal for every validated bundle. Non-existent paths are never
+    returned.
     """
     dirs: list[str] = []
     by_name = _bundle_dirs_by_name(tuple(settings.connectors_dirs))
@@ -805,45 +547,15 @@ def _bundle_content_dirs(kind: str, manifests: Iterable[ConnectorManifest]) -> l
 def _bound_by_this_process() -> dict[str, str]:
     """Every tool name core binds itself, mapped to the phrase naming what it binds it as.
 
-    The half `_declared_tool_names` could not see, and the reason it could not is that a manifest
-    walk only ever meets other manifests. Measured: a bundle declaring an endpoint tool
-    `find_notes` bound **two** tools of that name — `ToolNode` keys `tools_by_name` by name and
-    `build_langgraph_agent` appends the connector tools *after* the in-process ones, so the
-    connector won and the knowledge-graph read was never invoked. A *job* of that name failed the
-    other way and worse: the launcher was dropped in silence, while `state_changing_tool_names()`
-    kept reporting the name, so a pure graph read landed in `side_effecting_tools()` and
-    `expensive_actions()` — refused by the plan gate under an unapproved plan and subtracted from
-    every helper's tool set. `make connector-validate` passed for both.
+    Lets `_declared_tool_names` refuse a connector tool or job that collides with an in-process
+    tool,
+    which would otherwise shadow it or corrupt the plan gate's view of what is state-changing.
 
-    **Importing the agent here is what makes the check exist in the validator too.** The registry
-    is populated by import side effect (`chemclaw.agent.tool_modules`), so a process that has not
-    imported it sees an empty registry and would get a check that silently tests nothing —
-    measured, `make connector-validate` holds **0** registered tools at the moment it calls
-    `job_tools()`. `chemclaw.cli.validate_templates` does the same import for the same reason and
-    says so; that this is the declared `connectors -> agent` edge rather than a new one is
-    `tests/test_layering.py`'s record. It is a function-scope import because
-    `chemclaw.agent.chemclaw_agent` imports this module back at module scope, and it costs nothing
-    in the chat pod, which has imported it before the first turn.
-
-    **A generated launcher is excluded, and that exclusion is what keeps a second build working.**
-    `build_langgraph_agent` runs once per profile and registers this registry's own job launchers
-    into the very registry read here — so reading them back would make every deployment with jobs
-    fail on its second build, on a name it declared itself. The launchers are recognised by the
-    module that generated them rather than by a marker, so there is nothing to remember to set.
-    **Template launchers are a fourth name space, and they are named here rather than left to the
-    registry walk.** `registered_tools()` cannot answer for them at the moment this runs:
-    `chemclaw_agent._register_generated_tools` is `[*job_tools(), *template_tools()]`, so this
-    check has already returned before the first launcher is registered — measured, a bundle
-    declaring `run_bond_strength_survey` was accepted on exactly the paths that ship cold
-    (`make connector-validate`, a fresh pod loading its manifests), and refused only in a process
-    that had already built an agent, where it came back as *"an in-process tool"* — the wrong
-    reason for an operator to be handed.
-
-    So the launcher names are asked for directly, the way the three name spaces above are, rather
-    than being hoped for in the registry. That also settles which registry owns the name space:
-    `chemclaw.templates.registry` does, and this module reads it through `chemclaw_agent` — the
-    same already-declared `connectors -> agent` edge the import above uses, so no new one is
-    introduced and *when* a misconfiguration is reported does not move.
+    Imports the agent (function scope, to avoid a cycle) so the tool registry is populated even in a
+    validator process. Generated job launchers are excluded, since this registry registers them
+    itself
+    on every build. Template launcher names are asked of `chemclaw.templates.registry` directly,
+    because they are registered after this check runs.
     """
     from chemclaw.agent import chemclaw_agent
 
@@ -864,29 +576,12 @@ def _bound_by_this_process() -> dict[str, str]:
 def _declared_tool_names() -> dict[str, tuple[str, str]]:
     """Every tool name the enabled bundles advertise, mapped to `(connector, kind)`.
 
-    **One name is one capability, whichever half of a bundle's surface declares it.** The name is
-    the authorization key — `state_changing_tool_names` and the plan gate both look a capability up
-    by it — so two capabilities sharing one name means one bundle's gate silently applies to the
-    other's work. It is also what the model calls: it has one name and gets whichever tool survived
-    the merge.
-
-    This used to check jobs against *jobs* only, and the gap was not hypothetical. `props` served an
-    MCP tool `compare_solvents` (tabulated physical properties, microseconds) while `calc` declared
-    a durable job `compare_solvents` (one reaction computed per solvent, minutes), and the wiring
-    that brings them together — this fleet's `manifests/` on `connectors_dir` — is the documented
-    one. Measured with both enabled: 21 endpoint tools plus 9 jobs is 30 declared names and 29
-    distinct. Nothing raised, because `connector_tool_names()` is a set union and
-    `agent.chemclaw_agent._narrow` keys its lookup by name, so the loser vanished with no error.
-
-    **A first-party name is claimed too, and by whoever holds it** (`_bound_by_this_process`).
-    The rule was always stated in general terms — one name is one capability — and checked in one
-    direction only, which is how a bundle came to be able to take over `record_knowledge_note`
-    with every gate still firing on the name and the note body going to the connector's server.
+    One name is one capability, whichever half of a bundle declares it, and whether a bundle or core
+    holds it (`_bound_by_this_process`): the name is the authorization key and what the model calls,
+    and a duplicate would silently drop one tool or apply one gate to another's work.
 
     Raises:
-        ConnectorError: naming both claimants and what each declares the name as. Loud at build
-            time is the whole point — the alternative is a capability that is simply absent from
-            the agent's surface, which reads as a broken tool rather than a misconfiguration.
+        ConnectorError: naming both claimants and what each declares the name as.
     """
     owner: dict[str, tuple[str, str]] = {}
     bound = _bound_by_this_process()
@@ -917,9 +612,7 @@ def _declared_tool_names() -> dict[str, tuple[str, str]]:
 def job_tools() -> list[CapabilityTool]:
     """The generated launcher for every job declared by an enabled connector.
 
-    Two enabled connectors claiming one name is a configuration error rather than a last-one-wins,
-    and the check is `_declared_tool_names`'s because the collision is not specific to jobs — see
-    there for the rule and for the collision that was live when it was written.
+    A name collision is a configuration error, checked by `_declared_tool_names`.
     """
     _declared_tool_names()
     withheld = set(withheld_job_names())
@@ -934,12 +627,9 @@ def job_tools() -> list[CapabilityTool]:
 def withheld_job_names() -> list[str]:
     """The enabled jobs this deployment declares and cannot run, so binds no launcher for, sorted.
 
-    A job says so through its manifest's `unavailable_reason` (`jobs.unavailable_reason`), asked
-    now rather than at startup. Still *declared* — `job_names`, `connector_tool_names` and the
-    validators keep it, since a skill or a template naming it names something this tree ships — and
-    subtracted from the bound surface by `chemclaw_agent._withheld_tool_names` as well as here,
-    because the tool registry only grows and a launcher some earlier build registered would
-    otherwise stay bound.
+    Decided now by the manifest's `unavailable_reason`. Still declared (validators keep it), but
+    subtracted from the bound surface here and in `chemclaw_agent._withheld_tool_names`, since the
+    tool registry only grows.
     """
     return sorted(
         job.name
@@ -952,10 +642,8 @@ def withheld_job_names() -> list[str]:
 def job_names() -> list[str]:
     """Every declared job name across the enabled connectors, sorted.
 
-    Distinct from `connector_tool_names`, which unions these with each endpoint's *MCP* tools. The
-    caller that wants this one wants the jobs specifically — `chemclaw.agent.plan_gate` gates
-    durable launches and must not gate a connector's read tools — and deriving it from the same
-    `enabled()` walk is what keeps the two answers consistent as bundles come and go.
+    Distinct from `connector_tool_names`: `chemclaw.agent.plan_gate` gates durable launches and must
+    not gate a connector's read tools.
     """
     return sorted(job.name for manifest in enabled() for job in manifest.jobs)
 
@@ -963,15 +651,10 @@ def job_names() -> list[str]:
 def state_changing_tool_names() -> list[str]:
     """Every enabled connector tool that spends real resources or writes data, sorted.
 
-    Both halves of a bundle's surface: each endpoint's declared `state_changing` subset, plus every
-    declared job — a job is durable work by construction, so it needs no declaration to be one.
-
-    Read by `chemclaw.agent.plan_gate` to decide what an unapproved harness plan may not call.
-    Assembled here rather than listed in core because whether a connector tool calculates or merely
-    looks up is the *bundle's* fact: `compute_xtb_energy` runs a semiempirical calculation and
-    caches it, `resolve_compound` is a lookup, and core cannot tell them apart from the name. A
-    copy of that knowledge in core would be a second source of truth that goes stale the first time
-    a bundle changes what a tool does.
+    Each endpoint's declared `state_changing` subset plus every job (durable work by construction).
+    Read by `chemclaw.agent.plan_gate`. Declared by the bundle because core cannot tell a
+    calculation
+    from a lookup by name.
     """
     names: set[str] = set()
     for manifest in enabled():
@@ -984,14 +667,8 @@ def state_changing_tool_names() -> list[str]:
 def knowledge_read_tool_names() -> list[str]:
     """Every enabled connector tool that consults the record, sorted.
 
-    The retrieval counterpart of `state_changing_tool_names`, and declared by the bundle for the
-    same reason: whether `substrate_precedent` searches the reaction corpus is `rxnfp`'s fact, not
-    something core can read off a name. Read by `chemclaw.agent.authz.knowledge_read_tools`, whose
-    only consumer is `turn_costs.retrieval_calls` — the column that says whether a turn looked at
-    what we know before answering.
-
-    Jobs are deliberately absent, where `state_changing_tool_names` includes them: a durable job is
-    spending, which is what that set is about, and none of the declared ones is a search.
+    Declared by the bundle; read by `chemclaw.agent.authz.knowledge_read_tools` for
+    `turn_costs.retrieval_calls`. Jobs are absent: none is a search.
     """
     names: set[str] = set()
     for manifest in enabled():
@@ -1003,10 +680,9 @@ def knowledge_read_tool_names() -> list[str]:
 def find_job(name: str) -> tuple[str, JobSpec]:
     """Resolve a declared job name to its connector and spec, or raise naming the valid ones.
 
-    The lookup a template's `job` step needs: it names a job the way the model does, and has to turn
-    that into the connector, workflow type and queue `ConnectorJobWorkflow` requires. Every declared
-    name is unique across the enabled connectors — `_declared_tool_names` refuses a collision with
-    an endpoint tool as well as with another job — so one name resolves to exactly one job.
+    For a template's `job` step. Names are unique across enabled connectors
+    (`_declared_tool_names`),
+    so one name resolves to exactly one job.
     """
     for manifest in enabled():
         for job in manifest.jobs:
@@ -1017,19 +693,15 @@ def find_job(name: str) -> tuple[str, JobSpec]:
 
 
 def endpoint_tool_names(servers: Iterable[str] | None = None) -> list[str]:
-    """The MCP tools the enabled connectors' *endpoints* serve, sorted; `servers` selects bundles.
+    """The MCP tools the enabled connectors' endpoints serve, sorted; `servers` selects bundles.
 
-    Distinct from `job_names` (the generated launchers, which are in-process registry tools) and
-    from `connector_tool_names` (their union). The caller that wants this one wants the half that
-    travels over MCP specifically, because that is the half a profile's `mcp_server_names` selects:
-    `chemclaw.agent.chemclaw_agent.advertised_tool_names` has to answer "what will this profile's
-    agent actually be able to call" without *building* the connector tools, since constructing one
-    opens an httpx client that nothing would then close.
+    The half a profile's `mcp_server_names` selects, answered without building connector tools
+    (which
+    would open httpx clients nothing closes).
 
     Args:
         servers: The connector names to include; `None` (the default) means every enabled bundle.
-            A name here that no enabled bundle provides is silently ignored — this function reports
-            a surface, and `connector_tools` is where a profile naming an unknown connector fails.
+            Unknown names are ignored; `connector_tools` is where a profile naming one fails.
     """
     names: set[str] = set()
     for manifest in enabled():
@@ -1041,28 +713,21 @@ def endpoint_tool_names(servers: Iterable[str] | None = None) -> list[str]:
 
 
 def connector_tool_names() -> list[str]:
-    """Every tool name the enabled connectors advertise — endpoint tools and job tools, sorted.
+    """Every tool name the enabled connectors advertise: endpoint tools and job tools, sorted.
 
-    The set `chemclaw.cli.validate_skills` and `chemclaw.cli.validate_prose_contract` check
-    declared names
-    against, so a skill or a prompt that teaches a connector tool cannot outlive it.
+    Checked by `chemclaw.cli.validate_skills` and `validate_prose_contract`, so a skill or prompt
+    cannot outlive the tool it teaches.
     """
     return sorted(set(endpoint_tool_names()) | set(job_names()))
 
 
 def declared_connector_tool_names() -> list[str]:
-    """Every tool name any *discovered* bundle declares, enabled or not, sorted.
+    """Every tool name any discovered bundle declares, enabled or not, sorted.
 
-    The sibling of `connector_tool_names`, and the difference is the whole point of
-    `ConnectorManifest.default_enabled`: that one answers "what can this deployment call", which is
-    what the runtime verifier needs, and this one answers "what does this tree declare", which is
-    what a validator needs. A skill, a prompt clause or a template step naming a tool is a claim
-    about the repository, not about one checkout's enable-list — so checking it against `enabled()`
-    would reject a correct reference to an opt-in bundle's tool on every machine that has not
-    turned the bundle on, which is every machine by default.
-
-    Deletion is still caught, which is the property the enabled-based check was really providing:
-    a tool that no manifest declares any more is absent from this set too.
+    The validator's answer: a skill, prompt or template naming a tool is a claim about the
+    repository,
+    so it must not be rejected because an opt-in bundle is off on this machine. Deleted tools are
+    still caught.
     """
     found = discovered()
     names: set[str] = set()
@@ -1074,14 +739,10 @@ def declared_connector_tool_names() -> list[str]:
 
 
 def declared_skills_dirs() -> list[str]:
-    """The `skills/` directory of every *discovered* bundle, enabled or not.
+    """The `skills/` directory of every discovered bundle, enabled or not.
 
-    `skills_dirs` above is the runtime answer and stays enabled-based: a deployment that has not
-    turned `thermalsafety` on must not be offered judgment about tools it cannot call. This one is
-    the validator's answer, and it has to reach further for the reason
-    `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-tree-declares-no-bundle-for`
-    gives about controls generally: a bundled skill that no `make skill-validate` run ever reads is
-    a check whose condition never occurs. An opt-in bundle's skill would be exactly that — shipped,
-    unvalidated, and free to name a tool its own manifest dropped three releases ago.
+    The validator's answer (`skills_dirs` is the runtime one): an opt-in bundle's skills must still
+    be
+    validated.
     """
     return _bundle_content_dirs("skills", [m for _, m in discovered().values()])

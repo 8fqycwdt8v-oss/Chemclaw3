@@ -1,33 +1,12 @@
-"""Let a chemist hand the agent a file (gap AGT-3); the backfill CLI reuses it (gap IDEA-6).
+"""Let a chemist hand the agent a file; the backfill CLI reuses the parser path.
 
-There was no upload route and no non-text input path, so the *only* way data entered the system was
-the scheduled ELN sync. A chemist could not hand over a CSV of runs, a vendor CoA, or an SOP — the
-highest-frequency real request for a lab assistant.
+Parsing lives in `chemclaw.ingest.documents.parse` (ingest may not import agent). What remains
+here is upload-specific: the size limit, the sanitized handle the model uses, the session-scoped
+store, and the bounded off-loop parse the route uses (`parse_attachment_off_loop`).
 
-**The parsing itself lives in `chemclaw.ingest.documents.parse`, not here.** Reading a PDF is an
-ingest concern that an upload happens to use; when the mounted-share crawler needed the same
-extractors it could not import them, because `chemclaw.ingest` may not import `chemclaw.agent`
-(`tests/test_layering.py`). Moving them down rather than copying them up keeps one parsing
-implementation with two callers — the format allowlist, the structural-extraction rule and the
-by-name refusal of a scanned PDF are all documented there.
-
-What remains here is what is genuinely about an *upload*: the size limit, the sanitized handle the
-model uses, the session-scoped store, and — because parsing untrusted bytes is real work and the
-front door runs one uvicorn worker — the bounded worker-thread wrapper the route parses through
-(`parse_attachment_off_loop`).
-
-Attachments are **session-scoped**, and where sessions are durable they are **in Postgres**
-(`session_attachments`, `D-2026-10-04-an-upload-is-session-state-not-pod-state`). They used to be
-held in the memory of the pod that took the upload, which made a file invisible to every other
-front-door replica: measured with two processes on one database, the second resolved the session
-(200) and answered `read_attachment("runs.csv")` with "no attachment named 'runs.csv' in this
-conversation". The in-memory store is still what a deployment without durable sessions runs.
-
-They are working material for a conversation, not knowledge. Anything worth keeping goes through
-`record_knowledge_note` like every other machine-written note — routing uploads straight into the
-graph would bypass the one write path that stamps `created_by`, renders the note and checks its
-links (`kg/record.py`). That clause read "would bypass the review line" until
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the line.
+Attachments are session state: in Postgres where sessions are durable, so every front-door
+replica sees them, and in memory otherwise. They are working material, not knowledge; anything
+worth keeping goes through `record_knowledge_note`.
 """
 
 import asyncio
@@ -62,9 +41,8 @@ from chemclaw.ingest.documents.parse import (
 
 logger = logging.getLogger(__name__)
 
-# The refusal an upload route and the agent tools already catch by this name. It *is* the parser's
-# error rather than a wrapper around it: a caller doing `except AttachmentError` must still catch a
-# malformed PDF, and re-raising through a second class would only add a name for the same event.
+# The parser's own error under the name upload callers catch, so `except AttachmentError` still
+# catches a malformed PDF.
 AttachmentError = DocumentParseError
 
 __all__ = [
@@ -106,11 +84,8 @@ _NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 def _safe_name(name: str) -> str:
     """Reduce a client-supplied filename to a sanitized basename.
 
-    The name is untrusted input that becomes the handle the model uses with `read_attachment`
-    *and* the `id` attribute of the data envelope framing the file's text — a name like
-    `x"></retrieved-note>` would otherwise close that envelope from inside its opening tag.
-    Restricting to a conservative charset (rather than blocklisting `<>"`) keeps the stored name,
-    the lookup key and the framed id byte-identical, so the model's handle always resolves.
+    The name becomes the model's `read_attachment` handle and the envelope `id` attribute, so it is
+    restricted to a conservative charset; stored name, lookup key and framed id stay identical.
     """
     base = name.replace("\\", "/").rsplit("/", 1)[-1]
     return _NAME_UNSAFE.sub("_", base) or "upload"
@@ -119,11 +94,7 @@ def _safe_name(name: str) -> str:
 def _accepted_name(name: str, raw: bytes) -> str:
     """Sanitize the caller's filename and refuse the upload if it is over the byte limit.
 
-    The two checks that must happen in *this* process whichever way the parse itself runs: the size
-    limit is about the bytes already in hand, and the name has to be safe before it appears in a
-    refusal message. Shared by the in-process parser and the isolated one so the two cannot drift —
-    they did not, and a size limit enforced in one of two entry points is the shape that ends that
-    way.
+    Shared by the in-process and isolated parsers so both enforce the same checks.
 
     Args:
         name: The client-supplied filename.
@@ -146,30 +117,10 @@ def _accepted_name(name: str, raw: bytes) -> str:
 def parse_attachment(name: str, raw: bytes, declared_type: str | None = None) -> Attachment:
     """Parse an upload in this process, or refuse it with a message naming the supported formats.
 
-    The caller's filename is reduced to a sanitized basename first (`_safe_name`), so every
-    downstream use — refusal messages, the session store, the model-facing handle, the framing
-    envelope — sees only the safe form.
-
-    **In-process, and that is right for its callers and wrong for the front door.**
-    `cli/backfill_corpus.py` is a one-document-at-a-time operator command where a slow parse costs
-    the operator their own wait, and the format tests call this to assert what each parser
-    extracts. The upload route uses `parse_attachment_isolated` instead, because there a parse that
-    does not terminate takes a shared replica down: see that function and
-    `ingest/documents/isolate.py`.
-
-    **In-process also means *unbounded*, and the refusal now says so rather than implying a verdict
-    it cannot reach** (`D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`). No
-    `RLIMIT_DATA` is set here, so `isolate._at_ceiling` has no ceiling to read back and an
-    allocation failure inside a C parser is indistinguishable from a malformed file — lxml reports
-    its own as
-    `unknown error (<string>, line 0)`, which tells an operator their legal document is broken at
-    line 0. `UnclassifiedParseError` is the type that marks exactly that population, and
-    `read_without_a_ceiling` is the wording it earns here.
-
-    A *classified* refusal passes through untouched: an over-expanding archive, a container that is
-    not a zip at all, an unsupported format and a scanned PDF are all statements about the document
-    that hold whether or not a ceiling was set, and burying them under a caveat about memory would
-    be the same what-do-I-actually-know failure in the other direction.
+    The filename is sanitized first. In-process suits the backfill CLI and format tests; the upload
+    route uses `parse_attachment_isolated`. With no memory ceiling here, an unclassified parser
+    failure may be an allocation failure, so `UnclassifiedParseError` is reworded to not blame the
+    document; classified refusals (archive bomb, not a zip, unsupported, scanned PDF) pass through.
     """
     name = _accepted_name(name, raw)
     try:
@@ -186,16 +137,9 @@ def parse_attachment_isolated(
 ) -> Attachment:
     """`parse_attachment`, with the parse itself in a child process that can be killed.
 
-    **This is the function the upload path runs on its worker thread**, and the difference from the
-    one above is the whole of `D-2026-09-12-a-parse-that-cannot-be-killed-wedges-its-replica`: a
-    parse slot is released by its thread's completion, CPython cannot stop a thread, so before this
-    a non-terminating parse held its slot for the life of the process. Driven at the shipped cap of
-    2, `in_flight` stayed at 2 indefinitely and every later upload was shed — the replica's upload
-    path down permanently, with nothing saying so.
-
-    The size check and the name sanitising stay here rather than crossing into the child: they are
-    cheap, they are about bytes already in this process, and a refusal that never forks is a
-    refusal that costs nothing.
+    The upload path runs this on its worker thread: a thread cannot be stopped, so a
+    non-terminating in-process parse would hold its slot forever. Size and name checks stay in this
+    process, so a refusal never forks.
 
     Raises:
         AttachmentError: The upload is over `attachment_max_bytes`, unsupported, or unreadable —
@@ -214,41 +158,20 @@ def parse_attachment_isolated(
 class AttachmentUnavailable(RuntimeError):
     """Every parse slot on this process is busy — a *retryable* refusal, unlike `AttachmentError`.
 
-    Its own type because the two say opposite things to the client: `AttachmentError` is about the
-    file (sending it again changes nothing), this one is about the moment (sending it again in a
-    second probably works). The route maps them to 422 and 503 accordingly.
+    The route maps this to 503 and `AttachmentError` (about the file) to 422.
     """
 
 
 class _ParseSlots:
     """How many uploads may be parsed in worker threads at once, across this whole process.
 
-    A counter rather than an `asyncio.Semaphore` for two reasons. It is released by the worker's
-    *completion callback*, never by the waiting request: a request whose parse timed out has
-    stopped waiting, but Python cannot stop its thread, and handing the slot back while that thread
-    still runs would let the cap be exceeded without bound — exactly the case the cap exists for.
-    And a counter has no event loop bound to it, so nothing here has to be rebuilt per loop, which
-    a module-level `asyncio` primitive would need across the many loops this process runs.
+    A counter rather than an `asyncio.Semaphore`: a slot is released by the worker's completion
+    callback, never by the waiting request, because a timed-out request's thread still runs; and a
+    counter binds to no event loop. The child-process parse is what bounds when completion happens.
 
-    **That release rule is sound and it used to be a permanent wedge, which is a different
-    property.** Releasing on completion is right; what was missing is that nothing bounded when
-    completion happened. A thread parsing in-process runs until the parse returns, so a parse that
-    does not return holds its slot for the life of the process — driven at the shipped cap of 2,
-    `in_flight` was still 2 five seconds after both callers had been freed and every later upload
-    was shed, forever. The cap was doing its job and the pod was dead. The work now runs in a child
-    process the thread kills on the parse deadline
-    (`D-2026-09-12-a-parse-that-cannot-be-killed-wedges-its-replica`), so "the slot comes back when
-    the thread does" is finally a bound rather than a hope.
-
-    Waiters are the exception, and they are safe because each belongs to one in-flight request:
-    a `Future` created on whichever loop is asking. Queueing *these* is not the thing the cap
-    forbids — a waiter holds a future, not a thread, so no number of them can crowd the default
-    executor where `chemclaw.api.auth` validates every bearer token.
-
-    Every mutation happens on the event loop thread: `take_or_wait` and `submit` are called from
-    the request, and `_give_back` arrives through `Future.add_done_callback`, which asyncio
-    dispatches with `call_soon`. There is therefore no lock, and no window between the test and the
-    increment.
+    Waiters are futures, not threads, so queueing them cannot crowd the default executor where
+    bearer tokens are validated. All mutations run on the event loop thread (callbacks arrive via
+    `call_soon`), so no lock is needed.
     """
 
     def __init__(self) -> None:
@@ -259,11 +182,9 @@ class _ParseSlots:
     async def take_or_wait(self, seconds: float) -> bool:
         """Claim a slot, waiting up to `seconds` for a busy one to come free.
 
-        The wait is what separates a burst from an overload. Shedding immediately at the cap
-        measured badly on the ordinary case: four 482 KB spreadsheets dropped on the UI at once
-        take about 1.3 s each, and with a cap of two, two of them came back as hard 503s. A slot
-        is handed straight from the finishing worker to the first waiter rather than released and
-        re-taken, so a queue cannot be barged past by a request that arrives later.
+        The wait absorbs a burst (several files dropped at once) instead of shedding it. A freed
+        slot
+        is handed straight to the first waiter, so later arrivals cannot barge past.
         """
         if self.in_flight < settings.attachment_max_concurrent_parses:
             self.in_flight += 1
@@ -283,10 +204,7 @@ class _ParseSlots:
     def _withdraw(self, waiter: "asyncio.Future[None]") -> None:
         """Leave the queue, giving back a slot if one was handed over as we left.
 
-        The second half is the leak this would otherwise have: `wait_for` returns the result of an
-        already-finished future rather than timing out, so a hand-off cannot be lost that way — but
-        a request cancelled *between* the hand-off and its own resumption holds a slot no one is
-        waiting on, forever.
+        A request cancelled between the hand-off and its resumption would otherwise leak the slot.
         """
         if waiter in self._waiters:
             self._waiters.remove(waiter)
@@ -307,18 +225,11 @@ class _ParseSlots:
     ) -> "asyncio.Future[Attachment]":
         """Start `work` on a worker thread under an already-taken slot, wiring its release.
 
-        **The take and the give-back live in one method because they are one transaction.** As two
-        statements at the call site there was no guard between them, and `run_in_executor` can
-        raise — a default executor shut down during pod drain, a loop closing under a cancelled
-        request. The slot was then taken with no thread to release it, and `_ParseSlots` is a
-        module singleton with no reset, so a cap of 2 reached permanently-full after two such
-        raises and the replica answered every later upload with a retryable 503 naming two parses
-        in flight that did not exist. Fixed here rather than at the call site so a later edit
-        cannot separate them again.
-
-        The slot stands for a *running thread*, which is the whole reason the release hangs off the
-        future's completion rather than off the awaiting request; a thread that never started is
-        the one case where giving it back immediately is not just safe but required.
+        Take and give-back live in one method because `run_in_executor` can raise (executor shut
+        down,
+        loop closing); a thread that never started must return its slot immediately, or the
+        singleton
+        fills permanently.
         """
         try:
             future = loop.run_in_executor(None, work)
@@ -331,10 +242,8 @@ class _ParseSlots:
     def _give_back(self, future: "asyncio.Future[Attachment]") -> None:
         """Return the slot once the worker thread has actually finished.
 
-        `future.exception()` is read and dropped on purpose: when the awaiting request has already
-        timed out, nothing else will ever retrieve it, and an unretrieved exception surfaces at
-        collection time as a bare `Future exception was never retrieved` traceback with nothing
-        tying it to an upload. The failure is not lost — the request that timed out was told.
+        Reads and drops `future.exception()` so an abandoned failure does not log a stray "never
+        retrieved" traceback; the timed-out request was already told.
         """
         self._release()
         if not future.cancelled():
@@ -351,20 +260,9 @@ async def parse_attachment_off_loop(
 ) -> Attachment:
     """Parse an upload in a worker thread, bounded in concurrency and in how long a caller waits.
 
-    `parse_attachment` is CPU-bound work by third-party libraries over untrusted bytes, and it used
-    to run inline in an `async def` route. `Settings` pins the front door to one uvicorn worker, so
-    a single document that parses slowly — a decompression bomb inside the 2 MB cap, or the
-    `/ToUnicode` bomb that took the previously locked pypdf 33.8 s and 1.9 GB — froze *every*
-    session, SSE stream and health probe on the pod for its whole duration. Nothing else bounded
-    it: `service_max_concurrent_turns` meters LLM turns, and `BodySizeLimit` meters bytes, not
-    parse cost.
-
-    Briefly queued past the cap (`attachment_max_concurrent_parses`) and then shed, the same
-    discipline the turn admission uses. The bounded wait is what keeps the cap from punishing the
-    ordinary case — several files dropped on the UI at once are a burst, not an attack — and what
-    it must never become is a queue of *threads*: piling those into the default executor, where
-    `chemclaw.api.auth` validates every bearer token, turns an upload flood into a whole-pod
-    outage one layer removed. A waiter costs a future, so the queue is free of that.
+    Parsing untrusted bytes is CPU-bound and the front door runs one uvicorn worker, so inline
+    parsing would freeze every session on the pod. Past `attachment_max_concurrent_parses`, requests
+    wait briefly and are then shed, like turn admission. Waiters cost futures, never threads.
 
     Raises:
         AttachmentUnavailable: Every parse slot was still busy after
@@ -386,27 +284,17 @@ async def parse_attachment_off_loop(
             f"{settings.attachment_max_concurrent_parses} uploads are already being parsed on "
             "this replica; retry in a moment"
         )
-    # The default executor, kept honest by the cap above rather than by a pool of its own: a
-    # dedicated pool would bound the threads and still let an unbounded queue of abandoned work
-    # accumulate behind them. `submit` owns starting the thread *and* releasing the slot, because
-    # doing those as two statements here left a window in which a failing `run_in_executor` lost
-    # the slot for the life of the process.
+    # The default executor, bounded by the slot cap; `submit` both starts the thread and wires its
+    # release.
     future = _PARSE_SLOTS.submit(
         asyncio.get_running_loop(), partial(parse_attachment_isolated, name, raw, declared_type)
     )
     try:
-        # Shielded, and that is what makes the cap true: `wait_for` cancels what it waits on, and
-        # cancelling this future would fire the release callback while the thread it stands for is
-        # still running. The shield takes the cancellation instead, so the slot comes back exactly
-        # when the thread does.
-        #
-        # **The deadline here is a backstop, not the control.** The parse timeout is enforced
-        # inside the worker thread, where it can kill the child process that is actually doing the
-        # work (`ingest/documents/isolate.py`); that is what makes the thread end at all. This one
-        # covers what that enforcement cannot see — the forkserver's own first start, measured at
-        # 0.86 s — so it is the parse budget plus `attachment_parse_reap_grace_seconds` rather than
-        # the parse budget itself. If it is ever the one that fires, the thread is still bounded and
-        # the slot still comes back; the caller simply hears about it a few seconds early.
+        # Shielded so a timeout cannot cancel the future (which would release the slot while the
+        # thread
+        # still runs). This deadline is a backstop: the worker kills the child at the parse timeout,
+        # and
+        # the extra `attachment_parse_reap_grace_seconds` covers forkserver start-up.
         return await asyncio.wait_for(
             asyncio.shield(future),
             timeout=(
@@ -428,13 +316,8 @@ async def parse_attachment_off_loop(
         ) from exc
 
 
-#: How many dropped file names one session remembers. A module constant rather than a `Settings`
-#: field, for the reason `ingest/rejections._MAX_ROWS_PER_SOURCE` is one: `core/config/` is the
-#: operator-facing deployment surface, and how many names a refusal message may list is not a
-#: deployment decision anybody tunes. Bounded at all because the in-memory store's whole purpose
-#: is a memory bound, and because the names go into the model's context — twenty short names is a
-#: sentence, five hundred is a page. The count is kept beyond it (`evicted_total`), so a session
-#: that has dropped more than this still says how many.
+# How many dropped file names one session remembers; a constant, not an operator setting. Bounded
+# because the names go into the model's context; `evicted_total` keeps the full count.
 _EVICTED_NAMES_REMEMBERED = 20
 
 
@@ -468,46 +351,26 @@ class SessionAttachments(BaseModel):
 def _resident_bytes(item: Attachment) -> int:
     """What one upload's parsed text costs the pod, in bytes rather than in characters.
 
-    `attachment_store_max_bytes` is a *memory* bound — its own comment reasons in percentages of the
-    pod's 1 GiB limit — and `len(str)` counts codepoints, which is the same number only for ASCII.
-    CPython stores a string at 1, 2 or 4 bytes per codepoint by its widest character, so the budget
-    silently permitted 128 MB resident on CJK text and 256 MB on astral: a quarter of the pod, for a
-    setting whose whole purpose is to stay well inside it. Measured at 1 M characters: 1,000,049
-    bytes ASCII, 2,000,074 CJK, 4,000,076 emoji.
-
-    `sys.getsizeof` rather than `len(text.encode())` because resident bytes is the unit that decides
-    whether the pod is OOM-killed, and because encoding would allocate a second copy of up to 64 MB
-    of text on every upload just to measure it. The per-object header it includes is tens of bytes
-    against a budget of tens of megabytes, and it errs the safe way.
+    `attachment_store_max_bytes` is a memory bound, and CPython stores 1, 2 or 4 bytes per
+    codepoint,
+    so `len()` would under-count non-ASCII text. `sys.getsizeof` measures resident bytes without
+    allocating an encoded copy.
     """
     return sys.getsizeof(item.text)
 
 
 def _entry_bytes(held: SessionAttachments) -> int:
-    """What one map entry costs, which is its files — the dropped *names* are not the payload.
-
-    Deliberately not counting `evicted`: it is bounded by `_EVICTED_NAMES_REMEMBERED` short strings
-    and charging it against a budget sized in tens of megabytes would let a session's own record of
-    what it lost evict another conversation's working material.
-    """
+    """What one map entry costs: its files. The bounded list of evicted names is not charged."""
     return sum(_resident_bytes(item) for item in held.items)
 
 
 def _uploads_to_drop(sizes: list[int]) -> int:
     """How many of a session's oldest uploads its bounds drop, given each one's size oldest-first.
 
-    The per-session rule, written once for both backends so they cannot drift: past
-    `attachment_max_per_session` files, or past `attachment_store_max_bytes` in total, the oldest
-    go — **and never the upload just made**, so the loop stops at one file whatever that file
-    weighs. What a "size" is differs by backend and is the caller's: bytes resident in this process
-    for the in-memory store (`_resident_bytes`), bytes stored for the Postgres one
-    (`octet_length`). That qualifier is the correction an earlier comment needed: the *count* half
-    drops as many as it takes to reach the cap however small the files are; only the *byte* half is
-    bounded to "at most the one upload just made" in excess.
-
-    A single attachment whose parsed text alone exceeds the budget is kept, because silently
-    discarding the file a chemist just uploaded is the worse failure and its size is bounded by
-    `document_max_expanded_bytes` — one document, not a session's worth.
+    Shared by both backends: past `attachment_max_per_session` files or `attachment_store_max_bytes`
+    total, the oldest go, but never the upload just made. A single oversized upload is kept (bounded
+    by `document_max_expanded_bytes`), since dropping the file just sent is worse. "Size" is
+    resident bytes in memory and stored bytes in Postgres.
     """
     held, total, dropped = len(sizes), sum(sizes), 0
     while held - dropped > settings.attachment_max_per_session or (
@@ -519,14 +382,9 @@ def _uploads_to_drop(sizes: list[int]) -> int:
 
 
 def _report_drops(session_id: str, dropped: list[str]) -> None:
-    """Tell the operator — the only reader who can raise the bound — that uploads were dropped.
+    """Log and count dropped uploads for the operator, who alone can raise the bound.
 
-    **Every drop is recorded, because the alternative was a false statement rather than a missing
-    detail.** Measured at the shipped cap: thirteen uploads left ten, and
-    `read_attachment("plate-00.csv")` answered "no attachment named 'plate-00.csv' in this
-    conversation" — about a file uploaded to that very conversation — with no log line and no
-    counter anywhere in the process. The name stays on the session (`SessionAttachments.evicted`)
-    so the tools can say it; this is the operator's half.
+    The names stay on the session (`SessionAttachments.evicted`) so the tools can tell the chemist.
     """
     logger.warning(
         "dropped %d attachment(s) from session %s past the per-session bound "
@@ -537,9 +395,7 @@ def _report_drops(session_id: str, dropped: list[str]) -> None:
         settings.attachment_store_max_bytes,
         ", ".join(dropped),
     )
-    # Unlabelled deliberately: the only candidate label is a session id, which is unbounded
-    # cardinality. The rate is what an operator wants — a deployment dropping uploads steadily is
-    # one whose per-session bound is too low for how chemists work.
+    # Unlabelled: the only candidate label, a session id, is unbounded cardinality.
     METRICS.increment("chemclaw_attachment_evictions_total", len(dropped))
 
 
@@ -554,19 +410,9 @@ def _excerpted(attachment: Attachment, excerpt_chars: int | None) -> Attachment:
 class AttachmentStore(Protocol):
     """Where a session's uploads live: the operations the upload route and the two tools need.
 
-    Shaped as `exhibits.store` is and for the same reason — an in-memory backend for a deployment
-    without Postgres (and for tests), and a Postgres one for every deployment whose sessions are
-    durable, chosen by `default_attachment_store` on the same switch. **The Postgres one is what
-    makes an upload visible to every front-door replica**
-    (`D-2026-10-04-an-upload-is-session-state-not-pod-state`): the in-memory store answered only in
-    the process that took the upload, so a turn served by a sibling pod — which is any turn the
-    companion UI sends, since its BFF reaches this service through the ClusterIP Service where the
-    Route's affinity cookie does not exist — told the chemist their file had never been sent.
-
-    **Every read is scoped to the session the caller already resolved.** The session id is never a
-    client's claim at this layer: the route takes it from `resolve_session` (the participant gate,
-    404 to anybody else) and the tools from the turn's bound session. An attachment of another
-    session answers exactly as an absent one does.
+    In-memory for deployments without Postgres, Postgres wherever sessions are durable, so any
+    front-door replica sees an upload. Every read is scoped to an already-resolved session (route:
+    `resolve_session`; tools: the turn's bound session); another session's file reads as absent.
     """
 
     async def add(self, session_id: str, attachment: Attachment, *, uploaded_by: str) -> None:
@@ -578,8 +424,7 @@ class AttachmentStore(Protocol):
     ) -> SessionAttachments:
         """Everything a session holds and everything it lost, oldest first.
 
-        `excerpt_chars` cuts each held file's text to that many characters — what a listing needs —
-        so the durable backend does not read a session's whole working set to show twenty lines.
+        `excerpt_chars` cuts each file's text, so a listing does not read the whole working set.
         """
         ...
 
@@ -591,23 +436,15 @@ class AttachmentStore(Protocol):
 class InMemoryAttachmentStore:
     """Session-scoped attachments in this process, bounded per session, in sessions and in bytes.
 
-    What a deployment without durable sessions runs, and **only** that: a store in one process's
-    memory is invisible to every other replica, which is the defect the Postgres backend exists for.
-    Working material for a conversation, never the record — anything worth keeping goes through
-    the one write path like every other machine-touched knowledge write.
+    Only for deployments without durable sessions: other replicas cannot see it.
     """
 
     def __init__(self) -> None:
-        """Start empty; bounds come from config so a deployment can tune them.
+        """Start empty; bounds come from config.
 
-        The session map is the shared `chemclaw.core.bounded.BoundedLru` (S2), capped at the same
-        `service_max_live_sessions` the front door's live-session cache uses — attachments are
-        working material for a live conversation, so they live and die on the same bound.
-
-        That count is not a memory bound and was read as one. `1000 × attachment_max_per_session ×
-        attachment_max_bytes` is a 20 GB ceiling in a pod the chart limits to 1 GiB, so the map is
-        *also* given the LRU's byte budget (`attachment_store_max_bytes`): the entry count bounds
-        how many conversations keep working material, the weight bounds what that costs.
+        The session map is a `BoundedLru` capped at `service_max_live_sessions` entries and at
+        `attachment_store_max_bytes` in weight: the count bounds conversations, the weight bounds
+        memory.
         """
         self._by_session: BoundedLru[str, SessionAttachments] = BoundedLru(
             lambda: settings.service_max_live_sessions,
@@ -618,15 +455,8 @@ class InMemoryAttachmentStore:
     async def add(self, session_id: str, attachment: Attachment, *, uploaded_by: str) -> None:
         """Attach a file to a session, evicting the least-recently-used sessions past either bound.
 
-        Both map bounds apply: too many sessions, or too many bytes across all of them. The
-        session's own list is bounded by `_uploads_to_drop`, and the byte half of that is what
-        keeps one session from exceeding the whole map's budget: `attachment_max_bytes` bounds the
-        *compressed upload*, while the text stored here is the parsed expansion, bounded only by
-        `document_max_expanded_bytes` (64 MiB) — larger than `attachment_store_max_bytes` — so two
-        or three legal spreadsheet uploads used to make one entry heavier than the entire store.
-
-        `uploaded_by` is not kept: nothing in one process's memory outlives an erasure, which is
-        what the durable backend records it for.
+        The per-session byte bound matters because parsed text can far exceed the compressed upload
+        limit. `uploaded_by` is not kept: memory does not outlive an erasure.
         """
         del uploaded_by
         held = self._by_session.get(session_id)  # an upload marks the session recently active
@@ -638,9 +468,7 @@ class InMemoryAttachmentStore:
         del held.items[:drop]
         if dropped:
             held.evicted_total += len(dropped)
-            # `deque(maxlen=…)` rather than a slice, so the bound is on the structure rather than
-            # on whoever remembers to re-apply it: the *oldest* names are the ones that go, which
-            # is the same recency rule everything else here follows.
+            # `deque(maxlen=…)` keeps the bound on the structure; the oldest names go.
             names = deque(held.evicted, maxlen=_EVICTED_NAMES_REMEMBERED)
             names.extend(dropped)
             held.evicted = list(names)
@@ -652,11 +480,9 @@ class InMemoryAttachmentStore:
     ) -> SessionAttachments:
         """Everything a session holds and everything it lost, oldest first.
 
-        `peek`, not `get`: reading a session's files is not the recency signal the eviction bound
-        measures (uploads are), so a read must not extend the session's slot.
-
-        A copy, because the stored object is mutated in place by `add` and a caller holding the
-        live one would see a later upload's evictions appear in an answer already written.
+        `peek`, not `get`: reads must not refresh the session's eviction recency. Returns a copy,
+        since
+        `add` mutates the stored object in place.
         """
         held = self._by_session.peek(session_id)
         if held is None:
@@ -676,10 +502,8 @@ class InMemoryAttachmentStore:
         return None
 
 
-# Serialized per session, because the eviction pass reads the session's live rows and decides from
-# them: two uploads racing without it would each count the other's row as absent and both keep it,
-# leaving the session one file over its bound. An advisory lock rather than `FOR UPDATE`, because a
-# session's *first* upload has no row to lock — the shape `exhibits.store._SESSION_LOCK` uses.
+# Serialized per session so concurrent uploads cannot both slip under the bound. An advisory lock,
+# since a session's first upload has no row to lock.
 _SESSION_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('session_attachments:' || %s, 0))"
 # The text is bound once and measured by the database, so a 64 MiB parse is sent once rather than
 # twice and `byte_size` is the stored UTF-8 length rather than a Python estimate of it.
@@ -729,23 +553,19 @@ def _attachment(row: Sequence[Any]) -> Attachment:
 
 
 class PostgresAttachmentStore:
-    """The durable store — `session_attachments` (120), readable from every replica.
+    """The durable store — `session_attachments`, readable from every replica.
 
-    A dropped upload keeps its row with `body` NULL, so `evicted` and `evicted_total` are
-    answered by whichever replica serves the next turn, exactly as the in-memory store answers them
-    in the one process it lives in. The in-memory store's cross-session byte budget has no
-    counterpart here, deliberately: it bounded a pod's *memory*, and nothing this store holds is
-    resident. What bounds the table is the per-session rule above and the conversation's retention
-    window (`durable/retention._PRUNABLE`).
+    A dropped upload keeps its row with `body` NULL, so eviction history is answerable anywhere.
+    There is no cross-session byte budget (nothing is resident); the per-session rule and the
+    retention window bound the table.
     """
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection on the *session layer's* database.
 
-        `session_store_dsn`, else `postgres_dsn` — the resolver `agent.session_store` uses — because
-        an upload is session state: `delete_session` removes it inside the same transaction as the
-        transcript, which only works if both live in one database.
+        Uploads must share a database with the transcript so `delete_session` removes both in one
+        transaction.
         """
         async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
             yield conn
@@ -808,10 +628,7 @@ STORE = InMemoryAttachmentStore()
 def default_attachment_store() -> AttachmentStore:
     """The store this deployment uses — Postgres where sessions are durable, memory otherwise.
 
-    The switch `exhibits.store.default_exhibit_store` and the session store read. A deployment with
-    durable sessions is the one that can run more than one front-door replica (a session is
-    reattached from `session_owners` on any of them), so it is exactly the one whose uploads must
-    not live in a single process.
+    Durable sessions are what permit multiple replicas, so their uploads must not be per-process.
     """
     if settings.session_store == "postgres":
         return PostgresAttachmentStore()
@@ -846,9 +663,7 @@ class AttachmentListing(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before telling a chemist what they sent.
 
-        `computed_field`, not a bare `property`, for the reason `FingerprintSearch.verdict` states
-        in full: a plain property is not serialized, so `model_dump()` would carry the evicted
-        names and drop the sentence explaining what they mean.
+        A `computed_field` so `model_dump()` carries it.
         """
         if not self.evicted_total:
             return (

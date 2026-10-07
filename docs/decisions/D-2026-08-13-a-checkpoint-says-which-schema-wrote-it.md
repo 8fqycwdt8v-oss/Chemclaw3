@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-08-13 · Extends `D-2026-08-10-langgraph-rebuild-of-the-conversation-layer` §3 (turn state is the checkpointer's).
 
+**Superseded-by:** [D-2026-09-26-a-checkpoint-refuses-only-what-a-node-would-index](D-2026-09-26-a-checkpoint-refuses-only-what-a-node-would-index.md) (in part)
+
 ## Context
 
 Layer 1's turn state lives in a Postgres checkpointer (`agent/checkpointer.py`), and `thread_id` is

@@ -1,20 +1,14 @@
 """One queued tool call, made from a worker: the wire model and the activity that sends it.
 
-A connector tool the manifest lists under `queued:` is not called on the turn's own session. The
-turn starts a `QueuedToolWorkflow` (`connectors/queued_workflow.py`) on the connector's interactive
-queue, and this activity — on a worker sized to the server's slots — makes the call when one is
-free. So a burst of chemists waits in one global, first-come queue instead of each being refused by
-whichever pod the Service happened to pick
-(`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`).
+A tool the manifest lists under `queued:` runs as a `QueuedToolWorkflow` on the connector's
+interactive queue, and this activity, on a worker sized to the server's slots, makes the call when
+one is free, so a burst waits first-come-first-served instead of being refused.
 
-**Three outcomes, and only one of them is retried quickly.** A server that answers is the result,
-refusal included: a domain refusal ("unknown solvent") is the tool's answer, and asking again cannot
-change it, so it travels back as the `CallToolResult` it was and the agent reads it exactly as it
-would have on a direct call. A server that says it is *full* (`core.mcp_session.at_capacity`) raises
-the retryable `ConnectorAtCapacity`, re-sent within seconds (`durable.publish.queued_tool_retry`).
-Anything else — the connector did not answer, the transport broke — is re-sent a few times and then
-failed (`settings.queued_tool_fault_attempts`): a rolling pod is the common cause of that, and an
-outage is news the chemist should hear now rather than in an hour.
+Three outcomes: any server answer (a domain refusal included) is the result and is returned as
+sent; a full server raises the retryable `ConnectorAtCapacity`
+(`durable.publish.queued_tool_retry`); any other fault is retried
+`settings.queued_tool_fault_attempts` times and then failed, so an outage reaches the chemist
+promptly.
 """
 
 from collections.abc import Iterator
@@ -67,9 +61,7 @@ class QueuedToolCall(BaseModel):
 def _acting_for(actor: str, correlation_id: str, session_id: str) -> Iterator[None]:
     """Stamp the requester's identity ambient, so the call's headers name the person it is for.
 
-    The same bracket `connectors/calc/activities.py::_acting_for` writes, plus the session: a
-    queued call is a turn's call made from somewhere else, and the server's log line should join to
-    that conversation as a direct call's would.
+    Includes the session, so the server's log joins to the conversation as a direct call's would.
     """
     identity = set_current_identity(actor, frozenset()) if actor else None
     correlation = set_current_correlation_id(correlation_id) if correlation_id else None
@@ -92,17 +84,15 @@ async def call_queued_tool(
     """Make one queued tool call and return the server's `CallToolResult`, as JSON.
 
     Returns:
-        The result exactly as the server sent it — `isError` and all for a domain refusal — so the
-        turn converts it with the adapter's own function and the agent cannot tell it was queued.
+        The result exactly as the server sent it, `isError` included, so the turn converts it with
+        the adapter's own function and the agent cannot tell it was queued.
 
     Raises:
         ApplicationError: `ConnectorAtCapacity` (retryable) when the server is full;
             `QueuedToolFault` (non-retryable) when any other fault outlived its attempts, and
             retryable before that.
     """
-    # Imported here, not at the top: the turn imports this module (through the workflow it
-    # starts) from `connectors/transport.py`, which the registry itself imports — so a top-level
-    # import is a cycle, and only the worker ever reaches this line.
+    # Imported lazily: a top-level import would be a cycle through `connectors/transport.py`.
     from chemclaw.connectors.registry import connector_spec
 
     spec = connector_spec(call.connector)
@@ -112,9 +102,9 @@ async def call_queued_tool(
                 await session.initialize()
                 result = await session.call_tool(call.tool, call.arguments)
     except Exception as exc:
-        # `Exception` rather than the transport's own types: every failure here happened before
-        # the server produced an answer, and the one thing that decides what to do next is how
-        # many times this has been tried — not which layer of the client noticed.
+        # Any `Exception`: every failure here precedes an answer, and only the attempt count decides
+        # what
+        # happens next.
         final = activity.info().attempt >= settings.queued_tool_fault_attempts
         raise ApplicationError(
             f"{call.tool} could not be sent to {call.connector!r} ({type(exc).__name__}); "

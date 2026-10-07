@@ -583,7 +583,7 @@ load_profiles()
 #: What it buys is the loop that was open since `D-2026-08-28` built the prescriptive tier: a
 #: design reached `executed` and nothing attached the outcome, so the round trip
 #: `skills/hte-campaign-design` promises in its own closing section was a person retyping a table,
-#: and the `DEFERRED.md` row on mining the agent-to-human protocol diff had no corpus because
+#: and the `BACKLOG.md` row on mining the agent-to-human protocol diff had no corpus because
 #: nothing could tell which designs had ever been run.
 #:
 #: **The running total is the thing to look at, not this entry.** This branch has taken

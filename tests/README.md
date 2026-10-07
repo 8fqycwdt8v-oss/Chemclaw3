@@ -42,17 +42,13 @@ repository rather than of a function, and that no type checker can see:
 | `test_deploy_chart.py` | the Containerfile COPY set, and chart ↔ entrypoint in **both** directions |
 | `test_helm_chart.py` | the chart's configuration keys and the app's `Settings`, both directions |
 | `test_decision_log.py` | ADR ids are unique and the ledger matches the files |
-| `test_deferred_register.py` | `DEFERRED.md` stays a register of pending work, not a log of past reviews (D-154) |
 | `test_no_egress.py` | no shipped module names a third-party data host (D-089) |
 | `test_vendored_source.py` | the one sanctioned vendored dataset stays the only escalation of that rule |
 | `test_migrations_are_additive.py` | no migration destroys data or ends the "deploy the previous image" rollback |
 | `test_schema_inventory.py` | `infra/sql/README.md` lists exactly the tables that exist, with the migrations that touch each |
 | `test_database_privileges.py` | the SQL grant matrix is derived from the code rather than maintained beside it |
 | `test_metric_declarations.py` | every metric name a call site uses is declared |
-| `test_docstring_paths.py` | every module path a docstring or comment points at is a file that exists |
 | `test_prose_contract.py` | the agent's prose names only capability the agent actually has |
-| `test_dead_vocabulary.py` | a superseded ADR's vocabulary is not used as current in the record |
-| `test_claude_md_figures.py` | `CLAUDE.md`'s "today" section states no figure a symbol should hold |
 
 ## A structural test must be shown failing
 

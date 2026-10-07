@@ -1,5 +1,7 @@
 # D-092 — Process/analytical-development capability research: quick wins, one durable big win, and what was rejected
 
+**Superseded-by:** [D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds](D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds.md) (in part), [D-2026-09-19-the-condition-was-met-and-the-answer-is-still-no](D-2026-09-19-the-condition-was-met-and-the-answer-is-still-no.md) (in part)
+
 A deep survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and
 analytical process development (data-source connectors like LIMS explicitly out of scope), asking
 specifically what could be added through the **existing** connector seams — a fast calculator

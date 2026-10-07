@@ -1,21 +1,11 @@
 """`python -m chemclaw.cli.live_storm` — drive the whole live stack hard, with a mock model.
 
-The live passes so far used a real model, which bounds volume by cost and — the sharper limit —
-puts the interesting inputs out of reach. A real model will not reliably emit an empty function
-name, an unparseable argument document, forty parallel calls or a turn with no prose, and every one
-of those has been a live defect in this system. `cli/mock_llm.py` makes them a parameter, so this
-harness can ask for them by name.
+A real model bounds volume by cost and will not reliably emit an empty function name, an
+unparseable argument document, forty parallel calls or a turn with no prose. `cli/mock_llm.py`
+makes those a parameter, so this harness asks for them by name.
 
-**It is committed, and that is a decision rather than tidiness.** The 2026-07 load test's harness
-was out-of-tree scripts that no longer exist, so every number in `docs/archive/load-test-2026-07.md`
-is a rebuild rather than a replay — and that document's own correction is that a harness which can
-silently measure the wrong process is worse than none at all. Two of its findings were later
-retracted for exactly that reason.
-
-**Nothing here is scored from prose.** Every verdict resolves to an HTTP status, a row count, a
-Temporal workflow state, a declared metric, or an event on a stream that was written to disk. That
-is the standing correction from D-2026-08-03, and this run is where it costs the most to ignore:
-under load, a plausible summary is the cheapest thing in the system to produce.
+Nothing here is scored from prose: every verdict resolves to an HTTP status, a row count, a
+Temporal workflow state, a declared metric, or an event on a stream written to disk.
 """
 
 from __future__ import annotations
@@ -55,19 +45,12 @@ logger = logging.getLogger(__name__)
 FRONT_DOOR = "http://127.0.0.1:8000"
 MOCK_STATS = "http://127.0.0.1:8820/__mock/stats"
 
-# The scripts that own this lane. The chaos family restarts things *through them* rather than by
-# calling `kill` and `pg_ctl` itself, so a process it brings back is started exactly as the lane
-# starts it — a recovery check that restarted a differently-configured replacement would measure
-# something the deployment never runs.
+# The scripts that own this lane. Chaos checks restart processes through them, so a recovered
+# process is started exactly as the lane starts it.
 _LANE_DIR = Path(__file__).resolve().parents[3] / "infra" / "live"
 
-# Every family this harness plans to run, declared once. `report` compares this against the
-# families that actually produced a finding and names the difference.
-#
-# It exists because the previous version had no such comparison: `run_storm` wired six of the eight
-# families the behaviour catalogue described, and the run printed "17/17 checks passed" — true of
-# what ran, and silent about the two that did not. A count of passes cannot say anything about
-# coverage, so the coverage has to be declared somewhere a run can be checked against.
+# Every family this harness plans to run, declared once. `report` compares it against the families
+# that produced a finding and names the difference: a pass count says nothing about coverage.
 FAMILIES: dict[str, str] = {
     "A": "volume, and the admission cap swept end to end",
     "B": "tool bodies really ran, asked of the audit trail",
@@ -79,10 +62,8 @@ FAMILIES: dict[str, str] = {
     "H": "pathological data: bad chemistry, impossible arguments, unicode, injection",
 }
 
-# The admission caps the SCALE-3 sweep restarts the front door at. Powers of two around the
-# shipped default (8) — the row that has been open since July asks where throughput stops
-# improving, and that cannot be answered by varying *offered* load alone, which is all the
-# previous sweep did.
+# The admission caps the sweep restarts the front door at: powers of two around the shipped default
+# (8), to find where raising the cap stops improving throughput.
 _ADMISSION_CAPS = (2, 4, 8, 16, 32)
 
 # The states a workflow never leaves. Asked for rather than assumed, so a wait ends on the truth it
@@ -100,29 +81,24 @@ _TERMINAL = {
 class TurnResult:
     """One turn, as the event stream reported it. The unit every family is counted in.
 
-    Every field is read by some check. That is not a coincidence to preserve by hand — four
-    others (`behaviour`, `tools_called`, `jobs_started`, `event_counts`) were collected here and
-    never looked at once, three of them from the first version and one left behind when family D
-    moved to asking the database instead of the stream. A record nobody reads is not evidence
-    kept in reserve; it is a field that will be wrong for a while before anyone finds out.
+    Every field is read by some check; a field nobody reads goes wrong unnoticed, so do not add one
+    without a check.
     """
 
     session_id: str = ""
     status: int = 0
     seconds: float = 0.0
     answered: bool = False
-    # `tool_call` events against `tool_result` events. The fragmentation question in one number,
-    # and deliberately *not* keyed by call id: `ToolCallEvent` carries no id — only the tool name —
-    # so keying by it collapsed six distinct parallel calls into one bucket and reported a working
-    # stream as broken. Announcements and results are the two counts the stream can actually
-    # distinguish, and one call that announces ten times against a single result is exactly the
-    # defect this family found.
+    # `tool_call` events against `tool_result` events, not keyed by call id: `ToolCallEvent` carries
+    # only the tool name, so keying would merge distinct parallel calls. One call announced many
+    # times
+    # against one result is the fragmentation defect.
     announced: int = 0
     returned: int = 0
     tools_failed: list[str] = field(default_factory=list)
-    # What each tool actually returned, as the stream previewed it. The adversarial family
-    # needs this: a malformed call that comes back as a *result* is only acceptable if the
-    # result says it failed, and 'a tool_result arrived' cannot tell those apart.
+    # What each tool returned, as previewed: a malformed call coming back as a result is acceptable
+    # only
+    # if the result says it failed.
     result_previews: list[str] = field(default_factory=list)
     error_code: str | None = None
     transport_error: str | None = None
@@ -142,13 +118,10 @@ class Finding:
 async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
     """Ask the front door one turn and fold its SSE stream into a result.
 
-    A transport failure is recorded rather than raised, the discipline `evals/live.run_probe`
-    established: a storm of thousands of turns must not lose all of them because one connection
-    dropped, and "the front door stopped answering" is itself the finding.
-
-    The behaviour is not a parameter: it travels inside `message` as the `[[name]]` selector the
-    mock reads, so passing it separately meant two places could disagree about which scenario a
-    turn was. `storm` asserts the selector is present, which is the check that actually matters.
+    A transport failure is recorded rather than raised, so one dropped connection does not lose a
+    storm. The behaviour travels inside `message` as the `[[name]]` selector the mock reads, so
+    there
+    is one source of truth for the scenario.
     """
     result = TurnResult()
     started = time.monotonic()
@@ -157,12 +130,10 @@ async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
         created.raise_for_status()
         result.session_id = str(created.json()["session_id"])
 
-        # `evals.live.decoded_events` rather than a fourth reading of the wire format — see its
-        # docstring for why there were three and what they each got wrong. The status is taken off
-        # the response before the stream is touched, because a refused turn has a JSON body rather
-        # than an event stream, and the reader answers a body that is not a stream by yielding
-        # nothing: right for a 200 that is not a stream, and indistinguishable from a silent turn
-        # for a 429, which this harness has to record as a *status*. So the status is read first.
+        # `evals.live.decoded_events` is the one wire-format reader. The status is read first: a
+        # refused
+        # turn has a JSON body, which the reader yields nothing for, and a 429 must be recorded as a
+        # status.
         async with aconnect_sse(
             client, "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
         ) as source:
@@ -199,16 +170,14 @@ async def storm(
 ) -> list[TurnResult]:
     """Fire `turns` turns of one behaviour, `concurrency` of them in flight at once.
 
-    Concurrency is the offered load, not the accepted load — the front door's admission semaphore
-    (`service_max_concurrent_turns`) is the thing under test in family A, so this must be able to
-    offer far more than it will accept.
+    Concurrency is offered load, not accepted load: the admission semaphore
+    (`service_max_concurrent_turns`) is under test, so this must offer far more than it accepts.
 
-    `message` overrides the turn text for the families where the *user's own words* are the thing
-    under test — family H sends unicode and an injection string, and the only way to prove either
-    survived Postgres is to put it in the message that Postgres stores. The behaviour selector must
-    still be in it, since that is how the mock chooses what to do, so this asserts rather than
-    trusts: a custom message that forgot the selector would silently run the default behaviour and
-    the family would pass having tested nothing.
+    `message` overrides the turn text where the user's own words are under test (unicode,
+    injection).
+    It must still contain the behaviour selector, which is asserted: without it the default
+    behaviour
+    would run and the family would pass having tested nothing.
     """
     if message is not None and f"[[{behaviour}]]" not in message:
         raise ValueError(f"a custom storm message must carry the [[{behaviour}]] selector")
@@ -229,10 +198,9 @@ async def storm(
 def _lane(script: str, *args: str, env: Mapping[str, str] | None = None) -> str:
     """Run one of the lane's own scripts, returning its output and failing loudly if it fails.
 
-    Synchronous and therefore always called through `asyncio.to_thread`: `processes.sh restart`
-    ready-checks everything it starts, which takes tens of seconds on a cold page cache, and
-    blocking the event loop for that long would stall the very in-flight turns a chaos check exists
-    to observe.
+    Synchronous, so always called through `asyncio.to_thread`: `processes.sh restart` can take tens
+    of
+    seconds, and blocking the loop would stall the in-flight turns a chaos check observes.
     """
     completed = subprocess.run(
         ["/bin/bash", str(_LANE_DIR / script), *args],
@@ -282,16 +250,9 @@ def percentiles(results: Sequence[TurnResult]) -> tuple[float, float]:
 async def family_c_shapes() -> list[Finding]:
     """C · the same call delivered whole, fragmented, and in parallel.
 
-    The hypothesis, from reading the stream path against the Responses client rather than from
-    running it: every `response.function_call_arguments.delta` carries **both** the name and a
-    non-empty fragment, so a reader treating "name and arguments" as a complete, non-streamed call
-    overwrites the accumulated fragments and emits immediately. If that is right, an 8-fragment call
-    emits 8 `tool_call` events each holding a partial document, rather than one holding the whole
-    JSON. (The chunk reassembler this was first written against is gone — it was measured to be
-    unreachable — so what is under test is what `graph_stream` itself puts on the wire.)
-
-    One event per call id is correct. Anything else is the defect, and this is the measurement that
-    decides which — the `openai_compatible` path has never been exercised live.
+    Every `response.function_call_arguments.delta` carries both the name and a fragment, so a reader
+    treating "name and arguments" as a complete call would emit one `tool_call` per fragment. One
+    event per call is correct; this measures what `graph_stream` puts on the wire.
     """
     findings: list[Finding] = []
     for behaviour, expected in (("c-whole", 1), ("c-fragmented", 1), ("c-parallel", 6)):
@@ -314,43 +275,17 @@ async def family_c_shapes() -> list[Finding]:
 async def family_d_durable(sessions: int) -> list[Finding]:
     """D · many sessions launching the *identical* durable payload at the same moment.
 
-    The D-011 guarantee under contention: a duplicate launch must rejoin the existing run rather
-    than recompute. Measured by what the database did, never by what a summary said — `k`
-    simultaneous launches of one payload must produce one `job_records` row and one computation's
-    worth of cache rows.
+    The D-011 guarantee under contention: `k` simultaneous launches of one payload must produce
+    exactly
+    one `job_records` row and at most one computation's worth of cache rows. Zero is a failure — it
+    means the payload was already cached and nothing was tested.
 
-    **The first version of this family passed by measuring nothing, and the report said so in the
-    numbers rather than in the verdict**: "0 distinct workflow id(s) announced across 12 turns;
-    calculation_results 113 → 113". The collision payload was fixed across runs, so the *second*
-    storm against one database found the answer already cached, launched no workflow, and satisfied
-    `len(launched) <= 1` with zero — the exact failure `cli/live_jobs.py` documents at length and
-    designs `_RUN_TEMPERATURE_K` against. `<= 1` is the tell: a bound that a run doing nothing also
-    meets.
-
-    Two things follow from that, and the second was only found by fixing the first.
-
-    **The payload has to be cold, and the process that owns it is the mock.** Giving
-    `COLLISION_PAYLOAD` a per-run temperature is not enough, because the mock is a *separate
-    process* that imported the catalogue when the lane came up — its temperature is minutes or
-    hours older than this process's, and the two disagree. Restarting the mock is what actually
-    makes the payload new, so this family restarts it rather than assuming a shared clock.
-
-    **And that means this process cannot know the workflow id**, which is the better design anyway.
-    The verdict is asked of `job_records` by *time* — rows the database stamped after the launch
-    began, on its own clock — so it is authoritative regardless of what the mock chose and immune
-    to a shared-constant drift of exactly the kind that produced the vacuous pass. It also has to
-    be: a job finishing inside `inline_wait_seconds` emits no `job_started` event, so the stream was
-    never going to see it.
-
-    Stated as **exactly one**, both times. Zero is the failure this family exists to make visible.
-
-    **The soak found the third thing wrong with this family, and it was in the payload rather than
-    the check.** 6 of 81 rounds reported "0 job_records row(s) written", spaced ~12 rounds apart.
-    Nothing was broken: `_COLLISION_TEMPERATURE_K` had a 719-second period, so a temperature
-    recurred every ~12 minutes, `ALLOW_DUPLICATE_FAILED_ONLY` correctly rejoined the completed run
-    rather than recomputing it, and no new row was written. Invisible in a single storm and
-    unmissable over hours — which is the whole argument for running one. The period is now
-    27 hours; `exactly one` stands.
+    The payload must be cold, and the mock owns it (it imported the catalogue at lane start), so
+    this
+    family restarts the mock to get a fresh temperature. This process therefore cannot know the
+    workflow id; the verdict asks `job_records` for rows the database stamped after the launch
+    began,
+    which also covers jobs finishing inside `inline_wait_seconds` (no `job_started` event).
     """
     await asyncio.to_thread(_lane, "processes.sh", "restart", "mock-llm")
     since = await _scalar("select now()")
@@ -359,10 +294,9 @@ async def family_d_durable(sessions: int) -> list[Finding]:
     after = await _scalar("select count(*) from calculation_results")
     recorded = await _scalar("select count(*) from job_records where completed_at >= %s", (since,))
 
-    # And the run is findable afterwards, which is the other half of a durable job being durable.
-    # `find_past_jobs` reads `job_records` through the agent's own tool, so this asks the question a
-    # chemist asks the next morning — "what did we run?" — of the row the collision just wrote,
-    # rather than asking the database twice.
+    # And the run is findable afterwards: `find_past_jobs` reads `job_records` through the agent's
+    # own
+    # tool, asking what a chemist asks the next morning.
     (listed,) = await storm("d-status", turns=1, concurrency=1)
 
     ok_turns = sum(1 for r in results if r.status == 200)
@@ -389,18 +323,13 @@ async def family_d_durable(sessions: int) -> list[Finding]:
             name="the collision computed at most one result set",
             ok=(after - before) <= 8,
             observed=f"calculation_results {before} → {after} (one cold run writes ~3-6 rows)",
-            # **Zero is a legitimate outcome here, and demanding otherwise was this check being
-            # wrong about the system rather than the reverse.** It first asserted `0 < delta`, on
-            # the reasoning that a new workflow must compute something. Measured: one new job
-            # record, zero new cache rows. Both are right — the workflow id is a hash of the whole
-            # payload including `temperature_k`, while `calculation_results` is keyed on the
-            # species and method, so a new temperature is a genuinely new *reaction* question
-            # answered entirely from cached *species*. That is D-011 working one level down, which
-            # is the opposite of the failure the assertion was written to catch.
-            #
-            # "Did anything run at all" is the row above's question, asked of `job_records` where
-            # it has a real answer. This one only bounds the recompute: twelve simultaneous
-            # launches must not cost twelve computations.
+            # Zero is legitimate: the workflow id hashes the whole payload including
+            # `temperature_k`, while
+            # `calculation_results` is keyed on species and method, so a new temperature can be
+            # answered
+            # entirely from cached species. This bounds only the recompute; "did anything run" is
+            # the
+            # `job_records` check above.
             detail="twelve launches must not cost twelve computations; zero is a full cache hit",
         ),
     ]
@@ -419,8 +348,7 @@ def _first_preview(result: TurnResult) -> str | None:
 def _completed_without_dying(result: TurnResult) -> bool:
     """The turn reached an end the client can read, rather than hanging or dropping the stream.
 
-    For inputs that are merely *large* rather than malformed: the right outcome is that the system
-    absorbs them and says something, not that it refuses.
+    For inputs that are large rather than malformed: the system should absorb them, not refuse.
     """
     return (
         result.status == 200
@@ -432,14 +360,9 @@ def _completed_without_dying(result: TurnResult) -> bool:
 def _bad_call_was_reported(result: TurnResult) -> bool:
     """The turn made the *bad tool call* visible — not merely that the turn ended somehow.
 
-    The distinction is the whole value of this family, and the first version did not make it. Every
-    adversarial behaviour emits no prose, so every one of them produced `empty_answer`, and a
-    predicate that accepted any error code passed all eight without ever looking at the tool. That
-    is the vacuous-check pattern this repository has now hit three times in one day — a signal that
-    reports success for a reason unrelated to what it claims to measure.
-
-    So: a `tool_failed` event, or a `tool_result` whose text says it refused. A result that came
-    back looking like ordinary data is the LOAD-1 outcome and fails here.
+    Every adversarial behaviour emits no prose, so any error code would pass vacuously. Requires a
+    `tool_failed` event or a `tool_result` whose text says it refused; a result that looks like
+    ordinary data fails.
     """
     if result.status != 200:
         return False
@@ -454,10 +377,8 @@ def _bad_call_was_reported(result: TurnResult) -> bool:
 async def family_f_adversarial() -> list[Finding]:
     """F · what a real model will not do on request.
 
-    Every case asserts the same thing in a different disguise: the turn must **say** what went
-    wrong. A silent success, an empty answer with no error, or a stream that simply stops are all
-    failures here regardless of how the system recovers internally — that is the class this
-    repository has now met five times (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed).
+    Every case asserts the turn **says** what went wrong; a silent success, an empty answer with no
+    error, or a stream that stops are failures however the system recovers internally.
     """
     cases: list[tuple[str, str, Callable[[TurnResult], bool]]] = [
         (
@@ -488,10 +409,9 @@ async def family_f_adversarial() -> list[Finding]:
         (
             "f-huge-arguments",
             "a 100 KB argument document is survived, not refused",
-            # Deliberately *not* the refusal predicate. A 100 KB search string is legitimate input,
-            # and the measured behaviour is that `find_notes` ran and returned `[]` — surviving it
-            # is the correct outcome, so asserting a refusal was this check being wrong about what
-            # good looks like rather than the system being wrong.
+            # Not the refusal predicate: a 100 KB search string is legitimate input, and surviving
+            # it (an empty
+            # result) is correct.
             _completed_without_dying,
         ),
         (
@@ -506,9 +426,7 @@ async def family_f_adversarial() -> list[Finding]:
         ),
         (
             "f-http-500",
-            # As the *provider's* failure, retryable — not `internal`. Any error code used to
-            # satisfy this, and `internal` is exactly what it was until `_classify` asked
-            # `classify_model_failure` about the transport family too.
+            # As the provider's failure, retryable — not `internal`.
             "an upstream model outage reaches the asker as the model provider's failure",
             lambda r: r.error_code == "llm_timeout",
         ),
@@ -535,9 +453,9 @@ async def family_f_adversarial() -> list[Finding]:
 async def family_g_limits() -> list[Finding]:
     """G · the front door's own refusals, asked for deliberately.
 
-    A limit nobody has ever hit is a limit nobody has tested. Each case wants a *specific* refusal
-    code, because "it did not crash" and "it refused correctly" are different outcomes and only one
-    of them tells an operator what to change.
+    Each case wants a specific refusal code, since "did not crash" and "refused correctly" differ
+    and
+    only the second tells an operator what to change.
     """
     findings: list[Finding] = []
     async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=30.0, trust_env=False) as client:
@@ -582,15 +500,12 @@ async def family_g_limits() -> list[Finding]:
 async def family_b_tool_truth(expect_tools: Sequence[str]) -> list[Finding]:
     """B · did tool *bodies* actually run — asked of the audit trail, not of the turn.
 
-    LOAD-1 made permanent. The previous load test reported "100 tool calls, the tool path is
-    genuinely exercised" while every call had died in MAF's parse-error branch before any tool body
-    ran; the truth was only recoverable afterwards from `audit_events`. So a turn count is never
-    allowed to stand in for a tool count here.
+    A turn count never stands in for a tool count: calls can die in argument parsing before any tool
+    body runs, which only `audit_events` shows.
     """
-    # One turn that reaches for all three, so the audit question below is asked of something this
-    # run actually did rather than of residue an earlier run left in the table. `find_notes` is
-    # exercised by nearly every family; `gather_evidence` and `expand_note` are not, and without
-    # this the two of them would be answered by rows of unknown age.
+    # One turn reaching all three tools, so the audit question is asked of this run rather than of
+    # old
+    # rows; `gather_evidence` and `expand_note` are otherwise rarely exercised.
     await storm("a-retrieval", turns=1, concurrency=1)
 
     findings: list[Finding] = []
@@ -607,30 +522,21 @@ async def family_b_tool_truth(expect_tools: Sequence[str]) -> list[Finding]:
     return findings
 
 
-# The reaction the chaos family kills a worker in the middle of. Benzene hydrogenation rather than
-# the ammonia synthesis `cli/live_jobs.py` uses, for two independent reasons: its species appear in
-# no other payload in this repository, so the first run of a storm cannot be answered from a cache
-# some earlier lane filled — and it is *slow enough to interrupt*. A job that finishes before the
-# SIGKILL lands would report a passing durability check having tested nothing, which is the vacuous
-# pass this harness has now had to correct three times.
+# The reaction the chaos family kills a worker in the middle of: benzene hydrogenation, whose
+# species
+# appear in no other payload (so no earlier lane cached it) and which is slow enough to interrupt.
 #
-# The temperature varies per process for the reason `live_jobs._RUN_TEMPERATURE_K` does: the
-# workflow id is a hash of the payload, so a fixed one makes every rerun a rejoin of the first.
-#
-# `% 971` recurred every 16.2 minutes — 1.35x the ~12-minute period that had already been *measured*
-# failing this harness (`cli/storm_behaviours.py` records 6 of 81 soak rounds reporting "0
-# job_records row(s) written", which was D-011's cache working correctly and being read as a
-# failure). Same modulus as the other two copies now: ~27.8 hours, past any soak this harness runs.
+# The temperature varies per process so reruns do not rejoin the first run's workflow; 100,000
+# values
+# on a 10-µK grid give a ~27.8-hour period, and the 300.0 K base keeps the grid disjoint from the
+# other harnesses (`tests/test_run_jitter.py`).
 _CHAOS_TEMPERATURE_K = 300.0 + (int(time.time()) % 100_000) / 100_000.0
 _CHAOS_PAYLOAD: dict[str, Any] = {
     "kind": "reaction",
     "reactants": ["c1ccccc1", "[H][H]", "[H][H]", "[H][H]"],
     "products": ["C1CCCCC1"],
-    # `standard`, not `quick`, and that is the difference between a check and a decoration. At
-    # `quick` this job optimises and reports ΔE, which for these three species finished in under
-    # four seconds — measured: the first run of this check killed the worker with the workflow
-    # already COMPLETED and correctly reported that it had proved nothing. `standard` adds the
-    # thermochemistry, so there are Hessians on a 12-atom and an 18-atom molecule to interrupt.
+    # `standard`, not `quick`: `quick` finishes in seconds, before the kill lands; `standard` adds
+    # Hessians long enough to interrupt.
     "level": "standard",
     "temperature_k": _CHAOS_TEMPERATURE_K,
     "symmetry_numbers": {"c1ccccc1": 12, "[H][H]": 2, "C1CCCCC1": 6},
@@ -647,15 +553,10 @@ async def _workflow_status(workflow_id: str) -> WorkflowExecutionStatus | None:
 async def _chaos_client_disconnect() -> Finding:
     """E1 · a client that walks away mid-turn must free the session at once, not after the lease.
 
-    The CHAOS-1 regression, made permanent. The 2026-07 load test measured 63 seconds before a
-    disconnected session accepted a new turn — the full `service_turn_claim_lease_seconds` — because
-    nothing released the claim when the generator was closed. `api/routes/turns.py` now releases
-    both the in-process slot and the durable claim in the stream's `finally`, which runs on client
-    disconnect; that is the claim, and this is the measurement of it.
-
-    Measured as time-to-accept rather than as an inspection of the lock, because a lock that is
-    released and a session that answers are different statements and only the second one is what a
-    chemist experiences.
+    `api/routes/turns.py` releases the in-process slot and the durable claim in the stream's
+    `finally`, which runs on disconnect. Measured as time until the session accepts a new turn,
+    since
+    that is what a chemist experiences.
     """
     async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=60.0, trust_env=False) as client:
         created = await client.post("/sessions", json={})
@@ -673,10 +574,9 @@ async def _chaos_client_disconnect() -> Finding:
         started = time.monotonic()
         codes: list[int] = []
         for _ in range(300):
-            # `stream`, not `post`. A successful re-POST returns an SSE body that only ends when
-            # the *whole next turn* does, so reading it measured 25.5 s of turn on the first
-            # attempt at this and reported it as 25.5 s of lock. The question is when the session
-            # stops answering 409, which is knowable from the status line alone.
+            # `stream`, not `post`: a successful re-POST's SSE body lasts the whole next turn, while
+            # the question
+            # is when the session stops answering 409, which the status line alone answers.
             async with client.stream(
                 "POST",
                 f"/sessions/{session_id}/messages",
@@ -692,10 +592,9 @@ async def _chaos_client_disconnect() -> Finding:
     return Finding(
         family="E",
         name="a disconnected session accepts a new turn without waiting out the lease",
-        # Five seconds, not "half the lease": the claim is that the release is *explicit*, and an
-        # explicit release is an order of magnitude away from a lease expiry, not a factor of two.
-        # A threshold at lease/2 would have passed a release that never happened on a lane whose
-        # lease was configured short.
+        # Five seconds, not a fraction of the lease: an explicit release is an order of magnitude
+        # faster
+        # than lease expiry, and a lease-relative threshold could pass on a lane with a short lease.
         ok=codes[-1] == 200 and waited < 5.0,
         observed=f"accepted after {waited:.1f}s (lease is {lease}s); status codes {codes[:4]}",
         detail="CHAOS-1 regression: this was 63 s before the claim was released on disconnect",
@@ -705,24 +604,13 @@ async def _chaos_client_disconnect() -> Finding:
 async def _chaos_worker_killed_mid_job() -> Finding:
     """E2 · SIGKILL the connector worker mid-job; Temporal must still finish the job.
 
-    The whole reason durability lives in Temporal rather than in layer 1 (`CLAUDE.md`), and
-    until now asserted rather than shown: the thirteen Temporal test modules run against the
-    time-skipping test server, where no worker is ever killed. `make live-jobs` freezes a worker
-    with SIGSTOP and resumes it, which tests a *stall*; this kills the process outright and starts
-    a new one, which is what a pod eviction does.
+    Kills the process outright and starts a new one, as a pod eviction does (`make live-jobs` only
+    tests a SIGSTOP stall). The workflow state at the kill is reported, so a job that had already
+    completed cannot pass vacuously.
 
-    The workflow's state at the moment of the kill is reported, not assumed. A job that had already
-    completed would make this check pass having interrupted nothing — the same vacuous shape as an
-    audit chain that verifies over zero rows.
-
-    **The recovery latency is the deliverable, not the pass.** A SIGKILLed worker leaves its
-    activity in `Started` against a worker identity that no longer exists, and Temporal has no
-    other liveness signal for it — so the job resumes only when `xtb_job_heartbeat_timeout_seconds`
-    expires. Measured here at **600 s**, exactly the configured value, with the activity pinned at
-    `species 1/5` the whole time. That is the documented design (`core/config/calculators.py`: "the
-    heartbeat below — not this timeout — is what detects a dead worker"), and it had never been
-    measured, so the wait budget below is derived from the setting rather than guessed: a check
-    that timed out at 240 s reported a durability failure that was a ten-minute detection window.
+    A killed worker's activity stays `Started` until `xtb_job_heartbeat_timeout_seconds` expires —
+    Temporal has no other liveness signal — so the wait budget is derived from that setting, and the
+    recovery latency is part of the result.
     """
     connector, job = find_job("compute_reaction_energy")
     tool = build_job_tool(connector, job)
@@ -732,12 +620,8 @@ async def _chaos_worker_killed_mid_job() -> Finding:
     launch = asyncio.create_task(
         tool(params_type(**_CHAOS_PAYLOAD), "storm chaos: SIGKILL the connector worker mid-job")
     )
-    # Poll for RUNNING and kill the instant it is, rather than sleeping a guessed interval. A fixed
-    # sleep has to be long enough for the workflow to start and short enough that the job has not
-    # finished, and nothing guarantees those windows overlap — on this job at `quick` level they
-    # did not. Polling removes the guess from the front half; `standard` level removes it from the
-    # back half; and `at_kill` below still records what was actually true, because a check that
-    # cannot detect its own vacuous pass is the thing this harness keeps having to fix.
+    # Poll for RUNNING and kill at once rather than sleeping a guessed interval; `at_kill` records
+    # what was actually true so a vacuous pass is detectable.
     at_kill: WorkflowExecutionStatus | None = None
     for _ in range(100):
         with contextlib.suppress(Exception):  # not started yet reads as "not found"
@@ -785,10 +669,8 @@ async def _chaos_worker_killed_mid_job() -> Finding:
 async def _chaos_postgres_bounce() -> Finding:
     """E3 · restart Postgres under load; the pool must reconnect rather than stay poisoned.
 
-    Turns in flight across the bounce are *expected* to fail, and this does not assert otherwise —
-    a database that goes away mid-query has taken the answer with it, and pretending it did not is
-    the failure this repository keeps naming. What must hold is that the failure is bounded in
-    time: a fresh turn afterwards has to work, without restarting the front door.
+    Turns in flight across the bounce may fail; what must hold is that a fresh turn afterwards works
+    without restarting the front door.
     """
     load = asyncio.create_task(storm("a-cheap", turns=24, concurrency=8))
     await asyncio.sleep(1.5)
@@ -821,17 +703,10 @@ async def _chaos_postgres_bounce() -> Finding:
 async def _chaos_broker_outage() -> Finding:
     """E4 · with no broker, a durable launch must *say so* rather than hang or answer anyway.
 
-    This is the 2026-08-02 incident's own shape, one step upstream: a task queue with no worker
-    reached the model as "Error: Function failed." A broker that is not there at all is the harder
-    case, because the launch cannot even be confirmed — and the outcome that must never happen is a
-    turn where the failure is nowhere on the stream.
-
-    **What is deliberately not scored: whether the turn also produced prose.** It does, and the
-    prose says the job was launched — but that text is the mock's script, replayed regardless of
-    what the tool returned, so failing the check on it would be measuring this harness rather than
-    the system. The system's obligation is to put the failure on the stream, which is what
-    `_bad_call_was_reported` reads. What a model *does* with a reported failure is family F's
-    question and a real model's job.
+    The launch cannot even be confirmed, and the failure must appear on the stream
+    (`_bad_call_was_reported`). Whether the turn also produces prose is not scored: that prose is
+    the
+    mock's fixed script, not the system's behaviour.
     """
     await asyncio.to_thread(_lane, "bootstrap.sh", "stop-temporal")
     try:
@@ -856,9 +731,8 @@ async def _chaos_broker_outage() -> Finding:
 async def family_e_chaos() -> list[Finding]:
     """E · break the stack while it is working, and measure what it does about it.
 
-    Ordered by blast radius, least first. The broker outage is last because it is the only one that
-    can leave the lane needing a restart, and a chaos family that poisons the families after it
-    would report their failures as their own.
+    Ordered by blast radius, least first; the broker outage is last because it alone can leave the
+    lane needing a restart.
     """
     findings: list[Finding] = []
     for check in (
@@ -908,8 +782,7 @@ async def _front_door_gauge(name: str) -> float | None:
 def _calibration_finding(status: int, billed: int, ratio: float | None) -> Finding:
     """H's calibration check: a billed, request-sized turn left the published ratio above 1.
 
-    Above 1 and not merely equal, because 1.0 is the clamp every untightened process reads —
-    so equality is indistinguishable from the branch never running.
+    Strictly above: 1.0 is the clamp every untightened process reads.
     """
     return Finding(
         family="H",
@@ -929,10 +802,9 @@ def _calibration_finding(status: int, billed: int, ratio: float | None) -> Findi
 async def family_h_edges() -> list[Finding]:
     """H · data a chemist could plausibly send that nothing in the corpus resembles.
 
-    Each case is verified where the damage would actually show. Unicode is read back out of
-    Postgres rather than off the answer — an answer is the mock's own text and would round-trip
-    through nothing — and the injection string is checked against the table it names, because "the
-    turn answered" says nothing at all about whether a `DROP TABLE` ran.
+    Each case is verified where damage would show: unicode is read back out of Postgres (the answer
+    is
+    mock text), and the injection string is checked against the table it names.
     """
     findings: list[Finding] = []
 
@@ -958,24 +830,13 @@ async def family_h_edges() -> list[Finding]:
         )
     )
 
-    # The estimator calibration, driven rather than reasoned about. Every other behaviour in the
-    # catalogue bills a constant `input_tokens`, so `billed / estimated` is always far below 1 and
-    # `_Calibration.ratio()` clamps to 1.0 — which left the EWMA and the *tightening* branch that
-    # `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` and
-    # `D-2026-09-04-a-budget-that-excludes-the-prefix-is-not-a-budget` both rest on exercised by no
-    # lane anywhere, only by unit tests with hand-fed numbers. `h-size-billed` bills the serialized
-    # request at 0.5 tokens per character, roughly twice the chars/4 estimator, so the ratio this
-    # asserts is the one direction that can only tighten a budget and never loosen it.
-    #
-    # **Asked of the ratio itself, not of `turn_costs`.** This compared `input_tokens` against
-    # `turn_costs.estimated_tokens` and wanted `billed > estimated > 0` — but `estimated_tokens` is
-    # by design only what nobody was billed *through* (`agent/turn_usage.InFlightPrompts`: a
-    # cancelled or in-flight prompt), so on a turn that completes it is 0 every time and the check
-    # could never pass. The quantity the property is about is
-    # `agent/context_budget.estimator_ratio`, which the front door publishes as
-    # `chemclaw_context_estimator_ratio`. Every other behaviour bills the mock's constant 900
-    # against a request estimated in the tens of thousands, which is below `_Calibration._SANE`'s
-    # floor and dropped, so this turn's samples are what move it.
+    # Drive the estimator calibration. Other behaviours bill a constant 900 tokens against a much
+    # larger
+    # estimate, which `_Calibration._SANE` drops; `h-size-billed` bills 0.5 tokens per character
+    # (about
+    # twice the chars/4 estimate), exercising the tightening branch. Asserted on
+    # `chemclaw_context_estimator_ratio` (`agent/context_budget.estimator_ratio`), not on
+    # `turn_costs.estimated_tokens`, which is 0 for any completed turn.
     (sized,) = await storm("h-size-billed", turns=1, concurrency=1)
     billed = await _scalar(
         "select coalesce(sum(input_tokens), 0) from turn_costs where session_id = %s",
@@ -984,13 +845,8 @@ async def family_h_edges() -> list[Finding]:
     ratio = await _front_door_gauge(ESTIMATOR_RATIO_GAUGE)
     findings.append(_calibration_finding(sized.status, billed, ratio))
 
-    # The one request-level refusal that unlocks a label nothing else reaches.
-    # `Behaviour.http_status` injects a failure per behaviour and every such injection classifies
-    # as the generic `error`;
-    # only an oversize request reaches `_is_context_length`, and the marker it matches
-    # ("prompt is too long") was measured against a real gateway before this behaviour copied it.
-    # The turn must still end somewhere a client can read, which is what `_completed_without_dying`
-    # asks — a refused request is not licence to drop the stream.
+    # Only an oversize request reaches `_is_context_length` (per-behaviour `http_status` injection
+    # classifies as `error`). The turn must still end where a client can read it.
     (oversize,) = await storm("h-oversize", turns=1, concurrency=1)
     findings.append(
         Finding(
@@ -1027,11 +883,10 @@ async def family_h_edges() -> list[Finding]:
                 f"HTTP {smiles.status}, answered={smiles.answered}, error={smiles.error_code}, "
                 f"result[0]={_first_preview(smiles)!r}"
             ),
-            # Empty rather than an error is the *documented* contract, not an oversight:
-            # `FingerprintReactionRetriever.retrieve` answers only what its source can, and a
-            # gather that raised because one of four retrievers could not parse an optional anchor
-            # would lose the three that could. The conversational search tools are where "nothing
-            # similar" has to be distinguishable from "I could not read that", and they do.
+            # Empty rather than an error is the contract: one retriever unable to parse an optional
+            # anchor must
+            # not lose the others. The conversational search tools are where "could not read that"
+            # is reported.
             detail="an unparseable anchor contributes no chunks; the other retrievers still run",
         )
     )
@@ -1058,40 +913,14 @@ async def family_a_admission(
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     """A · what the admission cap actually buys, swept by restarting the front door at each value.
 
-    **This is SCALE-3, and the previous sweep was not.** It varied *offered* load against a fixed
-    `service_max_concurrent_turns=8`, which measures how much load the door will shed and says
-    nothing about where raising the cap stops helping — the question the backlog row has held open
-    since July. The cap is read once at startup into a semaphore, so the only honest way to sweep
-    it is to restart the process at each value, which is what this does.
+    The cap is read once at startup into a semaphore, so the front door is restarted per value.
+    Throughput means goodput — turns that answered per second — since counting shed turns would make
+    refusing look fast.
 
-    **Throughput here means goodput — turns that answered, per second — and the distinction is the
-    difference between an answer and its opposite.** The first run of this sweep reported
-    `len(results) / elapsed`, which counts a shed turn as a completed one: at cap 2 it read
-    6.65 turns/s (with 6 of 48 answering) against 2.45 turns/s at cap 32 (with 32 answering), and
-    concluded that raising the cap *hurt*. Draining a queue by refusing it is fast. Counting only
-    the turns that answered inverts the finding: 0.83 → 1.08 → 1.43 → 1.65 → 1.63 accepted/s, which
-    rises with the cap and then stops.
-
-    **Each cap is sampled `repeats` times and the knee is judged against the spread those samples
-    show, not against a threshold chosen in advance.** This is D-2026-08-04-a-plateau-needs-the-
-    noise-you-measured-it-with, applied to the harness that was written the day after it: the first
-    version declared a knee wherever a step bought less than a fixed 10 %, and its own docstring
-    asserted that "the measurement's own run-to-run spread is a few percent, which is why the
-    threshold is well outside it". Nothing had measured the spread. Three single-sample runs then
-    put the 8 → 16 step at **+6.3 %, +3.9 % and +13.5 %** — straddling the threshold — so the same
-    stack answered "the knee is at 8" twice and "no knee in range" once. A plateau test that
-    supplies its own noise reproduces exactly the error that ADR exists to prevent, with a
-    harness's authority behind it.
-
-    So the sweep now measures what it needs. Each cap's goodput is the **median** of its samples,
-    and the noise floor is the largest within-cap spread seen anywhere in the sweep — an honest
-    upper bound on what one sample can be wrong by, taken from this run rather than from memory.
-
-    Four mechanical verdicts, because a table is a measurement and not a check: **no turn may
-    vanish**, the cap must be **load-bearing** (goodput at the top above goodput at the bottom —
-    otherwise the setting is decoration and an operator tuning it is wasting a restart), the sweep
-    must **resolve** the knee against its own noise, and the noise itself must be **small enough for
-    the answer to mean anything** — which is the check that would have caught the first version.
+    Each cap is sampled `repeats` times (median goodput, a fresh restart each time), and the knee is
+    judged against the largest within-cap spread of this run rather than a preset threshold. Four
+    verdicts: no turn may vanish; the cap must be load-bearing (top goodput above bottom); the knee
+    must resolve against the noise; and the noise must be small enough to read.
     """
     rows: list[dict[str, Any]] = []
     try:
@@ -1116,10 +945,9 @@ async def family_a_admission(
                 p50, p95 = percentiles(results)
                 samples.append(accepted / max(elapsed, 0.001))
                 drains.append(turns / max(elapsed, 0.001))
-                # The restart is inside the loop on purpose: a repeat that reused the warm process
-                # would measure the same process twice and report its agreement with itself as
-                # reproducibility. Restarting is the thing being varied everywhere else in this
-                # sweep, so it has to be varied here too.
+                # Restart inside the loop: reusing a warm process would report its agreement with
+                # itself as
+                # reproducibility.
             rows.append(
                 {
                     "cap": cap,
@@ -1206,20 +1034,15 @@ async def family_a_admission(
     return findings, rows
 
 
-# The most within-cap disagreement a sweep may show and still be read for a knee. Above it, one
-# sample's error is bigger than the steps being compared, so any knee is a coin flip — the check
-# above says so rather than letting the knee check report an artefact as an answer.
+# The most within-cap disagreement a sweep may show and still be read for a knee; above it, one
+# sample's error exceeds the steps being compared.
 _MAX_READABLE_NOISE = 0.15
 
 
 def noise(rows: Sequence[dict[str, Any]]) -> float:
     """The largest within-cap spread anywhere in the sweep, as a fraction of that cap's median.
 
-    An upper bound on how wrong one sample can be, taken from *this* run. That is the whole point:
-    a plateau test that supplies its own noise figure reproduces the error
-    D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with exists to prevent, and this harness
-    reproduced it — a fixed 10 % threshold, and a docstring asserting the spread was "a few
-    percent" with nothing having measured it.
+    An upper bound on how wrong one sample can be, taken from this run rather than assumed.
     """
     return max((float(row["spread"]) for row in rows), default=0.0)
 
@@ -1227,21 +1050,9 @@ def noise(rows: Sequence[dict[str, Any]]) -> float:
 def _knee(rows: Sequence[dict[str, Any]]) -> int | None:
     """The first cap whose successor buys less improvement than the sweep's own noise floor.
 
-    Judged against `noise(rows)` rather than a constant, because a step smaller than the spread
-    between two runs of the *same* cap is not a step anyone measured. Three single-sample runs of
-    this sweep put the 8 → 16 step at +6.3 %, +3.9 % and +13.5 %; against a fixed 10 % the same
-    stack answered "the knee is at 8" twice and "no knee in range" once.
-
-    **None also when the noise itself is too large to read a knee against, and that guard is not
-    optional.** A noise floor makes this function fire *sooner*, not later — "the step is smaller
-    than the spread" is a statement about the measurement, and at a large enough spread every step
-    satisfies it and the knee lands on the first pair. So without the ceiling, a sweep too noisy to
-    say anything would confidently report the smallest cap as the answer: the failure mode is not a
-    missing knee but a fabricated one. Found by writing the test for the opposite behaviour and
-    watching it fail.
-
-    None means "we do not know yet" in both cases — the sweep ended before the system did, or it
-    could not see well enough to tell. Neither is the top of the range dressed up as an answer.
+    Judged against `noise(rows)`, since a step smaller than the spread of one cap was not measured.
+    Returns None also when the noise exceeds `_MAX_READABLE_NOISE`: a large noise floor would make
+    every step qualify and fabricate a knee at the first pair. None means "not known yet".
     """
     floor = noise(rows)
     if floor > _MAX_READABLE_NOISE:
@@ -1260,10 +1071,8 @@ def report(
 ) -> str:
     """The run as tables — every row an observation, none of them a paraphrase.
 
-    The coverage table comes first and is the reason this signature grew a `planned` argument. A
-    pass count answers "did what ran, run clean"; only the difference between planned and observed
-    families answers "did it run". Reporting the first while the reader infers the second is how
-    this harness printed 17/17 for a matrix two families short of what it documented.
+    The coverage table (planned vs. observed families) comes first: a pass count says only that what
+    ran, ran clean.
     """
     observed_families = {finding.family for finding in findings}
     missing = [letter for letter in planned if letter not in observed_families]
@@ -1361,15 +1170,9 @@ def report(
 async def _require_mock_lane() -> None:
     """Fail before any work if the lane is not pointed at the mock model.
 
-    Every family here assumes the mock: the shapes family asks for malformed tool calls by name,
-    and family D restarts `mock-llm` mid-flight. Against a real-model lane the first of those to
-    touch the process died on `no .live/run/mock-llm.pid — is the lane up?`, which is both alarming
-    and wrong — the lane *is* up, it is simply serving a real model, and by then the storm had
-    already driven a few hundred turns through it.
-
-    `processes.sh` starts `mock-llm` only when `CHEMCLAW_LLM_BASE_URL` names it, so its stats
-    endpoint answering is the honest precondition: it is the same fact, asked of the thing itself
-    rather than of a pid file.
+    Every family assumes the mock (malformed calls by name, restarting `mock-llm`). `processes.sh`
+    starts `mock-llm` only when `CHEMCLAW_LLM_BASE_URL` names it, so its stats endpoint answering is
+    the precondition.
 
     Raises:
         RuntimeError: The mock is not serving, with the setting that would fix it.
@@ -1398,9 +1201,8 @@ async def run_storm(
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     """Run each planned family in turn; return every finding and the admission sweep's rows.
 
-    Ordered so the destructive families come last: A restarts the front door at five different
-    caps and E kills processes, so anything they disturb must already have been measured. B is
-    genuinely last because it reads the audit trail every family before it wrote to.
+    Destructive families come last (A restarts the front door, E kills processes); B is last of all
+    because it reads the audit trail the others wrote.
     """
     await _require_mock_lane()
 
@@ -1433,9 +1235,7 @@ async def run_storm(
 def main(argv: list[str] | None = None) -> int:
     """Run the storm and write its report; exit non-zero if a check failed *or* a family did not.
 
-    A planned family that produced nothing is an error, not a gap in the prose. That is the whole
-    correction this version carries: the exit code now depends on coverage as well as on results,
-    so a matrix that quietly stops running half of itself cannot go green.
+    A planned family that produced nothing is an error, so the exit code depends on coverage too.
     """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sweep-turns", type=int, default=48, help="turns per admission-cap step")
@@ -1478,12 +1278,7 @@ def main(argv: list[str] | None = None) -> int:
     notes = {
         "families planned / ran": f"{len(planned)} / {len(ran & set(planned))}",
         "mock requests served": served,
-        # **The gateway this run actually drove**, not whether a vendor key happens to be in the
-        # environment. That is what this line asked until 2026-09-04, and after
-        # `D-2026-09-04-a-gateway-is-the-only-provider` nothing in `src/` reads that variable — so
-        # a real-gateway run reported `False` and a mock run in an environment carrying a stray
-        # vendor key reported `True`. `soak.sh` writes this report every round, and a note about
-        # the environment where a note about the run belongs is worse than no note.
+        # The gateway this run actually drove; every model call goes through it.
         "model gateway": settings.llm_base_url,
         "wall clock": f"{time.monotonic() - started:.0f} s",
         "disk free": f"{shutil.disk_usage('.').free // 1_000_000_000} GB",

@@ -1,32 +1,16 @@
 """What the model is told about artefacts: a listing on every request, and a note on the turn.
 
-Two channels, split by **whether the thing is state or an event** — the line
-`agent/preferences.StandingPreferences` draws:
+Split by whether the thing is state or an event:
 
-- **The listing is state**, current at request time: which artefacts exist, their titles, kinds
-  and head revisions. It is appended to the *system message* of every model call by
-  `ExhibitListing` and never written to the thread, so it is never stale (a revision mid-turn is in
-  the next call's listing), never cut by the conversation window, and never accumulates one copy per
-  turn in the checkpointed history. It is what makes a list tool unnecessary (the decision record
-  kept the surface at three schemas), and it is bounded by `exhibit_note_max_listed` and
-  `exhibit_listing_max_chars`.
-- **A chemist's edit is an event**, to be told once. Its notice goes into the turn's own message
-  (`api/runner.run_turn`), beside the job push-back `_with_pushed_job_results` appends there, and
-  the agent's read mark (`session_exhibits.agent_seen_revision`) moves **after the turn completes**
-  (`mark_told`), and only for the notices the note actually carried whole — a notice cut for space
-  is named instead, stays unseen, and is told again next turn. A system-message section is rebuilt
-  on every call and has nowhere to keep "already told".
-- Artefacts the chemist referenced in this message (`MessageIn.exhibit_refs`) ride with the note,
-  so "make the second column percent" reaches the model with the table it is about. They are the
-  chemist's words for this turn, which is why they belong in the thread.
+- **The listing is state**: which artefacts exist, with titles, kinds and head revisions.
+  `ExhibitListing` appends it to the system message of every model call and never to the thread,
+  so it is never stale, never cut by the window and never accumulates in the checkpoint.
+- **A chemist's edit is an event**, told once in the turn's own message; the agent's read mark
+  moves only after the turn completes (`mark_told`) and only for notices carried whole.
+- Artefacts the chemist referenced in this message ride with the note, as the chemist's words.
 
-**Framed as data, not instruction**, all three: a title, a chemist's edit and a referenced spec are
-text being shown to the model, the discipline every retrieved note and job result has
-(`agent/framing.frame_untrusted`), and titles are additionally JSON-quoted so a newline in one
-cannot start a line of its own. The note is bounded by `exhibit_note_max_chars`, because it is a
-`HumanMessage` producer, and
-`D-2026-09-16-a-mailbox-nobody-bounded-is-a-human-message-nobody-bounded` is the cost of one that
-is not.
+All three are framed as data, titles are JSON-quoted, and the note is bounded by
+`exhibit_note_max_chars` because it produces a `HumanMessage`.
 """
 
 from __future__ import annotations
@@ -85,9 +69,8 @@ CUT_REMEDY = ModelProse("call read_exhibit for the whole artefact")
 class TurnNote:
     """The note appended to a turn's message, and which edits it told the agent of.
 
-    `told` is `(exhibit_id, revision)` for every chemist edit whose notice the note carries whole;
-    the runner hands it to `mark_told` once the turn has completed, so a turn that fails before the
-    model saw the note leaves the edits unseen and they are told again.
+    `told` is `(exhibit_id, revision)` for each edit notice carried whole; the runner passes it to
+    `mark_told` after the turn, so a turn that fails early leaves the edits unseen.
     """
 
     text: str = ""
@@ -97,12 +80,10 @@ class TurnNote:
 class ExhibitListing(AgentMiddleware[Any, Any, Any]):
     """Put the session's artefact listing in front of the model on every call, never in the thread.
 
-    The `StandingPreferences` shape for the same reason: what exists *now* is state, so it is read
-    fresh per request and appended to the instructions, where the window cannot cut it and the
-    checkpointer never stores it. No section when artefacts are off, the call has no session, the
-    session holds none, or the store cannot be read (recorded as a degradation) — never a failed
-    model call. The synchronous hook passes through: the store is async, and every turn this
-    system serves takes the async path (`StandingPreferences` gives the rest of that argument).
+    Read fresh per request and appended to the instructions, so the window cannot cut it and the
+    checkpointer never stores it. Emits nothing when artefacts are off, there is no session or no
+    artefact, or the store is unreadable (recorded as a degradation). The sync hook passes through:
+    the store is async.
     """
 
     def wrap_model_call(
@@ -160,14 +141,10 @@ def _listed(headers: list[ExhibitHeader]) -> str:
 async def resolve_exhibit_refs(
     session_id: str, refs: Sequence[ExhibitRef], *, store: ExhibitStore | None = None
 ) -> list[ExhibitView]:
-    """The referenced revisions, each resolved within `session_id`, bound values filled in.
-
-    Filled in (`exhibits.bindings.resolved_view`) because the note shows the model what the chemist
-    is looking at, and a bound cell shows its value there, not its pointer.
+    """The referenced revisions, each resolved within `session_id`, with bound values filled in.
 
     Raises:
-        UnknownExhibit: a ref names an artefact this session does not hold, or a revision it does
-            not have — one answer for both, as every session-scoped read gives.
+        UnknownExhibit: A ref names an artefact or revision this session does not hold.
     """
     found = store or default_exhibit_store()
     views: list[ExhibitView] = []
@@ -186,9 +163,8 @@ async def resolve_exhibit_refs(
 async def exhibit_turn_note(session_id: str, refs: Sequence[ExhibitRef] = ()) -> TurnNote:
     """The note to append to this turn's message: unseen chemist edits and referenced artefacts.
 
-    Reads only; the read mark moves in `mark_told`, after the turn. Never fails the turn: an
-    unreadable store is recorded as a degradation and the turn runs without the note, as it would
-    on a deployment that had no artefacts.
+    Read-only; `mark_told` moves the read mark after the turn. Never fails the turn: an unreadable
+    store is recorded as a degradation and the turn runs without the note.
     """
     if not settings.agent_exhibits_enabled:
         return TurnNote()
@@ -222,9 +198,7 @@ async def exhibit_turn_note(session_id: str, refs: Sequence[ExhibitRef] = ()) ->
 async def mark_told(session_id: str, told: Sequence[tuple[str, int]]) -> None:
     """Record that the agent was told of each `(exhibit_id, revision)` — called after the turn.
 
-    After, because "told" means the model saw the note: a turn torn down before its first model
-    call told nobody anything. A mark that cannot be written is a degradation, not a failure; its
-    cost is the same edit announced again next turn, which is the cheap direction.
+    A mark that cannot be written is a degradation, not a failure: the edit is announced again.
     """
     if not told:
         return
@@ -274,11 +248,10 @@ async def _edit(store: ExhibitStore, session_id: str, state: ExhibitState) -> st
 
 
 def _compose(notices: list[tuple[ExhibitHeader, str]], referenced: list[ExhibitView]) -> TurnNote:
-    """The note: whole edit notices that fit their share, the rest named, then the references.
+    """Compose the note: whole edit notices that fit their share, the rest named, then references.
 
-    A notice is shown whole or not at all, because the read mark is per artefact: a notice cut in
-    the middle would be marked told while the model saw half of it. The ones that do not fit are
-    named by id (ids are minted here, so they need no framing) with the way to read them.
+    A notice is whole or absent because the read mark is per artefact; one cut in half would be
+    marked told. Overflow notices are named by id with the way to read them.
     """
     parts: list[str] = []
     told: list[tuple[str, int]] = []

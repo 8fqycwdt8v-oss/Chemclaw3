@@ -2,6 +2,8 @@
 
 **Status:** accepted
 
+**Superseded-by:** [D-2026-08-25-a-lakehouse-arrives-on-two-seams-not-one](D-2026-08-25-a-lakehouse-arrives-on-two-seams-not-one.md) (in part)
+
 ## Context
 
 Production will use an external vector database — probably Qdrant, not settled — and the requirement
