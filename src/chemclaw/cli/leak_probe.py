@@ -1,12 +1,9 @@
 """`python -m chemclaw.cli.leak_probe` — drive real turns in one process and say what it retains.
 
-A soak can only see the front door's RSS grow from outside; this runs the same turns inside the
-measuring process, where `gc`, `tracemalloc` and the app's structures are reachable. Committed
-rather than a scratch script so the measurement can be replayed.
-
-The verdict is `chemclaw.cli.soak_report`'s `fit`/`describe`, unchanged: a slope inside its own
-standard error is flat. It drives the real path — `create_app()`, middleware, per-turn graph, MCP
-connectors over HTTP, the session store — with only the model faked (`cli/mock_llm`).
+Runs the soak's turns inside the measuring process, where `gc`, `tracemalloc` and the app's
+structures are reachable, over the real path (`create_app()`, per-turn graph, MCP connectors,
+session store) with only the model faked. The verdict is `chemclaw.cli.soak_report`'s
+`fit`/`describe`.
 
 Usage (with `make live-up` running against the mock):
     python -m chemclaw.cli.leak_probe --turns 300 --batch 25

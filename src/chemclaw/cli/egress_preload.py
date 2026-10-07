@@ -3,13 +3,10 @@
     python -m chemclaw.cli.egress_preload
     enabled 127.0.0.1,localhost,postgres.example.svc
 
-One line: the posture word and the comma-joined allowlist. On `enabled` the entrypoint exports
-`CHEMCLAW_NETGUARD_PRELOAD_ALLOW` and `LD_PRELOAD` before `exec`ing the component.
-
-A separate process because `LD_PRELOAD` must be in the environment before the guarded interpreter
-starts. The allowlist is `netguard.derive_allowed(settings)`, the same function the in-process guard
-uses, so the two layers cannot drift. A failure exits non-zero and, under `set -e`, stops the
-container rather than starting it unguarded.
+On `enabled` the entrypoint exports `CHEMCLAW_NETGUARD_PRELOAD_ALLOW` and `LD_PRELOAD`, which must
+be set before the guarded interpreter starts. The allowlist is `netguard.derive_allowed(settings)`,
+as for the in-process guard. A failure exits non-zero, stopping the container rather than starting
+it unguarded.
 """
 
 from __future__ import annotations

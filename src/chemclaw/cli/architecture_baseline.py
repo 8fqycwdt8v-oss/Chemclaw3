@@ -77,13 +77,13 @@ def _prose_by_package() -> dict[str, dict[str, float]]:
 
 def _agent_build() -> dict[str, Any]:
     """Time the first and a steady-state compile, and count the root graph's middleware."""
-    import langchain.agents as lc_agents  # noqa: PLC0415 - imported only when measuring
-    from langchain_core.language_models.fake_chat_models import (  # noqa: PLC0415
+    import deepagents.graph as deep_graph
+    import langchain.agents as lc_agents
+    from langchain_core.language_models.fake_chat_models import (
         GenericFakeChatModel,
     )
 
-    import deepagents.graph as deep_graph  # noqa: PLC0415
-    from chemclaw.agent.langgraph_agent import build_langgraph_agent  # noqa: PLC0415
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
     class _Model(GenericFakeChatModel):
         def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
@@ -126,6 +126,7 @@ def _static() -> dict[str, Any]:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.ClassDef):
                 settings_fields += sum(isinstance(s, ast.AnnAssign) for s in node.body)
+    makefile = (REPO / "Makefile").read_text(encoding="utf-8")
     env_names = set()
     for path in SRC.rglob("*.py"):
         env_names.update(re.findall(r"CHEMCLAW_[A-Z0-9_]+", path.read_text(encoding="utf-8")))
@@ -138,7 +139,7 @@ def _static() -> dict[str, Any]:
         "test_files": len(list((REPO / "tests").rglob("test_*.py"))),
         "test_lines": _count_lines(list((REPO / "tests").rglob("*.py"))),
         "src_lines": _count_lines(list(SRC.rglob("*.py"))),
-        "make_targets": len(re.findall(r"^[a-z][a-z0-9-]*:", (REPO / "Makefile").read_text(), re.M)),
+        "make_targets": len(re.findall(r"^[a-z][a-z0-9-]*:", makefile, re.M)),
         "settings_fields": settings_fields,
         "chemclaw_env_names_in_src": len(env_names),
         "helm_values_lines": _count_lines([REPO / "deploy" / "helm" / "chemclaw" / "values.yaml"]),

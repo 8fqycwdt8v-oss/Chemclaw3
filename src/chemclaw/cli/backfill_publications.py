@@ -1,16 +1,12 @@
 """Queue results that were computed before a results store was attached.
 
-Publishing hooks a calculation as it completes, so a newly attached sink would otherwise miss
-everything already in `calculation_results` and `job_records`.
-
     python -m chemclaw.cli.backfill_publications --dry-run   # what would be queued
     python -m chemclaw.cli.backfill_publications             # queue it
     python -m chemclaw.cli.backfill_publications --requeue   # also retry rows that gave up
 
-Safe to run twice (the outbox's identity index makes a repeat a no-op) and while live (it writes the
-same queue the hooks do). Rows with no projector in this release are skipped, not failed. Rows a
-projector could not read are reported on their own line: they fail on every pass until code changes.
-`--dry-run` projects too, so its counts match the real pass.
+Idempotent (the outbox's identity index) and safe while live. Rows with no projector are skipped;
+rows a projector cannot read are reported separately, since they need a code change. `--dry-run`
+projects too, so its counts match.
 """
 
 import argparse

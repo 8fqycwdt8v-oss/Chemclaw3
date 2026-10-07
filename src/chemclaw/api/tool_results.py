@@ -1,11 +1,9 @@
 """The tool-result store: where a turn's full tool output lives so a surface can fetch it.
 
-The stream's `ToolResultEvent` carries a short preview and a reference; a surface that renders one
-result fetches its full text once through `GET /sessions/{id}/tool-results/{ref}`. The ref is the
-SHA-256 of the text, so a repeat stores nothing new and the ref can be computed without the
-database. Storing never fails a turn: every way of not storing yields `""`, the one meaning of "not
-stored". Kept apart from the artifact store (`science/calc`), which is keyed by calculation; these
-are keyed by the session that produced them.
+Events carry a preview and a ref; a surface fetches one result's full text through `GET
+/sessions/{id}/tool-results/{ref}`. The ref is the SHA-256 of the text, so repeats store nothing
+new. Storing never fails a turn: every failure yields `""`. Keyed by session, unlike the
+calculation-keyed artifact store.
 """
 
 import hashlib
@@ -149,14 +147,9 @@ async def load_tool_result(session_id: str, ref: str) -> StoredToolResult | None
 async def fetchable_refs(session_id: str) -> frozenset[str]:
     """Every ref `session_id` can currently fetch — what the transcript needs to advertise one.
 
-    The content address pairs a transcript's call with its blob exactly, but cannot say the blob
-    still exists (the store may have been off, the result over the cap, the write failed, or
-    retention swept it). This set turns a derivable ref into a checked one, so an empty `result_ref`
-    means "not fetchable" as on the stream. Frozen, since it crosses into a pure projection.
-
-    A failure yields an empty set via `degraded()` (same subsystem as the write side): a transcript
-    reload must not fail because the blob store is down. Skipped when `stream_max_result_bytes` is
-    0, the store's off switch.
+    The content address pairs a call with its blob but cannot say the blob still exists (store off,
+    over cap, failed write, swept), so this set makes a ref checked. A failure yields an empty set
+    via `degraded()`; skipped when `stream_max_result_bytes` is 0.
     """
     if settings.stream_max_result_bytes <= 0:
         return frozenset()

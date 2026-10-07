@@ -48,7 +48,7 @@ def default_vector_store() -> VectorStore:
 
     Raises:
         VectorStoreConfigError: The provider is `pgvector`, or a reference that does not resolve to
-        something callable.
+            something callable.
     """
     global _STORE
     provider = settings.vector_store_provider

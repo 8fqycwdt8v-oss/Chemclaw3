@@ -849,7 +849,7 @@ def require_problem_yields_one_best_point(problem: OptimizationProblem) -> None:
 
     Raises:
         ValueError: When a parameter and an objective share a name, two categories carry identical
-        descriptors, or the problem names more than one objective.
+            descriptors, or the problem names more than one objective.
     """
     require_names_do_not_clash(problem)
     require_descriptors_distinguish_categories(problem)
@@ -892,10 +892,10 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
 
     Raises:
         ValueError: When the round count exceeds `bo_max_rounds`, the total evaluation budget
-        exceeds `bo_max_evaluations`, the problem names more than one objective, a parameter and an
-        objective share a name, two categories carry the same descriptor row, the declared direction
-        disagrees with the registered objective's, or the decision space omits a parameter that
-        objective reads.
+            exceeds `bo_max_evaluations`, the problem names more than one objective, a parameter and
+            an objective share a name, two categories carry the same descriptor row, the declared
+            direction disagrees with the registered objective's, or the decision space omits a
+            parameter that objective reads.
     """
     require_rounds_within_ceiling(spec.n_rounds)
     require_evaluations_within_budget(spec)
@@ -955,7 +955,7 @@ def observed_value(
 
     Raises:
         ValueError: When the observation reports no value for `objective`, or reports one that is
-        not a finite number.
+            not a finite number.
     """
     name = problem.objective.name if objective is None else objective
     if name in observation.values:

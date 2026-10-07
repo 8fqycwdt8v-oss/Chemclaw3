@@ -351,8 +351,8 @@ class FingerprintReactionRetriever:
                 # Qualified by source: two sites behind one entry id are two hits.
                 source_note_id=note_id_for_reaction(match.id, match.source),
                 retriever=self.name,
-                # Structural hits score by their Tanimoto similarity — a closer precedent survives
-                # truncation first (KM-5). Clamped to [0, 1] to stay a valid chunk score.
+                # Tanimoto similarity as the score, so a closer precedent survives truncation;
+                # clamped to [0, 1].
                 score=min(max(match.similarity, 0.0), 1.0),
             )
             for match in matches

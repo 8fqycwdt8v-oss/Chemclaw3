@@ -1,17 +1,11 @@
 """`python -m chemclaw.cli.live_benchmark` — score this system on a benchmark somebody else wrote.
 
-Every `make eval` number is first-party; an external benchmark gives one that compares with other
-systems. ChemBench items are keyed (`target_scores` name one correct option), so scoring is a
-comparison, not a model-graded judgement, and inherits no judge noise.
+ChemBench items are keyed, so scoring compares rather than judges. Multiple-choice answers come from
+the model's knowledge, so the score is a floor, not a tool measurement. `--profile tools-removed`
+isolates the tools; `--profile no-tools` also replaces the prompt
+(`D-2026-09-14-tools-were-never-the-variable`).
 
-It does not measure the tools: multiple-choice questions are answered from the model's knowledge, so
-the score is a floor; `make live-ab` over `data/evals/probes/` measures the tools. Of the two
-control arms, `--profile tools-removed` removes every capability tool and nothing else, so its
-difference is attributable to the tools; `--profile no-tools` also replaces the system prompt, so
-its difference is a prompt effect (`D-2026-09-14-tools-were-never-the-variable`).
-
-Exit codes: 0 when the run completed, 3 when the lane could not be reached (never counted as a
-pass).
+Exit codes: 0 when the run completed, 3 when the lane could not be reached (never a pass).
 """
 
 import argparse

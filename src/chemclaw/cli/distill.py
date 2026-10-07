@@ -1,12 +1,7 @@
 """Mine the stored conversations for recurring procedure and propose what survives the guard.
 
-The distilling counterpart to `chemclaw/cli/trajectory_census.py`; findings go into the
-behaviour-proposal queue, so nothing changes behaviour until the person a proposal belongs to
-accepts it.
-
-On demand, never on a timer: no Temporal Schedule mines knowledge. Dry by default; `--propose`
-writes, so the output can be read before anything is proposed. On an empty corpus (the expected
-first result) it proposes nothing and says so.
+Findings go into the behaviour-proposal queue; nothing changes behaviour until their owner accepts.
+On demand, never on a timer. Dry by default (`--propose` writes); on an empty corpus it says so.
 """
 
 import argparse

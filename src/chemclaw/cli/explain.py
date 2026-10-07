@@ -1,13 +1,9 @@
 """Reconstruct why a session's tool calls happened — the join made usable.
 
-Joins `audit_events.session_id` with `session_messages.correlation_id`
-(D-2026-07-31-the-audit-chain-is-versioned): given a session, print the conversation and, under each
-turn, the tools that ran because of it, the plan step each call served (`audit_events.plan_step`,
-including refused calls), a durable job's stated rationale where one exists, and how the turn ended
-(`turn_costs`), so a capped or failed turn does not read as a clean one.
-
-Read-only: five `SELECT`s, no writes. Deliberately not an agent tool: the audit trail is evidence
-about the agent, to be examined rather than summarized by it.
+Joins `audit_events` to `session_messages` by correlation id
+(D-2026-07-31-the-audit-chain-is-versioned): the conversation, and under each turn the tools it ran,
+the plan step each served, any durable job's rationale, and how the turn ended. Read-only, and
+deliberately not an agent tool: the trail is evidence about the agent.
 """
 
 import argparse

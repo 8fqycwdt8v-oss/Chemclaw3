@@ -1,11 +1,9 @@
 """A chemist's own skills over HTTP: the only way one is written, listed or removed.
 
-The write is a route and never a tool: a model must not authorize its own behaviour change
-(`agent/skill_backend.SkillsReadOnlyRefusal` makes that structural). The read and the delete are the
-condition for the tier needing no review: a chemist can inspect and withdraw what acts on their
-turns. Owner-scoped by construction, via a namespace derived from `principal.oid`. Available exactly
-when the memory store is (`agent_memory_enabled` and a Postgres session store), since the tier lives
-in the same `AsyncPostgresStore`.
+A route, never a tool, so a model cannot change its own behaviour
+(`agent/skill_backend.SkillsReadOnlyRefusal`). Read and delete let a chemist inspect and withdraw
+what acts on their turns. Owner-scoped via a namespace derived from `principal.oid`; available
+exactly when the memory store is.
 """
 
 from fastapi import FastAPI, HTTPException

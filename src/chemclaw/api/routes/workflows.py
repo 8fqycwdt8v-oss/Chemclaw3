@@ -78,8 +78,9 @@ async def list_workflows(principal: CurrentUser) -> WorkflowListOut:
 
 
 async def get_workflow(name: str, principal: CurrentUser) -> WorkflowApprovalOut:
-    """What approving this workflow would authorize: its steps, the job steps, and the fingerprint to
-    post back. 404 when this caller has no workflow of that name.
+    """What approving this workflow would authorize, for the person about to decide.
+
+    Its steps, the job steps, and the fingerprint to post back; 404 for an unknown workflow.
     """
     workflow = await default_composed_store().get(principal.oid, name)
     if workflow is None:
@@ -130,8 +131,9 @@ async def approve_workflow(name: str, body: WorkflowApprovalIn, principal: Curre
 
 
 async def forget_workflow(name: str, principal: CurrentUser) -> Response:
-    """Delete one of this caller's composed workflows (a real delete; owner scoping is the
-    authorization). 404 when this caller has no workflow of that name.
+    """Delete one of this caller's composed workflows.
+
+    A real delete; owner scoping is the authorization. 404 for an unknown workflow.
     """
     if not await default_composed_store().forget(principal.oid, name):
         raise HTTPException(status_code=404, detail=f"no composed workflow called {name!r}")

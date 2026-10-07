@@ -1,14 +1,10 @@
 """Run every enabled local connector in one process — the dev loop for the connector topology.
 
-In a cluster each connector is its own Deployment and port; locally this mounts each enabled
-bundle's FastAPI app under `/<name>` of one uvicorn process. Core reaches it through
-`CHEMCLAW_CONNECTOR_URLS` — the same override a cluster uses — and the runner prints the JSON to
-set. Bundles without a local app (third-party endpoints) are skipped.
-
-Every locally served bundle declares `auth: mode: bearer`, so `ensure_dev_tokens` mints a random
-token per bundle the environment does not set, and `--export-env` prints them as shell exports so a
-core process started elsewhere (`infra/live/processes.sh`) can use the same values. There is no
-default token: a fixed dev credential in the tree eventually reaches a deployment.
+Mounts each enabled bundle's app under `/<name>` of one uvicorn process and prints the
+`CHEMCLAW_CONNECTOR_URLS` JSON that points core at it — the same override a cluster uses. Bundles
+with no local app are skipped. Bearer tokens are minted per bundle unless already set
+(`ensure_dev_tokens`), never defaulted; `--export-env` prints them for a core process started
+elsewhere.
 """
 
 import argparse
@@ -69,13 +65,8 @@ def bearer_token_envs() -> dict[str, str]:
 def ensure_dev_tokens() -> tuple[dict[str, str], frozenset[str]]:
     """Fill in a random token for every credential variable the environment does not already set.
 
-    Minted, never defaulted: a constant would be a public password that looks like a control.
-    Existing values are kept, so a caller can choose the secret for both processes. Which were
-    already set is returned, because after this writes `os.environ` a minted token and an operator's
-    are indistinguishable, and operator tokens must not be echoed.
-
-    Returns:
-        Every credential variable and its value, and the subset that was already set.
+    Existing values are kept so a caller can choose the secret. Returns every variable and value,
+    and the subset already set, so operator tokens are never echoed.
     """
     resolved: dict[str, str] = {}
     preexisting: set[str] = set()

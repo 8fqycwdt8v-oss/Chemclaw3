@@ -105,15 +105,10 @@ async def fork_session_route(
 ) -> SessionOut:
     """Branch this session onto a new one carrying its whole history, and return the new id.
 
-    Authorized by `OwnedSession` (a stranger gets 404) and then by ownership: a shared session holds
-    other people's words, so a member's fork is refused with 403. The fork inherits the parent's
-    profile from the live session, never from the request, so it cannot widen what the parent could
-    do. Durable stores only.
-
-    A turn in flight is a 409, as for `delete_session`: the copy spans several statements at READ
-    COMMITTED, so a concurrent turn could land a checkpoint with holes in the child. The route
-    claims the turn slot (in-process lease, then the durable claim) and releases both in a
-    `finally`.
+    Owner only: a shared session holds other people's words, so a member gets 403 (a stranger 404).
+    The fork inherits the parent's profile, never one from the request. Durable stores only. A turn
+    in flight is a 409: the copy spans several statements, so the route holds the turn slot
+    (in-process, then durable) and releases both in a `finally`.
     """
     front = state(request)
     if front.session_owners is None:
@@ -174,14 +169,10 @@ async def list_sessions(
 ) -> list[SessionSummary]:
     """One page of the caller's own sessions, newest first — the conversation list.
 
-    Lets a client that lost local state find the sessions it still owns. Read from the durable
-    ownership registry `resolve_session` authorizes against, so it never lists a session the caller
-    would be refused; empty under the in-memory store. Ordered by last activity with each session's
-    name; never-used sessions are not listed.
-
-    `service_max_listed_sessions` is the page size. `after` resumes after the row a cursor names,
-    and `X-Next-Cursor` on a full page says there may be more. The cursor is a keyset, not an
-    offset, because the list reorders while it is read.
+    Read from the durable ownership registry `resolve_session` authorizes against (empty under the
+    in-memory store), ordered by last activity; never-used sessions are not listed.
+    `service_max_listed_sessions` is the page; `after` resumes from a keyset cursor, and
+    `X-Next-Cursor` on a full page says there may be more.
     """
     owners: SessionOwners | None = state(request).session_owners
     if owners is None:
@@ -220,13 +211,9 @@ async def get_messages(
 ) -> list[TranscriptMessage]:
     """One session's stored transcript, in order — what a client reads back after a reload.
 
-    Gated by `resolve_session` (owner and members; anyone else gets the same 404 as an unknown id).
-    Read through the agent's own history provider, so read and write paths cannot drift and either
-    store works. Each message carries the tools invoked alongside it.
-
-    `fetchable_refs` is read once for the whole transcript: a `result_ref` is advertised only when
-    the full result can still be served, and is `""` otherwise — the same meaning the live stream
-    gives an unstored result.
+    Gated by `resolve_session`; read through the agent's own history provider so read and write
+    cannot drift. Each message carries its tool calls; a `result_ref` is advertised only if
+    `fetchable_refs` (read once) says the full result can still be served.
     """
     history = state(request).history
     # Mark a turn whose process died as `interrupted`; a turn whose claim is still live is left
@@ -243,15 +230,10 @@ async def delete_session(
 ) -> Response:
     """Delete one conversation and everything keyed by it — the owner's own erasure.
 
-    Authorized by `resolve_owned_session` (read gate, then `require_owner`): a non-reader gets the
-    same 404 as an unknown id, so delete is not an id oracle; a member gets 403. Unlike `make
-    user-erase`, this removes only what belongs to the conversation — no memory, preference or
-    subscription, and nothing from the retained audit tier.
-
-    A turn in flight is a 409: the turn slot is claimed as `POST /sessions/{id}/messages` claims it,
-    so a delete cannot interleave with a running turn and no turn starts during the sweep. The live
-    in-process handle is replaced by one no principal can match (`_tombstone_owner`), so this pod
-    stops resolving the id.
+    `resolve_owned_session` gates it: a non-reader gets the same 404 as an unknown id, a member 403.
+    Removes only what belongs to the conversation, never the person's memory or the retained audit
+    tier. A turn in flight is a 409 (the turn slot is held for the sweep), and the live handle is
+    replaced by an unmatchable one (`_tombstone_owner`).
     """
     front = state(request)
     # Nothing may sit between this claim and the `try`: only that `finally` gives it back.
@@ -310,15 +292,11 @@ async def upload_attachment(
 ) -> AttachmentSummary:
     """Attach a working file to a conversation.
 
-    Stored in `session_attachments` whenever sessions are durable, so any replica can serve the turn
-    that asks about it. `principal` is recorded as the uploader so an erasure reaches it; reading is
-    the session gate's decision. An attachment is working material, not knowledge: anything worth
-    keeping goes through `kg/record.py`.
-
-    Unsupported formats are a 422 naming what is supported, never half-parsed. Oversize bodies are a
-    413 from `BodySizeLimit` before this runs. The parse runs in a bounded worker thread
-    (`parse_attachment_off_loop`), because a small hostile file can hold a CPU for seconds and the
-    front door has one event loop; past the parse cap an upload is shed with a retryable 503.
+    Stored in `session_attachments` when sessions are durable, so any replica can serve it;
+    `principal` is recorded so an erasure reaches it. Working material, not knowledge. Unsupported
+    formats are a 422 naming what is supported; oversize bodies a 413 from `BodySizeLimit`. Parsing
+    runs in a bounded worker thread (`parse_attachment_off_loop`), since a hostile file can hold a
+    CPU for seconds; past the cap an upload gets a retryable 503.
     """
     raw = await file.read()
     try:

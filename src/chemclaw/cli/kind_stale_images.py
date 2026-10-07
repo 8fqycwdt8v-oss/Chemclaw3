@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Which Deployments run pods on an image the node no longer holds under that pod's tag.
 
-`up.sh` loads every build as `chemclaw/<x>:kind`, so a rebuild changes no pod template. This
-compares by digest: a container's `imageID` against the digests `crictl inspecti` lists for its tag
-on the node.
+Rebuilds reuse the `chemclaw/<x>:kind` tag, so compare by digest: each container's `imageID` against
+what `crictl inspecti` lists for its tag.
 
     kubectl get pods -o json | python3 src/chemclaw/cli/kind_stale_images.py --node <node>
 
-prints one Deployment name per line. `deploy/kind/up.sh` runs it as a file on the host's `python3`,
-so it imports only the standard library and stays 3.9-readable.
+Prints one Deployment per line. Run as a file on the host's `python3`, so stdlib only and
+3.9-readable.
 """
 
 from __future__ import annotations

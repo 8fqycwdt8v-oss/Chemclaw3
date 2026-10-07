@@ -1,13 +1,8 @@
 """The push-back mailbox's readers: the job stream, the standing-query digest, and check-ins.
 
-`session_events` is one durable mailbox, claimed per kind. `GET /sessions/{id}/events` streams a
-finished durable job (and other session pushes) back into the chat over SSE, authorized by
-`resolve_session`. `GET /digests` and `GET /check-ins` are single destructive reads of a mailbox
-derived from the authenticated `oid`, so no id is accepted and nothing needs authorizing. A digest
-is not streamed: it arrives about daily, and a stream would hold a slot for hours to carry one row.
-
-`_SlotBoundEventStream` owns the stream's admission slot, because the slot belongs to the response's
-lifetime, which is longer than the generator's.
+`session_events` is one durable mailbox, claimed per kind. `GET /sessions/{id}/events` streams
+session pushes over SSE, gated by `resolve_session`. `GET /digests` and `GET /check-ins` are single
+destructive reads of a mailbox derived from the caller's `oid`, so there is nothing to authorize.
 """
 
 import logging
@@ -100,14 +95,10 @@ def _awaiting_key(event: SessionEvent) -> tuple[str, str]:
 class _SlotBoundEventStream(EventSourceResponse):
     """An SSE response that holds its admission slot for exactly as long as it is being served.
 
-    The release lives in `__call__`'s `finally`, not the generator's: sse-starlette may cancel
-    before the generator first advances, and a never-started generator runs no `finally`, which
-    would leak the slot for the pod's lifetime. Starlette awaits the response once, so this runs on
-    every way a stream ends.
-
-    Not a lease: a push-back stream is deliberately unbounded in time, so any deadline short enough
-    to clear a leak would evict healthy streams. A `send_timeout` bounds each send, so a half-open
-    connection cannot park the generator forever.
+    Released in `__call__`'s `finally`, which runs however the stream ends, including a cancel
+    before the generator first advances (whose own `finally` would never run). Not a lease:
+    push-back streams are unbounded in time. `send_timeout` stops a half-open connection parking the
+    generator.
     """
 
     def __init__(
@@ -178,11 +169,8 @@ async def session_events(
         # The newest `awaiting_answer` state already sent to this client, per request; per
         # connection, so a reconnect re-reports.
         awaiting_reported: dict[str, str] = {}
-        # No `finally` returning the slot: `_SlotBoundEventStream` owns it, and releasing here as
-        # well would decrement twice.
-        #
-        # Through the front-door module so the suite's patch seam
-        # (`chemclaw.agent.session_events.stream_new_events`) reaches this tailer.
+        # No `finally` here: `_SlotBoundEventStream` owns the slot. Called through the module so the
+        # suite's patch seam (`chemclaw.agent.session_events.stream_new_events`) reaches it.
         try:
             async for pushed in front_door.stream_new_events(
                 session_id,
@@ -351,14 +339,10 @@ def _digest(payload: dict[str, Any]) -> Digest:
 async def read_digests(principal: CurrentUser) -> list[Digest]:
     """Claim and return the standing-query digests waiting for the caller.
 
-    The channel is derived from the authenticated principal with the writer's `digest_channel`, so
-    the caller cannot name a mailbox and there is nothing to authorize. The read is the consume,
-    scoped to `DIGEST_KIND`, which also lets retention age the row out. A lost response loses only
-    the notification: the notes are in the graph and the query is saved.
-
-    Unbounded on purpose: the claim has already run, so a page would destroy the tail. The bound is
-    the cadence — one row per subscription per `digest_schedule_minutes`. `consumed_at` records
-    reads, so nothing is counted here.
+    The channel derives from the principal (`digest_channel`), so there is nothing to authorize. The
+    read is the consume, scoped to `DIGEST_KIND`; a lost response loses only the notification.
+    Unbounded because the claim has already run; the bound is one row per subscription per
+    `digest_schedule_minutes`.
     """
     claimed = await claim_unconsumed(digest_channel(principal.oid), kinds=(DIGEST_KIND,))
     return [_digest(event.payload) for event in claimed]

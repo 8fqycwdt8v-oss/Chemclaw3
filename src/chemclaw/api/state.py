@@ -1,13 +1,9 @@
 """The front door's per-process state: what `create_app` seeds onto `app.state`, typed once.
 
-Every route and dependency reads the process's live structures (session cache, turn leases,
-admission semaphore) through `request.app.state`, which lets routes live in `chemclaw/api/routes/`
-while `create_app` stays the only factory. Tests replace `app.state` attributes wholesale, so
-nothing here may cache one: `FrontDoorState` reads through on every access.
-
-This module holds the shapes of that state — the live-session cache, the durable ownership and
-turn-claim Protocols with their config-gated defaults, the claim-holder identity, the in-process
-turn lease — and `state(request)`, which confines Starlette's untyped `app.state` to one place.
+Routes read live structures through `request.app.state`, so they can live in `chemclaw/api/routes/`
+with `create_app` the only factory. Holds the live-session cache, the durable ownership and
+turn-claim Protocols, the claim-holder identity and the in-process turn lease, plus
+`state(request)`, a read-through typed view (tests replace attributes wholesale).
 """
 
 import asyncio
@@ -49,14 +45,10 @@ class LiveSession:
 class _LiveSessions:
     """A bounded LRU cache of the front door's live in-process sessions with their owner.
 
-    Evicting drops only the live handle; durable history stays in the session store. Session, owner
-    and profile are stored together so they cannot drift: the profile decides the turn's agent and
-    connectors.
-
-    `pinned` names sessions eviction must skip — those with a turn in flight — because evicting one
-    makes the next request rehydrate a second handle over the same history, and the two diverge in
-    `session.state`. The pin comes from the in-process turn lease, which expires, so a leaked pin
-    cannot wedge eviction. Bookkeeping is `chemclaw.core.bounded.BoundedLru`.
+    Eviction drops only the live handle; history stays durable. Session, owner and profile are
+    stored together so they cannot drift. Sessions with a turn in flight are `pinned`, since
+    re-hydrating a second handle would diverge in `session.state`; pins come from expiring turn
+    leases. Built on `chemclaw.core.bounded.BoundedLru`.
     """
 
     def __init__(self, capacity: int, pinned: Callable[[str], bool] | None = None) -> None:
@@ -148,18 +140,11 @@ _WORKER_ID = uuid.uuid4().hex
 
 
 def claim_holder(token: str) -> str:
-    """This *turn's* identity as a durable claim holder — the process id plus its slot token.
+    """This *turn's* identity as a durable claim holder: the process id plus its slot token.
 
-    Per process alone is not enough: after a turn's lease lapsed and a successor in the same process
-    claimed the session, the first turn's refresh and release would act on the successor's claim and
-    let a third turn in elsewhere. Keying by the slot token makes the durable claim as
-    identity-checked as `_release_turn_slot`.
-
-    Args:
-        token: This turn's slot token from `_claim_turn_slot`.
-
-    Returns:
-        The holder string to claim, refresh and release under.
+    The token comes from `_claim_turn_slot`. Per-process identity is not enough: a turn whose lease
+    lapsed could refresh or release a successor's claim in the same process. With the token the
+    durable claim is identity-checked like `_release_turn_slot`.
     """
     return f"{_WORKER_ID}:{token}"
 
@@ -173,13 +158,10 @@ _CLAIM_REFRESHES_PER_LEASE = 3
 class TurnLease:
     """One session's in-process turn slot: which turn holds it, and until when.
 
-    `token` makes a release identity-checked, so a late teardown cannot revoke a successor's slot.
-    `deadline` is `math.inf` while `post_message`'s `try/finally` owns cleanup, then a real wall
-    clock (`_start_turn_lease`). `actor` is the principal whose turn holds the slot, so the
-    per-actor cap inherits this record's expiry; `None` marks a maintenance hold (fork, delete).
-    `claimed_at` lets the per-actor count age out an un-started reservation (a handler parked on a
-    store call, which no `finally` covers) instead of locking one chemist out of every session; the
-    session guard itself still relies only on the `finally`.
+    `token` identity-checks releases. `deadline` is `math.inf` while `post_message`'s `finally` owns
+    cleanup, then a wall clock (`_start_turn_lease`). `actor` feeds the per-actor cap (`None` for
+    fork/delete holds). `claimed_at` lets that cap age out an un-started reservation stuck on a
+    store call, so one wedged call cannot lock a chemist out everywhere.
     """
 
     token: str
@@ -193,15 +175,10 @@ def _claim_turn_slot(
 ) -> str | None:
     """Reserve the in-process one-turn-per-session slot, or report that a live turn holds it.
 
-    Returns this turn's token (its identity for `_start_turn_lease` and `_release_turn_slot`), or
-    `None` when another turn holds the session. `actor` is keyword-only with no default, so every
-    call site states whether its hold is a turn; maintenance holds pass `None`.
-
-    The slot is a lease, not a latch: one window runs neither releasing `finally` (a client gone
-    after hand-off but before the generator first advances). The clock does not start here: until
-    hand-off `post_message`'s `finally` releases on every exit, so the reservation needs no expiry
-    until then. Expired entries are swept here, keeping the map bounded and the gauge honest. No
-    `await` between test and write, so there is no race window.
+    Returns this turn's token, or `None` when another turn holds the session. `actor` is
+    keyword-only with no default (maintenance holds pass `None`). A lease, not a latch, because one
+    window runs no releasing `finally`; its clock starts at hand-off (`_start_turn_lease`). Expired
+    entries are swept here. No `await` between test and write.
     """
     now = time.monotonic()
     for stale_id, lease in list(active_turns.items()):

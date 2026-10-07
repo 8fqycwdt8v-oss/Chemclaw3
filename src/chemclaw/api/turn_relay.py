@@ -1,17 +1,10 @@
 """A running turn, followed and stopped from a replica that does not hold it.
 
-A turn's pump lives in the process that started it (`api/detach.DetachableTurn`), so other replicas
-reach it through rows (`agent/turn_remotes.TurnRemotes`):
-
-- **The holding process** runs `TurnRelay.run` while it holds a turn (an idle replica issues
-  nothing). It answers requests with the same in-process calls its routes make: a follow attaches an
-  ordinary `DetachableTurn.watch` view — so caps, lag cut-off and unload-stop resume treat it
-  exactly as a local one — and relays its frames into rows; a stop calls `stop()` or `defer_stop()`.
-- **The asking replica** authorizes first (same session gate, same sender-or-owner rule), writes the
-  request, waits for the answer, and streams the relayed frames (`follow`) or reports the outcome
-  (`stop`).
-
-A request is a lease on a conversation already in flight, not durable work.
+The turn's pump lives in its starting process, so other replicas go through rows
+(`agent/turn_remotes.TurnRemotes`). The asking replica authorizes first, writes a request and waits;
+the holder (`TurnRelay.run`, polling only while it holds a turn) answers with the same calls its
+routes make — an ordinary `DetachableTurn.watch` view whose frames it relays into rows, or
+`stop()`/`defer_stop()`. A request is a lease, not durable work.
 """
 
 import asyncio

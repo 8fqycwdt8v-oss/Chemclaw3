@@ -514,26 +514,19 @@ def _transcript(
 ) -> list[TranscriptMessage]:
     """Flatten stored messages into the transcript contract, pairing calls with their results.
 
-    Results arrive in a later message than their call, so pairing (on `tool_call_id`) takes a pass
-    over the whole transcript first. Plan snapshots and attachment references are never persisted,
-    so they are not recovered here.
-
-    A result's ref is computed, not looked up: it is the SHA-256 of the result's text as
-    `message_text` flattens it, the same flattening `api/graph_stream.py` hashed when storing, so
-    the pairing is identity of bytes. `fetchable` (`tool_results.fetchable_refs`) is passed in,
-    keeping this pure and the database read to one per transcript; a ref outside it is reported as
-    `""`.
+    Results arrive after their call, so pairing on `tool_call_id` takes a full pass first. A
+    result's ref is the SHA-256 of its text as `message_text` flattens it — the same bytes
+    `api/graph_stream.py` hashed — and is reported `""` unless it is in `fetchable`, passed in to
+    keep this pure.
     """
     results: dict[str, tuple[str, str, bool]] = {}
     for message in stored:
         call_id = getattr(message, "tool_call_id", None)
         if not call_id:
             continue
-        # `message_text` is the flattening `graph_stream` hashed, so the computed ref matches a
-        # stored blob. An empty result gets no ref. A cut or stamped result names its stored bytes
-        # by the stamp (`FULL_RESULT_REF_KEY` or the handle stamp), since the row holds the model's
-        # cut or a trailing handle line; the hash is the fallback for unstamped rows. The handle
-        # line is removed before display.
+        # Same flattening `graph_stream` hashed. A cut or stamped result names its stored bytes by
+        # its stamp (the row holds the cut, or a handle line, which is stripped for display); the
+        # hash is the fallback. An empty result gets no ref.
         text = without_handle_line(message_text(message))
         ref = (
             full_result_ref(message)

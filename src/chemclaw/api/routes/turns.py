@@ -1,15 +1,10 @@
-"""The SSE turn stream — the one route with real concurrency machinery, kept in one place.
+"""The SSE turn stream and its siblings: stop, the session's line, and following a turn live.
 
-`POST /sessions/{id}/messages` runs a turn under guards that must compose exactly: the per-session
-in-process lease and durable cross-process claim (a busy session is a line; only a full line is a
-409), the per-actor concurrent-turn cap (429), the admission semaphore (queued or shed on the open
-stream), and the budget (429). The rate limiter runs earlier, inside `require_principal`. The
-`_turn_events` generator stays nested in the route because everything it captures is per-request
-state; app-wide structures are read through `chemclaw.api.state.state(request)`.
-
-Beside it: the stop route, the session's line (`GET /sessions/{id}/queue`, and `DELETE …/{ticket}`
-to withdraw a waiting message), and `GET /sessions/{id}/turn/stream` to follow the running turn
-live.
+`POST /sessions/{id}/messages` composes the per-session lease and durable claim (a busy session is a
+line), the per-actor cap (429), the admission semaphore (queued or shed on the stream) and the
+budget (429); the rate limiter runs earlier in `require_principal`. `_turn_events` stays nested
+because it captures per-request state; app-wide state is read through
+`chemclaw.api.state.state(request)`.
 """
 
 import asyncio
@@ -81,12 +76,10 @@ TURN_CORRELATION_HEADER = "X-Chemclaw-Turn-Correlation-Id"
 class _TurnStream(EventSourceResponse):
     """A turn stream that ends *itself* when the client stops reading, rather than being collected.
 
-    `asyncio.timeout` in the generator bounds a stalled model but not a stalled transport: when
-    `send` blocks on a client that stopped reading, the cancellation lands in sse-starlette, which
-    does not `aclose()` the body, leaving teardown to the async-generator GC finalizer in a
-    different `Context`. `send_timeout` makes sse-starlette `aclose()` the generator in the serving
-    task, so the permit, lease and token booking are released promptly in the right context. The
-    resulting `SendTimeoutError` is caught and logged here with the session id.
+    A send blocked on a non-reading client is beyond the generator's `asyncio.timeout`;
+    `send_timeout` makes sse-starlette `aclose()` the generator in the serving task, so permit,
+    lease and token booking are released promptly and in the right `Context`. The `SendTimeoutError`
+    is logged here.
     """
 
     def __init__(
@@ -174,39 +167,24 @@ async def post_message(
 ) -> EventSourceResponse:
     """Run one turn for the session and stream its events as SSE.
 
-    Admission-controlled: the turn holds one of the process's turn permits for its whole run. The
-    permit is taken inside the stream, so a wait is reported as a `queued` event and a timeout ends
-    with an error event rather than an HTTP 503. Two wall clocks bound it:
-    `service_turn_timeout_seconds` bounds the turn (one `turn_timeout` error event), and
-    `service_sse_send_timeout_seconds` bounds one send to a client that stopped reading
-    (`_TurnStream`).
-
-    One turn at a time per session, claimed twice as leases: the in-process `active_turns` map (no
-    I/O, no race window) and, under `session_store="postgres"`, the durable `session_turns` claim
-    that covers other replicas.
-
-    A busy session is a line, not a 409: the message takes a ticket (`agent/session_queue`), this
-    request waits and reports its place, and at the head it takes both claims and runs as this
-    request's principal. Tickets run in database admission order. Still refused: a full line or a
-    sender already waiting (409, with `code`), and a process at its waiter budget (429). A message
-    that waited is re-authorized at the head (`_refusal_at_the_head`).
+    The turn holds an admission permit for its whole run, taken inside the stream (a wait is a
+    `queued` event; a timeout an error event). `service_turn_timeout_seconds` bounds the turn,
+    `service_sse_send_timeout_seconds` one send. One turn per session, claimed in-process
+    (`active_turns`) and, under Postgres, durably (`session_turns`). A busy session is a line: the
+    message takes a ticket, waits reporting its place, and at the head is re-authorized
+    (`_refusal_at_the_head`) and runs as its sender. 409 for a full line or a sender already
+    waiting; 429 at the process's waiter budget.
     """
     front = state(request)
     active_turns: dict[str, TurnLease] = front.active_turns
     claims: SessionTurns | None = front.turn_claims
     lease = settings.service_turn_claim_lease_seconds
     semaphore = front.turn_semaphore
-    # Artefact references are resolved before anything is claimed, so a refusal holds no slot, claim
-    # or permit; an unresolvable one is a 422 with `code="invalid_exhibit_ref"`.
-    #
-    # Then the per-actor cap: the semaphore bounds the process and is actor-blind, so without this
-    # one principal could hold every permit. It is a final refusal, so it gets a status code (429)
-    # rather than a stream event. `Retry-After` is required because the UI reads a 429 without it as
-    # an exhausted budget and locks the composer; the hint is a jittered check-back cadence, not an
-    # estimate. It sits above `_claim_turn_slot`, whose reservation has no expiry until the lease
-    # starts, so a raise here cannot leak a slot. Inert under the shared dev principal, where every
-    # caller is one oid and there is nothing to divide. Messages waiting in other sessions' lines
-    # count, since each will run as soon as its line moves.
+    # Artefact references are resolved before anything is claimed (422 `invalid_exhibit_ref`). Then
+    # the per-actor cap, since the semaphore is actor-blind: a final refusal, so a 429 with a
+    # jittered `Retry-After` (without it the UI shows an exhausted budget). It sits above
+    # `_claim_turn_slot`, so it cannot leak a slot, and is inert under the shared dev principal.
+    # Messages waiting in other lines count.
     if body.exhibit_refs and not settings.agent_exhibits_enabled:
         # Refused rather than dropped: with artefacts off the reference would reach nobody.
         raise HTTPException(
@@ -470,12 +448,9 @@ async def post_message(
             else:
                 await semaphore.acquire()
             permit = True
-            # The binding budget check. The pre-response check runs at request entry, so a
-            # concurrent burst passes it before any turn has booked; here a turn holds a permit, so
-            # the overshoot is bounded by `service_max_concurrent_turns` plus turns that detached
-            # and kept spending (`chemclaw_turns_in_flight` vs `chemclaw_turn_capacity`). An event,
-            # since the response is open; not retryable until the cap is raised or the counters
-            # reset.
+            # The binding budget check: the pre-response check runs before a concurrent burst has
+            # booked, while here the turn holds a permit, bounding overshoot to the permits plus
+            # detached turns. An event, since the response is open; not retryable.
             try:
                 await front.budget.check(session_id, principal.oid)
                 await check_thread_size(session_id)
@@ -491,11 +466,8 @@ async def post_message(
                 return
             METRICS.increment("chemclaw_turns_started_total")
             try:
-                # The deadline covers the whole streamed run: a stall inside `run_turn` surfaces
-                # here as `TimeoutError` and becomes one error event. It does not bound the
-                # transport; `_TurnStream`'s `send_timeout` does. There is no agent lease: a graph
-                # is compiled per turn around its own connectors, so there is no shared object to
-                # lease.
+                # Covers the whole streamed run: a stall in `run_turn` surfaces as `TimeoutError`,
+                # one error event. The transport is bounded by `_TurnStream`'s `send_timeout`.
                 async with asyncio.timeout(settings.service_turn_timeout_seconds) as deadline:
                     async for event in run_turn(
                         current.session,
@@ -543,12 +515,9 @@ async def post_message(
                 )
                 yield sse_frame(timeout_event)
         except Exception as exc:
-            # The stream's catch-all, for failures one frame above `run_turn`'s own guard
-            # (evaluating `front.connector_factory`, `front.history`, `front.graph_factory`) or
-            # while waiting in line. Once the response has started no exception handler can run, so
-            # without this the stream would end with zero events. A stream always ends with an
-            # answer or an error; `failure_event` is the runner's own classifier, so both report a
-            # failure the same way.
+            # The stream's catch-all for failures above `run_turn`'s own guard (the factories) or
+            # while waiting: once the response has started no handler can run, and a stream must end
+            # with an answer or an error. `failure_event` is the runner's own classifier.
             turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
             failed = failure_event(exc, session_id, correlation_id or uuid.uuid4().hex)
@@ -604,11 +573,9 @@ async def post_message(
                 busy = "durable"
         if slot is None:
             METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": busy or "queue"})
-            # Refused (still before the response exists) only when the line is full or the sender
-            # already has a message in it, or when this process cannot hold another waiter: a
-            # waiting message holds its stream open here, and the socket budget charges
-            # `service_max_concurrent_turns` × `service_turn_queue_max` waiters per process.
-            # Reserved with no `await` between test and write.
+            # Refused only for a full line, a sender already waiting, or a process at its waiter
+            # budget (`service_max_concurrent_turns` × `service_turn_queue_max`, which the socket
+            # budget assumes). No `await` between test and reservation.
             if sum(front_waiters.values()) >= (
                 settings.service_max_concurrent_turns * settings.service_turn_queue_max
             ):
@@ -635,11 +602,9 @@ async def post_message(
             # The lease clock starts here: from now on the `finally` below no longer owns cleanup,
             # so the slot needs its own expiry.
             _start_turn_lease(active_turns, session_id, slot)
-        # The turn runs on its own pump task: the SSE response is a view, so a disconnect detaches
-        # it and the turn runs to completion, releasing lease and claim at its true end. The permit,
-        # which belongs to the replica, goes back at detach (`_release_permit`). Stopping is the
-        # explicit route below. A waiting message waits on the same pump, so a detach keeps its
-        # place.
+        # The turn runs on its own pump task and the response is a view: a disconnect detaches and
+        # the turn completes, releasing lease and claim at its true end; the permit goes back at
+        # detach. Stopping is the explicit route below.
         turn = DetachableTurn(
             _turn_events(),
             session_id=session_id,
@@ -705,17 +670,11 @@ async def stop_turn(
 ) -> dict[str, bool]:
     """Stop the session's running turn — the one way to cancel work in flight.
 
-    A disconnect only detaches. Guarded by the session dependency; in a shared session a member
-    stops only their own turn, the owner any. 404 when nothing is running, so a client that raced
-    completion knows which happened. Any replica answers: a turn held elsewhere is authorized here
-    and delivered to its holder as a polled request (`_stop_elsewhere`); 503 if the holder does not
-    answer within `service_turn_relay_lease_seconds`.
-
-    `?reason=unload` defers the stop: the page is being discarded and a reload cannot be told from a
-    close, so the turn stops only if neither its sender nor the requester reattaches through `GET
-    /sessions/{id}/turn/stream` within `service_turn_unload_grace_seconds`. Answers `{"stopped":
-    false, "deferred": true}`. Without the reason the stop is immediate, including over a pending
-    deferral.
+    A member stops only their own turn, the owner any. 404 when nothing is running. A turn held by
+    another replica is authorized here and relayed to its holder (`_stop_elsewhere`), 503 if it does
+    not answer in `service_turn_relay_lease_seconds`. `?reason=unload` defers: the turn stops only
+    if neither its sender nor the requester reattaches within `service_turn_unload_grace_seconds`
+    (answers `{"stopped": false, "deferred": true}`).
     """
     front = state(request)
     turn = front.running_turns.get(session_id)
@@ -869,19 +828,12 @@ async def watch_turn(
 ) -> EventSourceResponse:
     """Follow the session's running turn live — any participant, from this moment on.
 
-    Fan-out: each watcher has its own buffer, so one that stops reading is cut off (`stream_lagged`)
-    without slowing the turn. The turn is resolved from this session's registry entry after the
-    session gate. A turn on another replica is relayed through rows by its holder
-    (`_watch_elsewhere`). A late joiner sees events from the moment it attaches.
-
-    404 when no turn is running; 410 `turn_interrupted` when the latest turn died with its process,
-    so the client can offer to resend. 429 at `service_turn_max_watchers`, or when the caller holds
-    `service_max_event_streams_per_user` long-lived streams (the same ledger as push-back streams);
-    both are held until the socket closes.
-
-    `TURN_CORRELATION_HEADER` names the turn being watched. The sender reattaching cancels a pending
-    unload stop (`DetachableTurn.resume`). Membership is re-read while watching
-    (`_while_a_participant`).
+    Each watcher has its own buffer and is cut off (`stream_lagged`) if it stops reading; a turn on
+    another replica is relayed by its holder (`_watch_elsewhere`). 404 when nothing is running; 410
+    `turn_interrupted` when the latest turn died with its process; 429 at
+    `service_turn_max_watchers` or the caller's stream cap, held until the socket closes.
+    `TURN_CORRELATION_HEADER` names the turn; the sender reattaching cancels a pending unload stop;
+    membership is re-read while watching.
     """
     front = state(request)
     turn = front.running_turns.get(session_id)

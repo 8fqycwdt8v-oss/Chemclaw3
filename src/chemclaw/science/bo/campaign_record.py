@@ -221,8 +221,7 @@ class Suggestion(BaseModel):
     # The durable run that produced this, empty for the inline tool. The idempotency key: a retried
     # activity must not append a duplicate suggestion.
     job_id: str = ""
-    # The calculations the decision space's descriptors came from, so a stale xTB run traces to the
-    # suggestions drawn from it — what `calc_refs` was built for (D-133) and D-158 first made real.
+    # The calculations the descriptors came from, so a stale xTB run traces to its suggestions.
     calc_refs: list[str] = Field(default_factory=list)
     actor: str = ""
     session_id: str = ""

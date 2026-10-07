@@ -1,33 +1,20 @@
 """The browser suite's scripted workflows: what the mock model does on the kind cluster's e2e lane.
 
-The UI's real-browser suite (`Chemclaw3_ui` `e2e/kind/`) runs whole workflows on kind with the
-scripted mock as its model. These behaviours make the model decisions a fixed plan cannot (propose a
-plan, store and honour a preference, cite a record, launch a cancellable job, stream long enough to
-queue behind) by reading the request (`mock_llm.Conversation`) through a `script`. Each still
-declares its calls as templates, so `_validate` checks names against the live surface and
-`_within_declared` holds every pass to them.
+These behaviours read the request (`mock_llm.Conversation`) to make the decisions a fixed plan
+cannot, still declaring their calls so `_validate` and `_within_declared` hold them to the live
+surface. A green scenario proves plumbing, not model judgement. Selected by `[[e2e:<name>]]` in the
+newest marked user message (`--catalogue e2e`):
 
-A green scenario proves the plumbing, not that a model would decide to do any of it — that is
-`CHEMCLAW_KIND_LLM=live`'s question. A separate catalogue (`--catalogue e2e`, the storm list plus
-this one), because every storm entry must be reached by a check in `cli/live_storm.py`.
-
-**Markers** are `[[e2e:<name>]]` in the user message; the newest marked user message decides
-(`MockLlm.select`), so an unmarked follow-up continues the behaviour.
-
-* `[[e2e:plan]]` — on the marked turn, `write_todos` with one step declaring
-  `compute_reaction_energy`, then "nothing runs until you approve it"; on any later turn of the
-  conversation, `compute_reaction_energy` on a fixed N2 + 3 H2 -> 2 NH3, then "ran" or "refused".
-* `[[e2e:remember]]` — `remember_preference` forbidding dichloromethane (DCM), then a confirmation.
-* `[[e2e:conditions]]` — no tool; amide-coupling conditions opening with the standing-preferences
-  entries the system message carried (or saying none arrived), in the first solvent none excludes.
-* `[[e2e:cite]]` — `gather_evidence` on a reaction anchor (or `expand_note` on a `reaction-…` id the
-  message names) plus `find_notes`; then cites the first record and the first note that came back.
-* `[[e2e:long-job]]` — `start_optimization_campaign` on the `measured` objective, seeded from the
-  message; then quotes the job id the launcher returned.
-* `[[e2e:slow]]` — no tool; streams its answer over `SLOW_STREAM_SECONDS`.
-* `[[e2e:artefact]]` — `create_exhibit` with a `document`, its arguments streamed in
-  `ARTEFACT_FRAGMENTS` pieces so the turn stream carries `exhibit_draft` frames before the
-  `exhibit` event; then a one-line answer pointing at the artefact.
+* `[[e2e:plan]]` — propose a `write_todos` plan declaring `compute_reaction_energy`; on a later
+  turn, run it (N2 + 3 H2 -> 2 NH3) and report "ran" or "refused".
+* `[[e2e:remember]]` — `remember_preference` forbidding dichloromethane (DCM).
+* `[[e2e:conditions]]` — amide-coupling conditions echoing the standing preferences received, in the
+  first solvent none excludes.
+* `[[e2e:cite]]` — search (`gather_evidence` or `expand_note`, plus `find_notes`), then cite what
+  came back.
+* `[[e2e:long-job]]` — `start_optimization_campaign` on the `measured` objective; quote the job id.
+* `[[e2e:slow]]` — stream the answer over `SLOW_STREAM_SECONDS`.
+* `[[e2e:artefact]]` — `create_exhibit`, arguments streamed in `ARTEFACT_FRAGMENTS` pieces.
 
 `deploy/kind/README.md` lists what a browser test asserts on each.
 """

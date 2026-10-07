@@ -65,7 +65,7 @@ def require_hessian_affordable(atom_count: int, what: str) -> None:
 
     Raises:
         ValueError: the molecule has more atoms than `calc_hessian_max_atoms` allows
-        (non-retryable).
+            (non-retryable).
     """
     ceiling = settings.calc_hessian_max_atoms
     if atom_count <= ceiling:

@@ -169,12 +169,10 @@ async def get_plan(
 ) -> PlanStatusOut:
     """The plan awaiting a decision, with the hash a client must post back to approve it.
 
-    `approved` is the effective state: a yes that the turn it authorized has not yet spent
-    (`ApprovalStore.decision` folds in `consumed_at`), so the surface matches what the gate
-    enforces. `decided_by` still names whoever decided. A session proposing no work items is asked
-    nothing, but its global `EMPTY_PLAN_HASH` is still reported so a client has an identity to
-    display. The plan is read from the checkpointer, so it survives eviction and pod rolls; there is
-    no stored mode.
+    `approved` is the effective state (a yes not yet spent by its turn), matching what the gate
+    enforces; `decided_by` names whoever decided. A session proposing nothing still reports the
+    global `EMPTY_PLAN_HASH` as its identity. The plan is read from the checkpointer, so it survives
+    eviction and pod rolls.
     """
     read = await _read_plan(session_id, state(request).plan_approvals)
     # One read, one question: a second query via `approval_stands` could disagree with this one.
@@ -195,20 +193,15 @@ async def get_plan(
 async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlansOut:
     """Every plan of the caller's that nobody has decided yet — the cross-session inbox.
 
-    Lists a plan with no decision at all (no `plan_approvals` row for the session and hash). This is
-    narrower than the in-turn card, which prompts whenever no live approval exists: a spent approval
-    or a rejection is an answer, and listing them would flood the inbox with finished work. A plan
-    re-proposed byte-identically after its approval was spent therefore does not list.
+    Lists plans with no `plan_approvals` row at all; a spent approval or a rejection is an answer,
+    so unlike the in-turn card the inbox does not re-list them. Sessions come from the same
+    registries as `GET /sessions` and `GET /sessions/shared`, and a plan is listed only for the
+    person who may decide it.
 
-    Owned sessions come from the `GET /sessions` registry and shared ones from `GET
-    /sessions/shared`, so a listed session is never refused. A plan is listed only for the person
-    who may decide it.
-
-    Bounded and reported, never silently truncated: ungated sessions are skipped for free, at most
-    `service_max_plan_scans` plans are read (each a serialized checkpointer statement), `unread`
-    counts what was left including unreadable checkpoints, and `truncated` says the listing walk hit
-    its page ceiling. The listing is paged rather than read once, because a blocked conversation
-    never moves its `updated_at` and would otherwise fall off the first page for good.
+    Bounded and reported: ungated sessions are skipped, at most `service_max_plan_scans` checkpoints
+    are read, `unread` counts what was left (including unreadable ones) and `truncated` says the
+    listing walk hit its ceiling. The listing is paged, since a blocked conversation never moves its
+    `updated_at`.
     """
     owners = state(request).session_owners
     if owners is None:
@@ -272,14 +265,11 @@ async def decide_plan(
     principal: CurrentUser,
     live: CurrentSession,
 ) -> Response:
-    """Approve (or reject) a harness plan — the pre-execution gate.
+    """Approve (or reject) a harness plan — the pre-execution gate; a route, never an agent tool.
 
-    An HTTP route and never an agent tool: a model must not be able to authorize its own plan.
-
-    The posted `plan_hash` must match the plan proposed *now*, including each step's declared tools;
-    a mismatch is a 409, because the plan changed between being shown and being approved. An empty
-    plan has no identity (`plan_identity` returns `None`) and is refused, using the same function
-    the gate asks so the route and enforcement agree on what counts as a plan.
+    The posted `plan_hash` must match the plan proposed now, declared tools included, or it is a
+    409. An empty plan has no identity (`plan_identity` returns `None`) and is refused, by the same
+    function the gate asks.
     """
     plan = await session_plan(session_id) or []
     plan_hash = plan_identity(plan)

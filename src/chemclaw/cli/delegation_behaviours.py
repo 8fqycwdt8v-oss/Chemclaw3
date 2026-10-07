@@ -1,18 +1,10 @@
 """The scripted double's catalogue for the delegation suite — what the mock model does, per arm.
 
-Separate from `cli/storm_behaviours.py` because every storm behaviour must be driven by a check in
-`cli/live_storm.py`; `tests/test_delegation_run.py` holds the same property here against
-`cli/live_probes.py`.
-
-Scripting a call to `task` is honest: it is a first-party tool resolved against the live surface,
-reaching a graph `build_langgraph_agent` compiled. The double supplies only the decision to
-delegate, so a run is evidence that the runner observes a real delegation (audit row, helper model
-call, bill) — not that a model would delegate or that delegating pays.
-
-Every behaviour's `text` is judge verdict JSON: `evals/live_judge` grades with a second call whose
-prompt quotes the probe's question, so the same marker selects the same behaviour and its text is
-the verdict. No marker may appear in an answer, since `[[…]]` parses as a note citation; the one
-marker below sits in a `task` argument.
+Kept apart from the storm catalogue, whose entries must each be driven by `cli/live_storm.py`. The
+double supplies only the decision to call `task` (a real first-party tool), so a run shows the
+runner observes a real delegation, not that a model would delegate. Each `text` is judge verdict
+JSON, since the judge's call selects the same behaviour; no marker may appear in an answer, where
+`[[…]]` reads as a citation.
 """
 
 from __future__ import annotations

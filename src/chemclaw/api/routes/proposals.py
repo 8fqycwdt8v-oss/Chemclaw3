@@ -1,13 +1,9 @@
 """The human gate on a proposed behaviour change: read what is waiting, accept it, or decline it.
 
-`agent/behaviour_proposals.py` holds the queue; this is the half a person acts through. A model must
-never authorize its own behaviour change: the agent proposes with `propose_skill`, and nothing it
-can call decides.
-
-Owner-scoped by construction: every handler keys the store by `principal.oid`, so there is no
-authorization decision to get wrong. Accepting re-applies every admission rule `POST /skills/mine`
-enforces (including `agent_local_skills_max`); a refusal leaves the proposal `open`. A decision is
-final: deciding twice reports what stands.
+The agent proposes with `propose_skill` (queue in `agent/behaviour_proposals.py`); only a person
+decides, here. Every handler keys the store by `principal.oid`, so there is no authorization
+decision to get wrong. Accepting re-applies every admission rule of `POST /skills/mine`, and a
+refusal leaves the proposal `open`. A decision is final.
 """
 
 from __future__ import annotations
@@ -189,13 +185,9 @@ async def _write_what_was_accepted(
 ) -> Callable[[], Awaitable[None]] | None:
     """Put an accepted proposal where it acts, or refuse the acceptance.
 
-    Returns what undoes the write (restore the replaced version, or remove the skill), or `None`
-    when nothing was written. Only `skill` has a destination a route can write; an accepted profile
-    proposal is a record, since profiles are reviewed files in `data/profiles/`.
-
-    Raises:
-        HTTPException: The deployment keeps no store, or a tier admission rule refuses the body.
-            Both leave the proposal open.
+    Returns what undoes the write, or `None` when nothing was written. Only `skill` proposals have a
+    destination a route can write; profiles are reviewed files. Raises `HTTPException` when there is
+    no store or an admission rule refuses the body, leaving the proposal open.
     """
     if proposal.kind != "skill":
         return None

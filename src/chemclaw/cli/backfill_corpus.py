@@ -1,11 +1,8 @@
 """Write knowledge notes from a directory of existing documents.
 
-The batch driver that makes an organisation's existing reports, SOPs and filings answerable. It
-reuses `chemclaw.agent.attachments`' parsers and the same write path as every machine-written note.
-
-One note per document, verbatim: no summarizing, extraction or chunking. A deterministic
-transcription infers nothing, so there is nothing for a reviewer to decide; an LLM-summarized
-backfill would put thousands of unreviewed paraphrases into the corpus.
+One note per document, verbatim, through `chemclaw.agent.attachments`' parsers and the normal note
+write path. A deterministic transcription infers nothing, so there is nothing to review; summarizing
+would put unreviewed paraphrases into the corpus.
 
 Run: `python -m chemclaw.cli.backfill_corpus <directory> [--dry-run] [--tag PROJECT]`
 """

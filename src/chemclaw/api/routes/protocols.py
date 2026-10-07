@@ -248,12 +248,9 @@ async def post_revision(
         raise HTTPException(
             status_code=404, detail=f"no design {design_id!r} at revision {body.parent_revision}"
         )
-    # The stage is derived from the document, so a request without a procedure is not graded as a
-    # protocol. The corpus evidence is passed in: a check handed none passes by construction, and a
-    # human edit must get the same verdict as the agent's draft. Both lookups answer `[]` rather
-    # than raise, so an unreachable corpus costs a quieter check, not a lost edit. Awaited inline;
-    # only `recorded_failures` offloads to a thread, and the remaining loop time is a few
-    # milliseconds.
+    # The stage is derived from the document, and the corpus evidence is passed in (a check handed
+    # none passes by construction), so a human edit gets the agent's verdict. Both lookups answer
+    # `[]` rather than raise, so an unreachable corpus costs a quieter check, not a lost edit.
     checks = run_checks(
         body.document,
         stage="protocol" if body.document.has_protocol else "request",
@@ -326,16 +323,9 @@ async def get_run_sheet(
 ) -> Response:
     """The design's arms as a CSV run sheet — one row per arm, in run order.
 
-    Not JSON: its consumers (instrument software, a LIMS import, a workbook) read files. Gated like
-    `GET /protocols/{design_id}`, of which it is a projection.
-
-    Args:
-        design_id: The `design-…` id.
-        principal: The authenticated caller.
-        revision: A specific revision, or 0 for the head.
-
-    Returns:
-        `text/csv` with a `Content-Disposition` named by `protocols.export.run_sheet_filename`.
+    `revision` 0 is the head. CSV because its consumers (instrument software, a LIMS import, a
+    workbook) read files. Gated like `GET /protocols/{design_id}`, of which it is a projection; the
+    filename comes from `protocols.export.run_sheet_filename`.
     """
     stored = await default_design_store().read(design_id, revision or None)
     if stored is None:

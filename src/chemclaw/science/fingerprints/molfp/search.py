@@ -1,5 +1,4 @@
-"""High-level molecule search over a fingerprint store: Tanimoto neighbours and substructure matches.
-"""
+"""Molecule search over a fingerprint store: Tanimoto neighbours and substructure matches."""
 
 import asyncio
 import logging

@@ -4,13 +4,9 @@
     python -m chemclaw.cli.erase_actor <oid> --apply    # commits
     python -m chemclaw.cli.erase_actor --finish <session-id> ... [--apply]
 
-The third form finishes an erasure a live turn interrupted: the actor form prints the orphaned
-session ids and exits `2`, and `--finish` deletes those sessions by id. It refuses any session that
-still has an ownership row, so it is not an unscoped conversation delete.
-
-A thin shim over `chemclaw.agent.leaver`, which holds the two-tier rule: delete the conversation,
-keep the record. Dry run by default, because the target is a pasted string and the operation is
-irreversible.
+`--finish` deletes by id the orphaned sessions an interrupted actor run printed (exit `2`), refusing
+any that still has an ownership row. A shim over `chemclaw.agent.leaver`: delete the conversation,
+keep the record. Dry run by default.
 """
 
 import argparse

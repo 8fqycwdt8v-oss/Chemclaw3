@@ -173,7 +173,7 @@ def _objective_output(problem: OptimizationProblem) -> ContinuousOutput:
 
 
 def _outputs(problem: OptimizationProblem) -> list[ContinuousOutput]:
-    """Every objective as a BoFire output, in declaration order (W3)."""
+    """Every objective as a BoFire output, in declaration order."""
     return [
         ContinuousOutput(
             key=objective.name,
@@ -549,7 +549,7 @@ def interrogate_surrogate(
 
     Raises:
         ValueError: Below the observation floor, when the caller named more folds than runs, or when
-        neither a point nor a fit assessment was asked for.
+            neither a point nor a fit assessment was asked for.
     """
     if not points and not assess_fit:
         raise ValueError("interrogate_surrogate was asked for neither a prediction nor a fit score")
@@ -964,8 +964,8 @@ def optimal_design(
 
     Raises:
         ValueError: An unknown criterion or formula, a non-positive budget, a budget over
-        `bo_max_design_runs`, a budget too small to estimate the stated model, or an
-        `ExcludeConstraint`, which the DoE solver cannot honour.
+            `bo_max_design_runs`, a budget too small to estimate the stated model, or an
+            `ExcludeConstraint`, which the DoE solver cannot honour.
     """
     if criterion not in _CRITERIA:
         raise ValueError(
