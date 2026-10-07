@@ -67,15 +67,10 @@ def test_skills_dirs_splits_the_path_list() -> None:
 def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
     """A fresh checkout is valid with no endpoint and no credential — and cannot leave the host.
 
-    The previous default was `llm_provider="anthropic"` with an empty `llm_base_url`, which meant a
-    process that configured nothing sent every prompt to the public vendor API. This one dials
-    `cli/mock_llm`'s port on loopback, so the worst an unconfigured deployment can do is be refused
-    a connection — loudly, on the first turn, rather than quietly and outbound
-    (`D-2026-09-04-a-gateway-is-the-only-provider`). Booting on this default at all is refused by
-    `core/llm_gateway.refuse_unconfigured_llm_gateway` unless the deployment states the posture.
-
-    There is no `llm_provider` field to assert; that is the point, and
-    `test_no_provider_field_survives` is what says so.
+    The default gateway is `cli/mock_llm` on loopback, so an unconfigured deployment is refused a
+    connection rather than sending prompts outbound (`D-2026-09-04-a-gateway-is-the-only-provider`).
+    Booting on it is refused by `core/llm_gateway.refuse_unconfigured_llm_gateway` unless the
+    posture is stated. `test_no_provider_field_survives` holds that no provider field exists.
     """
     from chemclaw.cli.mock_llm import MOCK_BASE_URL
 
@@ -89,27 +84,13 @@ def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
 
 
 def test_the_live_lane_derives_its_bundle_list_rather_than_naming_one() -> None:
-    """A bundle set written into the shell goes stale the day a bundle is added.
+    """The live lane derives its bundle list rather than naming one.
 
-    `CHEMCLAW_CONNECTORS_REQUIRED` is true in this lane and `connectors_enabled` is unset, so
-    discovery is enablement and a bundle core enables that nothing starts is not a warning — it is
-    `ConnectorsUnavailable` and a front door that refuses to boot. That is not hypothetical:
-    wiring `rxnpredict` in as a declaration-only bundle broke `make live-up` against a
-    `for name in chem safety` loop, and it stayed broken because nothing here failed.
-
-    Two fixes were written for it independently, and the one that survived is the wider one — the
-    lane starts what is *enabled* rather than narrowing what is enabled. Constraining
-    `CHEMCLAW_CONNECTORS_ENABLED` to the fleet's bundles would have taken the core-served ones
-    (`bo`, `calc`, `molfp`, `rxnfp`, `results`) off the lane with it, which is why this asserts the
-    derivation exists and *not* that the lane pins its enabled set.
-
-    **The shape it pins moved once, and the reason is the point.** This first asserted the literal
-    `for name in $(fleet_bundle_names "$python"); do` — which is the form that *swallows* a failure
-    in the thing it derives: bash does not propagate a command substitution's exit status under
-    `set -e` when it only feeds a `for` list, though it does for an assignment. So the test named a
-    line rather than the property in its own title, and the line it named was the unguarded one.
-    It now pins the property from both directions, which is what makes a green run here evidence
-    that the lane fails loudly rather than starting half a fleet.
+    With `CHEMCLAW_CONNECTORS_REQUIRED` true, a bundle enabled but not started refuses boot, so the
+    lane starts what is enabled rather than a hand-kept list (and does not narrow the enabled set,
+    which would drop the core-served bundles). The derivation must be an assignment, because bash
+    does not propagate a command substitution's exit status in a `for` list under `set -e`; both
+    directions are pinned so the lane fails loudly rather than starting half a fleet.
     """
     script = (
         Path(__file__).resolve().parent.parent / "infra" / "live" / "processes.sh"
@@ -135,20 +116,12 @@ def test_the_live_lane_derives_its_bundle_list_rather_than_naming_one() -> None:
 
 
 def test_the_live_lane_does_not_transcribe_the_gateway_address_into_shell() -> None:
-    """`infra/live/processes.sh` must ask this config for the gateway, never carry a copy of it.
+    """`infra/live/processes.sh` asks this config for the gateway, never carries a copy of it.
 
-    The lane decides whether to start `cli/mock_llm` by comparing the *resolved* `llm_base_url`
-    against `MOCK_BASE_URL`, both read out of the interpreter it is about to launch every process
-    with. It used to compare `$CHEMCLAW_LLM_BASE_URL` against the address written out in the
-    script — which was true for as long as an operator had to set that variable, and false from
-    the moment `D-2026-09-04-a-gateway-is-the-only-provider` made it a `Settings` default that
-    nothing in the lane sets. Measured on `make live-up`: the mock never started, the front door
-    came up pointed at a closed port, and the run log named the gateway as though it were serving.
-
-    An absence test, because the failure is a *duplication* rather than a wrong value: the copy
-    agreed with the default on the day it was written, and a shell string cannot be re-derived
-    when the Python one moves. `.env.example` is deliberately not covered — a documented mirror of
-    every setting is what that file is for, and nothing branches on it.
+    The lane decides whether to start `cli/mock_llm` by comparing the resolved `llm_base_url` with
+    `MOCK_BASE_URL`, both read from the interpreter it launches. A shell copy cannot follow the
+    Python default. `.env.example` is excluded: mirroring every setting is its purpose and nothing
+    branches on it.
     """
     from chemclaw.cli.mock_llm import MOCK_BASE_URL
 
@@ -163,11 +136,10 @@ def test_the_live_lane_does_not_transcribe_the_gateway_address_into_shell() -> N
 
 
 def test_no_provider_field_survives() -> None:
-    """The concept is gone, not narrowed to one value — asserted, because that was the decision.
+    """The provider concept is gone, not narrowed to one value.
 
-    A one-value enum would have left every reader in place and the next vendor one commit away.
-    `agent_model` goes with it: a vendor model id in git whose only readers were the deleted
-    branch and an `or` tail behind `llm_model`.
+    A one-value enum would leave every reader in place and the next vendor one commit away;
+    `agent_model` is gone with it.
     """
     assert "llm_provider" not in Settings.model_fields
     assert "llm_prompt_caching" not in Settings.model_fields
@@ -212,12 +184,10 @@ def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_blanked_gateway_address_is_refused() -> None:
-    """An empty base URL is not "no destination" — it is the SDK's own hardcoded public host.
+    """A blanked gateway address is refused.
 
-    This check was scoped to `llm_provider == "openai_compatible"`, which is exactly how the other
-    value came to ignore `llm_base_url` entirely. Unconditional now: both fields default to the
-    mock, so it fires only on a deployment that explicitly blanks one, which is the case worth
-    catching.
+    An empty base URL is the SDK's hardcoded public host, not "no destination". Both fields default
+    to the mock, so this fires only when a deployment blanks one.
     """
     with pytest.raises(ValueError, match="llm_base_url"):
         Settings(_env_file=None, llm_base_url="")  # type: ignore[call-arg]
@@ -281,15 +251,12 @@ def test_deploy_defaults() -> None:
 
 
 def test_the_connector_job_ceiling_stays_above_the_activity_it_bounds() -> None:
-    """A parent ceiling no larger than its child's longest activity is not a ceiling.
+    """The connector-job ceiling stays above the activity it bounds.
 
-    `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an execution timeout,
-    and `CalcJobWorkflow` inside it gives `run_xtb_calculation` — a CREST search —
-    `xtb_job_timeout_seconds` as a single-attempt `start_to_close`. Set them equal and one attempt
-    consumes the entire parent budget: the activity's five-attempt retry policy can never reach a
-    second attempt, and the run dies with a bare `WorkflowExecutionTimedOut` naming neither
-    setting. This is the rule that used to guard the DFT poll's 24 h budget; the tier is gone
-    (`D-2026-08-26-semiempirical-is-the-whole-tier`) and the rule is not.
+    `ConnectorJobWorkflow`'s child gets `connector_job_timeout_seconds`, and the CREST activity
+    inside it gets `xtb_job_timeout_seconds` as a single-attempt `start_to_close`. Equal values let
+    one attempt consume the whole parent budget, so retries are unreachable and the run dies as a
+    bare `WorkflowExecutionTimedOut`.
     """
     with pytest.raises(ValueError, match="connector_job_timeout_seconds"):
         Settings(  # type: ignore[call-arg]
@@ -298,31 +265,20 @@ def test_the_connector_job_ceiling_stays_above_the_activity_it_bounds() -> None:
 
 
 def test_raising_only_the_activity_budget_is_refused_rather_than_silently_ignored() -> None:
-    """The operator error the two comments invited, made loud.
+    """Raising only the activity budget is refused rather than silently ignored.
 
-    An operator whose CREST search on a large molecule needs eight hours raises
-    `xtb_job_timeout_seconds` — and gets no behaviour change at all, because the parent's ceiling
-    fires first. Failing at startup with both numbers named is the difference between a two-minute
-    fix and an unexplained timeout hours into a search.
+    The parent ceiling would fire first; failing at startup with both numbers named saves an
+    unexplained timeout hours into a search.
     """
     with pytest.raises(ValueError, match="raising the activity budget alone changes nothing"):
         Settings(_env_file=None, xtb_job_timeout_seconds=28_800)  # type: ignore[call-arg]
 
-    # And the fix the message asks for actually works — a guard that cannot be satisfied is a wall.
-    #
-    # It now takes a third setting, and that is the point rather than an inconvenience: a template
-    # `job` step is a child workflow bounded by `connector_job_timeout_seconds` plus what the
-    # wrapper's five post-child steps may spend, so raising the job ceiling raises the ceiling a
-    # template run has to contain (`_the_template_run_ceiling_covers_one_step`). Before that rule
-    # existed, the eight-hour search this operator is buying would have run under a 7,200 s template
-    # run and ended it as a bare TIMED_OUT with nothing on the chemist's stream. The startup refusal
-    # names the number, so the chain costs one more line rather than an afternoon.
-    #
-    # 52,530 rather than the 39,600 this line first carried: that number was `32,400 + 4 x 1,800`,
-    # the count-based headroom the wrapper never actually had. The five post-child steps are bounded
-    # by their own `schedule_to_start + start_to_close` — 12,930 s at the shipped budgets — so the
-    # honest bound here is 45,330, and this is that plus the eight-ordinary-step allowance, the same
-    # rule the default is sized by.
+    # And the fix the message asks for actually works: a guard that cannot be satisfied is a wall.
+    # It takes a third setting, because a template `job` step is bounded by
+    # `connector_job_timeout_seconds` plus the wrapper's post-child steps, which the template run
+    # ceiling must contain (`_the_template_run_ceiling_covers_one_step`). 52,530 is that bound (the
+    # post-child steps' `schedule_to_start + start_to_close`) plus the eight-ordinary-step allowance
+    # the default is sized by.
     assert (
         Settings(  # type: ignore[call-arg]
             _env_file=None,
@@ -335,12 +291,10 @@ def test_raising_only_the_activity_budget_is_refused_rather_than_silently_ignore
 
 
 def test_the_activity_budget_stays_above_the_search_it_awaits() -> None:
-    """The same equality-is-the-defect rule one level down: activity vs the sampler's client bound.
+    """The activity budget stays above the sampler's client bound it awaits.
 
-    The two shipped equal (14400 s each), so a sampling call that ran to its client bound
-    exhausted the activity's `start_to_close` at the same instant — the activity died as a bare
-    timeout instead of surfacing the sampler's error, and `activity_max_attempts` could never be
-    reached. Refused at startup with both numbers named, exactly as the parent ceiling above.
+    Equal values let a sampling call that runs to its client bound exhaust the activity at the same
+    instant, surfacing a bare timeout instead of the sampler's error.
     """
     with pytest.raises(ValueError, match="xtb_job_timeout_seconds"):
         Settings(  # type: ignore[call-arg]
@@ -352,11 +306,10 @@ def test_the_activity_budget_stays_above_the_search_it_awaits() -> None:
 
 
 def test_the_shipped_defaults_boot() -> None:
-    """Enforcing a rule the repository's own shipped configuration violates is a crash loop.
+    """The shipped defaults boot.
 
-    So the ceiling's default carries the headroom rather than asking every deployment to discover
-    it. The number is derived from `xtb_job_timeout_seconds`, which is why this asserts the
-    relation rather than a literal.
+    The ceiling's default is derived from `xtb_job_timeout_seconds`, so the relation is asserted
+    rather than a literal.
     """
     default = Settings(_env_file=None)  # type: ignore[call-arg]
     assert default.connector_job_timeout_seconds > default.xtb_job_timeout_seconds
@@ -368,12 +321,8 @@ def test_the_shipped_defaults_boot() -> None:
 def test_openai_compatible_embeddings_require_a_model_name() -> None:
     """Selecting the endpoint embedder without naming its model fails at startup, in its own words.
 
-    The endpoint half is *not* asserted here, because this validator does not own it: an empty
-    `llm_base_url` is refused unconditionally by `_gateway_is_addressed`, which is declared first
-    and therefore raises before this one runs. This test used to pass `llm_base_url=""` and match
-    on `"llm_base_url"` — which is the other validator's message, so it stayed green with the
-    embedding branch deleted. Matching the embedding validator's own wording is what makes it a
-    test of the embedding validator (`test_a_blanked_gateway_address_is_refused` covers the rest).
+    Matches the embedding validator's own message; an empty `llm_base_url` is refused earlier by
+    `_gateway_is_addressed` (`test_a_blanked_gateway_address_is_refused`).
     """
     with pytest.raises(ValueError, match="requires embedding_model"):
         Settings(  # type: ignore[call-arg]
@@ -431,13 +380,10 @@ def test_entra_expensive_actions_without_roles_is_rejected() -> None:
 
 
 def test_entra_privileged_roles_without_actions_is_accepted() -> None:
-    """Roles alone is the *documented remedy*, so it must construct — the other direction is not.
+    """Privileged roles without an action list are accepted.
 
-    `expensive: true` in a connector manifest derives into `authz.expensive_actions()`, so a
-    deployment gates its declared jobs by naming roles and nothing else; `docs/guides/runbook.md`
-    tells an operator to set exactly this. The validator used to demand the pair, which made the
-    instructed remedy un-constructable unless the operator also hand-copied the job names the
-    derivation removed.
+    `expensive: true` in a manifest derives into `authz.expensive_actions()`, so naming roles alone
+    is the runbook's documented remedy and must construct.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
@@ -483,11 +429,10 @@ def test_relative_knowledge_dir_is_accepted() -> None:
 
 
 def test_knowledge_path_joins_note_repo_dir_and_knowledge_dir() -> None:
-    """`knowledge_path` is where notes actually live: readers must agree with the PR-gate.
+    """`knowledge_path` joins `note_repo_dir` and `knowledge_dir`, where notes are written.
 
-    The PR-gate writes at `note_repo_dir/knowledge_dir/...`; a reader that resolved
-    `knowledge_dir` alone (relative to the process CWD) would look at a different tree
-    whenever `note_repo_dir` pointed elsewhere — the bug `knowledge_path` exists to close.
+    A reader resolving `knowledge_dir` alone (relative to the CWD) would read a different tree
+    whenever `note_repo_dir` points elsewhere.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None, note_repo_dir="/clones/kg", knowledge_dir="knowledge"
@@ -502,17 +447,11 @@ def test_knowledge_path_matches_todays_default_when_note_repo_dir_is_unset() -> 
 
 
 def test_a_log_level_that_logging_will_not_accept_is_refused_at_construction() -> None:
-    """The one enum-shaped setting whose value was never checked until it was used.
+    """A log level that `logging` will not accept is refused at construction.
 
-    Every neighbouring enum is a `Literal` and `vector_store_provider` has its own validator, so a
-    typo in any of them fails where the deployment can see it — while `CHEMCLAW_LOG_LEVEL=INFOO`
-    constructed cleanly and then killed the process at its first `configure_logging()` with a bare
-    `ValueError: Unknown level: 'INFOO'` naming neither the setting nor the variable.
-
-    Checked against `logging.getLevelNamesMapping()` rather than a `Literal`, because the accepted
-    set is the stdlib's rather than ours: `WARN` and `FATAL` are aliases a deployment may well be
-    using today, and freezing a list here would either break them or need keeping in step with a
-    module that owns the answer.
+    Otherwise the process dies at `configure_logging()` with an error naming neither setting nor
+    variable. Checked against `logging.getLevelNamesMapping()`, not a `Literal`, so stdlib aliases
+    like `WARN` stay valid.
     """
     for accepted in ("debug", "INFO", "WARN", "FATAL", "NOTSET"):
         assert Settings(_env_file=None, log_level=accepted).log_level  # type: ignore[call-arg]
@@ -523,10 +462,8 @@ def test_a_log_level_that_logging_will_not_accept_is_refused_at_construction() -
 def test_env_example_documents_only_real_fields() -> None:
     """Every `CHEMCLAW_*` key in `.env.example` names a real `Settings` field.
 
-    `Settings.model_config` sets `extra="forbid"`, so a stale key is not a cosmetic doc bug:
-    `cp .env.example .env` (the README quickstart) makes `Settings()` raise at import time and
-    every entry point dies. This test is the guard that keeps the documented onboarding path
-    working.
+    `Settings` forbids extras, so a stale key makes `cp .env.example .env` (the README quickstart)
+    fail every entry point at import.
     """
     unknown = _documented_keys() - set(Settings.model_fields)
     assert not unknown, f".env.example documents non-existent settings: {sorted(unknown)}"
@@ -535,38 +472,23 @@ def test_env_example_documents_only_real_fields() -> None:
 def test_env_example_documents_every_field() -> None:
     """Every `Settings` field appears in `.env.example`.
 
-    `docs/guides/runbook.md` and `docs/planning/implementation-plan.md` both promise "every field
-    mirrored in `.env.example`" — an operator reads that file to learn what is tunable. An
-    undocumented field is an invisible knob, so this makes the promise machine-checked rather than
-    aspirational.
+    Operators read that file to learn what is tunable; an undocumented field is an invisible knob.
     """
     undocumented = set(Settings.model_fields) - _documented_keys()
     assert not undocumented, f"settings missing from .env.example: {sorted(undocumented)}"
 
 
 # `.env.example` fields whose shipped line deliberately differs from the code default, and why. A
-# row here is a claim that the file is *better* off saying something else; there are none today,
-# and an empty mapping is the honest state rather than a placeholder — the four divergences that
-# existed were all defects and none of them was noticed for want of this check.
+# row is a claim the file is better off saying something else; there are none.
 _DELIBERATE_ENV_EXAMPLE_OVERRIDES: dict[str, str] = {}
 
 
 def test_env_example_ships_the_code_defaults(tmp_path: Path) -> None:
-    """The file's own promise — "this file lists every field, at its default" — as an assertion.
+    """`.env.example` ships the code defaults, compared as values.
 
-    The two tests above compare *names*, which is what caught a stale key; nothing compared
-    *values*, and four had drifted. Each was a real regression for anyone following the README
-    quickstart, because a `.env` copied from here is not a document, it is configuration:
-    `CHEMCLAW_LOG_FORMAT` dropped `correlation_id`/`session_id` from every line — the two fields
-    `ContextFilter` exists for — `CHEMCLAW_MCP_FACE_TOKEN_ENV=` empty made
-    `os.environ.get("", "")` the expected bearer and 401'd every request to the read-only MCP face,
-    `CHEMCLAW_NOTE_REINDEX_ENABLED=false` pinned a tri-state field whose `None` means "derive from
-    `data_sources`", and `CHEMCLAW_EVAL_AB_EPSILON=0.0` is no noise floor at all.
-
-    Compared as *parsed values* rather than as text, which is what makes it maintainable: `10` and
-    `10.0` are the same default, an absolute path a `default_factory` computes from the install
-    location is simply left unset (commented out, as `CHEMCLAW_CONNECTORS_DIR` already is), and the
-    diff a failure prints is the field rather than the line.
+    A `.env` copied from it is configuration, so a drifted value is a regression for anyone
+    following the quickstart. Compared as parsed values (`10` equals `10.0`); a path a
+    `default_factory` computes from the install location is left commented out.
     """
     env = tmp_path / ".env"
     env.write_text(_ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
@@ -615,23 +537,12 @@ def _clear_prefixed_env() -> Iterator[None]:
 @pytest.mark.parametrize(
     ("name", "overrides", "fires"),
     [
-        # Each of these was already forbidden in a field comment and enforced by nothing, so a
-        # deployment could set it and find out in production (REV-18, D-136).
-        #
-        # **`fires` is a phrase out of the guard's own message, and it is not decoration.** These
-        # rows used to assert `pytest.raises(ValueError)` and nothing more, which every guard in
-        # `_guards_that_the_comments_already_demand` satisfies equally: a guard that started firing
-        # for the wrong reason, or an earlier one swallowing a later row, passed. Two of the eight
-        # rows *were* passing that way, and only naming the message found them — see the two
-        # comments below.
+        # Each of these is a rule a field comment states; the guard enforces it at startup (REV-18,
+        # D-136). `fires` is a phrase from the guard's own message, so a row cannot pass because an
+        # earlier guard fired for a different reason.
         (
-            # It used to read "memory store cannot serve multiple workers" over
-            # `{"session_store": "memory", "service_uvicorn_workers": 4}` — a name describing a
-            # store-specific rule that does not exist. Measured: `memory` and `postgres` are
-            # refused identically at 2 and at 4, because the guard reads
-            # `service_uvicorn_workers` alone, so the row would have passed unchanged with a
-            # store-specific rule deleted. The store is dropped rather than parametrised for the
-            # same reason: it decides nothing here.
+            # The workers guard reads `service_uvicorn_workers` alone, so the
+            # store is not set here: it decides nothing.
             "uvicorn workers above one are refused whatever else is set",
             {"service_uvicorn_workers": 4},
             "service_uvicorn_workers>1 silently breaks five per-process guarantees",
@@ -645,13 +556,8 @@ def _clear_prefixed_env() -> Iterator[None]:
             },
             r"may admit \d+ concurrent turns",
         ),
-        # The row that stood here, "uvicorn workers multiply the fleet the same way replicas do",
-        # set `service_uvicorn_workers: 2` and was refused by the *workers* guard three statements
-        # earlier — it never reached the fleet product it was named after, and asserting only
-        # `ValueError` could not tell. It is gone rather than repaired because the axis it claimed
-        # to cover is unreachable by construction: the workers factor in
-        # `replicas × workers × cap` can only ever be 1 while that refusal stands, so the row
-        # above and the row before it are between them the whole of what can fire.
+        # No row sets `service_uvicorn_workers` above one for the fleet product: the workers guard
+        # refuses it first, so the workers factor in `replicas × workers × cap` is always 1.
         (
             "a mid-turn resume cannot outlive its turn",
             {
@@ -687,10 +593,8 @@ def _clear_prefixed_env() -> Iterator[None]:
             {"embedding_dim": 768, "data_sources": "graph,vector"},
             "disagrees with the note_index vector column",
         ),
-        # DARK-8: the check asked whether the *vector* source was on, while `reindex_notes` writes
-        # the embedding column for every note-index-backed source. So these two configurations
-        # passed validation and then failed every reindex on a pgvector dimension error, with
-        # nothing pointing at the setting that caused it.
+        # DARK-8: `reindex_notes` writes the embedding column for every note-index-backed source, so
+        # the dimension check applies whenever any such source is on, not only the vector one.
         (
             "a lexical-only deployment reaches the same vector column",
             {"embedding_dim": 768, "data_sources": "graph,lexical"},
@@ -708,14 +612,10 @@ def test_configurations_the_comments_forbid_are_rejected(
     overrides: dict,  # type: ignore[type-arg]
     fires: str,
 ) -> None:
-    """A rule worth writing in a comment is worth failing on at startup — and worth naming.
+    """Configurations the comments forbid are rejected at startup, by the guard named.
 
-    `match=` is what makes this table an assertion about *which* guard ran, and the difference is
-    measured rather than argued. Driven: widening the `service_uvicorn_workers` guard by one
-    disjunct so it also fires on a mismatched `embedding_dim` — an earlier guard swallowing a
-    later row, which is the failure mode here — leaves all **7** rows green under a bare
-    `pytest.raises(ValueError)` and turns **3** of them red under `match=`, each naming the
-    embedding guard it never reached.
+    `match=` makes each row an assertion about which guard ran; a bare `pytest.raises(ValueError)`
+    would pass if an earlier guard swallowed a later row.
     """
     with pytest.raises(ValueError, match=fires):
         Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
@@ -732,29 +632,13 @@ _ENFORCED: dict[str, Any] = {
 
 
 def test_enforcing_identity_without_the_plan_gate_is_refused() -> None:
-    """The two settings that decide "is a turn supervised" were never checked against each other.
+    """Enforcing identity without the plan gate is refused.
 
-    `plan_gate.gate_applies` is `harness_enabled_for(profile) and autonomy_for(profile) ==
-    "plan_only"`. `harness_autonomy` defaults to `plan_only`, but `harness_enabled` defaults to
-    **False** — so the gate D-167/DARK-1 exists for is attached only where an operator turned the
-    harness on. The shipped chart does (`CHEMCLAW_HARNESS_ENABLED: "true"`); the image run
-    directly, `docker compose`, the live lane and any non-Helm deployment do not.
-
-    A deployment that sets `CHEMCLAW_ENTRA_REQUIRED=true` believes it is in the enforced posture.
-    Without the chart's ConfigMap it gets an agent with no plan approval at all, and an ordinary
-    authenticated user holding no app roles can then run a turn that autonomously starts
-    state-changing work with nothing to approve it — measured, `report_measurement` (which writes
-    the calibration ledger), `compute_xtb_energy`, `watch_for` and `remember_preference` are all
-    allowed by both `authorize_tool` and `authorize_trigger`.
-
-    `_refuse_unauthenticated_exposure` already makes exactly this argument for the analogous
-    "the safe posture is one env var away" pair.
-
-    **The pairing has to be asked for explicitly since D-2026-09-13**, because `harness_enabled`
-    now defaults to `True` — so the refusal below names it rather than relying on the default to
-    produce it. That is a weaker trigger than it was and the refusal is no less necessary: a
-    deployment can still set the flag off, and this is what happens when it does so while claiming
-    to enforce identity.
+    `plan_gate.gate_applies` requires `harness_enabled` and `plan_only` autonomy. A deployment
+    setting `CHEMCLAW_ENTRA_REQUIRED=true` with the harness off would let any authenticated user run
+    turns that start state-changing work with nothing to approve. Same argument as
+    `_refuse_unauthenticated_exposure`. The harness defaults on, so this fires only when it is
+    turned off explicitly.
     """
     with pytest.raises(ValueError, match="harness_enabled"):
         Settings(_env_file=None, harness_enabled=False, **_ENFORCED)  # type: ignore[call-arg]
@@ -767,26 +651,12 @@ def test_the_enforced_posture_with_the_gate_attached_constructs() -> None:
 
 
 def test_the_opt_out_is_stated_in_the_same_vocabulary_as_the_thing_it_declines() -> None:
-    """A deployment that means "unsupervised" says so with `harness_autonomy`, not a security knob.
+    """The opt-out is stated in the vocabulary of what it declines: `harness_autonomy=execute`.
 
-    `service_allow_insecure` was the obvious escape hatch and is the wrong one: it means "boot
-    unauthenticated on a non-loopback bind", its own comment ends "Entra-enforced deployments never
-    need it", and a knob that means two things is one that gets set for the wrong reason.
-
-    `harness_autonomy=execute` is the right one because it is the *statement* this refusal is
-    asking for. With the harness off it changes no behaviour at all — `autonomy_for` is read
-    nowhere but `gate_applies`, which is already False — so it buys nothing except making the
-    posture visible in `helm show values` and in a values diff, which is the whole point.
-
-    A per-profile `harness_autonomy` still wins over it (`autonomy_for` prefers the profile), so
-    the opt-out cannot silently disarm a profile that narrowed on purpose.
-
-    **What the opt-out now buys is different, and better.** While `harness_enabled` defaulted off,
-    `harness_autonomy=execute` changed no behaviour at all — it was a statement and nothing more.
-    With the harness on by default it is the real thing it always claimed to be: the todo list stays
-    attached and the gate comes off, which is what an unsupervised deployment actually wants and is
-    why the refusal points at this knob rather than at `harness_enabled`. Turning the harness off
-    would drop the plan with the gate.
+    `service_allow_insecure` means something else and would get set for the wrong reason. With the
+    harness on, `execute` keeps the todo list and removes the gate, which is what an unsupervised
+    deployment wants. A per-profile `harness_autonomy` still wins, so the opt-out cannot disarm a
+    profile that narrowed on purpose.
     """
     relaxed = Settings(  # type: ignore[call-arg]
         _env_file=None, harness_enabled=False, harness_autonomy="execute", **_ENFORCED
@@ -801,18 +671,11 @@ def test_the_opt_out_is_stated_in_the_same_vocabulary_as_the_thing_it_declines()
 
 
 def test_a_wildcard_cors_origin_is_refused() -> None:
-    """`*` is the one value this allow-list may not hold, and nothing checked it.
+    """A wildcard CORS origin is refused.
 
-    `_add_cors` splits the field on commas and hands the result to `CORSMiddleware` verbatim, so
-    `CHEMCLAW_SERVICE_CORS_ORIGINS=*` became `allow_origins=["*"]`. The blast radius is bounded —
-    `allow_credentials` is left False and the API authenticates with a bearer rather than a cookie,
-    so a hostile origin cannot ride a user's session — and "bounded" is not "intended": the knob's
-    own comment calls the empty default "the safe default" without ever saying which values are the
-    unsafe ones, and the bound depends on two properties of *other* code that nothing pins.
-
-    Refused rather than opted out of, because there is no deployment that needs it: an empty value
-    already means "no cross-origin access", a same-origin embedded UI needs none, and a browser
-    client that does need access has an origin to name.
+    `_add_cors` passes the field to `CORSMiddleware` verbatim. The blast radius is bounded today by
+    two properties of other code (no credentials, bearer auth), which nothing pins. No deployment
+    needs `*`: empty means no cross-origin access, and a browser client has an origin to name.
     """
     with pytest.raises(ValueError, match="service_cors_origins"):
         Settings(_env_file=None, service_cors_origins="*")  # type: ignore[call-arg]
@@ -834,12 +697,10 @@ def test_the_shipped_defaults_still_construct() -> None:
 
 
 def test_an_undeclared_fleet_ceiling_checks_nothing() -> None:
-    """0 must mean "no opinion", not "a ceiling of zero".
+    """An undeclared fleet ceiling (0) checks nothing.
 
-    The code default, because a CLI, a test and a single-pod dev run have no fleet to bound — the
-    same split `budget_enabled` and the rate limiter already take. A guard that fired there is one
-    people switch off everywhere, and the failure mode would be spectacular: every process refusing
-    to start because it can admit eight turns and was allowed none.
+    A CLI, a test or a single-pod dev run has no fleet to bound; a guard firing there would be
+    switched off everywhere.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
@@ -852,11 +713,10 @@ def test_an_undeclared_fleet_ceiling_checks_nothing() -> None:
 
 
 def test_a_fleet_exactly_at_its_ceiling_is_allowed() -> None:
-    """The check is `>`, not `>=` — the shipped chart sits exactly on its own number.
+    """A fleet exactly at its ceiling is allowed: the check is `>`, not `>=`.
 
-    `values.yaml` declares 48 against 6 replicas × 1 worker × 8 turns, deliberately, so the ceiling
-    ships as a statement of the current shape rather than as slack. Off by one here and the chart
-    the repository ships would fail to boot.
+    `values.yaml` declares exactly 6 replicas × 1 worker × 8 turns = 48, so off-by-one would stop
+    the shipped chart booting.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
@@ -868,11 +728,9 @@ def test_a_fleet_exactly_at_its_ceiling_is_allowed() -> None:
 
 
 def test_the_fleet_ceiling_error_names_both_sides_and_every_factor() -> None:
-    """An operator has to be told which of three numbers to change, and what the product was.
+    """The fleet ceiling error names both sides and every factor.
 
-    "Invalid configuration" would send them to the one setting whose name contains `concurrent`,
-    which is exactly the per-process cap that is *not* the whole story — the point of the guard is
-    that the ceiling is a product nobody had computed.
+    The per-process cap is not the whole story; the operator must see the product.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
@@ -898,18 +756,10 @@ def test_the_connection_budget_is_undeclared_by_default() -> None:
 
 
 def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
-    """`>`, not `>=` — a chart may declare exactly the number it renders.
+    """A fleet exactly at its connection ceiling is allowed: `>`, not `>=`.
 
-    The shipped ceiling carries headroom, but nothing about this check should force it to: a
-    release that provisions exactly what it opens is a correct release. Off by one here and every
-    pod it renders refuses to start.
-
-    **The numbers had to move to keep testing the boundary.** They were written for the
-    uniform-width product — 17 pools x 8 = 136 exactly — and the arithmetic became a sum, so the
-    same pair opens 129 against a declared 136 and sits seven under the edge this test is named
-    for. Measured: with `>` relaxed to `>=`, the old numbers passed. The assertion also read a
-    constructor argument straight back, which is true whatever the check does; it now asserts the
-    figure the check compares.
+    A release provisioning exactly what it opens is correct. The numbers sit exactly on the edge
+    under the summed-pool arithmetic, and the assertion reads the figure the check compares.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
@@ -921,25 +771,12 @@ def test_a_fleet_exactly_at_its_connection_ceiling_is_allowed() -> None:
 
 
 def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods() -> None:
-    """One front-door process opens 48 connections, and this check used to charge it 16.
+    """A fleet that would exhaust the server is refused by pools, not by pods.
 
-    The measured shape (`tests/test_fleet_pools.py`): a front-door process holds three pools — the
-    stores', the `/readyz` probe's own `(dsn, statement timeout)` key, and the LangGraph
-    checkpointer's registered autocommit pool — so at `pg_pool_max_size=16` it opens 48. The
-    validator multiplied `pg_pool_max_size` by a *process* count, so `1 × 16 = 16` cleared a
-    declared ceiling of 40 for a process that exhausts it, in the direction that lets a deployment
-    run the server out of `max_connections`.
-
-    Written against the single-process case deliberately: it is the smallest fleet that fails, so
-    the assertion is about the arithmetic and not about any chart's replica counts.
-
-    **One front door is 33 connections, not 48, and the difference is the point of the second
-    correction.** Its three pools are not three `pg_pool_max_size`: the `/readyz` one asks for a
-    single connection, because the probe is single-flighted and was measured at a peak of one
-    simultaneous checkout under a thousand concurrent requests. So the ceiling that refuses this
-    fleet is 32, not 47 — and a ceiling of 40, which the old arithmetic refused, is one this
-    deployment genuinely fits inside. Charging every pool the full width is how a legal
-    `maxReplicas: 9` came to CrashLoop the fleet it was scaling.
+    A front-door process holds three pools (stores, `/readyz`, checkpointer;
+    `tests/test_fleet_pools.py`), and the `/readyz` pool is one connection wide. So one front door
+    at `pg_pool_max_size=16` is 33 connections, refused by a ceiling of 32 and fitting in 40.
+    Written against the single-process case, the smallest fleet that fails.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
@@ -957,19 +794,10 @@ def test_a_fleet_that_would_exhaust_the_server_is_refused_by_pools_not_by_pods()
 
 
 def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> None:
-    """The product is the thing nobody had computed, so the message has to show it.
+    """The connection ceiling error names both sides and every factor.
 
-    `core/config/store.py` stated "keep it under the server's max_connections" in prose and nothing
-    computed the left-hand side, so the shipped chart ran every pod on the default pool of 16 and
-    the fleet's real ceiling was ~272 against the max_connections=100 D-119 measured against. An
-    operator seeing this needs both numbers and both levers, not the name of one setting — and,
-    since the count moved from pods to pools, the sentence that says a process is not a pool: a
-    reader who reaches this message while looking at 14 pods needs to know why the number is 26.
-
-    The left-hand side is 257 rather than 272 because one of those seventeen pools is a front
-    door's `/readyz` pool and one connection wide. The message therefore has to name *how many*
-    are narrow as well as how wide the rest are, or the reader cannot reproduce the number it is
-    being refused over.
+    The operator needs both numbers and both levers, that the count is of pools rather than pods,
+    and how many pools are narrow, so they can reproduce the refused number.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
@@ -989,11 +817,10 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
 
 
 def test_the_calculation_backend_budget_is_undeclared_by_default() -> None:
-    """0 means "no opinion", not "a ceiling of zero" — the same split the other two budgets take.
+    """The calculation backend budget is undeclared (0) by default.
 
-    Sharper here than for either of them: the number belongs to a pod in *another* release
-    (`Chemclaw3-mcp` `servers/calc`), so a code default other than "undeclared" would be this
-    repository guessing at somebody else's CPU allocation.
+    The number belongs to a pod in another release (`Chemclaw3-mcp` `servers/calc`), so any other
+    default would be a guess.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None, calc_fleet_worker_processes=8, worker_max_concurrent_activities=16
@@ -1028,11 +855,10 @@ def test_a_release_with_no_calc_worker_dispatches_nothing_durably() -> None:
 
 
 def test_the_calculation_backend_ceiling_error_names_both_sides_and_every_factor() -> None:
-    """Scaling the calc worker is the lever that trips this, so the message has to name it.
+    """The calculation backend ceiling error names both sides and every factor.
 
-    The per-process cap is the only setting whose name contains `concurrent`, and it is exactly the
-    number that is *not* the whole story: `servers/calc` is one shared pod, so what it is offered is
-    that cap times the worker replica count — the product nobody had computed (BS-07).
+    `servers/calc` is one shared pod, offered the per-process cap times the worker replica count
+    (BS-07); scaling workers is the lever that trips this.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
@@ -1049,17 +875,12 @@ def test_the_calculation_backend_ceiling_error_names_both_sides_and_every_factor
 
 
 def test_a_screen_fanned_calc_fleet_is_counted_at_its_fan_out() -> None:
-    """One activity is not one backend session once a solvent screen fans out.
+    """A screen-fanned calc fleet is counted at its fan-out.
 
-    `compose.solvent_comparison` and `compose.species_solvent_comparison` are the two concurrency
-    sites in that module, and each branch holds its own `calc_session` for the whole of its chain
-    under `asyncio.Semaphore(calc_screen_max_parallel)`. So an activity presents up to that many
-    concurrent requests to `servers/calc`, and the product that omits it under-counts by exactly
-    that factor. Measured over five solvents with the knob at 1/4/8: 1/4/6 simultaneous sessions
-    inside a single activity (6, not 8, because only six media exist).
-
-    The fleet below is the one the exactly-at-the-ceiling test above declares legal — the same
-    three numbers, 16 against 16 — so what this pins is the fan-out and nothing else.
+    `compose.solvent_comparison` and `compose.species_solvent_comparison` hold one `calc_session`
+    per branch under `asyncio.Semaphore(calc_screen_max_parallel)`, so one activity can present that
+    many concurrent sessions. The fleet is the one declared legal above, so only the fan-out is
+    pinned.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]
@@ -1076,12 +897,10 @@ def test_a_screen_fanned_calc_fleet_is_counted_at_its_fan_out() -> None:
 
 
 def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() -> None:
-    """Widening the scope must not make it unconditional.
+    """The embedding width check leaves the standalone embedder alone.
 
-    The embedder is used on its own — the hash embedder's unit tests pick a small dim and touch no
-    database — so a deployment that cannot reach pgvector at all must still be free to choose any
-    width. The question the check asks is "does anything here write `note_index`", not "is an
-    embedding configured".
+    The check asks whether anything writes `note_index`, not whether an embedding is configured; a
+    deployment without pgvector may choose any width.
     """
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None, embedding_dim=768, data_sources="graph", note_reindex_enabled=False
@@ -1090,22 +909,11 @@ def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() 
 
 
 def test_no_calculator_setting_is_declared_without_a_reader() -> None:
-    """A calculator knob nobody reads is not tidiness — it is a control that does not exist.
+    """No calculator setting is declared without a reader.
 
-    When the physics moved to `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`),
-    twenty-four fields stayed declared here: the binaries, the optimizer's convergence thresholds,
-    the Hessian displacement and atom ceiling, the CREST budget, and both pKa calibration pairs.
-    Every one of them still had a `.env.example` row, so the parity test above was green — the
-    parity that was broken is the one nothing checked.
-
-    What makes it a defect rather than clutter is that the server reads the *same* names under the
-    *same* `CHEMCLAW_` prefix. An operator who set `CHEMCLAW_XTB_OPT_MAX_STEPS` on this deployment
-    got no error, no warning and no effect, while the identically-spelled setting on the calculation
-    server was the one that actually decided the calculation.
-
-    Scoped to this one section deliberately. Elsewhere a field with no first-party reader can be
-    legitimate — something a library or a chart consumes. Here it cannot: this section exists to
-    configure code in this repository, and after the split that code is orchestration.
+    The calc server reads the same `CHEMCLAW_` names, so a dead field here gives an operator no
+    error and no effect while the server's identically spelled setting decides the calculation.
+    Scoped to this section, which configures only code in this repository.
     """
     import ast
 
@@ -1135,12 +943,10 @@ def test_no_calculator_setting_is_declared_without_a_reader() -> None:
 
 
 def test_note_reindex_is_derived_from_the_source_list_unless_overridden() -> None:
-    """Enabling an index-backed leg must enable the reindex that builds what it queries.
+    """Note reindex is derived from the source list unless overridden.
 
-    As an independent switch defaulting to off, `vector`/`lexical` could be enabled with the
-    index never built — both legs then reported `chunks: 0, failed: false` forever, and the
-    deployment believed it ran hybrid retrieval. The same derivation move
-    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` made for connectors.
+    Enabling a `vector`/`lexical` leg must build the index it queries; otherwise both legs return
+    `chunks: 0, failed: false` forever.
     """
     derived_on = Settings(_env_file=None, data_sources="graph,vector,lexical")  # type: ignore[call-arg]
     assert derived_on.note_reindex_effective is True
@@ -1158,15 +964,10 @@ def test_note_reindex_is_derived_from_the_source_list_unless_overridden() -> Non
 
 
 def test_the_connector_job_ceiling_covers_every_activity_a_bundle_child_can_run() -> None:
-    """The ceiling rule has to name the longest activity, not the one the author remembered.
+    """The connector-job ceiling covers every activity a bundle child can run.
 
-    `_the_job_ceiling_covers_the_activity_it_bounds` knew only about `xtb_job_timeout_seconds`, so
-    the `results` bundle's republish walk — the other multi-hour activity a connector job can
-    start — sailed past it: it was given `connector_job_timeout_seconds` *itself* as a
-    start-to-close, which the parent ceiling equals rather than exceeds. Both then expire within
-    milliseconds of each other, the activity's five-attempt retry policy is unreachable, and the
-    run dies as a bare `WorkflowExecutionTimedOut` naming neither setting. The guard is written
-    against the max over the budgets so the next long activity is covered by construction.
+    The `results` republish walk is another multi-hour activity; the guard uses the max over all
+    such budgets, so a new long activity is covered by construction.
     """
     with pytest.raises(ValueError, match="connector_job_timeout_seconds"):
         Settings(  # type: ignore[call-arg]
@@ -1185,17 +986,11 @@ def test_the_shipped_republish_budget_is_strictly_inside_the_job_ceiling() -> No
 
 
 def test_a_heartbeat_timeout_must_fit_inside_the_budget_it_reports_within() -> None:
-    """The relation `background_activity_heartbeat_timeout_seconds`'s comment asserted as fact.
+    """A heartbeat timeout must fit inside the budget it reports within.
 
-    Two concrete misconfigurations, both silent, and one inequality covers them:
-
-    - `CHEMCLAW_RESULT_PUBLISH_TIMEOUT_SECONDS=30` with one sink gives the drain a 30 s
-      start-to-close under the shipped 60 s heartbeat timeout, so the heartbeat can never fire
-      first and the dead-worker detection it exists for is inert.
-    - A 3600 s heartbeat timeout makes `durable/heartbeat.py::beating` derive a 900 s beat
-      interval, longer than the 600 s `retention_timeout_seconds` — so the sweep sends no beat at
-      all before its own start-to-close expires, and fails on a timeout that has nothing to do
-      with the sweep.
+    - A drain whose start-to-close is below the heartbeat timeout can never detect a dead worker.
+    - A long heartbeat timeout derives a beat interval (`durable/heartbeat.py::beating`) longer than
+      `retention_timeout_seconds`, so the sweep never beats before timing out.
     """
     with pytest.raises(ValueError, match="background_activity_heartbeat_timeout_seconds"):
         Settings(_env_file=None, result_publish_timeout_seconds=30.0)  # type: ignore[call-arg]
@@ -1216,14 +1011,10 @@ def test_the_shipped_heartbeat_is_strictly_inside_every_budget_it_sits_under() -
 
 
 def test_the_two_metrics_expositions_may_not_claim_one_port() -> None:
-    """One process serves both, so equal ports is a bind failure rather than a duplicate scrape.
+    """The two metrics expositions may not claim one port.
 
-    Measured with the port already held: the SDK's `Runtime(...)` raised `ValueError: Failed
-    starting Prometheus exporter: Address already in use` from inside `connect_options()`, and
-    `connect()`'s `except Exception` reported it to every durable tool as "the durable execution
-    backend (Temporal) is unreachable … This is an infrastructure outage". That half now degrades;
-    a deployment stating a thing it cannot have should still hear about it at startup, naming both
-    settings, rather than from a counter somebody has to think to look at.
+    One process serves both, so equal ports are a bind failure that would surface as "Temporal is
+    unreachable". Refused at startup, naming both settings.
     """
     with pytest.raises(ValueError, match="temporal_metrics_port"):
         Settings(_env_file=None, temporal_metrics_port=9000)  # type: ignore[call-arg]
@@ -1279,13 +1070,10 @@ def test_enforced_posture_refuses_a_plaintext_postgres_dsn() -> None:
 
 
 def test_enforced_posture_refuses_a_plaintext_session_store_dsn() -> None:
-    """The third Postgres DSN, and the one the guard's own refusal text describes.
+    """The enforced posture refuses a plaintext session store DSN.
 
-    `session_store_dsn` is what `session_messages`, the plan approvals, the turn-cost rows and the
-    effect ledger are read and written over when a deployment splits the session layer onto its own
-    host — so "this connection carries the conversation transcripts, turn checkpoints and the audit
-    trail" is *literally* this field, and it was the one DSN the guard never looked at. Empty is
-    exempt because empty means "fall back to `postgres_dsn`", which the line above already checked.
+    `session_store_dsn` carries transcripts, approvals, turn costs and the effect ledger when the
+    session layer is split. Empty is exempt: it falls back to `postgres_dsn`, checked above.
     """
     base: dict[str, Any] = {
         "_env_file": None,
@@ -1320,12 +1108,10 @@ def test_enforced_posture_refuses_a_plaintext_session_store_dsn() -> None:
     ],
 )
 def test_the_tls_guard_reads_a_dsn_the_way_libpq_does(why: str, dsn: str) -> None:
-    """Three DSNs a hand-rolled parse and libpq disagree about, every one admitting plaintext.
+    """The TLS guard reads a DSN the way libpq does.
 
-    The guard used to re-parse the DSN itself (`urlsplit` + `parse_qs` + a `dsn.split()` scan)
-    while `core/db.py` round-tripped the same strings through `conninfo_to_dict`. A second spelling
-    of "what does this DSN say" is a second answer, and each disagreement below was in the
-    direction that let an unverified connection through.
+    Each case is a DSN a hand-rolled parse would misread in the direction that admits plaintext; the
+    guard uses `conninfo_to_dict`, the same parser `core/db.py` uses.
     """
     base: dict[str, Any] = {
         "_env_file": None,
@@ -1356,8 +1142,8 @@ _ENFORCED_POSTURE: dict[str, Any] = {
 @pytest.mark.parametrize(
     ("why", "dsn"),
     [
-        # The spelling that used to start and stopped: the hand-rolled parser could not see `host=`
-        # inside a URL query, so this took the loopback exemption by not being seen at all.
+        # `host=` inside a URL query names a socket directory; a hand-rolled parser would miss it
+        # and grant the loopback exemption by not seeing it.
         ("URL with host= in the query", "postgresql://u:p@/chemclaw?host=/var/run/postgresql"),
         ("the keyword form of the same", "host=/var/run/postgresql dbname=chemclaw user=u"),
         # Linux's abstract namespace, libpq's `@` spelling — the same transport, no filesystem path.
@@ -1369,15 +1155,10 @@ _ENFORCED_POSTURE: dict[str, Any] = {
 def test_the_tls_guard_exempts_a_unix_socket_because_a_socket_is_not_a_network(
     why: str, dsn: str
 ) -> None:
-    """`sslmode` is ignored outright on a Unix-domain connection, so requiring it is theatre.
+    """The TLS guard exempts a Unix socket, because a socket is not a network.
 
-    libpq reads a `host` beginning with `/` as a socket *directory* (and `@` as the abstract
-    namespace) and applies no TLS to either — there is no network to encrypt. The rewrite onto
-    libpq's own parser closed a real hole (`host=` inside a URL query was invisible to the
-    hand-rolled read) and closed this with it: the class became uniformly refused, with the only
-    passing spelling being `sslmode=require` on a transport that ignores it, i.e. a lie written into
-    the DSN to satisfy a guard. A `pgbouncer` sidecar or a local cluster over a mounted socket could
-    not start under the enforced posture at all.
+    libpq treats a `host` starting with `/` (or `@`) as a socket and ignores `sslmode`, so requiring
+    it would force a false `sslmode=require` and block socket-based setups.
     """
     Settings(postgres_dsn=dsn, **_ENFORCED_POSTURE)
 
@@ -1409,21 +1190,11 @@ def test_the_tls_guard_exempts_a_unix_socket_because_a_socket_is_not_a_network(
 def test_the_tls_guard_refuses_a_dsn_that_names_no_host_at_all(
     why: str, dsn: str, escape: str
 ) -> None:
-    """A "could not tell" answer must refuse, and three of them were being exempted.
+    """The TLS guard refuses a DSN that names no host at all.
 
-    `_pg_dial`'s docstring already makes this argument for the *unparseable* case — `""` is a member
-    of `PG_LOOPBACK_HOSTS`, so any could-not-tell answer would exempt the connection. But
-    `conninfo_to_dict` is `PQconninfoParse`, which parses the string and applies **neither** libpq's
-    environment defaults (`PGHOST`, `PGSSLMODE`) **nor** a `service=` file. All three below parse
-    cleanly, return no host, and were therefore exempted through that same `""` — the exact
-    fail-open the paragraph says it closes. `CHEMCLAW_POSTGRES_DSN=service=chemclaw` naming a remote
-    host with no sslmode in the service file connected at libpq's `prefer`: silent plaintext,
-    carrying the transcripts.
-
-    Refused rather than resolved, because resolving it means a second implementation of libpq's own
-    precedence rules — the "one parser, because a second spelling is a second answer" error this
-    guard was rewritten to stop making. Both escapes are one honest line of configuration: name the
-    host (a socket directory is exempt above), or state the sslmode in the DSN.
+    `conninfo_to_dict` (`PQconninfoParse`) applies neither `PGHOST`/`PGSSLMODE` nor a `service=`
+    file, so "no host" could be a remote plaintext connection. Refused rather than resolved, which
+    would reimplement libpq's precedence; the fix is to name the host or state the sslmode.
     """
     with pytest.raises(ValueError, match="no host"):
         Settings(postgres_dsn=dsn, **_ENFORCED_POSTURE)
@@ -1432,18 +1203,10 @@ def test_the_tls_guard_refuses_a_dsn_that_names_no_host_at_all(
 
 
 def test_an_unparseable_dsn_is_refused_without_printing_its_password() -> None:
-    """The refusal that names the setting must not carry the value the setting holds.
+    """An unparseable DSN is refused without printing its password.
 
-    `_pg_dial` interpolated psycopg's `ProgrammingError` into its own message, and libpq quotes the
-    offending token — which for a typo'd scheme or a stray leading space is the **whole DSN**,
-    userinfo included. This raise happens during `import chemclaw.core.config`, before
-    `configure_logging()` installs `SecretRedactingFilter`, so nothing downstream could scrub it: in
-    a pod the password went to the container log and to whatever ships it.
-
-    Both spellings are single-character slips in a `.env` or a ConfigMap, which is what makes this
-    reachable rather than theoretical. The guard's own docstring already promised the opposite —
-    "naming the setting rather than the DSN — the value carries a password" — so this asserts the
-    promise rather than the wording.
+    libpq quotes the offending token, which can be the whole DSN, and this raises at import before
+    `SecretRedactingFilter` is installed. The refusal names the setting, never the value.
     """
     base: dict[str, Any] = {
         "_env_file": None,
@@ -1467,18 +1230,10 @@ def test_an_unparseable_dsn_is_refused_without_printing_its_password() -> None:
 
 
 def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
-    """A socket DSN and an IPv6 loopback URL are dev, not an unverified network connection.
+    """The TLS guard still exempts the forms that carry no network.
 
-    Asserted beside the refusals above because reading a DSN with libpq's parser changes what the
-    exemption sees as well as what the refusal does: `[::1]` arrives unbracketed and the socket
-    directory arrives as the host, and both must stay exempt or local dev under `entra_required`
-    stops booting.
-
-    **The first case used to be `postgresql:///chemclaw` and is not any more.** That spelling names
-    no host, and "no host" is not "local": libpq goes on to read `PGHOST` or a `service=` file,
-    neither of which `PQconninfoParse` opens, so exempting it exempted a remote plaintext connection
-    on the strength of an answer nothing had. The dev convenience it was protecting survives one
-    character wider — naming the socket directory says the same thing and says it in the DSN.
+    A socket directory and an IPv6 loopback URL (unbracketed by libpq) stay exempt, or local dev
+    under `entra_required` stops booting. A host-less DSN is not among them (see above).
     """
     base: dict[str, Any] = {
         "_env_file": None,
@@ -1495,9 +1250,8 @@ def test_the_tls_guard_still_exempts_the_forms_that_carry_no_network() -> None:
 
 
 # The prompt-injection envelope's nonce and the durable session store
-# (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`).
-# Every other cross-section rule in `core/config/__init__.py` refuses; this one announces, because
-# the pairing it flags is the configuration the shipped chart itself ships.
+# (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`): this
+# rule warns rather than refuses, because the shipped chart ships the pairing it flags.
 
 
 def _envelope_warnings(records: list[logging.LogRecord]) -> list[logging.LogRecord]:
@@ -1508,16 +1262,11 @@ def _envelope_warnings(records: list[logging.LogRecord]) -> list[logging.LogReco
 def test_a_durable_deployment_without_the_envelope_secret_is_warned(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The pairing is detected at startup, and the line names both settings and the fix.
+    """A durable deployment without the envelope secret is warned, naming both settings and the fix.
 
-    `session_store="postgres"` with an empty `framing_envelope_secret` is the combination where
-    `agent/framing.py`'s per-process nonce orphans: a replayed thread's envelopes carry a previous
-    process's tag, and the agent instructions say only the current tag marks retrieved content as
-    data. Nothing said so until this guard — `framing.py`'s own docstring claimed `Settings` warned
-    while no validator anywhere read the field.
-
-    Asserting the *contents* rather than the count: a warning an operator cannot act on is the
-    failure this replaces, so the line has to name the variable to set.
+    With `session_store="postgres"` and no `framing_envelope_secret`, `agent/framing.py`'s
+    per-process nonce orphans replayed envelopes. The contents are asserted: the line must name what
+    to set.
     """
     with caplog.at_level(logging.WARNING, logger="chemclaw.core.config"):
         Settings(_env_file=None, session_store="postgres")  # type: ignore[call-arg]
@@ -1531,13 +1280,10 @@ def test_a_durable_deployment_without_the_envelope_secret_is_warned(
 
 
 def test_the_durable_pairing_is_warned_about_rather_than_refused() -> None:
-    """The decision itself, pinned: this configuration still constructs.
+    """The durable pairing is warned about rather than refused: it still constructs.
 
-    The shipped chart sets `CHEMCLAW_SESSION_STORE: "postgres"` and lists `framingEnvelopeSecret`
-    under `secrets.optionalKeys`, so a `ValueError` here would fail every existing release on
-    `helm upgrade` — front door and workers alike — over a condition the operator did not change.
-    Whoever converts this warning into a refusal has to delete this test, which is where the cost
-    is written down.
+    The shipped chart is this configuration, so a refusal would fail every release on `helm
+    upgrade`. Converting the warning means deleting this test.
     """
     durable = Settings(_env_file=None, session_store="postgres")  # type: ignore[call-arg]
     assert durable.session_store == "postgres"
@@ -1557,12 +1303,10 @@ def test_setting_the_envelope_secret_leaves_a_durable_deployment_silent(
 
 
 def test_a_memory_store_deployment_is_not_warned(caplog: pytest.LogCaptureFixture) -> None:
-    """The per-process fallback is *correct* without a durable store, so saying so would be noise.
+    """A memory-store deployment is not warned.
 
-    A memory session lives and dies inside one process, so no envelope it framed is ever replayed
-    under a different nonce. This is what makes the guard's condition `session_store`, and it is
-    also what keeps every dev run, CLI invocation and test from printing a security warning that
-    does not apply to it — the shape of warning an operator learns to ignore.
+    A memory session lives in one process, so no envelope is replayed under another nonce; warning
+    there would be noise operators learn to ignore.
     """
     with caplog.at_level(logging.WARNING, logger="chemclaw.core.config"):
         Settings(_env_file=None, session_store="memory")  # type: ignore[call-arg]
@@ -1570,14 +1314,10 @@ def test_a_memory_store_deployment_is_not_warned(caplog: pytest.LogCaptureFixtur
 
 
 def test_the_warning_reaches_stderr_with_no_logging_configured(tmp_path: Path) -> None:
-    """It is not silently swallowed: an unconfigured process still prints it.
+    """The warning reaches stderr with no logging configured.
 
-    This is the half a `caplog` assertion cannot prove, and the half that decides whether a
-    deployment sees anything. `Settings()` is constructed while `chemclaw.core.config` is still
-    being imported — before any entrypoint reaches `configure_logging()` — so the record is emitted
-    with no handler installed and reaches stderr through `logging.lastResort`. A pod log carries
-    it; the JSON stream does not, which is the cost this mechanism pays and the reason it is
-    measured here rather than assumed.
+    `Settings()` is built during import, before `configure_logging()`, so the record reaches stderr
+    via `logging.lastResort` (the JSON stream does not carry it). `caplog` cannot prove this.
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("CHEMCLAW_")} | {
         "CHEMCLAW_SESSION_STORE": "postgres",
@@ -1613,19 +1353,11 @@ def _shipped(session_store_dsn: str = "") -> Settings:
 
 
 def test_a_split_session_store_charges_each_server_its_own_pools() -> None:
-    """One `pg_fleet_max_connections` describes one server, and a split makes two.
+    """A split session store charges each server its own pools.
 
-    Measured on the real composition roots (`tests/test_fleet_pools.py`), pointing the session
-    layer at a second database gives every pooled process one more `core/db` pool: the front door's
-    `/readyz` and checkpointer pools move there and the stores' session pool is new. On the shipped
-    chart's numbers that is 278 connections against a declared 256 — and the check passed, because
-    it multiplied a pool count the chart derives on the one-DSN assumption from a Secret it cannot
-    read.
-
-    Split correctly it is 112 on `postgres_dsn`'s server and 166 on the session store's, so neither
-    is over on its own: summing them into the single ceiling would refuse a deployment that is
-    fine. That is why this is two numbers rather than one, and why the second is declared rather
-    than derived — the pool count is decidable here, what a second server will serve is not.
+    Pointing the session layer at a second database moves the front door's `/readyz` and
+    checkpointer pools there and adds a session pool (`tests/test_fleet_pools.py`). Each server is
+    checked against its own ceiling: summing would refuse a deployment that fits.
     """
     assert _shipped().fleet_connections_per_server() == (166, 0)
     assert _shipped("postgresql://u:p@sessions:5432/sessions").fleet_connections_per_server() == (
@@ -1633,11 +1365,9 @@ def test_a_split_session_store_charges_each_server_its_own_pools() -> None:
         166,
     )
 
-    # Two DSNs, one endpoint: a site that split *databases* rather than servers has one server and
-    # one ceiling, so the pools are summed onto it rather than checked against a ceiling that does
-    # not exist. libpq's own view of the *dialled* address, so `hostaddr` beats `host` — but it is
-    # a string comparison, so it is one endpoint only when both DSNs spell it the same way. See
-    # `test_one_server_spelled_two_ways_is_charged_as_two` for what that costs.
+    # Two DSNs, one endpoint: databases split on one server share one ceiling, so the pools are
+    # summed onto it. The endpoint is libpq's dialled address (`hostaddr` beats `host`) compared as
+    # a string; see `test_one_server_spelled_two_ways_is_charged_as_two`.
     assert _shipped("postgresql://u:p@primary:5432/sessions").fleet_connections_per_server() == (
         278,
         0,
@@ -1648,23 +1378,12 @@ def test_a_split_session_store_charges_each_server_its_own_pools() -> None:
 
 
 def test_one_server_spelled_two_ways_is_charged_as_two() -> None:
-    """`pg_endpoint` compares strings, so a spelling decides how many ceilings exist.
+    """`pg_endpoint` compares strings, so one server spelled two ways is charged as two.
 
-    Pinned rather than fixed, and pinned with the number so it is a known property instead of an
-    accident. The two DSNs below are one physical server. Spelled identically it is refused — 278
-    against a declared 256, which is the assertion above. Spelled differently the primary is
-    charged 112, the remaining 166 is charged to a server that does not exist, and the deployment
-    starts: the direction is exhaustion, of exactly the 22 connections the identical spelling
-    refuses.
-
-    Not normalised, because the loopback aliases are two of nine measured spellings of one endpoint
-    and none of the three a Kubernetes deployment produces (short name against FQDN, omitted port,
-    case) — and resolving them means reimplementing libpq's precedence, which `require_pg_tls`
-    already refused to do for the same reason. Not measured either: `Settings()` is constructed at
-    module import with no loop and no pool, so nothing here can ask a server who it is. What
-    carries the risk instead is the warning this configuration raises, which now says to check the
-    spelling *before* declaring a second ceiling — because declaring one is what silences the
-    runtime alert as well.
+    Pinned as a known property: spelled identically the fleet is refused; spelled differently it
+    starts with connections charged to a nonexistent server. Not normalised (that would reimplement
+    libpq's precedence) and not measurable at import. The warning tells the operator to check the
+    spelling before declaring a second ceiling.
     """
     same_box = {
         "one_spelling": "postgresql://u:p@primary:5432/sessions",
@@ -1683,13 +1402,10 @@ def test_one_server_spelled_two_ways_is_charged_as_two() -> None:
 
 
 def test_a_hand_set_pool_count_that_cannot_hold_its_readiness_pools_is_charged_in_full() -> None:
-    """The narrow pools are subtracted only when the declared topology can contain them.
+    """A hand-set pool count too small to hold its readiness pools is charged in full.
 
-    A front door holds three pools, so fewer than `3 × service_fleet_replicas` means the pair was
-    set by hand and does not describe a fleet this chart rendered. Subtracting a readiness pool
-    that is not there is an *under*-declaration, which is the direction that exhausts a server
-    rather than starving one: at the code defaults it would declare a single connection for a
-    process holding `pg_pool_max_size`.
+    Fewer than `3 × service_fleet_replicas` pools does not describe a rendered fleet; subtracting
+    narrow pools that are not there would under-declare, the direction that exhausts a server.
     """
     defaults = Settings(_env_file=None, pg_fleet_pools=1, pg_pool_max_size=16)  # type: ignore[call-arg]
     assert defaults.fleet_connections_per_server() == (16, 0)
@@ -1699,10 +1415,7 @@ def test_a_hand_set_pool_count_that_cannot_hold_its_readiness_pools_is_charged_i
     )
     assert impossible.fleet_connections_per_server() == (32, 0)
 
-    # **A point that separates `3 x replicas` from `2 x`, which neither of the two above does.**
-    # Both give the same answer under either constant, so the threshold this test is named for was
-    # untested: measured, relaxing it to `2 x` left them passing while `(2 pools, 1 replica)` —
-    # a pair that cannot hold a front door's three — quietly declared 17 instead of 32.
+    # A point that separates a `3 x replicas` threshold from `2 x`, which neither case above does.
     borderline = Settings(  # type: ignore[call-arg]
         _env_file=None, pg_fleet_pools=2, pg_pool_max_size=16, service_fleet_replicas=1
     )
@@ -1716,12 +1429,10 @@ def test_a_hand_set_pool_count_that_cannot_hold_its_readiness_pools_is_charged_i
 def test_a_split_session_store_with_no_ceiling_for_its_server_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Warned, not refused — and the reason is not the one its sibling guard has.
+    """A split session store with no ceiling for its server warns, not refuses.
 
-    The shipped chart is *not* this configuration, so no existing release reaches the line. What
-    would break is an existing split deployment on the `helm upgrade` that introduces the setting:
-    `Settings()` would fail to construct over a variable its operator has never seen, which is an
-    outage caused by a chart bump. The primary server's half still raises.
+    Refusing would break existing split deployments on the `helm upgrade` that introduces the
+    setting. The primary server's half still raises.
     """
     with caplog.at_level(logging.WARNING):
         Settings(  # type: ignore[call-arg]
@@ -1735,10 +1446,8 @@ def test_a_split_session_store_with_no_ceiling_for_its_server_warns(
     assert "CHEMCLAW_PG_SESSION_FLEET_MAX_CONNECTIONS" in caplog.text
     assert "166 connection(s) are charged there" in caplog.text
     assert "postgres.sessionStoreMaxConnections" in caplog.text
-    # The half that removes the risk rather than naming it. `pg_endpoint` compares strings, so this
-    # warning also fires for one server spelled two ways — and declaring the second ceiling *there*
-    # moves the deployment from the cell where the runtime alert fires into the one where nothing
-    # checks it at all. Telling the operator to declare it unconditionally is what this used to do.
+    # The warning also fires for one server spelled two ways, where declaring a second ceiling would
+    # disable every check, so it says to verify they really are two servers first.
     assert "check that these really are two servers" in caplog.text
 
     # And silent when the second server is declared, so the warning stays a signal.
@@ -1759,13 +1468,11 @@ def test_a_split_session_store_with_no_ceiling_for_its_server_warns(
 def test_the_session_stores_ceiling_is_refused_when_it_is_exceeded_and_when_there_is_no_split() -> (
     None
 ):
-    """Both directions of a ceiling that only means something beside a second server.
+    """The session store's ceiling is refused when exceeded and when there is no split.
 
-    Exceeded, it refuses like its primary sibling and names which server. Declared with no split it
-    refuses too, and that branch is the one this setting could afford: it is new, so nothing has it
-    set and no upgrade can trip on it. Left inert it would be a ceiling for a server that does not
-    exist — which `ChemclawFleetAboveItsConnectionCeiling` *adds* to the real one, so a fleet could
-    sit above its actual limit with nothing firing.
+    Without a split it would be a ceiling for a nonexistent server, which
+    `ChemclawFleetAboveItsConnectionCeiling` adds to the real one. The setting is new, so refusing
+    cannot break an upgrade.
     """
     with pytest.raises(ValueError) as exceeded:
         Settings(  # type: ignore[call-arg]
@@ -1793,16 +1500,10 @@ def test_the_session_stores_ceiling_is_refused_when_it_is_exceeded_and_when_ther
 
 
 def test_a_declared_session_ceiling_is_checked_whether_or_not_the_primary_one_is() -> None:
-    """Two independent ceilings, two independent checks — they used to share one `if`.
+    """A declared session ceiling is checked whether or not the primary one is.
 
-    `postgres.maxConnections: 0` is a documented value meaning "declare no ceiling", and nesting
-    the session check inside `if self.pg_fleet_max_connections:` made it silence a ceiling the
-    operator *did* declare. Measured before the split: a session store charged 500 connections
-    against a declared 180 constructed without a word — no refusal, and no warning either, because
-    the warning fires only when the second ceiling is missing.
-
-    The runtime alert had the identical hole and lost the shared guard in the same change, so a
-    deployment in this configuration was unchecked at startup and unwatched at runtime.
+    `postgres.maxConnections: 0` means "no primary ceiling" and must not silence a session ceiling
+    the operator declared; the runtime alert is likewise independent.
     """
     split = {
         "_env_file": None,
@@ -1821,14 +1522,10 @@ def test_a_declared_session_ceiling_is_checked_whether_or_not_the_primary_one_is
 
 
 def test_the_refusal_prints_a_breakdown_that_reaches_its_own_number() -> None:
-    """An operator is told what to lower; the arithmetic shown has to reach the figure refused.
+    """The refusal prints a breakdown that adds up to its own number.
 
-    The message printed the raw settings rather than the terms the number was built from, so it
-    added up on exactly one of three paths: a split said 112 beside a decomposition summing to 166,
-    and a hand-set pair too small to hold its readiness pools said 32 beside one summing to **-13**
-    — three narrow pools out of two. `_fleet_pool_widths` derives the split through the same
-    branches as `fleet_connections_per_server`, so `wide × pg_pool_max_size + narrow` is that
-    function's own answer by construction.
+    `_fleet_pool_widths` derives the terms through the same branches as
+    `fleet_connections_per_server`, so `wide × pg_pool_max_size + narrow` is that function's answer.
     """
     import re
 
@@ -1864,18 +1561,11 @@ def test_the_refusal_prints_a_breakdown_that_reaches_its_own_number() -> None:
 
 
 def test_every_bounded_drain_can_finish_a_run_inside_the_ceiling_that_kills_it() -> None:
-    """The shipped defaults must let a bounded run complete, not be killed near the end of one.
+    """Every bounded drain can finish a run inside the ceiling that kills it.
 
-    Four Schedules bound their own run by an iteration count and continue as new; the ceiling on
-    that run is `schedule_run_timeout_seconds`. The product was never checked and did not fit: at
-    the shipped defaults `corpus_sync`, `document_sync` and `label_sync` each needed 90,900 s of
-    activity budget (270,900 s for the document share, whose loop dispatches three) against an
-    86,400 s ceiling. A run killed there is a `TIMED_OUT` no `except` sees, and two of these jobs
-    keep no row between *fires*, so the next one starts from page one — a day of a worker slot for
-    zero net progress.
-
-    Asserted on the live settings rather than on the literals, so a site that lowers the ceiling or
-    raises a chunk budget in ENV is held to the same rule the validator refuses on.
+    Four Schedules bound their run by an iteration count; iterations × dispatches × activity budget
+    must fit `schedule_run_timeout_seconds`, or the run is killed as `TIMED_OUT` and some restart
+    from page one. Asserted on live settings, so ENV overrides are held to the same rule.
     """
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     for iterations_name, budget_name, per_iteration in _BOUNDED_DRAINS:
@@ -1889,17 +1579,11 @@ def test_every_bounded_drain_can_finish_a_run_inside_the_ceiling_that_kills_it()
 
 
 def test_the_dispatch_count_each_bounded_drain_declares_is_the_one_it_runs() -> None:
-    """`_BOUNDED_DRAINS`' third column is derived from the workflow's loop, never trusted.
+    """`_BOUNDED_DRAINS`' dispatch count is derived from the workflow's loop, never trusted.
 
-    The arithmetic above multiplies an iteration count by how many activities one iteration
-    dispatches, and that is a property of a `while` body no `Settings` object can see. Declared in
-    config and checked here against each workflow's own source: a loop that gains a fourth dispatch
-    fails this rather than silently needing a third more of a ceiling nobody re-derived.
-
-    Counted by walking the `run` method's AST and asking which dispatch calls sit inside a loop —
-    the same question `tests/test_activity_queue_bound.py` asks of the whole tree, narrowed to one
-    method — because a regex over `execute_activity` cannot tell the loop's dispatches from the
-    planning call that precedes it.
+    Counted by walking each `run` method's AST for dispatch calls inside a loop (as
+    `tests/test_activity_queue_bound.py` does tree-wide); a regex could not tell the loop's
+    dispatches from the planning call before it.
     """
     dispatch = {"execute_activity", "execute_local_activity", "start_activity"}
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable"
@@ -1932,15 +1616,10 @@ def test_the_dispatch_count_each_bounded_drain_declares_is_the_one_it_runs() -> 
 
 
 def test_a_per_actor_cap_at_or_above_the_process_cap_is_refused_at_startup() -> None:
-    """A fairness cap that cannot fire is worse than none: it publishes itself as protection.
+    """A per-actor cap at or above the process cap is refused at startup.
 
-    `chemclaw_turn_actor_capacity` reports the configured number to a dashboard, so a per-actor cap
-    of 12 against 12 permits reads exactly like a working guard while refusing nothing — the
-    request is checked, the count is scanned, and the predicate can never be true. The chart's own
-    pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`, so a
-    `--set` on the process cap or an env override of either key escaped it entirely. This is the
-    same argument the fleet-ceiling validator above makes: only this object sees the configuration
-    a pod actually runs.
+    `chemclaw_turn_actor_capacity` publishes the number, so a cap that can never fire looks like
+    protection. `tests/test_deploy_chart.py` reads `values.yaml` only; this sees overrides.
     """
     with pytest.raises(ValueError) as excinfo:
         Settings(  # type: ignore[call-arg]

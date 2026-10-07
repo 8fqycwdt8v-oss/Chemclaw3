@@ -1,11 +1,7 @@
 """Disagreeing notes are flagged, never silently both returned (KM-8, S5).
 
-Retrieval used to hand back two contradictory notes with no marker. For a system whose output a
-chemist acts on that is worse than returning neither: two notes saying different things read as
-corroboration.
-
-The line these tests hold is that a conflict is a *flag*, never a filter. Dropping one side would
-be this layer deciding which of two curated notes is right, and it has no basis for that.
+Two contradictory notes returned without a marker read as corroboration. A conflict is a flag,
+never a filter: this layer has no basis for deciding which curated note is right.
 """
 
 from datetime import date, timedelta
@@ -47,11 +43,9 @@ def test_a_contradiction_of_a_note_that_is_not_in_the_corpus_is_not_reported() -
 
 
 def test_superseded_by_is_not_a_conflict() -> None:
-    """A retired note is already out of current-evidence sweeps, so flagging it says nothing.
+    """`superseded-by` is not a conflict; `supersedes` is.
 
-    `supersedes` *is* a conflict — the surviving note asserts the other is out of date, and a
-    reader holding the old one should know. `superseded-by` points the other way, from a note that
-    retrieval has already excluded.
+    A retired note is already excluded from current-evidence sweeps, so flagging it says nothing.
     """
     retired = _note("old", relations=[Relation(rel="superseded-by", to="new")])
     assert find_conflicts([retired, _note("new")]) == []
@@ -157,11 +151,10 @@ def test_a_non_current_note_is_out_of_a_retrieval_time_scan() -> None:
 
 
 def test_a_failure_note_contradicts_what_it_refutes_and_is_therefore_findable() -> None:
-    """The negative-feedback loop closing (KM-12).
+    """A failure note contradicts what it refutes and is therefore findable (KM-12).
 
-    Before typed edges a correction could only be prose, so `find_conflicts` could not see it and a
-    later query served the refuted note with no indication anything was wrong. The `contradicts`
-    relation is what makes the feedback actually feed back.
+    The `contradicts` relation lets `find_conflicts` surface a correction, so a refuted note is
+    served with a flag.
     """
     playbook = _note("playbook-x", type="playbook")
     reported = failure_note(
@@ -205,15 +198,11 @@ def test_a_failure_note_is_not_current_before_it_was_observed() -> None:
 
 
 def test_retiring_the_refuted_note_ends_the_flag_and_keeps_the_history() -> None:
-    """Why `close_refuted_note` is opt-in, measured rather than argued.
+    """Retiring the refuted note ends the flag and keeps the history.
 
-    Closing the refuted note is the right move for a claim that *stopped* being true and the wrong
-    one for a claim that never was, and the difference is observable in two places at once:
-
-    - the note keeps answering `is_current` **True** inside its old window, i.e. `valid_to` states
-      that the claim did hold up to that date — a fresh false statement about a never-true claim;
-    - the retrieval-time conflict scan then reports nothing, because a note nothing serves needs no
-      flag. Leave it open and the disagreement is on every retrieval instead.
+    `close_refuted_note` is opt-in: closing is right for a claim that stopped being true and wrong
+    for one that never was, since the note then answers `is_current` True inside its old window and
+    the conflict scan stops reporting it. Left open, the disagreement is flagged on every retrieval.
     """
     claim = _note("playbook-x", type="playbook", valid_from=date(2024, 1, 1))
     reported = failure_note("playbook-x", "half the yield", reported_by="a@example.com")
@@ -247,16 +236,10 @@ def _write(directory: Path, note_id: str, *, smiles: str, confidence: float) -> 
 def test_the_conflict_index_is_computed_once_per_corpus_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The derived map is cached behind the notes fingerprint, like the notes and the graph.
+    """The conflict index is computed once per corpus state, cached behind the notes fingerprint.
 
-    It was the one whole-corpus artifact that was not, and it is the expensive one: every
-    `SourceRetriever.retrieve` recomputed it, so a `gather_evidence` sweep paid it once per enabled
-    note-backed source and the next sweep over an unchanged corpus paid the lot again. Measured on
-    a 2,000-note corpus shaped like a real programme (many runs on a few substrates), a three-source
-    sweep went from 2,458 ms to 22 ms once the answer was reused.
-
-    A changed corpus must still bust it, which is the half that makes the cache safe: a conflict
-    nobody is shown because the flag is stale is exactly the failure KM-8 exists to prevent.
+    Without the cache every `SourceRetriever.retrieve` recomputes it, once per note-backed source. A
+    changed corpus must still bust it, or a stale flag hides a conflict.
     """
     monkeypatch.setattr(settings, "graph_cache_enabled", True)
     monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 0.0)
@@ -293,9 +276,8 @@ def test_the_conflict_index_is_recomputed_for_a_different_day(
 ) -> None:
     """`as_of` is part of the key: yesterday's map is a different answer, not a stale one.
 
-    `find_conflicts` scans only the notes current on the day it is asked about, so a cache keyed on
-    the corpus alone would serve a long-running process the verdict it computed the first time it
-    was asked — and a note whose validity window closed overnight would keep being flagged.
+    `find_conflicts` scans notes current on the day asked, so a note whose window closed overnight
+    must stop being flagged.
     """
     monkeypatch.setattr(settings, "graph_cache_enabled", True)
     monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 0.0)
@@ -333,12 +315,10 @@ def test_the_conflict_index_of_an_absent_directory_is_empty() -> None:
 
 
 def test_the_conflicting_relations_are_all_real_relations() -> None:
-    """A relation named here but absent from the vocabulary detects nothing, and says nothing.
+    """The conflicting relations are all real relations.
 
-    `_CONFLICTING_RELATIONS` is matched against edges whose relation `kg-validate` has already
-    forced into `KNOWN_RELATIONS`; a name outside it can therefore never match, so the detector
-    would quietly stop finding declared conflicts while every test using the other member kept
-    passing.
+    Edges are validated against `KNOWN_RELATIONS`, so a name outside it can never match and the
+    detector would silently miss that kind of conflict.
     """
     assert conflicts_module._CONFLICTING_RELATIONS <= KNOWN_RELATIONS
 
@@ -356,12 +336,10 @@ def _crowd(count: int, *, confidence_of: object = None) -> list[Note]:
 
 
 def test_a_note_is_flagged_against_its_widest_disagreements_not_against_everything() -> None:
-    """The narrowing, stated as the claim it changes rather than as a number.
+    """A note is flagged against its widest disagreements, not against everything.
 
-    An exhaustive pairwise scan tells a reader "here is every note on this substrate whose
-    confidence differs from yours" — a fact about the corpus, not a signal about the note. On a
-    programme-shaped 2,000-note corpus over 7 substrates that was 141,156 pairs and ~141 ids on
-    every evidence chunk reaching the model. KM-8 asked for a signal; the strongest few are one.
+    An exhaustive pairwise list is a fact about the corpus, not a signal about the note; the
+    strongest few are the signal KM-8 asked for.
     """
     notes = _crowd(40)
     by_note = conflicts_by_note(find_conflicts(notes))
@@ -405,12 +383,10 @@ def test_a_declared_conflict_outranks_a_suspected_one_for_the_places() -> None:
 
 
 def test_the_scan_stops_at_the_threshold_rather_than_enumerating_every_pair() -> None:
-    """The cost and the noise are the same fact, so fixing one must fix the other.
+    """The scan stops at the threshold rather than enumerating every pair.
 
-    Measured on the corpus shape the finding named: 141,156 pairs and 637 ms before, and the walk
-    that takes each note's widest disagreements first can stop as soon as the wider end falls under
-    the threshold. The assertion is against the pair count rather than a wall-clock number, which
-    is the part that is a property of the algorithm rather than of the machine.
+    Taking each note's widest disagreements first lets the walk stop once the wider end is under the
+    threshold. Asserted on the pair count, a property of the algorithm, not on wall clock.
     """
     notes = [
         _note(
@@ -436,16 +412,11 @@ def test_notes_that_all_agree_cost_nothing_and_flag_nothing() -> None:
 def test_the_walk_stops_at_the_first_agreeing_candidate_instead_of_reading_the_whole_group() -> (
     None
 ):
-    """The early stop is the half that makes the scan cheap, and it is invisible in the output.
+    """The walk stops at the first agreeing candidate instead of reading the whole group.
 
-    Bounding what each note *emits* already bounds the flags a reader sees; it does not bound the
-    work, because a group of 500 notes that all agree still has 500 candidates to reject. The walk
-    takes the widest-disagreeing end first, so the moment that end is inside the threshold nothing
-    further in can beat it and the rest of the group need never be read — which is why replacing
-    the `break` with a `continue` changes no assertion about conflicts at all.
-
-    So this asserts the reads rather than the results, by handing the walk a sequence that counts
-    them. Two per note (the two ends) is the whole cost of a group that agrees.
+    Bounding emitted flags does not bound work: an agreeing group still has every candidate to
+    reject. The early `break` is invisible in the output, so this counts reads: two per note (the
+    two ends) for a group that agrees.
     """
 
     class _Counting(list):  # type: ignore[type-arg]
@@ -509,21 +480,16 @@ def test_a_run_note_and_a_retired_note_pair_when_their_windows_intersect() -> No
 
 #: How many times the sweep read the two fields it decides overlap on, across one `find_conflicts`.
 #:
-#: Module-level rather than a class attribute on `_CountingNote`. A `ClassVar[int]` would work;
-#: an underscore-prefixed one is a `ModelPrivateAttr` and silently is not a counter, which is how
-#: this started life as a module global. Kept there because the counter outlives any one instance
-#: and belongs to the measurement rather than to the note.
+#: Module-level because an underscore-prefixed class attribute on a pydantic model is a
+#: `ModelPrivateAttr`, not a counter.
 _FIELD_READS = [0]
 
 
 class _CountingNote(Note):
     """A note that counts reads of `valid_from` and `valid_to`, which is the sweep's own work.
 
-    Counting rather than timing, for the reason `tests/test_compaction.py::_CountingEstimator`
-    gives about the same class of claim: a ratio of two wall clocks on a shared runner has no safe
-    place to sit, and a count does not move. These two fields are the right quantity because they
-    are what `_conditional_disagreements` reads per active note per event — the exact loop whose
-    complexity is the subject — so the count is the work rather than a proxy for it.
+    Counting rather than timing (as `tests/test_compaction.py::_CountingEstimator`): these are the
+    fields `_conditional_disagreements` reads per active note per event, so the count is the work.
     """
 
     def __getattribute__(self, name: str) -> object:
@@ -535,11 +501,7 @@ class _CountingNote(Note):
 def _sweep_work(size: int, *, disjoint: bool) -> tuple[int, int]:
     """The field reads one `find_conflicts` costs over `size` dated notes, and what it found.
 
-    **Both, because the count alone lost half the old test.** The wall-clock version this replaced
-    also asserted `find_conflicts(4000 disjoint notes) == []`, and the first draft of the counted
-    version dropped it — so a regression that started *reporting* conflicts on a one-note-per-day
-    corpus would have passed at every size above two. The conflicts are returned rather than
-    asserted here because the overlapping arm is supposed to find plenty.
+    The conflicts are returned so the disjoint arm can also assert it finds none.
     """
     base = date(2020, 1, 1)
     notes: list[Note] = []
@@ -564,31 +526,12 @@ def _sweep_work(size: int, *, disjoint: bool) -> tuple[int, int]:
 
 
 def test_a_disjoint_dated_corpus_does_a_linear_amount_of_work() -> None:
-    """The regression the review measured: closed non-overlapping windows restored O(N²).
+    """A disjoint dated corpus does a linear amount of work.
 
-    The old walk's `_overlaps` rejection consumed a step without ending the walk, so a
-    one-note-per-day corpus — the exact structure `knowledge/README.md` advertises — walked its
-    whole group per note: 714 ms at 2,000 notes, 3.1 s at 4,000, clean 4x per doubling, returning
-    zero conflicts for the work. The sweep never examines a disjoint pair.
-
-    **A count, not a wall clock, and that is a correction.** This asserted `perf_counter() < 1.5`
-    over one corpus size, and on 2026-09-20 it took **1.84 s** inside a 46-minute run competing
-    with three subagents and reddened `check` on a pull request containing zero files under
-    `src/` — a gate reddening for machine load, which teaches everybody to re-run. The property
-    was never a duration anyway: its own docstring states it as *"went on matching every remaining
-    record"*, which is a claim about work.
-
-    Measured: field reads are **9,998 / 19,998 / 39,998 / 79,998** at 1,000 / 2,000 / 4,000 /
-    8,000 notes — exactly 2.00x per doubling, byte-identical run to run. Eight times the corpus is
-    therefore **8.0014x** the work, and the quadratic arm this exists to catch is 64x.
-
-    **The bar is 10, and the figure it replaces was wrong in the reassuring direction.** This said
-    16 and called it "two-and-a-half orders clear of both ends"; 16 is 2.0x above the linear end
-    and 4.0x below the quadratic one — 0.3 and 0.6 orders. Since the quantity is a deterministic
-    count rather than a duration, it needs none of the slack that sentence was claiming: 10 leaves
-    25% over the measured 8.0014 and, solving `(8 + 64f) / (1 + f)` for a quadratic confined to a
-    fraction `f` of the corpus, catches anything touching more than **0.05%** of it, where 16
-    caught only above 0.5%.
+    A one-note-per-day corpus (the structure `knowledge/README.md` advertises) must never examine a
+    disjoint pair. Field reads are a deterministic count, about 2x per doubling; eight times the
+    corpus is ~8x the work against 64x for the quadratic case. The bar of 10 catches a quadratic arm
+    touching more than ~0.05% of the corpus.
     """
     small, small_found = _sweep_work(1_000, disjoint=True)
     large, large_found = _sweep_work(8_000, disjoint=True)
@@ -607,16 +550,10 @@ def test_a_disjoint_dated_corpus_does_a_linear_amount_of_work() -> None:
 
 
 def test_the_work_counter_can_see_the_quadratic_arm_it_is_bounding() -> None:
-    """The control, because a bound satisfied by measuring nothing is not a bound.
+    """The work counter can see the quadratic arm it is bounding.
 
-    `_FIELD_READS` returning a small number for every corpus would pass the test above for the
-    wrong reason — the shape `D-2026-09-18-a-mutation-watched-failing-is-half-a-guard` is about.
-    So the same counter runs over a corpus where **every** window overlaps every later one, which
-    is the work the disjoint case is claimed not to do.
-
-    Measured, overlapping against disjoint at the same size: 81,200 / 1,998 at 200 notes,
-    322,400 / 3,998 at 400, 1,284,800 / 7,998 at 800 — 4.00x per doubling against 2.00x, which is
-    the difference the assertion above rests on being able to see.
+    The control: on a corpus where every window overlaps every later one the same counter grows ~4x
+    per doubling, so the bound above is not satisfied by measuring nothing.
     """
     disjoint, _ = _sweep_work(400, disjoint=True)
     overlapping, overlapping_found = _sweep_work(400, disjoint=False)
@@ -650,18 +587,13 @@ def test_a_self_contradiction_is_not_a_conflict() -> None:
 
 
 def test_failures_against_finds_what_a_design_cites_and_what_it_charges() -> None:
-    """`memory/failure.py` was a builder with no query side, which is most of why it did not work.
+    """`failures_against` finds what a design cites and what it charges.
 
-    A `failure-mode` note could be written, indexed and retrieved by anyone who went looking, and
-    nothing went looking at the moment it mattered. Two joins, and both arms matter:
+    - citation is exact: a failure's `contradicts` edge names a note id a design's `EvidenceRef.ref`
+      cites.
+    - structure is weaker, which is why the check it feeds is a note rather than a blocker.
 
-    - **citation** is exact: a failure's `contradicts` edge names a note id, and a design's
-      `EvidenceRef.ref` is such an id. No resemblance, no threshold.
-    - **structure** is weaker and is why the check it feeds is a note rather than a blocker: one
-      molecule appearing in two routes is not the same claim twice.
-
-    The negative arm is the one that earns its place — a corpus full of failures about other work
-    must come back empty, or the check becomes noise a chemist learns to skip.
+    The negative arm matters most: failures about other work must come back empty.
     """
     cited = failure_note(
         refutes="playbook-suzuki-a",
@@ -695,17 +627,10 @@ def test_failures_against_finds_what_a_design_cites_and_what_it_charges() -> Non
 
 
 def test_a_failure_matches_a_design_whatever_spelling_the_smiles_arrived_in() -> None:
-    """The structural arm compared raw strings, under an Args block saying "Canonical SMILES".
+    """A failure matches a design whatever spelling the SMILES arrived in.
 
-    Nothing canonicalizes a note's `compound_smiles` on the way in — a chemist writes whatever their
-    ELN exported — so a failure recorded against `OCC`, `C(O)C` or `[CH3][CH2][OH]` was invisible to
-    a design charging `CCO`, and `no_documented_failure` came back clean over a corpus that held the
-    warning. Driven on those four spellings of ethanol before the fix: one of four matched. The
-    sibling this function's own docstring names as "the same shape", `kg/conflicts.py`, has keyed on
-    `canonical_smiles` since it was written.
-
-    The negative arm is asserted too, because "canonicalize both sides" is one line away from
-    "match everything": ethanol must still not match ethylamine.
+    Notes' `compound_smiles` are not canonicalized on the way in, so both sides are canonicalized
+    before comparing, as `kg/conflicts.py` does. Negative arm: ethanol must not match ethylamine.
     """
     spellings = ["OCC", "C(O)C", "[CH3][CH2][OH]", "CCO"]
     corpus = [
@@ -738,17 +663,14 @@ def test_a_failure_matches_a_design_whatever_spelling_the_smiles_arrived_in() ->
 
 
 def test_only_failure_notes_answer_a_failure_query() -> None:
-    """A playbook that happens to cite the same id is not a record of it failing.
+    """Only failure notes answer a failure query.
 
-    The type filter is what keeps this a failure memory rather than a citation index — without it
-    the check would report every note that mentions the design's evidence, which is most of a
-    healthy corpus.
+    Without the type filter every note mentioning the design's evidence would be reported.
     """
     failure = failure_note(refutes="playbook-a", what_happened="it did not hold", reported_by="ana")
-    # **A `contradicts` edge on a note that is not a failure**, which is the case that actually
-    # exercises the type filter. The first version of this test used a `cites` edge, and the
-    # relation check alone refused it — so deleting the type filter left the test green, measured.
-    # A correction legitimately contradicts what it corrects, and it is not a record of a failure.
+    # A `contradicts` edge on a note that is not a failure, so the type filter (not the relation
+    # check) is what refuses it: a correction contradicts what it corrects without being a failure
+    # record.
     correction = Note(
         id="correction-b",
         type="correction",
@@ -764,12 +686,10 @@ def test_only_failure_notes_answer_a_failure_query() -> None:
 
 
 def test_a_failure_that_merely_cites_a_note_is_not_a_failure_of_it() -> None:
-    """The relation filter, which the type filter does not cover.
+    """A failure that merely cites a note is not a failure of it.
 
-    `outgoing_relations` returns every edge a note asserts, and a failure-mode note legitimately
-    carries more than one: it contradicts what failed and may cite the background it was read
-    against. Matching on any edge would report the *background* as having failed — which is the
-    opposite of what happened, and the kind of wrong that makes a chemist stop trusting the check.
+    A failure note may cite background besides contradicting what failed; matching any edge would
+    report the background as having failed.
     """
     failure = Note(
         id="failure-multi",

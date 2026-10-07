@@ -1,14 +1,8 @@
 """The multi-step composites: did the fan-out ask for the right parts, and stop asking on a repeat?
 
-Same discipline as `tests/test_calc_compose.py`, and for the same reason: these functions have no
-cache row of their own — their key would name an output — so the only thing that makes them
-correct is that they reach parts which *are* keyed, once each. "Was this recomputed?" is a question
-about call counts and nothing else (D-011), and a fan-out is where a wrong answer to it costs the
-most: a species ranking that misses the cache runs a CREST search per species, and a 33-atom search
-was measured at 1142 s.
-
-Driven against `tests/calc_server_fake.py`. Its ensemble members are three *distinct* geometries,
-which is what makes a per-member refinement three calls rather than one.
+These have no cache row (their key would name an output), so correctness is reaching keyed parts
+once each (D-011); a missed cache in a fan-out costs a CREST search per species. Driven against
+`tests/calc_server_fake.py`, whose ensemble members are distinct geometries.
 """
 
 import asyncio
@@ -36,11 +30,10 @@ def _run(coroutine: Any) -> Any:
 def test_a_refined_ensemble_optimizes_and_takes_a_hessian_per_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The cost D-101 declined to pay, paid deliberately and bounded.
+    """A refined ensemble optimizes and takes a Hessian per member.
 
-    One search, then one optimization and one Hessian for each member kept. The count is the point:
-    it is what makes free-energy weighting a different *price* as well as a different treatment, and
-    it is what `ensemble_refine_top_n` bounds.
+    One search, then one optimization and one Hessian per kept member, bounded by
+    `ensemble_refine_top_n`.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -55,11 +48,9 @@ def test_a_refined_ensemble_optimizes_and_takes_a_hessian_per_member(
 
 
 def test_refining_the_same_ensemble_twice_pays_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The measurement the whole split turns on, at fan-out scale.
+    """Refining the same ensemble twice pays nothing.
 
-    Every part is separately keyed, so a repeat is a lookup per part and no calculation. If this
-    ever regresses, a chemist asking the same question at a second temperature pays for a second
-    conformer search — the most expensive single thing in the system.
+    Every part is keyed, so a repeat is a lookup per part.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -78,9 +69,8 @@ def test_a_truncated_refinement_says_what_share_of_the_ensemble_it_covers(
 ) -> None:
     """A refinement over part of an ensemble must not read as one over the whole.
 
-    This is the error `ensemble_from_members` already refuses for `max_members`, and it is worse
-    here because a free energy looks more careful than an electronic one. The coverage is reported
-    as a number and warned about below the threshold, so a reader has to look away deliberately.
+    Coverage is reported as a number and warned about below the threshold, as
+    `ensemble_from_members` does for `max_members`.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -111,11 +101,10 @@ def test_a_refinement_over_the_whole_ensemble_warns_about_nothing(
 def test_a_property_average_evaluates_at_every_member_and_reports_the_spread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The caveat under every other number here — "this describes one conformer" — lifted.
+    """A property average evaluates at every member and reports the spread.
 
-    One properties call per member, at that member's own geometry, and the answer carries the range
-    as well as the mean. A property whose ensemble spread exceeds the difference it is being used to
-    argue is not a single number, and the spread is what lets a reader see that.
+    One properties call per member at its own geometry; the range shows whether the property is a
+    single number.
     """
     server = install(monkeypatch, FakeCalcServer())
 
@@ -134,7 +123,7 @@ def test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool(
 ) -> None:
     """The regioselectivity question over a whole ensemble rather than over one embedding.
 
-    It must reach `compute_fukui_at` — the primitive whose absence was a `DEFERRED.md` row — and
+    It must reach `compute_fukui_at` — the primitive whose absence was a `BACKLOG.md` row — and
     average per atom rather than per molecule, because "which site" is a per-atom question.
     """
     server = install(monkeypatch, FakeCalcServer())
@@ -152,19 +141,11 @@ def test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool(
 
 
 def test_an_averaged_fukui_pairs_atoms_by_index_not_by_rank() -> None:
-    """Conformers rank their atoms differently, and averaging by list position mixes them up.
+    """An averaged Fukui pairs atoms by index, not by rank.
 
-    `SiteReactivityResult.sites` is ordered *most-susceptible first* and truncated to `top_n`, so
-    position k is a different atom in different conformers — which is the normal case, not the
-    exotic one: if the ranking did not move with geometry there would be no reason to average over
-    an ensemble at all. The first version of `_averaged` did `member[position]` and labelled the
-    result with the first conformer's index, so it averaged one atom's index with another's and
-    reported it under a third name.
-
-    Asserted against a hand-built input rather than through the fake, because the arithmetic is
-    what is being pinned: atom 0 is 0.1 in every conformer and atom 1 is 0.9 in every conformer, so
-    *any* correct pairing gives 0.1 and 0.9 with zero spread. Position-pairing gives 0.5 and 0.5
-    with a spread of 0.8 — the reordering is the only difference between the two members.
+    `SiteReactivityResult.sites` is ordered most-susceptible first and truncated, so a position is a
+    different atom in different conformers. Atom 0 is 0.1 and atom 1 is 0.9 in every conformer, so a
+    correct pairing gives zero spread; position pairing would give 0.5 and 0.5.
     """
     ranked_high_first = {0: ("C", 0.1), 1: ("O", 0.9)}
     ranked_low_first = {1: ("O", 0.9), 0: ("C", 0.1)}
@@ -184,12 +165,10 @@ def test_an_averaged_fukui_pairs_atoms_by_index_not_by_rank() -> None:
 
 
 def test_an_atom_missing_from_one_conformer_is_dropped_rather_than_part_averaged() -> None:
-    """Truncation means conformers can carry different atom *sets*, not merely different orders.
+    """An atom missing from one conformer is dropped rather than part-averaged.
 
-    A Fukui result is cut to `top_n`, so a marginal atom can be inside one conformer's list and
-    outside another's. Position-pairing raised `IndexError` on the short list; averaging over
-    whichever members happen to carry the atom would be worse, because the result would look like a
-    population-weighted mean over the ensemble and be a mean over a subset, with nothing saying so.
+    Truncation to `top_n` means conformers carry different atom sets; averaging over the members
+    that happen to carry an atom would masquerade as an ensemble mean.
     """
     both = {0: ("C", 0.2), 1: ("O", 0.4)}
     truncated = {0: ("C", 0.6)}
@@ -235,9 +214,8 @@ def test_a_species_ranking_computes_each_form_once_and_normalizes(
 ) -> None:
     """Tautomers, microstates and stereoisomers are one composite, and this is its contract.
 
-    Every species goes through `_species_energy` — the engine the reaction composites already use —
-    so a species computed for a ranking is a cache hit for a reaction and the two cannot disagree
-    about what one form's free energy is.
+    Every species goes through `_species_energy`, as the reaction composites do, so the two share
+    cache entries and cannot disagree.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -261,9 +239,8 @@ def test_a_species_ranking_computes_each_form_once_and_normalizes(
 def test_a_quick_ranking_says_it_ignored_the_entropy(monkeypatch: pytest.MonkeyPatch) -> None:
     """At `quick` there is no free energy, so the populations are not free-energy populations.
 
-    Saying so is the difference between a cheap answer and a wrong one: two tautomers can differ by
-    more in zero-point energy than in electronic energy, and a reader given "populations" with no
-    qualifier has no way to know which was computed.
+    Two tautomers can differ more in zero-point energy than in electronic energy, so the ranking
+    says which was computed.
     """
     install(monkeypatch, FakeCalcServer())
 
@@ -299,10 +276,7 @@ def test_a_ranking_past_the_ceiling_reports_what_it_left_out(
 
     assert distribution.enumerated == 3
     assert len(distribution.species) == 2
-    # The *number*, not just the substring. Asserting `"were enumerated" in warning` is what let
-    # this ship reading "3 species were enumerated and the -1 lowest-priority were not computed":
-    # the branch runs only when the set exceeds the ceiling, so `ceiling - len(species)` was always
-    # negative. A chemist-facing count is worth pinning as a count.
+    # The number, not just the substring: the truncation count is chemist-facing and must be right.
     truncation = next(w for w in distribution.warnings if "were enumerated" in w)
     assert "1 that were dropped" in truncation, truncation
     assert "-" not in truncation.replace("lowest-", ""), (
@@ -352,18 +326,9 @@ def test_a_bond_survey_does_not_assert_a_symmetry_number_it_cannot_know(
 ) -> None:
     """The survey does no point-group detection, so it may not mark sigma *stated*.
 
-    It passed a literal 1 for the parent and both fragments, which is the defect `species_ranking`
-    documents having fixed one composite over. `_species_energy` records that as stated, so
-    `reaction_energy`'s withhold-and-warn machinery never ran — and sigma=1 is wrong for most of
-    what a homolysis produces: benzene is 12, phenyl 2, methyl 6, ethane 6.
-
-    Harmless only because the survey reads ΔH and discards the ΔG. The magnitude the disarmed
-    control was hiding, for benzene's C-H:
-
-        RT ln(sigma_phenyl · sigma_H / sigma_benzene) = 0.5924 · ln(2/12) = -1.06 kcal/mol
-
-    which is what a bond dissociation *free* energy would be wrong by, silently, the moment
-    anything reads that intermediate result.
+    A literal sigma=1 marked as stated would disarm `reaction_energy`'s withhold-and-warn, and is
+    wrong for most homolysis products (benzene 12, phenyl 2, methyl 6). For benzene's C-H the free
+    energy would be off by RT ln(2/12) ≈ -1.06 kcal/mol.
     """
     install(monkeypatch, FakeCalcServer())
     gas_constant_kcal = 1.987204258640832e-3
@@ -382,10 +347,9 @@ def test_a_bond_survey_does_not_assert_a_symmetry_number_it_cannot_know(
     assert hidden == pytest.approx(-1.0615, abs=1e-3)
     (unstated,) = [line for line in survey.warnings if "symmetry number" in line]
     assert "c1ccccc1" in unstated, unstated
-    # ΔH is sigma-independent, so withdrawing the fabricated sigma must not blank the survey — the
-    # energy it reports is still there, and it is still the enthalpy of the same cleavage. Compared
-    # against `reaction_energy` rather than against a pinned constant, because the fake's energies
-    # are arithmetic placeholders and only the *agreement* between the two is a real property.
+    # ΔH is sigma-independent, so the survey's energy must survive. Compared against
+    # `reaction_energy`, since only agreement between the two is meaningful with the fake's
+    # placeholder energies.
     reaction = _run(
         compose.reaction_energy(
             InMemoryStore(), ["c1ccccc1"], ["[c]1ccccc1", "[H]"], level="standard"
@@ -443,15 +407,9 @@ def test_a_fan_out_over_the_ceiling_refuses_before_it_computes_anything(
 def test_the_ensemble_composites_also_refuse_before_the_search(
     monkeypatch: pytest.MonkeyPatch, composite: Any
 ) -> None:
-    """Both of these awaited the CREST search and *then* checked the budget.
+    """The ensemble composites also refuse before the search.
 
-    That is the exact inversion `budget.py` exists to prevent — "a timeout that fires after three
-    hours has already spent three hours" — and it left the most expensive call in the bundle
-    outside the fence. Only `species_ranking` was covered by the test above, so the two that had
-    the defect were the two nobody asserted.
-
-    The count assertion is the whole test: a refusal that arrives after `search_conformer_ensemble`
-    ran is not a preflight, however correct its message.
+    A budget checked after the CREST search has already spent it. The call count is the test.
     """
     server = install(monkeypatch, FakeCalcServer())
     monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 1)
@@ -468,17 +426,11 @@ def test_the_ensemble_composites_also_refuse_before_the_search(
 def test_a_published_survey_names_the_method_the_server_ran(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`BondDissociationSurvey.method` must come off the result, never off local config.
+    """A published survey names the method the server ran.
 
-    `settings.xtb_method` describes a calculation this process no longer runs — the physics is
-    `Chemclaw3-mcp`'s since `D-2026-08-16-the-physics-leaves-the-cache-stays`. A deployment whose
-    env says one method while the server runs another would publish a Temporal wire type, PR-gated
-    into the knowledge graph, asserting the wrong level of theory. `reaction_energy` carries the
-    argument in a comment and reads it off the result; this composite did not, alone among the
-    three added beside it.
-
-    The setting is moved rather than the server's answer, so the test fails for the right reason:
-    with the defect present the survey reports "WRONG-METHOD" because that is what the env said.
+    `BondDissociationSurvey.method` comes off the result, never local config, since the server's
+    method may differ from `settings.xtb_method`. The setting is moved, so a regression reports
+    "WRONG-METHOD".
     """
     install(monkeypatch, FakeCalcServer())
     monkeypatch.setattr(calc_settings, "xtb_method", "WRONG-METHOD")
@@ -504,9 +456,8 @@ def test_a_species_screen_ranks_every_form_in_every_medium_and_includes_the_gas_
 ) -> None:
     """The fan-out's contract: N species x (M solvents + 1 reference), each relaxed once.
 
-    The gas phase is prepended rather than asked for, for the reason `solvent_comparison` prepends
-    it: "the medium barely matters here" is a real answer and is invisible without a reference
-    point. So two tautomers in two solvents is six relaxations, not four.
+    The gas phase is prepended as the reference, so two tautomers in two solvents is six
+    relaxations.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -534,10 +485,8 @@ def test_a_screen_that_reorders_the_ranking_says_so_rather_than_only_shifting(
 ) -> None:
     """`dominance_changes` is the finding, and it has to survive the sort.
 
-    `species_ranking` returns its species sorted by relative energy, so the same index is a
-    different form in two media exactly when the ranking reorders — which is why the transpose is
-    keyed by SMILES. Here the enol is stabilised in water enough to overtake the keto form, and the
-    result must report a changed dominant rather than two distributions a reader has to diff.
+    Each medium's species are sorted by energy, so the transpose is keyed by SMILES. Here the enol
+    overtakes the keto form in water and the result reports the changed dominant.
     """
     # Keyed on the **canonical** SMILES, which is what reaches the server:
     # `require_canonical_smiles` rewrites the enol `CC(O)=CC(C)=O` to `CC(=O)C=C(C)O` before
@@ -645,9 +594,8 @@ def test_a_screen_counts_its_whole_fan_out_against_the_budget(
 def test_a_pka_is_two_searches_and_a_subtraction(monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole composite: the neutral's conformers, its deprotomers, one difference.
 
-    Two searches and no third — the count is what says this is a *composition* of cached primitives
-    rather than a calculation of its own. A third would be a conformer search of the anion, which is
-    a different pipeline and would need its own calibration.
+    Exactly two searches; a third (the anion's conformers) would be a different, uncalibrated
+    pipeline.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -661,12 +609,10 @@ def test_a_pka_is_two_searches_and_a_subtraction(monkeypatch: pytest.MonkeyPatch
 
 
 def test_the_ionised_side_is_computed_as_the_anion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The defect this whole change exists for, asserted from the composite's own side.
+    """The ionised side is computed as the anion.
 
-    A deprotomer ensemble whose members carry the neutral's charge is not a slightly wrong label: it
-    is a converged energy for a species that does not exist, and every pKa built on it would be a
-    confident number about nothing. The ensembles this composite reports are the evidence for its
-    pKa, so the charge has to be visible in them.
+    A deprotomer ensemble at the neutral's charge is a species that does not exist; the reported
+    ensembles are the pKa's evidence, so the charge must be visible in them.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -678,12 +624,7 @@ def test_the_ionised_side_is_computed_as_the_anion(monkeypatch: pytest.MonkeyPat
 
 
 def test_asking_twice_pays_for_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both halves are keyed primitives, so the second pKa is arithmetic over rows that exist.
-
-    This is the economy the split is for: a CREST search is the most expensive single call in the
-    system, and a composite that re-ran one per question would make the careful pKa unaffordable
-    exactly where it is worth having.
-    """
+    """Both halves are keyed primitives, so the second pKa is arithmetic over rows that exist."""
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
 
@@ -715,9 +656,8 @@ def test_a_base_is_the_other_search_and_the_other_calibration(
 ) -> None:
     """Pyridine has no proton to lose, so `auto` asks the protonation question instead.
 
-    And the number it reports is the *conjugate acid's* pKa — what is tabulated for amines and what
-    an extraction pH is set against — which is why the branch travels on the result rather than
-    being inferred by a reader from the molecule.
+    It reports the conjugate acid's pKa (what is tabulated for amines), and the branch travels on
+    the result.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -732,9 +672,8 @@ def test_a_base_is_the_other_search_and_the_other_calibration(
 def test_a_molecule_with_no_equilibrium_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """Benzene has no proton on a heteroatom and no nitrogen, so there is nothing to answer.
 
-    Refused rather than computed: CREST would rank benzene's C-H deprotomers happily, and the
-    calibration would turn that into a confident aqueous pKa for an equilibrium that does not exist
-    in water. Two CREST searches is also an expensive way to produce a meaningless number.
+    Refused rather than computed: CREST would rank C-H deprotomers and the calibration would report
+    a confident pKa for an equilibrium that does not exist in water.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -748,9 +687,8 @@ def test_an_aliphatic_amine_is_warned_about_rather_than_quietly_reported(
 ) -> None:
     """The one limit CREST does not remove, because it is the solvent model rather than the search.
 
-    Over 13 reference amines the computed basicity correlates with the measured pKa at Spearman
-    -0.17. The sampling is not what fails — ALPB is — so a better ensemble produces a better-sampled
-    number with no ranking information, which is worse than a bad number that looks bad.
+    For aliphatic amines the computed basicity does not rank with measured pKa (ALPB fails, not
+    sampling), so the result is warned about.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -762,11 +700,10 @@ def test_an_aliphatic_amine_is_warned_about_rather_than_quietly_reported(
 
 
 def test_a_macrostate_is_more_stable_than_its_best_microstate() -> None:
-    """The arithmetic the whole composite turns on, checked without a server.
+    """A macrostate is more stable than its best microstate.
 
-    Two microstates within RT of each other make the macrostate more stable than either — by
-    RT ln 2 when they are degenerate, which is 0.41 kcal/mol at 298 K and about 0.3 pKa units
-    through a fitted slope. Taking the minimum instead of the sum silently loses exactly that.
+    Two degenerate microstates stabilize the macrostate by RT ln 2 (0.41 kcal/mol at 298 K, about
+    0.3 pKa units); taking the minimum loses that.
     """
     degenerate = macrostate_free_energy_kcal([0.0, 0.0], [1, 1], 298.15)
     single = macrostate_free_energy_kcal([0.0], [1], 298.15)
@@ -780,9 +717,8 @@ def test_a_macrostate_is_more_stable_than_its_best_microstate() -> None:
 def test_a_deeper_search_than_the_calibration_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     """Paying for a better ensemble does not buy a calibration fitted on one.
 
-    A deeper search finds lower members on *both* sides, so it moves the free-energy difference the
-    slope was fitted against. The ensembles are genuinely better and the mapping is still the quick
-    search's — which is a thing the reader has to be told, not a thing to quietly average over.
+    A deeper search shifts the free-energy difference the slope was fitted against, so the result
+    says the mapping is still the quick search's.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -811,10 +747,7 @@ def test_a_solvent_the_calibration_was_not_fitted_in_says_so(
 def test_a_deprotonation_off_the_fitted_domain_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     """An N-H acid is a real winner and an extrapolation, and the result has to say which.
 
-    The reference set is O-H and S-H only. CREST ranks every site, so an imide or a sulfonamide can
-    legitimately come back with the proton off nitrogen — a correct answer to "which proton" and an
-    unfitted one to "what is the pKa". Quoting the number without the warning is how a calibration
-    silently acquires a domain nobody measured.
+    The reference set is O-H and S-H only, so a proton lost from nitrogen gets a warning.
     """
     install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -830,11 +763,8 @@ def test_a_search_is_given_the_samplers_budget_not_a_hessians(
 ) -> None:
     """The client may not abandon a calculation the server is still running.
 
-    Unreachable until the binary shipped, because every search refused in milliseconds. It is
-    reachable now, and the numbers did not fit: this repository's own measurement of a 33-atom
-    conformer search is 1142 s against a 900 s default read bound, while the server allows one
-    14400 s. A client bound shorter than the server's saves nothing — the server computes to
-    completion, the answer is discarded, and the chemist is told the service timed out.
+    A search is given the sampler's read bound, not a Hessian's; a shorter client bound discards an
+    answer the server computes anyway.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()

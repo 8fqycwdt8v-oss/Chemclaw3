@@ -25,11 +25,8 @@ from chemclaw.core.http import gateway_client_kwargs, is_loopback_host, is_loopb
 def _restore_allowlist() -> Iterator[None]:
     """Snapshot and restore the config-derived allowlist around a test that mutates it.
 
-    `_reset_for_tests` writes the module-global `_allowed`; without this, a later test in a full run
-    would inherit an emptied allowlist and refuse a legitimately-configured connector host. Read
-    off `_allowed` directly, the way `_reset_for_tests` writes it: the public `allowed_hosts()`
-    that used to be read here said "for tests and diagnostics" and had no diagnostic caller, in a
-    module where the armed gauge reads the global itself.
+    `_reset_for_tests` writes the module-global `_allowed`; without restoring it, a later test would
+    inherit an emptied allowlist and refuse a configured connector host.
     """
     saved = netguard._allowed
     yield
@@ -39,11 +36,7 @@ def _restore_allowlist() -> Iterator[None]:
 def test_guard_is_armed_at_config_import() -> None:
     """Importing config arms the guard, so it is a property of the system, not of a launcher.
 
-    Read off `_armed` directly, for the reason the fixture above gives about `_allowed`: the public
-    `armed()` that used to be read here said "for the readiness gauge and tests" and the gauge does
-    not call it — `_publish_armed` binds a source closing over the global. A reader whose only
-    caller is this assertion is a claim that a surface exists, so it was deleted rather than kept
-    alive by the test that reads it.
+    Read off `_armed` directly, as the armed gauge does.
     """
     import chemclaw.core.config  # noqa: F401  (the import is the arming)
 
@@ -85,16 +78,9 @@ def test_localhost_suffix_is_not_trusted() -> None:
 
 
 # One table, driven through every caller below. Each row is (host, is it unreachable from the
-# network?) — the *only* question any of them asks, whether the address arrives as a bind, an
-# endpoint or a destination.
-#
-# The four marked rows are where the two answers used to differ, measured on 2026-09-05 against
-# `aed402c`: `core.http.LOOPBACK_HOSTS` was three literal strings and `netguard._is_loopback`
-# parsed, so `127.0.0.2`, `0.0.0.0`, `::` and a bracketed `[::1]` were loopback to one and not to
-# the other. The consequence was not cosmetic — a pod with the shipped `service_host="0.0.0.0"`
-# bind and `CHEMCLAW_LLM_BASE_URL=http://127.0.0.2:8820/v1` passed
-# `refuse_unconfigured_llm_gateway` (then in `api.middleware`, now `core.llm_gateway`), the guard
-# added to catch exactly that, and then failed every turn on a refused connection.
+# network?), the only question any caller asks, whether the address arrives as a bind, an endpoint
+# or a destination. `127.0.0.2`, `0.0.0.0`, `::` and `[::1]` are the rows two separate predicates
+# once disagreed on.
 _ADDRESSES: list[tuple[str, bool]] = [
     ("127.0.0.1", True),
     ("127.0.0.2", True),  # was: loopback to the guard, network-exposed to the front door
@@ -103,20 +89,14 @@ _ADDRESSES: list[tuple[str, bool]] = [
     ("::1", True),
     ("[::1]", True),  # a bracketed literal — the set never stripped them
     ("::1%lo0", True),  # a zone id
-    # The unspecified address is NOT loopback, and this is the one row the two roles disagree on
-    # for a real reason: as a *bind* it is every interface (the whole subject of SEC-2), as a
-    # *destination* it never leaves the host. The shared answer is the strict one, so a bind is
-    # refused and a destination needs an allowlist entry. Nothing dials it — there is no
-    # `0.0.0.0` URL in the tree, and no local-server bind idiom reaches the guard's resolver.
+    # The unspecified address is not loopback. As a bind it is every interface; as a destination it
+    # never leaves the host. The strict answer is shared: a bind is refused and a destination needs
+    # an allowlist entry.
     ("0.0.0.0", False),
     ("::", False),
     ("", False),
     # The short, decimal, octal and hexadecimal spellings `inet_aton(3)` accepts and
-    # `ipaddress.ip_address` does not. Every one was driven against a real listener and reached
-    # `('127.0.0.1', <port>)`, while this predicate called all four network-reachable — so a
-    # gateway named any of these booted past `core.llm_gateway` and sent every prompt to whatever
-    # answered inside the pod. `0177.1` is the fifth and was found by taking the measurement
-    # rather than by reading the four in the report.
+    # `ipaddress.ip_address` does not; each reaches `127.0.0.1` on a real socket.
     ("127.1", True),
     ("2130706433", True),
     ("0x7f.1", True),
@@ -140,15 +120,9 @@ _ADDRESSES: list[tuple[str, bool]] = [
 def test_every_caller_gets_one_answer_about_one_address(host: str, loopback: bool) -> None:
     """The shared predicate and both of its callers agree, row by row, over one table.
 
-    The two callers ask different questions of the same fact — the egress guard asks whether a
-    *destination* may be dialled without an allowlist entry, the front door asks whether a *bind*
-    is network-exposed — and before this test they got their answers from two different pieces of
-    code. Pinning them against one table is what makes a third caller's divergence a failing test
-    rather than a measurement somebody has to think to take.
-
-    `is_loopback_url` is included because a URL is how two of the four callers actually receive the
-    address (`llm_base_url`, a connector's `endpoint.url`), so a bracket- or parse-handling
-    difference between the bare host and the URL form would be a divergence of the same kind.
+    The egress guard asks whether a destination may be dialled without an allowlist entry; the front
+    door asks whether a bind is network-exposed. One table makes a divergence a failing test.
+    `is_loopback_url` is included because two callers receive the address as a URL.
     """
     assert is_loopback_host(host) is loopback
 
@@ -179,9 +153,7 @@ def test_every_caller_gets_one_answer_about_one_address(host: str, loopback: boo
 def _service_host(host: str) -> Iterator[None]:
     """Bind `settings.service_host` to `host` in the unauthenticated, no-opt-out posture.
 
-    That posture is what makes `_refuse_unauthenticated_exposure` a pure function of the loopback
-    answer: with `entra_required` or `service_allow_insecure` on it returns for another reason and
-    would assert nothing about this table.
+    In that posture `_refuse_unauthenticated_exposure` depends only on the loopback answer.
     """
     saved = (settings.service_host, settings.entra_required, settings.service_allow_insecure)
     settings.service_host = host
@@ -194,21 +166,12 @@ def _service_host(host: str) -> Iterator[None]:
 
 
 def test_the_loopback_answer_has_exactly_one_definition_in_src() -> None:
-    """No module may carry a second literal set of loopback hosts. AST-walked, not grepped.
+    """No module carries a second literal set of loopback hosts. AST-walked, not grepped.
 
-    The disagreement this file's table pins was not a bug inside either predicate — both were
-    right about what their own author meant — it was that there were *two*, and the second was a
-    three-element set that could not express `127.0.0.0/8`. So the durable guard is against the
-    shape: a collection literal naming loopback addresses is a predicate in disguise, and the next
-    one would diverge the same way, silently, on the same addresses.
-
-    `PG_LOOPBACK_HOSTS` is the one that remains and it is allowed here rather than folded in,
-    because measurement says it is a different predicate rather than a stale copy: it asks *is this
-    connection local* for a TLS/plaintext exemption, and its extra `""` member makes a hostless
-    sink URL (a `file://` outbox) local. Substituting `is_loopback_host` for it was measured across
-    its three readers and moves behaviour both ways — widening the exemption for `127.0.0.2`, the
-    rest of `127.0.0.0/8`, `[::1]` and a zone id, and narrowing it for the empty host. The argument
-    lives in `core/http.py`'s module docstring; this row is what keeps a *fourth* out.
+    A collection literal of loopback addresses is a predicate in disguise and diverges silently.
+    `PG_LOOPBACK_HOSTS` is allowed because it is a different predicate (is this connection local,
+    for a TLS exemption, with `""` covering a hostless `file://` sink), argued in `core/http.py`'s
+    module docstring.
     """
     known = {"src/chemclaw/core/config/__init__.py": "PG_LOOPBACK_HOSTS"}
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
@@ -268,13 +231,8 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
     assert "rxnlabel.internal" in hosts
     assert "calc-bundle.internal" in hosts
     assert "mirror.internal" in hosts
-    # **No vendor host is ever on this list, and it used to be** — `derive_allowed` added
-    # `api.anthropic.com` whenever `llm_provider == "anthropic"`, which was the shipped default. So
-    # the guard whose job is to bound where a prompt can go was opening exactly the destination the
-    # exfiltration path used, on the configuration a fresh checkout gets
-    # (`D-2026-09-04-a-gateway-is-the-only-provider`). There is no branch left, and this fixture
-    # declares no `llm_provider` — which is itself the assertion: a re-added one would be a
-    # `getattr` default and this list would grow again.
+    # No vendor host is on this list: the guard bounds where a prompt can go, and the fixture
+    # declares no `llm_provider`, so a re-added provider branch would grow the list here.
     assert "api.anthropic.com" not in hosts
     assert "api.openai.com" not in hosts
     assert hosts == {
@@ -288,10 +246,8 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
     }
 
 
-# Every destination-shaped `Settings` field this process is *not* expected to dial, with the
-# reason. A row here is a claim about which process holds the destination, so each names one — and
-# an empty exception list would be a stronger claim than this system can make, because the two
-# below are genuinely somebody else's socket.
+# Every destination-shaped `Settings` field this process is not expected to dial, each naming the
+# process that does dial it.
 _NOT_DIALLED_BY_A_GUARDED_PROCESS = {
     "live_probe_base_url": "the live lane dials the front door from `cli/live_probes.py`",
     "phoenix_base_url": "`cli/phoenix_publish.py` uploads a dataset from an operator's shell",
@@ -304,22 +260,12 @@ _DESTINATION_FIELD = re.compile(r"_(url|endpoint|address|dsn)$")
 
 
 def test_every_destination_shaped_setting_is_on_the_allowlist_it_derives() -> None:
-    """The derivation checks itself, rather than being kept in step by whoever reads it.
+    """Every destination-shaped setting is on the allowlist `derive_allowed` produces.
 
-    `derive_allowed` is a hand-maintained walk over named settings, and its module docstring claims
-    the allowlist "cannot drift from what a legitimate call needs" because it is read off the same
-    settings the process dials with. That is a property of the *list*, not of the mechanism, and it
-    had drifted twice by the time anyone measured it: `session_store_dsn` — the split session
-    database the chart provisions a secret key for — and `rxnlabel_server_url`, the sibling of the
-    `calc_server_url` line directly above it. Both failures are a control refusing a configured,
-    legitimate destination, and both surface as an `OSError` that says nothing about egress: the
-    session store as an outage, the labelling server as "the labelling server is not answering"
-    with a drain that retries forever.
-
-    So the assertion is over `Settings.model_fields` rather than over a list written here: every
-    field whose name ends in a destination word is given a distinct sentinel host, and each must
-    come back on the allowlist or be named above with the process that dials it instead. A setting
-    added next year lands in this test the day it is declared.
+    `derive_allowed` walks named settings by hand, so a missed one is a legitimate destination
+    refused with an `OSError` that says nothing about egress. The assertion runs over
+    `Settings.model_fields`: every field ending in a destination word gets a sentinel host that must
+    come back on the allowlist, or be named above. A new setting is covered the day it is declared.
     """
     hosts = {name: f"{name.replace('_', '-')}.sentinel.example" for name in Settings.model_fields}
     settings = Settings(
@@ -375,13 +321,10 @@ def test_every_destination_shaped_setting_is_on_the_allowlist_it_derives() -> No
 
 
 def test_a_connect_to_a_resolved_ip_is_permitted() -> None:
-    """The getaddrinfo→connect flow: a connect to an IP an allowed name resolved to is permitted.
+    """A connect to an IP an allowed name resolved to is permitted.
 
-    This is the case a naive allowlist guard breaks — the allowlist holds a *hostname* but `connect`
-    receives the *IP* the name resolved to. `getaddrinfo` records the resolved IPs (see
-    `test_getaddrinfo_records_the_resolved_ip`); here we assert the consequence: a recorded IP is
-    allowed at `connect`, while an IP never resolved from an allowed name is refused (the
-    direct-to-IP bypass stays closed).
+    The allowlist holds hostnames but `connect` receives the resolved IP; `getaddrinfo` records it.
+    An IP never resolved from an allowed name stays refused, closing the direct-to-IP bypass.
     """
     netguard._reset_for_tests(["llm.internal.example"])
     netguard._resolved_ips.clear()
@@ -416,21 +359,10 @@ def test_a_blocked_name_never_reaches_connect() -> None:
 
 # --- The wiring, not the decision -------------------------------------------------------------
 #
-# Everything above asks `netguard._check(...)` whether an address is refused. That is the
-# *decision*, and the decision was never the weak half: measured on 2026-09-06, deleting the
-# `_check(address)` line from the patched `connect` — and, one at a time, from `connect_ex`,
-# `sendto`, `sendmsg`, `gethostbyname`, `gethostbyname_ex`, `getnameinfo` and `gethostbyaddr` —
-# left `test_netguard.py test_egress.py test_no_egress.py test_leak_probe.py` at **86 passed**.
-# Only `getaddrinfo` was wired end to end, because two tests call `socket.getaddrinfo` itself.
-#
-# The one test that looked socket-level did not reach the hook it named: `socket.create_connection`
-# calls `getaddrinfo` even for an IP literal, so the refusal it observed came from the resolver
-# patch and `socket.socket.connect` was never entered. That is this repository's own recorded
-# `loop_cap` failure — "the hook ran, counted correctly, decided correctly, and was wired to
-# nothing" — in the module whose blast radius is prompt exfiltration.
-#
-# So the tests below dial the *real* `socket` surface under the armed guard, one per patched entry
-# point, at an address no allowed name ever resolved to. They observe the patch, not the predicate.
+# The tests above ask `netguard._check(...)` for a decision. These dial the real `socket` surface
+# under the armed guard, one per patched entry point, at an address no allowed name resolved to, so
+# removing `_check` from any wrapper fails. `socket.create_connection` calls `getaddrinfo` even for
+# an IP literal, so it cannot prove `connect` itself is wired.
 
 # TEST-NET-2 (RFC 5737). Never on the allowlist, never in `_resolved_ips` — so it is the
 # direct-to-IP bypass, which is the whole reason `_resolved_ips` exists.
@@ -444,9 +376,8 @@ _SocketFactory = Callable[[int], socket.socket]
 def open_socket() -> Iterator[_SocketFactory]:
     """A short-timeout socket factory whose sockets are closed when the test ends.
 
-    The timeout is load-bearing only when the guard is *broken*: with a `_check` deleted the call
-    falls through to the real syscall, and a guard whose failure mode is a two-minute hang is a
-    guard nobody re-runs. Under the armed guard nothing is dialled at all.
+    The timeout matters only if the guard is broken and the real syscall runs; under the armed guard
+    nothing is dialled.
     """
     opened: list[socket.socket] = []
 
@@ -527,9 +458,8 @@ _PATCHED_ENTRY_POINTS: list[tuple[str, Callable[[_SocketFactory], None]]] = [
 def _nothing_allowed() -> Iterator[None]:
     """An empty allowlist and no recorded resolutions, both restored afterwards.
 
-    `_resolved_ips` is process-wide and outlives a test, so a run that resolved the blocked
-    address earlier would otherwise permit it here — the fixture at the top of this file restores
-    `_allowed` and says nothing about the other half of the decision.
+    `_resolved_ips` is process-wide, so an earlier resolution of the blocked address would otherwise
+    permit it here.
     """
     resolved = set(netguard._resolved_ips)
     netguard._reset_for_tests([])
@@ -576,12 +506,10 @@ def test_the_patched_connect_still_dials_a_permitted_destination(
 
 
 def test_the_guard_patched_every_entry_point_it_says_it_patched() -> None:
-    """`arm()` installed a wrapper over each name, so a *removed* patch is a failing test too.
+    """`arm()` installed a wrapper over each name it patches, so a removed patch fails too.
 
-    The rows above catch a hollowed-out wrapper; this catches a wrapper that stopped being
-    installed — the `socket.getaddrinfo = getaddrinfo` line disappearing rather than the check
-    inside it. `arm()` is idempotent and armed at config import, so the live `socket` module is
-    the only place this can be observed.
+    The rows above catch a hollowed-out wrapper; this catches one that is no longer installed,
+    observed on the live `socket` module.
     """
     import chemclaw.core.config  # noqa: F401  (the import is the arming)
 
@@ -605,14 +533,10 @@ def test_the_guard_patched_every_entry_point_it_says_it_patched() -> None:
 
 
 def _proxy_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
-    """Clear every proxy variable this environment happens to carry, then set `values`.
+    """Clear every proxy variable this environment carries, then set `values`.
 
-    The CI container and the dev sandbox both run behind a filtering proxy of their own, so a test
-    that only *sets* a variable is measuring the ambient environment as much as its own arm. The
-    clear is by suffix rather than by a list of names, because the names are the thing under test:
-    `urllib` treats any `*_proxy` variable in any case as a proxy variable, and a helper that swept
-    only the three canonical spellings would leave `Https_Proxy` standing in the arm written to
-    prove `Https_Proxy` is read.
+    CI and the dev sandbox run behind their own proxies. Cleared by suffix, case-insensitively,
+    because `urllib` treats any `*_proxy` variable in any case as a proxy variable.
     """
     for name in list(os.environ):
         lowered = name.lower()
@@ -625,12 +549,8 @@ def _proxy_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
 def _proxy_settings(**overrides: object) -> Settings:
     """A deployment dialling a gRPC OTLP collector, plus destinations no proxy variable can carry.
 
-    The gateway, the calc backend, the database and the broker are here on purpose: they are what
-    a first version of this check charged, and every "not refused" arm below is therefore also an
-    assertion that they are *not* counted. Charging them refused deployments for a reason that was
-    not true — measured, every first-party client for them passes `trust_env=False`, zero proxy
-    mounts against two on a default `httpx.Client` — and on the shipped loopback defaults it
-    stopped a developer behind a corporate proxy from importing the config at all.
+    The gateway, calc backend, database and broker are present so every "not refused" arm also
+    asserts they are not charged: their clients pass `trust_env=False`.
     """
     return Settings(
         llm_base_url="https://gateway.internal/v1",
@@ -647,11 +567,10 @@ def _proxy_settings(**overrides: object) -> Settings:
 
 
 def _entra_settings(**overrides: object) -> Settings:
-    """A deployment in the enforced identity posture — `entra_required`, tenant, loopback infra.
+    """A deployment in the enforced identity posture: `entra_required`, tenant, loopback infra.
 
-    `entra_required` is poppable like the other defaults because it is the *gate* the ambient arm
-    of `refuse_proxied_egress` turns on, so an arm that measures the gate has to be able to flip it
-    on this fixture rather than on a differently-shaped one.
+    `entra_required` can be popped like the other defaults because it is the gate the ambient arm of
+    `refuse_proxied_egress` turns on.
     """
     return _proxy_settings(
         entra_required=bool(overrides.pop("entra_required", True)),
@@ -684,12 +603,10 @@ def _refuses(settings: Settings) -> bool:
 
 
 def _assert_live(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
-    """The positive control every "not refused" arm needs to mean anything.
+    """The positive control every "not refused" arm needs.
 
-    A test that asserts "no exception" passes just as well against a function whose body has been
-    deleted — measured on an earlier version: gutting `refuse_proxied_egress` left several arms
-    green. So each of them re-runs with the bypass removed and asserts the refusal *does* fire,
-    which is what distinguishes "this configuration is accepted" from "nothing is checked".
+    "No exception" also passes against a gutted function, so each arm re-runs with the bypass
+    removed and asserts the refusal does fire.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://control.invalid:3128")
     assert _refuses(settings), (
@@ -699,14 +616,11 @@ def _assert_live(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
 
 
 def test_an_undeclared_proxy_refuses_the_process_at_boot(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hole this closes: a proxy moves the destination out of the address the guard checks.
+    """An undeclared proxy refuses the process at boot.
 
-    Measured before the fix, with the allowlist empty and one local HTTP proxy: a request to an
-    external host through `proxy=http://127.0.0.1:<port>` returned **HTTP 200 with the body** and
-    `netguard._refused` never moved. A loopback proxy is not an attacker-only shape — an OpenShift
-    service mesh or egress sidecar is one by design, and a sidecar shares the pod's network
-    namespace, so its traffic never crosses a NetworkPolicy enforcement point either. There is no
-    layer below this one for this shape.
+    A proxy moves the destination out of the address the guard checks, so a request through a local
+    proxy would succeed with the allowlist empty. A service mesh or egress sidecar is a loopback
+    proxy sharing the pod's network namespace, so no lower layer sees its traffic.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
@@ -730,16 +644,12 @@ def test_an_undeclared_proxy_refuses_the_process_at_boot(monkeypatch: pytest.Mon
     ],
 )
 def test_every_proxy_spelling_is_read(monkeypatch: pytest.MonkeyPatch, variable: str) -> None:
-    """Every case, not both cases — and the difference was a working bypass, twice.
+    """Every case spelling of every proxy variable is read.
 
-    A first version read `name` and `name.upper()`, which misses every mixed-case spelling while
-    httpx, requests, git and grpc all lower-case the name. That was found by review and fixed by
-    going through `urllib.request.getproxies_environment`. Re-targeting the check at grpc and
-    urllib then required reading the variables directly again — CPython drops `http` from that
-    mapping whenever `REQUEST_METHOD` is set, and neither git nor grpc implements the carve-out —
-    and the *same* two-spelling shortcut came back with it. Measured: `Grpc_Proxy` gave grpc a live
-    proxy and the process booted silently. `grpc_proxy` is parametrised here because it is the one
-    variable only this deployment's exporter reads.
+    httpx, requests, git and grpc all lower-case the name, so checking only `name` and
+    `name.upper()` misses mixed case. Variables are read directly because
+    `urllib.request.getproxies_environment` drops `http` when `REQUEST_METHOD` is set, which git and
+    grpc do not. `grpc_proxy` is read only by this deployment's exporter.
     """
     _proxy_env(monkeypatch, **{variable: "http://127.0.0.1:15001"})
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
@@ -749,13 +659,11 @@ def test_every_proxy_spelling_is_read(monkeypatch: pytest.MonkeyPatch, variable:
 def test_only_the_destinations_whose_clients_read_the_environment_are_charged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The narrowing this check turns on, asserted as a property rather than described.
+    """Only the destinations whose clients read the environment are charged.
 
-    Every first-party HTTP client — the gateway, the embedding seam, the calc backend, every
-    connector endpoint — passes `trust_env=False`, so a proxy variable cannot carry any of them.
-    Charging them made the refusal fire on deployments where measurably nothing would be proxied,
-    and on the shipped loopback defaults it stopped a developer behind a corporate proxy from
-    importing the config at all. This arm dials all four and expects silence.
+    Every first-party HTTP client passes `trust_env=False`, so a proxy cannot carry them, and
+    charging them would refuse deployments where nothing is proxied. This arm dials all four and
+    expects silence.
     """
     settings = Settings(
         llm_base_url="https://gateway.internal/v1",
@@ -778,13 +686,10 @@ def test_only_the_destinations_whose_clients_read_the_environment_are_charged(
 def test_the_shipped_defaults_start_behind_a_corporate_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stock checkout on a developer's machine must import, and once it did not.
+    """The shipped defaults import behind a corporate proxy.
 
-    Measured on the version this replaces: `HTTP_PROXY=http://proxy.corp:3128 python -c "import
-    chemclaw.core.config"` raised, and `pytest` collection died with it — because every shipped
-    destination is loopback and loopback destinations were charged. Anyone behind a corporate proxy
-    could not run this repository. The refusal must be about what a proxy can carry, not about
-    whether one is configured.
+    Every shipped destination is loopback; the refusal is about what a proxy can carry, not whether
+    one is configured.
     """
     _proxy_env(monkeypatch, HTTP_PROXY="http://proxy.corp:3128", ALL_PROXY="http://proxy.corp:3128")
     assert not _refuses(Settings())
@@ -793,13 +698,10 @@ def test_the_shipped_defaults_start_behind_a_corporate_proxy(
 def test_the_grpc_exporter_is_charged_whatever_the_targets_scheme(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Grpc resolves its proxy without consulting the target, which no per-scheme rule would catch.
+    """The gRPC exporter is charged whatever the target's scheme.
 
-    `core/logging.py` uses the **gRPC** OTLP exporter, and grpc reads `grpc_proxy`, then
-    `https_proxy`, then `http_proxy`, regardless of whether the endpoint is `https`. Measured with
-    only `http_proxy` set against a TLS target: three `CONNECT` frames reached the recorder. With
-    `otel_include_sensitive_data` that traffic is prompts and completions, so this is the live hole
-    the re-targeting exists to close.
+    grpc reads `grpc_proxy`, then `https_proxy`, then `http_proxy` regardless of scheme, and with
+    `otel_include_sensitive_data` that traffic carries prompts and completions.
     """
     settings = _proxy_settings()
     for variable in ("grpc_proxy", "https_proxy", "http_proxy"):
@@ -820,25 +722,12 @@ def test_a_bare_host_port_otlp_endpoint_is_not_dropped(monkeypatch: pytest.Monke
 
 
 def test_the_jwks_fetch_is_no_longer_a_charged_destination() -> None:
-    """An *absence* test, because the destination that used to be here is now immune.
+    """The JWKS fetch is not a charged destination.
 
-    `api/auth.py` fetched the tenant key set through `urllib.request.urlopen`, which takes no
-    `trust_env` and was measured following `HTTP_PROXY` — on the anchor every bearer token is
-    validated against — so `_env_reading_destinations` charged it. `_HttpxJwkClient` now fetches it
-    with httpx and `trust_env=False`, so there is nothing left to charge, and a row for it would
-    refuse a pod over a hazard that no longer exists.
-
-    **The positive control is the second half of this test rather than `_assert_live`.** This arm
-    is about *charging*, not about refusing, so the helper — which re-runs a refusal with the
-    bypass removed — structurally cannot serve it: `_env_reading_destinations` with its body
-    deleted returns `[]`, and the version of this test that shipped asserted `charged == []` and
-    "not refused", both of which a gutted function passes. So the control is a configuration that
-    must charge something through the same call: with `otel_enabled` on, the OTLP exporter's row
-    has to come back, and an emptied function fails here instead of quietly agreeing.
-
-    What used to be this test's second assertion — an enforced-identity deployment behind a proxy
-    boots — is now false for a reason that is not the JWKS fetch, and
-    `test_the_enforced_posture_is_refused_behind_an_undeclared_proxy` below is where it lives.
+    `_HttpxJwkClient` fetches with `trust_env=False`, so a row for it would refuse a pod over a
+    hazard that does not exist. The positive control is the second half: with `otel_enabled` on, the
+    OTLP row must come back, so an emptied `_env_reading_destinations` fails rather than agreeing.
+    The enforced posture behind a proxy is covered by the next test.
     """
     charged = [reason for _, reason, _ in netguard._env_reading_destinations(_entra_settings())]
     assert charged == [], f"the enforced posture charges a destination nothing proxies: {charged}"
@@ -855,24 +744,13 @@ def test_the_jwks_fetch_is_no_longer_a_charged_destination() -> None:
 def test_the_enforced_posture_is_refused_behind_an_undeclared_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deleting the JWKS row emptied the charge sheet for a whole class of deployment.
+    """The enforced posture is refused behind an undeclared proxy.
 
-    Measured on the commit that removed it, with `entra_required=True`, `otel_enabled=False` and
-    `HTTPS_PROXY=http://sidecar.internal:15001`: `charged: []`, boot proceeds — where the same
-    settings refused the day before. The premise of the removal is sound and is asserted above; the
-    consequence was that `entra_required` charged **nothing**, so the only thing still refusing in
-    the shipped OpenShift topology was the chart's unrelated `CHEMCLAW_OTEL_ENABLED: "true"`, and
-    `make chat`, `make connectors`, CI and a hand-started worker in the enforced posture all booted
-    proxied.
-
-    What is refused is not the JWKS fetch — that destination is immune and must stay uncharged.
-    It is the carriers with no derivable destination, measured rather than argued:
-    `kg/git_writer._git_child_env` keeps every proxy variable in the `git` child's environment on
-    purpose (verified: `HTTPS_PROXY` survives it while `CHEMCLAW_LLM_API_KEY` is scrubbed), and a
-    `git ls-remote` behind a loopback recorder standing in for a sidecar sent it
-    `CONNECT notes.example.invalid:443`. The `git` destination is explicitly not on the allowlist's
-    derivation, and the LD_PRELOAD interposer exempts loopback by construction, so for a loopback
-    sidecar no layer below this one sees that push or its credential.
+    Not because of the JWKS fetch, but because of carriers with no derivable destination:
+    `kg/git_writer._git_child_env` deliberately keeps proxy variables in the `git` child's
+    environment, so a push and its credential go through the proxy. The git destination is not
+    derived for the allowlist, and the compiled interposer exempts loopback, so nothing below this
+    sees a loopback sidecar.
     """
     settings = _entra_settings()
     for proxy in ("http://sidecar.internal:15001", "http://127.0.0.1:15001"):
@@ -887,16 +765,12 @@ def test_the_enforced_posture_is_refused_behind_an_undeclared_proxy(
 def test_the_ambient_arm_is_the_enforced_posture_and_not_a_proxy_ban(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every way out of the arm above, because a refusal with no escape is an outage.
+    """The ambient arm is the enforced posture, not a proxy ban: every way out works.
 
-    The three that must work, and the one that must not. `egress_allow` naming the proxy is the
-    operator saying the mesh is intended — the same escape the charged arm takes. `NO_PROXY=*` is
-    honoured because it is measured to work on the carrier this arm is about: with it set, the same
-    `git ls-remote` resolved the host directly and the loopback recorder saw nothing. And with
-    identity off — a developer's checkout, `make chat`, CI — an ambient corporate proxy is expected
-    and says nothing about undeclared egress, so nothing is refused; that arm is
-    `test_the_shipped_defaults_start_behind_a_corporate_proxy`, re-run here against the enforced
-    fixture so the gate itself is what is measured rather than the fixture's other fields.
+    `egress_allow` naming the proxy declares the mesh intended; `NO_PROXY=*` makes `git` dial
+    directly; and with identity off (dev checkout, `make chat`, CI) an ambient corporate proxy is
+    expected and nothing is refused, re-run here on the enforced fixture so the gate itself is
+    measured.
     """
     proxy = "http://sidecar.internal:15001"
     _proxy_env(monkeypatch, HTTPS_PROXY=proxy)
@@ -916,12 +790,10 @@ def test_the_ambient_arm_is_the_enforced_posture_and_not_a_proxy_ban(
 def test_a_proxy_named_in_the_allowlist_is_the_operators_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The escape hatch, and why it is `egress_allow` rather than the loopback exemption.
+    """A proxy named in `egress_allow` is the operator's decision and proceeds.
 
-    A deployment legitimately behind a mesh says so by naming the sidecar, and naming it is exactly
-    what distinguishes the operator's intent from an env var somebody else set. Loopback does not
-    earn the exemption here for the same reason it is the dangerous case: the address carries no
-    signal at all.
+    Naming the sidecar is what distinguishes intent from an env var someone else set; loopback
+    carries no such signal, so it earns no exemption.
     """
     declared = _proxy_settings(egress_allow="gateway.internal,127.0.0.1")
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
@@ -952,21 +824,10 @@ def test_a_wildcard_no_proxy_bypasses_everything(monkeypatch: pytest.MonkeyPatch
 
 
 def test_two_readers_on_one_host_do_not_collapse(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A declared proxy must not hide an undeclared one reaching the same host by another reader.
+    """A declared proxy does not hide an undeclared one reaching the same host by another reader.
 
-    An earlier version keyed `carried` by destination host alone, so two entries for one host
-    overwrote each other and only the survivor was compared against the allowlist. **The first test
-    written for this could not fail**, because it varied two variables on *one* reader — and a
-    reader takes the first variable that hits and stops, so it can only ever record one proxy. The
-    collision needs two readers.
-
-    **This deployment no longer has two**, which is why the pair is injected rather than taken from
-    the shipped list. The second reader used to be `api/auth.py`'s `urllib` JWKS fetch, which now
-    passes `trust_env=False` and is not charged at all. Losing the fixture must not lose the
-    invariant: `proxied_destinations` is still keyed per destination *and reader and variable*, a
-    second reader is one ADR away, and the property is a property of that function rather than of
-    the list it happens to be handed today. So the real function is driven, with the input it can
-    no longer be given by configuration.
+    `proxied_destinations` is keyed per destination, reader and variable. A collision needs two
+    readers, and this deployment ships one, so the pair is injected and the real function driven.
     """
     monkeypatch.setattr(
         netguard,
@@ -989,12 +850,9 @@ def test_two_readers_on_one_host_do_not_collapse(monkeypatch: pytest.MonkeyPatch
         f"both readers' proxies must survive into the comparison, got {proxies}"
     )
 
-    # **And the invariant is about the refusal, not about this dict.** The rebuilt version of this
-    # test stopped at `proxied_destinations`, which means it held the keying and nothing else:
-    # `refuse_proxied_egress` filters `carried` down to the entries whose proxy is *undeclared*,
-    # and that filter is where a collapsed key would actually do the damage — the declared proxy
-    # wins the comparison and the undeclared one carries the traffic, silently. Driven to the
-    # raise: one proxy declared, one not, and the refusal must fire and name the undeclared one.
+    # The invariant is about the refusal, not the dict: `refuse_proxied_egress` filters to
+    # undeclared proxies, so with one declared and one not, the refusal must fire and name the
+    # undeclared one.
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured") as refusal:
         netguard.refuse_proxied_egress(settings)
     assert "undeclared.corp" in str(refusal.value)
@@ -1030,12 +888,10 @@ def test_disabling_the_guard_disables_this_too(monkeypatch: pytest.MonkeyPatch) 
 def test_the_refusal_names_the_proxy_the_destination_and_what_reads_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An operator has to be able to act on this at boot without reading the source.
+    """The refusal names the proxy, the destination, what reads it, and the edit that proceeds.
 
-    Four things: which proxy, which destination, **what reads the environment for it** — because
-    "the OTLP exporter" is what makes the refusal checkable rather than mysterious — and the one
-    edit that proceeds, in the form that works. Measured, only the bare host is accepted:
-    `proxy.corp:3128` and `http://proxy.corp:3128` both still refuse.
+    Only the bare host is accepted in `egress_allow`; `proxy.corp:3128` and `http://proxy.corp:3128`
+    still refuse.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
     with pytest.raises(RuntimeError) as raised:
@@ -1058,13 +914,10 @@ def test_only_the_bare_host_form_of_the_escape_hatch_works(
 
 
 def test_arm_from_settings_is_where_the_refusal_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The tests above call the function; this one pins that anything *calls the function*.
+    """`arm_from_settings` is where the refusal is wired.
 
-    `arm_from_settings` is the single call `chemclaw.core.config` makes, which is what puts this
-    refusal in front of the durable worker as well as the front door. The gateway guard reached the
-    front door only, for a whole year, because it lived in `api/middleware.py` with one caller;
-    `core/llm_gateway.py` plus a call in each entrypoint is the other way to close that, and
-    `tests/test_llm_gateway_guard.py` drives the processes to prove it.
+    It is the single call `chemclaw.core.config` makes, which puts the refusal in front of every
+    process, not only the front door.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
@@ -1074,17 +927,11 @@ def test_arm_from_settings_is_where_the_refusal_is_wired(monkeypatch: pytest.Mon
 def test_refusing_the_proxy_does_not_surrender_the_environment_trust_store(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """`trust_env` conflates proxy discovery with the trust store; only the first is objected to.
+    """Refusing the proxy does not surrender the environment trust store.
 
-    The backlog row that opened this named the cost and was right: `trust_env=False` also stops
-    httpx reading `SSL_CERT_FILE`/`SSL_CERT_DIR`, so a client that merely dropped `trust_env` would
-    swap a deployment's env-supplied trust store for `certifi` — silently, and visibly only as a
-    TLS failure against the site's own privately-signed gateway. Measured with a probe bundle
-    holding one certificate against `certifi`'s 118: `trust_env=False` with no explicit `verify`
-    read **118**, and with the context this builds it reads **1**.
-
-    `create_default_context(cafile=None)` is what makes that a one-liner rather than a second
-    setting — it falls through to OpenSSL's own default paths, which honour both variables.
+    `trust_env=False` also stops httpx reading `SSL_CERT_FILE`/`SSL_CERT_DIR`, which would silently
+    swap a site's trust store for `certifi`. `create_default_context(cafile=None)` falls through to
+    OpenSSL's default paths, which honour both variables.
     """
     import ssl
 
@@ -1113,12 +960,8 @@ def test_refusing_the_proxy_does_not_surrender_the_environment_trust_store(
 def _self_signed(label: str, directory: Path) -> tuple[Path, Path]:
     """A throwaway self-signed CA-and-server certificate, as (cert, key).
 
-    **Issued for `127.0.0.1`, not for a name.** The distinguishing fact under test is which issuer
-    a client trusts, and a certificate for a made-up hostname cannot express it here: the guard
-    this file is about refuses the `getaddrinfo` for any non-allowlisted name, so every arm would
-    return "not trusted" for a reason that has nothing to do with the trust store. Every
-    certificate is therefore valid for the loopback address and differs only in who signed it —
-    `label` names the file, and the handshake decides on the issuer alone.
+    Issued for `127.0.0.1`, because the guard refuses `getaddrinfo` for non-allowlisted names; the
+    certificates differ only in issuer, which is what the handshake decides on.
     """
     import datetime
     import ipaddress
@@ -1193,9 +1036,7 @@ def _tls_server(cert: Path, key: Path) -> Iterator[int]:
 def _trusts(kwargs: dict[str, Any], port: int) -> bool:
     """Whether a client built from `kwargs` completes a TLS handshake with the server on `port`.
 
-    A handshake rather than `SSLContext.get_ca_certs()`, because that call **does not report a
-    `capath` at all** — it is blind to exactly the half of the trust store this file's findings
-    turned on, and a table built from it agreed with itself while the stores diverged.
+    A handshake rather than `SSLContext.get_ca_certs()`, which does not report a `capath` at all.
     """
     import httpx
 
@@ -1221,19 +1062,11 @@ def _hashed_capath(cert: Path, directory: Path) -> Path:
 def test_an_ambient_cert_dir_cannot_widen_a_configured_ca_pin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The one path `llm_tls_ca_bundle` exists for, and a first version of this widened it.
+    """An ambient `SSL_CERT_DIR` cannot widen a configured CA pin.
 
-    **`SSLContext.get_ca_certs()` cannot see a `capath` at all**, so the four-row table that
-    "verified" the trust store agreed with itself while the stores diverged — `SSL_CERT_DIR` read
-    0 on both sides because the instrument was blind, not because the answer matched. This drives a
-    real handshake instead, which is the only thing that can tell the difference.
-
-    The defect: httpx's own precedence is *exclusive* (`httpx._config.create_ssl_context` is
-    `if SSL_CERT_FILE: … elif SSL_CERT_DIR: … else certifi`), and the first version made `cafile`
-    conditional while leaving `capath` unconditional — so an ambient `SSL_CERT_DIR` added roots to
-    a client whose configured pin is the whole reason it exists. Measured then: the code this
-    replaced refused the rogue CA, httpx with the same pin refused it, and the merged version
-    returned 200.
+    httpx's precedence is exclusive (`SSL_CERT_FILE`, else `SSL_CERT_DIR`, else certifi); making
+    `cafile` conditional but `capath` unconditional would add ambient roots to a pinned client.
+    Driven through a real handshake, since `get_ca_certs()` is blind to `capath`.
     """
     pinned_cert, _ = _self_signed("pinned.invalid", tmp_path)
     rogue_cert, rogue_key = _self_signed("rogue.invalid", tmp_path)
@@ -1257,11 +1090,10 @@ def test_an_ambient_cert_dir_cannot_widen_a_configured_ca_pin(
 def test_a_configured_bundle_is_the_store_and_certifi_is_not_added_to_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A pin that also trusts certifi is not a pin, and `get_ca_certs()` counting is not the check.
+    """A configured bundle is the whole store; certifi is not added to it.
 
-    This is the mutation the count-based assertion could not catch: making `cafile` ignore
-    `ca_bundle` left the old test green, because it configured the bundle *as* `certifi.where()`
-    and then asserted only that the store was non-empty.
+    A pin that also trusts certifi is not a pin. The bundle is not certifi itself, so ignoring
+    `ca_bundle` fails here.
     """
     pinned_cert, pinned_key = _self_signed("pinned.invalid", tmp_path)
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
@@ -1279,11 +1111,9 @@ def test_a_configured_bundle_is_the_store_and_certifi_is_not_added_to_it(
 def test_the_environment_store_is_read_the_way_httpx_reads_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """`SSL_CERT_FILE` wins over `SSL_CERT_DIR`, exclusively — not merged with it.
+    """`SSL_CERT_FILE` wins over `SSL_CERT_DIR` exclusively, as httpx reads them.
 
-    Pinned against upstream rather than against a belief: the assertion is that this function and
-    `httpx.Client(trust_env=True)` reach the *same* answer on the same environment, driven through
-    a handshake because the two disagree only where the counting instrument is blind.
+    Asserted against `httpx.Client(trust_env=True)` on the same environment, through a handshake.
     """
     file_cert, file_key = _self_signed("fromfile.invalid", tmp_path)
     dir_cert, dir_key = _self_signed("fromdir.invalid", tmp_path)
@@ -1323,12 +1153,10 @@ _HTTPX_VERBS = (
 
 
 def _httpx_module_names(tree: ast.Module) -> tuple[set[str], set[str]]:
-    """This module's aliases for `httpx` itself, and its names imported *from* `httpx`.
+    """This module's aliases for `httpx`, and its names imported from `httpx`.
 
-    The verbs need qualifying and the classes do not: `Client` is distinctive enough to match on
-    the bare name anywhere, while `get` is `dict.get`, `os.environ.get` and a hundred other things.
-    So the verbs are matched only as `<httpx alias>.<verb>` or as a name imported straight out of
-    `httpx`, which is what these two sets are for.
+    `Client` is matched by bare name anywhere; verbs like `get` are matched only as
+    `<httpx alias>.<verb>` or as a name imported from `httpx`.
     """
     aliases: set[str] = set()
     imported: set[str] = set()
@@ -1341,30 +1169,13 @@ def _httpx_module_names(tree: ast.Module) -> tuple[set[str], set[str]]:
 
 
 def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
-    """Every httpx client construction in `src/`, class and verb, and whether it refuses the env.
+    """Every httpx client construction in `src/`, and whether it refuses the environment.
 
-    **The verbs are here because this ratchet was blind to the call shape the tree had just grown.**
-    It matched `Client`/`AsyncClient` only, and `api/auth.py` is this tree's first module-level
-    `httpx.get(...)` — the tenant JWKS fetch, on the anchor every bearer token is validated against,
-    and the whole argument for deleting that destination's row from `core/netguard.py`
-    rests on its `trust_env=False`. Measured against the scan as it stood: that line was invisible
-    to it, so the property the deletion depends on was held by a keyword nobody was watching and a
-    second such call would have arrived exempt. `httpx.get` builds a `Client` per call and defaults
-    `trust_env` to True exactly as the class does, so nothing about the narrow reading was safer —
-    it was the same decay by omission one name further out.
-
-    A `**gateway_client_kwargs(...)` unpacking counts as compliant, whether inline or through a
-    local name bound to that call: that mapping's whole point is that `trust_env=False` is
-    unconditional in it (`core/http.py`), and the two call sites that use it are the LLM gateway
-    and the embeddings client — the two the proxy ADR was written about. Bare `**kwargs` from
-    anywhere else does *not* count, so the escape hatch is one named function rather than a shape.
-
-    **An `http_client=` delegation counts too, and it has to.** The scan keys on the bare name
-    `Client`, so it also catches an SDK's own client — `phoenix.client.Client` was in this list for
-    that reason, having no `trust_env` of its own to pass. What such an SDK offers instead is a
-    seam to hand it a transport, and handing it one that refuses the environment is the same
-    property reached one call deeper; the delegate is checked by this same function rather than
-    accepted on the strength of the keyword's name.
+    Verbs (`httpx.get(...)`) build a `Client` per call with `trust_env` defaulting to True, so they
+    are scanned like the classes. Compliant forms: `trust_env=False`; `**gateway_client_kwargs(...)`
+    inline or via a local bound to it (that mapping sets `trust_env=False` unconditionally); and an
+    `http_client=` delegate, which is itself checked by this function. Bare `**kwargs` does not
+    count.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     found: list[tuple[str, int, bool]] = []
@@ -1425,33 +1236,13 @@ def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
 
 
 def test_every_served_http_client_refuses_the_ambient_proxy() -> None:
-    """`trust_env=False` is a property of the tree, not a sentence in a docstring.
+    """Every HTTP client constructed in `src/` refuses the ambient proxy.
 
-    **This is the mitigation the module docstring was already asserting.** It said flatly that
-    "every first-party HTTP client here passes `trust_env=False`", and that claim is the entire
-    correctness argument for `_env_reading_destinations` charging two destinations instead of
-    twelve — if a served client reads the environment, the boot refusal is not looking at it and
-    the socket guard cannot see it either, because a proxy moves the destination out of the
-    address (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
-
-    Measured when this test was written, the sentence was false for eight constructions across four
-    live/eval-lane modules, so the *served* half of the claim held — but nothing was keeping it
-    true, and the next client to be added would have been the one that mattered. `httpx` defaults
-    `trust_env` to True, so this is a property that decays by omission rather than by edit.
-
-    **The named exemption list those four modules sat in is gone**
-    (`D-2026-09-12-an-ambient-proxy-is-a-destination-nobody-declared`), and deleting it is what
-    closes the hole *in the ratchet itself*: the list keyed on a **module path**, so every later
-    client added inside one of those four files was exempt on the day it was written — the exact
-    property this test exists to deny. There is now no exemption at all, so the scan is wider than
-    its own name: **`served` no longer narrows anything here**, and the name is kept only because
-    merged ADRs and `core/netguard.py` cite it, and a merged ADR is not edited.
-
-    Verified to bite: deleting `"trust_env": False` from `core/http.gateway_client_kwargs` turns
-    this red. The first version of this test did *not* — it accepted the unpacking on the strength
-    of the function's name, so the one escape hatch it grants was the one thing it did not check,
-    which is the shape the whole finding is about. The mapping is therefore asserted for real,
-    against the live function, before the scan is trusted.
+    `_env_reading_destinations` charges only destinations whose clients read the environment, which
+    is correct only while every first-party client passes `trust_env=False`; httpx defaults it to
+    True, so the property decays by omission. There is no exemption list; despite its name the scan
+    covers all of `src/`. `gateway_client_kwargs` is asserted against the live function before the
+    scan accepts unpackings of it.
     """
     assert gateway_client_kwargs("").get("trust_env") is False, (
         "`gateway_client_kwargs` is the exemption the scan below grants by name; if it stops "
@@ -1469,19 +1260,11 @@ def test_every_served_http_client_refuses_the_ambient_proxy() -> None:
 
 
 def test_a_loopback_name_does_not_seed_the_resolved_ip_allowlist() -> None:
-    """`_resolved_ips` is the *allowlist* branch's memory, and it was recording the other branch.
+    """A loopback name does not seed the resolved-IP allowlist.
 
-    `getaddrinfo` recorded every returned sockaddr, including for a host that passed `_check` only
-    because `is_loopback_host` answered by **name** — `localhost` is trusted without resolution.
-    Measured before the fix: resolving `localhost` put `127.0.0.1` into `_resolved_ips`, where it
-    stays for the life of the process and is consulted port-independently by `_check` with no
-    re-derivation. A second A record on `localhost` (a hosts file, a split-horizon resolver) would
-    therefore have converted a name the guard never resolved into a permanent allowlist entry for
-    an address the guard would otherwise refuse.
-
-    The entry buys nothing even when it is harmless: a loopback IP is already exempt by
-    `is_loopback_host`, so the only addresses the set needs to hold are the ones an *allowlisted*
-    name resolved to.
+    `localhost` passes `_check` by name, so recording its resolved addresses would let a second A
+    record turn into a permanent, port-independent allowlist entry. Loopback IPs are already exempt,
+    so `_resolved_ips` needs only addresses an allowlisted name resolved to.
     """
     saved = set(netguard._resolved_ips)
     try:
@@ -1563,12 +1346,10 @@ def test_the_git_note_remote_resolves_to_the_hosts_it_would_push_to(
 def test_the_push_url_is_what_is_derived_when_it_differs_from_the_fetch_url(
     tmp_path: Path,
 ) -> None:
-    """`git push` uses `remote.<name>.pushurl`, and plain `get-url` returns the *fetch* URL.
+    """The push URL is derived when it differs from the fetch URL.
 
-    A review drove this: with a `pushurl` set, the first version of this derivation was wrong in
-    both directions at once — the host that would actually be dialled was **missing** from the
-    allowlist, so the deployment's own guard refused its own push, and a host nothing dials was
-    **added** to it. `--push` is the fix, and `--all` is for the several-push-URL case git allows.
+    `git push` uses `remote.<name>.pushurl`, and plain `get-url` returns the fetch URL; `--push
+    --all` derives every push URL.
     """
     netguard._push_hosts.cache_clear()
     one = _clone_with_remote(
@@ -1603,11 +1384,10 @@ def test_the_push_url_is_what_is_derived_when_it_differs_from_the_fetch_url(
 def test_a_remote_url_git_accepts_and_urlsplit_refuses_does_not_crash_the_process(
     tmp_path: Path,
 ) -> None:
-    """`derive_allowed` runs at `chemclaw.core.config` import, so a raise here is a crashloop.
+    """A remote URL git accepts and `urlsplit` refuses does not crash the process.
 
-    `urlsplit` raises `ValueError` on an unbalanced `[`, and `git remote add` accepts one — so the
-    first version of this function, which called `_host_from_url` outside its `try`, would have
-    failed every component's import on a `.git/config` a deployment could write by accident.
+    `derive_allowed` runs at config import, so a `ValueError` from an unbalanced `[` would be a
+    crashloop.
     """
     netguard._push_hosts.cache_clear()
     for url in ("https://[oops/path", "ssh://[2001:db8::1/x"):
@@ -1617,12 +1397,10 @@ def test_a_remote_url_git_accepts_and_urlsplit_refuses_does_not_crash_the_proces
 
 
 def test_a_derived_host_can_never_carry_the_compiled_layers_separator(tmp_path: Path) -> None:
-    """A comma in one entry is *two* allowed hosts on the compiled layer and none on this one.
+    """A derived host can never contain a comma, the compiled layer's separator.
 
-    `core/netguard_preload.c::parse_allowlist` splits `CHEMCLAW_NETGUARD_PRELOAD_ALLOW` on commas,
-    while `_check` here compares whole strings — so a single derived entry containing a comma is
-    permitted by one layer and refused by the other, which is the divergence this function sits in
-    `derive_allowed` to prevent. Refused at the source rather than escaped at each layer.
+    `core/netguard_preload.c::parse_allowlist` splits on commas while `_check` compares whole
+    strings, so such an entry would be allowed by one layer and refused by the other.
     """
     netguard._push_hosts.cache_clear()
     repo = _clone_with_remote(tmp_path, "https://harmless,target.example.com/n.git")
@@ -1636,14 +1414,10 @@ def test_a_derived_host_can_never_carry_the_compiled_layers_separator(tmp_path: 
 
 @pytest.mark.parametrize("spelling", [".", "./", "././", "src/..", "{cwd}", "{cwd}/"])
 def test_no_spelling_of_this_processes_own_checkout_derives_a_git_host(spelling: str) -> None:
-    """The dev checkout must not put the *source* repository's host on the allowlist.
+    """No spelling of this process's own checkout derives a git host.
 
-    At any of these the writer refuses the write before it can push — `git_writer` commits into the
-    running application's own tree and would push to the source repository — so there is no
-    destination to allow. The first version compared the string to `"."` and a review drove every
-    row here through it: all of them derived this repository's own remote while the writer went on
-    refusing them, which is the widening the guard was written to prevent. `core/checkout.py` is
-    now the one predicate both sides ask.
+    The writer refuses to commit into the running application's own tree, so there is no destination
+    to allow. `core/checkout.py` is the one predicate both sides ask.
     """
     netguard._push_hosts.cache_clear()
     assert (
@@ -1652,11 +1426,10 @@ def test_no_spelling_of_this_processes_own_checkout_derives_a_git_host(spelling:
 
 
 def test_the_derivation_and_the_writers_refusal_ask_the_same_question(tmp_path: Path) -> None:
-    """They disagreed once, and the disagreement was the widening above.
+    """The derivation and the writer's refusal ask the same question.
 
     `git_writer._require_dedicated_checkout` raises for exactly the directories
-    `is_the_processes_own_checkout` reports, so "the writer refuses anyway, therefore there is no
-    destination" is a claim this test holds rather than a sentence in a comment.
+    `is_the_processes_own_checkout` reports.
     """
     from chemclaw.core.checkout import is_the_processes_own_checkout
     from chemclaw.kg.git_writer import GitWriteError, _require_dedicated_checkout
@@ -1671,11 +1444,10 @@ def test_the_derivation_and_the_writers_refusal_ask_the_same_question(tmp_path: 
 
 
 def test_an_unresolvable_remote_contributes_nothing_rather_than_failing(tmp_path: Path) -> None:
-    """Absent beats wrong: a deployment can still name the host in `egress_allow`.
+    """An unresolvable remote contributes nothing rather than failing.
 
-    Three ways to have no answer — a directory that is not a checkout, a directory that is not
-    there, and a checkout with no such remote. None of them may raise, because `derive_allowed`
-    runs at import in every process and a raise there is a crashloop.
+    A missing directory, a non-checkout, or a missing remote must not raise at import; a deployment
+    can still name the host in `egress_allow`.
     """
     netguard._push_hosts.cache_clear()
     plain = tmp_path / "not-a-checkout"
@@ -1690,11 +1462,10 @@ def test_an_unresolvable_remote_contributes_nothing_rather_than_failing(tmp_path
 
 
 def test_a_remote_named_like_a_flag_is_a_remote(tmp_path: Path) -> None:
-    """`--` before the name, so a `.git/config` cannot turn the resolution into a git option.
+    """A remote named like a flag is a remote: `--` precedes the name.
 
-    Driven by creating the remote git would otherwise be asked to *run*: without the separator,
-    `get-url --upload-pack=...` is an unknown option rather than an unknown remote, and a future
-    git that accepted it would be executing a string from a config file.
+    Without the separator, `get-url --upload-pack=...` is parsed as an option, and a future git
+    accepting it would execute a string from a config file.
     """
     netguard._push_hosts.cache_clear()
     repo = _clone_with_remote(tmp_path, "https://git.example.com/o/n.git")
@@ -1719,11 +1490,10 @@ def test_a_remote_named_like_a_flag_is_a_remote(tmp_path: Path) -> None:
 
 
 def test_the_cache_key_is_the_resolved_directory_and_not_the_string(tmp_path: Path) -> None:
-    """Two clones reached by the same relative path are two clones.
+    """The cache key is the resolved directory, not the string.
 
-    Measured before the fix: under two working directories, a relative `notes` returned the first
-    clone's host for the second, one cache hit and one miss. The resolution happens before the
-    cache rather than inside it, so the key says which directory was meant.
+    A relative path under two working directories names two clones, so resolution happens before the
+    cache.
     """
     netguard._push_hosts.cache_clear()
     first, second = tmp_path / "a", tmp_path / "b"
@@ -1774,11 +1544,9 @@ def test_the_derived_allowlist_carries_the_git_note_remote(tmp_path: Path) -> No
 def _fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
     """Put an `ssh` first on `PATH` that logs its argv to the returned file, then runs `body`.
 
-    A stand-in rather than the real client because the real one reads the *user's* configuration
-    from the password database's home directory, which a test cannot point elsewhere without
-    touching the machine it runs on. What the stand-in has to get right is the one line
-    `_ssh_hostname` reads — `hostname <host>`, lowercase key, one space — and that shape was taken
-    from a real `ssh -G` against a `Host`/`HostName` block, not written from memory.
+    The real client reads the user's configuration from their home directory, which a test cannot
+    redirect. The stand-in reproduces the `hostname <host>` line `_ssh_hostname` reads, as a real
+    `ssh -G` prints it.
     """
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1807,12 +1575,10 @@ esac"""
 def test_an_ssh_alias_derives_the_host_ssh_dials_not_the_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
-    """`Host notes-alias` / `HostName real-git.internal.example` is a push to the second name.
+    """An ssh alias derives the host ssh dials, not the alias.
 
-    Before this, the alias itself reached the allowlist and the host ssh then dialled did not, so
-    both guard layers refused the deployment's own push at `getaddrinfo` with nothing naming ssh.
-    The argv is asserted too: `--` before the alias is what keeps a remote host spelled like an
-    option from becoming one.
+    Otherwise both guard layers refuse the deployment's own push. The argv is asserted too: `--`
+    keeps a host spelled like an option from becoming one.
     """
     calls = _fake_ssh(tmp_path, monkeypatch, _ALIAS_CONFIG)
     netguard._push_hosts.cache_clear()
@@ -1848,11 +1614,10 @@ def test_an_https_remote_never_asks_ssh(tmp_path: Path, monkeypatch: pytest.Monk
 def test_an_ssh_that_cannot_answer_leaves_the_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, why: str
 ) -> None:
-    """Every failure falls back to what was derived before ssh was asked — never to nothing.
+    """Every ssh failure falls back to the alias, never to nothing.
 
-    The alias is a wrong entry a deployment can correct in `egress_allow`; an exception here is a
-    crashloop at config import, and an empty set would drop an entry that was right whenever the
-    host in the URL is not an alias at all.
+    The alias is a correctable wrong entry; an exception is a crashloop at config import, and an
+    empty set would drop a right entry when the host is not an alias.
     """
     calls = _fake_ssh(tmp_path, monkeypatch, body)
     netguard._push_hosts.cache_clear()
@@ -1864,12 +1629,10 @@ def test_an_ssh_that_cannot_answer_leaves_the_alias(
 def test_an_ssh_that_hangs_is_bounded_by_the_configured_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A wedged `ssh -G` must not wedge every process's start-up, which is where this runs.
+    """A hanging `ssh -G` is bounded by the configured timeout.
 
-    The stand-in `exec`s into a long sleep — one process, as a real ssh stuck on a `Match exec`
-    or a dead mount would be, so the kill `subprocess.run` sends on timeout reaches it. The alias
-    alone would not prove the bound fired (a silent exit also falls back to it); returning in well
-    under the sleep does, and the call log proves ssh was reached at all.
+    The stand-in `exec`s into a long sleep, so `subprocess.run`'s kill reaches it. Returning well
+    under the sleep proves the bound fired; the call log proves ssh was reached.
     """
     calls = _fake_ssh(tmp_path, monkeypatch, "exec sleep 30")
     netguard._push_hosts.cache_clear()
@@ -1883,12 +1646,10 @@ def test_an_ssh_that_hangs_is_bounded_by_the_configured_timeout(
 def test_no_ssh_on_the_path_leaves_the_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The shipped image may carry no ssh client at all, and then this is the old behaviour.
+    """No ssh on `PATH` leaves the alias.
 
-    `PATH` is narrowed to a directory holding nothing but a `git` symlink, so the `ssh` lookup
-    fails the way it does on an image without one — an `OSError` from `subprocess`, which must not
-    escape. (Deliberately no `shutil.which` probe for ssh: `tests/test_deploy_chart.py` reads every
-    such call in the suite as a skip guard that CI owes the binary for.)
+    `PATH` holds only a `git` symlink, so `subprocess` raises `OSError`, which must not escape. No
+    `shutil.which` probe, since `tests/test_deploy_chart.py` reads those as skip guards.
     """
     git = shutil.which("git")
     assert git is not None
@@ -1917,13 +1678,10 @@ def test_the_derived_allowlist_carries_the_host_an_ssh_alias_names(
 
 
 def test_the_git_remote_is_a_destination_no_field_suffix_would_have_found() -> None:
-    """Why this needed its own derivation, pinned so the reason cannot be forgotten.
+    """The git remote is a destination no `Settings` suffix would find, hence its own derivation.
 
-    `test_every_destination_shaped_setting_is_on_the_allowlist_it_derives` walks `Settings` for
-    names ending in `_url`, `_endpoint`, `_address` or `_dsn` — the shape every other destination
-    takes. This asserts the premise against the *live* setting rather than a string literal: a
-    first version matched the regex against `"git_remote"` written out, which no change to
-    `Settings` could ever falsify.
+    Asserted against the live setting name, not a string literal, so a change to `Settings` can
+    falsify it.
     """
     from chemclaw.core.config import settings as live
 

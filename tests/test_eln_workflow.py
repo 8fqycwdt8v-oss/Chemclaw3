@@ -1,11 +1,8 @@
-"""Server-backed test for the durable ELN sync workflow (plan step 4.5).
+"""Server-backed tests for the durable ELN sync workflow.
 
-Runs the real `ElnSyncWorkflow` on Temporal's time-skipping server (CI; skips offline),
-proving the durable path ingests the seed ELN corpus end-to-end: fetch → map → validate →
-index (in-memory here) → record store (in-memory here). Stores are swapped via the module
-factories so no database or git is needed. The per-source-cursor behavior (D-054) is proven by
-a second server test with an in-memory cursor store, plus offline unit tests of the named-source
-activity and the summary fold.
+Runs the real `ElnSyncWorkflow` on Temporal's time-skipping server (skips offline): fetch → map →
+validate → index → record store, with in-memory stores swapped in via the module factories. Plus
+offline unit tests of the named-source activity, the chunk bound and the summary fold.
 """
 
 import asyncio
@@ -107,9 +104,8 @@ def test_sync_eln_entries_applies_overlap_only_when_asked(
 ) -> None:
     """`apply_overlap=False` fetches from the cursor itself; True replays the window.
 
-    This is the per-chunk seam: the workflow passes False for every chunk after the first,
-    so a backlog drain fetches (and re-checks) the overlap window once per run, not once
-    per chunk.
+    The workflow passes False after the first chunk, so a backlog drain replays the overlap window
+    once per run, not once per chunk.
     """
     _swap_stores(monkeypatch)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
@@ -128,9 +124,8 @@ def test_sync_eln_entries_applies_overlap_only_when_asked(
 def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
     """The bound applies only past the cursor: overlap re-ingests pass through uncapped.
 
-    The overlap window exists to re-pick-up late-landing files (idempotent, never advances the
-    cursor), so capping it would starve it; capping only the *new* tail guarantees a truncated
-    chunk always advances the cursor — the workflow loop's progress condition.
+    The overlap never advances the cursor, so capping only the new tail guarantees a truncated chunk
+    always advances it, which is the loop's progress condition.
     """
 
     def entry(entry_id: str, ts: datetime) -> RawEntry:
@@ -160,22 +155,12 @@ def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
 
 
 def test_the_bound_truncates_on_the_same_stamp_the_cursor_advances_on() -> None:
-    """Two orderings of one batch is silent data loss, and this is where they were different.
+    """The bound truncates on the same stamp the cursor advances on.
 
-    `sync_entries` advances the cursor on `entry_window(created_at, modified_at)` — the later of
-    the two, because the fetch filters on that and an amended entry counts as new. `_BoundedIngest`
-    sorted, split and truncated on `created_at` alone. So the chunk that was *kept* could contain
-    an entry whose window is later than the window of an entry that was *dropped*: the cursor
-    advances past the dropped one, the next fetch asks for entries after that cursor, and the
-    dropped entry is never seen again. Nothing reports it — there is no `ingest_rejections` row for
-    an entry that was fetched, silently discarded by the cap, and then filtered out by a cursor.
-
-    The corpus this builds is a scientific record, so an entry lost this way is a real experiment a
-    chemist ran that nobody can find. Driven with amendments ordered *against* creation, which is
-    the ordinary shape of the case — old entries corrected recently — rather than a contrived one.
-
-    Asserted as "the kept chunk's cursor does not overrun any dropped entry" rather than as a count,
-    because the count is a property of this fixture and the invariant is what has to hold for any.
+    The cursor advances on `entry_window(created_at, modified_at)`. Truncating on `created_at` alone
+    could keep an entry whose window is later than a dropped one's, so the cursor overruns the
+    dropped entry and it is never fetched again, with no ledger row. Driven with amendments ordered
+    against creation; asserted as the invariant, not a fixture count.
     """
     since = datetime(2026, 6, 1, tzinfo=UTC)
     total, limit = 150, 100
@@ -224,14 +209,9 @@ def test_the_bound_truncates_on_the_same_stamp_the_cursor_advances_on() -> None:
 def test_absorb_folds_every_chunk_counter_and_takes_the_max_cursor() -> None:
     """`_absorb` counts every per-entry list across chunks and sources, and never regresses.
 
-    Every list, not the ones a reader remembers: the run's whole outcome arrives through this fold
-    (the workflow syncs each source in chunks and folds each one), so a field left out here is a
-    field that silently reports zero for the entire deployment.
-
-    Counters rather than the id lists themselves, because this state is what
-    `continue_as_new` carries — see `ElnSyncOutcome`. A backfill large enough to need a continued
-    run is one whose id lists would outgrow Temporal's payload limit, which would defeat the bound
-    that exists to keep the run alive.
+    A field left out reports zero for the whole deployment. Counters rather than id lists, because
+    this state is what `continue_as_new` carries and id lists would outgrow Temporal's payload
+    limit.
     """
     early, late = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
     state = ElnSyncState(max_iterations=100, remaining=["eln-json"])
@@ -329,21 +309,11 @@ async def test_eln_sync_workflow_cursors_each_source_independently(
 def test_one_failing_source_does_not_take_the_rest_of_the_sync_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A drain over N sources must be N independent drains, not one that shares a fate.
+    """One failing source does not take the rest of the sync down.
 
-    `sync_eln_entries` is called per source with no handler around it, so a source that raises
-    after `BAD_DATA_RETRY` is exhausted — a warehouse that is down, a credential that expired, a
-    binding that no longer matches the site's schema — failed the whole workflow. Every source
-    *after* it in the plan was then never synced, and its cursor never advanced: a run that looked
-    like one broken source was silently a run where the healthy ones stopped ingesting too, for as
-    long as the broken one stayed broken.
-
-    Bad data was never the case at issue and still is not — that rejects and continues *inside*
-    `sync_entries`, and the retry policy exists to keep it there. What this covers is the source
-    itself being unreachable, which no amount of retrying inside one activity can fix.
-
-    Asserted on the healthy source's own outcome, because "the run did not raise" is much weaker
-    than what has to hold: the second source must actually have been synced and its cursor stored.
+    A source that is unreachable after its retries (down, expired credential, stale binding) is
+    skipped; bad data is still rejected per entry inside `sync_entries`. Asserted on the healthy
+    source's own outcome: it must actually be synced and its cursor stored.
     """
     records, _ = _swap_stores(monkeypatch)
     monkeypatch.setattr(settings, "data_sources", "eln-json,eln-ord")
@@ -405,24 +375,12 @@ def test_one_failing_source_does_not_take_the_rest_of_the_sync_down(
 def test_cancelling_a_drain_stops_it_instead_of_skipping_the_source_in_flight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cancel must end the run, and the skip-one-source clause is exactly where that can be lost.
+    """Cancelling a drain stops it rather than skipping the source in flight.
 
-    Temporal delivers a workflow cancellation to the awaiting `execute_activity` as an
-    `ActivityError` whose cause is `temporalio.exceptions.CancelledError` — the same type the
-    clause above catches to drop one unreachable source. Caught rather than re-raised, `cancel`
-    becomes "skip whichever source is in flight and carry on": the run finishes COMPLETED, the
-    remaining sources are synced, and the SDK's `uncancel` after the absorbed cancel means no
-    later activity is cancelled either. `cli.live_data.backfill` awaits `handle.result()`, so an
-    operator's cancel of a wrong-`since` backfill silently mutilated one source instead of
-    stopping the drain.
-
-    Driven on the **real-time** server for the reason `start_local_env_or_skip` records: this is a
-    test about a wall-clock event reaching a run that is still going, and time skipping would
-    fast-forward the in-flight activity instead of letting the cancel arrive during it.
-
-    Asserted on the run's *status* rather than on "it raised", because the failure being pinned is
-    a run that ends successfully, and on the second source's cursor, because the harm is the work
-    that happened after the cancel rather than the exception that did not.
+    A workflow cancellation reaches the awaiting activity as an `ActivityError` caused by
+    `CancelledError`, the type the skip-one-source clause catches; absorbing it would let the run
+    complete and keep syncing. Driven on the real-time server because time skipping would
+    fast-forward the in-flight activity. Asserted on run status and on the second source's cursor.
     """
     _swap_stores(monkeypatch)
     monkeypatch.setattr(settings, "data_sources", "eln-json,eln-ord")
@@ -492,10 +450,8 @@ async def test_eln_sync_workflow_drains_a_backlog_in_chunks(
 ) -> None:
     """With a batch bound of 1 the workflow loops, persisting the cursor after every chunk.
 
-    This is the fix for the wedged-backfill failure mode: progress must be durable per chunk,
-    so a backlog larger than one activity window completes across attempts instead of retrying
-    one giant attempt forever from the same cursor. The drain must also replay the late-file
-    overlap window only on its first chunk — per-chunk replay is quadratic over a backlog.
+    Durable per-chunk progress lets a backlog larger than one activity window complete across
+    attempts; the overlap window is replayed only on the first chunk.
     """
     records, _ = _swap_stores(monkeypatch)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
@@ -572,20 +528,12 @@ _HISTORY_EVENT_LIMIT = 51_200
 def test_a_long_eln_drain_continues_as_new_instead_of_growing_one_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The one drain in this package with no iteration bound — so a big backfill is terminated.
+    """A long ELN drain continues as new instead of growing one history.
 
-    Each chunk emits two activities (`sync_eln_entries`, `store_sync_cursor`) and nothing bounded
-    how many chunks one run could take, so history grew linearly with the backlog until the server
-    killed the run at its 51,200-event ceiling. Measured against a live broker on the identical
-    two-activity loop: 12.2 events per chunk, i.e. ~4,200 chunks — about 420,000 entries at the
-    default batch size, against a warehouse ELN this repository sizes at ~700,000. A termination
-    is not a failure, so nothing retries and nothing is pushed back; and a *manual* backfill
-    (`since` supplied) stores no cursor, so it loses everything it had drained.
-
-    The three sibling drains — `ReactionLabelWorkflow`, `ReactionCorpusWorkflow`,
-    `DocumentShareSyncWorkflow` — all capture a bound in their planning activity and
-    `continue_as_new`. This asserts the ELN sync now does the same, by measuring what one run's
-    history actually costs and what the configured bound therefore buys.
+    Each chunk adds history events, and the server terminates a run at its event ceiling; a
+    terminated manual backfill stores no cursor and loses its progress. Like the sibling drains, the
+    sync captures a bound and calls `continue_as_new`; this measures one run's history cost and what
+    the configured bound buys.
     """
     _swap_stores(monkeypatch)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))

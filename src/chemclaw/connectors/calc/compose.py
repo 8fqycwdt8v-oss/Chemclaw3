@@ -1,31 +1,17 @@
-"""Composition over remote primitives: what a composite calculation is, now that it is not shipped.
+"""Composition over remote primitives: the composite calculations, built here from cached parts.
 
-`D-2026-08-16-the-physics-leaves-the-cache-stays` split `calc` by **composability** rather than by
-speed. A *primitive* — one calculation whose identity is derivable from its inputs — moved to
-`Chemclaw3-mcp` and is cached here under the key the server derives. A *composite* — anything whose
-key would have to name an output — was **not shipped at all**, because a single remote call would
-swallow the nested entries that are its entire economy: `compute_thermochemistry`'s key would name
-the geometry its refinement loop *settles on*, and moving it whole would have turned every repeat
-into a full recompute (measured: `CCO` 0.816 s cold, 0.007 s warm; `CC(=O)OCC` 3.273 s against
-0.012 s).
+`D-2026-08-16-the-physics-leaves-the-cache-stays` split `calc` by composability: a primitive (one
+calculation whose identity derives from its inputs) runs in `Chemclaw3-mcp` and is cached here under
+the server's key; a composite (whose key would name an output, e.g. the geometry a refinement loop
+settles on) is decomposed here so every part is separately cached and a repeat costs round trips,
+not SCFs. This module holds the composites and their bookkeeping: balance checking, symmetry
+numbers, relative energies, populations and warnings.
 
-So this module is where the composites live. Every function here is the same shape — ask for the
-parts, each separately cached, and do the bookkeeping in between — and the bookkeeping is the part
-that was always ours: balance checking, symmetry-number discipline, relative energies, populations,
-warnings a chemist acts on.
+The MCP tool path and the durable activity path share it; they differ only in how a remote call is
+awaited (an activity must heartbeat), which is the `run` parameter, defaulting to a plain await.
 
-**Why the tool path and the durable path share it.** `compute_thermochemistry` (an MCP tool) and the
-reaction job (a Temporal activity) both need relax-then-Hessian-then-RRHO with the same saddle-point
-escape. Writing it twice is how the two drift, and one of them is the one nobody re-reads. What
-differs between them is not the chemistry but the *waiting*: an activity must heartbeat through a
-minutes-long call or Temporal declares it dead, and `activity.heartbeat` raises outside an activity
-context, so a tool cannot use it. That difference is one parameter, `run`, and it defaults to a
-plain await.
-
-**Nothing here derives a `calc_version` or a cache key.** Every key comes from the server, through
-`cached_remote`. The rule and the reason are in `connectors/calc/remote.py`; the short form is that
-a locally-derived version would be *well-formed*, match zero calibration rows, and make
-`calculator_trust` report a confident `UNCALIBRATED` with nothing looking broken.
+Nothing here derives a `calc_version` or cache key; every key comes from the server via
+`cached_remote` (see `connectors/calc/remote.py`).
 """
 
 import asyncio
@@ -118,23 +104,20 @@ from chemclaw.science.calc.thermo import (
 )
 from chemclaw.science.calc.uncertainty import CalculationDomainError
 
-# What `ensemble_property` can average, and the field each name reads off its result model. A
-# closed set rather than a free-form attribute name: a caller naming a field that does not exist
-# would get an AttributeError from inside a fan-out that had already paid for its conformer search.
+# What `ensemble_property` can average, and the result field each name reads. A closed set, so a
+# bad name fails before the fan-out pays for a conformer search.
 EnsembleProperties = Literal["dipole_debye", "homo_ev", "lumo_ev", "gap_ev", "charges", "fukui"]
 
 # Which species-set question a distribution answers. The arithmetic is identical across them; the
 # label is what stops a reader having to infer the question from the SMILES.
 SpeciesKind = Literal["tautomers", "microstates", "stereoisomers", "custom"]
 
-# Below this share of the E-weighted population, a refined ensemble says so rather than presenting
-# a truncation as the whole. 0.9 is CENSO's own convention for how much of an ensemble a refinement
-# step carries forward, so a chemist reading the warning recognises the threshold.
+# Below this share of the E-weighted population a refined ensemble warns rather than presenting a
+# truncation as the whole; 0.9 is CENSO's convention.
 _REFINED_COVERAGE_WARNING = 0.9
 
-# Which Fukui index a per-atom average reports. The three are one calculation and `ranked_for`
-# re-sorts locally, so an ensemble average carries the radical index — the mean of the other two,
-# and the only one that is not a claim about which attack was meant.
+# Which Fukui index a per-atom average reports: the radical index, the mean of the other two and
+# the only one that assumes no particular attack.
 _DEFAULT_FUKUI_MODE = "radical"
 _FUKUI_FIELD = {"electrophilic": "f_minus", "nucleophilic": "f_plus", "radical": "f_zero"}
 
@@ -152,9 +135,8 @@ _COORDINATES: dict[int, tuple[str, str]] = {
     4: ("dihedral", "degree"),
 }
 
-# Called with a human-readable line as each unit of work completes. Minute-scale runs on drug-sized
-# molecules are the normal case, so a caller that needs liveness (a durable activity's heartbeat)
-# passes one.
+# Called with a human-readable line as each unit of work completes; a durable activity uses it for
+# liveness.
 Progress = Callable[[str], None]
 
 
@@ -165,10 +147,9 @@ def no_progress(_message: str) -> None:
 class RemoteRunner(Protocol):
     """How one remote call is awaited — the single difference between a tool and an activity.
 
-    A Temporal activity must beat its heartbeat while a minutes-long call is in flight or the worker
-    is declared dead and the whole job retried from zero; an MCP tool has no activity context and
-    `activity.heartbeat` raises outside one. Passing the *waiting strategy* rather than a flag keeps
-    the chemistry identical between the two and puts the one real difference in one argument.
+    An activity must heartbeat during a long call or Temporal retries it from zero, while
+    `activity.heartbeat` raises outside an activity. Passing the waiting strategy keeps the
+    chemistry identical on both paths.
     """
 
     async def __call__(self, awaitable: Awaitable[_Result], what: str) -> _Result:
@@ -179,8 +160,7 @@ class RemoteRunner(Protocol):
 async def plain(awaitable: Awaitable[_Result], what: str) -> _Result:
     """Await the call and nothing else — the tool path's runner.
 
-    `what` is accepted and unused: it is the description a heartbeating runner reports, and the
-    parameter name is part of the `RemoteRunner` protocol rather than decoration.
+    `what` is unused here; it is part of the `RemoteRunner` protocol.
     """
     del what
     return await awaitable
@@ -189,22 +169,10 @@ async def plain(awaitable: Awaitable[_Result], what: str) -> _Result:
 async def kept(payload: _Payload, *, structures: StructureStore | None = None) -> _Payload:
     """Persist every geometry in a server payload, then hand the payload back unchanged.
 
-    **The write half of the handle** (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Every
-    geometry this repository ever shows a chemist comes back through one of the calls below, and
-    every one of them is reported by its `structure_id` rather than by its coordinates. That address
-    has to resolve, and this is where it comes to.
-
-    Applied to the *returned* payload rather than on the miss path, deliberately: a cache **hit**
-    never reaches the server, so persisting only on a miss would leave every handle from a
-    previously-computed calculation unresolvable — including, on the first deployment that has this
-    store, every geometry already on disk.
-
-    **A failed write raises**, deliberately, where most bookkeeping in this tree is swallowed. A
-    geometry store that is not writing is a deployment whose next `structure_id` argument will be
-    refused as unresolvable, and a calculation that fails loudly now is the better half of that
-    than a handle that fails mysteriously later. It costs little: the calculation's own result is
-    already in the cache by the time this runs, so the retry Temporal issues for a database fault
-    pays no SCF.
+    Every geometry is reported by `structure_id`, so the address must resolve; this is where it is
+    written. Applied to the returned payload, not only on a miss, so geometries from cache hits are
+    persisted too. A failed write raises: a store that is not writing would make the next
+    `structure_id` unresolvable, and the result is already cached, so a retry pays no SCF.
 
     Args:
         payload: What the server (or the cache) answered with.
@@ -227,20 +195,12 @@ async def kept(payload: _Payload, *, structures: StructureStore | None = None) -
 def radical_multiplicity(smiles: str) -> int:
     """The spin multiplicity a SMILES' explicit radical electrons imply.
 
-    A SMILES *can* state its open shell: `[CH3]` carries one radical electron, `[O][O]` two. Where
-    it does, the ground-state multiplicity follows (2S+1 with every radical electron unpaired), and
-    there is nothing to guess — which is what makes a homolysis energy computable from two SMILES
-    rather than from a hand-declared spin state. Silent on the cases a SMILES genuinely does not
-    encode: a closed-shell formula whose ground state is a triplet still needs its multiplicity
-    stated explicitly.
+    `[CH3]` carries one radical electron, `[O][O]` two; the multiplicity is 2S+1 with all of them
+    unpaired, which makes a homolysis computable from SMILES alone. A closed-shell formula whose
+    ground state is a triplet still needs its multiplicity stated.
 
-    Derived here and passed to `embed_structure` explicitly, because the server reads
-    `multiplicity=None` as *closed-shell singlet* rather than as *derive from the radicals* —
-    measured: `[CH3]` with
-    `multiplicity=None` is refused as "9 electrons at charge 0 cannot be a closed-shell singlet".
-    That is a defensible default for a server whose callers state what they mean, and it puts the
-    derivation on this side. It belongs here anyway: it is a property of the molecular graph, needs
-    no engine, and every reaction species goes through it so a homolysis stays computable.
+    Passed to `embed_structure` explicitly because the server reads `multiplicity=None` as a
+    closed-shell singlet.
     """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -251,17 +211,9 @@ def radical_multiplicity(smiles: str) -> int:
 async def embed(smiles: str, run: RemoteRunner = plain) -> Structure:
     """The force-field-cleaned starting geometry for one molecule, from the server.
 
-    Remote rather than local even though RDKit is installed here, and the reason is the cache: a
-    geometry embedded by a different RDKit build is a different `structure_id`, so every relaxation
-    and Hessian keyed on it downstream would miss. Embedding on the same side that keys the results
-    keeps the two in agreement by construction instead of by a version comparison nobody runs.
-
-    Takes a `run` like every other remote call here, and defaulting it to `plain` is what hid the
-    gap: an activity that forgot to pass one still worked, so all four call sites did. A remote
-    call is bounded by `calc_server_timeout_seconds` (900 s) and an activity by
-    `xtb_job_heartbeat_timeout_seconds` (600 s), so an embed slow enough to sit in that window
-    trips the activity's heartbeat timeout — Temporal retries the job while the original call is
-    still running, which is the exact failure `beating` was extracted to end.
+    Remote rather than local: a geometry embedded by a different RDKit build would be a different
+    `structure_id`, and every downstream key would miss. Pass `run` from an activity — a slow embed
+    would otherwise trip the heartbeat timeout while the call is still running.
     """
     payload = await run(
         remote_call(
@@ -306,25 +258,14 @@ async def hessian(
 ) -> tuple[HessianPayload, bool]:
     """Take the second derivatives at one geometry, cached under the server's key.
 
-    Keyed on what can move the matrix and nothing else — geometry, method, solvent — so a second
-    thermochemistry question about the same minimum at another temperature is a hit here and a
-    millisecond of `science/calc/thermo.py` arithmetic after it.
+    Keyed on geometry, method and solvent only, so another temperature is a cache hit plus
+    `science/calc/thermo.py` arithmetic.
 
-    **The one calculation whose result does not fit in its row.** A Hessian is megabytes where every
-    other payload is numbers — 33 atoms is 99x99 doubles, 120 atoms about 1.4 MB — and
-    `durable/retention.py` refuses to prune `calculation_results` at all, because D-011 says a
-    persisted result is never recomputed. Storing the matrix inline therefore builds a table that
-    grows without bound and has no reclaim path by design, which is exactly what D-124 built the
-    content-addressed artifact store to avoid. So the store this hands to `cached_remote` is
-    wrapped: the packed arrays go to the artifact store and the row keeps their content hashes.
-    Nothing else about the call changes, which is the point of expressing the policy as a
-    `ResultStore` rather than as a second caching path.
-
-    **The single place every Hessian in this repository passes through**, which is why the atom
-    fence is here rather than at each composite. The server has its own ceiling and would refuse
-    too — but its refusal named a durable QM path this system deleted, and no durable path could
-    have helped anyway, since every job here composes *this* function. So the refusal a chemist
-    reads is written on the side that knows the alternatives (`require_hessian_affordable`).
+    A Hessian is megabytes, and `calculation_results` is never pruned, so the store handed to
+    `cached_remote` is wrapped: packed arrays go to the content-addressed artifact store and the row
+    keeps their hashes. Every Hessian passes through here, so the atom fence
+    (`require_hessian_affordable`) lives here too, with a refusal that names this system's
+    alternatives.
     """
     require_hessian_affordable(
         len(structure.elements), f"a Hessian of {structure.smiles or structure.structure_id}"
@@ -354,27 +295,14 @@ async def relax_to_minimum(
 ) -> tuple[OptimizationResult, ThermochemistryResult, bool]:
     """Optimize until the geometry is a genuine minimum, then return it with its thermochemistry.
 
-    A plain gradient optimization converges to the nearest *stationary* point, which is not always a
-    minimum. The common case is mundane and universal: a force field hands over a molecule with an
-    eclipsed methyl, and a Cartesian optimizer preserves that symmetry all the way down onto the
-    rotational saddle. Measured on ethyl acetate — an ordinary ester, not a contrived example — the
-    optimizer settles at a -42 cm^-1 mode, and the free energy computed there is not a free energy.
+    A gradient optimization converges to the nearest stationary point, often a rotational saddle (an
+    eclipsed methyl preserved by symmetry), where a free energy is meaningless. The standard escape
+    is applied: displace along the imaginary mode and re-optimize. Each part is keyed on its own
+    input, so a repeat costs round trips and no SCF.
 
-    The escape is standard practice and cheap: displace along the imaginary mode and re-optimize.
-    Ethyl acetate needs one such step and lands 0.016 kcal/mol lower, confirming what it was — a
-    shallow rotor saddle rather than a different structure.
-
-    **This loop is why thermochemistry was not shipped.** Its key would have to name the geometry
-    the loop settles on, which is an output; the parts it walks through are each keyed on their own
-    input, so a repeat pays two round trips and no SCF.
-
-    Bounded by `settings.xtb_minimum_refinement_attempts`, after which the result is returned as it
-    stands with `is_minimum=False` intact. A structure that will not settle is reporting something
-    real about itself, and looping on it is not the fix.
-
-    The third element of the return is whether *every* underlying calculation was a cache hit —
-    what a caller reports as "this cost nothing". The RRHO arithmetic is always recomputed and is
-    deliberately not counted: it is milliseconds, and it is what depends on the temperature.
+    Bounded by `settings.xtb_minimum_refinement_attempts`, after which the result is returned with
+    `is_minimum=False`. The third element of the return is whether every underlying calculation was
+    a cache hit; the RRHO arithmetic (temperature-dependent, milliseconds) is not counted.
     """
     thermo = thermo or ThermoSettings()
     current = structure
@@ -410,26 +338,15 @@ async def scan_profile(
 ) -> ScanResult:
     """Relax the molecule at every value of one internal coordinate and assemble the profile.
 
-    `subject` is the geometry to scan *from*, when the caller named one
-    (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Without it the profile is driven from a
-    fresh force-field embedding, which is the right default and the wrong answer after a conformer
-    search: a rotational barrier depends on which conformer it is measured in, and re-embedding
-    throws away the choice the search was run to make. `smiles` is then only the label the result
-    is reported under.
+    `subject` is the geometry to scan from; a barrier depends on the conformer, so after a conformer
+    search the caller passes its choice. Without it a fresh embedding is used and `smiles` is only
+    the label.
 
-    Each point is a `scan_point` call: the server drives the coordinate with RDKit's
-    `rdMolTransforms` — which moves the whole attached fragment, so the point starts from a
-    chemically sensible geometry — freezes the defining atoms and relaxes everything else. Each is
-    separately keyed, so a scan re-run with two extra values pays for two points.
-
-    Every point is driven from the *input* geometry rather than from the previous one. That costs a
-    little convergence speed and buys determinism: a sequential scan's result depends on the
-    direction it was walked, which is exactly the kind of hidden input a content-addressed cache
-    must not have (D-011).
-
-    `maximum_relative_kcal` is the highest point of the *profile*, not an optimized transition
-    state. For a torsion it is a sound barrier estimate; for a bond being broken it is an
-    upper-bound sketch — there is no saddle-point search here.
+    Each point is a separately keyed `scan_point` call (the server moves the attached fragment,
+    freezes the defining atoms and relaxes the rest), always from the input geometry so the result
+    does not depend on walk direction, a hidden input a content-addressed cache must not have.
+    `maximum_relative_kcal` is the profile's highest point, not an optimized transition state: sound
+    for a torsion, an upper-bound sketch for a bond being broken.
     """
     limit = settings.xtb_scan_max_points
     if len(values) > limit:
@@ -499,15 +416,10 @@ async def conformer_ensemble(
 ) -> tuple[ConformerEnsemble, bool]:
     """Search conformational space and weight what was found at `temperature_k`.
 
-    One remote call, because a CREST search cannot be decomposed: it is a single metadynamics run
-    with no unit boundary inside it. It is also the most expensive single calculation in the system,
-    which is why the *weighting* stayed here — populations and the conformational entropy depend on
-    a temperature the search never saw, so asking the same molecule at 310 K after 298 K is a cache
-    hit plus arithmetic rather than a second search.
-
-    The search is stochastic, so this is a sample of conformational space rather than an enumeration
-    of it. The cache is what makes it stable: the first run's members are what every later question
-    about that molecule is weighted from.
+    One remote call: a CREST search has no internal unit boundary. The weighting stays here because
+    populations and conformational entropy depend on temperature, so another temperature is a cache
+    hit plus arithmetic. The search is stochastic; the cache makes later questions consistent with
+    the first run.
     """
     payload, cached = await searched_members(
         store, smiles, subject=subject, search=search, effort=effort, solvent=solvent, run=run
@@ -536,13 +448,9 @@ async def searched_members(
 ) -> tuple[EnsemblePayload, bool]:
     """One CREST search, cached, with its members' **absolute** energies still on them.
 
-    Split out of `conformer_ensemble` once a second caller needed what that function drops.
-    `ConformerEnsemble` reports energies *relative to its own lowest member* and truncates to
-    `crest_max_members`, which is right for reading an ensemble and useless for comparing two of
-    them: an acid and its conjugate base have different lowest members, so a difference of
-    relative energies is a difference of nothing. `microstate_pka` needs the absolute Hartrees and
-    the whole member list, and taking them by repeating the remote call would have been a second
-    place for the arguments — and therefore the cache key — to be written.
+    `ConformerEnsemble` reports energies relative to its own lowest member and truncates to
+    `crest_max_members`; comparing two ensembles (as `microstate_pka` does) needs absolute Hartrees
+    over every member. Shared so the arguments, and hence the cache key, are written once.
     """
     starting = subject if subject is not None else await embed(smiles, run=run)
     payload, cached = await run(
@@ -555,10 +463,8 @@ async def searched_members(
                 "effort": effort or settings.crest_effort,
                 "solvent": solvent,
             },
-            # The one call class that outgrew the default read bound. Measured here, a 33-atom
-            # conformer search is 1142 s against a 900 s default — so before this, a search on
-            # anything drug-sized would have been abandoned by the client while the server ran it
-            # to completion, and the chemist would have been told the service timed out.
+            # Conformer searches on drug-sized molecules exceed the default read bound, so they get
+            # their own.
             timeout_seconds=settings.calc_sampling_timeout_seconds,
         ),
         f"{search} of {smiles}",
@@ -568,31 +474,22 @@ async def searched_members(
 
 # --- acid/base equilibria -----------------------------------------------------------------------
 
-# Heteroatoms whose bound protons mean "the pKa" is the acid one. It is a *domain* guard rather than
-# a site enumeration, and that distinction is the whole point of doing this with CREST: which proton
-# actually comes off is decided by energy over every site the sampler finds, including the C-H ones
-# no rule here would have offered. What this decides is only which of the two questions to ask.
+# Heteroatoms whose bound protons mean "the pKa" is the acid one. A domain guard, not a site
+# enumeration: CREST decides which proton comes off over every site it finds.
 #
-# **Nitrogen is deliberately not in this tuple even though N-H protons exist.** An amine has N-H and
-# nobody means its N-H acidity (pKa ~36) by "the pKa of ethylamine" — they mean the conjugate acid,
-# 10.7. Amides and anilines are the same: their N-H is too weak an acid in water to be the number
-# anyone quotes. So an N-H molecule with no O-H or S-H takes the base branch, and a molecule that is
-# genuinely both — an aminophenol — is the case the `branch` argument exists for.
+# Nitrogen is excluded: "the pKa of ethylamine" means its conjugate acid (10.7), not its N-H acidity
+# (~36), and the same holds for amides and anilines. An aminophenol is what the `branch` argument is
+# for.
 _ACIDIC_HETEROATOMS = (8, 16)  # O, S
 
 
 def _acid_or_base(smiles: str) -> Literal["acid", "base"]:
     """Which equilibrium to compute when the caller did not say.
 
-    Acid whenever a proton sits on O or S — the pKa a chemist means by "the pKa" of a carboxylic
-    acid, a phenol or a thiol. Base for anything else carrying nitrogen, which covers both pyridine
-    (no N-H at all) and ethylamine (N-H, but 10.7 is its *conjugate acid's* number, not its N-H
-    acidity at ~36).
-
-    **Oxygen and sulfur are deliberately not a base branch.** CREST will happily protonate an ether
-    or a ketone and rank the protomers, and the result would be a confident pKaH for a species that
-    is not protonated at any pH a chemist works at. A caller who genuinely wants that number asks
-    for it explicitly.
+    Acid whenever a proton sits on O or S (carboxylic acids, phenols, thiols); base for anything
+    else carrying nitrogen (pyridine, ethylamine). Oxygen and sulfur never take the base branch: a
+    pKaH for a protonated ether or ketone is irrelevant at any working pH, so a caller must ask for
+    it explicitly.
     """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -614,9 +511,8 @@ def _acid_or_base(smiles: str) -> Literal["acid", "base"]:
 def _macrostate_hartree(payload: EnsemblePayload, temperature_k: float) -> float:
     """One ensemble's free energy in Hartree: its lowest member plus the sum over the rest.
 
-    The whole member list, not the truncated one a `ConformerEnsemble` reports — a macrostate is the
-    sum over everything that carries population, and dropping the tail biases the side with more
-    accessible states, which is systematically the anion.
+    Over every member, not the truncated list: dropping the tail biases the side with more
+    accessible states, systematically the anion.
     """
     lowest = min(member.energy_hartree for member in payload.members)
     relative = [(member.energy_hartree - lowest) * HARTREE_TO_KCAL for member in payload.members]
@@ -628,13 +524,9 @@ def _macrostate_hartree(payload: EnsemblePayload, temperature_k: float) -> float
 def _aryl_protonation(site_smiles: str | None) -> bool | None:
     """Whether a protonated nitrogen is aromatic or aryl-attached; None where it cannot be read.
 
-    The one class boundary this composite still has to police, and it is physics rather than
-    enumeration — which is why CREST does not remove it. Over 13 reference aliphatic amines the
-    computed basicity correlates with the measured pKa at Spearman **-0.17**: no ranking ability at
-    all. The cause is the continuum solvent, since aqueous aliphatic amine basicity is set by how
-    many hydrogen bonds the ammonium ion donates to water, and that is not a thing ALPB can see.
-    Aromatic and aryl nitrogen is dominated instead by delocalisation into the ring, which GFN2 does
-    capture.
+    Computed basicity of aliphatic amines does not rank with measured pKa, because aqueous ammonium
+    basicity is set by hydrogen bonding to water, which ALPB cannot see. Aromatic and aryl nitrogen
+    is dominated by delocalisation, which GFN2 captures.
     """
     if site_smiles is None:
         return None
@@ -655,14 +547,10 @@ def _aryl_protonation(site_smiles: str | None) -> bool | None:
 def _off_domain_anion(site_smiles: str) -> str | None:
     """The element a deprotonation landed on when it is one the calibration was not fitted on.
 
-    The acid reference set is **O-H and S-H only**, so a winning deprotomer at carbon or nitrogen is
-    an extrapolation and says so. Both are real answers to "which proton is most acidic" and wrong
-    answers to "what is its pKa in water" if quoted unqualified: CREST ranks every site including
-    C-H, and an N-H acid (an imide, a sulfonamide) is a class the linear map has never seen.
-
-    Read off the atom carrying the charge rather than matched against the string, because a
-    substring test cannot tell `[CH2-]` from `[Cl-]` or from a bracketed carbon that is not the
-    anion. Returns `None` for the fitted case and for a site that cannot be read.
+    The acid reference set is O-H and S-H only, so a winning deprotomer at C or N is an
+    extrapolation and is labelled as one. Read off the atom carrying the charge, since a substring
+    test cannot tell `[CH2-]` from `[Cl-]`. Returns `None` for the fitted case and for an unreadable
+    site.
     """
     mol = Chem.MolFromSmiles(site_smiles)
     if mol is None:
@@ -688,23 +576,15 @@ async def microstate_pka(
 ) -> MicrostatePka:
     """Predict a pKa from two sampled macrostates: the neutral's conformers and its microstates.
 
-    Two CREST searches and one subtraction. The neutral molecule's conformer ensemble gives the
-    protonated macrostate; `--deprotonate` (or `--protonate`) enumerates every site, optimises each
-    product and ranks them, giving the other. Each side is reduced to `-RT ln sum g exp(-E/RT)` over
-    everything it found, and the difference is mapped to a pKa by a calibration fitted through this
-    same pipeline.
+    Two CREST searches and one subtraction: the neutral's conformer ensemble gives one macrostate,
+    `--deprotonate` (or `--protonate`) the other. Each is reduced to `-RT ln sum g exp(-E/RT)` and
+    the difference mapped to a pKa by a calibration fitted through this same pipeline. A composite
+    because its key would name the microstate the search settles on; both searches are cached
+    primitives.
 
-    **Why this is a composite here rather than a tool on the server.** Its key would have to name
-    the microstate the deprotonation search settles on, which is an *output* — the structural
-    giveaway that a calculation is a loop with state and belongs to whoever orchestrates it. Both
-    searches underneath are keyed primitives, so the expensive halves are cached separately: asking
-    about the same molecule at another temperature, or asking for its conformer ensemble on its own,
-    is arithmetic over rows that already exist.
-
-    **What it is not.** A macroscopic aqueous pKa of one ionisable centre, at the semiempirical
-    level, in a continuum solvent. Not a microscopic pKa per site (the ranking of sites is reported,
-    the individual constants are not), not a polyprotic titration curve, and not a number to put in
-    a specification — quote the uncertainty, which is the fit's own standard error.
+    A macroscopic aqueous pKa of one ionisable centre, semiempirical, in a continuum solvent — not
+    per-site microscopic pKas, not a titration curve, not a specification number. Quote the fit's
+    standard error.
     """
     canonical = require_canonical_smiles(smiles)
     chosen: Literal["acid", "base"] = _acid_or_base(canonical) if branch == "auto" else branch
@@ -795,9 +675,8 @@ def _pka_warnings(
 ) -> list[str]:
     """Everything a reader has to know before using the number, gathered in one place.
 
-    Each of these is a case where the arithmetic succeeds and the answer means less than it looks
-    like it does — which is exactly the class that has to be *carried on the result* rather than
-    left in a docstring nobody reads at the point of use.
+    Each is a case where the arithmetic succeeds but the answer means less than it looks, so it is
+    carried on the result.
     """
     warnings: list[str] = []
     if branch == "base":
@@ -862,17 +741,9 @@ def _ordered(
 ) -> tuple[tuple[str, Structure], tuple[str, Structure]]:
     """The pair in a canonical order, so A-with-B and B-with-A are one calculation.
 
-    The interaction of two molecules is one physical quantity, but the starting arrangement is not
-    symmetric in its arguments: `combine_structures` holds the first monomer at the origin and
-    offsets the second along +x, so swapping them negates the intermolecular vector while leaving
-    each monomer's own orientation alone. That is a *different* starting geometry, and it would key
-    to a different cache entry — paying twice, at minutes per search, for the same answer.
-
-    **Each molecule travels with its geometry**, which is why this takes pairs rather than two
-    SMILES. Once a caller may name the starting geometries
-    (D-2026-08-21-a-geometry-is-an-address-not-a-payload), sorting the names while leaving the
-    structures in argument order would pair each monomer with the *other* one's conformer — a
-    calculation about neither molecule, reported as being about both.
+    `combine_structures` places the first monomer at the origin and offsets the second along +x, so
+    order changes the starting geometry and the cache key. Each molecule travels with its geometry,
+    so sorting cannot pair a monomer with the other one's conformer.
     """
     return (first, second) if first[0] <= second[0] else (second, first)
 
@@ -889,20 +760,12 @@ async def interaction(
 ) -> InteractionResult:
     """Search the binding modes of two molecules and difference the relaxed species.
 
-    The interaction energy is computed the only way that means anything: the complex at its
-    optimized binding mode, minus each monomer optimized on its own. That deliberately includes the
-    deformation cost of binding, which is part of the interaction and is what a "rigid monomer"
-    definition leaves out.
+    The complex at its optimized binding mode minus each monomer optimized alone, so the deformation
+    cost of binding is included. Five cached calls and no composite key: two monomer relaxations,
+    the binding-mode search, and one relaxation of the chosen mode; the pair is canonicalized first.
 
-    Five cached calls and no composite key: two monomer relaxations (shared with every other
-    question about those molecules), the binding-mode search, and one relaxation of the mode it
-    picked. The pair is canonicalized first, so either argument order reaches the same entries.
-
-    Three limits belong with every number this produces. **It is an energy, not a free energy** —
-    association costs entropy and that term is absent, so a complex with a favourable interaction
-    energy can be entirely unbound at room temperature. **The search is stochastic**, so a binding
-    mode that was not sampled cannot be reported. **It is one pair, in a continuum**: no bulk, no
-    competing solvent molecules, no stoichiometry beyond two.
+    Limits: it is an energy, not a free energy (association entropy is absent); the search is
+    stochastic; it is one pair in a continuum.
     """
     # An ion pair in vacuum is the pc-03 defect as a binding energy: two bare opposite charges
     # attract by hundreds of kcal/mol there and by a few in solution.
@@ -920,9 +783,8 @@ async def interaction(
     for structure in (structure_a, structure_b):
         relaxed, _ = await relax(store, structure, solvent, run=run)
         monomers.append(relaxed)
-    # The separation between the two monomers' bounding spheres is the server's own default: it is
-    # only a starting point — the wall potential and the search decide where they end up — and it
-    # belongs to the geometry builder rather than to this orchestration.
+    # The monomer separation is the server's default: only a starting point that the wall potential
+    # and search move.
     combined = Structure.model_validate(
         await run(
             remote_call(
@@ -935,9 +797,8 @@ async def interaction(
             f"starting complex geometry for {smiles_a} and {smiles_b}",
         )
     )
-    # Deliberately not `kept`: this is the *starting* arrangement the search is about to discard,
-    # and no result reports its address. The geometry a caller can name is the relaxed binding mode
-    # below, which `relax` keeps.
+    # Not `kept`: this starting arrangement is discarded by the search; the relaxed binding mode
+    # below is the geometry callers can name.
     payload, _ = await run(
         cached_remote(
             store,
@@ -988,14 +849,9 @@ def _composition(smiles: str) -> tuple[Counter[str], int]:
 def check_balance(reactants: list[str], products: list[str]) -> None:
     """Raise unless the equation conserves atoms and charge (gate G4).
 
-    An unbalanced equation produces a difference that includes whatever atoms the two sides do not
-    share — a number that is meaningless rather than merely imprecise, and one that looks entirely
-    ordinary. Named rather than just detected: the message says which element is short and by how
-    much, because the usual cause is a forgotten water or proton and that is immediately fixable
-    once stated.
-
-    Local, and it should be: it is a graph property with no engine behind it, and it is what stops
-    a request before any remote call is made.
+    An unbalanced difference is meaningless yet looks ordinary. The message names which element is
+    short and by how much (usually a forgotten water or proton). Local, so it stops a request before
+    any remote call.
     """
     if not reactants or not products:
         raise ValueError("a reaction needs at least one reactant and one product")
@@ -1030,13 +886,10 @@ def check_balance(reactants: list[str], products: list[str]) -> None:
 def ionic_species(species: Sequence[str]) -> list[str]:
     """The species in `species` that are, or contain, a free ion — in first-seen order.
 
-    A species is ionic when any of its dot-separated fragments carries a net formal charge: a bare
-    ion (`O=C([O-])[O-]`) and a salt written as its ions (`[Na+].[Cl-]`) both are. A single fragment
-    whose charges cancel is **not**, and that exemption is deliberate rather than an oversight:
-    nitro groups, N-oxides, azides and diazo compounds are neutral molecules conventionally written
-    with separated formal charges (`C[N+](=O)[O-]`), and refusing them would refuse the energetic
-    functional groups a thermal-hazard screen most needs. The price is that a zwitterion drawn as
-    one is not caught either; nothing in a SMILES distinguishes the two.
+    A species is ionic when any dot-separated fragment carries a net formal charge (`O=C([O-])[O-]`,
+    `[Na+].[Cl-]`). A fragment whose charges cancel is not: nitro groups, N-oxides, azides and diazo
+    compounds are neutral molecules a thermal-hazard screen needs. A zwitterion is therefore not
+    caught either.
     """
     found: list[str] = []
     for smiles in dict.fromkeys(species):
@@ -1051,14 +904,9 @@ def ionic_species(species: Sequence[str]) -> list[str]:
 def require_solvent_for_ions(species: Sequence[str], solvent: str | None) -> None:
     """Refuse a gas-phase energy difference over free ions, before anything is computed.
 
-    Found live (probe pc-03): a TFA/carbonate neutralisation run with `solvent=None` came back as
-    ΔE ≈ −185 kcal/mol and was reported to a chemist as "exothermic enough to matter at scale". In
-    the gas phase GFN2-xTB treats each ion as isolated in vacuum, so the difference is dominated by
-    unscreened charge localisation — a dianion accepting a proton is worth hundreds of kcal/mol
-    there and a few in water. The number is not imprecise, it describes a different physical
-    situation, and this repository refuses rather than approximates. Charge *balance* is
-    `check_balance`'s and holds here; it is exactly what let this one through, since both sides
-    carried −2.
+    In the gas phase GFN2-xTB treats each ion as isolated in vacuum, so differences are dominated by
+    unscreened charge localisation (hundreds of kcal/mol that are a few in water) — a different
+    physical situation, not an imprecise one. Charge balance (`check_balance`) does not catch this.
 
     Raises:
         ValueError: `solvent` is None and some species is ionic (`ionic_species`). The message names
@@ -1080,9 +928,8 @@ def require_solvent_for_ions(species: Sequence[str], solvent: str | None) -> Non
 def solvated_ion_caveat(species: Sequence[str]) -> str | None:
     """The warning every energy difference over ions carries once a solvent has let it run.
 
-    One sentence for every composite that differences species (a reaction, a species ranking, an
-    interaction), because `require_solvent_for_ions` is one rule and the caveat is its other half:
-    the refusal is what happens without a continuum, this is what the continuum still leaves.
+    The other half of `require_solvent_for_ions`: what the continuum still leaves uncertain. Shared
+    by every composite that differences species.
     """
     ions = ionic_species(species)
     if not ions:
@@ -1099,11 +946,8 @@ def media_with_gas_reference(
 ) -> tuple[list[str | None], str | None]:
     """The media an across-solvents screen runs in: the gas phase first, unless an ion forbids it.
 
-    Both screens (`solvent_comparison` over a reaction, `species_solvent_comparison` over a species
-    set) prepend the gas phase as a reference, and over ions that reference is exactly the number
-    `require_solvent_for_ions` refuses. Leaving it out keeps the screen — which is solution against
-    solution — answerable instead of failing on its reference, and the second value is the warning
-    that says the row is missing and why. One function so the two screens cannot disagree.
+    Over ions the gas reference is what `require_solvent_for_ions` refuses, so it is left out and
+    the second value is the warning saying so. One function so both screens agree.
     """
     if ionic_species(species):
         return list(solvents), (
@@ -1118,10 +962,8 @@ def _checked_symmetry_numbers(
 ) -> dict[str, int]:
     """Validate a caller's sigma map against the equation it claims to describe.
 
-    A key that names no species in the equation is a typo — most often a differently written SMILES
-    for a species that *is* there. Left unchecked it would look exactly like an omission, and the
-    caller would be told their symmetry number is missing while staring at the line where they
-    passed it.
+    A key naming no species in the equation is a typo (often a differently written SMILES) and is
+    refused rather than treated as an omission.
     """
     if not symmetry_numbers:
         return {}
@@ -1147,13 +989,9 @@ async def _species_energy(
 ) -> SpeciesEnergy:
     """Optimize one species and, above `quick`, run its Hessian.
 
-    Multiplicity comes from the SMILES' own radical electrons (`radical_multiplicity`), so a
-    homolysis — the reaction whose whole point is that one side is open-shell — needs no extra
-    argument to be computable.
-
-    `symmetry_number` is this species' sigma, or None when the caller did not state one. The
-    thermochemistry settings are specialized here rather than handed in ready-made so that the
-    stated value and the value actually used cannot disagree.
+    Multiplicity comes from the SMILES' radical electrons (`radical_multiplicity`).
+    `symmetry_number` is this species' sigma or None when unstated; the thermochemistry settings are
+    specialized here so the stated and used values cannot disagree.
     """
     structure = await embed(smiles, run=run)
     ensemble_correction = 0.0
@@ -1242,28 +1080,14 @@ async def reaction_energy(
 ) -> ReactionEnergyResult:
     """Compute the energetics of a balanced reaction, one entry per stoichiometric equivalent.
 
-    Pure composition — this contributed *no* primitive to the server, because a reaction energy is a
-    subtraction over per-species optimizations and Hessians that are already keyed individually. A
-    second reaction sharing a species reuses it, and there is deliberately no reaction-level cache
-    entry: it could never be hit by anything the per-species entries miss.
+    Pure composition over per-species optimizations and Hessians, each cached; there is no
+    reaction-level cache entry. Enforced: balance; identical treatment of every species (settings,
+    solvent, level); and a stated rotational symmetry number per species, since sigma shifts entropy
+    by R ln(sigma) and does not cancel — with any sigma unstated, ΔE and ΔH are reported and ΔG is
+    withheld with a warning.
 
-    Three disciplines are enforced here rather than trusted. **Balance** — an unbalanced equation is
-    rejected. **Same treatment on both sides** — every species is optimized with the same settings,
-    in the same solvent, at the same level; mixing an optimized product with an unoptimized reactant
-    is the other way a reaction energy silently becomes fiction. **A rotational symmetry number is
-    stated or ΔG is not reported** — sigma shifts a species' entropy by exactly R ln(sigma), and
-    that does *not* cancel across a balanced equation (any hydrogenation consumes H2; anything
-    aromatic consumes or makes benzene), so a reaction with any species' sigma unstated reports ΔE
-    and ΔH and withholds ΔG with a warning naming the species.
-
-    **The ΔG is quoted at the standard state of the medium it was computed in**, which `solvent`
-    decides and `standard_state` records: 1 atm in the gas phase, 1 mol/L in solution. That matters
-    only when the equation changes the number of molecules — the term is 1.894·Δn kcal/mol at
-    298.15 K, a factor of 24.47 in K per unit of Δn — and it cancels exactly for Δn = 0. **This
-    changed published numbers**
-    (`D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity`): every
-    solution ΔG used to be the 1 atm one, so every association, dissociation and BDFE ran with
-    that offset and nothing said so.
+    ΔG is quoted at the medium's standard state (`standard_state`): 1 atm in the gas phase, 1 mol/L
+    in solution. This matters only for Δn ≠ 0: 1.894·Δn kcal/mol at 298.15 K.
 
     Args:
         store: The calculation store; every species is computed once, ever.
@@ -1306,18 +1130,15 @@ async def reaction_energy(
                 store, smiles, role, solvent, thermo, sigmas.get(smiles), level, run
             )
         )
-    # "not a minimum" covers two findings and the message no longer picks one of them: a saddle
-    # point shows an imaginary mode, while a geometry that is not stationary at all often shows
-    # nothing in its frequencies and still has a zero-point energy that is quietly too low.
+    # "not a minimum" covers both a saddle (imaginary mode) and a non-stationary geometry (often no
+    # imaginary mode, but a zero-point energy that is too low).
     warnings = [
         f"{entry.smiles} is not a minimum (an imaginary mode, or a geometry that is not a "
         "stationary point): its free energy is not a free energy"
         for entry in species
         if entry.is_minimum is False
     ]
-    # Every level, not just `standard`: the caveat is about the *energies*, which every level
-    # differences, so gating it on one level dropped it from exactly the `thorough` homolysis a user
-    # paid the most for.
+    # Every level: the open-shell caveat is about the energies, which every level differences.
     if any(entry.multiplicity > 1 for entry in species):
         warnings.append(
             "open-shell species present: unrestricted GFN2 energies are less reliable "
@@ -1351,20 +1172,14 @@ async def reaction_energy(
     return ReactionEnergyResult(
         reactants=reactants,
         products=products,
-        # **The server's method, not this deployment's configured name.** `settings.xtb_method`
-        # describes a calculation this process no longer runs: the physics is `Chemclaw3-mcp`'s
-        # since `D-2026-08-16-the-physics-leaves-the-cache-stays`, and a deployment whose env says
-        # `GFN2-xTB` while the server runs GFN1 published a `ReactionEnergyResult` — a Temporal wire
-        # type, recorded into the knowledge graph — asserting the wrong level of theory. The
-        # neighbouring composites (`scan_profile`, `solvent_comparison`) already read it off the
-        # result; this one did not. The fallback is for histories written before `SpeciesEnergy`
-        # carried the field, never for a live run.
+        # The server's method, not `settings.xtb_method`: the calculation runs in `Chemclaw3-mcp`,
+        # and this wire type is recorded into the knowledge graph. The fallback is for old histories
+        # only.
         method=species[0].method or settings.xtb_method,
         solvent=solvent,
         temperature_k=temperature,
-        # Read from the one rule in `science/calc/thermo.py` rather than restated here, so the
-        # state this result is labelled with is the state its species' partition functions were
-        # evaluated at. A solution ΔG is the 1 mol/L one; ΔE and ΔH do not depend on it.
+        # From `science/calc/thermo.py`'s one rule, so the label matches the state the partition
+        # functions were evaluated at. ΔE and ΔH do not depend on it.
         standard_state=standard_state_for(solvent),
         level=level,
         delta_e_kcal=round(delta_e, 2),
@@ -1387,30 +1202,14 @@ async def reaction_energy(
 async def _attempt(awaitable: Awaitable[_Result]) -> _Result | ValueError:
     """Await one item of a screen, handing back its refusal instead of raising it.
 
-    **The boundary is `ValueError` and nothing wider, and that is the whole design.** `ValueError`
-    is this repository's "this input is bad" contract — `ChemclawError` and `CalcToolError` (the
-    server refusing) are both one, and `durable/publish.py` registers the family non-retryable
-    because the identical call fails identically. So it is exactly the failure that belongs to one
-    item and that no retry can fix. An outage is the opposite claim: `CalcServerError` and
-    `CalcBusyError` are `SubsystemUnavailableError`s, not `ValueError`s, and they propagate so the
-    activity is retried rather than a pod restart being reported as N chemistry failures.
-    Cancellation is a `BaseException` and propagates too.
+    The boundary is `ValueError`, this repository's "bad input" contract (`ChemclawError` and
+    `CalcToolError` included), which no retry can fix. Outages (`CalcServerError`, `CalcBusyError`)
+    and cancellation propagate so the activity is retried. `CalcTimeBudgetError` is a refusal that
+    `_cause` records as a `time_budget` stop.
 
-    **What the class carries is wider than bad input.** The calc server's inline time budget stops
-    a calculation by load rather than by input; it arrives as `CalcTimeBudgetError`, still a
-    refusal, and `_cause` records it as a `time_budget` stop rather than a refused item
-    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`). A refused credential and a contract
-    skew arrive as `CalcToolError` too, but those fail every item alike and reach the caller as the
-    all-failed refusal.
-
-    **A payload that does not validate is not an item's refusal, and it propagates.** pydantic's
-    `ValidationError` is a `ValueError`, so a server answer that the client's model rejects — a
-    contract skew that only some inputs reach — would otherwise be recorded as one medium
-    "refused" and the job would complete; before the per-item boundary the same skew failed the
-    job loudly, and that is what it does again (`ValidationError` is registered non-retryable in
-    `durable/publish.py`). A plain `ValueError` that is not a `ChemclawError` is still one item's
-    answer, because many domain refusals here are plain `ValueError`, but it is logged with its
-    traceback, since a data-dependent bug arrives in exactly that shape.
+    pydantic's `ValidationError` propagates: a server payload the client's model rejects is a
+    contract skew that must fail the job, not one item. A plain `ValueError` is still one item's
+    answer but is logged with its traceback, since a data-dependent bug looks the same.
     """
     try:
         return await awaitable
@@ -1425,16 +1224,10 @@ async def _attempt(awaitable: Awaitable[_Result]) -> _Result | ValueError:
 async def _every_medium(branches: Sequence[Awaitable[_Result]]) -> list[_Result]:
     """Run a screen's media together, and stop the rest the moment one of them fails the screen.
 
-    Each branch already turns a refusal into a value (`_attempt`), so what escapes one is an outage
-    or a contract fault — and that fails the whole activity, which Temporal then retries. A bare
-    `asyncio.gather` re-raises the first such error but leaves every sibling running: measured on
-    the fake server, a five-solvent screen whose first medium hit a full pod went on to make five
-    more relaxations for the other media after the screen had failed, against one (already in
-    flight) with this — and a retry stacks fresh work on top of work nobody will read.
-
-    So the siblings are cancelled, and awaited, before the error is re-raised. The error itself is
-    the first one, unchanged — not an `ExceptionGroup`, which is what `asyncio.TaskGroup` would
-    raise and what `durable/publish.py`'s by-name retry classification would not recognise.
+    What escapes a branch is an outage or contract fault, which fails the activity. Unlike a bare
+    `asyncio.gather`, siblings are cancelled and awaited before the first error is re-raised
+    unchanged (not an `ExceptionGroup`, which `durable/publish.py`'s retry classification would not
+    recognise).
     """
     tasks = [asyncio.ensure_future(branch) for branch in branches]
     try:
@@ -1453,10 +1246,8 @@ def _cause(refusal: ValueError) -> FailureCause:
 def _refusal(causes: Sequence[FailureCause]) -> type[ValueError]:
     """The class a screen refuses with when nothing it was asked for could be answered.
 
-    `CalcTimeBudgetError` when every failed item was stopped by the server's clock, so a caller —
-    a species screen reading one medium's ranking, or a chemist reading a job — sees a stop rather
-    than a refused input; a plain `ValueError` as soon as one input was refused, because then no
-    amount of waiting completes the set. Both are non-retryable.
+    `CalcTimeBudgetError` when every failure was a stop by the server's clock; a plain `ValueError`
+    as soon as one input was refused. Both are non-retryable.
     """
     if causes and all(cause == "time_budget" for cause in causes):
         return CalcTimeBudgetError
@@ -1476,9 +1267,8 @@ def _medium(solvent: str | None) -> str:
 def lost_the_comparison(failed: Sequence[FailedMedium], computed: int) -> bool:
     """Whether failures left a screen with fewer than two media, so nothing was compared.
 
-    Only a *failure* can do that. A screen asked for one medium and nothing else — one solvent over
-    an ionic set, which has no gas reference — never had a comparison to lose, and says what it
-    always said. Public because the job summary asks the same question of the finished result.
+    Only a failure can do that; a screen asked for one medium never had a comparison. Public because
+    the job summary asks the same question.
     """
     return bool(failed) and computed < 2
 
@@ -1486,15 +1276,13 @@ def lost_the_comparison(failed: Sequence[FailedMedium], computed: int) -> bool:
 def _media_warnings(failed: Sequence[FailedMedium], computed: int) -> list[str]:
     """What a solvent screen must say about the media it lost, and about a comparison they cost.
 
-    A spread over one medium is zero by construction, so when failures leave one medium the
-    "does not distinguish them" verdict would be about a comparison that never happened; the caller
-    withholds it (`lost_the_comparison`) and this says there is nothing to compare instead.
+    A spread over one medium is zero by construction, so the caller withholds the verdict
+    (`lost_the_comparison`) and this says there is nothing to compare.
     """
     warnings: list[str] = []
     if failed:
-        # Names only; each reason is under `failed`. A reason is the server's own sentence, and a
-        # species screen's nests a whole ranking refusal, so joining them here made one warning of
-        # unbounded length — and every warning becomes a published flag row.
+        # Names only; reasons are under `failed`, since joining them makes an unbounded warning and
+        # every warning becomes a published flag row.
         warnings.append(
             f"{len(failed)} of {computed + len(failed)} media could not be computed and are not in "
             "this comparison: "
@@ -1522,25 +1310,14 @@ async def solvent_comparison(
 ) -> SolventComparisonResult:
     """Rank solvents by how far they push the same reaction toward products.
 
-    Includes the gas phase as a reference point, because "the solvent barely matters here" is a real
-    and useful answer and it is invisible without one — **except over ions**, where the gas-phase
-    row is a number `require_solvent_for_ions` refuses to produce, so it is left out and a warning
-    says why rather than the whole screen failing on its reference.
-
-    **Bounded fan-out, and the bound defaults to 1** — which is the serial loop it replaces. The
-    media are independent (each is its own cache key, so no branch recomputes another's work), but a
-    branch here is a remote SCF and the server sizes itself to its own machine: six solvents at once
-    is six calculations each expecting every core of one pod. So the fan-out is available and off,
-    and `calc_screen_max_parallel` says what raising it is paired with.
+    Includes the gas phase as a reference, so "the solvent barely matters" is visible — except over
+    ions, where it is left out with a warning. Fan-out is bounded by `calc_screen_max_parallel`,
+    default 1: each branch is a remote SCF expecting a whole pod's cores.
     """
     if not solvents:
         raise ValueError("give at least one solvent to compare")
-    # `calc_screen_max_parallel` bounds only how many media run at once, not how many run in total
-    # (every medium in `solvents` is eventually run via the `gather` below) — the analogue of
-    # `rank_species_across_solvents`'s species x media multiplication, checked the same way here.
-    # The equation's own checks, once and before the fan-out: every medium runs the same equation,
-    # so an unbalanced one or a mistyped sigma key would otherwise be refused once per medium and
-    # reported as N copies of one sentence. `reaction_energy` still runs them itself.
+    # The equation's own checks run once before the fan-out, so a bad equation is refused once
+    # rather than once per medium; `reaction_energy` still runs them itself.
     check_balance(reactants, products)
     _checked_symmetry_numbers(symmetry_numbers, set(reactants) | set(products))
     media, no_reference = media_with_gas_reference([*reactants, *products], solvents)
@@ -1555,16 +1332,14 @@ async def solvent_comparison(
     async def one(solvent: str | None) -> ReactionEnergyResult | ValueError:
         """One medium, under the fan-out bound, reporting progress prefixed with its own name.
 
-        Returns the medium's refusal rather than raising it (`_attempt`), so one medium the
-        calculation cannot do is reported beside the others instead of failing the screen.
+        Returns the medium's refusal (`_attempt`), so it is reported beside the others.
         """
         label = _medium(solvent)
 
         def relay(line: str) -> None:
             """Prefix the inner reaction's progress with which medium it is running in.
 
-            What makes a parallel loop readable: interleaved lines stay attributable to the branch
-            that wrote them.
+            Keeps interleaved parallel lines attributable.
             """
             progress(f"{label}: {line}")
 
@@ -1618,11 +1393,9 @@ async def solvent_comparison(
     if no_reference:
         warnings.append(no_reference)
     warnings.extend(_media_warnings(failed, len(results)))
-    # **The gas reference and the solution rows are in different standard states**, because each is
-    # in the convention its own phase uses. Solvent against solvent — what this screen ranks — is
-    # like against like and needs no caveat. The gas-to-solution gap does: for Δn != 0 it carries
-    # 1.894·Δn kcal/mol of reference state on top of the solvation, and a reader differencing the
-    # two columns without being told would read that as a solvent effect.
+    # The gas reference (1 atm) and solution rows (1 mol/L) are in different standard states.
+    # Solvent against solvent needs no caveat, but for Δn ≠ 0 the gas-to-solution gap includes
+    # 1.894·Δn kcal/mol of reference state, which a reader would misread as a solvent effect.
     delta_n = len(products) - len(reactants)
     # Both phases present, not just the gas row: a screen whose every solvent failed has no
     # solution row for this sentence to be about.
@@ -1657,12 +1430,8 @@ async def solvent_comparison(
 
 # --- ensembles refined, averaged and ranked ---------------------------------------------------
 #
-# **The fan-out lives here and not in a template, and that placement is the whole design.** A
-# template is an ordered step list with deliberately no loops, no conditionals and no expressions,
-# and the agent's own loop is capped at `harness_max_loop_iterations`. A tautomer ratio over eight
-# species, or a bond survey over twenty bonds, fits neither — so the loop is a composite and the
-# sequence around it is a template. Everything below is one of those loops, and every one of them
-# counts its cost before it starts (`science/calc/budget.py`).
+# Fan-out loops live here rather than in templates: a template has no loops and the agent's loop is
+# iteration-capped. Every loop below counts its cost before it starts (`science/calc/budget.py`).
 
 
 async def refined_ensemble(
@@ -1678,29 +1447,14 @@ async def refined_ensemble(
 ) -> RefinedEnsemble:
     """Re-weight a conformer ensemble by free energy instead of by electronic energy.
 
-    D-101 recorded that this system does not do this, and gave the reason: "one Hessian per member,
-    half an hour each at 76 atoms". That reason has not changed, so this does not replace
-    `conformer_ensemble` — it is the shape for when a caller decides to pay, bounded to the top
-    `ensemble_refine_top_n` members by electronic energy.
-
-    **What the refinement buys.** Weighting by E assumes every conformer has the same zero-point,
-    thermal and entropic contribution, which is exactly wrong for the case a conformer search is run
-    on: a compact hydrogen-bonded fold has a low electronic energy *and* a stiff, ordered set of low
-    modes, so E-weighting over-populates it. G-weighting is the distribution the populations are
-    supposed to be.
-
-    **What it costs in honesty.** Refining five of forty-seven and calling the result "the ensemble"
-    is the error `ensemble_from_members` already refuses for `max_members`, and it is worse here
-    because a free energy looks more careful than an electronic one. So the result carries
-    `refined_population_covered` — the E-weighted population fraction the refined members account
-    for — and warns below a threshold rather than leaving a reader to notice.
+    Costs one Hessian per member, so it is opt-in and bounded to the top `ensemble_refine_top_n`
+    members by electronic energy. E-weighting assumes equal zero-point, thermal and entropic terms,
+    which over-populates compact hydrogen-bonded folds; G-weighting gives the intended distribution.
+    The result carries `refined_population_covered` (the E-weighted share the refined members
+    account for) and warns below `_REFINED_COVERAGE_WARNING`.
     """
-    # **Counted before the search, not after it.** This used to await `conformer_ensemble` first
-    # and then check the budget, which is the one thing `budget.py` exists to prevent: a CREST
-    # search is minutes to hours (measured, 1142 s at 33 atoms), so the fence was reached with the
-    # single most expensive call in the bundle already paid. The ceiling has to be read against the
-    # work the caller *asked for*, which is knowable here — the search plus a relax and a Hessian
-    # per conformer kept — rather than against the count the search happens to return.
+    # Counted before the search: the budget is read against the work requested (the search plus a
+    # relax and Hessian per kept conformer), not after the most expensive call has been paid.
     keep = top_n or settings.ensemble_refine_top_n
     require_within_budget(
         estimate_units(1, level="thorough") + estimate_units(keep, level="standard"),
@@ -1788,25 +1542,16 @@ async def ensemble_property(
 ) -> EnsembleProperty:
     """Compute one property at every populated conformer and weight it by their populations.
 
-    The caveat under every other number in this system is that it describes **one** conformer —
-    whichever geometry was embedded. This is the composite that lifts it, and the lift is not
-    cosmetic: a dipole, a HOMO-LUMO gap and a Fukui ranking can all move by more between two
-    populated conformers of one molecule than between two different molecules.
+    Lifts the one-conformer caveat: a dipole, gap or Fukui ranking can differ more between
+    conformers of one molecule than between molecules. The answer carries a spread as well as a
+    mean; when the values scatter widely, the molecule has no single value at this temperature.
 
-    Which is why the answer carries a *spread* and not only a mean. When the values scatter more
-    than the difference the number is being used to argue, the honest report is that the molecule
-    does not have one value of this property at this temperature.
-
-    Per-atom properties (`fukui`, `charges`) are averaged atom by atom over the same populations,
-    which is the same arithmetic — `weighted_average` is called once per atom rather than once.
-    **Atoms are paired by index, never by position in the returned list**: a Fukui result is ranked
-    by susceptibility and truncated, so its order is a property of the conformer rather than of the
-    molecule. `_per_atom` carries the argument; this sentence used to claim the opposite.
+    Per-atom properties (`fukui`, `charges`) are averaged atom by atom, paired by atom index
+    (`_per_atom`).
     """
-    # `crest_max_members`, not `ensemble_refine_top_n`. That setting is documented as how many
-    # members get their own optimization *and Hessian*; a property average costs one single point
-    # per member and no Hessian, so borrowing it silently covered five of up to twenty members for
-    # the cheap composite. And counted before the search, for the reason `refined_ensemble` gives.
+    # `crest_max_members`, not `ensemble_refine_top_n` (which sizes Hessian work); a property
+    # average costs one single point per member. Counted before the search, as in
+    # `refined_ensemble`.
     keep = max_members or settings.crest_max_members
     require_within_budget(
         estimate_units(1, level="thorough") + keep,
@@ -1870,23 +1615,10 @@ def _per_atom(
 ) -> tuple[list[WeightedAtom], int]:
     """Average a per-atom property across conformers, pairing atoms by **index**.
 
-    **Not by list position, and the difference is a wrong answer rather than a rough one.** The
-    first version of this did `member[position]` over `enumerate(members[0])`, which is only correct
-    if every conformer returns its atoms in one order. `SiteReactivityResult` documents the
-    opposite in its own docstring: `sites` is *"ordered most-susceptible first by the index named in
-    `ranked_by`, and truncated to the most susceptible `len(sites)` of `total_atoms`"*. Ranked, and
-    cut. Two conformers of a floppy molecule rank their atoms differently — that is the entire
-    reason to average over an ensemble at all — so position *k* was a different atom in each, and
-    the mean was labelled with the first conformer's index.
-
-    The bug therefore fired hardest in exactly the case the composite exists for: had the ranking
-    not moved with geometry, `compute_fukui_at` and the `DEFERRED.md` row it closed would have had
-    no purpose. Truncation made it worse than a mispairing — conformers can carry different atom
-    *sets*, and a short list raised `IndexError`.
-
-    Atoms missing from any member are dropped rather than averaged over a subset, because a mean
-    over three of five conformers is not a population-weighted average and nothing downstream could
-    tell. The caller reports the count so a truncated ranking is visible instead of implied.
+    Never by list position: `SiteReactivityResult.sites` is ranked by susceptibility and truncated,
+    so position *k* is a different atom in each conformer, and conformers may carry different atom
+    sets. Atoms missing from any member are dropped rather than averaged over a subset; the caller
+    reports the count.
     """
     if not members:
         return [], 0
@@ -1908,8 +1640,7 @@ def _averaged(
 ) -> tuple[WeightedValue | None, list[WeightedAtom], int]:
     """Split one property out of each payload and weight it — scalar or per atom.
 
-    A `match` over the property name rather than a registry, because there are four of them and a
-    registry with four entries is indirection that hides what is being read off which model.
+    A `match` rather than a registry: four entries do not need indirection.
     """
     if prop == "fukui":
         sites = [SiteReactivityResult.model_validate(payload).sites for payload in payloads]
@@ -1955,19 +1686,10 @@ async def species_ranking(
 ) -> SpeciesDistribution:
     """Rank a set of *distinct species* by free energy and report their equilibrium populations.
 
-    One composite for three questions, because they are the same arithmetic over different species
-    sets: which tautomer dominates, which protonation microstate is present, which stereoisomer is
-    favoured. `kind` records which was asked — the number means something different in each, and a
-    reader must not have to infer it from the SMILES.
-
-    Each species goes through `_species_energy`, which is the engine every reaction energy already
-    uses: embed, optionally search its conformers, relax, and at `standard` or above take its
-    Hessian for a free energy. So a ranking and a reaction energy cannot disagree about what one
-    species' free energy is, and a species computed for one is a cache hit for the other.
-
-    **The set is the answer's universe, and it is not checked here.** A species that was not
-    enumerated was not ranked, so a distribution over an incomplete set is confident about the wrong
-    universe. `enumerated` carries the count the caller started from for exactly that reason.
+    One composite for tautomers, protonation microstates and stereoisomers; `kind` records which was
+    asked. Each species goes through `_species_energy`, as reaction energies do, so the two agree
+    and share cache entries. The set is the answer's universe and is not checked here; `enumerated`
+    carries the count the caller started from.
     """
     if not species:
         raise ValueError("a distribution needs at least one species")
@@ -1991,11 +1713,8 @@ async def species_ranking(
     causes: list[FailureCause] = []
     for index, (smiles, _) in enumerate(considered, start=1):
         progress(f"species {index}/{len(considered)}: {smiles}")
-        # **`stated.get(smiles)`, not a literal 1.** Passing 1 marked the number *stated*, so the
-        # machinery `reaction_energy` uses to withhold or flag an assumed sigma never ran here — and
-        # this composite ranks by the free energy that sigma shifts. `None` computes at sigma=1
-        # exactly as before but records that nobody said so, which is what makes the warning below
-        # possible.
+        # `stated.get(smiles)`, not a literal 1: `None` computes at sigma=1 but records it as
+        # unstated, so the warning below fires.
         outcome = await _attempt(
             _species_energy(
                 store, smiles, "reactant", solvent, thermo, stated.get(smiles), level, run
@@ -2008,14 +1727,9 @@ async def species_ranking(
         else:
             energies.append(outcome)
     if refused:
-        # **Refused rather than ranked over the rest, and only after every species was tried.** A
-        # population is normalised over the set, so dropping a form re-distributes its share over
-        # the survivors — the incomplete-universe error above, made by this function instead of by
-        # the enumeration. Trying the rest first is what makes the refusal useful: it names every
-        # form that cannot be computed, not only the first, and each one that could is now cached
-        # (D-011), so the rerun without the offenders pays for none of them again.
-        # `_refusal`'s rule: a stop on every failed form is named as one, so a species screen
-        # records the medium as stopped by the clock rather than refused.
+        # Refused rather than ranked over the rest, after every species was tried: dropping a form
+        # would redistribute its population. Trying all first names every failing form and caches
+        # the rest. Per `_refusal`, a set stopped entirely by the clock is named as a stop.
         raise _refusal(causes)(
             f"{len(refused)} of {len(considered)} species could not be computed, and a "
             "distribution over the rest would re-share their population among the forms that "
@@ -2047,12 +1761,9 @@ async def species_ranking(
         )
     unstated = sorted({energy.smiles for energy in energies if energy.symmetry_number is None})
     if unstated and use_gibbs:
-        # Warned rather than withheld, and the difference from `reaction_energy` is deliberate.
-        # There, an unstated sigma means no ΔG is reported at all, because ΔE and ΔH still answer
-        # the question. Here the free energy *is* the question — an E-only ranking is what `quick`
-        # already is — so downgrading silently would be its own wrong answer. sigma shifts G by
-        # exactly R·T·ln(sigma), ~0.41 kcal/mol per factor of two at 298 K, which is comparable to
-        # the tautomer gaps this job exists to resolve, so it is worth a sentence every time.
+        # Warned rather than withheld (unlike `reaction_energy`): here the free energy is the
+        # question. sigma shifts G by R·T·ln(sigma), ~0.41 kcal/mol per factor of two at 298 K —
+        # comparable to tautomer gaps.
         warnings.append(
             "no rotational symmetry number was given for "
             + ", ".join(unstated)
@@ -2063,10 +1774,8 @@ async def species_ranking(
             "12 = benzene) to correct it"
         )
     if len(species) > ceiling:
-        # `len(species) - ceiling`, not the reverse: this branch only runs when the set is *over*
-        # the ceiling, so the old expression was always negative and told a chemist that "-3
-        # species were not computed". And the cut is `species[:ceiling]` — first N in the order the
-        # caller passed them — so "lowest-priority" described a prioritisation that never happened.
+        # This branch runs only when the set exceeds the ceiling; the cut is the first N in caller
+        # order.
         warnings.append(
             f"{len(species)} species were enumerated and only the first {len(considered)} were "
             f"computed, in the order they were given; the populations describe those and not the "
@@ -2081,10 +1790,8 @@ async def species_ranking(
                 population=round(population, 4),
                 gibbs_free_energy_hartree=energy.gibbs_free_energy_hartree,
                 electronic_energy_hartree=energy.electronic_energy_hartree,
-                # Off the energy rather than hardcoded: this was a literal 0 beside
-                # `sampled=True`, which reads as "a search ran and found nothing", and the geometry
-                # of the dominant form was unreachable downstream — the one thing every other
-                # ensemble model in this bundle hoists an id for.
+                # The dominant form's geometry id, so it is reachable downstream like every other
+                # ensemble's.
                 structure_id=energy.structure_id,
                 conformers_found=energy.conformers_found,
             )
@@ -2122,21 +1829,11 @@ async def species_solvent_comparison(
 ) -> SpeciesSolventComparison:
     """Rank one species set in each of several media, and report how the ranking moves.
 
-    `species_ranking` answers in one medium, so "which tautomer dominates in water against toluene"
-    was one job per solvent and a comparison the caller assembled by hand. This is the fan-out, and
-    it is `solvent_comparison`'s shape applied to a distribution rather than to a reaction: the gas
-    phase is prepended as a reference (left out over ions, `media_with_gas_reference`), the media
-    run under the same bound, and the spread is checked against the method's uncertainty before
-    any of it is reported as a difference.
-
-    **This is the calculation implicit solvation is best at.** Every medium ranks the *same*
-    species — same formula, same atoms, same level — so the systematic error of the continuum model
-    largely cancels in the relative energies, which is not true of an absolute solvation energy.
-    Report the ordering and the swing; do not quote one medium's number on its own.
-
-    The budget is counted over the whole fan-out rather than per medium, because that is what the
-    caller is about to spend: `species x media` is the shape that surprises, and eight tautomers in
-    five solvents at `standard` is 120 remote primitives from a request that looks like one call.
+    `solvent_comparison`'s shape over a distribution: the gas phase prepended (left out over ions,
+    `media_with_gas_reference`), media under the same bound, and the spread checked against the
+    method's uncertainty. Implicit solvation does best here: the same species in every medium, so
+    the continuum's systematic error largely cancels. Report the ordering and swing, not one
+    medium's number alone. The budget counts the whole `species x media` fan-out.
     """
     if not solvents:
         raise ValueError("give at least one solvent to compare")
@@ -2157,9 +1854,8 @@ async def species_solvent_comparison(
     async def one(solvent: str | None) -> SpeciesDistribution | ValueError:
         """One medium, under the fan-out bound, with its progress attributed to its own branch.
 
-        Returns the medium's refusal rather than raising it (`_attempt`). `species_ranking` refuses
-        a medium where any species failed, so a medium is either whole or in `failed` — never a
-        distribution over part of the set.
+        Returns the medium's refusal (`_attempt`); `species_ranking` refuses a partial set, so a
+        medium is whole or in `failed`.
         """
         label = _medium(solvent)
 
@@ -2196,9 +1892,8 @@ async def species_solvent_comparison(
             + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
         )
 
-    # Keyed by SMILES rather than by position: `species_ranking` sorts its output by relative
-    # energy, so the same index is a different species in two media whenever the ranking reorders —
-    # which is the case this whole composite exists to detect.
+    # Keyed by SMILES, not position: `species_ranking` sorts by energy, so indices differ between
+    # media exactly when the ranking reorders.
     responses: list[SpeciesSolventResponse] = []
     for smiles, label in considered[: len(distributions[0].species)]:
         standings = [
@@ -2274,22 +1969,13 @@ async def bond_dissociation_survey(
 ) -> BondDissociationSurvey:
     """Compute the dissociation energy of every enumerated bond and rank them.
 
-    Each bond is one `reaction_energy` — parent on the left, its two fragments on the right — so
-    the arithmetic, the balance check and the open-shell handling are the ones already in use rather
-    than a second implementation. `radical_multiplicity` reads the explicit radical electrons the
-    enumeration wrote (`[CH3]`, `[H]`), which is what makes a homolysis computable from two SMILES
-    with no declared spin state.
+    Each bond is one `reaction_energy` (parent → two fragments), reusing its arithmetic, balance
+    check and open-shell handling; `radical_multiplicity` reads the fragments' explicit radicals.
 
-    Defaults to `level="quick"`: a survey is a *ranking*, the ordering is what it supports, and a
-    Hessian per fragment per bond multiplies a twenty-bond survey by three for a magnitude
-    semiempirical theory does not deliver anyway. Ask for `standard` when the question is one bond.
-
-    **The energies are ΔH (or ΔE at `quick`), and no symmetry number is asserted.** This composite
-    does no point-group detection, so it states none — sigma is wrong at 1 for most of what a
-    homolysis makes, and `RT ln(sigma_phenyl·sigma_H/sigma_benzene) = -1.06 kcal/mol` is the size
-    of it for benzene's C-H. ΔH does not depend on sigma, so the ranking is unaffected; the ΔG that
-    would be is withheld by `reaction_energy` and its warning is surfaced here rather than
-    swallowed. That is also why no bond dissociation *free* energy is reported.
+    Defaults to `level="quick"`: a survey supports a ranking, and a Hessian per fragment per bond
+    triples the cost for a magnitude semiempirical theory does not deliver. Energies are ΔH (ΔE at
+    `quick`); no symmetry number is asserted, so `reaction_energy` withholds ΔG and its warning is
+    surfaced. No bond dissociation free energy is reported.
     """
     if not cleavages:
         raise ValueError(f"no breakable bond was enumerated for {smiles}")
@@ -2298,13 +1984,9 @@ async def bond_dissociation_survey(
         f"a {len(cleavages)}-bond dissociation survey of {smiles}",
     )
 
-    # **The parent is the survey's input, not one of its items.** It is the left-hand side of every
-    # bond's reaction and a refusal is not cached, so a parent the server refuses was asked for —
-    # and refused — once per bond, each attempt possibly minutes of server time, and reported as N
-    # copies of one reason. So it is computed once here and allowed to fail the survey, since no
-    # bond can be answered without it. Through `_species_energy` with exactly the settings
-    # `reaction_energy` derives, so every bond then reads it as a cache hit; the survey tests pin
-    # that as one relaxation of the parent, which is what goes red if the two ever diverge.
+    # The parent is computed once here, with exactly the settings `reaction_energy` derives, so each
+    # bond reads it as a cache hit and a refused parent fails the survey once rather than once per
+    # bond.
     require_solvent_for_ions([smiles], solvent)
     temperature = temperature_k or settings.xtb_thermo_temperature_k
     progress(f"parent {smiles}")
@@ -2322,17 +2004,12 @@ async def bond_dissociation_survey(
     results: list[DissociatedBond] = []
     failed: list[FailedBond] = []
     methods: list[str] = []
-    # Every composed reaction's own caveats, deduplicated on the way out — the idiom
-    # `solvent_comparison` already uses over its fan-out. Without it a survey swallowed the
-    # unstated-sigma and open-shell warnings of every reaction it ran, which is what let a disarmed
-    # sigma control look like an absent one.
+    # Every composed reaction's caveats, deduplicated, so unstated-sigma and open-shell warnings
+    # surface.
     caveats: list[str] = []
     for index, (atoms, bond, fragments) in enumerate(cleavages, start=1):
         progress(f"bond {index}/{len(cleavages)} ({bond}) of {smiles}")
-        # Keyword arguments deliberately: `BondCleavageSpec`'s own docstring argues that a
-        # positional payload is one field-order change away from computing a different bond than
-        # the caller named, and seven positionals here — with the symmetry map in slot seven — is
-        # the same hazard one call up.
+        # Keyword arguments, so a field-order change cannot compute a different bond than named.
         outcome = await _attempt(
             reaction_energy(
                 store,
@@ -2341,15 +2018,8 @@ async def bond_dissociation_survey(
                 solvent=solvent,
                 temperature_k=temperature_k,
                 level=level,
-                # **No symmetry map, not a map of fabricated ones.** This passed
-                # `dict.fromkeys([smiles, *fragments], 1)`, which marked sigma *stated* for the
-                # parent and both fragments — so `reaction_energy`'s withhold-and-warn machinery
-                # never ran, and sigma=1 is wrong for most of what a homolysis produces (benzene 12,
-                # phenyl 2, methyl 6, ethane 6). It was harmless only because the ΔG is discarded
-                # below; the moment anything reads it, or this grows a BDFE, the control was
-                # already disarmed and would not have said so. `None` computes at sigma=1 exactly
-                # as before and records that nobody said so — the same fix `species_ranking`
-                # carries, now uniform across the three composites that share `_species_energy`.
+                # No symmetry map: sigma=1 is wrong for most homolysis products, and `None` records
+                # it as unstated so `reaction_energy`'s withhold-and-warn applies.
                 symmetry_numbers=None,
                 progress=no_progress,
                 run=run,
@@ -2405,13 +2075,7 @@ async def bond_dissociation_survey(
     )
     return BondDissociationSurvey(
         smiles=require_canonical_smiles(smiles),
-        # **The server's method, not this deployment's configured name** — the argument
-        # `reaction_energy` already carries, and this composite is on the same publication path.
-        # `settings.xtb_method` describes a calculation this process no longer runs, so a
-        # deployment whose env says `GFN2-xTB` while the server runs GFN1 published a
-        # `BondDissociationSurvey` — a Temporal wire type, recorded into the knowledge graph —
-        # asserting the wrong level of theory. The two sibling composites added alongside this one
-        # both read it off the result; this one alone regressed a fix already argued for.
+        # The server's method, not `settings.xtb_method`, since this survey is published.
         method=methods[0] or settings.xtb_method,
         solvent=solvent,
         temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
@@ -2447,36 +2111,23 @@ async def rotation_profile(
 ) -> RotationProfile:
     """Drive one torsion through a full period and report its rotamers and their barriers.
 
-    **A composite, and the textbook one.** Its key would have to name the wells it settles on and
-    the geometries they relax to, which are outputs — so by
-    `D-2026-08-16-the-physics-leaves-the-cache-stays` it is not shipped as a tool at all: it is
-    decomposed here, and every part it asks for is separately keyed. A re-run at a finer step pays
-    only for the points it has not seen.
+    A composite (its key would name the wells it settles on), so every part is separately keyed and
+    a finer re-run pays only for new points. Four stages:
 
-    Four stages, each closing a gap a bare `scan_profile` leaves open:
+    1. **The coarse profile**, over `period_degrees` (a symmetric rotor repeats).
+    2. **Refine each pass**: a coarse grid steps over maxima, so each is rescanned finely between
+       its neighbours.
+    3. **Release each well**: a scan point is constrained, so each well is optimized freely into a
+       rotamer with a `structure_id`; wells relaxing into one basin are merged.
+    4. **Rank and time them**: populations at `temperature_k` weighted by `symmetry_order`, then
+       Eyring half-lives with the band the method's uncertainty implies.
 
-    1. **The coarse profile**, over `period_degrees` rather than always 360. A symmetric top or a
-       biaryl repeats, and scanning the repeat is paying twice for one answer.
-    2. **Refine each pass.** A coarse grid steps *over* a maximum; the barrier read off it is
-       therefore a lower bound with no error bar. Each maximum is rescanned finely between its
-       neighbours, which is the loop `skills/conformational-analysis` currently asks a human to run
-       and which neither a template (no loops) nor the agent (iteration-capped) can hold.
-    3. **Release each well.** A scan point is a *constrained* geometry, so the bottom of a well is
-       not a minimum of the molecule. Optimizing without the constraint is what turns it into a
-       rotamer with a `structure_id` worth carrying — and two wells that relax into one basin are
-       merged, which is a real finding about the profile rather than bookkeeping.
-    4. **Rank and time them.** Populations over the released minima at `temperature_k`, weighted by
-       `symmetry_order` because the profile covers one period of several; then Eyring on each
-       barrier for a half-life with the band the method's uncertainty implies.
-
-    Above `quick` each rotamer gets a Hessian, so the ranking is by free energy; at `thorough` each
-    pass gets one too and the barrier becomes a ΔG‡ — a Hessian at a constrained maximum, with its
-    one imaginary mode dropped, which is the standard transition-state treatment applied to a
-    geometry that is a relaxed-scan maximum rather than an optimized saddle. A pass with more than
-    one imaginary mode is reported on `E` and says so.
+    Above `quick` each rotamer gets a Hessian (ranking by free energy); at `thorough` each pass does
+    too, giving ΔG‡ with its one imaginary mode dropped. A pass with more than one imaginary mode is
+    reported on `E` and says so.
 
     Args:
-        store: The D-011 result cache every primitive is keyed in.
+        store: The result cache every primitive is keyed in.
         smiles: The molecule, and the label the result is reported under.
         torsion: The bond to rotate, as `enumerate_torsions` reported it. Verified against the
             structure rather than trusted — see `_verified_torsion`.
@@ -2485,8 +2136,8 @@ async def rotation_profile(
         solvent: Implicit solvent for every point, or None for gas phase.
         temperature_k: What the populations and half-lives are quoted at.
         step_degrees: The coarse step; the configured default otherwise.
-        level: `quick` (electronic), `standard` (free energies at the rotamers), `thorough` (also
-            at the passes, giving ΔG‡).
+        level: `quick` (electronic), `standard` (free energies at the rotamers), `thorough` (also at
+            the passes, giving ΔG‡).
         progress: Called as each unit of work completes, for an activity's heartbeat.
         run: How each remote call is awaited.
 
@@ -2542,12 +2193,8 @@ async def rotation_profile(
     return RotationProfile(
         smiles=structure.smiles or smiles,
         input_structure_id=structure.structure_id,
-        # **The server's method, not this deployment's configured name** — the same read every
-        # sibling composite makes, and this one is on the same publication path: `publish/project`
-        # turns this field into a `TheoryLevel` beside a `rotational_barrier` fact, so a deployment
-        # whose env says `GFN2-xTB` while the server runs GFN1 published a rotational barrier
-        # asserting the wrong level of theory. The fallback is the config only for a payload that
-        # states no method, exactly as `bond_dissociation_survey` does.
+        # The server's method, not `settings.xtb_method`: `publish/project` turns it into a
+        # `TheoryLevel`. The config is the fallback only for a payload stating no method.
         method=method or settings.xtb_method,
         solvent=solvent,
         temperature_k=temperature,
@@ -2567,9 +2214,8 @@ async def rotation_profile(
         ],
         rotamers=[well.rotamer for well in wells],
         barriers=barriers,
-        # `None` rather than 0.0 when nothing resolved. A zero here is indistinguishable from a
-        # freely-rotating bond, and `publish/project.py` writes it as a real `rotational_barrier`
-        # fact — so the absent case has to be absent rather than a number that reads as an answer.
+        # `None`, not 0.0, when nothing resolved: `publish/project.py` would publish a zero as a
+        # real `rotational_barrier`, indistinguishable from free rotation.
         highest_barrier_kcal=(
             round(max(barrier.forward_kcal for barrier in barriers), 2) if barriers else None
         ),
@@ -2581,22 +2227,11 @@ async def rotation_profile(
 def _verified_torsion(structure: Structure, torsion: Torsion) -> tuple[int, int, int, int]:
     """Check the handle names this molecule's bond, and hand back the four atoms.
 
-    **This is where the silent failure is caught.** The four indices arrive from an enumeration the
-    agent ran, and an index carried between turns, or written by hand, is one rewritten SMILES away
-    from naming a different bond that is equally in range — measured, `(4, 5)` is the amide C-N of
-    `c1ccc(NC(C)=O)cc1` and an aromatic ring bond of `CC(=O)Nc1ccccc1`. So the handle is recomputed
-    here, from the molecule this calculation is actually about, and compared. A mismatch is a
-    refusal naming what to do about it, which is the whole difference between this and a scan that
-    quietly answers a different question.
-
-    The bond must also be acyclic: driving a ring bond deforms the ring rather than rotating about
-    it, and the profile would be a ring pucker reported as a rotational barrier.
-
-    **A rotor whose rotating end carries only hydrogens arrives with no dihedral at all**, because
-    `enumerate_torsions` cannot name one: a dihedral through such a bond needs a hydrogen index, and
-    a hydrogen index means something only inside one explicit-H numbering. There are two of those
-    rotors and they are not the same finding, which is why `_rotor_dihedral` builds the dihedral for
-    one of them and refuses the other.
+    Indices carried between turns are one rewritten SMILES away from naming a different, equally
+    valid bond, so the handle is recomputed from this molecule and compared; a mismatch is a refusal
+    saying what to do. The bond must be acyclic (driving a ring bond is a ring pucker, not a
+    rotation). A rotor whose rotating end carries only hydrogens has no reported dihedral;
+    `_rotor_dihedral` builds one or refuses.
 
     Raises:
         ValueError: the handle does not name a bond of this molecule, an index is out of range, the
@@ -2646,15 +2281,10 @@ def _verified_torsion(structure: Structure, torsion: Torsion) -> tuple[int, int,
 def _explicit_molecule(structure: Structure, mol: Chem.Mol) -> Chem.Mol:
     """`mol` with explicit hydrogens, in the atom order `structure` itself is numbered in.
 
-    **The numbering is a cross-repository contract and this is where it stops being an assumption.**
-    Every geometry here is `AddHs` over the canonical SMILES — heavy atoms in canonical order,
-    hydrogens appended by parent — which is what `structure_from_smiles` builds on the calculation
-    server and what `scan_point` validates its atom indices against. Comparing the element lists
-    turns that reliance into an assertion, exactly as the server's own `_mol_with_conformer` does,
-    because the alternative is driving the wrong atoms and getting a plausible profile for it.
-
-    Heavy indices are unaffected — `AddHs` appends — so every existing check reads the same. What it
-    adds is that a *hydrogen* index is now in range, which is the whole of what an X-H rotor needs.
+    Every geometry is `AddHs` over the canonical SMILES (heavy atoms in canonical order, hydrogens
+    appended by parent), as the calc server's `structure_from_smiles` builds it and `scan_point`
+    validates. The element lists are compared to assert that cross-repository contract. Heavy
+    indices are unchanged; hydrogen indices become addressable, which X-H rotors need.
     """
     explicit = Chem.AddHs(mol)
     elements = [atom.GetAtomicNum() for atom in explicit.GetAtoms()]
@@ -2670,20 +2300,11 @@ def _explicit_molecule(structure: Structure, mol: Chem.Mol) -> Chem.Mol:
 def _rotor_dihedral(explicit: Chem.Mol, torsion: Torsion) -> tuple[int, int, int, int]:
     """The dihedral for a rotor `enumerate_torsions` reported without one, or a refusal saying why.
 
-    `Chemclaw3-mcp`'s `chem` server splits these into two kinds and this side must too, because the
-    two get opposite answers:
-
-    - a **symmetric top** — a methyl or tert-butyl, three hydrogens on the rotating end — is
-      refused. Its barrier is genuinely already counted, in the quasi-RRHO free-rotor treatment of
-      the low modes, so profiling it would spend a scan to double-count something.
-    - an **X-H rotor** — one or two hydrogens: an O-H, S-H or N-H — is scanned. Acetamide's amide
-      N-H is 16-18 kcal/mol and acetic acid's syn/anti O-H is 5-6 with two genuinely distinct
-      rotamers, and none of that is in the low modes. Calling those a methyl told the model their
-      barrier was already accounted for, which is the reason this function exists.
-
-    The dihedral is built rather than received, in the structure's own explicit-H numbering, and
-    each loose end is chosen deterministically so two runs of the same question drive the same four
-    atoms — which is what keeps each scan point's cache key stable.
+    A symmetric top (three hydrogens on the rotating end, e.g. methyl) is refused: its barrier is
+    already in the quasi-RRHO free-rotor treatment. An X-H rotor (one or two hydrogens: O-H, S-H,
+    N-H) is scanned, since its barrier is not in the low modes. The dihedral is built in the
+    structure's explicit-H numbering with deterministic end atoms, so each scan point's cache key is
+    stable.
     """
     begin, end = (explicit.GetAtomWithIdx(index) for index in torsion.bond)
     rotating, anchor = (end, begin) if _heavy_neighbours(begin, end) else (begin, end)
@@ -2702,10 +2323,9 @@ def _rotor_dihedral(explicit: Chem.Mol, torsion: Torsion) -> tuple[int, int, int
             "orientation is the same structure, so there is no barrier to profile. Its energetic "
             "effect is already in the free-rotor treatment of the low modes."
         )
-    # A dihedral needs one atom off the axis at each end. `enumerate_torsions` never reports a bond
-    # without them — it excludes a monovalent end by name, because turning about C-Cl moves nothing
-    # — so reaching this is a hand-assembled entry, and it gets a sentence rather than an
-    # `IndexError` out of the arithmetic two functions further down.
+    # A dihedral needs an off-axis atom at each end; `enumerate_torsions` never reports a bond
+    # without them, so this catches a hand-assembled entry with a sentence rather than an
+    # `IndexError`.
     anchored = sorted(
         atom.GetIdx() for atom in anchor.GetNeighbors() if atom.GetIdx() != rotating.GetIdx()
     )
@@ -2735,17 +2355,10 @@ def _checked_dihedral(
 ) -> tuple[int, int, int, int]:
     """The four atoms that will actually be driven, checked as carefully as the bond was.
 
-    **The handle only guards `bond`, and `atoms` is what the scan drives.** That gap let a torsion
-    whose handle was correct still name a nonsense dihedral: measured before this check,
-    `atoms=[-1, 1, 2, 3]` returned a full profile with a barrier and no error at all — Python's
-    negative indexing silently addressed the last atom — and `atoms=[0, 1, 2, 2]` returned another,
-    for a "dihedral" with a repeated atom. `atoms=[0, 1, 2, 99]` escaped as a bare numpy
-    `IndexError` from inside the geometry arithmetic, which is an error nobody can act on.
-
-    A profile of the wrong four atoms is precisely the silent-wrong-answer failure this whole
-    module exists to remove, so the check is the same shape as the bond's: the indices must address
-    this molecule, be four distinct atoms, be bonded in sequence, and carry the named bond in the
-    middle.
+    The handle guards `bond`, but `atoms` is what the scan drives: negative indices, repeated atoms
+    or out-of-range indices would otherwise give a profile of the wrong atoms or a numpy
+    `IndexError`. The indices must address this molecule, be four distinct atoms, be bonded in
+    sequence, and carry the named bond in the middle.
     """
     atoms = list(torsion.atoms)
     # `mol` carries explicit hydrogens, so the bound is the structure's own atom count rather than
@@ -2786,9 +2399,7 @@ def _checked_dihedral(
 def _pass_count(period_degrees: float, step: float) -> int:
     """How many maxima a period can hold, for the budget count made before anything is computed.
 
-    Bounded by the number of coarse intervals rather than by what the profile turns out to have —
-    the fence has to count before the first calculation, which is the whole point of a preflight
-    (`science/calc/budget.py`).
+    Bounded by the number of coarse intervals, since the preflight must count before computing.
     """
     return max(1, math.ceil(period_degrees / step) // 2)
 
@@ -2804,19 +2415,10 @@ async def _driven(
 ) -> tuple[dict[float, float], str]:
     """Relax the molecule at each dihedral value and return `{degrees: energy}`, and the method.
 
-    Each point is driven from the *input* geometry rather than from its neighbour, exactly as
-    `scan_profile` does and for the same reason: a sequential walk's answer depends on the direction
-    it was walked, which is a hidden input a content-addressed cache must not have (D-011).
-
-    **The method comes back because it is the server's, not this pod's.** The physics answers from
-    `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`), so `settings.xtb_method`
-    is a label this process holds rather than a fact about the calculation — and
-    `RotationProfile.method` is a published claim about the level of theory. This function already
-    validated the payload that states it and threw it away; every sibling composite reads it off
-    the result instead (`scan_profile` from `relaxed[0].method`, `bond_dissociation_survey` from
-    `methods[0]`). The first point's, for the same reason `scan_profile` takes the first: the whole
-    profile is one method, and an empty string is the "the payload did not say" case the caller
-    falls back on.
+    Each point starts from the input geometry, as in `scan_profile`, so results do not depend on
+    walk direction. The method is the server's (read off the first point; the whole profile is one
+    method) because `RotationProfile.method` is a published claim; an empty string means the payload
+    did not say.
     """
     energies: dict[float, float] = {}
     method = ""
@@ -2844,9 +2446,8 @@ async def _driven(
 def _wrapped(profile: dict[float, float], period_degrees: float) -> list[tuple[float, float]]:
     """The profile as an ordered ring: the last point's neighbour is the first point again.
 
-    A torsion is periodic, so the interval between the highest scanned angle and the period is a
-    real interval with a real maximum in it — and treating the profile as a line rather than a ring
-    is how the barrier that matters most, the one across the wrap, goes unreported.
+    A torsion is periodic, so the interval across the wrap has a real maximum that a linear reading
+    would miss.
     """
     ordered = sorted(profile.items())
     return ordered + [(ordered[0][0] + period_degrees, ordered[0][1])]
@@ -2887,10 +2488,8 @@ async def _refined_maxima(
 ) -> dict[float, float]:
     """Rescan finely around each maximum, because a coarse grid steps over one.
 
-    A 30-degree grid lands a point *near* the top of a barrier, not on it, so the height read off
-    it is a lower bound whose error nobody can state. This adds `xtb_rotation_refine_points` between
-    the coarse neighbours on each side — the loop `skills/conformational-analysis` asks a human to
-    run, done where it can be counted, budgeted and cached.
+    Adds `xtb_rotation_refine_points` between the coarse neighbours on each side, so the barrier is
+    not a lower bound of unknown error.
     """
     extra = settings.xtb_rotation_refine_points
     if not extra:
@@ -2919,14 +2518,9 @@ async def _refined_maxima(
 class _Well(NamedTuple):
     """A released rotamer beside the absolute energies it was derived from.
 
-    **The absolute energies are the point.** A barrier is a difference between a pass and a well,
-    and the two were previously measured from different zeros — the profile's lowest *constrained*
-    scan point on one side and the lowest *released* minimum on the other — so every barrier was
-    understated by the lowest well's relaxation energy and could in principle come out negative.
-    Carrying the absolutes here lets `_barriers` subtract two numbers that mean the same thing.
-
-    Internal, and deliberately not fields on `Rotamer`: an absolute Hartree energy is not something
-    a chemist reads, and `RotationProfile` is a published record.
+    Barriers subtract a pass from a well; carrying absolute energies keeps both on one zero, rather
+    than mixing constrained scan points with released minima. Internal: absolute Hartrees are not
+    for `Rotamer`, a published record.
     """
 
     rotamer: Rotamer
@@ -2948,14 +2542,10 @@ async def _released_wells(
 ) -> tuple[list[_Well], list[str]]:
     """Turn each well of the profile into a real minimum, then rank and populate them.
 
-    **Releasing the constraint is the point.** A scan point is optimized with the dihedral frozen,
-    so the bottom of a well is the best *constrained* geometry rather than a minimum of the
-    molecule — and the `structure_id` a chemist carries into the next calculation has to be the
-    latter. Two wells that relax into one basin are merged and said so: that is a finding about the
-    profile, namely that the coarse grid saw a feature that is not there.
-
-    Above `quick` each survivor gets a Hessian, so the ranking is by free energy rather than by
-    electronic energy. The two are different treatments and the result says which ran.
+    A scan point is the best constrained geometry, not a minimum, and the `structure_id` a chemist
+    carries forward must be the minimum. Wells relaxing into one basin are merged and reported.
+    Above `quick` each survivor gets a Hessian and the ranking is by free energy; the result says
+    which.
     """
     warnings: list[str] = []
     found: list[tuple[float, OptimizationResult, float | None]] = []
@@ -2979,10 +2569,8 @@ async def _released_wells(
         gibbs = None
         if level != "quick":
             progress(f"free energy of the rotamer near {angle:g} degrees")
-            # **The refinement's own geometry is what the rotamer is**, not the one handed to it.
-            # `relax_to_minimum` may displace along an imaginary mode and re-optimize, so keeping
-            # the pre-refinement structure would have published a `structure_id`, a dihedral and an
-            # electronic energy describing one geometry beside a free energy describing another.
+            # The refined geometry is the rotamer: `relax_to_minimum` may displace and re-optimize,
+            # and the structure, dihedral and energies must all describe the same geometry.
             relaxed, thermo, _ = await relax_to_minimum(
                 store,
                 relaxed.structure,
@@ -2992,13 +2580,9 @@ async def _released_wells(
             )
             gibbs = thermo.gibbs_free_energy_hartree
             if not thermo.is_minimum:
-                # The refinement gave up: `relax_to_minimum` is bounded by
-                # `xtb_minimum_refinement_attempts` and returns what it has. A free energy at a
-                # geometry that is still a saddle is not a free energy, and this is the "a well
-                # that would not settle" the result model promises to report.
-                # Names whichever finding actually stands: the imaginary modes when there are
-                # any, and otherwise the gradient — a well that stops short of a stationary point
-                # reports an empty frequency list, and `[] cm^-1` is not a reason anyone can act on.
+                # The refinement gave up (`xtb_minimum_refinement_attempts`), and a free energy at a
+                # saddle is not a free energy. Name the imaginary modes if any, otherwise the
+                # gradient: a non-stationary well can report no frequencies at all.
                 why = (
                     f"{thermo.imaginary_frequencies_cm} cm^-1"
                     if thermo.imaginary_frequencies_cm
@@ -3040,10 +2624,8 @@ def _ranked(
 ) -> list[_Well]:
     """Relative energies and populations over the released minima, lowest first.
 
-    **Degeneracy is `symmetry_order`, and it is not bookkeeping.** The profile covers one period of
-    several identical ones, so every well found in it stands for that many copies of itself. This is
-    the same arithmetic, and the same failure if skipped, as an ensemble population that ignores
-    conformer degeneracy — measured there at 73% against the correct 59.2%.
+    Degeneracy is `symmetry_order`: the profile covers one of several identical periods, so each
+    well stands for that many copies.
     """
     electronic = [relaxed.energy_hartree for _, relaxed, _ in found]
     lowest = min(electronic)
@@ -3084,8 +2666,7 @@ def _ranked(
 def _dihedral_of(structure: Structure, atoms: tuple[int, ...]) -> float:
     """The dihedral these four atoms span in `structure`, in degrees on [0, 360).
 
-    Computed from the coordinates rather than asked of the server: it is four dot products, and a
-    round trip to learn the angle of a geometry already in hand is a round trip for nothing.
+    Computed locally; it is four dot products.
     """
     _, positions = structure.arrays()
     first, second, third, fourth = (np.asarray(positions[index]) for index in atoms)
@@ -3121,22 +2702,13 @@ async def _barriers(
 ) -> tuple[list[RotationBarrier], list[str]]:
     """The pass between each adjacent pair of rotamers, in both directions, with its half-life.
 
-    **Both directions, because a barrier has one.** Out of the populated well and back into it are
-    different numbers unless the wells are degenerate, and the one that decides whether two rotamers
-    can be separated is the barrier out of the populated one. Reporting a single height for an
-    unequal pair is reporting the wrong number half the time.
-
-    **Every energy here is absolute.** The pass comes from the profile in Hartree and each well
-    carries its own Hartree energy, so a barrier is one subtraction between two numbers measured
-    the same way. The previous version mixed two zeros — the profile's lowest *constrained* point
-    against the lowest *released* minimum — which understated every barrier by the lowest well's
-    relaxation energy (measured on n-butane at 0.118 kcal/mol) and could in principle have produced
-    a negative one.
+    Out of and back into a well differ unless the wells are degenerate; separability depends on the
+    barrier out of the populated one. Pass and wells are both absolute Hartree energies, so a
+    barrier is one subtraction on one zero.
 
     At `thorough` the pass gets its own Hessian and the barrier becomes a free energy: one imaginary
-    mode along the driven coordinate is exactly what a first-order saddle has, and `_vibrational`
-    already skips it. More than one means the geometry is not a saddle in any useful sense, so that
-    barrier stays electronic and says so.
+    mode along the driven coordinate is a first-order saddle, which `_vibrational` skips. With more
+    than one, the barrier stays electronic and says so.
     """
     warnings: list[str] = []
     if not wells:
@@ -3184,12 +2756,9 @@ async def _barriers(
                     "the electronic barrier is reported instead"
                 )
             elif min(gibbs_forward, gibbs_reverse) <= 0.0:
-                # **Keep the electronic barrier rather than dropping the pass.** A saddle's RRHO
-                # free energy is missing its imaginary mode's zero-point term, and where the
-                # electronic barrier is small that single mode can outweigh it and invert the sign.
-                # Reporting nothing would be the defect this module was just fixed for; reporting a
-                # negative barrier would be a rate of 10^12 for a real compound. So the answer is
-                # the electronic barrier, labelled `E`, and a warning saying why.
+                # Keep the electronic barrier rather than dropping the pass: a saddle's RRHO free
+                # energy lacks its imaginary mode's zero-point term, which can invert a small
+                # barrier's sign. Report `E` with a warning.
                 warnings.append(
                     f"the free-energy barrier at {peak:g} degrees came out non-positive "
                     f"({gibbs_forward:+.2f} forward, {gibbs_reverse:+.2f} reverse kcal/mol), "
@@ -3199,9 +2768,9 @@ async def _barriers(
             else:
                 forward, reverse, basis = gibbs_forward, gibbs_reverse, gibbs_basis
         if min(forward, reverse) <= 0.0:
-            # A pass below the well it separates is not a barrier, and turning it into a rate would
-            # report a femtosecond half-life for a real compound. It means the profile's maximum
-            # and the released minima disagree — usually a well that relaxed out of its own basin.
+            # A pass below the well it separates is not a barrier and must not become a rate. It
+            # means the profile's maximum and the released minima disagree — usually a well that
+            # relaxed out of its basin.
             warnings.append(
                 f"the pass at {peak:g} degrees is not above both rotamers it separates "
                 f"({forward:+.2f} and {reverse:+.2f} kcal/mol), so no barrier is reported for it: "
@@ -3227,9 +2796,8 @@ def _pass_energies(
 ) -> tuple[float, float, Literal["E", "G"]]:
     """The pass height measured from each of the two wells it separates, in kcal/mol.
 
-    Measured from the *released* rotamer energies rather than from the constrained scan points
-    beneath them, so the barrier is the one a rate depends on: from the minimum the molecule is
-    actually in. Both sides are absolute Hartree energies, so the subtraction has one zero.
+    From the released rotamer energies, the minimum the molecule is actually in, on one absolute
+    zero.
     """
     return (
         (top_hartree - one.energy_hartree) * HARTREE_TO_KCAL,
@@ -3244,8 +2812,7 @@ def _highest_between(
     """The highest scanned point strictly between two angles, going the short way round the ring.
 
     Returns `(angle, its absolute energy in Hartree)`, or `(None, 0.0)` when no point lies between
-    them — which happens when two wells are adjacent scan points and means there is no *resolved*
-    pass, not that the barrier is zero. The caller warns rather than publishing a zero.
+    them — no resolved pass, not a zero barrier; the caller warns rather than publishing a zero.
     """
     span = [
         (angle, energy)
@@ -3260,13 +2827,9 @@ def _highest_between(
 def _between(angle: float, one: float, other: float, period_degrees: float) -> bool:
     """Is `angle` on the arc from `one` to `other` that does not pass through the other well?
 
-    **A zero-length forward arc means the whole period, and that case is the important one.** Two
-    wells at the same angle is one well and its own image a period away — which is what a hindered
-    rotation with a single populated form looks like, and it is the shape the whole capability
-    exists for. N,N-dimethylacetamide has exactly one planar amide per 180 degrees; measured against
-    the live GFN2 server, its profile rises to 18.1 kcal/mol at 96 degrees and the well returns to
-    itself. Reading the arc as empty reported **no barrier at all** for it: the number was computed
-    and then dropped.
+    A zero-length forward arc means the whole period: two wells at one angle are one well and its
+    image a period away, as in a hindered rotor with a single populated form (e.g.
+    N,N-dimethylacetamide). Treating that arc as empty would drop the barrier.
     """
     forward = (other - one) % period_degrees or period_degrees
     offset = (angle - one) % period_degrees
@@ -3288,15 +2851,10 @@ async def _free_energy_barrier(
 ) -> tuple[float, float, Literal["E", "G"], int]:
     """The barrier as a free energy — `G(pass) - G(well)` — or the electronic one, saying which.
 
-    **Both sides must be free energies.** An earlier version added the pass's *absolute* thermal
-    correction (`G - E`, tens of kcal/mol for any molecule) to an *electronic* barrier whose well
-    had no correction subtracted, which is not a free-energy barrier but a barrier plus a molecule's
-    entire thermal term: measured on n-butane, 69.9 kcal/mol where the electronic barrier is 1.9,
-    and a half-life of 1e38 s. Nothing caught it because no test ran a non-`quick` level.
-
-    So this falls back to the electronic barrier — and says so through the returned basis — unless
-    *both* wells carry their own free energy and the pass is a first-order saddle. Absent stays
-    absent; a `G` label on an `E` number is the failure this whole module is about.
+    Both sides must be free energies; adding only the pass's absolute thermal correction to an
+    electronic barrier would be wrong by the molecule's whole thermal term. So this falls back to
+    the electronic barrier, reported through the returned basis, unless both wells carry their own
+    free energy and the pass is a first-order saddle.
     """
     if one.gibbs_hartree is None or other.gibbs_hartree is None:
         return forward, reverse, "E", 0
@@ -3336,17 +2894,14 @@ async def _free_energy_barrier(
 def _profile_warnings(profile: dict[float, float], torsion: Torsion, step: float) -> list[str]:
     """What the profile says about how far to trust itself.
 
-    The three pathologies `skills/conformational-analysis` asks a reader to spot by eye. Each is
-    arithmetic over the points, so each is checked rather than hoped for — the argument
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` makes about controls that
-    exist only in prose.
+    The three pathologies `skills/conformational-analysis` describes, checked arithmetically over
+    the points.
     """
     del step
     warnings: list[str] = []
     ring = _wrapped(profile, torsion.period_degrees)
-    # Each jump carries the interval it spans, read off the ring rather than assumed to be one
-    # coarse step: the profile also holds refinement points, spaced `2*step/(refine+1)`, so naming
-    # `angle - step` pointed at an angle that is usually not in the profile at all.
+    # Each jump carries the interval it spans, read off the ring: refinement points are spaced
+    # `2*step/(refine+1)`, so `angle - step` is usually not in the profile.
     jumps = [
         (
             ring[index - 1][0] % torsion.period_degrees,

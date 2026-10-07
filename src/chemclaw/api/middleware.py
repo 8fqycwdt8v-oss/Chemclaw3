@@ -1,15 +1,9 @@
-"""The front door's cross-cutting HTTP armor: headers, body caps, CORS, and the fail-closed boot.
+"""The front door's cross-cutting HTTP armour: headers, body caps, CORS, the boot guard.
 
-One boot guard, not two. `_refuse_unconfigured_llm_gateway` moved to `chemclaw.core.llm_gateway`
-(`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`): its subject is where
-this deployment's model gateway is, which every process that takes a turn has to be right about, and
-a background worker takes turns. What is left here is the one whose subject really is *this* app —
-a bind, which is why it could not follow.
-
-Everything here applies to *every* request or to the process as a whole — nothing is specific to a
-route, which is the line that separates this module from `chemclaw/api/routes/` (R3.2). `create_app`
-(`api/app.py`) is the only caller of the installers; the `_SecurityHeaders` middleware itself is
-pure ASGI for the streaming-safety reason its docstring carries.
+Everything here applies to every request or to the process, never to one route; routes live in
+`chemclaw/api/routes/`. `create_app` (`api/app.py`) is the only caller of the installers. The
+gateway guard lives in `chemclaw.core.llm_gateway` because every turn-taking process needs it; the
+bind guard here is about this app alone.
 """
 
 import ipaddress
@@ -47,28 +41,19 @@ from chemclaw.core.session_context import reset_current_session_id, set_current_
 logger = logging.getLogger(__name__)
 
 
-# What a client is told when the process cannot take the work right now. One literal because it is
-# said in two shapes — an error *event* on an already-open turn stream (D-166) and a 503 body from
-# `_database_unavailable` — and the client behaviour it asks for is the same either way: back off
-# and retry. A browser has no business learning which piece of infrastructure was full.
-#
-# Public because it now has three readers across two modules (`api/routes/turns.py` says it on an
-# open stream, `auth.py` sheds with it before a request reaches a pool), and a name imported
-# through the underscore is a private name only by spelling.
+# What a client is told when the process cannot take the work right now — as an error event on an
+# open turn stream or as a 503 body. Either way: back off and retry. Which infrastructure was full
+# is not the browser's business.
 AT_CAPACITY = "server at capacity; retry shortly"
 
-# CSP for the self-served chat UI (SEC-5): everything is same-origin except the one inline
-# <style> block in index.html (so style-src needs 'unsafe-inline') and data: images; app.js is
-# external (script-src 'self') and the SSE stream is same-origin (connect-src 'self'). base-uri
-# and frame-ancestors are locked down to blunt injection and clickjacking.
+# CSP for the self-served chat UI: same-origin except the inline `<style>` in index.html (hence
+# `'unsafe-inline'` styles) and data: images; base-uri and frame-ancestors are locked down.
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
 )
 
-# The full header set, as the `(name, value)` pairs the ASGI response-start message wants. A
-# tuple rather than four `setdefault` calls so adding a header is one line and the middleware
-# stays a loop.
+# The header set, as the `(name, value)` pairs the ASGI response-start message wants.
 _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
     ("Content-Security-Policy", _CONTENT_SECURITY_POLICY),
     ("X-Content-Type-Options", "nosniff"),
@@ -80,18 +65,8 @@ _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
 async def _database_unavailable(request: Request, exc: Exception) -> Response:
     """Turn a failed Postgres checkout into a retryable 503 instead of an unhandled 500.
 
-    `create_session` writes the session's owner row before returning an id, so it needs a
-    connection; under load 16 of those writes raised `psycopg_pool.PoolTimeout` and, with no
-    handler anywhere, became HTTP 500s. A 500 tells a client "this request is broken, do not
-    retry" — the opposite of the truth. The pool was not even exhausted: it held 13 of a
-    permitted 64 connections and opened none during the run, so the callers were waiting for a
-    connection that was *available* and could not be handed to them, which is the same event-loop
-    starvation that used to show up as a connect timeout.
-
-    Answered with the admission path's wording on purpose (`AT_CAPACITY`): it is what a shed turn
-    already says, the client behaviour is identical (back off and retry), and a browser has no
-    business learning which piece of infrastructure is behind it — while a misconfigured DSN still
-    names itself loudly in the log line below.
+    A pool timeout is transient; a 500 would tell the client not to retry. Answered with
+    `AT_CAPACITY`, like a shed turn, while the log line names the cause.
     """
     METRICS.increment("chemclaw_db_unavailable_total")
     logger.warning("shedding %s %s: %s", request.method, request.url.path[:256], exc)
@@ -101,40 +76,20 @@ async def _database_unavailable(request: Request, exc: Exception) -> Response:
 async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
     """Turn an unreachable durable subsystem into a retryable 503 instead of an unhandled 500.
 
-    `job_status` and `cancel_job` used to report *every* Temporal `RPCError` as "no such job", so a
-    broker roll during a cancel told an operator their runaway DFT run did not exist. Narrowing that
-    to NOT_FOUND was right and, without this handler, exchanged one wrong answer for another: with
-    no handler registered the raise became a bare HTTP 500, whose contract is "this request is
-    broken, do not retry" — the opposite of the truth, and a page for the on-call as an application
-    bug.
-
-    Unlike `_database_unavailable` this relays the exception's own message rather than the capacity
-    wording, because `SubsystemUnavailableError` is written for a human by contract
-    (`core/errors.py`): it names the subsystem, says the work never began, and carries no hostname,
-    port or driver text — those live on `__cause__`, for the log below.
-
-    **Counts its own requests, not the turn probe's.** This used to increment
-    `chemclaw_durable_unreachable_total`, whose declaration is "turns whose durable-subsystem health
-    probe failed (Temporal did not answer)" and whose alert says so — while the handler fires per
-    *request* for the whole `SubsystemUnavailableError` family, `DocumentIndexError` (a pgvector
-    failure) included. One series, two populations, two denominators, and an alert whose summary was
-    true of only one of them. The sibling above is the pattern: one counter per shedding handler.
+    Relays the exception's own message, because `SubsystemUnavailableError` is written for a human
+    by contract (`core/errors.py`): it names the subsystem and carries no hostname or driver text,
+    which live on `__cause__`. Counted on its own per-request counter.
     """
     METRICS.increment("chemclaw_subsystem_unavailable_total")
-    # `exc_info` because the sentence above is only true if something logs the `__cause__`. The
-    # relayed message is deliberately free of hostname, port and driver text, so without the chain
-    # the operator's copy of this event says no more than the client's — the half of the contract
-    # that had no implementation.
+    # `exc_info` so the operator's log carries the `__cause__` the client's message omits.
     logger.warning(
         "shedding %s %s: %s", request.method, request.url.path[:256], exc, exc_info=exc.__cause__
     )
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-#: Server addresses already reported by `arrived_over_the_network`, so the SECURITY line below is
-#: said once per distinct socket rather than once per request. Bounded for `_REPORTED_FLOORS`'
-#: reason: the value is an address an *unauthenticated* caller's connection chose to land on, and an
-#: unbounded set would be a memory cost anyone able to reach the pod could impose.
+#: Server addresses already reported by `arrived_over_the_network`, so the SECURITY line is said
+#: once per socket. Bounded, since an unauthenticated caller chooses the address.
 _REPORTED_EXPOSURES: set[str] = set()
 _MAX_REPORTED_EXPOSURES = 8
 
@@ -142,26 +97,10 @@ _MAX_REPORTED_EXPOSURES = 8
 def arrived_over_the_network(scope: Scope) -> bool:
     """Whether this request landed on an address reachable from outside the machine.
 
-    **The socket, not the setting** — which is the whole reason this exists beside
-    `_refuse_unauthenticated_exposure`. That guard reads `settings.service_host`, and uvicorn binds
-    whatever `--host` it was given; the two agree only on the container path, where
-    `deploy/entrypoint.sh` derives one from the other. Measured against a real uvicorn on
-    2026-09-06: `CHEMCLAW_SERVICE_HOST=127.0.0.1 uvicorn --host 0.0.0.0` booted with no warning of
-    any kind and answered an off-box `POST /sessions` with 200 and the shared dev principal, while
-    the loopback command `README.md` prints verbatim refused to boot. A control whose bypass is
-    "start the server the way the README says" is not a control.
-
-    `scope["server"]` is filled by uvicorn from the accepted connection's own `sockname`, so it is
-    per-connection rather than per-bind: on a socket bound to `0.0.0.0` a request from the host
-    itself reads `127.0.0.1` and one from the network reads the interface it arrived on. That is
-    the fact this decides on, and it is strictly narrower than the bind address.
-
-    **A `server` that is not an IP address is not judged.** Starlette's test client puts the base
-    URL's *name* there (`testserver`), and an in-process ASGI call has no accepted connection and
-    therefore no `sockname` at all — there is no exposure to observe, and refusing it would refuse
-    every caller that has no socket rather than every caller that has an exposed one. What a name
-    cannot rule out, the boot guard still covers: the configuration is the only thing knowable
-    before a request exists, so the two checks are a pair rather than a duplication.
+    The socket, not the setting: `_refuse_unauthenticated_exposure` reads `settings.service_host`,
+    which uvicorn's `--host` can contradict. `scope["server"]` is the accepted connection's own
+    address, so a local request on a `0.0.0.0` bind reads loopback. A non-IP `server` (the test
+    client's name, an in-process call) is not judged; the boot guard covers configuration.
 
     Args:
         scope: The ASGI scope of the request being served.
@@ -182,9 +121,8 @@ def arrived_over_the_network(scope: Scope) -> bool:
 def note_network_exposure(host: str) -> None:
     """Say once, loudly, that an unauthenticated request arrived from the network.
 
-    Once per distinct address rather than once per request: this is a *deployment* fault — it is
-    true of every request that socket will ever accept — and a per-request WARNING is a log volume
-    an unauthenticated caller controls, on the one interpreter that serves every SSE stream.
+    Once per address: it is a deployment fault, and a per-request warning would be log volume an
+    unauthenticated caller controls.
     """
     if len(_REPORTED_EXPOSURES) >= _MAX_REPORTED_EXPOSURES or host in _REPORTED_EXPOSURES:
         return
@@ -203,18 +141,10 @@ def note_network_exposure(host: str) -> None:
 def _refuse_unauthenticated_exposure() -> None:
     """Fail closed when the app would run unauthenticated (`entra_required` off) network-exposed.
 
-    With `entra_required` False every request is the shared dev principal and all authorization
-    gates are open (SEC-2) — intended for local dev only. Binding that mode to a non-loopback
-    interface (the `service_host="0.0.0.0"` default) exposes it to the network, so the service
-    refuses to boot rather than leaving the whole deployment's safety to one env var defaulting
-    the insecure way (the earlier warn-and-boot was one missed log line from an open
-    deployment).
-    `service_allow_insecure=true` is the explicit, conscious opt-out — it boots with the loud
-    warning instead. Loopback dev and Entra-enforced deployments are untouched.
-
-    **What counts as loopback is `core.http.is_loopback_host`, not a set of three strings.** That is
-    what this used to read, and a bind on `127.0.0.2` — loopback, and not in the set — was refused
-    as though it were network-exposed while `core.netguard` treated the same address as local.
+    Without `entra_required` every request is the shared dev principal and every authorization gate
+    is open, so binding a non-loopback interface refuses to boot. `service_allow_insecure=true` is
+    the explicit opt-out (boots with a loud warning). Loopback is decided by
+    `core.http.is_loopback_host`.
     """
     if settings.entra_required or is_loopback_host(settings.service_host):
         return
@@ -237,21 +167,11 @@ def _refuse_unauthenticated_exposure() -> None:
 
 
 class _SecurityHeaders:
-    """Stamp the browser security headers onto every response — pure ASGI, never buffering (SEC-5).
+    """Stamp the browser security headers onto every response — pure ASGI, never buffering.
 
-    Pure ASGI rather than `BaseHTTPMiddleware`, which is what this used to be. That wrapper runs
-    the downstream app as a *second task* and pipes its ASGI messages through a memory stream, so
-    a request that ends without ever sending a response — a client that gives up while waiting
-    for an admission permit, a pod draining mid-stream on a rolling deploy, anything that
-    cancels the handler — reaches `call_next` as a closed stream and is re-raised as
-    `RuntimeError("No response returned.")`: a 500 with a traceback where the honest outcome is
-    a closed connection. A 50-user load run logged 44 of them, every one on the SSE turn route,
-    and the same wrapper is why an `EventSourceResponse` cannot be run under more than one
-    uvicorn worker safely.
-
-    This wraps only `send`, mutating the `http.response.start` headers in place. The body is
-    never re-tasked, never buffered, and a long-lived SSE stream is byte-for-byte what the route
-    produced.
+    Not `BaseHTTPMiddleware`, which runs the app as a second task and turns a request cancelled
+    before responding (a client giving up, a draining pod) into a spurious 500. This wraps only
+    `send`, so an SSE stream passes byte for byte.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -261,8 +181,7 @@ class _SecurityHeaders:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Pass the call through, adding the headers to the response-start message.
 
-        Non-HTTP scopes (lifespan, websocket) carry no response headers, so they pass straight
-        through — a middleware that assumed `http` would break startup.
+        Non-HTTP scopes (lifespan, websocket) pass straight through.
         """
         if scope["type"] != "http":
             await self._app(scope, receive, send)
@@ -282,52 +201,16 @@ class _SecurityHeaders:
 class _RequestObservability:
     """One record per HTTP request: the access log, the RED metrics, and the correlation id.
 
-    **There was no first-party record of an HTTP request at all.** The only one was uvicorn's own
-    access line — client address, method, *raw path*, status — with no latency, no route template,
-    no actor, no session, no correlation id (the three rendered `-`, because nothing outside
-    `run_turn` ever stamped them) and no byte count. There was no HTTP metric of any kind either,
-    so "what is p95 on `/jobs`", "which route is returning 5xx" and "is this slow because of the
-    model or the database" were all unanswerable from outside the process.
+    Pure ASGI, for `_SecurityHeaders`' reason. `route` is the FastAPI route template, never the raw
+    path, which is attacker-controlled — a cardinality bomb and a redaction cost. Starlette merges
+    the matched route into this scope, so the template is readable after the app runs; unmatched
+    requests share one `<unmatched>` series.
 
-    **Pure ASGI, never `BaseHTTPMiddleware`**, for the reason `_SecurityHeaders` above gives in
-    full: that wrapper runs the app as a second task through a memory stream and turns every
-    cancelled SSE stream into a spurious 500 — 44 of them in one 50-user run, every one on the
-    turn route. This wraps `send` and reads `scope`; the body is never re-tasked.
-
-    **`route` is the FastAPI route *template*, never the raw path.** The raw path is
-    attacker-controlled, so it is both a metric-cardinality bomb and a redaction cost: a 115 KB
-    request line reaching the redaction filter through uvicorn's access log stalled a pod for 21 s
-    with the logging lock held, *unauthenticated* (`core/logging.py`). `APIRoute.matches` writes
-    the matched route into the scope, and Starlette merges that child scope into this one — so the
-    template is readable here once the app has run, and an unmatched request (a 404 on a bogus
-    path, a static file, a redirect) collapses onto one fixed `<unmatched>` series instead of one
-    per URL anybody cares to invent.
-
-    **Where it sits in the stack, and what that buys.** `create_app` installs this *first*, which
-    under Starlette's `insert(0)` semantics makes it the innermost user middleware — inside the
-    security headers, inside the body cap (which is now installed second, so it sits between the
-    two rather than above both), and outside `ExceptionMiddleware`. Inside the security
-    headers is what fixes the 500: Starlette's own `ServerErrorMiddleware` sits above every user
-    middleware, so a default 500 was served with none of the browser security headers on it, and
-    with no correlation id for a chemist to quote. Answering the 500 here means it carries both.
-    Outside `ExceptionMiddleware` is what makes the status honest: the 401s, 404s, 422s and 429s
-    the handlers produce are all seen here as ordinary responses.
-
-    What that ordering deliberately leaves out is the 413 from `BodySizeLimit`, which runs above
-    this and answers without ever calling down. It is counted by its own
-    `chemclaw_requests_too_large_total` and logged where it is refused, so the fact survives — it
-    just is not in this log line. A CORS preflight is outside it for the same reason.
-
-    **The label set is inside the registry's cap, measured rather than assumed.** `core/metrics`
-    refuses a counter past `_MAX_SERIES_PER_COUNTER` label series (D-152). Across 158 front-door
-    tests this counter grew **35** series and no route produced more than three status classes, so
-    three per route is the worst case: 20 templates plus `<unmatched>` is 63. The cap was 64 when
-    that arithmetic was written and the margin really was one route; it was raised to 128 for
-    exactly this reason, and the number is deliberately not repeated here — the constant is one
-    import away and a copy of it in prose is what goes stale.
-    `tests/test_api_observability.py` asserts the arithmetic against the constant, so the route
-    that would make it start dropping series fails a test instead of silently under-reporting in
-    production.
+    Installed innermost: inside the security headers and body cap, so a 500 answered here carries
+    the headers and a correlation id; outside `ExceptionMiddleware`, so handler 4xx responses are
+    recorded. The body cap's 413 and CORS preflights are answered above it and are not in this log.
+    `tests/test_api_observability.py` checks routes × status classes stays within the registry's
+    per-counter series cap.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -352,17 +235,11 @@ class _RequestObservability:
             nonlocal status, response_bytes, answered
             if message["type"] == "http.response.start":
                 status = int(message["status"])
-                # **Before `answered`, and before `MutableHeaders`.** `headers` is optional in the
-                # ASGI spec, and `MutableHeaders(scope=message)` raises `KeyError` without it — a
-                # raise that reached the `except` below with `answered` already true, took the
-                # `if answered: raise` arm, and so sent *nothing at all*: a valid response became a
-                # connection that hangs until the client gives up. Defaulting it first makes the
-                # omission the no-op it is meant to be.
+                # Default `headers` before anything reads it: it is optional in ASGI and
+                # `MutableHeaders` raises without it, which would leave the connection hanging.
                 message.setdefault("headers", [])
                 answered = True
-                # `setdefault`, so a route that already carries an id of its own keeps it. Every
-                # response gets one: 22 of the 23 routes used to give a client nothing to quote in
-                # a bug report, and only the SSE turn path put an id on its error event.
+                # `setdefault`, so a route's own id is kept.
                 MutableHeaders(scope=message).setdefault(HEADER_CORRELATION, correlation)
             elif message["type"] == "http.response.body":
                 response_bytes += len(message.get("body", b""))
@@ -372,8 +249,8 @@ class _RequestObservability:
             try:
                 await self._app(scope, receive, _send)
             except Exception:
-                # Not `BaseException`: a cancelled request — a client that hung up, a pod draining
-                # — is an ended connection, not a server error, and must stay one.
+                # Not `BaseException`: a cancelled request is an ended connection, not a server
+                # error.
                 logger.exception(
                     "unhandled error serving %s %s (correlation %s)",
                     scope.get("method", ""),
@@ -382,10 +259,9 @@ class _RequestObservability:
                     extra={"correlation_id": correlation},
                 )
                 if answered:
-                    # The response is already on the wire (an SSE stream that died mid-answer), so
-                    # there is nothing truthful left to send — and **`status` is left alone**:
-                    # the client was told 200 and booking a 500 here would put a status on the
-                    # counter that nothing ever answered with. The log line above is the record.
+                    # Already on the wire (an SSE stream that died mid-answer): nothing truthful
+                    # left to send, and `status` stays as the client was told. The log line is the
+                    # record.
                     raise
                 status = 500
                 await _answer_internal_error(send, correlation)
@@ -397,75 +273,42 @@ class _RequestObservability:
             reset_current_correlation_id(token)
 
 
-# Marks a scope this middleware is serving, so the two binders below are no-ops in a stack that
-# does not carry it (a route exercised directly, an app built without the middleware). A binder
-# that stamped an ambient nobody resets would leak one request's identity into the next.
+# Marks a scope this middleware is serving, so the binders below are no-ops elsewhere: an ambient
+# nobody resets would leak into the next request.
 _SCOPE_BOUND = "chemclaw.observed"
-# Where a bound identity's reset token is parked for `_RequestObservability`'s `finally`. The
-# **middleware owns every reset**, because it is the one frame that runs on every exit path: a
-# FastAPI dependency has no teardown unless it is a generator, and turning the authentication gate
-# into one would change the shape of every route that depends on it.
+# Where a bound identity's reset token waits for `_RequestObservability`'s `finally`. The middleware
+# owns every reset because it runs on every exit path.
 _SCOPE_IDENTITY_TOKEN = "chemclaw.identity_token"
 _SCOPE_SESSION_TOKEN = "chemclaw.session_token"
-# The session for the access-log line, stamped by the ownership gate once it has *resolved* one —
-# never read off `path_params`. See `_record_request` for what that distinction is worth.
+# The resolved session for the access-log line, never `path_params` (see `_record_request`).
 _SCOPE_SESSION = "chemclaw.session_id"
 # The actor for the access-log line, stamped by the authentication gate once it knows one.
 _SCOPE_ACTOR = "chemclaw.actor"
 
-# The route label for a request that matched no route. A fixed literal, so the whole family stays
-# bounded by the route table (a source constant) rather than by what a caller puts in a URL.
+# The route label for an unmatched request, keeping the series bounded by the route table.
 _UNMATCHED_ROUTE = "<unmatched>"
 
-# What an inbound correlation id may look like to be adopted. Hex, dashes and underscores, bounded
-# — the shape this system's own ids (a `uuid4().hex`) and an ingress-generated request id both
-# take. Anything else is replaced rather than sanitised: the id is written into log lines, into
-# `audit_events` and into a response header, and a value that reaches all three is not a field to
-# be generous about. A *literal* rather than a setting, because it is a format, not a threshold —
-# there is no deployment for which a different answer is right.
+# The shape an inbound correlation id must have to be adopted: hex, dashes, underscores, bounded
+# (covers a `uuid4().hex` and typical ingress ids). Anything else is replaced, since the id reaches
+# logs, `audit_events` and a response header. A format, not a threshold, so not a setting.
 _CORRELATION_ID = re.compile(r"\A[A-Za-z0-9_-]{8,64}\Z")
 
-# How many pydantic error objects a 422 body may carry. Pydantic materialises one per bad list
-# element, so an unbounded render turns a linear body into a linear response: measured at 683,520
-# errors and ~32 MB from a 2 MB body, on the pod's single uvicorn worker, reachable by any
-# authenticated caller (`docs/archive/lessons-2026-08.md`).
-#
-# **It bounds the error *count*, and that is not the same bound as a webhook's.** This comment
-# used to claim it bounded "every other route the same way" as the knowledge-merged webhook (which
-# went with the PR-gate, `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), and the
-# two were never comparable: measured, that webhook answered a 2.4 MB body in 112 bytes, while 20
-# pydantic errors still carry 20 copies of whatever the caller sent, because a v2 error object
-# embeds the offending `input` verbatim. Measured before `_render_errors` existed: a 200,025-byte
-# body came back as a 200,119-byte 422, so with `service_max_request_bytes` at 4,000,000 the
-# reflected ceiling was the request itself. The count is bounded here; the *bytes* are bounded
-# in `_render_errors`.
+# How many pydantic error objects a 422 body may carry: pydantic emits one per bad list element, so
+# an unbounded render amplifies a large body. This bounds the count; `_render_errors` bounds the
+# bytes each echoes back.
 _MAX_VALIDATION_ERRORS = 20
 
 # How long a caller-controlled string may be where it is echoed into a log record or a 422 body.
-# Long enough for every id, field name and path segment this system mints (a `uuid4().hex` is 32),
-# short enough that a caller cannot spend the logging lock. `SecretRedactingFilter` regex-scans
-# every record it is given, and the cost is linear in the record's length — measured on this
-# machine at 0.13 ms for 100 characters, 4.4 ms for 6 KB and 12.0 ms for 16 KB, with the logging
-# lock held, on the one interpreter that serves every SSE stream. At this cap a record costs the
-# first of those numbers whatever a caller sends.
+# Covers every id this system mints; `SecretRedactingFilter`'s cost is linear in record length under
+# the logging lock, so this bounds what a caller can spend.
 _MAX_LOGGED_CHARS = 128
 
 
 def clip_for_log(value: str) -> str:
     """`value` bounded for a log record or an error body, marked when it was actually cut.
 
-    One definition because three sites need it and each of them was measured unbounded: the access
-    log's session id (6,000 characters, unauthenticated), the authorization refusal's target
-    (8,000), and the 422's echo of what the caller sent (200,119 bytes). A truncation that said
-    nothing would be worse than the raw value in one specific way — an operator reading a clipped
-    id cannot tell it from a short one — so the marker is part of the contract.
-
-    **The bound is read, not passed.** It was a `limit=_MAX_LOGGED_CHARS` parameter no call site
-    ever overrode, which made the cap two spellings of one number — and the one that decides is
-    whichever a caller happened to use, which is exactly what a clip measured against
-    `SecretRedactingFilter`'s cost must not be. A site that genuinely needs its own bound is the
-    second caller that re-adds the argument; `connectors/server.py` shows the other shape, a
-    separate constant for a surface that may legitimately want a different number.
+    The marker matters: a clipped id must not be mistaken for a short one. The bound is the module
+    constant, not a parameter, so there is one number.
     """
     return (
         value
@@ -474,40 +317,22 @@ def clip_for_log(value: str) -> str:
     )
 
 
-# How deep `_json_safe` walks before it names what it stopped at rather than descending.
-#
-# **Not reachable through `input`, and the arithmetic is why it is this number rather than a small
-# one.** `json.loads` accepts nesting to the interpreter's recursion limit, but the clip above turns
-# any `input` past `_MAX_LOGGED_CHARS` characters into a string first, and a nested container costs
-# at least two characters per level — so whatever survives that clip is at most
-# `_MAX_LOGGED_CHARS // 2` deep. Set *at* the clip rather than below it for that reason: a floor of
-# 20 would fire on a caller's legitimate 25-deep, 51-character list and replace the value the 422
-# exists to show them. What it does floor is the keys the clip does not cover (`ctx`, and whatever a
-# future pydantic adds), which are shallow today and promised by nobody.
+# How deep `_json_safe` walks before naming what it stopped at. Equal to the clip, because `input`
+# is already clipped to at most half that depth; this floors the other keys (`ctx` and future ones).
 _MAX_ERROR_DEPTH = _MAX_LOGGED_CHARS
 
 
 def _json_safe(value: Any, depth: int = 0) -> Any:
     """`value` with every non-finite float replaced by its name, bounded in depth.
 
-    **`json.dumps` refuses NaN and `jsonable_encoder` does not convert it**, so a non-finite float
-    reaching `JSONResponse.render` raises `ValueError` *inside the 422 handler* — which the
-    observability middleware then answers as a 500. Measured: `{"temperature_c": NaN}` in a design
-    body (`NaN` is a literal Python's `json.loads` accepts) came back as
-    `500 The request could not be completed due to an internal error`, while
-    `chemclaw_request_validation_failures_total` had already booked a 422 nobody was ever sent. The
-    caller's mistake is a validation failure and must read as one.
-
-    Replaced with the float's own name rather than dropped, because `input` is what tells the client
-    which value to fix, and `null` would say the field was empty when it was `NaN`.
+    `json.dumps` refuses NaN, which would turn a 422 into a 500 inside the handler. The name, not
+    `null`, so the client sees which value to fix.
     """
     if isinstance(value, float):
-        # `isfinite` rather than `!= value`, so ±inf is caught alongside NaN — both are refused
-        # by `json.dumps`, and `Infinity` is a `json.loads` literal exactly as `NaN` is.
+        # `isfinite` also catches ±inf, which `json.dumps` refuses like NaN.
         return value if isfinite(value) else repr(value)
     if depth >= _MAX_ERROR_DEPTH:
-        # Named rather than truncated silently, for `clip_for_log`'s reason: a reader cannot tell a
-        # dropped value from an absent one.
+        # Named rather than silently truncated, so a dropped value is not read as absent.
         return f"…(nested past {_MAX_ERROR_DEPTH})"
     if isinstance(value, dict):
         return {key: _json_safe(item, depth + 1) for key, item in value.items()}
@@ -519,30 +344,19 @@ def _json_safe(value: Any, depth: int = 0) -> Any:
 def _render_errors(errors: list[Any]) -> list[Any]:
     """Pydantic's error objects with the caller's own bytes bounded — the 422's whole payload.
 
-    **`errors()` takes no `include_input=` here.** FastAPI's `RequestValidationError` is not
-    pydantic's `ValidationError`: it holds an already-materialised `Sequence` and its `errors()`
-    accepts no arguments (`fastapi.exceptions.ValidationException`), so the switch pydantic offers
-    for exactly this cannot be reached and the clipping is done by hand.
-
-    `input` is the caller's own value, `url` is a documentation link that is identical on every
-    error of a kind — one is an amplifier and the other is 60 wasted bytes per error object.
-    `loc` is the *second* amplifier and less obvious than the first: its tail is a caller-chosen
-    string for an `extra_forbidden` error and for a bad key in a `dict[str, …]` field, so clipping
-    only `input` still returned a 5,227-byte body for a 5,000-character key (measured). `type` and
-    `msg` are the handler's own vocabulary and are what tell the client which field to fix.
+    FastAPI's `RequestValidationError.errors()` takes no `include_input=`, so clipping is manual.
+    `input` and the tail of `loc` (caller-chosen for `extra_forbidden` and dict keys) are clipped;
+    `url` is dropped; `type` and `msg` are kept.
     """
     rendered: list[Any] = []
     for error in errors:
         if not isinstance(error, dict):
-            # Not every producer of a `RequestValidationError` is pydantic; anything that is not a
-            # mapping is passed through as it came rather than being guessed at.
+            # Not every producer is pydantic; a non-mapping error passes through unchanged.
             rendered.append(error)
             continue
         trimmed = {key: value for key, value in error.items() if key != "url"}
         if "input" in trimmed and len(str(trimmed["input"])) > _MAX_LOGGED_CHARS:
-            # Rendered as a clipped *string* only once it is too big to send back as it came, so a
-            # client parsing `input` still sees the number, list or object it sent in every
-            # ordinary case and the wire shape changes only where it had to.
+            # Stringified and clipped only when too big, so ordinary `input` keeps its JSON shape.
             trimmed["input"] = clip_for_log(str(trimmed["input"]))
         if "loc" in trimmed:
             trimmed["loc"] = [
@@ -555,13 +369,8 @@ def _render_errors(errors: list[Any]) -> list[Any]:
 def bind_request_actor(request: Request, actor: str, roles: frozenset[str]) -> None:
     """Make the authenticated caller ambient for the rest of this request.
 
-    Called from `require_principal`, which is the one funnel every authenticated route passes
-    through — so this is the same "a gate a new route cannot forget" argument that put the rate
-    budget there. What it buys is the ~30 WARNING sites already in this tree: they log under a
-    `ContextFilter` that renders `actor=-` on every non-turn route today, because `run_turn` was
-    the only thing in the process that ever stamped one.
-
-    A no-op outside `_RequestObservability`, which owns the reset — see `_SCOPE_BOUND`.
+    Called from `require_principal`, which every authenticated route passes, so every log line on
+    any route names its actor. A no-op outside `_RequestObservability`, which owns the reset.
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
@@ -572,16 +381,12 @@ def bind_request_actor(request: Request, actor: str, roles: frozenset[str]) -> N
 def bind_request_session(request: Request, session_id: str) -> None:
     """Make the resolved session ambient for the rest of this request.
 
-    Called from the session-ownership gate (`api/deps.resolve_session`) rather than from the
-    middleware, because the session id is a *routed* path parameter: the router runs below this
-    middleware, so at request entry there is nothing to bind and the raw path is the wrong place
-    to look for one. Same no-op rule and same reset owner as `bind_request_actor`.
+    Called from `api/deps.resolve_session`, because the session id is a routed path parameter
+    unknown at request entry. Same no-op rule and reset owner as `bind_request_actor`.
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
-    # Stamped for the access log here rather than read off `path_params` there, because *this* is
-    # the frame that establishes the condition the log line needs: the id resolved to a session
-    # this caller owns. See `_record_request`.
+    # Stamped here because only here has the id resolved to a session the caller may reach.
     request.scope[_SCOPE_SESSION] = clip_for_log(session_id)
     request.scope[_SCOPE_SESSION_TOKEN] = set_current_session_id(session_id)
 
@@ -600,11 +405,8 @@ def _reset_request_identity(scope: Scope) -> None:
 def _request_correlation_id(headers: Headers) -> str:
     """Adopt the caller's correlation id when it is well formed, else mint one.
 
-    Adopting is what makes a chemist's click traceable from the browser through the ingress into
-    this pod and on into the MCP fleet: `X-Chemclaw-Correlation-Id` is the header this system
-    already *sends* on every connector call (`connectors/identity.py`, one definition, imported
-    here rather than respelled), and until now it was never *read* — an id the UI or the ingress
-    generated was silently replaced by one nobody upstream had.
+    Lets a request be traced from the browser and ingress through this pod into the MCP fleet, using
+    the same `X-Chemclaw-Correlation-Id` header this system sends on connector calls.
     """
     inbound = headers.get(HEADER_CORRELATION, "")
     return inbound if _CORRELATION_ID.match(inbound) else uuid.uuid4().hex
@@ -613,10 +415,7 @@ def _request_correlation_id(headers: Headers) -> str:
 def route_template(scope: Scope) -> str:
     """This request's route template, or `<unmatched>` — never the raw path (see the class).
 
-    Public because the authentication gate needs the same answer for the same reason: it logged
-    `request.url.path` on a missing bearer token, *before* any credential was checked, which
-    measured 6,054 characters from an unauthenticated caller. A route template is a source
-    constant; a path is whatever somebody types.
+    Public because the authentication gate logs it on unauthenticated requests.
     """
     path = getattr(scope.get("route"), "path", None)
     return path if isinstance(path, str) and path else _UNMATCHED_ROUTE
@@ -625,9 +424,7 @@ def route_template(scope: Scope) -> str:
 async def _answer_internal_error(send: Send, correlation: str) -> None:
     """The 500 a client can act on: one sentence, plus the id to quote in a bug report.
 
-    Worded as `runner.failure_event` words a failed turn, and for the same reason — the exception
-    detail (a DSN, a driver error, a workflow id) stays in the log line above, and what crosses the
-    wire is a classification plus the key the audit trail is joined on.
+    Exception detail stays in the log; the wire carries a classification and the correlation id.
     """
     body = json.dumps(
         {
@@ -654,9 +451,8 @@ def _record_request(
 ) -> None:
     """One INFO record and the two RED series for one served request.
 
-    Skipped entirely for a request that produced no response at all — a disconnect during
-    admission, a pod draining mid-stream. `status=0` is not a status, and booking it as one would
-    put a fabricated class on the counter every operator reads as "what did we answer".
+    Skipped when no response was sent at all (a disconnect, a draining pod): `status=0` is not a
+    status.
     """
     if not status:
         return
@@ -677,37 +473,21 @@ def _record_request(
         status=status,
         duration_ms=round(elapsed * 1000.0, 1),
         response_bytes=response_bytes,
-        # The three context keys, passed explicitly so `ContextFilter`'s `setdefault` keeps them.
-        # Explicit rather than left to the ambient stamp, because the filter lives on the *handler*
-        # — so a process that has not run `configure_logging`, or a handler somebody added later,
-        # would drop the one field this record exists to be joined on.
+        # Passed explicitly so the record keeps them even on a handler without `ContextFilter`.
         correlation_id=correlation,
         actor=str(scope.get(_SCOPE_ACTOR, "")),
-        # **The session the ownership gate resolved, never the path parameter.** `path_params` is
-        # filled at route *match*, before any dependency runs, so reading it here put an
-        # unbounded, attacker-chosen, unauthenticated string in this record: measured with
-        # `entra_required=True`, `GET /sessions/<6000 Q's>/messages` answered 401 and booked a
-        # 6,000-character `session_id`, which `SecretRedactingFilter` then regex-scanned holding
-        # the logging lock — 4.4 ms for that record against 0.13 ms for a bounded one. That is
-        # the hazard this class's own docstring cites as the reason `route` is the template and
-        # not the raw path, reintroduced one field along. `bind_request_session` stamps this once
-        # the id has resolved to a session the caller owns, and clips it on the way in.
+        # The session the ownership gate resolved, never `path_params`, which holds the
+        # unauthenticated caller's raw string before any dependency runs. `bind_request_session`
+        # stamps it clipped.
         session_id=str(scope.get(_SCOPE_SESSION, "")),
     )
 
 
 async def _validation_failed(request: Request, exc: Exception) -> Response:
-    """A 422 that leaves a trace — measured, a validation failure emitted **zero** log records.
+    """A 422 that leaves a trace: a counter and a WARNING naming the route.
 
-    So a client looping on a malformed body was indistinguishable from silence: no log line, no
-    metric, and a response the caller alone ever saw. The counter is what makes it alertable and
-    the WARNING is what says which route and how badly.
-
-    The errors are counted rather than rendered into the log, and the body is bounded twice: at
-    `_MAX_VALIDATION_ERRORS` objects and, inside each of them, at `_MAX_LOGGED_CHARS` of the
-    caller's own `input` (`_render_errors`). A handler that logged `exc.errors()` would rebuild the
-    amplification inside the log stack instead of on the wire, which is the worse of the two places
-    for it.
+    Errors are counted, not logged in full, and the body is bounded by `_MAX_VALIDATION_ERRORS` and
+    `_render_errors`, so the amplification is not rebuilt in the log stack.
     """
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
     route = route_template(request.scope)
@@ -723,20 +503,9 @@ async def _validation_failed(request: Request, exc: Exception) -> Response:
         route=route,
         method=request.method,
         error_count=len(errors),
-        # The *locations* of the first few. They name the offending fields rather than echoing
-        # their values — with one exception that is why each is clipped: for an `extra_forbidden`
-        # error, and for a bad key in a `dict[str, …]` field, the tail of `loc` **is** a string the
-        # caller chose. No route in this app produces either shape today (no body model forbids
-        # extras and none is a bare mapping), but this handler is registered for every route there
-        # will ever be, and "no caller-controlled bytes in this field" is a property of the handler
-        # or it is a property of nothing.
-        #
-        # `isinstance`, for the reason `_render_errors` states two hundred lines up: not every
-        # producer of a `RequestValidationError` is pydantic, and a non-mapping error is passed
-        # through there rather than guessed at. Here it was not, and this line runs *first* —
-        # measured, a bare string raised `AttributeError` inside the handler, so a malformed
-        # request came back as a 500 with `chemclaw_request_validation_failures_total` already
-        # counting a 422 nobody was sent. The same claim now holds in both places it is made.
+        # Locations of the first few errors, clipped: the tail of `loc` can be a caller-chosen
+        # string. `isinstance`, as in `_render_errors`, because not every producer of a
+        # `RequestValidationError` is pydantic.
         first_locations=[
             clip_for_log(".".join(str(part) for part in e.get("loc", ())))
             for e in errors[:5]
@@ -752,9 +521,7 @@ async def _validation_failed(request: Request, exc: Exception) -> Response:
 def _add_request_observability(app: FastAPI) -> None:
     """Install the access log, the RED metrics and the correlation id — see `_RequestObservability`.
 
-    Unconditional: there is no deployment for which "serve requests and keep no record of them" is
-    the right posture, and the one knob that would express it (turn the access log off) is
-    uvicorn's, in `deploy/entrypoint.sh`, where it is now redundant with this.
+    Unconditional: no deployment should serve requests without a record of them.
     """
     app.add_middleware(_RequestObservability)
     app.add_exception_handler(RequestValidationError, _validation_failed)
@@ -763,9 +530,7 @@ def _add_request_observability(app: FastAPI) -> None:
 def _add_body_size_limit(app: FastAPI) -> None:
     """Bound every request body when `service_max_request_bytes` is set (0 disables).
 
-    `BodySizeLimit` itself lives in `chemclaw.core.asgi` — shared with `connectors.server`, whose
-    `/mcp` needed the identical fix (Sec-5) — not here, so this is only the front door's wiring of
-    it to its own setting.
+    `BodySizeLimit` lives in `chemclaw.core.asgi`, shared with `connectors.server`.
     """
     if settings.service_max_request_bytes:
         app.add_middleware(BodySizeLimit, max_bytes=settings.service_max_request_bytes)
@@ -774,19 +539,9 @@ def _add_body_size_limit(app: FastAPI) -> None:
 def _add_security_headers(app: FastAPI) -> None:
     """Add the browser security headers to every response, when `service_security_headers` is on.
 
-    Off only when a deployment fronts its own header policy at the ingress/Route; on by default
-    so the app is safe standalone. The headers are static, so one pure-ASGI middleware sets them
-    on every response (including static files, errors and the body cap's 413) without touching the
-    route handlers.
-
-    **One response is outside it, and naming it is the point of this paragraph.** A CORS preflight
-    is answered by `CORSMiddleware`, which is installed last and is therefore outermost — the
-    correct place for it, because a 500 raised anywhere below has to come back out through CORS or
-    a browser cannot read it. So an `OPTIONS` preflight carries none of these, which is harmless
-    (nothing is rendered from a preflight) and is a consequence of that ordering rather than an
-    oversight. The 413 *was* outside this middleware for the same structural reason and was not
-    harmless — it is a client-facing JSON body — so `create_app` now installs the body cap before
-    this one; see the comment there.
+    Off only when an ingress applies its own policy. Covers static files, errors and the body cap's
+    413 (installed inside this). A CORS preflight is answered by the outermost `CORSMiddleware` and
+    carries none, which is harmless: nothing is rendered from it.
     """
     if settings.service_security_headers:
         app.add_middleware(_SecurityHeaders)

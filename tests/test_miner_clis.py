@@ -1,19 +1,8 @@
-"""The two miner CLIs, driven — they had no test file at all.
+"""The two miner CLIs, `cli/distill.py` and `cli/propose_profile.py`, driven.
 
-`src/chemclaw/cli/distill.py` (151 lines) and `src/chemclaw/cli/propose_profile.py` (190) were
-referenced by the `Makefile` and by one docstring list, and by nothing that runs. A mutation review
-made the cost of that concrete: replacing `distiller.propose`'s store call with an undefined name
-left `tests/test_distiller.py tests/test_behaviour_proposals.py tests/test_api_proposals.py` at 27
-passed, and the commit message's "both miners run on demand and report zero on this corpus" was a
-claim about somebody's manual run.
-
-**What these assert is the shape of the run, not a mined result**, and the first draft got that
-wrong in a way worth recording: it asserted the *empty-corpus* message, which is a claim about the
-database rather than about the miner. The Postgres arm of this suite is shared — by the time these
-ran in a full pass, 243 sessions written by other tests were in `turn_costs`, and the two tests that
-had passed alone failed. So what is pinned is what the miner is responsible for: it completes,
-exits 0, says something a person can act on, and its machine-readable form parses with the keys a
-report reads. Which branch of that prose it takes is the corpus's business, not this file's.
+What is pinned is the shape of the run, not a mined result: each completes, exits 0, prints
+something a person can act on, and its machine-readable form parses with the keys a report reads.
+Which message it prints depends on the shared Postgres corpus, which other tests also write.
 """
 
 import asyncio
@@ -90,11 +79,10 @@ def test_the_profile_miner_s_json_form_is_parseable(capsys: pytest.CaptureFixtur
 
 
 def test_a_proposed_profile_is_yaml_whatever_the_tool_names_hold() -> None:
-    """The document is dumped, not interpolated, so a hostile string cannot add a key.
+    """A proposed profile is valid YAML whatever the tool names hold.
 
-    `document()` used to f-string the names into the YAML; a name carrying `": "` or a newline made
-    a document that failed to parse or parsed to keys nobody wrote, once an operator copied it into
-    `data/profiles/`.
+    The document is dumped, not interpolated, so a name containing `": "` or a newline cannot add a
+    key once an operator copies it into `data/profiles/`.
     """
     import yaml
 

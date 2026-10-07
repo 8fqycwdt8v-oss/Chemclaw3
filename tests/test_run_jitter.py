@@ -1,58 +1,15 @@
 """Every clock-derived payload jitter must outlast the longest run that will use it.
 
-Three live-harness modules vary one physical input per process so a rerun cannot be answered from
-the calculation cache. That is not decoration: a durable job's workflow id is a hash of its
-payload, a duplicate launch deliberately rejoins the existing run rather than recomputing (D-011),
-so a payload that repeats makes the lane report a working durable path it never exercised.
+Live-harness modules vary one input per process so a rerun is not answered from the calculation
+cache; a repeated payload rejoins the earlier run and the lane reports work it never did.
 
-The mechanism is right and the *modulus* is the whole guarantee — and it was wrong in two of the
-three copies:
+The walk finds every assignment (plain or annotated) under `src/chemclaw` whose value calls
+`time.time()`, `time.time_ns()` or `time.monotonic()` and contains `%`, and evaluates it over a
+24-hour window (above a resumed soak's span). The union across harnesses must also be distinct,
+so base temperatures stay at least 1 K apart.
 
-- `cli/storm_behaviours.py` carries the reasoned value, and a nine-line comment recording how it
-  was learned: `% 719` recurs every ~12 minutes, and 6 of 81 soak rounds failed that family with
-  "0 job_records row(s) written". Nothing was broken; D-011's cache had answered the payload from
-  an earlier round and the harness read that as a failure.
-- `cli/live_storm.py` had `% 971` — 16.2 minutes, 1.35x the period already measured failing.
-- `cli/live_jobs.py` had `% 25`: **25 distinct temperatures that ever exist**. After ~25 runs
-  against one database the cache holds every one of them and the lane is green forever, computing
-  nothing.
-
-So the fix is a value, and a value copied into three places is a value that will be wrong in one of
-them again. This file finds the expressions rather than being told where they are — any
-`… time.time() … % N …`, anywhere under `src/chemclaw` — and *evaluates* each one across a window
-of clock values instead of reading its modulus, because the property is "no payload repeats within
-a run", not "the literal 100000 appears".
-
-**Per-expression distinctness is not the property; the union is.** Fixing `live_jobs` by copying
-`storm_behaviours`'s expression gave the two modules the identical jitter *and* the identical base
-temperature over otherwise byte-identical payloads, so at `t = 1700000123` both derived 298.15123
-and the payloads compared equal — a `make live-jobs` during a soak round hashed to the storm's
-workflow id and read D-011's cache as "0 job_records row(s) written". Each grid spans base + [0, 1)
-K, so the bases (298.15, 300.0, 301.15) must stay ≥ 1 K apart, and that is asserted rather than
-trusted.
-
-**What this file can and cannot see.** It matches an assignment — plain or annotated — whose value
-subtree calls `time.time()`, `time.time_ns()` or `time.monotonic()` and contains a `%`. Deliberate
-limits, stated because the previous version of this docstring claimed the walk pinned "all three
-periods so a fourth copy cannot regress it" while an *annotated* assignment slipped past it
-silently:
-
-- a jitter that is never assigned — computed inline in a payload literal, or `return`ed from a
-  helper — has no `Assign`/`AnnAssign` node to match;
-- a derivation without `%` (`random`, a counter, `time() // N`) is out of scope by construction,
-  since the property being checked is a modulus's period;
-- a clock read through an alias (`from time import time`) is not seen, because the matcher pins
-  the `time.<clock>()` attribute form.
-
-Each of these is a hole a future fourth copy could walk through. They are named rather than closed
-because the check is a net for a copy-paste, not a proof, and a net that claims to be a proof is
-the thing this whole lane is about.
-
-**Where the window comes from.** `infra/live/soak.sh` runs 200 rounds by default and a round was
-measured at ~58 s, so a default soak spans ~3.2 hours; it is checkpointed and resumes after a
-container reclaim, so a record can span considerably more wall-clock than one process does. 24
-hours is the round number above that with room to spare, and all three copies clear it (100,000
-values on a one-second grid ≈ 27.8 h).
+Not seen, by construction: jitter never assigned (inline or returned), derivations without `%`,
+and clocks read through an alias such as `from time import time`.
 """
 
 from __future__ import annotations
@@ -100,12 +57,9 @@ def _uses_the_clock(node: ast.AST) -> bool:
 
 
 def _collect() -> list[_Jitter]:
-    """Every `... % N ...` expression under `src/chemclaw` whose left side reads the wall clock.
+    """Every `... % N ...` assignment under `src/chemclaw` whose left side reads the wall clock.
 
-    Both assignment forms: `x = …` and `x: float = …`. The annotated one was invisible until an
-    adversarial review measured it — a probe module carrying `_T: float = 298.15 + (int(time.time())
-    % 7)` passed the whole file, while the identical line without the annotation failed two of its
-    tests. What is still invisible is stated in the module docstring rather than fixed here.
+    Both `x = …` and `x: float = …` forms are matched.
     """
     found: list[_Jitter] = []
     for f in sorted(_SRC_ROOT.rglob("*.py")):
@@ -161,12 +115,7 @@ def test_the_walk_finds_every_clock_derived_payload_jitter() -> None:
 
 
 def test_no_payload_jitter_repeats_within_the_longest_soak() -> None:
-    """Evaluated, not read: one distinct value per second across a 24-hour window.
-
-    Measured on the unfixed tree this replaces, the same window gave 25 distinct values for
-    `live_jobs` and 971 for `live_storm` — so a soak longer than 25 seconds, respectively 16
-    minutes, was re-launching payloads the cache had already answered.
-    """
+    """Evaluated, not read: one distinct value per second across a 24-hour window."""
     window = range(_LONGEST_SOAK_SECONDS)
     for jitter in _JITTERS:
         distinct = len(_values(jitter, window))
@@ -178,23 +127,11 @@ def test_no_payload_jitter_repeats_within_the_longest_soak() -> None:
 
 
 def test_no_two_harnesses_can_derive_the_same_payload_value() -> None:
-    """The union, which per-expression distinctness does not imply and did not hold.
+    """No two harnesses can derive the same payload value.
 
-    Fixing `live_jobs`'s `% 25` by copying `storm_behaviours`'s expression gave the two modules the
-    *identical* jitter and otherwise byte-identical payloads. Measured at `t = 1700000123`:
-
-        live_jobs temp        298.15123
-        storm_behaviours temp 298.15123
-        payloads equal: True
-
-    Before that fix the two grids intersected in exactly one value; after it they were the same
-    set. A `make live-jobs` launched in the same second as a soak round then hashes to the storm's
-    workflow id, rejoins its completed run and writes no `job_records` row — the "0 job_records
-    row(s) written" false failure the nine-line comment exists to prevent, reached *between*
-    harnesses rather than within one.
-
-    Asserted over the same 24-hour window as the test above, because two grids can be disjoint at
-    one instant and overlap an hour later.
+    Identical jitter over otherwise identical payloads hashes to the same workflow id and rejoins a
+    completed run. Asserted over the whole window, since two grids can be disjoint at one instant
+    and overlap later.
     """
     window = range(_LONGEST_SOAK_SECONDS)
     reached = {jitter: _values(jitter, window) for jitter in _JITTERS}
@@ -208,11 +145,6 @@ def test_no_two_harnesses_can_derive_the_same_payload_value() -> None:
 
 
 def test_each_jitter_is_constant_within_one_process() -> None:
-    """The value is read once at import, so a relaunch inside a run derives the same workflow id.
-
-    The counterpart to the test above and the reason this is a *module constant* rather than a
-    function: `live_jobs` relaunches its own job to assert idempotency, which only means anything
-    if the second launch computes the same id.
-    """
+    """Each jitter is a module constant, so a relaunch in one process gets the same workflow id."""
     for jitter in _JITTERS:
         assert len(_values(jitter, range(1_700_000_000, 1_700_000_001))) == 1

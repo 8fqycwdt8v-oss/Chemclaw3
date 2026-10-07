@@ -1,30 +1,8 @@
 """Where a computed geometry lives so that its address resolves.
 
-`Structure.structure_id` is a content address over a geometry's chemistry, derived byte-identically
-here and on the calculation server. Every result model that describes a geometry reports one, and
-until `D-2026-08-21-a-geometry-is-an-address-not-a-payload` **nothing accepted one**: the address
-was a handle onto a store that did not exist, so a conformer search's twenty geometries could only
-reach the next calculation as the SMILES they all came from — which is the search thrown away.
-
-This is that store, and it is deliberately the smallest thing that closes the gap: two methods over
-one content-addressed table. It is not a cache (there is nothing to recompute — the bytes *are* the
-answer), and it is not the artifact store (see below), so it borrows neither's machinery.
-
-**Why not `artifacts.ArtifactStore`.** That store addresses a blob by the SHA-256 of its bytes and
-reaches it through a `(calc_key, name)` link. A geometry's identity is *narrower* than its bytes:
-`structure_id` excludes `smiles` and `origin`, because two identical geometries are the same
-structure whether one was embedded and the other optimized — and that is precisely the identity
-that lets a downstream task hit the cache regardless of which route produced its input. Addressing
-it by its bytes would fork on the provenance the identity ignores, and reaching it through a
-calculation key would make the *producer* part of the address. `api/tool_results.py` declined to
-share that store for the same reason, in the same words: one of the two keys would be pretending to
-be the other.
-
-**The invariant this exists to hold: every `structure_id` the agent is shown resolves.** It holds
-because the write and the projection are two halves of one act — `chemclaw.science.calc.geometry`
-strips a geometry out of a model-facing payload and this module keeps it, and both are driven from
-the same walker over the same shape. A handle the agent can read is therefore a handle it can pass
-back, structurally rather than by convention.
+A content-addressed `structure_id` → geometry table
+(D-2026-08-21-a-geometry-is-an-address-not-a-payload). Invariant: every `structure_id` the agent is
+shown resolves, because `geometry` strips and this module keeps the same geometries.
 """
 
 import logging
@@ -43,11 +21,8 @@ class StructureStore(Protocol):
     async def put(self, structures: Sequence[Structure]) -> None:
         """Persist every geometry under its own `structure_id`; a repeat writes nothing new.
 
-        **Takes a sequence rather than one structure, because the calculation that motivates this
-        store returns forty-seven of them.** A per-structure method would have made a conformer
-        search forty-seven connection checkouts and forty-seven commits — on the *cache hit* path
-        too, since the geometries are persisted from whatever the cache returned. One statement is
-        one round trip.
+        Takes a sequence so a conformer search's geometries are one round trip, on the cache-hit
+        path too.
         """
         ...
 
@@ -59,16 +34,8 @@ class StructureStore(Protocol):
 class InMemoryStructureStore:
     """The same contract in process — the reference the Postgres one is written to match.
 
-    **A differential oracle, not a deployment backend.** No configuration returns it — every
-    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
-    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
-    `src/` because it is the executable statement of the contract its Postgres sibling is written
-    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
-    halves of that — the absence of a shipped caller, and the absence of this claim.
-
-    A dict rather than an LRU: a geometry is kilobytes, a process holds one conversation's worth,
-    and evicting one would break the handle a turn is still holding — which is the one failure this
-    store exists to prevent.
+    A differential test oracle, not a deployment backend. A dict, not an LRU: evicting a geometry
+    would break a handle a turn still holds.
     """
 
     def __init__(self) -> None:
@@ -88,37 +55,13 @@ class InMemoryStructureStore:
 class UnknownStructureError(ValueError):
     """A `structure_id` was given that this deployment cannot resolve to a geometry.
 
-    A `ValueError` so it takes the bad-data path everywhere that already sorts errors that way:
-    `durable/publish._BAD_DATA_TYPES` fails a job fast instead of retrying an id that will never
-    resolve, and `agent/tool_authz.surface_domain_errors` hands the sentence to the model verbatim
-    so it can say which handle it was and what to run to get a fresh one.
+    A `ValueError`, so durable jobs fail fast instead of retrying and the model is handed the
+    message verbatim.
     """
 
 
 async def require_structure(store: StructureStore, structure_id: str) -> Structure:
-    """Resolve `structure_id`, or raise a message a model can act on.
-
-    One function rather than a `get`-then-check at each call site, because the message is the
-    interesting part: a handle that does not resolve is almost always a handle from a conversation
-    older than the deployment's data, and the remedy is to re-run the search rather than to retry
-    the id.
-
-    **There are two call sites in `src/`, not the six this said, which puts the extraction under
-    the Rule of Three it was invoking rather than over it** — `connectors/calc/server/tools.py`
-    (the MCP face) and `connectors/calc/activities.py` (the Temporal face). Said plainly because
-    the honest reading changes: with six callers the count carried the argument on its own, and
-    with two it does not. What keeps this a function is the other half of the sentence, and it is
-    the stronger half: the two callers are in two *processes*, answering the same handle to the
-    same model, and a message that told a chemist to re-run a search in one and not the other
-    would be a difference in the system's behaviour produced by a copy-paste. Inline it and the
-    sentence above has to be written twice.
-
-    Args:
-        store: Where geometries are kept.
-        structure_id: The address, as a result reported it.
-
-    Returns:
-        The geometry.
+    """Resolve `structure_id`, or raise a message telling the model to re-run the search.
 
     Raises:
         UnknownStructureError: Nothing is stored under that address.

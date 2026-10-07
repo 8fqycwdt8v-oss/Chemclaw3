@@ -1,9 +1,8 @@
 """Shared helpers for Temporal-backed tests.
 
-The time-skipping test server's binary is downloaded on first use; in a
-network-restricted sandbox that fails, so `start_env_or_skip` turns that into a
-skip (the tests run fully in CI). Kept in one place so every workflow/tool test
-uses the same server bootstrap and pydantic-configured client (DRY).
+The time-skipping test server's binary is downloaded on first use; where that fails,
+`start_env_or_skip` skips (the tests run fully in CI). One server bootstrap and client for every
+workflow test.
 """
 
 import pytest
@@ -23,12 +22,9 @@ async def start_env_or_skip() -> WorkflowEnvironment:
 async def start_local_env_or_skip() -> WorkflowEnvironment:
     """Start a **real-time** local dev server, or skip if its binary can't be fetched.
 
-    The time-skipping server above is the right instrument for a workflow whose behaviour is about
-    timers; it is the wrong one for a test about *wall-clock* worker events — a terminate, a cache
-    eviction, a graceful drain, or a client call that must return promptly on a run that is still
-    going. Under time skipping the server advances the clock whenever every worker is idle, so a
-    workflow parked on an unserved child queue is fast-forwarded to its own execution timeout
-    instead of staying `RUNNING`, which is exactly the state those tests need to observe.
+    For wall-clock worker events (terminate, eviction, drain, a prompt return on a running run): a
+    time-skipping server fast-forwards an idle workflow to its execution timeout instead of leaving
+    it `RUNNING`.
     """
     try:
         return await WorkflowEnvironment.start_local()

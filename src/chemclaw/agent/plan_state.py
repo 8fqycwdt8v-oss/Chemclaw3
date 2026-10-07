@@ -1,30 +1,9 @@
-"""Reading a session's proposed plan from outside a turn (M13 Step 5).
+"""Reading a session's proposed plan from outside a turn.
 
-The plan gate reads the plan *during* a call, off `request.state`, which is this turn's live view.
-Two callers need the same plan while no turn is running: `api/routes/plan.py`, so a chemist can see
-what is about to be executed and approve it, and the CLI's `/plan` and `/approve` commands.
-
-Under MAF both went through an in-process `AgentSession` object — the front door held one per live
-session and the harness kept its todo list inside it. That object is gone: `TodoListMiddleware`
-owns `todos`, and where it *lives* between turns is the checkpointer, keyed by the session id as
-`thread_id`. So the read is a checkpointer read, and this module is the one place that knows that.
-
-**One place, because the identity must not be computed twice.** `plan_identity` hashes each todo's
-`content` beside its `tools` declaration — *not* the rendered line, which is what this sentence
-said until a `plan_hash` on `PlanEvent` was nearly derived from `api/graph_stream._todo_titles`'s
-checkbox form on the strength of it. That would have shipped a hash matching no decision, on every
-plan, while looking authoritative. A durable approval row is keyed on this hash. If the route
-derived the plan differently from the gate — a different field, a different order, bookkeeping rows
-included — a chemist's approval would hash to something the gate never asks about, and every write
-would be refused with the plan visibly approved on screen. That is not hypothetical: it is the
-shape of the defect D-167 fixed, where `/approve` recorded against `current_plan_hash` while the
-guard asked `todo_titles`, and a session whose list held only bookkeeping recorded an approval
-against the empty-plan constant.
-
-**Absent state is not an error.** A session that has never taken a turn has no checkpoint, and a
-session mid-first-turn may have one with no todos yet. Both mean "no plan yet", which is what the
-route renders and what `/approve` refuses to act on — so this returns an empty list rather than
-raising, and the callers decide what nothing means.
+`api/routes/plan.py` and the CLI's `/plan` and `/approve` need the plan while no turn runs.
+`TodoListMiddleware` owns `todos` and the checkpointer holds them between turns (keyed by session id
+as `thread_id`), so this is a checkpointer read, in one place so the plan an approval is hashed over
+is the same plan the gate checks. Absent state means "no plan yet", not an error.
 """
 
 import logging
@@ -36,43 +15,12 @@ logger = logging.getLogger(__name__)
 async def session_plan(session_id: str, *, saver: Any | None = None) -> list[dict[str, Any]] | None:
     """The session's plan steps whole, or `None` when the plan is unreadable.
 
-    **`None` and `[]` are different answers and the callers act on them differently**, which is the
-    whole reason this does not return one list. `[]` means "this session has proposed nothing" — a
-    fact. `None` means "the plan could not be read": no checkpoint, an unreachable checkpointer, or
-    a checkpoint whose shape this does not recognise.
-
-    Collapsing the two was a fail-*open*: `consume_turn_approval` hashes what this returns, and on
-    `[]` it found no decision and returned early **without spending the approval** — leaving a
-    one-shot human approval live for every later turn. Its sibling `enforce_plan_approval` fails
-    closed on the same input. One input, two opposite directions, is exactly the divergence a gate
-    must not have.
-
-    **Only one of the two keys read here is an unpromised literal.** `channel_values` is a declared
-    field of `langgraph.checkpoint.base.Checkpoint`, a public `TypedDict`, so reading it is API use
-    rather than a reach into an internal. What upstream genuinely never promised is `todos`, which
-    is `TodoListMiddleware`'s own state key; that one is pinned by
-    `tests/test_upstream_surface.py::test_the_todo_middleware_still_names_the_plan_channel_todos`,
-    so a rename is a red build rather than a gate that silently reads every plan as empty.
-
-    **It answers the steps whole, and a narrower sibling returning only their text is what this
-    module used to also export.** `session_todos` is gone
-    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`): every caller
-    needs the declaration as well as the content — the identity hashes both, the decision records
-    one and the card displays the other — so a reader that dropped `tools` was a reader that could
-    only compute a hash matching no decision.
-
-    Steps with no readable `content` are dropped here rather than at each caller, so the hash, the
-    scope and the display are all taken over the same list — a plan identity that included a step
-    the scope did not would be two readings of one plan.
-
-    Args:
-        session_id: The session, which is the checkpointer's `thread_id`.
-        saver: The checkpointer to read. `None` resolves the configured one — passed in by the
-            front door, which already holds it open for the turn path and must not open a second.
-
-    Returns:
-        The plan's steps in order; `[]` for a readable session proposing nothing; `None` when the
-        plan could not be read at all.
+    `[]` means the session proposed nothing; `None` means the plan could not be read (no checkpoint,
+    unreachable checkpointer, unrecognised shape). Callers must treat them differently:
+    `consume_turn_approval` must not skip spending an approval because a read failed. Steps are
+    returned whole because the identity hashes both content and `tools`; steps without readable
+    `content` are dropped here so every caller sees the same list. The `todos` channel name is
+    pinned by `tests/test_upstream_surface.py`. `saver=None` resolves the configured checkpointer.
     """
     checkpoint = await _latest_checkpoint(session_id, saver)
     if checkpoint is None:

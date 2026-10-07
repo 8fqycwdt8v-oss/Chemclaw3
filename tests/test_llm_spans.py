@@ -1,16 +1,8 @@
-"""A model call is a span, it carries the counts, and it carries nothing a chemist said.
+"""A model call is a span, it carries the token counts, and it carries nothing a chemist said.
 
-The two gaps this closes were named regressions rather than wishes: `core/tracing.py` opens exactly
-two spans — the turn and the tool call — so the model call between them was invisible, and
-`chemclaw_*_tokens_total` carries `profile` rather than model since the framework that emitted
-`gen_ai.client.token.usage` was removed. Both are in `docs/guides/runbook.md` as things an operator
-can no longer ask.
-
-**The content assertion scans every attribute value rather than naming keys**, and that is the
-whole design of this file. Naming keys tests the list of keys somebody thought of; a deployment's
-question is "can a chemist's question reach the collector", and only sweeping the exported spans
-answers it. It is also the assertion that would catch an upstream release adding a new
-content-bearing attribute, which naming keys would not.
+The content assertion sweeps every attribute value of every exported span rather than naming keys,
+so it answers "can a chemist's text reach the collector" and catches a new content-bearing
+attribute an upstream release adds.
 """
 
 import asyncio
@@ -85,11 +77,9 @@ def _attributes_carrying_content(spans: list[Any]) -> set[str]:
 def test_a_model_call_becomes_a_span_carrying_its_token_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gap this closes: there was no span between `chemclaw.turn` and `chemclaw.tool`.
+    """A model call becomes a span between the turn and tool spans, carrying token counts.
 
-    Asserted on the counts as well as on the span's existence, because a span that named the model
-    call and carried nothing would close the *trace* gap and leave the *attribution* one open — and
-    those are two separate rows in `docs/planning/BACKLOG.md`.
+    A span without counts would close the trace gap and leave attribution open.
     """
     spans = _turn(content_allowed=False, monkeypatch=monkeypatch)
 
@@ -106,12 +96,7 @@ def test_a_model_call_becomes_a_span_carrying_its_token_counts(
 def test_the_suppressed_span_carries_no_word_the_chemist_typed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default must satisfy `core/tracing.py`'s rule, and satisfy it by measurement.
-
-    "identifiers and counts, never a question, an argument or an answer" is a property of what
-    reaches the collector, so it is checked against what reached the exporter — every attribute of
-    every span, not the ones this test's author could name.
-    """
+    """The suppressed span carries no word the chemist typed, in any exported attribute."""
     spans = _turn(content_allowed=False, monkeypatch=monkeypatch)
 
     assert _attributes_carrying_content(spans) == set(), (
@@ -122,12 +107,10 @@ def test_the_suppressed_span_carries_no_word_the_chemist_typed(
 def test_the_flag_is_what_decides_it_and_it_costs_none_of_the_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Content appears only when `otel_include_sensitive_data` says so, and hiding is free.
+    """Content appears only when `otel_include_sensitive_data` allows it, at no cost in counts.
 
-    Both halves in one test because they are one claim. A suppression that also cost the token
-    counts would be a trade-off a deployment might reasonably refuse; measured, it is not one — the
-    counts are identical across the two runs, so the privacy-preserving setting can be the default
-    without anybody weighing it against what the instrumentation was added for.
+    The counts are identical across both runs, so the privacy-preserving default trades nothing
+    away.
     """
     hidden = _turn(content_allowed=False, monkeypatch=monkeypatch)
     shown = _turn(content_allowed=True, monkeypatch=monkeypatch)
@@ -153,9 +136,7 @@ def test_the_flag_is_what_decides_it_and_it_costs_none_of_the_counts(
 def test_the_instrumentation_is_absent_until_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
     """Off by default, and off means the instrumentation is never imported or attached.
 
-    The counter-example every observability switch here needs: a flag that is read but never acted
-    on looks identical from outside to one that works, which is the defect
-    `agent/compaction.py` exists because of.
+    A flag read but never acted on looks identical from outside to one that works.
     """
     monkeypatch.setattr(settings, "otel_llm_spans", False)
     exporter = InMemorySpanExporter()
@@ -170,13 +151,11 @@ def test_the_instrumentation_is_absent_until_asked_for(monkeypatch: pytest.Monke
 
 
 def test_every_hide_flag_is_set_together(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Suppression is all-or-nothing, and the list is written out rather than derived.
+    """Every hide flag is set together, from an explicit list.
 
-    Two things are pinned. That no hide flag is left False when content is disallowed — a span
-    carrying the prompt but not the completion still carries a chemist's question, so a partial
-    answer here is not an answer. And that the list is *explicit*: deriving it from the dataclass's
-    fields would silently adopt whatever a future release adds, including a field whose default is
-    the permissive one, so a new upstream flag should fail this test rather than inherit a decision.
+    A span with the prompt but not the completion still leaks the question. The list is written out
+    rather than derived, so a new upstream flag fails here rather than inheriting a permissive
+    default.
     """
     from openinference.instrumentation import TraceConfig
 
@@ -202,17 +181,10 @@ def test_every_hide_flag_is_set_together(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_enabling_content_says_so_out_loud(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The dangerous direction must warn, because it is the one that used to be silent.
+    """Enabling content warns, naming the endpoint it will be exported to.
 
-    `otel_include_sensitive_data` governed nothing for a phase, and the process warned about
-    exactly that. Giving it a consumer back inverts which case needs saying: a deployment that set
-    the flag while it was inert — and `core/config/observability.py` kept it "because a deployment
-    may still have it in its values file" — gets `otel_llm_spans` switched on by the shipped chart
-    and starts exporting a chemist's question to the collector, without anybody deciding that in
-    this release.
-
-    The endpoint is in the assertion because a warning that does not say *where* the content is
-    going leaves the operator with the wrong half of the question.
+    A deployment carrying the flag in its values file would otherwise start exporting chemists'
+    questions without a decision.
     """
     monkeypatch.setattr(settings, "otel_include_sensitive_data", True)
     monkeypatch.setattr(settings, "otel_llm_spans", True)
@@ -229,11 +201,9 @@ def test_enabling_content_says_so_out_loud(
 def test_the_inert_case_still_says_it_is_inert(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The inert direction keeps its warning: a dead switch must not read as a live one.
+    """The inert direction keeps its warning, so a dead switch does not read as a live one.
 
-    Both directions are pinned because the bug being guarded against is a *branch* that fires on
-    the wrong one — and a test for only the new half would have passed against the code that had
-    only the old half.
+    Both directions are pinned because the guarded bug is a branch firing on the wrong case.
     """
     monkeypatch.setattr(settings, "otel_include_sensitive_data", True)
     monkeypatch.setattr(settings, "otel_llm_spans", False)

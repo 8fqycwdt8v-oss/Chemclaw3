@@ -1,17 +1,9 @@
-"""A worker that was killed rather than asked to stop.
+"""A worker is asked to stop on `SIGTERM` rather than killed.
 
-`asyncio.run(main())` around `worker.run()` looks complete and contains no shutdown at all. Python
-installs no `SIGTERM` handler, so the default disposition applied: on every node drain, rolling
-update, HPA scale-down and eviction the process died **immediately**, mid-activity, with nothing
-unwound. Temporal made the work survivable — the activity is retried elsewhere once its
-start-to-close timeout expires — and survivable was doing a lot of work in that sentence: a long
-activity is paid for twice, the retry waits out a timeout that exists for lost workers rather than
-for deploys, and the pod's own cleanup (`db.pooling()`'s connections, a half-finished PR-gate
-checkout) never ran.
-
-`durable/serve.py` is the missing handler. These tests drive it with a stand-in worker rather than a
-real one, because the behaviour under test is entirely in the runtime — what a signal does, what is
-awaited, and what happens to the surrounding context managers — and a real worker needs a broker.
+Python installs no `SIGTERM` handler, so without `durable/serve.py` every drain, rollout and
+eviction would kill the worker mid-activity: the activity is paid for twice, its retry waits out
+start-to-close, and the pool never closes. Driven with a stand-in worker, because the behaviour is
+in the runtime and a real worker needs a broker.
 """
 
 import asyncio
@@ -34,11 +26,7 @@ class _FakeCount:
 class _FakeClient:
     """The one client method `serve_worker` reaches for, through the in-flight gauge's refresh.
 
-    Present because `serve_worker` now drives `poll_open_jobs(worker.client, stop)`: the durable
-    in-flight reading is the broker's own visibility count rather than a number a workflow body
-    kept about itself (`durable/job_metrics.py`). A fake that omitted it would make every test here
-    exercise the refresh's *degrade* path instead of its normal one, which is the wrong thing for
-    tests whose subject is the shutdown.
+    Without it every test here would exercise the refresh's degrade path instead of its normal one.
     """
 
     async def count_workflows(self, query: str) -> _FakeCount:
@@ -49,9 +37,8 @@ class _FakeClient:
 class _FakeWorker:
     """A worker that runs until told to shut down, recording what it was asked to do.
 
-    Shaped after the real contract rather than a convenient one: `run()` returns only once
-    `shutdown()` is called, and `shutdown()` waits for the drain — which is exactly why the runtime
-    has to await both in the right order.
+    Shaped after the real contract: `run()` returns only once `shutdown()` is called, and
+    `shutdown()` waits for the drain.
     """
 
     def __init__(
@@ -59,9 +46,8 @@ class _FakeWorker:
     ) -> None:
         """Start not-running; `fail` is raised by `run()` — at once, or on the way out of the drain.
 
-        Two timings because they are two different bugs: a worker that cannot start, and a worker
-        that breaks while finishing its last activity. Only the second can be lost by a runtime that
-        stops awaiting once `shutdown()` returns.
+        Two timings, two bugs: a worker that cannot start, and one that breaks while finishing its
+        last activity, which a runtime that stops awaiting after `shutdown()` would lose.
         """
         self.is_running = False
         self.client = _FakeClient()
@@ -145,9 +131,8 @@ def test_sigint_drains_the_same_way() -> None:
 def test_a_fatal_worker_error_is_raised_not_drained() -> None:
     """The one case where the process *should* end loudly.
 
-    Temporal's own `run()` docstring says `shutdown()` need not be invoked for a fatal error, and
-    swallowing it inside the drain would turn a broken worker into a pod that exits 0 — which reads
-    to Kubernetes as a completed job rather than a crash to restart and alert on.
+    Swallowing a fatal error in the drain would make the pod exit 0, read as a completed job rather
+    than a crash to restart and alert on.
     """
     worker = _FakeWorker(fail=RuntimeError("worker fatal error"))
 
@@ -165,11 +150,8 @@ def test_a_fatal_worker_error_is_raised_not_drained() -> None:
 def test_a_failure_during_the_drain_is_not_swallowed() -> None:
     """What the final `await` on the run task is actually for.
 
-    `Worker.shutdown()` already waits for the drain, so it is tempting to read the await after it as
-    redundant and delete it. It is not: an error raised by `run()` while finishing its last activity
-    would then be attached to a task nobody looks at, and the pod would exit 0 — a broken drain
-    reported as a clean one, which is the same class of lie as the `Running` pod with a dead poll
-    loop that this whole change started from.
+    `shutdown()` already waits for the drain, but an error `run()` raises while finishing its last
+    activity is only surfaced by awaiting the run task; without it the pod exits 0.
     """
     worker = _FakeWorker(fail=RuntimeError("broke while draining"), fail_while_draining=True)
 
@@ -182,16 +164,9 @@ def test_a_failure_during_the_drain_is_not_swallowed() -> None:
 def test_the_handlers_do_not_outlive_the_worker() -> None:
     """`serve_worker` puts the process's signal disposition back the way it found it.
 
-    Installing a handler is a *process*-wide effect, and leaving it behind would silently claim
-    SIGTERM from whatever ran next in the same loop — a caller that had its own shutdown would
-    simply stop seeing the signal, which is the failure this module was written to remove, wearing
-    the module's own name.
-
-    Asserted through `signal.getsignal`, because that is where the effect actually lives:
-    `loop.add_signal_handler` installs an asyncio trampoline and `remove_signal_handler` restores
-    the default. Checking it *inside* the loop matters — `asyncio.run` closes the loop on the way
-    out, and closing a Unix loop removes its handlers anyway, so an assertion after the run would
-    pass with no cleanup here at all.
+    A leftover handler would silently claim SIGTERM from whatever ran next. Asserted via
+    `signal.getsignal` inside the loop, because `asyncio.run` closing the loop removes handlers
+    anyway and an assertion afterwards would pass with no cleanup.
     """
     worker = _FakeWorker(fail=RuntimeError("stop"))
 
@@ -210,9 +185,7 @@ def test_the_handlers_do_not_outlive_the_worker() -> None:
 def test_the_pool_and_the_probe_surface_close_with_it() -> None:
     """The drain is what makes the surrounding `async with` unwind at all.
 
-    Under the old hard kill, `db.pooling()`'s exit never ran — connections were dropped rather than
-    closed. That is the quiet cost of "Temporal retries it anyway": the work survives and the
-    process's own promises do not.
+    On a hard kill `db.pooling()`'s exit never runs and connections are dropped rather than closed.
     """
     closed: list[str] = []
 

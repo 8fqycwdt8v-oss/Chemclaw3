@@ -1,12 +1,8 @@
 """The delegation comparison drops what it cannot measure, loudly, and never averages it in.
 
-Every case here is a way the measurement can be wrong *while looking right*, which is the failure
-the instrument this replaces actually had: `data/evals/probes/m12/routing.yaml` measured delegation
-rate over one-tool probes and reported two numbers seven-fold apart as though each were a result.
-
-The arithmetic cases are thin on purpose. Medians and subtractions are not where this goes wrong —
-the drops are, because every one of them is a task silently becoming part of an average about
-something else.
+Every case is a way the measurement can be wrong while looking right. The arithmetic cases are
+thin on purpose: the drops are where a task silently becomes part of an average about something
+else.
 """
 
 from __future__ import annotations
@@ -103,13 +99,11 @@ def test_a_complete_pair_is_compared_on_all_three_axes() -> None:
 
 
 def test_a_baseline_that_delegated_is_contaminated_rather_than_compared() -> None:
-    """The defect a behavioural arm actually has, and the reason `delegated` is on every run.
+    """A baseline that delegated is contaminated rather than compared.
 
-    `no-helper` is the model being *asked* not to call `task`, because the tool cannot be taken
-    away — `SubAgentMiddleware` is required and an empty roster makes upstream re-insert its own.
-    So compliance is an observation. A task where the baseline delegated anyway compares delegation
-    against delegation, and averaging it in would pull every aggregate toward zero effect: the
-    answer this measurement most needs to be unable to produce by accident.
+    `no-helper` *asks* the model not to call `task`, because the tool cannot be removed, so
+    compliance is an observation. Comparing a task where the baseline delegated anyway would pull
+    every aggregate toward zero effect.
     """
     runs = [
         *_pair("clean-a"),
@@ -131,10 +125,9 @@ def test_an_arm_that_never_delegated_is_reported_rather_than_credited() -> None:
     report = compare_arms(runs, arm=ARM)
 
     assert report.undelegated == ["inert"]
-    # **Reported, and still compared** — this is an intention-to-treat comparison, so the arm's own
-    # behaviour never decides which tasks count. Dropping "inert" would score the arm only where it
-    # chose to delegate, which measures the choice; keeping it dilutes the effect toward zero,
-    # which is the conservative direction, and `delegated_in` is what says how much.
+    # Reported, and still compared: intention-to-treat, so the arm's own behaviour never decides
+    # which tasks count. Keeping "inert" dilutes toward zero, the conservative direction;
+    # `delegated_in` says how much.
     assert [c.task_id for c in report.comparisons] == ["inert", "real-a", "real-b"]
     inert = next(c for c in report.comparisons if c.task_id == "inert")
     assert (inert.delegated_in, inert.repeats) == (0, MINIMUM_REPEATS)
@@ -188,11 +181,10 @@ def test_an_empty_comparison_raises_rather_than_reporting_no_effect() -> None:
 
 
 def test_a_zero_baseline_drops_that_axis_and_keeps_the_others() -> None:
-    """A turn that failed before billing is a real observation and an impossible ratio.
+    """A zero baseline drops that axis and keeps the others.
 
-    Dropping the whole task would lose its quality and wall-clock evidence over an artefact of one
-    axis; letting the ratio through would put an infinity into a median and make the cost answer
-    about the one broken run.
+    A turn that failed before billing is a real observation and an impossible ratio; dropping the
+    whole task would lose its quality and wall-clock evidence.
     """
     report = compare_arms(_pair("free", base_tokens=0, arm_tokens=0), arm=ARM)
 
@@ -283,16 +275,11 @@ def test_a_third_arm_is_ignored_rather_than_refused() -> None:
 
 
 def test_quality_stays_an_observation_on_an_even_number_of_repeats() -> None:
-    """The averaging the module forbids, reproduced at the repeat count that produces it.
+    """Quality stays an observation on an even number of repeats.
 
-    `MINIMUM_REPEATS` is documented as a floor rather than a target, so four repeats is ordinary —
-    and `statistics.median` returns the *mean of the two middle values* on an even-sized group. On
-    the five-point verdict scale that is exactly the "number that names no verdict" the module's own
-    docstring rejects: `served` (1.0) beside `unserved` (0.0) would aggregate to 0.5, which is
-    `partial`'s score, asserted about a pair of runs where neither arm was ever partial.
-
-    Every other case in this file uses three *identical* runs, so none of them can tell `median`
-    from `median_low` — which is why this one varies the values and takes an even count.
+    `statistics.median` averages the two middle values on an even group, so `served` beside
+    `unserved` would aggregate to `partial`'s score, a verdict neither run had. The other cases use
+    three identical runs and cannot tell `median` from `median_low`.
     """
     runs = [
         ArmRun(
@@ -340,15 +327,9 @@ def test_the_cost_axes_keep_the_midpoint_on_an_even_number_of_repeats() -> None:
 def test_an_arm_that_delegated_in_some_repeats_is_reported_with_its_compliance() -> None:
     """Compliance is a number beside the result, never a filter in front of it.
 
-    `ArmAggregate.delegated_in` is a count because "delegated in one repeat of three is a different
-    fact from either extreme and is the shape a behavioural arm actually produces". Two earlier
-    versions of this comparison threw that away: one collapsed it to `if not delegated_in` and
-    credited the task outright, the other required every repeat and dropped anything less. Both
-    conditioned on the treatment; the second also made the instrument refuse corpora a real run
-    produces (a Monte-Carlo puts the per-repeat delegation needed for an even chance of any report
-    at ~87.4%, rising with the repeat count).
-
-    So the task is compared and its compliance travels with it.
+    `ArmAggregate.delegated_in` is a count, because partial delegation is what a behavioural arm
+    produces. Crediting or dropping a task by compliance conditions on the treatment; so the task is
+    compared and its compliance travels with it.
     """
     mixed = [
         *_runs("mixed", BASELINE_ARM, quality=0.5, tokens=10_000, seconds=60.0, delegated=False),
@@ -382,18 +363,11 @@ def test_an_arm_that_delegated_in_some_repeats_is_reported_with_its_compliance()
 
 
 def test_an_arm_that_declines_or_fails_the_hard_tasks_cannot_report_that_it_helped() -> None:
-    """The selection effect, in the two shapes the bound that preceded this missed.
+    """An arm that declines or fails the hard tasks cannot report that it helped.
 
-    A share bound over the *surviving* tasks was added to stop "helped everywhere, 60% cheaper,
-    33% faster" over one task of eight. It counted only the tasks the arm *declined*, so both of
-    these reproduced that headline with the guard green: an arm that crashed or timed out on the
-    hard seven (`incomplete`, excluded from the bound's denominator), and an arm that ran, lost
-    badly, and completed 2 of 3 repeats each (`incomplete` again, on a repeat-count technicality).
-
-    Under intention-to-treat there is nothing to bound, because nothing is dropped for the arm's
-    behaviour: a task the arm declined is compared and dilutes toward zero, and a task the arm lost
-    is compared and counts against it. Both arms of this test are the headline the old guard let
-    through.
+    Under intention-to-treat nothing is dropped for the arm's behaviour: a declined task is compared
+    and dilutes toward zero, and a lost or incomplete task counts against the arm. Both arms here
+    are headlines a survivor-only bound would have let through.
     """
     helped_once = list(_pair("t1", base_quality=0.0, arm_quality=1.0, arm_tokens=400))
     declined = [run for index in range(2, 9) for run in _pair(f"t{index}", arm_delegated=False)]

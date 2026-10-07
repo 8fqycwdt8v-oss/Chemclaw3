@@ -2,6 +2,8 @@
 
 ## Status
 
+**Superseded-by:** [D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports](D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports.md) (in part)
+
 Accepted (2026-08-27) — and **revised on review the same day**. The rule this ADR is named for
 stands. The storage-and-sweep tier built to carry it was measured to be unreachable in three
 independent places and has been **removed**; the defect it was written for is open again, and what

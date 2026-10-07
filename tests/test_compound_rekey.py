@@ -1,10 +1,9 @@
 """A `STANDARDIZATION_VERSION` bump that moves a compound's id re-keys it rather than orphaning it.
 
-`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. The corpus in these tests is
-built **under the previous version for real** — `std11` is `std12` without
-`_IONISABLE_NEUTRAL_ACIDS`, so emptying that table and clearing the standardization cache
-reproduces what a deployment wrote before the bump — and then carried across it by the production
-entry point, `rekey_standardization`, writing through `kg.record.record_note` onto disk.
+`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. The corpus is built under the
+previous version for real (`std11` is `std12` without `_IONISABLE_NEUTRAL_ACIDS`, so emptying that
+table and clearing the cache reproduces it), then carried across by the production entry point
+`rekey_standardization`, writing through `kg.record.record_note`.
 """
 
 import asyncio
@@ -117,9 +116,9 @@ class _DiskWriter:
 def corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """A knowledge tree written under `std11`, and the ids it was written under.
 
-    Every branch the planner takes has a member: two old spellings collapsing onto an id that
-    already has a note, one onto an id that has none, one a person wrote, a slug-named seed note,
-    and a job result citing an old id with a typed edge.
+    Every planner branch has a member: two old spellings onto an id that already has a note, one
+    onto an id with none, a person-written note, a slug-named seed note, and a job result citing an
+    old id with a typed edge.
     """
     monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
     monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
@@ -201,11 +200,10 @@ def test_a_citation_to_a_pre_bump_id_resolves_to_the_post_bump_note(
 def test_a_note_citing_the_old_id_keeps_its_compound_neighbour_and_its_typed_edge(
     tmp_path: Path, corpus: dict[str, str]
 ) -> None:
-    """The dependency is not dropped from the graph view when the note it names is retired.
+    """A note citing the old id keeps its compound neighbour and its typed edge.
 
-    Before the re-key the neighbour is the old note; after it, the old note is not current, and a
-    neighbourhood that drops non-current notes would lose the compound — so it is reported as the
-    note that superseded it, carrying the `computed-from` the author typed against the old id.
+    After the re-key the old note is not current, so the neighbour is reported as the note that
+    superseded it, carrying the `computed-from` edge typed against the old id.
     """
     _rekey(tmp_path, apply=True)
     view = asyncio.run(expand_note("job-perchlorate"))
@@ -234,7 +232,7 @@ def test_no_link_in_the_corpus_is_left_pointing_at_nothing_current(
 
 
 def test_a_pre_bump_note_re_recorded_still_carries_its_compound(corpus: dict[str, str]) -> None:
-    """`compound_dependencies` used to return `[]` here, so the note landed without its compound."""
+    """`compound_dependencies` resolves the old id, so the note lands with its compound."""
     job = next(n for n in load_notes(settings.knowledge_path) if n.id == "job-perchlorate")
     (dependency,) = compound_dependencies(job)
     assert dependency.id == corpus["ionic"]
@@ -358,10 +356,8 @@ def test_the_command_disposes_only_when_asked_and_only_after_the_apply(
 ) -> None:
     """`--apply` alone keeps the shelf; `--dispose-superseded` settles each index after the re-key.
 
-    The disposal is recorded rather than run because what this pins is the command's wiring — which
-    tables, which definitions, after which step. That the guard keeps an incomplete rebuild's shelf
-    and that the statement deletes exactly the superseded rows is driven against a real table in
-    `tests/test_live_index.py`, which runs the same `settle_index`.
+    The disposal is recorded rather than run, pinning the wiring (tables, definitions, ordering);
+    `settle_index` itself is driven against a real table in `tests/test_live_index.py`.
     """
     monkeypatch.setattr(rekey_compounds, "default_molecule_store", InMemoryFingerprintStore)
     monkeypatch.setattr(rekey_compounds, "default_reaction_store", InMemoryFingerprintStore)
@@ -394,11 +390,9 @@ def test_the_command_disposes_only_when_asked_and_only_after_the_apply(
 
 
 def test_the_disposal_connects_as_the_schema_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`094` names an operator statement under the owning principal, never the runtime role.
+    """The disposal connects as the schema owner, never the runtime role.
 
-    On a split-principal deployment the runtime credential has no `DELETE` on either table
-    (`tests/test_database_privileges.py` holds the grant to that), so a disposal through it would
-    fail `permission denied` — and a grant that let it succeed is the boundary this exists to keep.
+    The runtime credential has no `DELETE` on these tables (`tests/test_database_privileges.py`).
     """
     seen: list[str] = []
 

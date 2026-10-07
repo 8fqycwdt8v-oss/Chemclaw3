@@ -1,22 +1,9 @@
-"""What travels with a connector call that is *about the connector*: its own credential.
+"""What travels with a connector call that is about the connector: its own credential.
 
-One concern, since `D-2026-09-14-identity-stamping-is-cores-not-a-connectors` moved the other one.
-
-- **Identity** (who is asking) is `chemclaw.core.call_identity`. It reads the turn's ambient
-  ContextVars and nothing about connectors, and it had to leave so that a *non-connector* MCP
-  client could reach it — `chemclaw.ingest.labels.labeller` could not, because
-  `ingest -> connectors` is not an edge `tests/test_layering.py` permits, so its leg to the
-  labelling server ran for hours inside a durable activity carrying `Authorization` and nothing
-  else.
-- **Our credential** (who *we* are) is an `httpx.Auth` on the connector's client, because it must
-  also be present on the MCP `session.initialize()` that happens when the connection opens — and
-  because *which* credential is a fact declared in a bundle's `connector.yaml`, which is what makes
-  it this module's and not core's. `connectors.manifest` is now this module's **only** first-party
-  import, which is the line drawn as plainly as it can be: what is left here is exactly what needs
-  to know what a bundle declared.
-
-Read `chemclaw.core.call_identity` for the header contract, the redirect strip, and why a request
-hook rather than a per-call header callback.
+Identity (who is asking) is `chemclaw.core.call_identity`, so non-connector MCP clients can use it
+too; read it for the header contract and the redirect strip. The credential (who we are) is an
+`httpx.Auth` on the connector's client, so it is also present on the MCP `initialize`, and it lives
+here because which credential is declared in the bundle's `connector.yaml`.
 """
 
 import os
@@ -34,11 +21,8 @@ class MissingConnectorCredential(RuntimeError):
 class _EnvBearerAuth(httpx.Auth):
     """Send `Authorization: Bearer <$env>`, reading the variable per request.
 
-    Reading at request time (not at construction) is what makes a rotated secret take effect
-    without a restart: the front door holds one connector tool for the process's whole lifetime,
-    so a token captured at import would be pinned to whatever was mounted at startup. A missing
-    variable raises rather than sending an empty credential — a 401 from a silently
-    unauthenticated call is much harder to diagnose than a named configuration error.
+    Read at request time so a rotated secret takes effect without a restart. A missing variable
+    raises rather than sending an empty credential, which would surface as an opaque 401.
     """
 
     def __init__(self, token_env: str, connector: str) -> None:
@@ -61,9 +45,6 @@ class _EnvBearerAuth(httpx.Auth):
 def auth_for(auth: ConnectorAuth, connector: str) -> httpx.Auth | None:
     """The `httpx.Auth` for a connector's declared auth mode, or `None` when it needs no credential.
 
-    One dispatch site for the auth union, so adding a mode is one variant in
-    `chemclaw.connectors.manifest.ConnectorAuth` plus one branch here.
-
     Args:
         auth: The connector's declared auth mode.
         connector: The connector's name, for the error message when a credential is missing.
@@ -75,7 +56,6 @@ def auth_for(auth: ConnectorAuth, connector: str) -> httpx.Auth | None:
         return _EnvBearerAuth(auth.token_env, connector)
     if isinstance(auth, NoAuth):
         return None
-    # Deliberately not `assert_never`: `ConnectorAuth` is a plain union, and a variant added
-    # without a branch here must fail loudly at build time rather than silently sending no
-    # credential.
+    # Not `assert_never`: `ConnectorAuth` is a plain union, and an unhandled variant must fail
+    # loudly rather than silently send no credential.
     raise ValueError(f"connector {connector!r}: unsupported auth mode {type(auth).__name__}")

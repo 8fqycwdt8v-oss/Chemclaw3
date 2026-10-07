@@ -1,39 +1,19 @@
-"""The observations tier: what the agent noticed, kept out of the knowledge graph (D-161).
+"""The observations tier: what the agent noticed, kept out of the knowledge graph.
 
-An observation is explicitly **not** truth. "Both projects that tried this coupling on an
-electron-poor aryl chloride got a poor outcome" is worth noticing and is not a claim.
+An observation is explicitly not truth: a pattern across projects that no single run supports. Notes
+in `knowledge/` are cited as evidence, so a hunch lives here until it crosses the promotion
+thresholds, and promotion writes an ordinary playbook note. Enforced rules:
 
-**Why this tier survives the gate's deletion, when its original justification did not.** D-161
-argued it as a cost argument about review: every candidate learning would cost a reviewer a pull
-request, and most do not earn one. There is no reviewer now
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so that argument is gone — and the tier
-is still right, for the reason underneath it. A note in `knowledge/` is *cited* and served as
-evidence; an observation is a pattern across projects that no single run supports, so serving it as
-evidence would let a hunch be cited as a finding. The threshold is what turns one into the other,
-and promotion writes an ordinary playbook note through the ordinary write path.
+- An observation's identity is its scope, so a growing finding updates one row (see `with_id` for
+  when the scope moves).
+- Support is `len(evidence_note_ids)`, derived rather than counted, holding only what the miners put
+  there (reaction records). Migration `025` forbids an observation id in that column, so the agent
+  cannot count its own observation as corroboration.
+- An observation never enters the evidence list: `recall_observations` is its own labelled tool,
+  never fused into `gather_evidence`.
 
-Two rules make that safe, and both are enforced rather than documented:
-
-- **An observation's identity is its scope**, so a finding that grows normally updates one row
-  instead of minting a near-duplicate every time the corpus does. "Normally" is load-bearing and
-  `with_id` spells out the exception and what it costs.
-- **Support is `len(evidence_note_ids)`**, not a counter. A counter can be incremented by anything;
-  a derived count can only hold what the miners put there, and they put only reaction records and
-  the chemist's own `interaction` note (`observation_mining`'s docstring restates why that, rather
-  than "merged", is the property doing the work). Migration `025` additionally forbids an
-  observation id from ever appearing in that column, because the dangerous failure is the agent
-  retrieving its own observation, counting it as corroboration, and inflating past the promotion
-  threshold — a self-confirming loop that looks exactly like cross-project evidence from the
-  outside, and one nothing downstream can now catch, because nothing reads a promoted note before
-  a chemist does.
-- **An observation never enters the evidence list.** `recall_observations` is its own tool and its
-  results are labelled as what they are; nothing fuses them into `gather_evidence`'s ranked chunks.
-  An observation may direct what you look for; it may never be the evidence for a claim.
-
-Stored in Postgres rather than Git, which *preserves* "git is the source of truth" precisely
-because these are not truth: with no review, Git buys a commit per candidate and repo churn and
-returns nothing, while a table gives cheap upsert-accumulation, TTL eviction, and no
-file-per-observation explosion.
+Stored in Postgres rather than Git because these are not truth: a table gives cheap upserts and TTL
+eviction without a commit per candidate.
 """
 
 import logging
@@ -55,42 +35,17 @@ logger = logging.getLogger(__name__)
 ObservationStatus = Literal["open", "promoted", "retired"]
 ObservationOrigin = Literal["corpus-mining", "interaction"]
 
-# Re-observing a finding revives it. Retirement means "the corpus stopped supporting this", and
-# the corpus is entitled to change its mind: a finding that lapses for
-# `observation_retire_after_days` and returns, or an ingest source quiet for that long, both come
-# back through here — two ordinary paths, not edge cases. Without this the row kept its evidence
-# replaced and its `last_seen` bumped by every subsequent pass while every read
-# (`open_observations`, `promotable`, `recall_observations`) filters `status = 'open'` — so it was
-# invisible *permanently*, and it never re-entered `retire_stale`'s count either, which is the
-# tier's own instrumentation for whether the miners are producing noise. A dead tier rather than a
-# breathing one.
-#
-# `retired -> open` only. The column holds exactly three values (migration `025` constrains it), and
-# `promoted` must survive re-observation untouched: the miners keep re-observing a promoted finding
-# by construction, and reopening it would re-promote it on the next sweep and write the same
-# playbook note every night — the failure `test_a_promoted_observation_leaves_the_open_set`
-# exists to prevent.
+# Re-observing a retired finding reopens it: the corpus may support it again (a lapsed finding
+# returns, a quiet source resumes). Without this the row would stay invisible to every read, which
+# filters `status = 'open'`. Only `retired -> open`: a `promoted` row is re-observed by construction
+# and must stay promoted, or it would be re-promoted every night.
 _REVIVE = """
     status = CASE WHEN observations.status = 'retired' THEN 'open' ELSE observations.status END"""
 
-# **A run is authoritative for the rows it names — when, and only when, it saw the whole corpus.**
-#
-# The union these replace could only ever grow, so a member that left the cluster stayed forever: a
-# reaction re-assayed SUCCESS is dropped by `mine_corpus` before fingerprinting, yet its note id
-# remained in `evidence_note_ids` and kept counting toward `support`. Proved end to end — an
-# observation crossed the promotion threshold on three notes while its own refreshed statement said
-# "failed in 2 runs across 2 projects", so the generated PR body contradicted itself in consecutive
-# paragraphs and cited a documented success as evidence of failure. `retire_stale` cannot reach it
-# either, because the row is still being re-observed. So a complete pass **replaces** both arrays,
-# and support tracks the corpus in both directions.
-#
-# Replacing on *every* pass, however, reintroduces the same defect one layer down: a pass that read
-# only part of the corpus would rewrite evidence *down* and render as an authoritative statement of
-# what the record holds. `chemclaw.durable.memory_jobs.read_corpus` cannot promise completeness —
-# an entry `map_to_ord` rejects is skipped and the read goes on — so it reports whether it was
-# complete, and a partial pass falls back to the union: it may add what it saw and may never delete
-# what it could not see. A retraction it cannot distinguish from an invisible member simply waits
-# for the next complete pass, which is the only pass entitled to make it.
+# A complete pass is authoritative for the rows it names and replaces both arrays, so a member that
+# left the cluster (e.g. re-assayed as a success) stops counting toward support. A partial pass
+# (`read_corpus` may skip rejected entries) uses `_ACCUMULATE` instead: it may add what it saw but
+# never delete what it could not see.
 _REPLACE = f"""
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
@@ -103,24 +58,10 @@ ON CONFLICT (id) DO UPDATE SET
     last_seen = now(),{_REVIVE}
 """
 
-# Postgres has no array-union operator, so the union is spelled out — `array_agg(DISTINCT ...)` over
-# the concatenation, ordered so the stored value is stable and a no-op run produces a byte-identical
-# row. The statement is *kept*, not refreshed: it was written by a pass that saw more than this one,
-# and replacing it would leave a "one project" sentence beside three-project evidence — the exact
-# self-contradiction the replacement above exists to remove, arrived at from the other side.
-#
-# **`COALESCE`, because `array_agg` over zero rows returns NULL rather than `'{{}}'`.** Both columns
-# are `TEXT[] NOT NULL DEFAULT '{{}}'` (025), so an accumulate whose stored *and* incoming arrays
-# are both empty aborts the statement with a not-null violation — and it takes the whole batch with
-# it, since `record` sends the pass in one `executemany`. The `_REPLACE` branch above is unaffected:
-# it assigns `EXCLUDED.*` straight through, and an empty array is a fine value to store.
-# Reachability, stated honestly: **neither shipped miner can produce it** — both `mine_corpus` and
-# `mine_interactions` skip a finding with fewer than two projects, and derive evidence from the
-# same rows the projects came from. It is `record()`'s own signature that permits it, `Observation`
-# declares both fields `default_factory=list` with no minimum length, and driving the public
-# function with such a row against a real database is what turns it red
-# (`tests/test_observations.py`). Two branches of one function that disagree about the empty case is
-# a defect whether or not today's two callers happen to avoid it.
+# Array union spelled out (`array_agg(DISTINCT ...)` over the concatenation), ordered so a no-op run
+# writes a byte-identical row. The statement is kept, not refreshed: it came from a pass that saw
+# more. `COALESCE` because `array_agg` over zero rows is NULL and the columns are NOT NULL; the
+# shipped miners never send empty evidence, but `record()` permits it.
 _ACCUMULATE = f"""
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
@@ -140,15 +81,8 @@ _COLUMNS = (
     "id, statement, scope, evidence_note_ids, projects_seen, origin, status, first_seen, last_seen"
 )
 
-# **This ORDER BY and `observations_open_rank_idx` are one decision, and they must move together.**
-# Migration `025` indexed `(status, last_seen DESC)` under a comment claiming the retrieval bucket
-# wants open observations newest-first. It never did — support leads here, deliberately
-# (`open_observations` says why) — so the index covered the `status` filter and nothing else, and
-# every read of the bucket fetched all open rows and top-N sorted them on an expression no index
-# knew about: 234 ms over 924 324 open rows, inside a conversation turn. Migration `062` adds
-# `(status, cardinality(evidence_note_ids) DESC, last_seen DESC)`, which is this sort exactly, and
-# takes the same read to 0.076 ms. Change either key here and the plan silently falls back to that
-# sort; `tests/test_observations.py` fails instead, in both the text and the plan.
+# This ORDER BY must match `observations_open_rank_idx` (migration `062`); change either and the
+# read falls back to sorting every open row. `tests/test_observations.py` checks both.
 _SELECT_OPEN = f"""
 SELECT {_COLUMNS} FROM observations
  WHERE status = 'open' ORDER BY cardinality(evidence_note_ids) DESC, last_seen DESC LIMIT %s
@@ -169,9 +103,8 @@ SELECT {_COLUMNS} FROM observations
 
 _SET_STATUS = "UPDATE observations SET status = %s WHERE id = %s"
 
-# Retire what has stopped being re-observed. `last_seen` is refreshed by every run that still finds
-# the finding, so a stale row is one the corpus no longer supports — the evidence was superseded,
-# the reactions were re-classified, or it was noise to begin with.
+# Retire what has stopped being re-observed: every run that still finds a finding refreshes
+# `last_seen`, so a stale row is one the corpus no longer supports.
 _RETIRE_STALE = """
 UPDATE observations SET status = 'retired'
  WHERE status = 'open' AND last_seen < now() - make_interval(days => %s)
@@ -208,10 +141,8 @@ class Observation(BaseModel):
     def _evidence_is_never_an_observation(cls, values: list[str]) -> list[str]:
         """Refuse self-citation here too, not only in the database.
 
-        The constraint in `025` is the one that cannot be bypassed, and it is the reason this is a
-        structural rule rather than a convention. This copy exists so a miner that would violate it
-        fails where it is written, with a message naming the rule, instead of at the insert with a
-        Postgres constraint name.
+        Migration `025` is the constraint that cannot be bypassed; this copy makes a violating miner
+        fail where it is written, with a readable message.
         """
         for value in values:
             if value.startswith("observation-"):
@@ -229,51 +160,13 @@ class Observation(BaseModel):
     def with_id(self) -> "Observation":
         """The same observation carrying its scope-derived id.
 
-        **Scope only, never the statement.** The statement names what the evidence currently shows
-        — "run in 2 projects … (2 runs)" — so it changes the moment a cluster gains a member, which
-        is routine under periodic ELN sync. Hashing it would mint a *new* row for **every** growth
-        step, so support would never accumulate at all and the tier's one threshold would never be
-        crossed. That is the failure `memory/ids.py` documents for note ids, and the fix is the
-        same one — anchor on something that moves less often than the wording does.
-
-        **Scope is a better anchor, not a stable one, and it is worth saying which.**
-        `interaction:<note id>` is genuinely stable: a note keeps its id.
-        `transformation:<smallest member id>` is not. It moves in two cases — a new reaction whose
-        id sorts below the current anchor joins the cluster, and two clusters merge because a new
-        reaction bridges them under single linkage (`memory.similarity`), after which the merged
-        cluster answers to the smaller of the two anchors. Cluster disjointness prevents neither;
-        it buys a *different* property, that two clusters never claim one scope, and the two
-        miners' scope prefixes do the same job between them.
-
-        **What an anchor move costs, in full.** The next run mints one row for the superset and
-        stops refreshing the old one, which sits `open` with its subset statement until
-        `retire_stale` reaps it — at most `observation_retire_after_days`. `open_observations`
-        orders by support, and the superset holds the subset's evidence plus the new member, so a
-        reader of `recall_observations` sees a weaker restatement ranked below the current finding.
-        Redundancy, bounded and self-healing, never a contradiction.
-
-        One further cost is **not** among them, which is part of what makes this acceptable where
-        hashing the statement is not: `first_seen` resets on the new row, and nothing reads that
-        column — no ranking, promotion or retirement query touches it.
-
-        **The duplicate-PR argument that used to sit here has been withdrawn, and replaced by an
-        actual check.** It read: promotion runs on every mining pass, so a row over both thresholds
-        is already `promoted` — and out of `_SELECT_PROMOTABLE` — before any later run can move the
-        anchor. That was true while one workflow did both. D-2026-08-25 split promotion out so that
-        no timer mines and promotes in one pass, and the precondition went with it: mining
-        now runs daily
-        with no promotion, so a subset row can sit `open` and over-threshold while an anchor move
-        mints a superset row that is over-threshold too, and one later promotion writes two
-        playbook notes for one finding. `durable.observation_jobs.promote_observations_activity`
-        now supersedes the subset instead of relying on the ordering — a guarantee the code makes
-        rather than one the schedule happened to provide.
-
-        **Kept rather than replaced, deliberately.** A merge-stable key would have to survive two
-        clusters becoming one, and a single-linkage cluster's identity *is* its membership — the
-        one thing a merge changes. Nothing derived from the members can be stable across it, so the
-        alternative is a union-find identity persisted between runs: new state, plus a
-        reconciliation step of its own, bought against a redundancy that expires inside the
-        retirement window and is outranked for as long as it lasts.
+        Scope only, never the statement: the statement changes as a cluster grows, and hashing it
+        would mint a new row each time so support never accumulates. `interaction:<note id>` is
+        stable; `transformation:<smallest member id>` moves when a smaller id joins or clusters
+        merge. A move leaves the old row open with a subset statement, ranked below the superset by
+        support, until `retire_stale` reaps it; promotion supersedes the subset so one finding is
+        not promoted twice. A merge-stable key would need persisted cluster identity, not worth it
+        for redundancy that expires on its own.
         """
         digest = stable_hash({"scope": self.scope}, chars=12)
         return self.model_copy(update={"id": f"observation-{digest}"})
@@ -289,10 +182,8 @@ async def _connection() -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
 def _observation(row: tuple[Any, ...]) -> Observation:
     """Build an `Observation` from a `_COLUMNS` row.
 
-    Validated through the model rather than constructed around it, so a row whose `status` or
-    `origin` no longer matches the schema fails here instead of flowing on as a plausible-looking
-    string. The CHECK constraints make that unreachable today; a future migration widening one is
-    exactly when it stops being unreachable.
+    Validated through the model, so a row whose `status` or `origin` no longer matches the schema
+    fails here.
     """
     return Observation(
         id=row[0],
@@ -310,17 +201,11 @@ def _observation(row: tuple[Any, ...]) -> Observation:
 async def record(observations: list[Observation], *, complete: bool) -> int:
     """Upsert observations. Returns the count.
 
-    `complete` says whether the pass that produced these read the **whole** corpus. It is required
-    and keyword-only because it decides whether a row may shrink, and a caller that has not thought
-    about it is exactly the caller that must not silently get the authoritative branch:
+    `complete` (required, keyword-only) says whether the producing pass read the whole corpus:
 
-    - `True` — each observation replaces the row it names, so a member the record has since
-      retracted stops counting instead of backing a promotion forever (`_REPLACE`).
-    - `False` — the pass may only add what it saw (`_ACCUMULATE`). It read part of the corpus, so
-      an absent member is not evidence of a retraction, and deleting on that basis would state a
-      partial reading as the complete one.
-
-    Support accumulates across runs either way; only a complete pass may take it back down.
+    - `True`: each observation replaces its row, so retracted members stop counting (`_REPLACE`).
+    - `False`: the pass may only add what it saw (`_ACCUMULATE`), since an absent member is not
+      evidence of a retraction.
     """
     if not observations:
         return 0
@@ -344,9 +229,7 @@ async def record(observations: list[Observation], *, complete: bool) -> int:
     ]
     async with _connection() as conn:
         async with conn.cursor() as cur:
-            # One batched statement, not one round trip per row: a mining pass records the whole
-            # corpus's findings in a single transaction either way, and N sequential executes made
-            # its cost N network latencies for no isolation the transaction did not already give.
+            # One batched statement rather than a round trip per row.
             await cur.executemany(statement, rows)
         await conn.commit()
     return len(observations)
@@ -355,9 +238,7 @@ async def record(observations: list[Observation], *, complete: bool) -> int:
 async def open_observations(limit: int | None = None) -> list[Observation]:
     """The best-supported open observations, for the retrieval bucket.
 
-    Ordered by support before recency: an observation backed by six records is worth reading
-    ahead of last night's single-note one, and the tool's page is small enough that the ordering
-    decides what is seen at all.
+    Ordered by support, then recency; the page is small, so the order decides what is seen.
     """
     page = limit if limit is not None else settings.observation_max_results
     page = max(1, min(page, settings.observation_max_results))
@@ -369,17 +250,11 @@ async def open_observations(limit: int | None = None) -> list[Observation]:
 
 
 async def count_open_observations() -> int:
-    """How many observations are open at all — the population `open_observations` pages.
+    """How many observations are open at all: the population `open_observations` pages.
 
-    Separate from the page rather than counted beside it, and the trade is worth stating. Two
-    statements over two connections can in principle disagree; this tier is written by a nightly
-    mining pass and by nothing a person is doing at the same moment, so the window is a batch that
-    runs once a day rather than the browser-versus-timer race `pending_requests` has. What it buys
-    is that `open_observations` keeps its shape for the eighteen call sites that only want the
-    page — a `count(*) OVER ()` column would put a page-size fact inside every parsed row.
-
-    Read by `recall_observations`, which needs it because a page of ten out of fifteen and a tier
-    holding exactly ten are the same list.
+    A separate query, so `open_observations` rows stay page-free; the tier is written by a nightly
+    batch, so the two reads rarely disagree. Used by `recall_observations` to tell a full page from
+    a truncated one.
     """
     async with _connection() as conn:
         async with conn.cursor() as cur:
@@ -391,10 +266,8 @@ async def count_open_observations() -> int:
 async def promotable() -> list[Observation]:
     """Open observations that have crossed both promotion thresholds.
 
-    Two thresholds, not one, because they answer different questions: evidence count says the
-    finding is not a coincidence, and project count says it is not one team's local habit. A
-    finding with ten notes from a single project is a well-evidenced *episodic* fact, which is what
-    the campaign layer is already for.
+    Evidence count says the finding is not a coincidence; project count says it is not one team's
+    habit (a single-project finding belongs to the campaign layer).
     """
     async with _connection() as conn:
         async with conn.cursor() as cur:
@@ -410,13 +283,10 @@ async def promotable() -> list[Observation]:
 
 
 async def promoted_observations() -> list[Observation]:
-    """Every promoted observation, best-supported first — what the promotion guard checks against.
+    """Every promoted observation, best-supported first: what the promotion guard checks against.
 
-    The duplicate-promotion guard used to be a list local to one activity pass, so a subset
-    promoted *last week* was invisible to this week's superset (two playbooks for one finding),
-    and an activity retry started the pass over with the list empty. Reading the promoted rows
-    makes the guard a property of the store rather than of the schedule that happened to run —
-    the guarantee `with_id`'s docstring claimed and the code did not keep.
+    Reading promoted rows from the store makes duplicate-promotion protection hold across passes and
+    activity retries.
     """
     async with _connection() as conn:
         async with conn.cursor() as cur:
@@ -436,8 +306,7 @@ async def set_status(observation_id: str, status: ObservationStatus) -> None:
 async def retire_stale() -> int:
     """Retire open observations nothing has re-observed within the configured window.
 
-    Returns how many were retired. A tier that only ever grows is a write-only log; this is the
-    half that lets it shrink when the corpus stops supporting a reading.
+    Returns how many were retired.
     """
     if settings.observation_retire_after_days <= 0:
         return 0

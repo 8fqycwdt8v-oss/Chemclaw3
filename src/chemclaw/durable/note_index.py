@@ -1,17 +1,9 @@
-"""Scheduled rebuild of the derived note index (gap SCH-2).
+"""Scheduled rebuild of the derived note index.
 
-F10-A shipped the dense+lexical `note_index` and a `make reindex` CLI, but nothing kept it in step
-with the graph. The graph changes on every note write, so under `retrieval_mode="hybrid"` the vector
-and lexical legs were serving whatever the last manual reindex captured — and because RRF fusion is
-score-agnostic, a stale entry ranks confidently *alongside* live graph hits with no staleness
-signal. That is worse than the legs being absent.
-
-This is the missing driver: one activity wrapping the existing `reindex_notes` (no new logic, no new
-store), one workflow on `background-jobs`, and one Temporal Schedule (`durable/schedules.py`).
-Reindexing is idempotent by upsert, so re-running is always safe and the Schedule needs no cursor.
-
-The index is *derived* — Git-Markdown stays the source of truth (D-004) — so a failed run degrades
-retrieval quality for one cycle and never loses data.
+Keeps the dense and lexical `note_index` in step with the graph: under hybrid retrieval a stale
+entry ranks confidently beside live hits with no staleness signal. One activity wrapping
+`reindex_notes`, one workflow on `background-jobs`, one Schedule. Idempotent by upsert, and the
+index is derived (Git-Markdown is the source of truth), so a failed run never loses data.
 """
 
 from datetime import timedelta
@@ -32,10 +24,8 @@ from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 async def reindex_notes_activity() -> int:
     """Rebuild the derived note index from the knowledge graph; return the note count indexed.
 
-    Heartbeating throughout, because there is no unit boundary to report progress at: this is one
-    whole-corpus pass plus one embedding batch over the network, which is precisely the "opaque
-    single call" shape `durable/heartbeat.py` was extracted for. Without it a worker that dies here
-    is invisible until `note_reindex_timeout_seconds` — ten minutes — has elapsed.
+    Heartbeats throughout, since a whole-corpus pass plus an embedding batch has no unit boundary to
+    report progress at.
     """
     return await beating(
         reindex_notes(default_note_index()),
@@ -45,22 +35,13 @@ async def reindex_notes_activity() -> int:
 
 
 @durable_workflow("background")
-# Declared, and the warrant moved on 2026-09-07 without the stance moving. D-2026-08-27 decided it
-# on the *webhook* starter — `agent.durable_tools.request_note_reindex` began a run per calendar
-# minute with no `execution_timeout`, so a park there was immortal — and that starter is now gone:
-# it had no caller, no route and no webhook, and deleting it leaves this workflow Schedule-only.
-# What keeps the declaration is the argument that ADR itself records as having replaced the
-# visibility case: `D-2026-09-04-a-schedule-that-cannot-report-an-outcome` gave the schedule surface
-# `last_outcome`, so a *failed* scheduled run is reported and a parked one is not — and a park here
-# leaves hybrid retrieval serving the stale index this module's own header calls worse than no index
-# at all, silently, for as long as nobody looks.
+# Declared so a broken run is reported through `ScheduleHealth.last_outcome` rather than parking
+# silently while hybrid retrieval serves a stale index.
 @workflow.defn(failure_exception_types=[Exception])
 class NoteReindexWorkflow:
     """Refresh the derived note index so hybrid retrieval sees the current graph.
 
-    A single activity: the work is one bounded pass over the note directory plus one embedding
-    batch, so there is nothing to fan out. It runs on the background queue beside the other
-    periodic jobs.
+    A single activity: one bounded pass plus one embedding batch, nothing to fan out.
     """
 
     @workflow.run
@@ -70,12 +51,8 @@ class NoteReindexWorkflow:
             reindex_notes_activity,
             start_to_close_timeout=timedelta(seconds=settings.note_reindex_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
-            # Without a heartbeat timeout the beats the activity now sends do nothing for
-            # failure detection, and this activity's start-to-close budget is the only thing that
-            # would notice a dead worker — ten minutes, over a pass that normally takes seconds.
-            # `connectors/calc/workflows.py` states the rule; core's own long work simply never
-            # applied it. The beat is derived from this same number
-            # (`durable/heartbeat.py::beating`), so the two cannot drift.
+            # Without a heartbeat timeout the beats detect nothing; the beat interval is derived
+            # from this same value (`durable/heartbeat.py::beating`).
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),

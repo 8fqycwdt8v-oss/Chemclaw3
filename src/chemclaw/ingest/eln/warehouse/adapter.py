@@ -1,15 +1,9 @@
 """The ingest half: an `ElnAdapter` whose knowledge of the source is a binding, not code.
 
 `fetch_new_entries` runs the binding's queries and bundles each reaction with its child rows;
-`map_to_ord` walks the binding to build an `OrdReaction`. Nothing below this line names a table or a
-column, which is the property the whole package exists for: attaching a warehouse nobody has seen
-yet is writing YAML, and a column landing in it next quarter is a line of YAML.
-
-Everything downstream is untouched and inherited. `chemclaw.ingest.eln.sync` supplies the cursor,
-the overlap window, the future-timestamp guard, dedup against merged note bodies and reject-and-
-continue; `ingest_reaction` writes the fingerprints, the label row and the transcription record;
-`ElnSyncWorkflow` drains this source in chunks under its own `sync_cursors` watermark. This adapter
-is one of two methods and a mapping, exactly like the two file-drop adapters beside it.
+`map_to_ord` walks the binding to build an `OrdReaction`. Nothing below names a table or column, so
+attaching a new warehouse, or a new column, is YAML. Cursor, overlap, dedup, reject-and-continue and
+the chunked drain are inherited from `chemclaw.ingest.eln.sync` and `ElnSyncWorkflow`.
 """
 
 import logging
@@ -52,25 +46,19 @@ logger = logging.getLogger(__name__)
 # can never shadow it (`RelatedBinding` rejects the name).
 ROOT = "root"
 
-# How many pages one fetch may take to get *past* a single watermark value before it gives up and
-# says so. The rows of a block are held in memory until the block is crossed, so this is the bound
-# on that — ten pages of the binding's own `fetch_limit`, which at the default is 5,000 rows sharing
-# one timestamp. Past it the source is genuinely un-resumable on a timestamp cursor (nothing this
-# side can invent gets past a block it cannot hold), so the fetch reports itself truncated and the
-# sync workflow's "no cursor advance" guard stops the source with a warning. That is the whole
-# difference from what this used to do, which was to return the first page forever in silence.
+# How many pages one fetch may take to get past a single watermark value before reporting itself
+# truncated. Rows of the block are held in memory, so this bounds that; past it the source cannot
+# resume on a timestamp cursor, and the sync workflow's no-advance guard stops it with a warning.
 _MAX_TIE_PAGES = 10
 
 
 class WarehouseElnAdapter:
     """An `ElnAdapter` over a SQL warehouse, configured entirely by its binding.
 
-    Built by the data-source registry from a manifest's `config:` block, so its constructor
-    signature *is* the manifest's schema. `name` is the data source this adapter *is*: it names
-    every warning below and is the rejection ledger's `source`. It exists in this position so that
-    this class and `WarehouseVectorRetriever` take identical keyword arguments, which they must:
-    the registry splats one `config` into whichever half it builds, and `make datasource-validate`
-    binds that same config against every declared half.
+    Built by the registry from a manifest's `config:` block, so the constructor signature is the
+    manifest's schema. `name` is the data source this adapter is (warnings, ledger `source`), and
+    the constructor matches `WarehouseVectorRetriever`'s because the registry splats one `config`
+    into either half.
     """
 
     def __init__(self, binding: dict[str, Any], name: str | None = None) -> None:
@@ -83,10 +71,8 @@ class WarehouseElnAdapter:
         self._ingest: IngestBinding = self._binding.ingest
         self._name = name or "warehouse"
         self._warehouse: Warehouse | None = None
-        # Whether the last fetch stopped because the page filled up rather than because the source
-        # ran out. Read through `chemclaw.ingest.eln.adapter.fetch_was_truncated`, which is what
-        # lets the durable sync tell "come back for more" from "that was everything" — a
-        # distinction only the side that issued the `LIMIT` can make.
+        # Whether the last fetch stopped because the page filled rather than because the source ran
+        # out; read via `fetch_was_truncated`.
         self._truncated = False
         if self._ingest.entry.fetch_limit < settings.eln_sync_batch_size:
             logger.warning(
@@ -107,43 +93,19 @@ class WarehouseElnAdapter:
     async def fetch_new_entries(self, since: datetime, limit: int | None = None) -> list[RawEntry]:
         """Every reaction created or amended at or after `since`, oldest first.
 
-        Inclusive on `since` because the sync's cursor is the newest timestamp already seen and
-        ingestion is idempotent, so replaying the boundary row is safe and skipping it is not.
-        Amendments count as new — `sql.watermark_expression` is what makes that true, and it is the
-        reason a binding should declare `modified_at` whenever the source has one.
+        Inclusive on `since` (replaying the boundary is safe; skipping it is not); amendments count
+        via `sql.watermark_expression`, so bindings should declare `modified_at` when the source has
+        one.
 
-        **A page that cannot move the cursor is continued rather than returned.** The sync's cursor
-        is a timestamp, so a page whose newest watermark is the cursor itself leaves the next run
-        issuing the identical fetch — permanently, in silence, with the rest of that block never
-        seen again. `_page` therefore keeps reading *inside* the block, by the composite keyset
-        `entry_statement` now orders on, until a row with a later watermark comes into view or the
-        source runs out. See `_MAX_TIE_PAGES` for what happens when a block is too large to cross.
+        A page that cannot move the cursor is continued inside the watermark block, by the composite
+        keyset `entry_statement` orders on, until a later watermark appears or the source runs out
+        (see `_MAX_TIE_PAGES`). A row that cannot become a `RawEntry` is logged, filed in the
+        rejection ledger and skipped. The block at the cursor is re-read each run and skipped as
+        unchanged; binding a finer watermark column reduces that.
 
-        **A row this cannot turn into a `RawEntry` costs itself, not the fetch.** One row whose
-        bound `created_at` is NULL or unreadable is logged, written to the rejection ledger and
-        skipped; see the comment at the return for why raising there stopped the source for good.
-
-        The residual, stated because it is real: the cursor is inclusive, so the block sitting *at*
-        the cursor is re-read on every run — one row where the watermark is a timestamp, a whole
-        day's entries where a binding pointed `created_at:` at a DATE column. They cost one indexed
-        `bodies` lookup each and are skipped as unchanged; what the block's size decides is how much
-        the source re-reads, not whether it makes progress. A site paying that noticeably should
-        bind a finer watermark column, which is what the warning above tells it.
-
-        **`limit` reaches the `LIMIT`, which is the point of it existing.** The durable sync drains
-        in chunks of `eln_sync_batch_size` and throws away everything past that, so every
-        continuation chunk asked this warehouse for `entry.fetch_limit` rows to keep 100 — 500 at
-        the binding's default, up to 5,000 at its ceiling, so a 5x to 50x over-read of a table per
-        chunk for the length of the drain. It is not only the entry query: every fetched key
-        becomes a bind parameter in each child relation's `IN (...)` list, so the related-table
-        reads were over-read by the same factor. The ordinary page is now `min(limit,
-        fetch_limit)`, which is the half of the chunked re-read a source *can* bound — the file
-        drops next door cannot, and say so.
-
-        The tie-crossing pages below deliberately keep the binding's own `fetch_limit`: a
-        continuation page exists to get *past* a block of rows sharing one watermark, so shrinking
-        it would shrink the block this fetch can cross — the caller's bound is on the ordinary
-        read, not on the recovery path.
+        `limit` bounds the ordinary page (`min(limit, fetch_limit)`), which also bounds each child
+        relation's `IN (...)` list. Tie-crossing pages keep the binding's `fetch_limit`, so the
+        bound never shrinks the block a fetch can cross.
 
         Args:
             since: The cursor; rows at or after it, in watermark order.
@@ -167,10 +129,8 @@ class WarehouseElnAdapter:
                 break
             last_key = rows[-1].get(entry.key)
             if last_key is None:
-                # The keyset cannot continue past a row with no key, and `as_text` would hand the
-                # predicate the six characters `str(None)` produces — a value from no column's
-                # domain, which is how the corpus drain skipped most of a release. The fetch stops
-                # here still reporting itself truncated, so the sync workflow's guard says so.
+                # The keyset cannot continue past a row with no key (`as_text` would yield the
+                # string `"None"`), so the fetch stops here, still reporting itself truncated.
                 logger.warning(
                     "%s: the last row of a page carries no %s, so this fetch cannot page past the "
                     "watermark %s; the declared key must be present on every row",
@@ -193,17 +153,12 @@ class WarehouseElnAdapter:
         if not rows:
             return []
 
-        # entry key -> why it was refused. Filed below, and the two in-fetch loss paths here are in
-        # it for the same reason the unreadable-`created_at` one is: a worker log line is not an
-        # explanation a chemist can be given, and these rows never become a `RawEntry`, so they are
-        # absent from the `IngestSummary.rejected` the sync files for every other refusal
-        # (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`).
+        # entry key -> why it was refused. These rows never become a `RawEntry`, so they are filed
+        # here rather than by the sync.
         refused: dict[str, str] = {}
 
-        # **Truthiness, not presence, is what used to drop a row here**: an integer primary key of
-        # `0` and an empty-string key are both falsy, so a real row was removed from the fetch by
-        # the same test that removes a NULL one. `is None` plus a blank check says what is meant,
-        # and the blank case is a refusal rather than a silent skip.
+        # Presence, not truthiness: a key of `0` is real. A blank key is refused rather than
+        # silently skipped.
         keyed = [row for row in rows if _has_key(row, entry.key)]
         if len(keyed) != len(rows):
             logger.warning(
@@ -213,10 +168,8 @@ class WarehouseElnAdapter:
                 len(rows),
                 entry.key,
             )
-            # One row per fetch rather than per offending row, keyed by the column that was empty:
-            # these rows have no id, so there is nothing to key them by individually, and the
-            # ledger's `occurrences`/`last_seen` then answer "is this still happening, and since
-            # when" — which is the question a keyless row can be asked.
+            # One row per fetch keyed by the empty column, since these rows have no id; the ledger's
+            # `occurrences`/`last_seen` say whether it is still happening.
             refused[f"<no {entry.key}>"] = (
                 f"{len(rows) - len(keyed)} of {len(rows)} rows fetched from {entry.relation} "
                 f"carried no {entry.key!r} and could not be ingested: the binding's `key` is what "
@@ -225,11 +178,8 @@ class WarehouseElnAdapter:
             )
         bundles = {str(row[entry.key]): {ROOT: row} for row in keyed}
         if len(bundles) != len(keyed):
-            # Counted separately from the missing-key case above, because the two are different
-            # faults with the same symptom and one message for both would misdiagnose either. A
-            # repeated key means the declared `key` is not unique in the declared relation — a
-            # binding pointing at a joined view rather than a reaction view — and the reactions it
-            # collapses would otherwise vanish with no explanation at all.
+            # Counted apart from missing keys: a repeated key means the declared `key` is not unique
+            # (e.g. a joined view), a different fault with the same symptom.
             logger.warning(
                 "%s: %d row(s) shared a %s with another row and only one survived; the declared "
                 "key is not unique in %s",
@@ -238,13 +188,9 @@ class WarehouseElnAdapter:
                 entry.key,
                 entry.relation,
             )
-            # Keyed by the id that was shared, which is also the id the survivor is ingested under:
-            # the ledger row is what says a record answering to it is one of several, which is the
-            # honest statement and the one a citation of that id needs. Refusing *both* is what the
-            # file-drop adapters do (`adapter.refuse_colliding_ids`) and is not available here — a
-            # page is a slice of a relation, so the two rows behind one key may not even be in the
-            # same fetch, and dropping the survivor would refuse a record this source can still
-            # amend.
+            # Keyed by the shared id, which the survivor is ingested under, so a citation of it can
+            # learn it was one of several. Unlike `adapter.refuse_colliding_ids`, the survivor is
+            # kept: the two rows may not be in the same page, and the source can still amend it.
             for shared, count in _repeated_keys(keyed, entry.key).items():
                 refused[shared] = (
                     f"{count} rows in {entry.relation} share the {entry.key!r} {shared!r}; only "
@@ -255,23 +201,17 @@ class WarehouseElnAdapter:
                 )
         await self._attach_related(warehouse, bundles)
         entries: list[RawEntry] = []
-        # A row whose bound `created_at` is NULL, empty or unparseable costs itself and nothing
-        # else: `_raw_entry` used to raise straight out of this method, outside every per-entry
-        # handler `sync_entries` has, and `ElnMappingError` is non-retryable
-        # (`durable/publish._BAD_DATA_TYPES`) — so one draft row with no timestamp stopped the
-        # source, the cursor never advanced, and every later run re-fetched the same page and
-        # failed identically. The two file-drop adapters have always skipped-and-continued on the
-        # same fault.
+        # A row with a NULL, empty or unparseable `created_at` costs only itself: raising here would
+        # escape every per-entry handler as a non-retryable error and stop the source on the same
+        # page forever.
         for key, bundle in bundles.items():
             try:
                 entries.append(self._raw_entry(key, bundle))
             except ElnMappingError as exc:
                 logger.warning("%s: skipping entry %s: %s", self._name, key, exc)
                 refused[key] = str(exc)
-        # Nothing downstream can see these: they never become a `RawEntry`, so they are absent from
-        # `IngestSummary.rejected` that `durable/eln_sync.py` files for every other refusal
-        # (`D-2026-08-29-a-bound-derived-twice-is-two-bounds`). This is the same argument that keeps
-        # `ord_adapter`'s two fetch-time writers where they are.
+        # Filed here because these rows never reach `IngestSummary.rejected`, which
+        # `durable/eln_sync.py` files for every other refusal.
         await record_refusals(self._name, refused)
         return entries
 
@@ -284,9 +224,8 @@ class WarehouseElnAdapter:
     ) -> list[dict[str, Any]]:
         """One page of `size` entry rows, at the cursor or inside a watermark block.
 
-        `size` is passed rather than read from the binding because the caller's chunk bound and the
-        binding's page are two different numbers on one fetch — the ordinary page takes the
-        smaller, the tie-crossing page takes the binding's.
+        `size` is passed in because the ordinary page and the tie-crossing page use different
+        bounds.
         """
         entry = self._ingest.entry
         statement, params = sql.entry_statement(
@@ -299,12 +238,9 @@ class WarehouseElnAdapter:
     def _watermark(self, row: dict[str, Any]) -> datetime:
         """The row's own value of the column the page is ordered on — `COALESCE(modified, created)`.
 
-        The Python reading of `sql.watermark_expression`, and it has to be exactly that rather than
-        `entry_window`'s `max`: what decides whether a page got past the cursor is what the
-        *warehouse* sorted on. A row with no usable timestamp at all reads as no later than the
-        cursor, so the fetch keeps paging rather than concluding it has moved on off a value it
-        could not read; `fetch_new_entries` refuses that row a moment later, naming the column, and
-        returns the rest of the batch.
+        Must match `sql.watermark_expression` exactly (not `entry_window`'s `max`), since paging
+        follows what the warehouse sorted on. An unreadable timestamp reads as no later than the
+        cursor, so paging continues; `fetch_new_entries` then refuses that row by name.
         """
         entry = self._ingest.entry
         if entry.modified_at and row.get(entry.modified_at) is not None:
@@ -318,17 +254,9 @@ class WarehouseElnAdapter:
     ) -> None:
         """Fetch every declared child table for the whole batch and file its rows by entry key.
 
-        One query per block rather than per row: a hundred reactions across four child tables is
-        four round trips, not four hundred. Rows whose foreign key matches no entry in the batch are
-        dropped silently — with `order_by` set the warehouse may return them in any order, and the
-        `IN (...)` list is what scopes them.
-
-        **Per `fetch_limit` keys, not per batch**, because a batch is no longer bounded by one page:
-        crossing a block of tied watermarks accumulates several pages of entries, and every key in
-        the batch is a bind parameter in each of these `IN (...)` lists. `fetch_limit`'s own bound
-        is chosen to keep that list under a warehouse's bind limit (`EntryBinding` says so), so it
-        is the size to slice by — the alternative is a child query that fails on exactly the fetch
-        the tie-crossing exists to make possible.
+        One query per block, not per row. Rows matching no entry in the batch are dropped; the `IN
+        (...)` list scopes them. Sliced per `fetch_limit` keys, since a tie-crossing batch can span
+        several pages and `fetch_limit` is what keeps the bind list under the warehouse's limit.
         """
         keys = list(bundles)
         page = self._ingest.entry.fetch_limit
@@ -360,10 +288,8 @@ class WarehouseElnAdapter:
                 else None
             ),
             payload=bundle,
-            # The site's own withdrawal, when the binding names the column that carries it. Absent
-            # means "this source does not report withdrawals", never "withdrawn" — the row's
-            # disappearance from a page says nothing at all
-            # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+            # The site's own withdrawal, when the binding names its column. Absent means the source
+            # does not report withdrawals, never "withdrawn".
             retracted_at=(
                 _stated_timestamp(row.get(entry.retracted_at), entry.retracted_at, key)
                 if entry.retracted_at
@@ -374,21 +300,13 @@ class WarehouseElnAdapter:
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Build the canonical reaction this binding says the row describes.
 
-        Every failure is an `ElnMappingError` (or a `TransformError`, which is one), so a row the
-        binding cannot map is rejected with its reason and the batch continues — the behaviour
-        `sync_entries` already gives every adapter that raises that type.
+        Every failure is an `ElnMappingError` (or a `TransformError`, which is one), so the row is
+        rejected with its reason and the batch continues.
         """
         binding = self._ingest
-        # A field the source was silent about is *omitted*, not passed as `None`, so the model's own
-        # default applies. That is what keeps `reaction_id` honest: leaving it out raises "field
-        # required", which is the message that names the actual problem, where an explicit `None`
-        # would raise a type error about a value the source never had.
-        #
-        # For the optional fields the two are now the same thing, `outcome_class` included: it used
-        # to be non-optional with a SUCCESS default, so a binding that mapped no status column
-        # produced a corpus asserting every run worked. It is optional now
-        # (`D-2026-08-26-silence-is-not-a-successful-run`), so a source with nothing to say leaves
-        # it unset and the record says nobody stated an outcome.
+        # A field the source was silent about is omitted, not passed as `None`, so the model's
+        # default applies and a missing `reaction_id` raises "field required". `outcome_class` is
+        # optional, so a source without a status column states no outcome.
         fields = {
             name: value
             for name, field in sorted(binding.reaction.items())
@@ -415,9 +333,8 @@ class WarehouseElnAdapter:
     def _components(self, payload: dict[str, Any]) -> tuple[list[Component], list[Component]]:
         """Split every mapped component row into the reaction's inputs and its products.
 
-        The split is by the role the binding produced, not by which table a row came from: a site
-        that keeps products in the same charge table as its reagents is the common case, and one
-        that separates them is served by two `components:` blocks reading two tables.
+        By the role the binding produced, not the source table, since products often share the
+        charge table.
         """
         inputs: list[Component] = []
         outcomes: list[Component] = []
@@ -438,9 +355,7 @@ class WarehouseElnAdapter:
     def _impurities(self, payload: dict[str, Any]) -> list[Impurity]:
         """The impurity profile, skipping rows that identify nothing.
 
-        Skipped rather than rejected, for the same reason a structureless charge row is: an
-        analytics table carries system peaks, solvent fronts and blank rows, and failing a good
-        reaction over one of them would lose the record to a bookkeeping artefact.
+        Skipped rather than rejected: analytics tables carry system peaks and blank rows.
         """
         found: list[Impurity] = []
         for block in self._ingest.impurities:
@@ -451,14 +366,9 @@ class WarehouseElnAdapter:
                 area = _read(block.area_percent, scope) if block.area_percent else None
                 rrt = _read(block.rrt, scope) if block.rrt else None
                 # An RRT-only row is identified by where it eluted, so it is named rather than
-                # dropped — the remedy `Impurity._identifiable` prescribes, and the identical hole
-                # `json_adapter._impurities` had. The unresolved peaks in a site's analytics table
-                # are routinely its largest.
-                #
-                # Coerced before it is tested, because a NUMERIC column arrives as a `Decimal` and a
-                # text column as `str` — neither an `int | float` — and the JSON adapter already
-                # names both. The coerced value is what the `Impurity` carries, too; a value that
-                # will not coerce goes on as read, for `Impurity` to refuse by name.
+                # dropped (`Impurity._identifiable`). Coerced first, since drivers return NUMERIC as
+                # `Decimal` and text as `str`; a value that will not coerce is passed on for
+                # `Impurity` to refuse by name.
                 retention = _rrt(rrt)
                 if not name and not smiles and retention is not None and retention > 0:
                     name = unresolved_peak_name(retention)
@@ -482,8 +392,7 @@ class WarehouseElnAdapter:
     def _consumed(self) -> set[str]:
         """Entry columns already carried by a mapped field, so `['*']` does not repeat them.
 
-        Only the entry's own columns, and only paths that read it directly: an attribute bag that
-        restated the yield beside the `yield:` bullet would be noise in every note body.
+        Only direct reads of the entry's own columns.
         """
         entry = self._ingest.entry
         consumed = {entry.key, entry.created_at}
@@ -520,10 +429,8 @@ def _read(field: FieldBinding, scope: dict[str, Any]) -> Any:
 def _component(block: ComponentBinding, row: dict[str, Any]) -> Component | None:
     """One charge row as a `Component`, or `None` when it names no structure.
 
-    A row with no structure is skipped rather than rejected: a charge table routinely carries lines
-    for things that are not species — a vessel, a note, a blank continuation row — and failing the
-    whole reaction over one of them would lose a good record to a bookkeeping artefact. A row with a
-    structure but no usable role *is* an error, because that is a vocabulary the binding missed.
+    A row with no structure is skipped (vessels, notes, blank rows); a structure with no usable role
+    is an error, a vocabulary the binding missed.
     """
     scope = {ROOT: row, **row}
     smiles = _read(block.smiles, scope)
@@ -561,8 +468,8 @@ def _attributes(
 ) -> dict[str, str]:
     """The entry columns carried into the note verbatim, bounded and in column order.
 
-    Under `['*']` this is "everything the row had that no field already took" — which is what makes
-    a column added to the warehouse next quarter visible without anyone editing this repository.
+    Under `['*']`, everything no field already took, so a newly added warehouse column appears
+    without code changes.
     """
     if binding.include == ["*"]:
         excluded = set(binding.exclude) | consumed
@@ -589,10 +496,8 @@ def _attributes(
 def _provenance(template: str, payload: dict[str, Any], entry_id: str) -> str:
     """Render the citation, refusing one that resolved to nothing.
 
-    `OrdReaction.provenance` is required and becomes the record's `source` — the line a reader
-    follows to find the original entry. A template whose every reference was empty would produce a
-    citation pointing nowhere, so it falls back to naming the entry rather than emitting one
-    nobody can follow.
+    `OrdReaction.provenance` becomes the record's `source`; a template whose references are all
+    empty falls back to naming the entry.
     """
     rendered = render_template(template, payload).strip(": ").strip()
     return rendered or f"warehouse:{entry_id}"
@@ -601,10 +506,8 @@ def _provenance(template: str, payload: dict[str, Any], entry_id: str) -> str:
 def _has_key(row: dict[str, Any], column: str) -> bool:
     """Whether this row carries a usable entry key in `column`.
 
-    `row.get(column)` was the test, which is truthiness: a warehouse integer primary key of `0`, or
-    an empty-string key, removed the row from the fetch by the same branch that removes a NULL one.
-    A `0` is a key; `NULL` and a blank string are not, and the blank one is refused rather than
-    skipped, because a column that holds `''` is a column somebody bound to the wrong thing.
+    A `0` is a key; `NULL` and a blank string are not, and a blank one is refused rather than
+    skipped, since it suggests a mis-bound column.
     """
     value = row.get(column)
     return value is not None and str(value).strip() != ""
@@ -613,8 +516,8 @@ def _has_key(row: dict[str, Any], column: str) -> bool:
 def _repeated_keys(rows: list[dict[str, Any]], column: str) -> dict[str, int]:
     """How many rows claim each entry key that more than one row claims.
 
-    Counted after the fact rather than while building `bundles`, so the dict comprehension that
-    collapses them stays the one place the surviving row is chosen.
+    Counted separately so the `bundles` comprehension stays the one place the surviving row is
+    chosen.
     """
     counts: dict[str, int] = {}
     for row in rows:
@@ -637,12 +540,9 @@ def _timestamp(value: Any, column: str, entry_id: str) -> datetime:
 def _rrt(value: Any) -> float | None:
     """A relative retention time as a float, or `None` when the cell holds nothing readable.
 
-    `float()` rather than an `isinstance` test, because a driver hands a NUMERIC column back as a
-    `Decimal` — not an `int | float`, nor registered as `numbers.Real` — and a text-typed RRT as
-    `str`; either way an RRT-only peak was dropped here while `json_adapter` named it. A `bool` is
-    refused rather than read as 1.0. `None` for an unreadable value only decides the naming; the
-    caller hands the raw value on, so `Impurity`'s own validation still refuses it rather than
-    the row losing its RRT in silence.
+    `float()` rather than `isinstance`, since drivers return NUMERIC as `Decimal` and text as `str`.
+    A `bool` is refused. `None` only affects naming; the caller passes the raw value on for
+    `Impurity` to validate.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -655,29 +555,10 @@ def _rrt(value: Any) -> float | None:
 def _stated_timestamp(value: Any, column: str, entry_id: str) -> datetime | None:
     """An amendment or withdrawal stamp: `None` only when the column is genuinely empty.
 
-    **Absent and unparseable are different facts and `_optional_timestamp` answers `None` to both**,
-    which is safe for the watermark and wrong here. `json_adapter._optional_timestamp` states the
-    rule this restores: "a present but unparseable value is bad data and is raised, because silently
-    treating it as absent would reinstate the exact silence this field exists to break". Driven over
-    the two same-named readers, 6 of 9 realistic warehouse cell values diverged — `01/09/2026`,
-    `0000-00-00 00:00:00`, `N/A`, `-`, `01-SEP-2026` and a Unix epoch integer all raised in the JSON
-    adapter and read as absent here.
-
-    What each silence costs is specific. A `modified_at` of `None` makes `entry_window` fall back to
-    creation, so an **amended row never re-enters the fetch window and the correction is never
-    ingested** — the binding at `ElnWarehouseAdapter.fetch_new_entries` says exactly that. A
-    `retracted_at` of `None` means a source's explicit withdrawal is never seen and the withdrawn
-    record stays live as current knowledge, against
-    `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`.
-
-    Raising costs the row its ingest this run and files it in the rejection ledger naming the column
-    — `_raw_entry`'s caller catches `ElnMappingError` per entry — which is the trade
-    `D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask` names: a refusal somebody can
-    ask about beats a correction that silently never arrives.
-
-    **`_watermark` deliberately keeps the lenient reader.** What decides whether a page got past the
-    cursor is what the *warehouse* sorted on, and a row with no usable timestamp must read as no
-    later than the cursor so the fetch keeps paging; it is this function that then refuses the row.
+    A present but unparseable value raises `ElnMappingError` (filed per entry, naming the column)
+    rather than reading as absent: an absent `modified_at` would keep an amended row out of the
+    fetch window forever, and an absent `retracted_at` would leave a withdrawn record live.
+    `_watermark` keeps the lenient reader, since paging must continue past an unreadable value.
     """
     if value is None:
         return None
@@ -699,9 +580,8 @@ def _stated_timestamp(value: Any, column: str, entry_id: str) -> datetime | None
 def _optional_timestamp(value: Any) -> datetime | None:
     """Read a timestamp from a driver-native value or an ISO string; `None` when absent.
 
-    Lenient by design and by one caller only: `_watermark` orders pages on whatever the warehouse
-    sorted on and must keep paging past a value it cannot read. Everything a *record* is built from
-    goes through `_stated_timestamp` or `_timestamp`, which refuse rather than answer `None`.
+    Lenient, for `_watermark` only; record fields go through `_stated_timestamp` or `_timestamp`,
+    which refuse.
     """
     if value is None:
         return None

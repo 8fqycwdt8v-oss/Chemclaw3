@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-08-10
 
+**Superseded-by:** [D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it](D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it.md) (in part)
+
 Companion to
 [`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md),
 which decides the rebuild. This one decides what a subagent is allowed to be.

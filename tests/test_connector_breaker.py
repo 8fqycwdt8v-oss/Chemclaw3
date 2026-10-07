@@ -1,19 +1,10 @@
 """A connector already known to be down is not dialled again (BS-18).
 
-`connectors.health` has probed every enabled bundle at startup and on every `/readyz` since the
-seam existed, and the per-turn open path read none of it. So a dark connector cost
-`connector_open_timeout_seconds` on *every* turn for the whole outage, with no backoff, while a
-fresh verdict sat in the readiness snapshot — and the readiness route and the open path could not
-even see each other, because the snapshot lived on `app.state` in the front door.
-
-These tests drive the real open path against a real dark address and count *dials*, because "the
-dial did not happen" is the only observable this change is about: the turn's outcome (no tools, the
-name in `unreachable`, the degradation notice) is deliberately identical either way. They fail on
-the unfixed code, where the second open dials exactly like the first.
-
-The recovery half is tested as carefully as the breaker itself, because a breaker with no way back
-is an outage amplifier: both paths back — the readiness sweep recording a healthy probe, and the
-verdict simply expiring — get a test of their own.
+`connectors.health` verdicts are shared with the per-turn open path, so a dark connector does not
+cost `connector_open_timeout_seconds` on every turn. These drive the real open path against a real
+dark address and count dials, since the turn's outcome is identical either way. Both recovery
+paths — a healthy readiness sweep and the verdict expiring — are tested, because a breaker with no
+way back amplifies an outage.
 """
 
 import asyncio
@@ -40,9 +31,8 @@ from tests.conftest import _free_port
 def dials(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     """Record every real dial, wrapping `create_session` rather than replacing it.
 
-    A spy, not a stub: the session is still opened for real against a dark port, so the failure
-    these tests build on is the same `create_session` failure a dead sidecar produces. What the
-    list adds is the one fact the outcome cannot show — whether the dial was attempted at all.
+    A spy: the session still opens for real against a dark port; the list records whether the dial
+    was attempted.
     """
     attempted: list[str] = []
 
@@ -125,11 +115,10 @@ def test_the_breaker_is_off_when_the_window_is_zero(
 def test_a_healthy_readiness_sweep_readmits_a_connector_the_open_path_blocked(
     monkeypatch: pytest.MonkeyPatch, dials: list[str]
 ) -> None:
-    """The fast path back: `/readyz` runs every ten seconds and its verdict wins.
+    """A healthy readiness sweep readmits a connector the open path blocked.
 
-    Driven through the real `probe_connectors`, with only the socket replaced — a connector that
-    answers `/healthz` 200 while its MCP endpoint is dark is exactly the state a restarting pod
-    passes through, and it must not have to wait out the window.
+    Driven through the real `probe_connectors` with only the socket replaced: a restarting pod may
+    answer `/healthz` before its MCP endpoint and must not wait out the window.
     """
     monkeypatch.setattr(settings, "connector_breaker_window_seconds", 60.0)
     spec = _dark_spec("dark")
@@ -166,11 +155,9 @@ def test_a_healthy_readiness_sweep_readmits_a_connector_the_open_path_blocked(
 def test_a_failed_readiness_sweep_spares_the_next_turn_its_open_timeout(
     monkeypatch: pytest.MonkeyPatch, dials: list[str]
 ) -> None:
-    """The verdict the breaker was built for: the *probe* found it down, and no turn had to.
+    """A failed readiness sweep spares the next turn its open timeout.
 
-    The startup probe and every `/readyz` run this sweep, so in a cluster the first turn of an
-    outage is already spared — which is the half of the saving the open path cannot produce for
-    itself.
+    The startup probe and `/readyz` run this sweep, so even an outage's first turn is spared.
     """
     monkeypatch.setattr(settings, "connector_breaker_window_seconds", 60.0)
     manifest = SimpleNamespace(
@@ -196,20 +183,12 @@ def test_a_failed_readiness_sweep_spares_the_next_turn_its_open_timeout(
 def test_a_repeated_failing_sweep_does_not_restart_the_breaker_window(
     monkeypatch: pytest.MonkeyPatch, dials: list[str]
 ) -> None:
-    """The window measures the outage, not the gap between observations of it.
+    """A repeated failing sweep does not restart the breaker window.
 
-    This is the shape the shipped deployment is in: the kubelet runs `/readyz` every ten seconds
-    against a five-second readiness cache, so a front-door pod re-observes every connector three
-    times inside a thirty-second window. If each observation re-dated the verdict, recovery path 2
-    — "independently of any probe a verdict expires" — would be unreachable for every probed
-    connector, and a connector whose `/healthz` disagrees with its MCP surface (a health route
-    slower than `connector_health_timeout_seconds` but well inside `connector_open_timeout_seconds`,
-    or a hand-set URL override that sends `health_url` to the manifest's loopback default) would
-    lose its tools for the life of the process with nothing dialling it to find out.
-
-    So: a sweep, a wait past the window, a second sweep re-observing the same outage, then a turn.
-    The turn must dial — and the turn after it must not, because it is the *dial* that restarts the
-    window, being the observation that costs the open bound.
+    `/readyz` re-observes every connector several times per window; if each observation re-dated the
+    verdict it would never expire, and a connector whose `/healthz` disagrees with its MCP surface
+    would lose its tools for the life of the process. Only a dial restarts the window: after the
+    window a turn must dial, and the next must not.
     """
     monkeypatch.setattr(settings, "connector_breaker_window_seconds", 0.5)
     manifest = SimpleNamespace(
@@ -245,12 +224,9 @@ def test_a_repeated_failing_sweep_does_not_restart_the_breaker_window(
 def hanging_port() -> Iterator[int]:
     """A port that completes the TCP handshake and then never speaks.
 
-    A listening socket nobody accepts from: the kernel completes the connect into the backlog, so
-    `httpx` gets its connection and then waits out the session's *read* timeout on `initialize`.
-    That is the failure `/healthz` cannot see and the only one that reaches
-    `HeldConnectorSession.__aenter__`'s `except TimeoutError` — every other test in this file points
-    at a dark port, whose connect is *refused*, which fails fast inside the holder task and returns
-    through the success path instead.
+    The kernel accepts into the backlog, so `httpx` connects and waits out the read timeout on
+    `initialize` — the only failure reaching `HeldConnectorSession.__aenter__`'s
+    `except TimeoutError`. A refused connect fails fast through the other path.
     """
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -264,19 +240,11 @@ def hanging_port() -> Iterator[int]:
 def test_a_connector_that_accepts_and_never_speaks_is_recorded_too(
     monkeypatch: pytest.MonkeyPatch, dials: list[str], hanging_port: int
 ) -> None:
-    """The open bound expiring is a verdict, and it is the expensive one.
+    """A connector that accepts and never speaks is recorded too.
 
-    Every other test here builds its connector on a refused connect, which never enters
-    `__aenter__`'s `except TimeoutError` branch — so the `record_reachability` call in that branch
-    was executed by no test in this repository, and deleting it left all five green. It is also the
-    branch that matters most: a refused connect costs microseconds, while a server that accepts the
-    socket and never finishes its handshake costs `connector_open_timeout_seconds` plus the
-    teardown wait, on every turn of the outage, and is precisely the state `/healthz` returning 200
-    cannot describe.
-
-    So: three turns. The first pays the bound, the second is spared it, and the third — past the
-    window — dials again, which is the only shape that proves the saving is a saving and not a
-    connector permanently dropped.
+    This is the expensive failure (the full open bound per turn) and the `record_reachability` call
+    in the `except TimeoutError` branch. Three turns: the first pays, the second is spared, the
+    third (past the window) dials again, proving the connector is not dropped permanently.
     """
     monkeypatch.setattr(settings, "connector_open_timeout_seconds", 0.2)
     monkeypatch.setattr(settings, "connector_teardown_timeout_seconds", 0.2)

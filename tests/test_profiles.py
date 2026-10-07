@@ -1,10 +1,8 @@
-"""The named `AgentProfile` seam (config-extensibility item 3, Stage 1).
+"""The named `AgentProfile` seam.
 
-Proves the seam adds per-use-case agent configuration without weakening anything: the default
-profile reproduces today's agent byte-for-byte, a profile *narrows* the advertised tools/MCP and
-swaps instructions/harness, an unknown tool name fails loud (fail-fast), and — the load-bearing
-invariant — a profile *attenuates but never authorizes*: the audit + authz middleware is attached
-regardless of profile. See `docs/archive/audit/10-config-extensibility.md` §6/§8 (Spike 2).
+The default profile reproduces the default agent; a profile narrows the advertised tools and
+swaps instructions and harness; an unknown tool name fails loudly; and a profile attenuates but
+never authorizes: audit and authz middleware attach regardless.
 """
 
 import pytest
@@ -42,10 +40,9 @@ def test_default_profile_reproduces_todays_agent() -> None:
 def test_profile_narrows_tools_and_swaps_instructions() -> None:
     """A profile advertises only its named tool subset and its own instructions.
 
-    `tool_names` spans both halves of the surface, which is what makes a profile expressible at
-    all now that the domain capabilities live behind connectors: `gather_evidence` is in-process,
-    the two predictors are the `calc` connector's, and a profile naming all three must get exactly
-    those — the in-process tools narrowed, and `calc` attached with its allow-list cut to two.
+    `tool_names` spans both halves: `gather_evidence` is in-process and the two predictors are
+    `calc`'s, so the in-process tools are narrowed and `calc` attaches with its allow-list cut to
+    two.
     """
     profile = AgentProfile(
         name="property-lookup",
@@ -74,13 +71,10 @@ def test_profile_can_narrow_connectors() -> None:
 
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
-    """The invariant: narrowing a profile never removes the audit + per-tool authz middleware.
+    """Narrowing a profile never removes the audit and per-tool authz middleware.
 
-    A narrowing profile carries **one more** than the default agent's chain, not fewer: the
-    undeclared-write refusal is attached exactly when `tool_names is not None`, because that is the
-    only case in which a tool can be missing from the graph on purpose rather than by mistake
-    (D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only). Asserted by name rather than by
-    count alone, so a future change that swapped one entry for another cannot keep this green.
+    A narrowing profile carries one more entry, the undeclared-write refusal, attached exactly when
+    `tool_names is not None`. Asserted by name so swapping one entry for another fails.
     """
     from chemclaw.agent.langgraph_agent import tool_call_middleware
     from chemclaw.agent.repeat_guard import refuse_repeated_calls
@@ -110,18 +104,12 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         "enforce_tool_authz",
         "refuse_writes_on_dry_run",
         "refuse_repeated_calls",
-        # Innermost of the *deciding* gates, and the position is the mechanism rather than a
-        # preference: a call the model mis-serialised is promoted onto `tool_calls` precisely so it
-        # reaches this chain, so everything above must see it before it is refused
-        # (`D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure`).
+        # Innermost of the deciding gates: a mis-serialised call is promoted onto `tool_calls` so it
+        # reaches this chain, and everything above must see it before it is refused.
         "refuse_unparsed_arguments",
-        # The harness pair, here since D-2026-09-13 made the gate the default — so this list is now
-        # the shipped chain rather than one only an opting-in deployment ran. Both nest *inside*
-        # the guard above, which is deliberate and is why that comment no longer says "innermost":
-        # `refuse_unparsed_arguments` raises before calling its handler, so a promoted call never
-        # reaches the plan gate, and arguments that did not parse are not a well-formed request for
-        # a gate to decide about. Pinned as a relation rather than an index in
-        # `tests/test_invalid_tool_calls.py`.
+        # The harness pair, on by default. Both nest inside the guard above:
+        # `refuse_unparsed_arguments` raises before its handler, so arguments that did not parse
+        # never reach the plan gate. Pinned as a relation in `tests/test_invalid_tool_calls.py`.
         "enforce_plan_approval",
         "stamp_plan_link",
     ]
@@ -163,15 +151,10 @@ def test_get_profile_resolution_and_registration() -> None:
 def test_a_profiles_harness_answer_is_the_same_one_the_plan_gate_gets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The builder and the gate must resolve a profile's harness dimensions identically.
+    """The builder and the plan gate resolve a profile's harness dimensions identically.
 
-    They used to hold three copies of the same `override or default` rule — one in `build_agent`,
-    one in `_build_harness_agent`, one in `gate_applies` — and that triplication has cost a live
-    defect before: reading `settings` directly instead of the profile let a `plan_only` profile
-    under a global `execute` get the gate attached while its approval was never spent, so one human
-    decision authorized every later turn (DARK-1). One resolver now answers for all three, and this
-    pins the agreement in the direction that matters: a profile that asks for the approval-first
-    posture gets the harness *and* the middleware that gates it.
+    One resolver serves `build_agent`, `_build_harness_agent` and `gate_applies`, so a profile
+    asking for `plan_only` gets both the harness and the gate whose approval is spent.
     """
     monkeypatch.setattr(settings, "harness_enabled", False)
     monkeypatch.setattr(settings, "harness_autonomy", "execute")
@@ -185,12 +168,7 @@ def test_a_profiles_harness_answer_is_the_same_one_the_plan_gate_gets(
 
 
 def test_a_harness_profiles_instructions_are_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The harness path advertises the profile's prompt, as the classic path does.
-
-    It resolved the prompt a second time from the same rule rather than taking the one
-    `build_agent` had already resolved — true by duplication, which is the state a docstring
-    claiming "pre-resolved by `build_agent`" describes wrongly.
-    """
+    """The harness path advertises the profile's prompt, the one `build_agent` already resolved."""
     monkeypatch.setattr(settings, "harness_enabled", True)
     profile = AgentProfile(name="terse-harness", instructions="Answer tersely.")
     agent = surface(profile)

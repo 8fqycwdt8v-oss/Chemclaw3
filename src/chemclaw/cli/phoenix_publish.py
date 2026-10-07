@@ -1,13 +1,10 @@
-"""Publish an archived probe run into Phoenix, and print the URL that shows it (AG-13).
+"""Publish an archived probe run into Phoenix, and print the URL that shows it.
 
-The command half of `evals/phoenix.py`. It owns the endpoint — the module takes a client so the
-tests can drive it against a recorder — and it prints a URL rather than a summary, because the
-whole point of the row this closes is that the comparison happens in a surface a person opens.
+The command half of `evals/phoenix.py`: it owns the endpoint and client. Nothing here calls a
+model; the transcripts are the record.
 
     make phoenix-up
-    uv run python -m chemclaw.cli.phoenix_publish tasks/live-test/transcripts --name haiku-2026-08
-
-Nothing here calls a model. The transcripts are the record; this reads them.
+    uv run python -m chemclaw.cli.phoenix_publish .live/transcripts --name haiku-run
 """
 
 import argparse
@@ -21,17 +18,14 @@ from chemclaw.evals.phoenix import publish_run
 
 
 def _publish(args: argparse.Namespace) -> int:
-    """Publish one directory and report what landed, or say why it could not.
+    """Publish one directory and report what landed, or why it could not.
 
-    Returns non-zero on a failure a caller should notice — an absent directory, an ungraded corpus
-    mismatch, a Phoenix that is not running — because this is invoked from `make` and a publish
-    that quietly did nothing is the failure mode the eval lane already has enough of.
+    Returns non-zero on an absent directory, a corpus mismatch or an unreachable Phoenix, so `make`
+    notices a publish that did nothing.
     """
     base_url = args.base_url or settings.phoenix_base_url
-    # Phoenix's SDK builds its own httpx client, which defaults to reading the environment for a
-    # proxy; handing it one that refuses is the only seam it offers (`http_client` is its whole
-    # transport). Phoenix runs on loopback here, so a proxy variable on the box would divert a
-    # run's transcripts to a host nobody declared.
+    # Hand Phoenix an httpx client that ignores proxy env vars: Phoenix runs on loopback, and a
+    # proxy would divert transcripts to an undeclared host.
     client = Client(base_url=base_url, http_client=httpx.Client(trust_env=False))
     directory = Path(args.directory)
     name = args.name or directory.name

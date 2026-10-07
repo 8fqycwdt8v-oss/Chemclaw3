@@ -1,43 +1,14 @@
 """What Postgres actually decides about the runtime role, measured against a live ACL.
 
-`tests/test_database_privileges.py` derives the *table DML* matrix from the SQL in `src/` and is
-deliberately database-free — it compares the text of `src/` with the text of
-`infra/sql/grants/app_privileges.sql`. That is the right shape for a declaration check and it is
-structurally blind to everything Postgres decides: a table dropped and recreated by a later
-migration, an `EXECUTE format` typo inside a `to_regclass` guard, or a `REVOKE` reaching further
-than intended all pass a comparison of two regexes. This file is the other half — the one that
-connects, applies the grant file to a probe role, and asks the database.
+`tests/test_database_privileges.py` compares the text of `src/` with the grant file and cannot
+see what Postgres decides. This file applies `infra/sql/grants/app_privileges.sql` to a probe role
+and asks the database: the role can `CREATE` in `public` (LangGraph's setups issue `CREATE TABLE
+IF NOT EXISTS` on every start, and the schema ACL is checked before existence), the materialised
+ACL matches the declared matrix, and the withheld verbs are refused with `42501`.
 
-**It is named for the regression that created it**, which was schema-level DDL rather than a verb
-against a row: six of the eight tables LangGraph uses are created by the *application*, on first
-use, inside the process taking the turn (`AsyncPostgresSaver.setup()`, `AsyncPostgresStore.setup()`)
-and no migration in `infra/sql` declares them. Under PostgreSQL 15+ `PUBLIC` holds no `CREATE` on
-schema `public`, `app_privileges.sql` granted only `USAGE`, and `agent.checkpointer.checkpointer()`
-has no fallback when `session_store = postgres`. Measured end to end on a freshly migrated database
-following `docs/guides/runbook.md`'s own steps: both setups raised `InsufficientPrivilege:
-permission denied for schema public`.
-
-**Why the grant is the fix and pre-creating the tables is not.** Postgres checks the schema ACL
-*before* it checks existence, so `CREATE TABLE IF NOT EXISTS` on a table that already exists still
-raises `permission denied for schema public` — exercised below, because it is the whole argument.
-And both setups issue exactly that statement on **every process start**, so the privilege is
-permanent rather than first-install only.
-
-**And for a long time DDL was all it measured**, while the file's own reasoning ("the question is
-what Postgres does with an ACL, and only Postgres can answer it") applies just as much to the
-append-only guarantee one directory over. No table verb was ever attempted as the role anywhere in
-this repository: the audit trail's INSERT-only posture, the ledger's, and the retention refusals
-that `app_privileges.sql` turns from intentions into enforcement were claimed by a regex over the
-grant file and by nothing else. They hold — measured, `42501` on `UPDATE`/`DELETE audit_events` and
-on writes to `schema_migrations` — which makes what was missing a *ratchet* rather than a defect,
-and a ratchet is only worth having before the posture drifts.
-
-Everything here runs in a transaction that is rolled back, against a probe role dropped on the way
-out, with the connection's `search_path` pinned to `public` — the schema the grant file names in its
-`ON ALL TABLES` statements, and the one a deployment's tables live in. Pinned rather than inherited
-because the session-wide isolation fixture redirects `postgres_dsn` into a throwaway schema, and a
-bare `GRANT INSERT ON audit_events` resolves through the *connection's* search_path: unpinned, this
-file would grant on one schema's tables and the blanket statements on another's.
+Everything runs in a rolled-back transaction against a probe role dropped afterwards, with
+`search_path` pinned to `public`, because the isolation fixture redirects `postgres_dsn` into a
+throwaway schema and unqualified grants resolve through the connection's search_path.
 """
 
 import asyncio
@@ -52,10 +23,9 @@ from chemclaw.core.config import settings
 from chemclaw.core.grants import apply_grants, grant_files
 from tests.test_database_privileges import verbs_the_grant_allows
 
-# The role constant `app_privileges.sql` declares. Substituting it is what lets the live test run
-# against a shared database without minting the real cluster-wide `chemclaw_app` role — and the
-# substitution is asserted to have matched exactly once, so a test that silently stopped rewriting
-# the file, and therefore interrogated a role the file never granted, fails instead of passing.
+# The role constant `app_privileges.sql` declares. Substituting it lets the test run without the
+# real cluster-wide role; the substitution must match exactly once, or the test would interrogate
+# a role the file never granted.
 _ROLE_CONSTANT = "'chemclaw_app'"
 
 _GRANTS_CREATE = re.compile(r"GRANT\s+CREATE\s+ON\s+SCHEMA\s+public\s+TO\s+%I", re.IGNORECASE)
@@ -93,11 +63,8 @@ def _reconciliation_for(role: str) -> str:
 def _reconcile_reporting(connection: psycopg.Connection, role: str, drift: list[str]) -> list[str]:
     """Apply `drift`, reconcile, and return what the reconciliation reported — all rolled back.
 
-    Every statement runs inside one transaction that is discarded, `GRANT`/`REVOKE`/`CREATE TABLE`
-    and `ALTER DEFAULT PRIVILEGES` all being transactional in PostgreSQL. That matters more here
-    than in the tests above: two of these drifts are grants to `PUBLIC` and to a role's
-    *membership*, neither scoped to the probe role, which would outlive the run on a shared
-    database.
+    Two drifts grant to `PUBLIC` or via membership, not scoped to the probe role, so they must not
+    outlive the run on a shared database.
     """
     reported: list[str] = []
 
@@ -122,13 +89,8 @@ def _reconcile_reporting(connection: psycopg.Connection, role: str, drift: list[
 def granted_probe_role() -> Iterator[tuple[psycopg.Connection, str]]:
     """A throwaway role with `app_privileges.sql` applied to it, on a `public`-pinned connection.
 
-    One fixture rather than the minting block repeated per test: the setup is four steps that must
-    all be undone (create role, rewrite the constant, apply the file, `DROP OWNED BY` before
-    `DROP ROLE`), and getting the last pair wrong leaks a role onto a shared database that the next
-    run cannot drop either.
-
-    Skips rather than fails on the two environments it cannot run in, both named in the reason: no
-    database, and a non-superuser connection that cannot mint a role.
+    Teardown runs `DROP OWNED BY` before `DROP ROLE`, or the role leaks onto a shared database.
+    Skips with no database or without superuser rights to mint a role.
     """
     try:
         connection = psycopg.connect(settings.postgres_dsn, autocommit=True)
@@ -167,10 +129,8 @@ def granted_probe_role() -> Iterator[tuple[psycopg.Connection, str]]:
 def _live_write_matrix(connection: psycopg.Connection, role: str) -> dict[str, set[str]]:
     """`{table: {INSERT, UPDATE, DELETE}}` as the database holds it, for every table in `public`.
 
-    `has_table_privilege` is Postgres evaluating its own ACL — the same evaluation the executor
-    makes — so this reads the whole schema in one pass rather than attempting 144 statements. The
-    statements that *are* attempted are the handful whose refusal is the point (below): a real
-    `42501` is the only evidence that the ACL is enforced and not merely reported.
+    `has_table_privilege` is Postgres evaluating its own ACL; the refusals that matter are also
+    attempted for a real `42501`.
     """
     with connection.cursor() as cur:
         cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")
@@ -209,13 +169,10 @@ def test_the_grant_file_gives_the_runtime_role_create_on_the_schema_it_creates_i
 def test_the_runtime_role_can_actually_create_in_public_after_the_grants_are_applied(
     granted_probe_role: tuple[psycopg.Connection, str],
 ) -> None:
-    """Live half: make the probe role run the DDL the application runs.
+    """The probe role can run the DDL the application runs.
 
-    Two assertions rather than one, and the second is the one that matters:
-    `has_schema_privilege` reads the ACL, while `CREATE TABLE` is what the application does. The
-    DDL runs inside a transaction that is rolled back, so `public` keeps exactly the tables it had
-    — and the `IF NOT EXISTS` arm is executed against a table that already exists, which is the
-    measurement the fix rests on.
+    `has_schema_privilege` reads the ACL; `CREATE TABLE` is what the application does, including the
+    `IF NOT EXISTS` arm against an existing table. Rolled back.
     """
     connection, role = granted_probe_role
     table = f"probe_ddl_{uuid.uuid4().hex[:8]}"
@@ -244,19 +201,11 @@ def test_the_runtime_role_can_actually_create_in_public_after_the_grants_are_app
 def test_the_acl_the_grant_file_materialises_is_the_matrix_it_declares(
     granted_probe_role: tuple[psycopg.Connection, str],
 ) -> None:
-    """The derived matrix, checked against the database instead of against a second text.
+    """The ACL the grant file materialises is the matrix it declares, checked in the database.
 
-    `tests/test_database_privileges.py` proves the grant file's *statements* match the writes `src/`
-    performs. Nothing proved the statements produce the ACL they read like — and the file is a
-    ~280-line `DO $$` block of `EXECUTE format(...)` with per-table `to_regclass` guards, an
-    indiscriminate `REVOKE ALL ON ALL TABLES` at the top, and a blanket `GRANT SELECT` after it.
-    Every one of those is a place where the text and the outcome can part company silently.
-
-    Both directions, for the reasons the static test gives: a verb the role lacks is an outage on a
-    path nobody exercised before the deploy, and a verb it holds and no code uses is the boundary
-    widening back out. Restricted to tables `public` actually has, because the LangGraph store's
-    tables are created by the application on first use and a database that has never taken a turn
-    does not have them — their absence is reported by `tests/conftest.py`, not asserted here.
+    The file's guarded `EXECUTE format(...)`, blanket `REVOKE` and blanket `GRANT SELECT` can part
+    from their text silently. Both directions are checked, restricted to tables `public` has;
+    LangGraph's tables appear only after the first turn.
     """
     connection, role = granted_probe_role
     live = _live_write_matrix(connection, role)
@@ -291,19 +240,11 @@ def test_the_acl_the_grant_file_materialises_is_the_matrix_it_declares(
 def test_the_verbs_the_grant_withholds_are_refused_by_the_database(
     granted_probe_role: tuple[psycopg.Connection, str],
 ) -> None:
-    """The refusals the whole file exists for, attempted as the role rather than asserted about.
+    """The verbs the grant withholds are refused by the database, attempted as the role.
 
-    `audit_events` is the append-only trail, and since the hash chain was removed
-    (D-2026-08-14) this grant is the entire guarantee: the credential that writes a row cannot
-    rewrite or remove it. `schema_migrations` is the migrator's record of its own work — a runtime
-    credential able to write it could mark a migration applied that never ran.
-    `calculation_results` is one of the tables `durable/retention.py` refuses to prune, and
-    withholding DELETE is what makes that refusal enforced rather than intended.
-
-    Each statement is written so that a role holding the privilege would still change nothing
-    (`WHERE false`, and the one INSERT is rolled back), because the assertion is about the error
-    code and not about the row: `42501` (`insufficient_privilege`) rather than any failure, since a
-    typo failing on `42703` would otherwise read as a refusal.
+    `audit_events` is append-only, `schema_migrations` is the migrator's record, and
+    `calculation_results` may not be pruned. Each statement would change nothing even if permitted,
+    and the assertion is on `42501` specifically, so an unrelated error does not read as a refusal.
     """
     connection, role = granted_probe_role
     refused = {
@@ -345,16 +286,9 @@ def test_the_verbs_the_grant_withholds_are_refused_by_the_database(
 def test_read_is_uniform_and_reaches_the_migration_ledger(
     granted_probe_role: tuple[psycopg.Connection, str],
 ) -> None:
-    """`GRANT SELECT ON ALL TABLES` means every table, and the ledger is not an exception.
+    """`GRANT SELECT ON ALL TABLES` reaches every table, including `schema_migrations`.
 
-    Asserted because the grant file said otherwise in prose for as long as the sentence existed:
-    "`schema_migrations` is deliberately absent from every GRANT above" was true of every *write*
-    grant and false of the blanket read, which names no table and therefore cannot be seen by
-    `tests/test_database_privileges.py`'s regex over the named `GRANT` statements. Measured, the
-    role holds `SELECT` on it. The load-bearing half of that sentence — no write verb — is proven
-    by the test above; this one pins the half that was wrong, so a deployment that decides to
-    revoke the read has to change the claim and this assertion together rather than leaving a third
-    version of the sentence standing.
+    Revoking that read must change this assertion together with the grant file's claim.
     """
     connection, role = granted_probe_role
     with connection.cursor() as cur:
@@ -374,12 +308,8 @@ def test_read_is_uniform_and_reaches_the_migration_ledger(
 
 
 # The four ways the role's effective privileges move without any `GRANT` in `app_privileges.sql`
-# changing, each with the drift that creates it and the phrase the reconciliation must report it
-# under. `app_privileges.sql` says it "states the whole matrix", which is true of the direct table
-# grants it enumerates and false of every row here — measured as the role after a full
-# reconciliation: `UPDATE audit_events` succeeds under a `PUBLIC` write and under role membership,
-# and `DROP TABLE audit_anchors` succeeds under membership, so two of these silently retire the one
-# control D-2026-08-14 left standing.
+# changing, each with the drift that creates it and the phrase the reconciliation must report.
+# Two of them would allow `UPDATE`/`DELETE` on `audit_events`.
 _DRIFT: dict[str, tuple[list[str], str]] = {
     # Membership carries the other role's privileges wholesale, so it reaches every table this file
     # withholds a verb on. `pg_read_all_data` is a predefined role: harmless, always present on
@@ -397,10 +327,8 @@ _DRIFT: dict[str, tuple[list[str], str]] = {
         ['ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "{role}"'],
         "default privileges",
     ),
-    # The other direction, and the one that is this file's own doing: `REVOKE ALL ON ALL TABLES` is
-    # indiscriminate, so a table the app role created and owns — a ninth checkpointer table, say —
-    # loses even its owner's DML on the *second* deploy, having installed fine on the first.
-    # Guarded per table for the eight that exist; nothing guards a ninth.
+    # The reverse direction: `REVOKE ALL ON ALL TABLES` strips a table the app role owns but the
+    # file does not name, on the second deploy.
     "an owned table this file does not name": (
         [
             'SET LOCAL ROLE "{role}"',
@@ -416,20 +344,11 @@ _DRIFT: dict[str, tuple[list[str], str]] = {
 def test_the_reconciliation_reports_the_drift_it_cannot_revoke(
     granted_probe_role: tuple[psycopg.Connection, str], channel: str
 ) -> None:
-    """A full restatement is not a full reconciliation, and the difference must not be silent.
+    """The reconciliation reports the drift it cannot revoke.
 
-    `REVOKE ALL ON ALL TABLES … FROM <role>` reaches exactly one of the four ACL sources that decide
-    what the role may do. Two of the other three hand back `UPDATE`/`DELETE` on `audit_events` — the
-    whole of the trail's integrity claim since the hash chain was removed (D-2026-08-14) — and one
-    of them also allows `DROP TABLE`. Measured as the role after a reconciliation, both succeed.
-
-    **Reported rather than refused**, and the choice is argued rather than defaulted
-    (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step): raising here fails the
-    `pre-upgrade` hook, which blocks the release — and the operator whose hand-grant caused it is
-    the one person who cannot fix it from the deploy. A refusal wants an opt-out, an opt-out wants a
-    setting, and this file is applied by `psql`-equivalent with no settings in it. So CI fails and
-    the deploy reports: this assertion is the hard half, and the `WARNING` is the half that can see
-    a live database's hand-grants, which no test can.
+    `REVOKE ALL ON ALL TABLES` reaches one of the four ACL sources. Drift is reported as a
+    `WARNING` rather than refused, since refusing would block the `pre-upgrade` hook on a hand-grant
+    the deploy cannot fix; CI fails on it instead.
     """
     connection, role = granted_probe_role
     drift, phrase = _DRIFT[channel]
@@ -444,13 +363,7 @@ def test_the_reconciliation_reports_the_drift_it_cannot_revoke(
 def test_a_clean_reconciliation_reports_no_drift(
     granted_probe_role: tuple[psycopg.Connection, str],
 ) -> None:
-    """The other direction, without which the four assertions above prove only that it warns.
-
-    A report that fires on a database nobody has touched is a report an operator learns to ignore,
-    which is the failure mode of every check that cannot say *nothing is wrong*. This is also what
-    holds the shipped grant file to its own claim: after it runs against a migrated schema, the role
-    holds what it declares and nothing from anywhere else.
-    """
+    """A clean reconciliation reports no drift, so the warning means something when it fires."""
     connection, role = granted_probe_role
     assert _reconcile_reporting(connection, role, []) == []
 
@@ -458,18 +371,11 @@ def test_a_clean_reconciliation_reports_no_drift(
 def test_what_the_reconciliation_reports_reaches_the_deploy_log(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The audit is only a report if something reads it, and nothing else in that process does.
+    """Server `WARNING`s from the reconciliation reach the deploy log.
 
-    `app_privileges.sql` raises its drift findings as server `WARNING`s, which psycopg collects into
-    a diagnostics channel that is discarded unless a handler is attached. So the wiring in
-    `chemclaw.core.grants` is load-bearing rather than cosmetic: without it the audit runs on every
-    deploy, finds a `PUBLIC` write on `audit_events`, and says so to nobody — the "a control exists"
-    claim this repository keeps deleting, in its purest form.
-
-    Driven through the one message this file can raise on a database with no runtime role, because
-    that costs nothing and mutates nothing: the reconciliation returns at its first statement.
-    Whether the *drift* findings are raised at all is the parametrised test above; this one is only
-    about whether a server message on that connection reaches stdout.
+    psycopg discards notices unless a handler is attached, so the wiring in `chemclaw.core.grants`
+    is load-bearing. Driven with the one message raised on a database with no runtime role, which
+    mutates nothing.
     """
     try:
         connection = psycopg.connect(settings.postgres_dsn, autocommit=True)

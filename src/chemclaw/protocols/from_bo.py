@@ -1,48 +1,18 @@
 """Turn an optimisation design space and the points it suggests into factors and arms.
 
-**The gap this closes is retyping, not judgment.** A BoFire suggestion hands back
-`Candidate.params` — a bare `dict[str, float | str]` keyed by parameter name, with no units, no
-level labels and no roles — and a screening design hands back `ScreeningDesign.runs`, the same shape
-in bulk. `draft_experiment_protocol` needs `Factor`s whose levels carry labels and structures, and
-`ProtocolArm`s mapping factor name to level *label*. Nothing connected the two, so the model read
-the candidate table and typed the arms out by hand, one level label at a time, and a transposed
-value there is a different experiment run at a different condition with nobody able to see it.
+A BoFire suggestion or screening design is a bare `{parameter: value}` mapping; this does the
+mechanical translation into labelled `Factor`s and `ProtocolArm`s so the model never retypes
+levels by hand. The protocol itself (charges, steps, analytics, hazards) is judgment and stays
+the model's, so this returns the two collections `draft_experiment_protocol` takes rather than
+an `ExperimentDesign`. It lives in `protocols/` because the layering only allows
+`protocols -> science`.
 
-Everything here is mechanical: which parameters vary, what their distinct settings are, which runs
-repeat. **What is deliberately not here is the protocol** — the charge table, the steps, the
-analytics, the hazards. Those are judgment over the chemistry and stay the model's, which is why
-this returns the two collections `draft_experiment_protocol` takes as arguments rather than an
-`ExperimentDesign` it could not honestly fill.
+It refuses rather than papers over: two parameters slugging to one factor name; a parameter with
+more settings than `Factor.levels` allows; runs and problem disagreeing about which parameters
+exist. A parameter the runs never vary is a setpoint, reported in `constants`, never dropped.
 
-**Why this lives in `protocols/` and not beside the optimiser.** `tests/test_layering.py` allows
-`chemclaw.protocols -> chemclaw.science` and allows neither `chemclaw.science -> chemclaw.protocols`
-nor `chemclaw.connectors -> chemclaw.protocols`, so the translation can only sit on this side. That
-is the right side on the argument the layering comment already makes: it says `protocols` imports
-neither `ingest` nor `kg` because "a design is prescriptive and their shapes are descriptive". An
-`OptimizationProblem` is a design space — prescriptive, like everything else here — so reading one
-is the rule applying rather than an exception to it.
-
-**Four things it refuses rather than papers over**, because each would otherwise reach a chemist as
-a plausible-looking plate:
-
-- Two parameters whose names slug to one `Factor.name`. Silently merging them puts two variables in
-  one column and the arms stop describing the runs.
-- A parameter over more than `Factor.levels`' 96 settings. A continuous parameter sampled freely can
-  do this on a large campaign, and the model would otherwise meet a validation error with no idea
-  which parameter caused it.
-- A parameter the runs never vary. That is a *setpoint*, not a factor — `Factor.levels` requires
-  two — so it is reported in `constants` for the model to put in `ProtocolBody.setpoints` or the
-  prose, never dropped.
-- A run naming a parameter the problem does not declare, or omitting one it does. Either means the
-  runs and the problem are not from the same campaign, and `factor_levels_declared` is a *blocker*
-  check that would refuse the resulting design anyway — later, and with a worse message.
-
-**Units are the one thing this cannot supply and the one a reader will assume.** An
-`OptimizationProblem` carries none: a `ContinuousParameter` is a name and two bounds, and whether 80
-means °C or mol% lives only in whoever wrote the campaign. So `Factor.unit` and `FactorLevel.unit`
-come back empty and `notes` says so per parameter. `quantities_are_plausible` bands temperature and
-time but reads the *setpoints*, not a factor's levels, so nothing downstream catches a missing unit
-either — the chemist or the model supplies it before the design is drafted.
+Units cannot be supplied: an `OptimizationProblem` carries none, so units come back empty and
+`notes` says so per parameter.
 """
 
 from __future__ import annotations
@@ -74,9 +44,7 @@ class BoTranslationError(ChemclawError):
 class BoTranslation:
     """What a campaign's points become, and what the model still has to decide.
 
-    A dataclass rather than a `protocols.models` entry because nothing persists it: it is the return
-    of one function, consumed in the same turn by the tool that renders it. Adding it to the model
-    module would put it in a document schema that stores it nowhere.
+    A dataclass rather than a `protocols.models` entry because nothing persists it.
     """
 
     #: Ready to pass to `draft_experiment_protocol(factors=...)`.
@@ -86,9 +54,8 @@ class BoTranslation:
     #: `{parameter name: the single value every run uses}` — a setpoint the design holds fixed, not
     #: a factor. The model puts these in `ProtocolBody.setpoints` or says them in the prose.
     constants: dict[str, str] = field(default_factory=dict)
-    #: What a reader has to supply or check, one sentence each. Never empty of the units warning
-    #: when a continuous parameter varies, because a number without one is the failure this
-    #: translation cannot prevent.
+    #: What a reader has to supply or check, one sentence each; always includes the units warning
+    #: when a continuous parameter varies.
     notes: list[str] = field(default_factory=list)
 
 
@@ -101,13 +68,11 @@ def factors_and_arms(
     """Translate an optimisation problem and the points it suggested into factors and arms.
 
     Args:
-        problem: The campaign's design space — the parameters are what may vary and, for a
-            categorical one, `structures` is where a level's SMILES comes from.
-        runs: The points to run, each `{parameter name: value}`. A BO suggestion's
-            `Candidate.params`, or a `ScreeningDesign.runs` entry. Order is preserved: arm *n* is
-            run *n*, so a randomised screening design keeps the order its randomisation chose.
-        prefix: The arm-id stem. `arm` gives `arm1`, `arm2`; a second block on one design uses
-            another so the ids do not collide.
+        problem: The campaign's design space; a categorical parameter's `structures` supply a
+            level's SMILES.
+        runs: The points to run, each `{parameter name: value}`. Order is preserved: arm *n* is run
+            *n*.
+        prefix: The arm-id stem (`arm` gives `arm1`, `arm2`); a second block uses another.
 
     Returns:
         The factors, the arms, the parameters that turned out to be constants, and what the model
@@ -116,8 +81,7 @@ def factors_and_arms(
     Raises:
         BoTranslationError: The runs and the problem disagree about which parameters exist, two
             parameter names slug to one factor name, or a parameter varies over more settings than
-            a `Factor` may declare. Each names the parameter, because the alternative is a pydantic
-            error against a field the model never wrote.
+            a `Factor` may declare. Each names the parameter.
     """
     if not runs:
         raise BoTranslationError(
@@ -145,11 +109,8 @@ def _require_runs_match_the_problem(
 ) -> None:
     """Refuse runs that name a parameter the problem does not, or omit one it declares.
 
-    Both directions, because they are different mistakes with the same cause — runs from one
-    campaign against another's problem — and only one of them would be caught downstream. An extra
-    key is silently ignored by every dict read below; a missing one produces an arm that does not
-    set a declared factor, which `checks.factor_levels_declared` refuses as a **blocker**, later and
-    against a design the model has already written a protocol body for.
+    Both directions mean runs from one campaign against another's problem. An extra key would be
+    silently ignored; a missing one would only be caught later by a blocker check.
     """
     for index, run in enumerate(runs, start=1):
         extra = sorted(set(run) - set(declared))
@@ -168,12 +129,8 @@ def _split_by_variation(
 ) -> tuple[list[str], dict[str, str]]:
     """Separate the parameters the runs actually vary from the ones they hold fixed.
 
-    A parameter at one setting across every run is a **setpoint**, and calling it a factor is not
-    merely redundant: `Factor.levels` has `min_length=2`, so it cannot be expressed, and
-    `coverage_is_stated` would compare a grid against arms that never explore it.
-
-    Order follows `problem.parameters` rather than the runs, so two translations of one campaign
-    put the factors in the same order and the run sheet's columns do not move between revisions.
+    A parameter at one setting is a setpoint (`Factor.levels` requires two). Order follows
+    `problem.parameters`, so run-sheet columns are stable across revisions.
     """
     varying: list[str] = []
     constants: dict[str, str] = {}
@@ -189,14 +146,9 @@ def _split_by_variation(
 def _slugs_for(names: Sequence[str]) -> dict[str, str]:
     """Map each varying parameter name onto a legal, distinct `Factor.name`.
 
-    A parameter is named by whoever wrote the campaign — "Pd source", "T (degC)", "equiv. base" —
-    and `Factor.name` is `^[a-z][a-z0-9_]*$`. The slug is lowercase with every other run of
-    characters collapsed to one underscore, prefixed when it would otherwise start with a digit.
-
-    **A collision raises.** Two parameters slugging to one name would silently become one factor
-    column holding two variables, and every arm after the first would overwrite the other's level —
-    so the design would be internally consistent, pass every check, and describe experiments nobody
-    asked for. Nothing downstream could detect it, because by then there is only one factor.
+    The slug is lowercase with every other character run collapsed to `_`, prefixed if it would
+    start with a digit. A collision raises: two parameters in one factor column would yield a design
+    that passes every check and describes experiments nobody asked for.
     """
     slugs: dict[str, str] = {}
     taken: dict[str, str] = {}
@@ -226,14 +178,9 @@ def _factor_for(
 ) -> Factor:
     """One `Factor`, with a level for each distinct setting the runs actually use.
 
-    **Levels come from the runs, not from the parameter's declared range**, and that is the choice
-    that makes the design honest. A `CategoricalParameter` may declare eight catalysts where the
-    suggestion picks three; declaring all eight would state a grid the arms do not explore, which is
-    exactly what `coverage_is_stated` reports on. What the design varies is what the runs vary.
-
-    `role` is `UNKNOWN` throughout: an optimisation parameter says what may change, never what the
-    species *does*, and `SpeciesRole.UNKNOWN` is a member precisely so "nothing has decided" stays
-    distinguishable from a decision. The model sets it when it drafts the body.
+    Levels come from the runs, not the declared range, so the design never states a grid the arms
+    do not explore. `role` is `UNKNOWN`: a parameter says what may change, not what the species
+    does; the model sets it when drafting.
     """
     settings = _distinct_in_order(parameter.name, runs)
     if len(settings) > 96:
@@ -268,15 +215,9 @@ def _arms_for(
 ) -> list[ProtocolArm]:
     """One arm per run, with a repeated run pointing at the first that set those levels.
 
-    **Repeats are `replicate_of` rather than duplicate arms**, because they are what a screening
-    design's centre points and replicates *are*, and `arms_are_distinct` reports two arms at
-    identical settings as a warning unless one declares itself a replicate. Doing it here is the
-    whole reason: the model reading a run table cannot see that run 7 repeats run 2 without
-    comparing every column by eye, which is the error this module exists to remove.
-
-    `ProtocolArm` requires a replicate to carry *identical* levels and identical effective
-    setpoints. The first holds by construction — the runs are equal — and the second because no arm
-    here sets `setpoints`, so every one inherits the same body.
+    Repeats become `replicate_of` (what centre points and replicates are), which
+    `arms_are_distinct` accepts. Replicates have identical levels by construction and identical
+    setpoints because no arm here sets `setpoints`.
     """
     arms: list[ProtocolArm] = []
     first_seen: dict[tuple[tuple[str, str], ...], str] = {}
@@ -297,9 +238,7 @@ def _notes_for(
 ) -> list[str]:
     """What the model still has to supply, one sentence each and none of them optional.
 
-    Written as notes rather than raised, because none of them makes the translation wrong — they
-    make it incomplete in ways only a chemist can finish, and refusing would leave the model with
-    no arms at all rather than with arms and a list of what to add.
+    Notes rather than errors: they make the translation incomplete, not wrong.
     """
     notes: list[str] = []
     numeric = [name for name in varying if isinstance(declared[name], ContinuousParameter)]
@@ -329,9 +268,7 @@ def _notes_for(
 def _distinct_in_order(name: str, runs: Sequence[Mapping[str, ParamValue]]) -> list[ParamValue]:
     """The settings one parameter takes, deduplicated, in the order the runs first use them.
 
-    Order matters and sorting would be worse: a run sheet's level order is what a chemist reads
-    down, and the suggestion's own order carries the optimiser's preference — the first candidate is
-    the one it most wants run.
+    Not sorted: the suggestion's order carries the optimiser's preference.
     """
     seen: dict[str, ParamValue] = {}
     for run in runs:
@@ -340,13 +277,9 @@ def _distinct_in_order(name: str, runs: Sequence[Mapping[str, ParamValue]]) -> l
 
 
 def _label(value: ParamValue) -> str:
-    """One setting as a `FactorLevel.label` and a `ProtocolArm.levels` entry — the same string.
+    """One setting as a `FactorLevel.label` and a `ProtocolArm.levels` entry: the same string.
 
-    The two must be produced by one function: `checks.factor_levels_declared` is a **blocker** that
-    matches an arm's level against the factor's declared labels by string equality, so a float
-    formatted one way in the factor and another in the arm fails a design that is in fact correct.
-
-    `%.10g` is the format `protocols/export.csv_cell` writes a float to the run sheet in, so a level
-    reads the same in the factor table, the arm and the CSV a chemist opens.
+    One function for both because `checks.factor_levels_declared` matches them by string
+    equality. `%.10g` matches `protocols/export.csv_cell`, so a level reads the same everywhere.
     """
     return f"{value:.10g}" if isinstance(value, float) else str(value)

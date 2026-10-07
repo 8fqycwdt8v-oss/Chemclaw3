@@ -1,34 +1,13 @@
-"""Turning two graded answers to one question into the tool-utility A/B this corpus never ran.
+"""Turning two graded answers to one question into the tool-utility A/B.
 
-Why this exists: `evals/ab.py::compare_tool_utility` has always been able to compare a metric with
-tools against the same metric without them, and nothing ever produced its inputs from a live run —
-the one registered caller (`autonomy.plan_execute_utility`) reads four hand-written floats out of a
-case file. So the comparison the corpus most needs was implemented, registered, gated, and never
-measured.
+Produces `evals/ab.py::compare_tool_utility`'s inputs from a live run. The augmented arm is the
+default agent; the baseline arm asks the same question of `data/evals/profiles/no-tools.yaml`, which
+removes the tools and replaces the system prompt, so its delta is prompt-and-tools, not tools alone.
+`data/evals/profiles/tools-removed.yaml` varies only the tools.
 
-**What the two arms are, and what they differ by.** The augmented arm is the front door's default
-agent. The baseline arm is the *same question* asked of `data/evals/profiles/no-tools.yaml`, which
-empties `tool_names` — structurally, so the compiled graph never holds the tools and, by
-`ToolScopedSkills`, no skill about them — **and** replaces the system prompt wholesale, because a
-profile's `instructions:` are not additive. So a delta from this pairing is a prompt-and-tools delta
-and cannot be attributed to the tools (`D-2026-09-14-tools-were-never-the-variable`);
-`data/evals/profiles/tools-removed.yaml` is the arm that varies only the tools, and re-running the
-corpus against it is the open row in `docs/planning/BACKLOG.md`. The comparison ChemToolAgent
-reports — tool augmentation does not consistently beat the base model, and it hurts on general
-chemistry questions — is what this machinery was built to reproduce, and a run whose baseline also
-swaps the prose is not yet that run.
-
-**Why a verdict becomes a number rather than a rate.** `compare_tool_utility` scores *per task* so
-that "tools helped here and hurt there" survives, which an aggregate served-rate destroys — and the
-per-task delta is what selective steering would need. The scale is the judge's own five verdicts
-collapsed onto one axis, with `fabricated` **below** `unserved` because the whole point of the
-comparison is that tools introduce an error class of their own: an answer that invents a citation is
-worse than one that declines, and a scale that put them level would score the failure mode this
-measurement exists to find as a tie.
-
-**`ungraded` is dropped, loudly.** It means the judge itself failed, which is evidence about the
-grader rather than about either arm; scoring it as anything would put a grader outage into the
-system's own utility number. `paired_tasks` returns what it dropped so a report can say so.
+Scored per task, so "tools helped here and hurt there" survives. Judge verdicts map to one axis with
+`fabricated` below `unserved`, since an invented answer is worse than a refusal. `ungraded` (the
+judge failed) is dropped, and `paired_tasks` returns what it dropped.
 """
 
 from collections.abc import Mapping, Sequence
@@ -37,9 +16,8 @@ from chemclaw.evals.ab import ABSummary, TaskScores, compare_tool_utility
 from chemclaw.evals.live_judge import Judgement
 from chemclaw.evals.probe import Probe
 
-#: One judge verdict, on the axis the A/B compares. Higher is better, and the span is deliberate:
-#: `fabricated` is a negative rather than a zero, so a probe whose tool-armed answer invents
-#: something scores *below* the same probe answered by a model that declined.
+#: One judge verdict on the A/B axis; higher is better. `fabricated` is negative, below a declined
+#: answer.
 VERDICT_SCORES: Mapping[str, float] = {
     "served": 1.0,
     "partial": 0.5,
@@ -66,14 +44,11 @@ def paired_tasks(
 
     Returns:
         `(tasks, dropped)` — the paired scores, and the ids left out because at least one arm was
-        `ungraded`. The second element is returned rather than logged because a comparison over 30
-        probes that silently became one over 11 is the failure this repository keeps finding in its
-        own harnesses.
+        `ungraded`, so a report can say how much smaller the comparison became.
 
     Raises:
-        UnpairedProbe: A probe is missing from an arm entirely. Unlike an `ungraded` verdict — which
-            is a grader failure and is dropped — a missing id means the two arms did not ask the
-            same set, so every aggregate below would be comparing different questions.
+        UnpairedProbe: A probe is missing from an arm entirely: the arms did not ask the same set,
+            so every aggregate would compare different questions.
     """
     tasks: list[TaskScores] = []
     dropped: list[str] = []
@@ -98,14 +73,9 @@ def paired_tasks(
 def by_bucket(probes: Sequence[Probe], tasks: Sequence[TaskScores]) -> dict[str, ABSummary]:
     """One summary per bucket, plus `"all"` — because the buckets ask opposite questions.
 
-    Bucket A is "the capability exists, tools should win"; bucket C is "there is no capability, the
-    honest answer is a refusal, and tools are an opportunity to fabricate one". A single aggregate
-    over both would let a gain on one cancel a loss on the other, which is exactly the averaging
-    that made the deleted routing measurement unable to answer its own question.
-
-    A bucket with no paired task is absent from the result rather than present and empty:
-    `compare_tool_utility` refuses an empty task list on purpose, and inventing a benign-looking
-    zero for it here would defeat that refusal one layer up.
+    In bucket A tools should win; in bucket C the honest answer is a refusal and tools are a chance
+    to fabricate. A single aggregate would let one cancel the other. A bucket with no paired task is
+    absent, since `compare_tool_utility` refuses an empty list.
     """
     bucket_of = {probe.id: probe.bucket for probe in probes}
     summaries: dict[str, ABSummary] = {}

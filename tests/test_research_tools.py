@@ -1,8 +1,7 @@
-"""Tests for the cross-source evidence gatherer (plan Phase 5b, generalized).
+"""Tests for the cross-source evidence gatherer.
 
-Proves gather_evidence unions the knowledge graph with reaction-fingerprint search in one
-call, that every chunk is note-cited, and that the graph filters work — using a temp
-knowledge dir and an in-memory reaction store (no database, no git).
+`gather_evidence` unions the knowledge graph with reaction-fingerprint search in one call, every
+chunk is note-cited, and graph filters work (temp knowledge dir, in-memory reaction store).
 """
 
 import asyncio
@@ -168,13 +167,9 @@ def test_sweep_ranks_by_confidence_before_truncating(
 def test_a_mounted_share_is_not_starved_by_a_larger_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A sixth source must survive the cap, and the only honest check is to count its chunks.
+    """A mounted share is not starved by a larger graph; its surviving chunks are counted.
 
-    `D-2026-08-01-a-cap-that-starves-a-source` is the reason: a flat union truncated in config
-    order gave the lexical leg **zero** chunks in every default-mode answer, silently, on the
-    success path. A file share is exactly the shape that regresses it — a graph of thirty notes
-    matching a common word will out-produce it every time — so this counts per source rather than
-    asserting the round-robin is still there.
+    A cap applied in config order can silently give one source zero chunks.
     """
     from chemclaw.ingest.documents.binding import load_binding
     from chemclaw.ingest.documents.index import InMemoryDocumentIndex
@@ -218,12 +213,9 @@ def test_a_mounted_share_is_not_starved_by_a_larger_graph(
 def test_the_sweep_is_bounded_by_characters_and_not_only_by_a_chunk_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A count of chunks cannot bound what a sweep costs, because a chunk's cost is its content.
+    """The sweep is bounded by characters, not only by a chunk count.
 
-    `gather_evidence_max_chunks` counts chunks whose sizes differ by ~7.5x across sources — a
-    note-backed chunk is excerpted to `note_excerpt_chars` (240) and a mounted share's is up to
-    its binding's `chunk_chars` (1,800). Same finding as `agent_keep_last_conversation_groups`,
-    where counting groups left a 300k-token thread at 180k against a 100k budget.
+    Chunk sizes differ several-fold across sources, so a count alone cannot bound cost.
     """
     for i in range(20):
         body = f"yield noted. {'padding ' * 60}"
@@ -288,13 +280,7 @@ def test_one_oversized_chunk_is_returned_rather_than_reported_as_nothing_on_file
 def test_the_character_budget_does_not_starve_a_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`D-2026-08-01-a-cap-that-starves-a-source` in the new currency.
-
-    That ADR is about the *shape* of a cut, not its size: a flat cut in config order gave one leg
-    **zero** chunks on every default-mode answer. A second cap applied the old way would
-    reintroduce exactly that, so this counts per source under a character budget the way the
-    sibling test counts under a chunk count.
-    """
+    """The character budget does not starve a source; survivors are counted per source."""
     from chemclaw.ingest.documents.binding import load_binding
     from chemclaw.ingest.documents.index import InMemoryDocumentIndex
     from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
@@ -328,17 +314,9 @@ def test_the_character_budget_does_not_starve_a_source(
 
     assert sweep.truncated_by == "chars", "the fixture must actually exercise the character cap"
     surviving = Counter(chunk.retriever for chunk in sweep.chunks)
-    # **Both directions, and measured against the mutants rather than assumed.** Spending the
-    # budget in config order — the original D-2026-08-01 shape — gives `{"graph": 12}` here, the
-    # share starved to zero, and this fails. Asserting only that the share survives would have
-    # missed the mirror image: the share's RRF-derived 1.0 outranks a note's 0.5 confidence, so a
-    # score-re-sorted cut starves the *graph* instead.
-    #
-    # What this pins is the **currency** change specifically. A score-re-sorted cut still passes
-    # against this fixture, because at 1,200 characters both legs happen to survive it; that shape
-    # is guarded by `test_a_mounted_share_is_not_starved_by_a_larger_graph` above and by the
-    # cross-source sort being gone from `_interleave_dedup` — said out loud rather than left for
-    # someone to discover this test was weaker than it reads.
+    # Both directions: a config-order cut starves the share, and a score-sorted cut starves the
+    # graph (the share's RRF score outranks a note's confidence). This fixture pins the currency
+    # change; the score-sorted shape is guarded by the test above.
     assert surviving["sharedrive"] > 0 and surviving["graph"] > 0, (
         f"a source was starved by the character budget: {dict(surviving)} — "
         "which is D-2026-08-01 reintroduced in a new currency"
@@ -348,12 +326,9 @@ def test_the_character_budget_does_not_starve_a_source(
 def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`content` is only part of what reaches the model, and charging it alone under-counts badly.
+    """The budget charges the whole serialized chunk, not only its content.
 
-    Measured on one realistic chunk carrying conflicts and provenance: 300 characters of content
-    against 569 serialized — a 47% under-count, so a 60,000-character budget really spent about
-    114,000. The assertion is on the *cut moving* when only non-content fields grow, because that
-    is the property; a fixed expected length would pin the serializer instead.
+    Asserted as the cut moving when only non-content fields grow, so the serializer is not pinned.
     """
     for i in range(12):
         (tmp_path / f"n{i}.md").write_text(
@@ -408,13 +383,10 @@ def test_the_sweep_reports_what_each_source_contributed(
 def test_gather_evidence_records_the_kept_half_of_the_source_metric_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`chemclaw_evidence_source_kept_total` must come from the real sweep, not only a direct call.
+    """`chemclaw_evidence_source_kept_total` is recorded by the real `gather_evidence` sweep.
 
-    `retrieval.fanout.record_kept_chunks` is what makes the D-2026-08-01-a-cap-that-starves-a-
-    source shape alertable — a leg that hands over chunks and survives the merge with none — but
-    the metric had a function and no producer: nothing on the one production path it exists to
-    watch (`gather_evidence`) ever called it, so `tests/test_datapath_observability.py` exercising
-    the function directly was the only thing keeping the series alive.
+    It is what makes a source surviving the merge with no chunks alertable, so its producer must be
+    the production path, not only a direct call.
     """
     (tmp_path / "reaction").mkdir()
     (tmp_path / "reaction" / "reaction-a.md").write_text(

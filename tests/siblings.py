@@ -1,31 +1,10 @@
 """The companion checkouts: where they are, and what each tree declares.
 
-Where they are is asked of the one script that already knows.
-
-Some tests in this suite need a sibling repository on disk — `tests/test_context_floor.py` runs
-`Chemclaw3-mcp`'s own servers to bound the half of the request prefix this repository cannot
-measure, and `tests/test_sibling_manifest_agreement.py` reads the fleet's manifests and its
-recorded `calc` surface. Every one of them is **opt-in**: without a checkout it skips, loudly, and
-a skip is not a pass. How many that is, the run says — `tests/conftest.py::_report_sibling_skips`
-counts them and names what the run is therefore not evidence about.
-
-**Which makes the search itself load-bearing, and it was wrong.** `tests/test_context_floor.py`
-searched exactly one path in one casing (`../Chemclaw3-mcp`) and read one variable
-(`CHEMCLAW_MCP_CHECKOUT`), while `infra/live/siblings.sh` — merged the same day, in a different
-pull request, with a header describing this bug being fixed for the live lanes — searched four
-candidates and read `CHEMCLAW_MCP_REPO`. Measured on the container this repository's own tooling
-provisions, with the fleet checked out at `../8fqycwdt8v-oss/chemclaw3-mcp`: the live lanes
-resolved it and the ratchet skipped. So `SERVED_ELSEWHERE_ALLOWANCE`, and therefore `PREFIX_BOUND`,
-and therefore both compaction defaults `core/config/agent.py` derives from it, had never been
-checked by a machine anywhere.
-
-**So there is one resolution and it is the shell's**, invoked here rather than reimplemented.
-A Python copy of that search would be a second answer to one question — which is the
-defect `infra/live/siblings.sh` exists to have ended, and re-committing it inside the fix would be
-this repository's favourite kind of mistake. The cost is a `bash` subprocess per lookup, tens of
-milliseconds, on a path that then spawns the sibling's interpreter anyway; and where `bash` is
-missing the lookup fails to a reason string, so the caller skips with an explanation instead of
-resolving something different from what `make live-up` would.
+Some tests need a sibling repository on disk (`tests/test_context_floor.py`,
+`tests/test_sibling_manifest_agreement.py`); without a checkout they skip, and
+`tests/conftest.py::_report_sibling_skips` counts the skips. Where a checkout is is resolved by
+`infra/live/siblings.sh`, invoked rather than reimplemented, so tests and the live lanes find the
+same checkout. A missing `bash` fails the lookup to a reason string.
 """
 
 from __future__ import annotations
@@ -38,9 +17,7 @@ from pathlib import Path
 import yaml
 
 #: The head of every skip message a missing companion checkout produces, so one reporter can find
-#: them all. Defined here rather than restated in `tests/conftest.py` because a marker that is
-#: transcribed is a marker that drifts, and the whole subject of this module is one fact declared
-#: twice: a reporter matching a phrase two files claim to share is that defect, one layer up.
+#: them all. Defined once and imported by `tests/conftest.py`.
 SIBLING_SKIP = "[no Chemclaw3-mcp checkout]"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,11 +27,8 @@ _SIBLINGS_SH = REPO_ROOT / "infra" / "live" / "siblings.sh"
 def _ask_shell(function: str, *args: str) -> tuple[str, str]:
     """Run one function out of `infra/live/siblings.sh`, returning `(stdout, reason)`.
 
-    `REPO_ROOT` is that file's stated contract — the sourcing script defines it first — so it is
-    set here to this checkout, exactly as `infra/live/processes.sh` and `e2e-full-stack/up.sh` set
-    it to theirs. A non-zero exit or a missing `bash` comes back as a reason rather than an
-    exception: every caller of this module is deciding between running and skipping, and a sibling
-    somebody has not cloned is a fact about their machine rather than a regression.
+    `REPO_ROOT` is that script's contract, set here to this checkout. A non-zero exit or a missing
+    `bash` comes back as a reason, since every caller decides between running and skipping.
     """
     bash = shutil.which("bash")
     if bash is None:
@@ -95,9 +69,8 @@ def env_var_names(canonical_name: str) -> tuple[str, ...]:
 def sibling_root(env_var: str, canonical_name: str) -> tuple[Path | None, str]:
     """The sibling checkout, or `None` and the reason there is not one.
 
-    `sibling_repo` prints its first candidate when it finds nothing, so that a live lane's own
-    `die` can name a concrete place to clone into. A test has to tell that apart from a hit, and
-    the only way to is to test the printed path — which is what makes the fallback safe to keep.
+    `sibling_repo` prints its first candidate when it finds nothing, so the printed path is tested
+    for existence.
     """
     printed, reason = _ask_shell("sibling_repo", env_var, canonical_name)
     if reason:
@@ -112,13 +85,9 @@ def sibling_root(env_var: str, canonical_name: str) -> tuple[Path | None, str]:
 def sibling_python(env_var: str, canonical_name: str) -> tuple[Path | None, str]:
     """The sibling checkout's own interpreter, or `None` and the reason there is not one.
 
-    Separate from `sibling_root` because the two costs are different. Reading the fleet's manifests
-    and its recorded `calc` surface needs a shallow clone and no install; running its servers to
-    measure their tool schemas needs a built `.venv`. A check that needs only the first should not
-    be gated on the second. **The second is cheaper than this docstring used to say** — "RDKit,
-    torch and a T5 checkpoint's dependencies" — and that sentence is what kept it out of CI: the
-    model backends are optional extras, so the fleet's default `uv sync --frozen` is RDKit and
-    SciPy, measured at 24-44 s and 708 MB cold. CI's `check` job now builds it.
+    Separate from `sibling_root`: reading the fleet's manifests needs only a clone, while running
+    its servers needs a built `.venv`, and a check needing the first should not be gated on the
+    second.
     """
     root, reason = sibling_root(env_var, canonical_name)
     if root is None:
@@ -132,18 +101,10 @@ def sibling_python(env_var: str, canonical_name: str) -> tuple[Path | None, str]
 def fleet_published_bundles(root: Path) -> dict[str, Path]:
     """Every bundle `Chemclaw3-mcp`'s published `manifests/` directory offers, by declared name.
 
-    That directory and no other, because it is the one a deployment points
-    `CHEMCLAW_CONNECTORS_DIR` at. The fleet keeps `calc` and `rxnlabel` in `manifests-internal/`,
-    which no published `export` line names and whose manifests declare a `mount:` key this
-    repository's `extra="forbid"` manifest model refuses outright — so counting "the bundles the
-    fleet serves" as six counts two servers this repository is built to be unable to mount, and
-    one of them (`calc`) would take the calculation cache off the agent's surface if it could.
-
-    Keyed on the **directory**, which is what `registry.discovered()` keys on and therefore what
-    resolves a collision on `CHEMCLAW_CONNECTORS_DIR`. `_load_manifest` rejects a manifest whose
-    `name:` disagrees with its folder outright, so the two are equal for anything this repository
-    can load at all — and a fleet manifest where they disagree is a startup error rather than a
-    differently-named bundle, which `tests/test_sibling_manifest_agreement.py` asserts separately.
+    Only that directory, because it is what a deployment points `CHEMCLAW_CONNECTORS_DIR` at;
+    `manifests-internal/` holds servers this repository refuses to mount. Keyed on the directory, as
+    `registry.discovered()` is; a manifest whose `name:` disagrees with its folder is rejected,
+    which `tests/test_sibling_manifest_agreement.py` asserts separately.
     """
     return {
         manifest.parent.name: manifest
@@ -154,17 +115,10 @@ def fleet_published_bundles(root: Path) -> dict[str, Path]:
 def fleet_published_tool_names(root: Path) -> dict[str, frozenset[str]]:
     """Every tool each published fleet bundle declares, by bundle name.
 
-    The *declared* surface rather than the served one, and that is the whole reason this is cheap
-    enough to run in CI: it reads YAML off a shallow clone, where measuring what a server actually
-    answers needs the sibling's built `.venv` (`sibling_python`, and the schema measurement in
-    `tests/test_context_floor.py` that uses it). The two are held to each other on the fleet's own
-    side, by `mcp_server_kit.testing.assert_manifest_matches` against a running server, so a name
-    declared here and not served there fails over there rather than silently here.
-
-    Reads `endpoint.tools`, which is the key `tests/test_sibling_manifest_agreement.py` already
-    compares under the name `"tools"`. A bundle with no `endpoint:` contributes an empty set rather
-    than being dropped, so a manifest that loses its endpoint reads as "declares nothing" instead of
-    "is not in the fleet" — those are different failures and only the first is this function's.
+    The declared surface, read as YAML from a clone, so it is cheap enough for CI; the fleet checks
+    declared against served itself. Reads `endpoint.tools`; a bundle with no `endpoint:` contributes
+    an empty set rather than being dropped, so "declares nothing" is distinguishable from "not in
+    the fleet".
     """
     declared: dict[str, frozenset[str]] = {}
     for name, path in fleet_published_bundles(root).items():
@@ -177,11 +131,8 @@ def fleet_published_tool_names(root: Path) -> dict[str, frozenset[str]]:
 def bundles_declared_here() -> dict[str, Path]:
     """The bundle manifests *this repository's own tree* holds, whatever the environment says.
 
-    Deliberately not `registry.discovered()`, which reads `CHEMCLAW_CONNECTORS_DIR`: every caller
-    below is asking which names the two trees *both* declare, and under
-    `infra/live/e2e-full-stack/up.sh` that variable already holds the fleet's manifests — so
-    `discovered()` would report the sibling's declarations as this one's and the check would fail
-    on a configuration rather than on a drift.
+    Not `registry.discovered()`, which reads `CHEMCLAW_CONNECTORS_DIR` — under
+    `infra/live/e2e-full-stack/up.sh` that already points at the fleet's manifests.
     """
     import chemclaw.connectors
 

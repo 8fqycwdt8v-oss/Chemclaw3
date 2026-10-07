@@ -1,15 +1,9 @@
-"""The property registry is coherent, and it is not quietly fragmenting.
+"""The property registry is coherent and not quietly fragmenting.
 
-**The registry is the one thing standing between this design and EAV.** A foreign key guarantees a
-property is *defined*; it does not guarantee it is the *only* definition of that quantity. Three
-teams shipping `pka`, `pka_acid` and `pka_conjugate_acid` would each pass the constraint, and every
-query would then return a confident subset with nothing raising — which is exactly the failure the
-registry was chosen to avoid.
-
-Only review can prevent a synonym being registered. What a test can do is narrow the gap, and these
-do: they fail on a registered unit that cannot be converted, on a value written under a kind its
-definition forbids, and — the one that matters most — on two properties that share a dimension and
-land on the same subject, which is what a split looks like from the outside.
+A foreign key ensures a property is defined, not that it is the only definition of its quantity;
+synonyms would make every query return a confident subset. These tests fail on unconvertible
+units, on values written under a forbidden kind, and on two same-dimension properties landing on
+one subject, which is what a split looks like.
 """
 
 from collections import defaultdict
@@ -37,11 +31,9 @@ from chemclaw.publish.record import (
 
 
 def test_every_canonical_unit_is_reachable_within_its_dimension() -> None:
-    """Properties sharing a dimension must agree on a unit, or be convertible to one.
+    """Properties sharing a dimension agree on a unit or are convertible to one.
 
-    The check that catches a row shipped with `kcal/mol` under `molar_entropy`. Without it, two
-    energies could be registered in different units under one dimension and a query summing them
-    would be adding hartree to kilocalories — a mistake that produces a plausible number.
+    So a query cannot add hartree to kilocalories.
     """
     by_dimension: dict[str, set[str]] = defaultdict(set)
     for definition in REGISTRY.values():
@@ -122,15 +114,11 @@ def _projected_properties_by_subject() -> dict[str, set[str]]:
 
 
 def test_no_two_properties_of_one_dimension_land_on_the_same_subject() -> None:
-    """The fragmentation check: what a split property looks like from the outside.
+    """No two properties of one dimension land on the same subject.
 
-    If `pka` and `pka_acid` both existed and both described a molecule, this fails — which is the
-    only automatic signal available that the registry has grown two names for one quantity.
-
-    **Dimensions where several distinct quantities legitimately coexist are exempted by name**, and
-    the exemption list is deliberately short and reasoned: a thermochemistry genuinely establishes
-    an enthalpy *and* a Gibbs energy, and a reaction genuinely has a delta-E, a delta-H and a
-    delta-G. Those are different quantities, not two spellings of one.
+    The only automatic signal that the registry has two names for one quantity. A short, reasoned
+    exemption list covers dimensions with genuinely distinct quantities (enthalpy and Gibbs energy;
+    reaction delta-E, delta-H and delta-G).
     """
     # Dimensions that carry several genuinely distinct quantities per subject, with why.
     exempt = {
@@ -205,14 +193,11 @@ def test_every_exempted_dimension_is_actually_used() -> None:
 
 
 def test_the_sink_gate_checks_the_block_against_the_driver_and_its_env_names() -> None:
-    """Both halves of "the driver's signature is the schema", on the outbound seam.
+    """The sink gate checks the `connection:` block against the driver and its `*_env` names.
 
-    A sink's `connection:` block has no model behind it — by design
-    (`D-2026-08-26-the-driver-s-signature-is-the-schema`) — so the gate is the only place either
-    mistake is caught before a publish attempt makes it. The `*_env` check matters as much as the
-    signature one and used to run on neither side: a key holding a *value* rather than a variable
-    name, or a lower-case variable, reaches the driver as an unset credential and fails on the first
-    delivery, hours after the deploy.
+    The block has no model by design (`D-2026-08-26-the-driver-s-signature-is-the-schema`), so the
+    gate is the only check before a delivery. A `*_env` holding a value instead of a variable name
+    would reach the driver as an unset credential.
     """
     from chemclaw.cli.validate_sinks import _driver_problems
     from chemclaw.publish.manifest import ResultSinkManifest
@@ -244,17 +229,10 @@ def test_the_sink_gate_checks_the_block_against_the_driver_and_its_env_names() -
 def test_the_sink_gate_checks_every_discovered_sink_not_only_the_enabled_ones(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The gate ran on the enabled list, which is empty by default — so it checked nothing at all.
+    """The sink gate checks every discovered sink, not only the enabled ones.
 
-    `CHEMCLAW_RESULT_SINKS` is empty on the shipped configuration and in CI (the baseline run says
-    "1 discovered, 0 enabled"), and `problems()` reached `_driver_problems` only for enabled names.
-    Zero drivers were resolved, zero config blocks bound, zero `*_env` names checked, on every
-    release — a rename in `publish/drivers/sql.py` would have been green through all of them and
-    failed on the first deployment that turned publishing on, in a worker, against a database a DBA
-    had already provisioned.
-
-    Discovery is what the two sibling seams validate, and for the reason they both write down: a
-    sink that is broken while disabled is a sink nobody can enable, and CI is where that surfaces.
+    `CHEMCLAW_RESULT_SINKS` is empty by default and in CI, so gating only enabled sinks checks
+    nothing. A sink broken while disabled is one nobody can enable.
     """
     from chemclaw.cli.validate_sinks import problems
     from chemclaw.publish.registry import discovered
@@ -280,24 +258,12 @@ def test_the_sink_gate_checks_every_discovered_sink_not_only_the_enabled_ones(
 def test_a_quantity_registered_for_another_table_cannot_be_projected_as_a_scalar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`scope_kind` is a control, not a comment — the claim its own definition makes.
+    """A quantity registered for another table cannot be projected as a scalar.
 
-    Nothing compared a fact's property against its declaration: not the projectors, not the row
-    builder, not the SQL driver. So the `property_definition` rows a site ships — the table a
-    consumer joins to decide *where to look* for a quantity — asserted a placement nothing kept.
-    Measured, one shipped projection disagreed with it: every species distribution wrote
-    `relative_energy`, registered per-conformer, as a calculation-scope scalar.
-
-    `calculation` names the scalar table and covers both of its row scopes, which is why the seven
-    per-species facts a reaction publishes at `member` scope are not violations — a species' own
-    Gibbs energy is a `property_value` row, and `FactScope` on the row says which kind.
-
-    **Driven through `project`, because the check is the projection's and not the model's.** As a
-    `PropertyFact` validator it also ran on the parse of a document already queued — see
-    `tests/test_publish_outbox.py::test_a_document_this_system_already_queued_stays_readable` —
-    which turned a write-side control into a filter that retired stored rows. This test fails in
-    both directions: with the guard gone the fabricated projector's record is built, and with the
-    guard back on the model the fact cannot be constructed and the raise is the wrong type.
+    `scope_kind` is enforced in `project`: `calculation` covers both scalar row scopes, so
+    per-member reaction facts are fine. Not a `PropertyFact` validator, because that would also run
+    when parsing already-queued documents and retire stored rows. Fails both with the guard removed
+    and with it moved onto the model.
     """
     conformer_scoped = next(
         name for name, definition in REGISTRY.items() if definition.scope_kind == "conformer"
@@ -327,11 +293,9 @@ def test_a_quantity_registered_for_another_table_cannot_be_projected_as_a_scalar
 
 
 def test_every_projected_scalar_is_registered_for_the_scalar_table() -> None:
-    """The same rule over every shape this system produces, not only the one that broke it.
+    """Every projected scalar is registered for the scalar table.
 
-    The validator above cannot be reached by a projector that never runs in a unit test, so this
-    drives all of them — a new calculator writing a per-atom quantity into the scalar table fails
-    here the day it ships.
+    Checked across every shape this system produces.
     """
     from tests.test_publish_projection import _cases
 
@@ -348,10 +312,8 @@ def test_every_projected_scalar_is_registered_for_the_scalar_table() -> None:
             assert definition_for(site.property).scope_kind == "site"
         for point in record.points:
             assert definition_for(point.property).scope_kind == "point"
-        # The fourth scope, and the one the rule was written without: a ranked row's
-        # `score_property` is a foreign key into the same registry, and a species distribution
-        # scored its candidates with `population` — registered per conformer, so the column a
-        # consumer joins to decide where a quantity lives pointed at the wrong table.
+        # Candidates too: `score_property` is a foreign key into the same registry, and must name a
+        # property registered for this placement.
         for candidate in record.candidates:
             if not candidate.score_property:
                 continue

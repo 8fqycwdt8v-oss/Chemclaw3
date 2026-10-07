@@ -1,10 +1,8 @@
-"""Tests for the plateau reading and the sd reference scale (W1).
+"""Tests for the plateau reading and the sd reference scale.
 
-The arithmetic is pure Python over the observations supplied — no BoFire, no Temporal — so these
-run in-process like `test_bo_tools.py`. The load-bearing case is the `op-13` replay: a live probe
-graded *fabricated* for asserting "the last 1-2% gains are real" against a +/-2% reproducibility
-the chemist had stated in the same question. The numbers below are that probe's, verbatim from
-`data/evals/probes/optimization.yaml`.
+Pure Python over the observations supplied. The load-bearing case replays probe `op-13`, whose
+numbers come verbatim from `data/evals/probes/optimization.yaml`: claiming "the last 1-2% gains
+are real" against the chemist's stated +/-2% reproducibility was graded fabricated.
 """
 
 import asyncio
@@ -28,10 +26,8 @@ from chemclaw.science.bo.problem import (
 )
 from chemclaw.science.bo.progress import campaign_progress as read_progress
 
-# op-13's twelve runs, ordered by equivalents — the axis the chemist walked. The probe's own
-# `direction` field says "the last four results span 87-89% against a stated +/-2% assay
-# reproducibility so they are indistinguishable from each other", which is the claim this replay
-# has to make computable.
+# op-13's twelve runs, ordered by equivalents. The probe says the last four results (87-89%) are
+# indistinguishable against +/-2%, which this replay makes computable.
 OP13_RUNS = [
     (1.1, 0.0, 54.0),
     (1.1, 25.0, 62.0),
@@ -86,9 +82,8 @@ def _series_problem() -> OptimizationProblem:
 def test_op13_last_four_results_are_not_distinguishable_from_each_other() -> None:
     """The exact claim the probe's grader made, now computed instead of asserted.
 
-    The model under test said "the last 1-2% gains are real". Against the +/-2% the chemist stated,
-    the last four runs (88, 87, 88, 89) span exactly 2.0 — one noise width — so they say nothing
-    about each other, and the reading has to state that.
+    The last four runs span 2.0 — one noise width — so the reading must say they are
+    indistinguishable.
     """
     progress = read_progress(_amide_problem(), _op13_observations(), assay_noise=2.0, window=4)
     assert progress.window_span == pytest.approx(2.0)
@@ -98,11 +93,8 @@ def test_op13_last_four_results_are_not_distinguishable_from_each_other() -> Non
 def test_op13_names_how_long_since_a_gain_that_beat_the_noise() -> None:
     """Three evaluations, and that number is the honest answer to "have we plateaued".
 
-    Worth pinning as its own case because it refutes the shape this test was first planned in. The
-    campaign is **not** plateaued on the default five-evaluation window: the jump from 83 to 88 at
-    2.2 equivalents is a real 5-point gain and it happened only four runs from the end. What is
-    true is narrower — nothing since has beaten the noise — and a tool that rounded that up to
-    "plateaued" would be making the opposite of op-13's error with the same overconfidence.
+    Not plateaued on the default five-evaluation window: the 83 → 88 jump is a real gain four runs
+    from the end. Only "nothing since has beaten the noise" is true.
     """
     progress = read_progress(_amide_problem(), _op13_observations(), assay_noise=2.0)
     assert progress.evaluations_since_improvement == 3
@@ -137,14 +129,9 @@ def test_a_series_still_climbing_is_not_plateaued() -> None:
 def test_a_series_creeping_past_the_noise_in_small_steps_is_not_plateaued() -> None:
     """A climb of 1-point steps against +/-2 noise is still a climb once it accumulates.
 
-    **This test replaced its own opposite** (D-2026-08-05). The first version asserted `plateaued`
-    here, arguing that what makes a gain real is the assay rather than the slope. That is true of a
-    single step and false of a series: a chemist comparing run 1 with run 7 measures +6 on a +/-2
-    assay, which is a real, repeatable gain and the whole reason to keep going. Calling it a plateau
-    tells a lab leader to stop a campaign that is working.
-
-    The counter is anchored at the last real gain, so the third run (+3 over the anchor at 50)
-    resets it and the series never accumulates five flat evaluations.
+    A real gain is measured against the last real gain, not step by step (D-2026-08-05): run 1 vs
+    run 7 is +6 on a +/-2 assay. The third run resets the counter, so five flat evaluations never
+    accumulate.
     """
     progress = read_progress(
         _series_problem(),
@@ -157,11 +144,9 @@ def test_a_series_creeping_past_the_noise_in_small_steps_is_not_plateaued() -> N
 
 
 def test_a_long_creep_ten_times_the_noise_is_not_plateaued() -> None:
-    """The case that found the defect: +20.9 against +/-2, once reported as a plateau.
+    """A long creep of ten times the noise is not plateaued.
 
-    Twelve runs climbing 1.9 each. Every individual step is inside the assay, and the campaign has
-    nonetheless gained ten times the noise — which is what a chemist measures when they compare the
-    first run with the last. The old semantics returned `evaluations_since_improvement=11` here.
+    Twelve runs climbing 1.9 each: every step is inside the assay, the total is not.
     """
     progress = read_progress(
         _series_problem(),
@@ -299,9 +284,7 @@ def test_the_tool_refuses_an_observation_that_does_not_match_the_declared_space(
 def test_the_tool_the_model_sees_demands_the_assay_noise() -> None:
     """The description the model receives must say where the noise comes from and to ask for it.
 
-    Asserted against the served MCP description rather than the Python docstring, because that is
-    what actually travels to the model — the same reason the sibling assertion in
-    `test_bo_tools.py` is written that way.
+    Asserted against the served MCP description, which is what travels to the model.
     """
     from chemclaw.connectors.bo.server.tools import server
 
@@ -438,12 +421,8 @@ def test_an_unknown_objective_lists_the_ones_the_problem_declares() -> None:
 def test_a_legacy_problem_whose_objective_shares_a_parameter_name_still_validates() -> None:
     """The rule that must NOT live in a validator, because stored data can violate it.
 
-    Nothing forbade an objective sharing a parameter's name before `objectives` became a list, so a
-    campaign launched earlier may carry one — and `OptimizationProblem`'s validators re-run wherever
-    that data is read back: `BoCampaignWorkflow` revalidates its `CampaignSpec` on **every replay**,
-    and `read_campaign_thread` revalidates the stored problem on every resume. A model-level rule
-    would strand an in-flight campaign and make a stored one permanently unreadable, which is the
-    hazard `require_rounds_within_ceiling` was moved out of the model to avoid.
+    Older campaigns may carry an objective sharing a parameter's name, and `OptimizationProblem` is
+    revalidated on every workflow replay and every resume, so a model-level rule would strand them.
     """
     legacy = {
         "parameters": [
@@ -511,16 +490,10 @@ def test_the_tool_refuses_a_clashing_problem() -> None:
 
 
 def test_the_coverage_claim_counts_both_sides_the_same_way() -> None:
-    """A coverage claim of 7 out of 6 is not a rounding error, it is impossible.
+    """The coverage claim counts both sides the same way.
 
-    `design_space` counts *feasible* cells — an exclusion removes some (W4) — while `n_distinct`
-    counts every distinct condition run. Divide one by the other and a history holding a run the
-    exclusion forbids produces a sentence with more conditions run than the grid contains. The
-    numerator for the ratio is therefore the runs that occupy a cell; `n_distinct` stays beside it
-    as the record of what was actually performed, because a chemist who ran an excluded condition
-    still ran it.
-
-    The trigger is the ordinary one: a pairing is excluded *after* being run once.
+    `design_space` counts feasible cells, so the numerator counts runs occupying a feasible cell;
+    `n_distinct` stays beside it as everything run, including a later-excluded condition.
     """
     problem = OptimizationProblem(
         parameters=[

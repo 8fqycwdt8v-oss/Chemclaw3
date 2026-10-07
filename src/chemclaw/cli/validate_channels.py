@@ -1,38 +1,18 @@
 """Validate the delivery-channel manifests — `make channel-validate`.
 
-Four checks pydantic cannot make from a manifest alone, in the shape `validate_sinks` established.
-Rule 1 is a property of the enabled set; rules 2 to 4 run over every **discovered** manifest,
-because a channel that is broken while disabled is a channel nobody can enable:
+Four checks pydantic cannot make from a manifest alone:
 
-1. an **enabled** channel that no manifest declares — a deployment believing it delivers and not
-   doing so is indistinguishable from one with nothing to deliver;
+1. an **enabled** channel that no manifest declares;
 2. a **driver** that cannot be imported or is not callable;
-3. a **config block** the driver's signature will not accept — the same "the callable is the
-   schema" rule the other three seams apply, checked by binding rather than by a second model;
+3. a **config block** the driver's signature will not accept (the callable is the schema);
 4. a **cleartext destination** under the enforced posture.
 
-Rules 2 and 3 run over *discovered* rather than enabled manifests for the reason `validate_sinks`
-records: `CHEMCLAW_DELIVERY_CHANNELS` is empty in CI, so iterating the enabled set would resolve
-zero drivers and bind zero config blocks — a gate that could only ever fail on rule 1, which is
-empty too.
+Rules 2-4 run over every *discovered* manifest, not the enabled set: `CHEMCLAW_DELIVERY_CHANNELS`
+is empty in CI, and a channel broken while disabled is one nobody can enable. Rule 4 lives here
+because the driver's own refusal happens inside the per-channel `try` of `registry.deliver`, where
+it reads as a delivery outage rather than a configuration fault.
 
-**Rule 4 needed the same workaround one layer in, and shipped without it.** It asks the posture
-question with `enforced=True` rather than letting `plaintext_channel_refusal` read
-`settings.entra_required`, which is `False` by default and set by nothing that invokes this gate —
-so the rule written to stop a plaintext channel merging silently was itself inert in CI. A gate
-that only fires once the setting it guards is already on is not a gate.
-
-**Rule 4 is here because it had nowhere else to be.** `deliver.driver` refuses a non-loopback
-`http://` channel under `entra_required`, and that raise happens inside driver construction — which
-`registry.deliver` performs inside the per-channel `try` that exists so one broken channel does not
-cost every other recipient their message. Measured, the refusal therefore never refused: the
-channel stayed enabled, every delivery returned `[]`, and the single WARNING per message read as
-the destination being down. A posture violation is a *configuration* fault, so it belongs in the
-gate an operator runs before delivering, and this is that gate.
-
-
-Deliberately does **not** connect to anything. A channel's reachability is a deployment fact, and
-this runs in CI with no webhook host and no mounted share in sight.
+Connects to nothing: reachability is a deployment fact.
 """
 
 import argparse
@@ -81,9 +61,8 @@ def _driver_problems(manifest: DeliveryChannelManifest) -> list[str]:
             f"{manifest.name}: driver {manifest.driver!r} does not accept its config "
             f"({sorted(manifest.config)}): {exc}"
         )
-    # A `*_env` key holds the NAME of an environment variable, never the value. The realistic
-    # mistake is a pasted token, which would then be committed in a manifest — so this is the one
-    # check here whose failure is a disclosure rather than an outage.
+    # A `*_env` key holds the NAME of an environment variable, never the value; a pasted token here
+    # would be committed, so this failure is a disclosure rather than an outage.
     for key, value in manifest.config.items():
         if not key.endswith(ENV_SUFFIX):
             continue
@@ -97,23 +76,10 @@ def _driver_problems(manifest: DeliveryChannelManifest) -> list[str]:
 def _config_strings(value: object, depth: int = 3) -> list[str]:
     """Every string a driver could read a destination out of, to a bounded depth.
 
-    The `config:` block is free-form by design — the driver's own signature is the schema — so a
-    destination is not always a top-level string. A site's driver may take `urls: [a, b]` for a
-    fan-out, or `endpoints: {primary: …, fallback: …}`; the first version of rule 4 looked only at
-    top-level `str` values, so both of those shapes passed a check written to catch exactly them.
-
-    Bounded rather than fully recursive on purpose. This is not a config-schema validator: `depth`
-    counts container hops (a list's items, a dict's values) spent *below* the `config` dict this is
-    first called on, and a plain string is always returned outright — the `depth <= 0` guard only
-    ever stops a *container*. With `depth=3` that reaches: `config`'s own values (hop 1 — a bare
-    `url: http://…`), one level of nesting inside those (hop 2 — `urls: [a, b]`,
-    `endpoints: {primary: …}`), and the strings living inside *that* nesting (hop 3 — a fan-out list
-    of per-target dicts, `targets: [{url: …}, {url: …}]`, or its dict-of-lists mirror). Three, not
-    two: a two-hop budget stops at the per-target *dict* one level short of the string inside it,
-    which is exactly the natural next step from the `urls`/`endpoints` examples above and the shape
-    this function silently dropped until this docstring's own depth was corrected to match it. A
-    driver that buries its URL deeper than that — a fourth container hop — is outside what this rule
-    claims to see, which is better stated here than believed.
+    `config:` is free-form, so a destination may be nested (`urls: [a, b]`, `endpoints: {primary:
+    …}`, `targets: [{url: …}]`). `depth` counts container hops below the `config` dict; a plain
+    string is always returned, and the guard only stops a container. `depth=3` reaches strings
+    inside a list of per-target dicts; anything deeper is outside what rule 4 claims to see.
     """
     if isinstance(value, str):
         return [value]
@@ -129,31 +95,13 @@ def _config_strings(value: object, depth: int = 3) -> list[str]:
 def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
     """A destination the enforced posture forbids (rule 4).
 
-    Every value in the `config:` block that *is* a URL is asked, rather than a key named `url`. The
-    block is free-form by design — the driver's own signature is the schema — so a site's driver may
-    call its destination `endpoint`, `webhook_url` or `hook`, and a check that only knew one
-    spelling would pass every channel it was written to catch.
+    Every `http`/`https` value in `config:` is asked, whatever its key, since drivers name their
+    destination freely. Only those schemes are asked: hostless values such as file paths are not
+    destinations, and must not depend on `PG_LOOPBACK_HOSTS` containing `''`.
 
-    **The scheme test is what makes that safe, and leaving it out only worked by accident.**
-    `plaintext_channel_refusal` exempts a loopback host, and `PG_LOOPBACK_HOSTS` contains `''` — so
-    a value with no host at all (`/var/chemclaw/outbox`, `.md`) was already answered `""`, and the
-    shipped `share` channel passed for a reason that has nothing to do with delivery: that empty
-    string is there so a Postgres DSN with no host reads as local. Depending on it would mean a
-    change to a Postgres constant silently refusing every file channel as a cleartext destination.
-    So this asks only about `http`/`https` values, and says so.
-
-    **`enforced=True` unconditionally**, which is the same workaround rules 2 and 3 already take one
-    step further out. Those two iterate *discovered* rather than enabled manifests because
-    `CHEMCLAW_DELIVERY_CHANNELS` is empty in CI; this one had the identical blindness one layer in,
-    because `plaintext_channel_refusal` read `settings.entra_required` — `False` by default, `False`
-    in CI, and set by nothing in `.github/workflows/ci.yml`, the chart or the runbook that invokes
-    this gate. So the rule written to stop an enabled plaintext channel merging silently merged
-    silently itself. A validator must ask the question the deployment is heading for, not the one
-    its own ambient config already answers: a manifest that will be refused the day enforcement is
-    turned on is a broken manifest today.
-
-    The rule itself comes from `deliver.driver` rather than a second copy here: one definition,
-    asked at construction *and* at validation, differing only in who supplies the posture.
+    Asked with `enforced=True` unconditionally, since `settings.entra_required` is off in CI: a
+    manifest that will be refused once enforcement is on is broken today. The rule itself is
+    `deliver.driver.plaintext_channel_refusal`, one definition for construction and validation.
     """
     token_env = str(manifest.config.get("token_env", "") or "")
     urls = [
@@ -170,25 +118,18 @@ def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
 def problems() -> list[str]:
     """Every finding across every discovered channel, plus rule 1 over the enabled set.
 
-    Zero discovered manifests is itself a finding, for the reason `validate_sinks.problems` gives:
-    a gate iterating nothing cannot fail, and rule 4 is the plaintext-destination refusal.
+    Zero discovered manifests is itself a finding: a gate iterating nothing cannot fail.
     """
     try:
         manifests = discovered()
     except (DeliveryChannelError, OSError, yaml.YAMLError) as exc:
-        # One problem line rather than a traceback, as the two sibling manifest gates already do.
-        # `OSError`/`yaml.YAMLError` are listed beside the seam's own error because
-        # `deliver.registry._load` reads and parses the file without wrapping either — unlike
-        # `publish.registry._load`, which folds both into `ResultSinkError` — so an unreadable or
-        # malformed `channel.yaml` reaches here as the raw parser exception.
+        # One problem line rather than a traceback. `OSError`/`yaml.YAMLError` are caught too
+        # because `deliver.registry._load` does not wrap them.
         return [f"cannot read a delivery channel manifest: {exc}"]
 
     if not manifests:
-        # Same refusal as `validate_sinks`, for the same reason and in the same words: zero
-        # discovered manifests leaves rules 2, 3 and 4 iterating nothing, so the gate can only
-        # fail on rule 1 — which is empty by construction on the shipped configuration. Rule 4 is
-        # the plaintext-destination refusal, so a typo in the `PATH`-style
-        # `CHEMCLAW_DELIVERY_CHANNELS_DIR` silently turns *that* off too.
+        # Zero discovered manifests leaves rules 2-4 checking nothing, so a typo in the `PATH`-style
+        # `CHEMCLAW_DELIVERY_CHANNELS_DIR` would silently disable the plaintext refusal.
         return [
             f"no delivery channels discovered under {settings.delivery_channels_dir!r} — no "
             "driver, no config block and no destination posture would be checked, and this gate "

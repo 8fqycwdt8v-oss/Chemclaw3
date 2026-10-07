@@ -1,12 +1,7 @@
-"""Typed edges and edge-level validity (STO-8, STO-9).
+"""Typed edges and edge-level validity.
 
-Every edge in the graph was `add_edge(note.id, target)` with no attributes at all, so no relation
-could say *precursor-of*, *contradicts* or *computed-from*. A knowledge graph in which nothing can
-be said about a connection is a citation network, and the retrieval layer treated it as one.
-
-Two properties matter most here and both are asserted below: that the existing corpus is unchanged
-by the addition (a bare `[[link]]` still means exactly what it meant), and that an unknown relation
-fails at the gate rather than becoming an edge nothing can find.
+Asserts that a bare `[[link]]` still means what it meant, and that an unknown relation fails at
+validation rather than becoming an edge nothing can find.
 """
 
 from datetime import date
@@ -93,11 +88,10 @@ def test_a_frontmatter_relation_to_a_missing_note_dangles_like_a_body_link(tmp_p
 
 
 def test_an_unknown_relation_fails_validation(tmp_path: Path) -> None:
-    """A typo makes an edge no relation-aware query can find, so it stops at the gate.
+    """An unknown relation fails validation, since no relation-aware query could find its edge.
 
-    Checked in `chemclaw.kg.validate` rather than in the schema, exactly as `KNOWN_NOTE_TYPES` is:
-    the agent
-    must still be able to *propose* a genuinely new relation, and a human sees it on the PR.
+    Checked in `chemclaw.kg.validate` rather than the schema, like `KNOWN_NOTE_TYPES`, so a
+    genuinely new relation can still be written and reviewed.
     """
     source = Note(id="a", type="report", body="[[percursor-of:b]]")  # typo, deliberately
     problems = validate(_write(tmp_path, source, Note(id="b", type="compound")))
@@ -105,13 +99,7 @@ def test_an_unknown_relation_fails_validation(tmp_path: Path) -> None:
 
 
 def test_every_known_relation_is_accepted(tmp_path: Path) -> None:
-    """The vocabulary and the validator agree — a relation listed but rejected would be a trap.
-
-    Endpoint types come from `RELATION_SIGNATURES` where the relation declares a direction,
-    because "accepted" now means "accepted *as directed*": a `catalyzes` edge from a report was
-    never a sensible sentence, and validating it green is exactly how the seed corpus came to
-    hold twelve inverted edges.
-    """
+    """Every known relation is accepted, in the direction `RELATION_SIGNATURES` declares."""
     from chemclaw.kg.relations import RELATION_SIGNATURES
 
     for relation in sorted(KNOWN_RELATIONS):
@@ -150,16 +138,10 @@ def test_the_same_edge_written_both_ways_is_not_doubled(tmp_path: Path) -> None:
 
 
 def test_the_richer_declaration_wins_when_an_edge_is_written_both_ways(tmp_path: Path) -> None:
-    """The measured defect (D-2026-08-05): the body form used to win, and it carries no metadata.
+    """The frontmatter declaration wins when an edge is written both ways.
 
-    A `[[rel:target]]` can express a relation and nothing else. A frontmatter entry can express
-    the same relation *plus* a confidence and a validity window. Deduplicating in favour of the
-    body therefore threw away the only information one of the two forms had — silently, at parse
-    time, so the confidence a chemist wrote reached no query and no reader.
-
-    It was not a corner case. All three notes in the shipped corpus that declare a typed relation
-    also write the link in the body, so before this every declared edge confidence in the corpus
-    read as `None` and the one edge with a validity window had no window at all.
+    A body `[[rel:target]]` carries no confidence or validity window, so preferring it would
+    silently drop the metadata a chemist wrote.
     """
     source = Note(
         id="a",
@@ -203,12 +185,9 @@ def test_related_is_directed_because_a_relation_is(tmp_path: Path) -> None:
 
 
 def test_an_edge_can_stop_being_true_while_both_notes_stay_current(tmp_path: Path) -> None:
-    """Edge-level bi-temporality (STO-9) — the half that was missing.
+    """An edge can stop being true while both notes stay current.
 
-    `Note.valid_from`/`valid_to` could say a *fact* expired. Nothing could say a *relation* did:
-    that this catalyst was used for that transformation until the process changed, while both notes
-    remain perfectly current. The edge stays in git and in the graph; it is only excluded from a
-    current-evidence query.
+    The edge stays in git and the graph; it is only excluded from a current-evidence query.
     """
     source = Note(
         id="rxn",
@@ -244,11 +223,8 @@ def test_a_malformed_typed_link_is_reported_as_written(tmp_path: Path) -> None:
     """
     assert split_link("precursor-of:") == (DEFAULT_RELATION, "precursor-of:")
     assert split_link(":compound-x") == (DEFAULT_RELATION, ":compound-x")
-    # The same principle on the third malformed shape: a second colon splits at the *first* one, so
-    # the id keeps the text the author wrote and dangles. Splitting at the last one instead would
-    # resolve `[[precursor-of:compound:x]]` to the note `x` under a relation nobody typed — the
-    # silent repair this test is named for. (Mutating `partition` to `rpartition` here survived the
-    # whole suite.)
+    # A second colon splits at the first one, so the id keeps the author's text and dangles;
+    # splitting at the last would silently resolve to note `x` under an untyped relation.
     assert split_link("precursor-of:compound:x") == ("precursor-of", "compound:x")
     problems = validate(_write(tmp_path, Note(id="a", type="report", body="[[precursor-of:]]")))
     assert any("precursor-of:" in problem for problem in problems)

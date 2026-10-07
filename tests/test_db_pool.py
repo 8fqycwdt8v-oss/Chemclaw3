@@ -1,18 +1,11 @@
 """The per-process Postgres pool, against a real server (skips offline).
 
-Three properties matter, and none can be proven without a live backend:
-
-- **Reuse.** The whole point is that a request path stops paying a TCP+auth handshake per call.
-  A load test measured 401 connections opened for 150 chat turns; the connect that then failed to
-  be scheduled inside its timeout is what silently disarmed the rollback watermark (D-107).
-  `pg_backend_pid()` is the only honest witness that two calls shared one backend.
-- **The DSN's own `options` survive.** The pool builds its connections from the DSN plus our
-  `statement_timeout`, and the test-schema isolation in `tests/pg.py` rides entirely on the DSN's
-  `options=-c search_path=…`. If pooling clobbered it the suite would silently operate on live
-  data — the exact regression `db._merged_options` exists to prevent (D-107).
-- **Exhaustion is a `ConnectionError`.** Waiting forever for a free connection would convert a
-  transient shortage into a hung turn, and a bare `PoolTimeout` would not be retried by the
-  callers that treat "database unreachable" as a retryable infrastructure fault.
+- **Reuse.** A request path must stop paying a handshake per call; `pg_backend_pid()` is the
+  witness that calls shared a backend.
+- **The DSN's own `options` survive.** Test-schema isolation rides on the DSN's
+  `options=-c search_path=…`; losing it would point the suite at live data (D-107).
+- **Exhaustion is a `ConnectionError`.** Waiting forever would hang a turn, and a bare
+  `PoolTimeout` would not be retried as an infrastructure fault.
 """
 
 import asyncio
@@ -51,11 +44,8 @@ async def test_pooling_reuses_backends_across_sequential_calls(
 ) -> None:
     """Twenty sequential `connection()` calls use at most `pg_pool_max_size` backends.
 
-    Counterfactual: with connect-per-call each one is its own backend — the churn the load test
-    measured at ~2.7 connects per turn. Sequential (not concurrent) on purpose: the pool hands out
-    whichever connection is free, and reuse across *time* is what takes the handshake off the hot
-    path. Bounded by `max_size` rather than pinned to one pid because the pool round-robins the
-    connections it holds.
+    Sequential on purpose: reuse across time is what takes the handshake off the hot path. Bounded
+    by `max_size` rather than one pid because the pool round-robins its connections.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 1)
     monkeypatch.setattr(settings, "pg_pool_max_size", 4)
@@ -82,9 +72,8 @@ async def test_pooled_connections_keep_the_dsn_search_path_and_our_statement_tim
 ) -> None:
     """A pooled connection carries the DSN's own libpq `options` *and* our statement timeout.
 
-    `tests/conftest.py` has already redirected `postgres_dsn` to `options=-c search_path=<schema>`,
-    so this asserts on the live suite-isolation setting rather than a contrived one: if pooling
-    dropped it, every Postgres test in this suite would start writing to `public`.
+    `tests/conftest.py` already set `search_path` in the DSN, so this asserts the live isolation
+    setting: if pooling dropped it, every Postgres test would write to `public`.
     """
     # A fractional value so Postgres renders it in milliseconds — the units our merge computes in.
     monkeypatch.setattr(settings, "pg_statement_timeout_seconds", 1.5)
@@ -102,14 +91,9 @@ async def test_a_caller_that_asks_for_no_timeout_still_gets_the_configured_one(
 ) -> None:
     """`connection()` bounds the statement even when the call site says nothing about a timeout.
 
-    Measured before the default existed: `SHOW statement_timeout` on a connection borrowed with no
-    keyword returned `0` — no bound at all — both pooled and unpooled. Every store passed
-    `pg_statement_timeout_seconds` by hand, so the bound was a convention twenty-two call sites
-    happened to keep rather than a property of the helper, and a twenty-third that forgot would
-    hold a pooled connection on one bad query for as long as the query ran.
-
-    Both paths are asserted because they are different code: unpooled falls through to `connect()`,
-    pooled builds the libpq `options` into the pool's connection kwargs.
+    The bound is a property of the helper, not a convention every caller must keep. Both paths are
+    asserted because they are different code: unpooled falls through to `connect()`, pooled builds
+    the `options` into the pool's connection kwargs.
     """
     monkeypatch.setattr(settings, "pg_statement_timeout_seconds", 7.5)
 
@@ -120,11 +104,10 @@ async def test_a_caller_that_asks_for_no_timeout_still_gets_the_configured_one(
 
 
 async def test_an_explicit_timeout_still_overrides_the_default() -> None:
-    """A call site that needs a different bound keeps it — the readiness probe is the live one.
+    """An explicit timeout still overrides the default.
 
-    `/readyz` deliberately bounds its `SELECT 1` at `service_readiness_db_timeout_seconds` (2 s), a
-    tighter budget than the stores'. A default that silently replaced an explicit argument would
-    turn that probe into a 30-second hang, which is the failure it exists to avoid.
+    `/readyz` bounds its `SELECT 1` tighter than the stores; a default replacing it would turn the
+    probe into a long hang.
     """
     await migrated_db_or_skip()
     async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.5) as conn:
@@ -139,9 +122,8 @@ async def test_pool_exhaustion_surfaces_as_a_connection_error(
 ) -> None:
     """A caller that cannot get a connection in time fails the same way an unreachable DB does.
 
-    Same exception type on purpose: from the caller's side "no free connection" and "no database"
-    are one transient infrastructure fault, and `ConnectionError` (deliberately not a
-    `ChemclawError`) is what marks it retryable rather than bad data.
+    Both are one transient infrastructure fault to the caller, and `ConnectionError` (not a
+    `ChemclawError`) marks it retryable.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 1)
     monkeypatch.setattr(settings, "pg_pool_max_size", 1)
@@ -187,19 +169,12 @@ _POOL_GAUGES = (
 async def test_pooling_binds_the_pool_gauges_so_every_pooled_process_reports_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A process that opens a pool cannot do so without also exposing the readings that describe it.
+    """A process that opens a pool also exposes the gauges that describe it.
 
-    This is the half the gauge above was missing. All three pool gauges were bound in the front
-    door's `create_app`, so of the seventeen processes the shipped chart pools in, the eleven that
-    are workers and connector servers served a `/metrics` surface with no pool reading at all —
-    including the background worker, which runs the retention sweep, the reindex and the chain
-    verification, the longest database work in the deployment. D-119 introduced `requests_waiting`
-    as the signal that distinguishes "the pool is too small" from "the database is down"; it was
-    absent exactly where that distinction is hardest to make from a log.
-
-    Run against a *fresh* registry, because an unbound gauge is omitted from the exposition rather
-    than rendered as 0 — on the shared singleton this would pass in any session where some earlier
-    test happened to build the front door, which is precisely the accident it exists to rule out.
+    Binding them only in the front door would leave workers and connector servers (including the
+    background worker's long database work) without `requests_waiting`, the signal separating "pool
+    too small" from "database down". Run against a fresh registry, because an unbound gauge is
+    omitted, and the shared singleton may have been bound by an earlier test.
     """
     await migrated_db_or_skip()
     registry = Metrics()
@@ -219,17 +194,11 @@ async def test_pooling_binds_the_pool_gauges_so_every_pooled_process_reports_the
 def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pool belongs to the loop that opened it, so the key has to name the loop.
+    """A second event loop gets its own pool rather than borrowing a broken one.
 
-    `psycopg_pool` binds its waiter futures and background workers to the loop the pool was opened
-    in. `_pool_for` keyed only on `(dsn, options)`, so any coroutine on any loop in the process got
-    the *same* object — and a checkout queued on loop-2 was never woken by the hand-off callback
-    running on loop-1. Measured with `max_size=1` and a `pool_timeout` of 8 s, the holder releasing
-    at t=1.00 s: the cross-loop waiter was served after **8.01 s** (its own timeout expiring),
-    against **1.00 s** for the identical hand-off on the pool's own loop.
-
-    `evals/retrieval._run_sync` creates exactly that second loop, on purpose, when a metric is
-    invoked from a coroutine — and then blocks the first on `thread.join()` for the whole wait.
+    `psycopg_pool` binds its waiters and workers to the loop that opened it, so a checkout queued
+    from another loop is never woken by the hand-off and waits out its whole timeout. The key names
+    the loop. `evals/retrieval._run_sync` creates exactly such a second loop.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 0)
     monkeypatch.setattr(settings, "pg_pool_max_size", 1)
@@ -266,35 +235,14 @@ def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_on
 
 
 async def test_a_nested_loop_that_opened_a_pool_still_ends(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A loop that abandons its pool does not merely leak it — it can fail to end at all.
+    """A nested loop that opened a pool still ends.
 
-    `D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`. `asyncio.run` shuts its loop down
-    through `asyncio.runners._cancel_all_tasks`, which cancels every remaining task and then
-    **awaits** them; `psycopg_pool`'s background connect and health-check workers are tasks on that
-    loop, and one mid-reconnect does not come back. So the nested `asyncio.run` never returns, with
-    its stack in `_cancel_all_tasks` — measured, dumped, and not a leak but a wedged thread.
-
-    The shape is the one two modules already produce on purpose:
-    `evals/retrieval._run_sync` runs a live metric's retrieval on its own loop, and
-    `durable/eval_drift` runs `run_eval` through `asyncio.to_thread` *inside* the background
-    worker's `db.pooling()`.
-
-    **`min_size` is 8 here because the rate depends on it, and because the one configuration that
-    does not hang is the one the rest of this file pins.** Measured over 8 rounds per setting:
-
-        min_size=1, max_size=1   ->  0 hangs
-        min_size=2, max_size=16  ->  3 hangs   (the shipped defaults)
-        min_size=8, max_size=16  ->  8 hangs
-
-    Every other pool test here sets `min_size` to 0 or 1 — `test_pool_exhaustion_surfaces_as_a_`
-    `connection_error` pins `min=max=1` outright — so the suite's own fixtures sat on exactly the
-    value that cannot reproduce it. A test at the shipped defaults would be red three times in
-    eight; this one is deterministic, which is what a regression test owes its reader.
-
-    The assertion is that the nested thread **joins**, bounded by a wall clock, and that is the
-    whole property. It deliberately does not inspect `_POOLS`: a registry that is empty because the
-    pool was closed and one that is empty because `_forget_pools_of_ended_loops` reclaimed it
-    afterwards look identical, and only one of them is a thread that came back.
+    `asyncio.run` cancels and **awaits** every remaining task, and a `psycopg_pool` worker
+    mid-reconnect does not come back, so a loop that abandons its pool can wedge its thread
+    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`). `min_size` is 8 because the hang
+    rate rises with it and is deterministic there (other tests here use 0 or 1, which cannot
+    reproduce it). Asserted as the thread joining within a wall clock; an empty `_POOLS` would not
+    distinguish a closed pool from a reclaimed one.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 8)
     monkeypatch.setattr(settings, "pg_pool_max_size", 16)
@@ -315,12 +263,9 @@ async def test_a_nested_loop_that_opened_a_pool_still_ends(monkeypatch: pytest.M
         def _nested_loop() -> None:
             """`evals/retrieval._run_sync` itself, on a thread with no loop of its own.
 
-            The real function rather than its wrapper, and that is the difference between this
-            test and a vacuous one: `_closing_this_loops_pools` could be perfect and `_run_sync`
-            could stop calling it, which is the arm a test driving the wrapper directly cannot
-            see. This is also production's own arm — `durable/eval_drift` reaches `_run_sync`
-            through `asyncio.to_thread` from inside the worker's `pooling()`, so the thread it
-            lands on has no running loop and the process has pools.
+            The real function, so the test fails if `_run_sync` stops calling
+            `_closing_this_loops_pools`. This is production's arm too: `durable/eval_drift` reaches
+            it via `asyncio.to_thread` inside `pooling()`.
             """
             try:
                 _run_sync(_touch())
@@ -343,25 +288,13 @@ async def test_a_nested_loop_that_opened_a_pool_still_ends(monkeypatch: pytest.M
 def test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A short-lived loop's pool used to outlive it for the whole process, open and unusable.
+    """A pool whose loop has ended is neither counted nor left holding backends.
 
-    Nothing removed a `_POOLS` entry except `pooling()`'s `finally`, which runs once at shutdown —
-    so every `asyncio.run` on a fresh loop inside a pooled process built a pool, opened it to
-    `pg_pool_min_size` backends, and abandoned it. That path is the ordinary one rather than a
-    corner: `evals/retrieval._run_sync` starts a loop per live metric call, and `durable/eval_drift`
-    runs `run_eval` in a thread *inside* the background worker's `db.pooling()`.
-
-    Both readings an operator has were polluted by the same entries — `_process_max_connections`
-    backs `chemclaw_pg_pool_max_size`, the per-process half of the `pg_fleet_max_connections` budget
-    the config validator enforces, and `pool_stats()` counted a dead pool's connections as
-    `pool_available`, i.e. as borrowable. And the backends were real: measured against this server,
-    one abandoned pool held one live entry in `pg_stat_activity` until the process exited.
-
-    Asserted through `pg_stat_activity` as well as through the gauges, because "the pool is
-    forgotten" and "the connection is closed" are different claims and only the second is the
-    thing the database is short of. Dropping the last reference is what closes it — the pool's own
-    `close()` cannot run on a loop that has ended, which is exactly why `pooling()` never closed
-    these.
+    Otherwise every `asyncio.run` inside a pooled process abandons an open pool: its connections
+    inflate `chemclaw_pg_pool_max_size` and `pool_available`, and its backends stay live. Asserted
+    through `pg_stat_activity` as well as the gauges, because "forgotten" and "closed" are different
+    claims. Dropping the last reference is what closes it, since `close()` cannot run on an ended
+    loop.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 1)
     monkeypatch.setattr(settings, "pg_pool_max_size", 1)
@@ -412,21 +345,11 @@ def test_a_pool_whose_loop_has_ended_is_neither_counted_nor_left_holding_backend
 async def test_the_reported_per_process_ceiling_counts_pools_and_not_processes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`chemclaw_pg_pool_max_size` is the per-process half of the fleet budget, so it must be true.
+    """The reported per-process ceiling counts pools, not processes.
 
-    Two defects, one number. `bind_pool_metrics` reported `settings.pg_pool_max_size` — *one*
-    pool's ceiling — while a process routinely holds more than one: `db.py` deliberately keys pools
-    on `(dsn, options)` so `/readyz`'s 2 s-bounded connection stays out of the stores' 30 s pool,
-    and the LangGraph checkpointer opens a third, autocommit pool that `pool_stats` could not see
-    at all. Measured in one process against a live server: three pools, 48 connections, reported as
-    16 — which put the shipped chart's real floor at 208 against the `postgres.maxConnections: 136`
-    its values file then provisioned. The same under-count was in the fleet validator, which
-    multiplied processes rather than pools; both are fixed, and the live figures are the ones
-    `tests/test_deploy_chart.py` derives from the rendered chart.
-
-    So the gauge sums the `max_size` of every pool this process actually holds, foreign ones
-    included, and the checkpointer registers its pool instead of the metrics learning about it
-    twice.
+    A process holds several pools (stores, `/readyz`'s narrow one, the checkpointer's), so the gauge
+    sums the `max_size` of every pool it holds, foreign ones included; the checkpointer registers
+    its pool. `tests/test_deploy_chart.py` derives the fleet figures from the rendered chart.
     """
     monkeypatch.setattr(settings, "pg_pool_max_size", 4)
 
@@ -475,34 +398,20 @@ def _gauge(rendered: str, name: str) -> float:
 async def test_the_two_pool_ceiling_gauges_partition_this_process_by_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`ChemclawFleetAboveItsConnectionCeiling` checks each server, so the gauges have to split.
+    """The two pool-ceiling gauges partition this process by server.
 
-    A sum of pools against a sum of ceilings is one check and not two: enumerated over 200,000
-    random `(pools, ceilings)` draws, `sum(pools) > primary + session` never fired with both
-    servers inside their own ceilings and stayed **silent in 49,993** where one of them was over.
-    Measured on the shipped topology with the session server declared at 180 it is at 183 from
-    seven front-door replicas and the summed comparison waits until thirteen, by which point it is
-    at 1.58x.
-
-    So `chemclaw_pg_session_pool_max_size` is the part of `chemclaw_pg_pool_max_size` that lands on
-    a split session store's own server, and the alert subtracts it to get the primary's. The two
-    must therefore *partition* the process: this drives the front door's split shape — the stores'
-    pool on `postgres_dsn`, `/readyz`'s one-connection pool and the session pool on the split DSN —
-    and asserts both halves and their sum, so a future pool landing in neither is a failure rather
-    than a silent under-count on whichever ceiling it belongs to.
-
-    Zero without a split, which is what leaves every existing release's alert exactly what it was.
+    The alert checks each server against its own ceiling (a sum against a sum can miss one being
+    over), so `chemclaw_pg_session_pool_max_size` is the part landing on a split session store and
+    the alert subtracts it for the primary. This drives the front door's split shape and asserts
+    both halves and their sum, so a pool landing in neither fails. Zero without a split.
     """
     monkeypatch.setattr(settings, "pg_pool_max_size", 8)
 
     await migrated_db_or_skip()
     registry = Metrics()
     monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
-    # A second *endpoint* for the same database. `tests/test_fleet_pools.py` splits on
-    # `application_name`, which is enough to mint a second *pool* and is deliberately not
-    # enough here: these gauges partition by the server `pg_endpoint` says a DSN dials, and
-    # two spellings of one host are exactly the pair that has to land on opposite sides. The
-    # loopback aliases are the one such pair that is also connectable from any runner.
+    # A second *endpoint* for the same database: these gauges partition by the server `pg_endpoint`
+    # says a DSN dials, and the loopback aliases are two spellings connectable from any runner.
     host = str(conninfo.conninfo_to_dict(settings.postgres_dsn).get("host") or "").lower()
     if host not in {"localhost", "127.0.0.1"}:
         pytest.skip(f"needs a loopback postgres_dsn to spell twice; this one dials {host!r}")
@@ -510,11 +419,9 @@ async def test_the_two_pool_ceiling_gauges_partition_this_process_by_server(
         settings.postgres_dsn, host="127.0.0.1" if host == "localhost" else "localhost"
     )
     monkeypatch.setattr(settings, "session_store_dsn", split)
-    # **And measured as two**, because the loopback pair is one server and `db.same_server` now
-    # asks it (`D-2026-09-23-the-server-says-which-server-it-is`): left to learn, the first borrow
-    # reads one `system_identifier` for both spellings and the split correctly collapses to 0 —
-    # the very case that ADR fixed. Seeding two identities before the first borrow is what makes
-    # this pair stand in for two real servers, which is the topology under test here.
+    # `db.same_server` asks the server its `system_identifier`, which would collapse the loopback
+    # pair to one (`D-2026-09-23-the-server-says-which-server-it-is`); seeding two identities makes
+    # the pair stand in for two servers.
     from chemclaw.core.config import pg_endpoint
 
     for dsn, identity in ((settings.postgres_dsn, 1), (split, 2)):
@@ -551,16 +458,9 @@ def test_a_sized_pool_is_not_the_pool_the_next_caller_borrows(
 ) -> None:
     """The requested size is in the pool key, so one call site's ceiling is never another's.
 
-    Without this the *first* caller to reach a `(dsn, options)` key would decide how wide that pool
-    is for everyone who lands on it afterwards — and the discriminator is a timeout *value*, not a
-    call site. `/readyz` asks for two seconds and one connection; a future borrower asking for two
-    seconds and saying nothing about size would silently inherit that one connection and, measured
-    on the real app with the probe's connection held, answer 503 "database unreachable" in 2.004 s
-    against an idle database.
-
-    So the same DSN and the same statement timeout, asked for with and without a size, must be two
-    pools of two widths. That is one more pool in the worst case, which is the safe direction: the
-    fleet budget counts pools, and a starved call site counts nothing.
+    Otherwise the first caller to reach a `(dsn, options)` key would fix the pool's width for
+    everyone, and a later caller with the same timeout could inherit `/readyz`'s single connection
+    and answer 503 against an idle database. One more pool in the worst case is the safe direction.
     """
     monkeypatch.setattr(settings, "pg_pool_max_size", 4)
     monkeypatch.setattr(settings, "pg_pool_min_size", 2)
@@ -585,14 +485,10 @@ def test_a_sized_pool_is_not_the_pool_the_next_caller_borrows(
 def test_a_narrow_pool_does_not_raise_on_the_request_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`min_size` is clamped under the requested size, and the alternative is a 500 on `/readyz`.
+    """`min_size` is clamped under the requested size, or `/readyz` answers 500.
 
-    psycopg refuses `min_size > max_size` with a `ValueError`, and `pg_pool_min_size` defaults to
-    2. Raised inside `_pool_for` that lands on the request path, where it is not a `psycopg.Error`
-    — so `_failure_kind` returns `None`, nothing counts it and nothing names it — and
-    `_probe_database`'s own `except (psycopg.Error, ConnectionError, TimeoutError)` does not catch
-    it either. The readiness route would answer 500 with "The request could not be completed due
-    to an internal error" as the operator's whole diagnosis, on a pool it asked to be small.
+    psycopg raises `ValueError` for `min_size > max_size`, which on the request path is not a
+    `psycopg.Error`, so nothing counts or names it and the probe's own `except` misses it.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 8)
     monkeypatch.setattr(settings, "pg_pool_max_size", 16)
@@ -613,15 +509,8 @@ def test_a_falsy_pool_size_does_not_mint_a_second_pool_of_the_default_width(
 ) -> None:
     """The pool key carries the *effective* width, not the width that was asked for.
 
-    `size = max_size or settings.pg_pool_max_size` resolves a falsy request to the default, and the
-    key used to carry the raw request — so `pool_max_size=0` and an omitted one were two keys
-    resolving to one width, and a process held two identical pools on the same DSN, options and
-    ceiling. Both count against the fleet budget; neither is wrong on its own; nothing would have
-    said so.
-
-    Unreachable from `src/` today, where the only caller passes a literal `1`. Pinned because the
-    parameter exists for call sites that do not exist yet, and "0" is what a settings-driven one
-    would pass when its setting is undeclared.
+    A falsy request resolves to the default, so keying on the raw request would hold two identical
+    pools on one DSN. Unreachable today; pinned for future settings-driven callers that pass 0.
     """
     monkeypatch.setattr(settings, "pg_pool_max_size", 4)
 
@@ -642,16 +531,10 @@ def test_a_falsy_pool_size_does_not_mint_a_second_pool_of_the_default_width(
 def test_the_three_pool_gauges_read_one_instant_rather_than_three(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The saturation question is read across all three at once, so they must agree on a moment.
+    """The three pool gauges read one instant rather than three.
 
-    `METRICS.render()` reads every gauge by calling its own source, so three gauges bound to three
-    `pool_stats()` lambdas walked the pools three times per scrape. Harmless for a trend and wrong
-    for the one question D-119 introduced them to answer — *is the pool full **and** are callers
-    waiting* — which is exactly the reading a triple from three instants cannot support.
-
-    Driven with a walk that changes on every call, which is what makes this a test rather than a
-    restatement: under the old binding the three gauges come back from three different walks, and
-    the assertion is that they do not.
+    "Is the pool full **and** are callers waiting" needs one snapshot. Driven with a walk that
+    changes on every call, so separate walks per gauge would visibly disagree.
     """
     walks = iter(
         [
@@ -675,11 +558,10 @@ def test_the_three_pool_gauges_read_one_instant_rather_than_three(
 def test_a_caller_cannot_mutate_the_snapshot_the_next_gauge_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A shared dict handed out by reference is one gauge able to corrupt the next one's reading.
+    """A caller cannot mutate the snapshot the next gauge reads.
 
-    Cheap to get wrong and invisible when it is: the render loop would publish whatever the
-    previous gauge's source happened to leave behind, and every existing assertion about a single
-    gauge would still pass.
+    A shared dict handed out by reference would let one gauge corrupt the next one's reading,
+    invisibly to every single-gauge assertion.
     """
     monkeypatch.setattr(
         db, "pool_stats", lambda: {"pool_size": 5, "pool_available": 2, "requests_waiting": 1}
@@ -694,10 +576,7 @@ def test_a_caller_cannot_mutate_the_snapshot_the_next_gauge_reads(
 def test_closing_the_pools_drops_the_window_they_were_measured_in() -> None:
     """A process that has closed its pools must not answer a later scrape from the live window.
 
-    `pooling()`'s exit resets it, so the next read walks a pool set that is actually there. Without
-    this a shutdown publishes its last busy reading for up to a second after there is nothing to
-    be busy about — small, and exactly the interval an operator looks at when asking what the pod
-    was doing when it stopped.
+    `pooling()`'s exit resets it, so a shutdown does not publish its last busy reading.
     """
     db.reset_pool_snapshot()
     assert db._POOL_SNAPSHOT is None

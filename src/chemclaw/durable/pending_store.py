@@ -1,16 +1,12 @@
 """Postgres backing for the wait: `infra/sql/076_pending_requests.sql`.
 
-The workflow in `durable/awaiting.py` is the authority on whether a wait is still open; this table
-is its projection, written by that workflow's own activities and read by the front door and the
-agent. Kept separate from the workflow module for the reason `audit_store` is kept separate from
-`audit`: a workflow module is imported by every worker, and a worker that runs no wait should not
-pull psycopg for a store it will not use.
+The workflow in `durable/awaiting.py` is the authority on whether a wait is open; this table is
+its projection, written by its activities and read by the front door and the agent. Separate so
+workers that run no wait never import psycopg.
 
-**Every write here is an upsert keyed on `request_id`, and every state transition is guarded.**
-An activity runs at-least-once, so `open` must be replayable, and `close` must not be able to
-overwrite an answer with an expiry — a reminder that fires while a person is clicking would
-otherwise decide the outcome by whichever transaction commits second. The guard is in the SQL
-(`WHERE state = 'waiting'`), so it holds across processes rather than in whichever worker asks.
+Every write is an upsert keyed on `request_id` (activities are at-least-once), and every state
+transition is guarded in SQL (`WHERE state = 'waiting'`), so an expiry cannot overwrite an
+answer across processes.
 """
 
 import json
@@ -35,10 +31,8 @@ class PendingRequest(BaseModel):
     order: the two are one declaration rather than two that agreed by inspection.
     """
 
-    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
-    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
-    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
-    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    #: `extra="forbid"` so a SELECT column with no matching field is an error rather than silently
+    #: ignored.
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
@@ -55,18 +49,14 @@ class PendingRequest(BaseModel):
     answered_by: str = ""
     answer: dict[str, Any] = Field(default_factory=dict)
     created_at: IsoStamp = ""
-    #: The knowledge notes the question rests on, so the answer route can ask whether they still
-    #: hold (`kg/premise.py`). Read out of the row rather than recomputed from `subject`, because a
-    #: re-ask may reword the question and the premise that was *validated* at ask time is the one an
-    #: answer must be checked against.
+    #: The knowledge notes the question rests on, so the answer route can check they still hold
+    #: (`kg/premise.py`). Read from the row: the premise validated at ask time is the one that
+    #: counts.
     premise_note_ids: list[str] = Field(default_factory=list)
 
 
-#: The most rows one `open_requests` call will serve, however much a caller asks for. A module
-#: constant rather than a `Settings` field for the reason `ingest/rejections._MAX_ROWS_PER_SOURCE`
-#: is one — it is the bound that keeps an inbox read from becoming a table scan into somebody's
-#: prompt, not a deployment decision. Reported as `limit_applied` rather than applied silently:
-#: a caller asking for 10,000 used to get 200 and had no way to tell that from a corpus of 200.
+#: The most rows one `open_requests` call serves, however much is asked for; a structural bound,
+#: not a deployment setting. Reported as `limit_applied` rather than applied silently.
 _MAX_PAGE = 200
 
 
@@ -101,27 +91,11 @@ def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]
     return db.connection(settings.session_store_dsn or settings.postgres_dsn)
 
 
-# **Three cases, and telling them apart is the whole point of `run_id`.** A retry of the opening
-# activity carries the *same* Temporal run and must update in place without disturbing a state the
-# workflow may already have settled. A re-ask after a **lapsed** deadline carries a different run —
-# `request_id_for` is deterministic and `ALLOW_DUPLICATE` is set precisely so a lapsed question can
-# be asked again — and must reopen the row, so the new wait is visible and answerable.
-#
-# The third case is the one the first version of this fix got wrong. Guarding on
-# `run_id <> EXCLUDED.run_id` alone admitted an **answered** row, and the reopen NULLs
-# `answered_at`/`answered_by`/`answer` — so re-asking a question somebody had already answered
-# destroyed their attribution and their payload. This table is in `retention._NOT_PRUNED`, justified
-# there as "the attribution for an answer that released a durable workflow", and the answer route
-# writes no audit event: the row is the only record there is. A row that can never be deleted must
-# not be silently overwritten either.
-#
-# So a reopen is scoped to the terminal states in which **nobody answered**. A genuinely new ask of
-# an already-answered question differs in its `subject`, which is what `request_id_for` keys on, and
-# therefore gets its own row rather than overwriting somebody's answer.
-#
-# Guarding on `state = 'waiting'` alone — the version before either fix — did the retry case and
-# silently dropped the re-ask: the row kept the old cycle's `expired` state and deadline, so the new
-# wait appeared in no inbox and the answer route refused it with 409 forever while the workflow ran.
+# Three cases, distinguished by `run_id`. A retry of the opening activity (same run) updates in
+# place without disturbing a state the workflow may already have settled. A re-ask under a new run
+# (after a lapsed deadline; `ALLOW_DUPLICATE`) reopens the row so the new wait is visible and
+# answerable. An answered row's answer is first moved to the archive by `_ARCHIVE_ANSWER`, so a
+# reopen never destroys attribution.
 _OPEN = """
     INSERT INTO pending_requests
         (request_id, kind, subject, rationale, asked_of, requested_by, session_id,
@@ -167,22 +141,10 @@ _OPEN = """
           )
 """
 
-# **Where the answer goes so the reopen above may have `'answered'` in it** (`D-2026-09-13-an-
-# answer-is-archived-so-the-question-can-be-asked-again`). Run before `_OPEN`, in the same
-# transaction, so the attribution is either moved aside or the reopen does not happen: migration
-# 079 excluded `answered` from the reopen because blanking somebody's answer is worse than refusing
-# the ask, and the consequence was that a legitimate re-ask met a non-retryable `ApplicationError`
-# in `durable/awaiting.py` and the workflow failed. With the answer archived there is nothing left
-# to destroy.
-#
-# `run_id <> %s` is what keeps a *retry* of the opening activity from archiving its own answer: the
-# retry carries the run that already owns the row, `_OPEN`'s `state = 'waiting'` arm does not apply
-# to an answered row, and `_CLAIMED_BY` then tells it that it still owns it. Only a different run
-# is a new cycle.
-#
-# `ON CONFLICT DO NOTHING` rather than an upsert: the archive is keyed on the run that *answered*,
-# so a second attempt at the same archive is the same row, and the application holds no UPDATE on
-# this table anyway (`infra/sql/grants/app_privileges.sql`).
+# Archive the answer before a reopen, in the same transaction, so attribution is either moved
+# aside or the reopen does not happen. `run_id <> %s` keeps a retry by the owning run from
+# archiving its own answer. `ON CONFLICT DO NOTHING`: the archive is keyed on the answering run,
+# and the application holds no UPDATE on that table.
 _ARCHIVE_ANSWER = """
     INSERT INTO pending_request_answers
         (request_id, run_id, kind, subject, asked_of, requested_by, session_id,
@@ -197,32 +159,12 @@ _ARCHIVE_ANSWER = """
     ON CONFLICT (request_id, run_id) DO NOTHING
 """
 
-# **There is no verdict to read any more, and that is what archiving the answer bought.**
-#
-# `open_request` used to return whether this run held the row, and `_CLAIMED_BY` was the read behind
-# it: `_OPEN` is a guarded upsert, so "wrote nothing" is one of its ordinary outcomes, and the one
-# case that mattered was a re-ask meeting an **answered** row — refused, because reopening blanked
-# an attribution nothing can delete. The workflow was told, and raised a non-retryable
-# `ApplicationError`, because no number of attempts changes whose answer is in that row.
-#
-# Since `_ARCHIVE_ANSWER` moves the answer aside
-# (`D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`) every terminal state is
-# reopenable by a different run, so that refusal has **no reachable input**: driven over all five
-# shapes — first ask, retry by the owning run, re-ask after `answered`, re-ask after `expired`, and
-# a caller with no run id — the verdict was `True` in every one. A guard whose condition is provably
-# false reads as a control and is not one, which is the `reject_widening` shape this repository
-# deleted rather than kept alive by a test that calls it directly.
-#
-# The invariant is not lost, because an invariant is not a function: `tests/test_pending_store.py`
-# drives all five shapes and asserts what each one does to the row and to the archive. A future
-# narrowing of `_OPEN`'s `WHERE` — which has been rewritten three times, in 076, 079 and 096 — goes
-# red on the behaviour rather than on a verdict nobody reads.
+# With answers archived, every terminal state is reopenable by a different run, so `open_request`
+# returns no verdict. `tests/test_pending_store.py` asserts what each case does to the row and the
+# archive.
 
-# `answered_at` only where somebody answered. It was stamped unconditionally, so an `expired` or
-# `cancelled` row carried a timestamp with an empty `answered_by` — a column saying "somebody
-# answered at some point" about a question nobody answered, surfaced to the agent and the front door
-# that way. `076`'s `pending_requests_answer_is_attributed` constraint exists to stop exactly that
-# claim and only fires on `state = 'answered'`; this walked around it from the other side.
+# `answered_at` only where somebody answered, so an `expired` or `cancelled` row never claims an
+# answer time.
 _SETTLE = """
     UPDATE pending_requests
     SET state = %s,
@@ -232,15 +174,8 @@ _SETTLE = """
     WHERE request_id = %s AND state = 'waiting'
 """
 
-# **A running total, not an increment, because an activity is at-least-once.** `reminders =
-# reminders + 1` under a 5-attempt retry policy counts one escalation twice whenever an execution
-# commits and its completion report is then lost — a worker that dies, a broker that misses the
-# response, or simply an attempt that overruns its own `start_to_close_timeout` after the UPDATE.
-# Established on a real broker: one escalation, two attempts, `reminders = 2` against the
-# workflow's own `self._reminders` of 1 — and that column is what an inbox shows and what
-# `AwaitOutcome.reminders` is compared against. `GREATEST` makes the redelivered attempt a no-op
-# and keeps the two counters one number, because the value written is the workflow's replay-stable
-# total rather than a delta.
+# A running total, not an increment, because an activity is at-least-once: `GREATEST` makes a
+# redelivered attempt a no-op and keeps this equal to the workflow's own replay-stable count.
 _REMIND = """
     UPDATE pending_requests
     SET reminders = GREATEST(reminders, %s), reminded_at = now()
@@ -269,19 +204,9 @@ async def open_request(
 ) -> None:
     """Record a wait as open — archiving the previous cycle's answer when there is one.
 
-    Idempotent within one Temporal run, and **reopening across runs** — see `_OPEN` for why those
-    are different cases and what it cost to treat them as one. `run_id` defaults to empty so a
-    caller with no run to name (a test, a backfill) keeps the old within-run behaviour.
-
-    **An answered cycle is archived first, which is what lets the reopen include `'answered'`**
-    (`D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`). `_ARCHIVE_ANSWER` and
-    `_OPEN` are two statements in one transaction, in that order, so the attribution is either moved
-    aside or the reopen does not happen — there is no ordering in which an answer is blanked. The
-    archive is a no-op for every other case: a first ask, a retry by the owning run, a reopen of an
-    expired or cancelled cycle.
-
-    **Returns nothing, and the verdict it used to return is deleted** — see the comment above
-    `_ARCHIVE_ANSWER` for why no input can refuse an open any more.
+    Idempotent within one Temporal run, reopening across runs (see `_OPEN`). `run_id` defaults to
+    empty for callers with no run to name. `_ARCHIVE_ANSWER` and `_OPEN` run in one transaction, in
+    that order, so an answer is never blanked; the archive is a no-op in every other case.
     """
     async with _connect() as conn:
         await conn.execute(_ARCHIVE_ANSWER, (request_id, run_id))
@@ -308,9 +233,8 @@ async def settle_request(
 ) -> bool:
     """Move a waiting request to `answered`, `expired` or `cancelled`.
 
-    Returns whether this call was the one that settled it. `False` means somebody else got there
-    first, which is not an error: an expiry racing a person's click is the ordinary case, and the
-    guard is what makes the first writer win rather than the last.
+    Returns whether this call settled it. `False` means somebody else got there first (an expiry
+    racing a click), which is not an error: the first writer wins.
     """
     async with _connect() as conn:
         cursor = await conn.execute(
@@ -319,21 +243,17 @@ async def settle_request(
         return cursor.rowcount == 1
 
 
-# **Guarded on the run, not only on the state.** `_OPEN` reopens a request id under a new run and
-# rewrites `run_id`, so a sweep that read an old run's row and then found that run dead must not
-# settle the *new* run's question. The run it examined is the only one it may speak for.
+# Guarded on the run as well as the state, so a sweep that examined an old run never settles a
+# question reopened under a new one.
 _SETTLE_ORPHAN = """
     UPDATE pending_requests
     SET state = 'cancelled', answered_at = NULL, answered_by = '', answer = %s
     WHERE request_id = %s AND run_id = %s AND state = 'waiting'
 """
 
-#: One keyset page of waiting rows past the grace window, oldest first.
-#:
-#: **A cursor, not only a limit.** Without one every pass selected the same oldest rows, and a
-#: healthy wait is left `waiting` — so a batch's worth of live questions older than an orphan held
-#: the front of the queue for up to `awaiting_max_days` and the orphan was never examined.
-#: `request_id` breaks `created_at` ties so the order is total and no row is skipped or repeated.
+#: One keyset page of waiting rows past the grace window, oldest first. A cursor so live waits at
+#: the front cannot hide an orphan behind them; `request_id` breaks `created_at` ties so the order
+#: is total.
 _ORPHAN_CANDIDATES = """
     SELECT request_id, run_id, created_at FROM pending_requests
     WHERE state = 'waiting' AND created_at < now() - make_interval(secs => %s)
@@ -356,7 +276,7 @@ async def waiting_rows(
 ) -> list[WaitingRow]:
     """One page of waiting rows past the grace window, continuing after `after`.
 
-    See `_ORPHAN_CANDIDATES` for why the sweep pages rather than re-reading one fixed batch.
+    See `_ORPHAN_CANDIDATES` for why the sweep pages.
     """
     at = after.created_at if after else None
     key = after.request_id if after else ""
@@ -392,11 +312,7 @@ async def get_request(request_id: str) -> PendingRequest | None:
     """One request by id, whatever state it is in.
 
     Raises:
-        pydantic.ValidationError: `_COLUMNS` and `PendingRequest` have stopped describing the same
-            row. `answer` and `premise_note_ids` are `NOT NULL DEFAULT` in the table (076), so the
-            `or {}` / `or []` the positional builder carried had no reachable cause and is not
-            restated here; a NULL in either would be a schema this code should refuse rather than
-            paper over.
+        pydantic.ValidationError: `_COLUMNS` and `PendingRequest` no longer describe the same row.
     """
     async with _connect() as conn:
         async with conn.cursor(row_factory=class_row(PendingRequest)) as cur:
@@ -411,22 +327,11 @@ async def open_requests(
 ) -> OpenRequests:
     """One page of what is still waiting, soonest deadline first, **and how many there are**.
 
-    `asked_of` narrows to what is routed to one actor **or to nobody in particular**: an unrouted
-    request is waiting on whoever is entitled, so hiding it from a named query would make the
-    common case invisible. Routing is advisory either way — the answer route is the control.
-
-    `identities` is the rest of the caller's routing surface — their user principal name and the
-    entitlements they hold — because **routing to a team is the case this was built for and was the
-    one it could not answer.** `request_external_input` documents `asked_of` as "an actor id or a
-    team entitlement", and `_may_answer` honours both, but this read matched the object id alone: a
-    request routed to `qc-team` was answerable by the QC team and appeared in **nobody's** inbox, so
-    it sat invisible until it expired. Passing only `asked_of` keeps the old behaviour for callers
-    that have no role set to offer.
-
-    **The count is read in the same transaction as the page**, not because two statements would be
-    slow but because they would disagree: this table is written by expiry timers and by a browser,
-    so "20 of 35" assembled from two connections can report a total smaller than the page it
-    describes. See `OpenRequests` for why a page that cannot say it is a page is the defect.
+    `asked_of` narrows to what is routed to one actor or to nobody in particular (an unrouted
+    request waits on whoever is entitled). `identities` adds the caller's other routing names (UPN
+    and entitlements), so a request routed to a team appears in that team's inboxes. Routing is
+    advisory; the answer route is the control. The count is read in the same transaction as the
+    page, so the two cannot disagree.
     """
     where = "WHERE state = 'waiting'"
     params: list[Any] = []
@@ -436,9 +341,7 @@ async def open_requests(
         params.append(routes)
     page = max(1, min(limit, _MAX_PAGE))
     async with _connect() as conn:
-        # Two cursors on one connection, which is still one transaction — a row factory is a
-        # property of the cursor, and the count is a bare scalar rather than a `PendingRequest`.
-        # The docstring's "same transaction" claim is about the connection and is unaffected.
+        # Two cursors on one connection, still one transaction; the row factory is per cursor.
         async with conn.cursor(row_factory=class_row(PendingRequest)) as cur:
             await cur.execute(
                 f"SELECT {_COLUMNS} FROM pending_requests {where} ORDER BY due_at LIMIT %s",

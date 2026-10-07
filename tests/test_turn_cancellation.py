@@ -1,32 +1,15 @@
-"""An abandoned turn must not leak its permit or escape the budget (gap AGT-1, corrected).
+"""An abandoned turn must not leak its permit or escape the budget.
 
-The gap analysis claimed cancellation was unhandled — that a chemist closing the tab left the turn
-running, holding an admission permit and never booking its tokens. **That claim was wrong**: the
-hardening in `4bc9b04` already made the counters cancellation-safe, and this suite is the evidence.
-It is kept (rather than dropped as a non-finding) because nothing previously *proved* the behavior,
-so a future refactor could silently reintroduce exactly the leak that was alleged — an
-`await` added to the runner's `finally`, or an `except Exception` widened to `BaseException`,
-would do it, and both look harmless in review.
+A real client disconnect reaches the turn as `CancelledError` (sse-starlette cancels its task
+group); `aclose()` and its `GeneratorExit` occur only on a send timeout. Both teardowns are
+exercised. Pinned here:
 
-**Correction (D-130): this suite used to simulate the disconnect wrongly, and hid a real defect.**
-Every case below closed the stream with `aclose()` and called that "what sse-starlette does when
-the client disconnects". It is not. sse-starlette answers `http.disconnect` by cancelling its task
-group and never calls `aclose()` on the body iterator at all, so a real disconnect raises
-`CancelledError` inside the turn — while `aclose()` raises `GeneratorExit`. The runner caught only
-the latter, so its rollback was dead code on the only path that matters, and this suite reported
-green throughout. Both teardowns are now exercised: `aclose()` is still reachable (sse-starlette
-uses it on a send timeout) and cancellation is the common case.
-
-What is pinned here:
-  1. Abandoning a turn still books the tokens metered so far (no free abandoned turns).
-  2. Abandoning a turn releases the admission permit and the session's active-turn slot, so the
-     session is not 409-bricked and capacity is returned.
-  3. A turn cut short has its session state rolled back under *both* teardowns, not just the one a
-     test can reach by hand — and a turn whose model run completed does not, however long the
-     verifier or a job-result wait then holds it open.
-  4. The transcript is all-or-nothing across a teardown: a turn that answered keeps its exchange,
-     a turn that did not writes none. That pair is what replaced the durable rollback the runner
-     used to carry (D-2026-08-10 §2), and it is why the rollback could go.
+  1. Abandoning a turn still books the tokens metered so far.
+  2. Abandoning a turn releases the admission permit and the session's active-turn slot.
+  3. A turn cut short has its session state rolled back under both teardowns, and a turn whose
+     model run completed does not, however long the verifier or a job-result wait holds it open.
+  4. The transcript is all-or-nothing across a teardown: a turn that answered keeps its
+     exchange, a turn that did not writes none.
 """
 
 import asyncio
@@ -55,11 +38,9 @@ from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
 
 def _closable(stream: AsyncIterator[Event]) -> AsyncGenerator[Event, None]:
-    """`run_turn` is typed as an AsyncIterator; the concrete object is an async *generator*.
+    """Narrow `run_turn`'s declared AsyncIterator to the async generator it really is.
 
-    The cast narrows the declared type to the real one rather than papering over a mismatch:
-    sse-starlette does call `aclose()` when a send times out, so this teardown is reachable — it
-    is simply not the one a client disconnect takes (see the module docstring).
+    sse-starlette calls `aclose()` on a send timeout, so this teardown is reachable.
     """
     return cast(AsyncGenerator[Event, None], stream)
 
@@ -67,25 +48,12 @@ def _closable(stream: AsyncIterator[Event]) -> AsyncGenerator[Event, None]:
 async def _cancel_mid_turn(
     stream: AsyncIterator[Event], stalled: asyncio.Event, *, tokens: int = 0
 ) -> None:
-    """Consume the turn until it stalls, then tear it down the way a real disconnect does.
+    """Consume the turn until it stalls, then cancel it the way a real disconnect does.
 
-    The consumption runs in its own task so it can be *cancelled* rather than closed — the whole
-    distinction this helper exists to preserve, since cancelling is what uvicorn plus sse-starlette
-    actually produce.
-
-    Waiting for `stalled` is not politeness, it is the test's correctness condition. The cancel has
-    to land while the consumer is suspended *inside* the turn; if it lands in the consumer's own
-    frame instead, the abandoned generator is finalised later by `asyncio.run`'s async-generator
-    shutdown, which delivers `GeneratorExit` — and a test written that way passes against the very
-    bug it is meant to catch. (It did. That is how this was found.)
-
-    `tokens` is the second half of that condition, and it exists because the two engines deliver a
-    stalled model's earlier chunks at different moments. Under MAF the runner consumes the model's
-    generator directly, so every chunk before the stall has already been metered by the time
-    `stalled` is set; under LangGraph they sit in `astream`'s queue until the producer suspends, so
-    the stall itself is what releases them and the cancel could otherwise land first. A test that
-    asserts on *metered* tokens therefore waits for both facts, which is deterministic on either
-    engine rather than a race one of them happens to win.
+    The consumer runs in its own task so it can be cancelled rather than closed. Waiting for
+    `stalled` makes the cancel land while the consumer is suspended inside the turn; landing in the
+    consumer's own frame would deliver `GeneratorExit` at shutdown instead and pass against the bug.
+    Waiting for `tokens` too ensures earlier chunks queued in `astream` were metered first.
     """
     counted = asyncio.Event()
     seen = 0
@@ -120,14 +88,10 @@ class _EndlessAgent(ScriptedTurn):
 
 
 class _StatePoisoningAgent(ScriptedTurn):
-    """An agent that writes a tool call into session state and then never returns its result.
+    """An agent that writes a tool call into session state and never returns its result.
 
-    This is the shape of the real failure (ISSUE-B-10): the model opens a `tool_use` block, and the
-    client disconnects before the matching `tool_result` is ever appended.
-
-    The session is held rather than taken from the run call, because the graph engine's model is
-    handed messages and not a `TurnSession` — the poisoning is a stand-in for whatever the turn
-    committed, and what matters is that it lands in the state the runner snapshotted.
+    The shape of the real failure: a `tool_use` block with no matching `tool_result` when the client
+    disconnects. What matters is that it lands in the state the runner snapshotted.
     """
 
     def __init__(self, session: TurnSession) -> None:
@@ -145,10 +109,7 @@ class _StatePoisoningAgent(ScriptedTurn):
 class _AnsweringAgent(ScriptedTurn):
     """An agent that completes an ordinary turn: two tokens, then it returns.
 
-    It stores nothing itself, and that is what the projection changed. Under MAF this fake had to
-    append its own rows, because the framework committed the thread as it went and the runner never
-    saw the write. `_record_transcript` is the writer now, so leaving the fake mute makes these
-    tests drive the *real* write path rather than a hand-placed imitation of it.
+    It stores nothing itself, so these tests drive the real `_record_transcript` write path.
     """
 
     async def stream(self, message: str) -> AsyncIterator[Piece]:
@@ -159,9 +120,7 @@ class _AnsweringAgent(ScriptedTurn):
 class _RecordingHistory:
     """The transcript projection store, reduced to the one call the runner makes into it.
 
-    Holding the rows in a list is what lets a test assert on what a teardown *left behind* rather
-    than on whether a method was called — which is the question these tests ask, and the one that
-    used to be put to the deleted `rollback_to`.
+    Rows are kept so a test asserts on what a teardown left behind.
     """
 
     def __init__(self) -> None:
@@ -179,9 +138,8 @@ class _RecordingHistory:
 class _StallingAgent(ScriptedTurn):
     """Emits a fixed number of updates and then blocks, announcing that it has.
 
-    The block is what lets a test cancel the turn *from inside*: while it holds, the consumer is
-    suspended in the agent's own frame, so `CancelledError` is delivered where a real disconnect
-    delivers it. `stalled` makes that deterministic — no sleep long enough to "probably" be enough.
+    While it blocks, the consumer is suspended in the agent's frame, so `CancelledError` is
+    delivered where a real disconnect delivers it; `stalled` makes that deterministic.
     """
 
     def __init__(self, session: TurnSession, *, updates: int = 1, poison: bool = False) -> None:
@@ -217,31 +175,12 @@ class _RecordingBudget(BudgetTracker):
 
 
 async def test_abandoned_turn_still_books_its_tokens() -> None:
-    """Tokens spent before the client vanished count — otherwise abandon-and-retry is free.
+    """Tokens spent before the client vanished count, otherwise abandon-and-retry is free.
 
-    Without this, a user could bypass the token budget indefinitely by dropping each connection
-    just before the answer, which is the cheapest possible attack on the runaway-cost guard.
-
-    **What "spent" means here changed on 2026-09-06, and the old answer was an artifact of this
-    suite.** A gateway reports usage on the terminal frame only (`stream_options.include_usage`),
-    so a turn cut off mid-message has been reported *nothing* — the ~30 tokens this used to assert
-    existed only because `tests/fakes_turn` attached usage to every chunk, a wire shape no
-    OpenAI-compatible endpoint produces. Measured against a real one, the abandoned turn booked
-    0/0 beside an identical completed turn's 900/120. So what is billed now is the prompt the
-    provider was already handed, estimated (`agent/turn_usage.InFlightPrompts`), and the assertion
-    is that it is non-zero and lands in the *estimated* series rather than the measured one — not a
-    figure, which would be a claim about how many tools this profile happens to bind.
-
-    The second assertion is the other half of that: the estimate binds the *budget* and is not
-    published as measured spend, so `chemclaw_tokens_total` stays exactly where it was.
-
-    **And the third is that it is published at all**, which it was not until 2026-09-06. The
-    estimate reached the budget, the `turn_costs` row and the `turn.finished` log line and no
-    series — so the fleet-wide rate an operator watches under-reported by the whole prompt of every
-    abandoned turn, which is precisely the population this test exists for. Measured, two identical
-    turns against a gateway billing 42,448 each moved `chemclaw_tokens_total` by 42,481 and **0**.
-    `chemclaw_estimated_tokens_total` is the second series; the two must move in opposite
-    directions on this turn, which is what makes them readable side by side.
+    A gateway reports usage only on the terminal frame, so a cut-off turn bills the estimated prompt
+    already handed to the provider (`agent/turn_usage.InFlightPrompts`). Asserted: it is non-zero,
+    it lands in `chemclaw_estimated_tokens_total` and binds the budget, and `chemclaw_tokens_total`
+    (measured spend) does not move. No figure is asserted, since it depends on the bound tools.
     """
     budget = _RecordingBudget()
     agent = _EndlessAgent()
@@ -261,10 +200,7 @@ async def test_abandoned_turn_still_books_its_tokens() -> None:
             connectors=[],
         )
     )
-    # Tokens, not events. Counting every event coupled the cut-off to how many *non*-token
-    # events a turn happens to open with — the capability announcement alone moved it twice —
-    # so the number of metered updates the assertion below depends on silently changed with
-    # each. The turn's spend is carried by its tokens; count those.
+    # Count tokens, not events: the number of non-token events a turn opens with is incidental.
     consumed = 0
     async for _event in stream:
         consumed += _event.type == "token"
@@ -289,20 +225,11 @@ async def test_abandoned_turn_still_books_its_tokens() -> None:
 def test_an_abandoned_prompt_charges_the_system_message_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The subtraction that stops the prefix being counted twice, as arithmetic rather than a sign.
+    """An abandoned prompt charges the system message once.
 
-    `prefix_tokens()` is the *whole* prefix — the system message plus every bound tool schema — and
-    the prompt handed to the callback already contains that system message, so the estimate is
-    `prompt + (prefix - system)`. The integration test above deliberately asserts "non-zero, in the
-    estimated series" rather than a figure, and it is right to: any number it named would be a
-    claim about how many tools this profile happens to bind. The cost of that choice is that the
-    minus can become a plus with the suite green — the abandoned turn is then billed roughly its
-    prefix twice, and a guard against free retries becomes an over-charge nothing would notice.
-
-    So the arithmetic is pinned here, against a stubbed prefix, which is the one form that pins it
-    without naming a deployment's number. The clamp is the second case: a prefix smaller than the
-    system message it contains is a measurement that disagrees with itself, and it books the
-    conversation rather than a negative.
+    `prefix_tokens()` already includes the system message the prompt contains, so the estimate is
+    `prompt + (prefix - system)`; pinned against a stubbed prefix so a flipped sign cannot pass. A
+    prefix smaller than its system message clamps rather than going negative.
     """
     system = SystemMessage(content="you are a process chemist. " * 100)
     prompt = [system, HumanMessage(content="hello " * 50), AIMessage(content="hi " * 50)]
@@ -326,11 +253,9 @@ def test_an_abandoned_prompt_charges_the_system_message_once(
 def test_a_prompt_that_cannot_be_estimated_books_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """This runs on every model call's callback path, so it meters 0 rather than ending the turn.
+    """A prompt that cannot be estimated books exactly zero rather than ending the turn.
 
-    Zero exactly, not "something small": the failure arm is what a deployment falls back to when
-    the message shape changes under it, and a fabricated token there is a spend nothing produced
-    charged against a budget an operator reads.
+    A fabricated token would be spend nothing produced, charged against a budget.
     """
 
     class _Hostile:
@@ -377,12 +302,10 @@ async def test_abandoned_turn_releases_its_permit_and_turn_slot() -> None:
 
 
 async def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
-    """A disconnect mid-tool-call must not leave a dangling `tool_use` in the thread (ISSUE-B-10).
+    """A disconnect mid-tool-call does not leave a dangling `tool_use` in the thread.
 
-    Losing the interrupted turn is the cheap outcome. The expensive one is keeping it: a `tool_use`
-    with no matching `tool_result` is replayed on every later turn, and the model rejects the whole
-    thread, so one dropped connection would permanently brick the conversation rather than costing
-    it a single answer. The earlier turns must survive — this is a rollback, not a wipe.
+    A `tool_use` with no `tool_result` is replayed every later turn and the model rejects the whole
+    thread. Earlier turns must survive: this is a rollback, not a wipe.
     """
     session = TurnSession(session_id="s3")
     session.state["messages"] = [{"role": "user", "text": "an earlier, completed turn"}]
@@ -400,12 +323,10 @@ async def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
 
 
 async def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
-    """The same rollback, reached the way a real disconnect reaches it: by cancellation.
+    """The same rollback, reached by cancellation as a real disconnect reaches it.
 
-    This is the case that was missing, and its absence is why the runner's rollback clause could
-    catch `GeneratorExit` alone for as long as it did. Counterfactual: with
-    `except GeneratorExit:` instead of `except (GeneratorExit, asyncio.CancelledError):`, the
-    poisoned `tool_use` survives here while the `aclose()` test above still passes.
+    With `except GeneratorExit:` alone, the poisoned `tool_use` would survive here while the
+    `aclose()` test above still passes.
     """
     session = TurnSession(session_id="s4")
     session.state["messages"] = [{"role": "user", "text": "an earlier, completed turn"}]
@@ -416,12 +337,7 @@ async def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
         run_turn(
             session,
             "hi",
-            # Stated, as every sibling in this file states it: defaulting means every enabled
-            # connector, none of which is running in a test process. It is no longer merely
-            # noise — the runner hands `connectors` straight to `build_langgraph_agent`, and
-            # the default is MAF's connector representation, which that builder cannot accept.
-            # See the M13 note in `tasks/todo.md`; the engines' connector wiring is a defect of
-            # its own and not this test's subject.
+            # Stated explicitly: the default means every enabled connector, none of which runs here.
             connectors=[],
             graph_factory=agent.graph_factory,
         ),
@@ -437,19 +353,9 @@ async def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
 async def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
     """A turn that answered keeps its transcript, however the stream is then torn down.
 
-    The window is one send plus one round trip and it was open on the only path production takes:
-    the client drops while sse-starlette is writing the `AnswerEvent`, and the runner's teardown
-    clause runs unconditionally. Under MAF that clause ran `rollback_to`, which DELETEd the user
-    and assistant rows the finished turn had already committed — the turn billed `completed=True`
-    and its output gone, silent loss of conversation history, which is the
-    expensive outcome rather than the cheap one.
-
-    The rollback is gone, and this is the test that has to keep holding without it — which is
-    exactly why it survives the deletion rather than going with it. `_record_transcript` writes the
-    exchange in one call once the answer exists, so the property is now structural: there is no
-    later step that could remove what this turn committed. Pinned under both teardowns — `aclose()`,
-    which sse-starlette uses on a send timeout, and the cancellation a real disconnect delivers
-    into the yield the answer is suspended in.
+    `_record_transcript` writes the exchange in one call once the answer exists, so no later step
+    can remove it. Pinned under `aclose()` and under cancellation delivered into the yield the
+    answer is suspended in.
     """
     history = _RecordingHistory()
     session = TurnSession(session_id="s6")
@@ -487,15 +393,10 @@ async def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
 async def test_a_disconnect_after_the_answer_is_billed_as_completed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`TurnCost.completed` means "the turn answered", not "the turn was never torn down".
+    """A disconnect after the answer is billed as completed.
 
-    The runner books `completed=answered`, so the flag draws its line at the answer and not at the
-    teardown: a client dropping while sse-starlette writes the `AnswerEvent` produces a cancelled
-    turn that nonetheless answered, kept its history, and must be billed as the completed turn it
-    is. The neighbouring test pins the history half of that; this pins the ledger half, which had
-    only the *failed*-turn direction pinned (`tests/test_turn_observability.py`) — so a change
-    booking `completed=False` for every torn-down turn passed the suite and quietly made every
-    disconnected-after-answering turn look abandoned in the spend ledger.
+    `TurnCost.completed` means "the turn answered", not "the turn was never torn down"; otherwise
+    every disconnect-after-answer would look abandoned in the spend ledger.
     """
     from chemclaw.agent.turn_cost import TurnCost
 
@@ -534,15 +435,10 @@ async def test_a_disconnect_after_the_answer_is_billed_as_completed(
 
 
 async def test_a_cancelled_turn_still_books_its_tokens() -> None:
-    """Cancellation is not a cheaper way to abandon a turn than closing the stream.
+    """A cancelled turn still books its tokens.
 
-    The budget booking lives in the runner's `finally`, which runs under both teardowns — but
-    "runs" is not "completes" when the task is cancelled, and that distinction is exactly what
-    cost the durable claim release. Pinning it here means a future `await` added to that `finally`
-    fails a test rather than silently making abandoned turns free.
-
-    On what a cancelled turn is billed for, and why it is not a number: see
-    `test_abandoned_turn_still_books_its_tokens` above.
+    The booking lives in the runner's `finally`, which a cancellation may not complete if an `await`
+    is added there; this fails if that happens.
     """
     budget = _RecordingBudget()
     session = TurnSession(session_id="s5")
@@ -569,31 +465,12 @@ async def test_a_cancelled_turn_still_books_its_tokens() -> None:
 
 
 async def test_a_cancelled_turn_unstamps_every_ambient_it_stamped() -> None:
-    """The ambients a turn stamps are cleared on the disconnect path, asserted by driving one.
+    """A cancelled turn unstamps every ambient it stamped.
 
-    **This is the behavioural half of a guarantee that used to be pinned only by reading source.**
-    `tests/test_disconnect_teardown.py` asserts that `run_turn`'s `finally` contains no `await`,
-    because on the cancellation path an `await` there re-raises on the spot and skips every
-    statement below it — which used to include the five `reset_current_*` calls, so the next turn on
-    the worker would run under the disconnected user's identity. That proxy is worth keeping and is
-    not sufficient: it constrains one block's shape rather than the property anyone actually cares
-    about, and it went half-stale the moment the resets moved into `_turn_ambient`, still describing
-    a block that no longer holds them.
-
-    So this asserts the property itself: stamped while the turn runs, clear once a `CancelledError`
-    has torn it down.
-
-    **Driven directly rather than through `_cancel_mid_turn`, and that is a correctness condition
-    rather than a shortcut.** That helper consumes the stream inside `asyncio.create_task`, which
-    *copies* the context — so contextvars set within the task are invisible to the caller, and the
-    "after" assertion below would pass against a runner that reset nothing at all. An async
-    generator, by contrast, runs in the context of whoever drives it (PEP 568 was never
-    implemented), so stamping and unstamping are both observable here. A vacuous green is the one
-    outcome this test must not be able to produce.
-
-    `athrow` is the same delivery a real disconnect makes — `CancelledError` raised at the
-    suspension point *inside* the turn — which is the D-130 distinction the module docstring above
-    records.
+    Otherwise the next turn on the worker would run under the disconnected user's identity. Driven
+    directly rather than through `_cancel_mid_turn`: that helper runs in a task, which copies the
+    context and would make the "after" assertion vacuous, whereas an async generator runs in its
+    driver's context. `athrow` delivers `CancelledError` at the suspension point inside the turn.
     """
     session = TurnSession(session_id="s-ambient")
 
@@ -628,19 +505,10 @@ async def test_a_cancelled_turn_unstamps_every_ambient_it_stamped() -> None:
 
 
 async def test_a_turn_torn_down_before_answering_writes_no_transcript_row() -> None:
-    """Nothing to roll back, because nothing was written — the other half of the deleted guard.
+    """A turn torn down before answering writes no transcript row.
 
-    The durable rollback existed for the opposite arrangement: MAF committed the thread as the turn
-    went, so a disconnect mid-tool-call left a `tool_use` with no `tool_result`, every later turn
-    replayed it, the model rejected the thread outright, and one dropped connection permanently
-    bricked the conversation. Deleting the rollback is only safe if that half-written state cannot
-    occur, so this is the claim the deletion rests on and it has to be pinned rather than argued.
-
-    `_record_transcript` runs once, after the answer exists, and writes the user message and the
-    answer in a single call. A teardown therefore lands on one side or the other: before it, and
-    the store is untouched (here), or after it, and the exchange is whole (the two tests above).
-    Nothing moves this test to green except moving that write, which is precisely the change that
-    would reintroduce the failure.
+    `_record_transcript` runs once, after the answer, writing question and answer together, so a
+    teardown leaves either nothing or a whole exchange; no half-written `tool_use` can be stored.
     """
     history = _RecordingHistory()
     history.rows = [
@@ -669,9 +537,7 @@ async def test_a_turn_torn_down_before_answering_writes_no_transcript_row() -> N
 class _StateWritingAgent(ScriptedTurn):
     """An answering agent that also advances `session.state`, the way the harness does.
 
-    The state write is the thing under test in the two windows below. It stands in for a completed
-    todo, a consumed approval, a recorded plan hash — whatever the turn's model run legitimately
-    settled before the post-run wait began.
+    The write stands in for whatever the model run legitimately settled before the post-run wait.
     """
 
     def __init__(self, session: TurnSession) -> None:
@@ -687,19 +553,11 @@ class _StateWritingAgent(ScriptedTurn):
 async def test_a_disconnect_during_a_slow_verifier_keeps_the_run_s_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The teardown predicate is "the model run returned", not "the answer was yielded".
+    """A disconnect during a slow verifier keeps the run's state.
 
-    Between the run finishing and the AnswerEvent the turn still awaits the verifier — an LLM
-    call. A disconnect or the front door's wall-clock deadline landing in that window finds
-    `answered` still False, and on the `answered`-only predicate would roll the session state back
-    over a run that had genuinely completed: the verifier, a scoring aid, silently undoing the work
-    it was scoring. `run_complete` is what draws the line in the right place, and this is the test
-    that fails if someone simplifies the predicate to the flag that reads like the obvious one.
-
-    This used to assert on `history.rows` instead, because MAF committed the stored thread during
-    the run and the teardown then DELETEd it. Both halves of that are gone — the projection writes
-    once, after the answer — so the surviving guard is the state rollback, and that is what it now
-    asks about. The window and the predicate are unchanged.
+    The teardown predicate is "the model run returned" (`run_complete`), not "the answer was
+    yielded"; otherwise the verifier window would roll back a completed run. This fails if the
+    predicate is simplified to `answered`.
     """
     from chemclaw.agent.verifier import VerificationResult
     from chemclaw.core.config import settings
@@ -728,12 +586,10 @@ async def test_a_disconnect_during_a_slow_verifier_keeps_the_run_s_state(
 async def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_run_s_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other window between the run and the answer: `await_job_results` under mid-turn resume.
+    """A disconnect during a slow job-result wait keeps the run's state.
 
-    The wait can hold the turn open for `mid_turn_resume_timeout_seconds`, and the run whose state
-    it holds has completed — so a teardown inside it has nothing to undo. (Once the resume's
-    *second* run starts the turn is genuinely mid-flight again and the rollback re-arms: that is
-    the `run_complete = False` around the resume.)
+    `await_job_results` may hold the turn open after its run completed. Once a resumed second run
+    starts, `run_complete` is reset and the rollback re-arms.
     """
     from chemclaw.core.config import settings
     from chemclaw.core.turn_signals import record_job_started

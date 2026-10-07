@@ -1,28 +1,14 @@
 """The property registry: every quantity this system may publish, with its canonical unit.
 
-**This is the extension point, and it is why the schema does not move when a tool ships.** A new
-calculator adds rows here; the DDL is untouched. That is the whole difference between this design
-and a typed table per result type, which would need a migration per tool forever — and where the
-failure is asymmetric across deployments, because a site that has not run this quarter's migration
-is missing the table the new writer needs, so the new tool writes *nothing*, silently.
+The extension point: a new calculator adds rows here and the DDL never moves (a typed table per
+result would need a migration per tool, and a lagging site would silently write nothing). Every
+fact's `property` is a foreign key into this registry, so a value cannot be written under an
+undefined name; `tests/test_publish_registry.py` catches two properties sharing a dimension on one
+subject (a likely synonym).
 
-**It is also what keeps the fact layer from degrading into EAV.** Every fact's `property` is a
-foreign key into this registry, so a value cannot be written under a name nobody defined. Without
-that, names drift — `pka`, `pka_acid`, `pKa` — and every query silently under-returns while looking
-entirely correct. The foreign key does not prevent a *synonym* being registered; only review does.
-`tests/test_publish_registry.py` narrows that gap by failing on two properties that share a
-dimension and appear on the same subject.
-
-**Canonical unit per property, not one global unit.** Absolute energies stay in hartree because
-their only use is being differenced, and six decimal places of kcal/mol on a -76 Ha number is a
-rounding trap. Every *difference* is kcal/mol, because that is the unit every threshold a chemist
-states is in: `value < -10` has to be literally what the question says. A single SI unit would mean
-nobody could write a predicate without dividing by 4184; a unit column with no canonicalization
-would mean one mis-tagged row falls silently out of a range filter.
-
-`dimension` exists so a test can assert that every property sharing one is expressed in a unit that
-converts to its canonical unit — the check that catches a row shipped with `kcal/mol` under
-`molar_entropy`.
+Canonical unit per property: absolute energies stay in hartree (they exist to be differenced);
+every difference is kcal/mol, so a chemist's threshold is literally the predicate. `dimension`
+lets a test assert every property's unit converts to its canonical unit.
 """
 
 from typing import Literal
@@ -31,23 +17,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.units import ELECTRONVOLT_TO_KJ, HARTREE_TO_KCAL, JOULE_PER_CALORIE
 
-# What kind of value a property carries. `PropertyFact` enforces that exactly one of its three
-# value columns is filled; this says which one is correct for a given name, so a projection that
-# writes `converged` as the float 1.0 is a registry violation rather than a plausible number.
+# Which of `PropertyFact`'s three value columns a property uses, so `converged` written as 1.0 is a
+# registry violation rather than a plausible number.
 ValueKind = Literal["number", "integer", "boolean", "text"]
 
-# **Which table a property's values live in.** A registry-level statement, so a projection that
-# writes a per-atom quantity as a calculation-scope scalar is caught rather than stored —
-# `record.PropertyFact` enforces it, which is what makes this a control rather than a comment.
-#
-# `calculation` names the scalar table, `property_value`, and covers *both* of that table's row
-# scopes: a reaction's delta-G is a fact about the run and a species' absolute Gibbs energy is a
-# fact about one member, and `FactScope` on the row is what distinguishes them. This deliberately
-# does not repeat that distinction — a `member` value existed here and nothing ever declared one,
-# while seven properties legitimately written at member scope were declared `calculation`, so the
-# only reading under which the registry was true is the one that reads it as naming the table.
-# The other four values name the tables that are not `property_value`, which is the whole
-# cardinality argument `SiteFact` and `PointFact` are built on.
+# Which table a property's values live in; `project` refuses a fact written to the wrong one.
+# `calculation` names the scalar table `property_value` and covers both of its row scopes (run and
+# member, distinguished by `FactScope` on the row). The other four name the per-site, per-point,
+# per-conformer and candidate tables.
 ScopeKind = Literal["calculation", "site", "point", "conformer", "candidate"]
 
 
@@ -84,14 +61,9 @@ def _d(
     )
 
 
-# Every conversion the registry needs, as (from, to) -> factor. Deliberately small: a unit appears
-# here only because some tool reports in it and the registry keeps another. `hartree -> kcal/mol` is
-# the one that matters, and it is **imported** rather than spelled out: this file held the third
-# copy of those digits, and the copies were not all the same length — a truncated one came out
-# 1.5e-08 relative low, which is nothing until it is a chemist's number. `core.units` is the one
-# definition, `science/calc/thermo.py` already reads it, and the reciprocal below is derived rather
-# than written twice, because a second literal is a second thing that can drift. Verified
-# bit-for-bit against what stood here: no published value moves.
+# Every conversion the registry needs, as (from, to) -> factor. A unit appears only because some
+# tool reports in it and the registry keeps another. Constants come from `core.units` and
+# reciprocals are derived, so no literal can drift from its definition.
 UNIT_CONVERSIONS: dict[tuple[str, str], float] = {
     ("hartree", "kcal/mol"): HARTREE_TO_KCAL,
     ("kcal/mol", "hartree"): 1.0 / HARTREE_TO_KCAL,
@@ -99,26 +71,16 @@ UNIT_CONVERSIONS: dict[tuple[str, str], float] = {
     ("kcal/mol", "kj/mol"): JOULE_PER_CALORIE,
     ("cal/(mol*K)", "j/(mol*K)"): JOULE_PER_CALORIE,
     ("j/(mol*K)", "cal/(mol*K)"): 1.0 / JOULE_PER_CALORIE,
-    # Derived rather than written, for the reason the paragraph above gives and this line used to
-    # be the counter-example to: `96.48533212331 / 4.184` is **exactly** the literal that stood
-    # here, `23.060547830619026`, difference 0.0 — so nothing published moves, and the way the two
-    # could ever disagree is now gone rather than merely absent today. The thermochemical calorie
-    # is `JOULE_PER_CALORIE`, which four of these entries were also spelling as a bare `4.184`.
+    # Derived from `core.units` rather than written as a literal.
     ("ev", "kcal/mol"): ELECTRONVOLT_TO_KJ / JOULE_PER_CALORIE,
-    # A gradient's unit is the *reciprocal* of a length, so this factor is the bohr radius itself
-    # and not its reciprocal: one Hartree/Angstrom is 0.529 Hartree/bohr, because a bohr is the
-    # shorter step. Here because both calculators that report a gradient report it per Angstrom
-    # (`OptimizationResult.max_gradient`, `HessianPayload.max_gradient_hartree_per_angstrom`) while
-    # the registry keeps `max_gradient` in the atomic unit every quantum-chemistry program prints
-    # its convergence criterion in. CODATA 2018 bohr radius in Angstrom.
+    # A gradient is per length, so Hartree/Angstrom -> Hartree/bohr multiplies by the bohr radius in
+    # Angstrom (CODATA 2018). Both gradient-reporting calculators report per Angstrom; the registry
+    # keeps the atomic unit.
     ("hartree/angstrom", "hartree/bohr"): 0.529177210903,
 }
 
-# The shipped registry. Grouped by what the quantity is, because that is how a reader looking for
-# "is there already a property for this" scans it.
-#
-# **Absolute energies are hartree; every difference is kcal/mol.** The split is not stylistic — see
-# the module docstring. A new absolute energy joins the first block, a new difference the second.
+# The shipped registry, grouped by what the quantity is so a reader can find an existing property.
+# Absolute energies are hartree; every difference is kcal/mol (see the module docstring).
 _DEFINITIONS: tuple[PropertyDefinition, ...] = (
     # --- absolute energies: kept in hartree, because they exist to be differenced ---------
     _d("total_energy", "energy", "hartree", "Total electronic energy of the system as computed."),
@@ -660,12 +622,10 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
     ),
     _d("aromatic_rings", "count", "", "Aromatic ring count.", kind="integer"),
     _d("torsion_period", "angle", "degree", "The range one full repeat of a torsion covers."),
-    # --- time: the first quantity here that is a duration -------------------------------------
+    # --- time ---------------------------------------------------------------------------------
     #
-    # Seconds across twenty orders of magnitude, deliberately unconverted: a rotamer half-life runs
-    # from microseconds to geological time, and a registry that offered "hours" would invite a
-    # comparison between two rows quoted in different units. The band the number carries is in the
-    # payload; what is queryable is the mean.
+    # Seconds, unconverted, across many orders of magnitude, so two rows are never compared in
+    # different units. The band is in the payload; the mean is queryable.
     _d(
         "interconversion_half_life",
         "time",
@@ -911,8 +871,7 @@ REGISTRY: dict[str, PropertyDefinition] = {d.property: d for d in _DEFINITIONS}
 class UnknownPropertyError(ValueError):
     """A fact named a property the registry does not define.
 
-    A `ValueError`, so `durable/publish.py` treats it as non-retryable: an unregistered name will
-    fail identically on every retry, and the fix is a registry row, not a wait.
+    A `ValueError`, so `durable/publish.py` treats it as non-retryable: the fix is a registry row.
     """
 
 
@@ -931,10 +890,9 @@ def definition_for(name: str) -> PropertyDefinition:
 def to_canonical(name: str, value: float, unit: str) -> float:
     """Convert `value` into the registry's canonical unit for `name`.
 
-    The one place a unit conversion happens on the publish path, so a predicate over
-    `value_canonical` is sound. An empty `unit` means the caller is already canonical and says so;
-    a unit with no conversion path is an error rather than a silent pass-through, because passing
-    it through is exactly how a mis-tagged row falls out of a range filter with nothing raising.
+    The one unit conversion on the publish path. An empty `unit` means the caller is already
+    canonical; a unit with no conversion path raises rather than passing through, since a
+    mis-tagged value would silently fall out of every range filter.
     """
     definition = definition_for(name)
     if not unit or unit == definition.canonical_unit:

@@ -1,14 +1,8 @@
 """Postgres backing for the commitment mirror (`infra/sql/074_commitments.sql`).
 
-Two readings and one write. The write is an upsert on `(source, external_id)`, because a portfolio
-export is a snapshot rather than a stream: re-reading it must converge on the source's current state
-rather than accumulate versions of it.
-
-**Every reading reports `observed_at`, and that is not decoration.** A mirror's characteristic
-failure is being *stale* rather than being wrong — the export stops running, the numbers keep
-answering, and a manager acts on a picture of last month. The staleness is therefore a field on the
-answer rather than something a reader has to think to ask for, the same argument
-`chemclaw.operations.activity.Coverage` makes about a window.
+The write is an upsert on `(source, external_id)` so re-reading a snapshot converges rather than
+accumulating versions. Every reading reports `observed_at`, because a mirror's characteristic
+failure is being stale, and the staleness belongs on the answer.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -23,12 +17,9 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.ingest.commitments.models import LIVE_STATES, Commitment
 
-#: The most rows one `outstanding` call will serve, whatever a caller asks for. A module constant
-#: rather than a `Settings` field for the reason `ingest/rejections._MAX_ROWS_PER_SOURCE` is one:
-#: it bounds what a portfolio read may put into a prompt, which is not a deployment decision.
-#: Reported as `limit_applied` rather than applied silently — a caller asking for 1,000 used to get
-#: 200 and had no way to tell that from a programme with 200 commitments (measured: 205 rows
-#: mirrored, `outstanding(limit=1000)` returned 200).
+#: The most rows one `outstanding` call will serve, whatever a caller asks for. A constant, not a
+#: setting: it bounds what a portfolio read may put into a prompt. Reported as `limit_applied`
+#: so a capped page is distinguishable from a small programme.
 _MAX_PAGE = 200
 
 _COLUMNS = (
@@ -89,8 +80,7 @@ def _row(values: tuple[Any, ...]) -> tuple[Commitment, datetime]:
 async def record_commitments(commitments: list[Commitment]) -> int:
     """Upsert a batch, returning how many rows were written.
 
-    One transaction for the batch: a portfolio snapshot is internally consistent, and applying half
-    of one would produce a mirror in a state the source was never in.
+    One transaction, so the mirror never holds half of an internally consistent snapshot.
     """
     if not commitments:
         return 0
@@ -150,14 +140,9 @@ class Outstanding(BaseModel):
 async def outstanding(*, owner: str = "", source: str = "", limit: int = 50) -> Outstanding:
     """What is still live, soonest deadline first, with the freshness and the size of the book.
 
-    Returns the freshness alongside the rows rather than expecting a caller to ask: an answer built
-    on a mirror that stopped updating in March is wrong in a way no individual row reveals. It
-    returns `total_outstanding` for the same reason one field over — an answer built on a page of a
-    programme is wrong in a way no individual row reveals either.
-
-    `due_at IS NULL` sorts last, because a commitment with no date is not the most urgent one —
-    which is what a plain `ORDER BY due_at` would make it under Postgres' NULLS FIRST for DESC and
-    is an easy thing to get backwards.
+    Freshness and `total_outstanding` ride with the rows because a stale mirror or a truncated page
+    is wrong in a way no individual row reveals. `due_at IS NULL` sorts last: an undated commitment
+    is not the most urgent one.
     """
     clauses = ["state = ANY(%s)"]
     params: list[Any] = [list(LIVE_STATES)]
@@ -189,10 +174,8 @@ async def outstanding(*, owner: str = "", source: str = "", limit: int = 50) -> 
 async def mirror_freshness(source: str = "") -> datetime | None:
     """When this mirror was last refreshed at all, whatever state its rows are in.
 
-    Separate from `outstanding` because the two answer different questions: an empty outstanding
-    list plus a recent refresh means nothing is due, and the same empty list with no refresh at all
-    means nobody has ever mirrored anything. Conflating them is how a manager reads "nothing is
-    late" out of a sync that never ran.
+    Separate from `outstanding` so "nothing is due" (recent refresh) is distinguishable from
+    "nothing was ever mirrored" (no refresh).
     """
     sql = "SELECT max(observed_at) FROM commitments"
     params: tuple[Any, ...] = ()

@@ -1,15 +1,10 @@
 """Agent tools for the memory layers: capturing a confirmed answer, and recalling observations.
 
-A confirmed or corrected answer from a chemist is evidence too. `record_confirmed_answer`
-lets the agent capture such an exchange as an episodic `interaction` note on the **same** write
-path as every other agent note (`D-2026-09-05-the-gate-is-deleted-not-dormant`: recorded, readable
-at once, nobody reviews it) — the fourth memory source, on the one shared write path.
+`record_confirmed_answer` captures a chemist's confirmed or corrected answer as an episodic
+`interaction` note on the same write path as every other agent note.
 
-`recall_observations` reads the ungated tier (D-161), and is a **separate tool on purpose**. An
-observation is not evidence and must never arrive as a chunk in the evidence list: fusing the two
-would make "what the record shows" and "what the agent noticed" the same kind of thing at the
-moment of ranking. Keeping it a distinct call is what makes the separation structural rather than a
-naming convention — and it matters more, not less, now that neither tier has a human in front of it.
+`recall_observations` reads the ungated observation tier (D-161) and is a separate tool on purpose:
+an observation is not evidence and must never arrive as a chunk in the evidence list.
 """
 
 from pydantic import BaseModel, Field, computed_field
@@ -102,10 +97,7 @@ class ObservationRecall(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before treating this list as a fact about the corpus.
 
-        `computed_field` rather than a bare property for the reason `FingerprintSearch.verdict`
-        states in full: a plain property is not serialized, so the sentence would never leave this
-        process — the lesson learned on a hazard screen that told a chemist "no hazards detected"
-        six times.
+        A `computed_field` so the sentence is serialized with the result.
         """
         standing = (
             "An observation is NOT evidence: it is a reading the system formed across projects "
@@ -134,29 +126,11 @@ class ObservationRecall(BaseModel):
 def _readable(observation: Observation) -> Observation:
     """One observation with its statement framed and every other string in it neutralised.
 
-    **The whole row, not the two fields somebody classified, and the classification was wrong.**
-    This treated `statement` (framed) and `projects_seen` (defanged) and argued the rest away:
-    "`scope` and `evidence_note_ids` need no such treatment — both are built from validated note
-    ids". Measured against `memory/observations.Observation`, neither is: `scope` is a `str` the
-    miner composes from note *bodies*, `evidence_note_ids` is a `list[str]`, and `id` is minted from
-    them. Driven with a live closing delimiter in each, **three** reached the model unescaped — and
-    they ride *outside* the envelope, where a forged delimiter reads as the envelope closing and the
-    mined text that follows reads as this system speaking.
-
-    So the escape is the payload's rather than a field list's, for `agent/tool_framing.
-    defanged_payload`'s stated reason: a field added to that model next year is covered without this
-    line being remembered, and `origin`/`status` are `Literal`s with no delimiter to spell.
-
-    `statement` is the one field that gets an **envelope** instead, because it is the only one a
-    citation is made against — and it is framed from the *unescaped* original, since
-    `frame_untrusted` defangs its own content and would otherwise escape an already-escaped string.
-    Framed here rather than at the store, so what is persisted stays the plain statement.
-
-    Args:
-        observation: One open observation, as the store holds it.
-
-    Returns:
-        The same observation, safe to put in front of a model.
+    Every string field is mined from note bodies, so the whole payload is defanged
+    (`agent/tool_framing.defanged_payload`) rather than a field list, which also covers fields added
+    later. `statement`, the field citations are made against, is framed in an envelope instead, from
+    the unescaped original because `frame_untrusted` defangs its own content. The store keeps the
+    plain statement.
     """
     safe = defanged_payload(observation)
     return safe.model_copy(
@@ -198,14 +172,10 @@ async def recall_observations(limit: int = 0) -> ObservationRecall:
         `total_open`, and a `verdict`.
     """
     if not settings.observations_enabled:
-        # No database is touched while the tier is off — the answer is about the deployment, and
-        # a disabled tier must not cost a connection to say so.
+        # No database is touched while the tier is off — the answer is about the deployment, and a
+        # disabled tier must not cost a connection to say so.
         return ObservationRecall(enabled=False)
-    # An observation's `statement` is corpus-mined free text — it is assembled from note bodies
-    # nobody wrote for this purpose, which makes it retrieved data exactly like an evidence chunk,
-    # and it reached the model unframed while `gather_evidence` framed the very notes it rests on.
-    # Framed here rather than at the store, so what is persisted stays the plain statement and the
-    # envelope belongs to the one channel that feeds a model.
+    # A statement is corpus-mined free text, so it is framed like any retrieved evidence chunk.
     found = await open_observations(limit or None)
     return ObservationRecall(
         enabled=True,

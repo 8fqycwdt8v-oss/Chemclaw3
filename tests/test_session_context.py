@@ -1,12 +1,8 @@
-"""Ambient session-id plumbing for job push-back (plan Phase F3-T3).
+"""Ambient session-id plumbing for job push-back.
 
-Proves the contextvar carrier, that a durable launcher stamps the current session onto the job (so
-the completing workflow knows whom to notify), and that the runner sets/clears the ambient id
-around a turn — all offline with fakes (no Temporal, no database).
-
-The launcher under test is the *generated* one (`chemclaw.connectors.jobs`), which is now the only
-kind: the
-hand-written QM launcher that used to carry this plumbing became a declared job in D-118.
+The contextvar carrier, the generated launcher (`chemclaw.connectors.jobs`) stamping the current
+session onto the job, and the runner setting and clearing the id around a turn — offline, with
+fakes.
 """
 
 import asyncio
@@ -36,11 +32,9 @@ _SPEC = JobSpec.model_validate(
 
 
 def test_session_id_does_not_affect_the_job_id() -> None:
-    """Two launches differing only by session share one id — identical science is deduped (D-011).
+    """Two launches differing only by session share one job id, deduplicating the science.
 
-    The id is derived from the *payload*, which is exactly the model-authored arguments; the
-    session is ambient and never enters it. So two chemists asking the same question in two chats
-    join one run, and each still gets woken (the wrapper carries the session beside the payload).
+    The session travels beside the payload, so each asker is still notified.
     """
     payload = {"smiles": "CCO", "kind": "conformers"}
     assert job_workflow_id("calc", "sample_conformers", payload) == job_workflow_id(

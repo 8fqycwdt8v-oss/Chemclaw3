@@ -1,15 +1,8 @@
 """What the front door does with a request it already knows the database cannot serve.
 
-Measured on 2026-09-06 against a real uvicorn pointed at a port nothing listens on: `/healthz`
-answered 200 in 3 ms, `/readyz` answered `503 database unreachable` in 2.03 s and cached it — and
-then `POST /sessions` and `GET /sessions` each took the full `pg_pool_timeout_seconds` (10 s) to
-answer `server at capacity`, per request. Readiness had the answer in two seconds and every request
-went on rediscovering it in ten, so a dead database converts into occupied connections and, under
-`--limit-concurrency`, into a queue — for a fact the process was already holding.
-
-These assertions are about that fact being *read* rather than re-derived. The wording is unchanged
-and deliberately so (`_database_unavailable` argues it: back off and retry is the client behaviour
-either way, and a browser has no business learning which dependency is down).
+When `/readyz` has cached "database unreachable", requests read that verdict and answer at once
+instead of each waiting out `pg_pool_timeout_seconds`. The wording is unchanged: clients back off
+and retry either way, and a browser need not learn which dependency is down.
 """
 
 import time
@@ -26,10 +19,8 @@ from tests.test_service import _app, _FakeAgent
 def app() -> FastAPI:
     """The front door with a fake agent, as every other front-door test drives it.
 
-    The `FastAPI` object is the fixture rather than the client because these tests write
-    `app.state` — the readiness verdict's own home — and `TestClient.app` is typed as the bare
-    ASGI callable, which has no `state`. Keeping the typed reference is the shape
-    `tests/test_api_sessions.py` already uses for the same reason.
+    The `FastAPI` object is the fixture because tests write `app.state`, which `TestClient.app`'s
+    type lacks.
     """
     return _app(_FakeAgent())
 
@@ -73,9 +64,8 @@ def test_a_stale_verdict_is_not_a_verdict(app: FastAPI, client: TestClient) -> N
 def test_the_probes_are_never_shed(app: FastAPI, client: TestClient) -> None:
     """`/readyz` is what clears the verdict, so shedding it would make the outage permanent.
 
-    `/healthz` and `/metrics` come with it, by construction rather than by a path list: none of the
-    three depends on `require_principal`, which is where the shed lives — the same structural
-    exemption the rate limiter documents.
+    `/healthz` and `/metrics` are exempt too, structurally: none depends on `require_principal`,
+    where the shed lives.
     """
     _database_is_down(app, probed_at=time.monotonic())
     assert client.get("/healthz").status_code == 200

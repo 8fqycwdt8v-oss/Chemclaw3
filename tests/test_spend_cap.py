@@ -1,19 +1,8 @@
-"""The per-turn spend cap meters what a turn bills, and stops it on a **compiled graph**.
+"""The per-turn spend cap meters what a turn bills, and stops it on a compiled graph.
 
-**Why every assertion here drives a graph rather than a hook.** `agent/loop_cap.py` shipped a cap
-whose hook ran, counted correctly, decided correctly, and was wired to nothing — the conditional
-edge is built from `can_jump_to`, and its own unit test passed by calling the hook and reading the
-returned dict. `tests/test_state_channels.py` exists because the sibling failure is quieter still: a
-write to a channel the graph does not declare is dropped in **silence**, so a metering middleware
-can accumulate perfectly into nowhere. This module's first probe did exactly that, before it was a
-module. So the questions asked here are the two that only a compiled graph can answer: does the
-count reach the channel, and does the decision reach the loop.
-
-The model's *reported* usage is what a turn is billed for, so every fake below reports usage the way
-a provider does — `usage_metadata` on the message — and the cap is compared against the numbers
-those add up to. A fake that reported nothing would make every assertion here vacuous, which is why
-`test_a_provider_that_reports_no_usage_cannot_arm_the_cap` pins that case explicitly rather than
-leaving it as an accident of the fixtures.
+Only a compiled graph shows that the count reaches the state channel (an undeclared channel
+drops writes silently) and that the decision reaches the loop. Fakes report `usage_metadata`
+the way a provider does; a provider reporting nothing is pinned separately.
 """
 
 import ast
@@ -44,18 +33,9 @@ from chemclaw.core.tool_registry import registered_tool_names
 def _billing(*costs: int) -> list[AIMessage]:
     """One scripted model call per cost, each reporting `usage_metadata` the way a provider does.
 
-    **Every call but the last asks for a tool**, because that is what makes the graph come back for
-    another model call — a turn whose first message is prose ends there, and a cap that is only
-    ever consulted once cannot be observed to bind. `ls` is the tool because it is registered on
-    every agent by `FilesystemMiddleware` and reads the scratchpad, so driving the loop costs the
-    test nothing and touches nothing.
-
-    `total_tokens` is stated explicitly rather than left for the reader to derive. It does **not**
-    discriminate the two branches of `graph_usage_tokens` — `cost // 2 + (cost - cost // 2)` is
-    `cost` identically, so a fixture shaped like this one cannot tell "prefer the provider's total"
-    from "sum the parts", and an earlier version of this docstring claimed it could.
-    `tests/test_budget.py::test_a_reported_total_is_preferred_and_a_missing_one_is_derived` is
-    where that rule is actually pinned.
+    Every call but the last asks for `ls`, so the graph comes back for another call. `total_tokens`
+    equals the sum of the parts here, so this fixture cannot tell the two branches of
+    `graph_usage_tokens` apart; `tests/test_budget.py` pins that.
     """
     messages = []
     for index, cost in enumerate(costs):
@@ -102,16 +82,8 @@ def test_the_meter_reaches_the_channel_and_the_state_carries_the_total(
 ) -> None:
     """A turn's bill accumulates across model calls and is readable from what the run returns.
 
-    This is the channel half: the assertion is on the state the run *returns*, because a middleware
-    that accumulates perfectly into a channel the graph does not declare is dropped in silence.
-
-    **The declaration that makes it work is `create_agent(state_schema=ChemclawState)` in
-    `langgraph_agent`, not `MeterTurnSpend.state_schema`** — and an earlier version of this
-    docstring said the opposite. Measured by removing the middleware's own declaration: nothing
-    changes, here or in `tests/test_state_channels.py`, because the graph already has the channel.
-    The attribute is kept for the case this file cannot reach — a graph compiled around this
-    middleware without that argument — but it is not what this test proves, and claiming it was
-    made an unfalsifiable statement out of a real lesson.
+    The channel exists because `langgraph_agent` passes `create_agent(state_schema=ChemclawState)`;
+    `MeterTurnSpend.state_schema` covers graphs compiled without it, which this test cannot reach.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(400))))
@@ -125,12 +97,10 @@ def test_the_meter_reaches_the_channel_and_the_state_carries_the_total(
 def test_a_turn_over_its_budget_is_stopped_and_says_so(
     monkeypatch: pytest.MonkeyPatch, watch: Any
 ) -> None:
-    """The decision half: past the budget the graph ends, and the fact is on the state.
+    """Past the budget the graph ends, and the fact is on the state.
 
-    Two calls of 600 against a budget of 1,000. The first is made (nothing is booked yet), the
-    second is made (600 < 1000), and the *third* is refused at 1,200 — so the cap is a ceiling on
-    what a turn may spend before its next call, which is what `enforce_spend_cap` documents and the
-    only placement that bounds anything.
+    Two calls of 600 against 1,000: the third is refused at 1,200, so the cap bounds spend before
+    the next call.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600, 600))))
@@ -148,18 +118,11 @@ def test_a_turn_over_its_budget_is_stopped_and_says_so(
 def test_the_call_count_is_what_the_turn_authorised_not_what_it_made(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`model_calls` counts authorisations, and it says so — because it cannot count completions.
+    """`model_calls` counts authorisations, not completions.
 
-    `enforce_loop_cap` increments in `before_model`, which is the one hook no later middleware can
-    skip and therefore the only safe place for the number a cap is compared against
-    (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`). The consequence is
-    that a *later* `before_model` hook ending the run — this cap, ordered right after it — leaves
-    the increment for a call that never happened: two calls made, three counted.
-
-    Conservative in the direction that matters (a cap can only bind early) and inert for the guard
-    itself, which compares the same number it wrote. It is pinned because the field is deliberately
-    non-private so a caller may read it off the finished run, and "how many model calls this turn
-    made" was what the declaration promised.
+    `enforce_loop_cap` increments in `before_model`, which no later hook can skip, so a later hook
+    ending the run leaves one extra count. That errs early, and is pinned because the field is
+    public.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600, 600))))
@@ -172,12 +135,9 @@ def test_the_call_count_is_what_the_turn_authorised_not_what_it_made(
 
 
 def test_the_partial_answer_still_goes_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A capped turn delivers what it managed, rather than raising it away.
+    """A capped turn delivers its partial answer rather than raising it away.
 
-    The position `agent/loop_cap.py` argues and this module inherits: a chemist is entitled to see
-    the work the last iteration managed. Upstream's `ModelCallLimitMiddleware` fabricates an
-    assistant message in this slot, which is one of the four regressions that got it reverted; this
-    cap emits none, so the last real answer is still the last message.
+    Unlike upstream's `ModelCallLimitMiddleware`, this cap fabricates no assistant message.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 500)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600))))
@@ -185,12 +145,9 @@ def test_the_partial_answer_still_goes_out(monkeypatch: pytest.MonkeyPatch) -> N
     result = asyncio.run(graph.ainvoke(turn_input("hello")))
 
     assert spend_capped(result)
-    # The model's own last words survive. The assertion is on the last *assistant* message rather
-    # than the last message, because the cap fires in `before_model` after the tool result that
-    # provoked the next call — so the tail of the thread is that result, and what matters is that
-    # nothing was appended *as the assistant*. Upstream's `ModelCallLimitMiddleware` fabricates an
-    # `AIMessage` carrying its limit string in exactly this slot, and `cli/chat.py`, the helper
-    # report and the persisted thread all read that position.
+    # The last assistant message is the model's own: the cap fires after a tool result, and nothing
+    # may be appended as the assistant, since the CLI, reports and the persisted thread read that
+    # slot.
     assistant = [m for m in result["messages"] if isinstance(m, AIMessage)]
     assert assistant[-1].content == "answer 0"
 
@@ -198,9 +155,7 @@ def test_the_partial_answer_still_goes_out(monkeypatch: pytest.MonkeyPatch) -> N
 def test_the_cap_binds_with_no_watch_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
     """Enforcement does not depend on a caller having started a watch.
 
-    The reason the count is a state channel rather than a contextvar. An ambient ledger would make
-    the cap inert everywhere nobody remembered to start one — the CLI, a template step, a test —
-    which is the "per-turn is a property of every call site" mistake `agent/state.py` records.
+    The count is a state channel, so the CLI, template steps and tests are capped too.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 500)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600))))
@@ -229,12 +184,9 @@ def test_an_unset_budget_never_stops_a_turn(monkeypatch: pytest.MonkeyPatch) -> 
 def test_a_provider_that_reports_no_usage_cannot_arm_the_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A model reporting nothing meters 0 and the turn runs — it must not fail instead.
+    """A provider that reports no usage meters 0 and the turn runs.
 
-    `turn_usage.graph_usage_tokens` duck-types on the provider's keys precisely so that a provider
-    or version reporting no usage meters zero rather than failing a turn. The honest cost is
-    recorded here rather than left to be discovered: on such a provider this cap cannot bind at
-    all, and the guard that still does is the iteration cap.
+    On such a provider this cap cannot bind; the iteration cap still does.
     """
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1)
     graph = build_langgraph_agent(
@@ -248,30 +200,17 @@ def test_a_provider_that_reports_no_usage_cannot_arm_the_cap(
 
 
 def test_the_counter_an_operator_reads_is_declared() -> None:
-    """The metric exists in the registry, so a deployment can alert on the guard firing.
-
-    Declared-ness is the assertion, not a count: `core/metrics.py` refuses an undeclared series, so
-    a counter the runner increments and nobody declared would fail at the increment rather than
-    here — and a rename would pass a test that only asserted the increment.
-    """
+    """The spend-cap counter is declared in the registry, so a deployment can alert on it."""
     assert "chemclaw_turn_spend_caps_total" in METRICS.render()
 
 
 def test_a_fan_out_shares_one_budget_rather_than_getting_one_each(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A helper's spend lands on the *turn's* total, which is why the count is a channel.
+    """A fan-out shares one budget rather than getting one each.
 
-    **This is the claim that justifies the whole design over an ambient ledger**, and it is the one
-    a unit test cannot make: `task` returns each helper's final state as a `Command` update, so the
-    budget spans the team only if `billed_tokens` crosses the subagent boundary and its channel
-    folds concurrent writes additively. Regression 3 in `agent/loop_cap.py`'s list is what happens
-    when it does not — every branch starts at zero and an N-way fan-out gets N times the budget it
-    was given.
-
-    Modelled on `tests/test_subagents.py`'s fan-out case, and asserted the same way: against the
-    number of calls the fake was actually asked for, so an under-count is a failure rather than a
-    smaller number nobody checks. One parent call to fan out, one per helper, one to answer.
+    `task` returns each helper's state as a `Command`, so `billed_tokens` must cross the boundary
+    and fold additively. Asserted against the number of calls the fake was asked for.
     """
     from chemclaw.agent.audit import NullAuditSink
     from chemclaw.agent.profiles import AgentProfile
@@ -337,17 +276,7 @@ def test_a_fan_out_shares_one_budget_rather_than_getting_one_each(
 def test_the_budget_is_a_ceiling_reached_not_a_ceiling_exceeded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn that lands exactly on its budget is capped, not waved through.
-
-    `enforce_spend_cap` compares `billed >= budget`, and every other case in this file is strictly
-    over — 600 against 500, 1,200 against 1,000 — so `>=` and `>` were indistinguishable and a
-    one-character change to the comparison survived the whole suite.
-
-    Exactly-on-budget is the boundary a deployment actually meets, because a budget is usually a
-    round number and `agent_max_turn_billed_tokens` is compared against a running total that steps
-    through many values. `>=` is the documented intent: the budget is what a turn may spend, so
-    having spent it is having reached the ceiling.
-    """
+    """A turn landing exactly on its budget is capped: the comparison is `billed >= budget`."""
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 1_000)
     # Two calls of exactly 500 land the total on 1,000 — equal to the budget, never above it.
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(500, 500, 500))))
@@ -364,12 +293,7 @@ def test_the_budget_is_a_ceiling_reached_not_a_ceiling_exceeded(
 def _modules_that_call_a_model_from_a_tool() -> list[Path]:
     """Every module that both defines a registered tool and builds a model.
 
-    The two halves are what make the pair dangerous: a model call in a module with no tool in it
-    runs outside the graph and must meter itself, and a tool in a module that calls no model has
-    nothing to take off the stream. Only their intersection is the shape this guard is about.
-
-    Derived from the tool *registry* rather than from a list, so a module added next year is
-    scanned the day its tool is registered.
+    Derived from the tool registry, so a new module is scanned once its tool is registered.
     """
     registered = set(registered_tool_names())
     found: list[Path] = []
@@ -404,43 +328,13 @@ def _model_calls_passing_a_config(module: Path) -> list[int]:
 
 
 def test_no_in_tool_model_call_passes_its_own_callbacks() -> None:
-    """The absence that puts a tool body's model call on the turn's ledger, guarded as an absence.
+    """No in-tool model call passes its own callbacks.
 
-    **The chain the widened cap depends on is: a tool body calls a model with no `config` → the
-    call inherits the graph's callbacks → its usage rides the stream `api/graph_stream` meters →
-    `enforce_spend_cap` reads it.** The load-bearing link is the *missing* argument.
-    `agent/turn_usage.py` says so in as many words: an explicit `callbacks` config "**replaces**
-    the inherited ones rather than joining them", measured there at 55 tokens booked to the ambient
-    ledger and 0 seen by the stream. So a well-meaning `config={...}` added to a tool body would
-    silently take that call off the ledger and reopen the gap the cap was widened to close, with
-    the whole suite green.
-
-    An absence is what `tests/test_upstream_surface.py` asserts for the same reason: nothing else
-    can fail when somebody adds the argument back.
-
-    **The module set is derived rather than named**
-    (`D-2026-08-29-a-guard-that-names-one-file-guards-one-file`). This scanned
-    `agent/condense.py` by name for as long as that was the only tool making a model call, which
-    made it a guard over one file rather than over the invariant — a second in-tool model call, of
-    exactly the kind an advisor would be, walked past it in silence. And the mistake it would walk
-    past is one edit away rather than hypothetical: `agent/verifier.py` passes
-    `config=off_stream_metering()` **correctly**, because a judge runs outside the graph where
-    nothing else is watching, and `off_stream_metering`'s own docstring says attaching it to an
-    in-graph call would take that call off the stream. Copying that line into a tool body is the
-    whole defect.
-
-    **What this deliberately does not claim.** The derivation is at *module* granularity, and that
-    is deliberate rather than loose: in `agent/condense.py` the `.ainvoke` is in `_read_prose` while
-    the registered tool is `condense_protocols`, so a scan of tool bodies would miss the only call
-    that exists to be found. The cost is that a module holding both a tool and a legitimately
-    off-stream call would read as an offender — none does, and the right answer if one ever should
-    is to split the module rather than to loosen this.
-
-    Nor does it prove the inherited callbacks reach the ledger end to end: that is somebody else's
-    machinery, exercised by every real turn and pinned by `tests/test_budget.py` on the stream side.
-    Writing an end-to-end version was attempted and abandoned, because a scripted fake's streaming
-    semantics are not a provider's and the test that resulted would have been evidence about the
-    fake. This asserts the one thing in *this* repository that can break the chain.
+    A tool body's model call inherits the graph's callbacks, so its usage reaches the stream the cap
+    reads; an explicit `config` replaces them and takes the call off the ledger (as
+    `off_stream_metering` correctly does for the out-of-graph verifier). Checked per module, since a
+    tool may call a model through a helper; a module mixing a tool with a legitimate off-stream call
+    should be split.
     """
     scanned = _modules_that_call_a_model_from_a_tool()
     assert scanned, (
@@ -463,15 +357,10 @@ def test_no_in_tool_model_call_passes_its_own_callbacks() -> None:
 def test_the_cap_reads_the_turn_ledger_not_only_its_own_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The enforcement half: spend the cap cannot meter still stops the turn.
+    """The cap reads the turn ledger, not only its own channel.
 
-    `MeterTurnSpend` books one figure per *model response*, so it is blind to two real classes of
-    provider call — a call inside a tool body (proven to reach the ledger by the test above) and
-    the discarded first attempt of a call `RepairInvalidToolCalls` retried. Measured before the
-    fix: 5,200 tokens spent against a 150-token budget with the cap never firing.
-
-    Seeded directly here, because what this asserts is *which reading `enforce_spend_cap` trusts* —
-    the plumbing that fills the ledger is the previous test's subject.
+    `MeterTurnSpend` misses in-tool calls and retried attempts. The ledger is seeded directly,
+    since which reading `enforce_spend_cap` trusts is under test.
     """
     from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
 
@@ -495,12 +384,7 @@ def test_the_cap_reads_the_turn_ledger_not_only_its_own_channel(
 
 
 def test_the_cap_still_binds_with_no_turn_ledger_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Off the request path the channel is the only reading, and it still works.
-
-    `metered_turn_tokens()` is 0 for a CLI turn, a template step or a test with no ledger, so `max`
-    has to degrade to exactly the previous behaviour rather than to an unbounded turn. This is the
-    counter-example that keeps the widening honest.
-    """
+    """With no turn ledger the channel alone still enforces the cap."""
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 500)
     graph = build_langgraph_agent(model=_Model(messages=iter(_billing(600, 600))))
 
@@ -527,20 +411,10 @@ def _request(billed: int) -> ModelRequest[Any]:
 
 
 def test_a_fan_outs_watch_agrees_with_the_channel_the_cap_reads(watch: Any) -> None:
-    """The ambient total and the state channel must fold a fan-out to the same number.
+    """The ambient watch and the state channel fold a fan-out to the same number.
 
-    They did not. Each branch of a fan-out is handed the *same* `billed_tokens` base —
-    `SubAgentMiddleware` builds each helper's input from the parent's state — so the absolute
-    totals the branches compute all sit one call's bill above that common base. `TurnTotal` folds
-    those additively, by construction; the watch took the largest, so it counted one branch.
-    Measured: a parent call of 1,000 and two helpers billing 100 and 150 gave 1,250 in the channel
-    and **1,150** on the watch — and the watch is the number `api/runner._spend_cap_event` puts in
-    front of a chemist ("after billing {billed:,}"), so the sentence explaining the refusal
-    understated the spend at the moment it exists to explain it.
-
-    Driven through the real middleware and the real channel rather than a compiled fan-out, because
-    what is under test is the *fold*: `tests/test_subagents.py` is where two `task` calls in one
-    superstep are actually driven.
+    Branches share a base, so their totals must be folded additively, not by maximum; the watch's
+    figure is what the refusal message shows. Driven through the real middleware and channel.
     """
     meter = MeterTurnSpend()
     channel = TurnTotal(int)
@@ -561,28 +435,12 @@ def test_a_fan_outs_watch_agrees_with_the_channel_the_cap_reads(watch: Any) -> N
 
 
 def test_a_turn_with_no_watch_has_billed_exactly_nothing() -> None:
-    """Off the request path the answer is 0, and "0" is a claim rather than a placeholder.
-
-    Every existing reader of this function drives it inside a watch, so `else 0` could become
-    `else 1` with the four tests that reach it green. The number is not decorative: the runner puts
-    it beside the refusal a chemist reads, because "the turn stopped" and "the turn stopped after
-    1.2 million tokens" are different messages — and a fabricated token there is spend nothing
-    made, reported to the person paying for it.
-    """
+    """A turn with no watch has billed exactly 0, since the number is shown beside the refusal."""
     assert turn_billed_tokens() == 0
 
 
 def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
-    """`enforce_spend_cap` records the cap the way `enforce_loop_cap` does — through the recorder.
-
-    `record_spend_cap` is documented as the public counterpart to `record_loop_cap` and as what
-    `api/runner._spend_cap_event` reads the result of, and it had **no caller in `src/` at all**:
-    the enforcer marked the watch through a private helper instead, so the only thing exercising
-    the public name was `tests/test_runner.py`. That is the `map_to_hpc_identity` shape this
-    repository deletes on sight — a named entry point that looks like the path and is not — and it
-    is worth an assertion rather than a deletion because the runner genuinely needs a mark and the
-    loop cap's own enforcer already produces one this way.
-    """
+    """`enforce_spend_cap` marks its watch via the public `record_spend_cap`."""
     sources = {
         "spend": (Path("src/chemclaw/agent/spend_cap.py"), "enforce_spend_cap", "record_spend_cap"),
         "loop": (Path("src/chemclaw/agent/loop_cap.py"), "enforce_loop_cap", "record_loop_cap"),
@@ -606,26 +464,12 @@ def test_each_cap_marks_its_watch_through_its_own_public_recorder() -> None:
 
 
 def test_the_turn_cap_stays_above_what_the_other_two_guards_authorise() -> None:
-    """The cap is a backstop, so it must sit above every turn this system said it would run.
+    """The turn cap stays above what the other two guards authorise.
 
-    **This shipped wrong once and nothing caught it.** `agent_max_turn_billed_tokens` was set to
-    300,000 from a measured 250,000-token runaway — a figure taken when a model call carried about
-    10,000 tokens. The static prefix has since grown sevenfold, and because `graph_usage_tokens`
-    reads the provider's `total_tokens` (prompt *and* completion, cached tokens included), the whole
-    prefix is billed on every call. Measured against `tests/test_context_floor.PREFIX_BOUND`, that
-    300,000 funded **three** model calls while `harness_max_loop_iterations` permitted 25: an
-    ordinary plan/tool/answer turn with one correction was refused mid-flight, and
-    `chemclaw_turn_loop_caps_total` could never move again because the spend cap always bit first.
-
-    So the relation, not the number, is what this asserts — the same shape
-    `tests/test_compaction.py` uses to hold both compaction defaults against their own basis. A
-    lawful turn is bounded by the two guards that already exist: at most
-    `harness_max_loop_iterations` model calls, each at most `agent_context_token_budget`. A cap at
-    or above that product can only be reached by a bug, which is what "runaway backstop" means. A
-    cap below it silently supersedes the loop cap and starts refusing work the system authorised.
-
-    A deployment may still set a smaller number deliberately — that is a cost *budget* and buys
-    refusals knowingly. This holds the shipped default only.
+    A lawful turn is at most `harness_max_loop_iterations` calls of at most
+    `agent_context_token_budget` each, and the whole prefix is billed every call. A cap below that
+    product silently supersedes the loop cap. This holds the shipped default; a deployment may set a
+    smaller cost budget deliberately.
     """
     lawful_ceiling = settings.harness_max_loop_iterations * settings.agent_context_token_budget
     assert settings.agent_max_turn_billed_tokens >= lawful_ceiling, (
@@ -637,13 +481,7 @@ def test_the_turn_cap_stays_above_what_the_other_two_guards_authorise() -> None:
 
 
 def test_the_turn_cap_funds_more_calls_than_the_loop_cap_permits() -> None:
-    """The same guarantee stated in calls rather than tokens, because that is how it failed.
-
-    `PREFIX_BOUND` is what one model call costs before a single token of conversation: this repo's
-    ratcheted ceiling plus what the sibling fleet serves. Dividing the cap by it gives the number of
-    model calls a turn can actually make — the figure that read 3 against a loop cap of 25 and was
-    invisible in the token comparison above.
-    """
+    """The turn cap funds more model calls than the loop cap permits, at `PREFIX_BOUND` each."""
     from tests.test_context_floor import PREFIX_BOUND
 
     funded = settings.agent_max_turn_billed_tokens // PREFIX_BOUND

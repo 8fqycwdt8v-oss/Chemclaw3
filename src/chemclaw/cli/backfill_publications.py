@@ -1,28 +1,12 @@
 """Queue results that were computed before a results store was attached.
 
-**The gap this closes.** Publishing hooks a calculation as it completes, so attaching a sink to a
-deployment that has been running for a year would publish only what it computes from that moment
-on — while `calculation_results` and `job_records` hold everything before it, and neither is ever
-pruned. That corpus is the more valuable half.
-
     python -m chemclaw.cli.backfill_publications --dry-run   # what would be queued
     python -m chemclaw.cli.backfill_publications             # queue it
     python -m chemclaw.cli.backfill_publications --requeue   # also retry rows that gave up
 
-Safe to run twice: the outbox's identity index makes a second pass a no-op. Safe to run while the
-system is live: it writes to the same queue the hooks do, and the drain does not care which put a
-row there.
-
-**Rows this release has no projector for are skipped, not failed.** A deployment legitimately holds
-results from calculators that no longer ship, and a backfill that aborted on the first one would
-never reach the rest.
-
-**A row this release cannot *read* is a fourth number, reported on its own line.** It is neither a
-skip nor a queue: this release has a projector for it and that projector could not read it, so it
-will fail identically on every pass until code changes — while a skip needs no fix and a queue
-needs none either. It used to be added to `queued` as a zero and named nowhere, so "4 row(s) seen,
-2 queued, 1 skipped" was a complete-looking report over a corpus of four. `--dry-run` now projects,
-so the four row counts it prints are the four the real pass will print.
+Idempotent (the outbox's identity index) and safe while live. Rows with no projector are skipped;
+rows a projector cannot read are reported separately, since they need a code change. `--dry-run`
+projects too, so its counts match.
 """
 
 import argparse
@@ -58,8 +42,8 @@ async def _run(args: argparse.Namespace) -> int:
         counts = await walk(dry_run=args.dry_run, batch=args.batch)
         total_queued += counts.queued
         total_failed += counts.failed
-        # Row counts and the record count on separate lines, in their own units. One line carrying
-        # both said "4 row(s) seen, 5 queued" whenever the corpus held a shape that decomposes.
+        # Row counts and the record count on separate lines: one row can decompose into several
+        # records.
         logger.info(
             "%s: %d row(s) seen = %d %s + %d skipped (no projector in this release) + "
             "%d unreadable by this release's projector",
@@ -78,9 +62,8 @@ async def _run(args: argparse.Namespace) -> int:
             counts.records,
         )
     if total_failed:
-        # WARNING, not INFO: unlike a skip this is a defect in *this* release, it will recur on
-        # every pass, and it is the one bucket an operator has to act on. `logger.exception` in
-        # `outbox.project_payload` has already named each row and its traceback.
+        # WARNING: unlike a skip this is a defect in this release that recurs every pass.
+        # `outbox.project_payload` already logged each row with its traceback.
         logger.warning(
             "%d row(s) have a projector in this release that could not read them, counted above "
             "as unreadable and queued nowhere. Nothing is lost — neither source table is ever "

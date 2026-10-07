@@ -1,18 +1,13 @@
-"""Structural gate over the Helm chart, the image, and the entrypoint (gaps DEP-1…DEP-5).
+"""Structural gate over the Helm chart, the image, and the entrypoint.
 
-`helm template | kubeconform` is a live-edge check that needs the helm binary and a cluster schema;
-this suite is the offline half that runs everywhere and catches the failure modes that actually bit:
+`helm template | kubeconform` is `make helm-validate`'s live-edge job; this is the offline half,
+catching what breaks a deployment silently and is invisible to `mypy`/`pytest`:
 
-- an `include` naming a `define` that does not exist (renders empty, silently drops a volume),
-- a `.Values.x.y` path that no longer exists in `values.yaml` (renders empty, same),
+- an `include` naming a `define` that does not exist (renders empty, drops a volume),
+- a `.Values.x.y` path missing from `values.yaml` (renders empty),
 - an unbalanced `{{ if }}` / `{{ end }}`,
-- a `CHEMCLAW_COMPONENT` the entrypoint has no case for (guaranteed crash loop),
-- an image missing a directory the running components read at import/run time — which is how
-  the skills, the terminal entrypoints and the eval case-set all came to be absent from the
-  image while every test passed.
-
-None of these are visible to `mypy`/`pytest` on the Python tree, and all of them break a deployment
-silently rather than loudly, which is why they earn a test of their own.
+- a `CHEMCLAW_COMPONENT` the entrypoint has no case for (crash loop),
+- an image missing a directory the running components read.
 """
 
 import os
@@ -100,22 +95,11 @@ def test_every_declared_component_has_an_entrypoint_case() -> None:
 
 
 def test_the_entrypoint_has_no_case_the_chart_never_declares() -> None:
-    """The other direction, which is how a deleted component stayed routable (D-117).
+    """The reverse direction: no entrypoint case for a component nothing deploys.
 
-    The check above catches a chart component with no entrypoint case — a crash loop. It cannot
-    catch the reverse: an entrypoint case for a component nothing deploys. That is what happened
-    to `mcp-calc`. Its module was described as deleted in three separate documents, yet
-    `entrypoint.sh` still carried `mcp-calc) exec python -m mcp_servers.calc.server`, so the image
-    went on shipping and dispatching a second live copy of seven `calc`-bundle tools. Nothing
-    failed, because nothing looked this way.
-
-    That module path is the pre-D-148 spelling and is left as written: it quotes a file as it
-    actually was. D-148's rewrite of every `mcp_servers.…` path caught this line too and made the
-    quotation say something the entrypoint never said — a small instance of the same class of error
-    the paragraph is about.
-
-    `*` is the unknown-component guard, and the two `<prefix>-*` cases are the generic connector
-    dispatch — the whole point of the seam is that they match names no chart line spells out.
+    Otherwise a deleted component stays routable and the image keeps dispatching a second live copy
+    of its tools. `*` is the unknown-component guard, and the two `<prefix>-*` cases are the generic
+    connector dispatch, which by design match names no chart line spells out.
     """
     entrypoint = (DEPLOY / "entrypoint.sh").read_text()
     cases = set(re.findall(r"^\s{2}([a-z0-9-]+)\)", entrypoint, flags=re.MULTILINE))
@@ -148,10 +132,9 @@ def _all_templates() -> str:
     return "\n".join(_template_text().values())
 
 
-# Directories the image reads at runtime that are *data*, not code, so no package discovery can
-# find them. Each absence is invisible offline and silent in production: the agent simply advertises
-# no skills or fewer capabilities, the graph is empty, migrations have no SQL. `tests/` and
-# `examples/` are the two first-party trees deliberately not shipped.
+# Directories the image reads at runtime that are *data*, not code, so no package discovery finds
+# them; a missing one fails silently (no skills, an empty graph, no migration SQL). `tests/` and
+# `examples/` are deliberately not shipped.
 _RUNTIME_DATA = ("data", "skills", "knowledge", "infra", "schema")
 
 
@@ -164,16 +147,8 @@ def _copied() -> set[str]:
 def test_image_ships_the_first_party_source_tree() -> None:
     """All first-party code must be in the image.
 
-    This started as a hardcoded list and **missed `safety/`**: `main` added the package, the image
-    never COPYd it, and the container died at import with `ModuleNotFoundError: No module named
-    'safety'`. It then discovered the eighteen top-level packages instead, so the next one was
-    covered on the day it was created.
-
-    Since D-148 there is one package under `src/`, so the discovery has nothing left to discover —
-    and a test that iterates an empty set passes vacuously, which is worse than the hardcoded list
-    it replaced. What it asserts now is the property that actually keeps the image complete: `src/`
-    is COPYd whole, and `tests/test_packaging.py` separately forbids a first-party package from
-    reappearing anywhere else.
+    `src/` is COPYd whole; `tests/test_packaging.py` separately forbids a first-party package from
+    appearing anywhere else, so together they keep the image complete.
     """
     assert "src" in _copied(), "Containerfile never COPYs src/ — the image would ship no code"
 
@@ -188,15 +163,9 @@ def test_image_ships_the_data_directories_read_at_runtime() -> None:
 def test_every_runtime_data_directory_actually_exists() -> None:
     """A COPY of a vanished directory fails the build; one that moved fails silently at start-up.
 
-    The pairing matters: `eln/exports` became `data/eln-exports` in D-148, and had the Containerfile
-    kept COPYing `eln/` the build would have broken loudly — but had the *config default* alone
-    moved, the image would have started fine and read an empty export directory forever.
-
-    D-156 moved three more (`profiles`, `templates`, `evals`) under `data/`, so this list shrank
-    rather than grew. Five entries now: `data/` is every corpus the code reads; `skills/`,
-    `knowledge/` and `infra/` are the three that are not configuration (layers 3 and 4, and this
-    system's own SQL); and `schema/` is the DDL for stores it does *not* own, which was missing from
-    the image while `publish/drivers/sql.py` told operators to generate it from inside one.
+    So every declared runtime directory must exist: `data/` (every corpus), `skills/` and
+    `knowledge/` (layers 3 and 4), `infra/` (this system's SQL) and `schema/` (DDL for stores it
+    does not own).
     """
     root = DEPLOY.parent
     for required in _RUNTIME_DATA:
@@ -206,21 +175,13 @@ def test_every_runtime_data_directory_actually_exists() -> None:
 
 
 def test_the_ignore_file_sits_where_every_builder_that_ships_here_reads_it() -> None:
-    """`deploy/.dockerignore` was inert: nothing reads an ignore file from there.
+    """The ignore file must sit at the build-context root, where every supported builder reads it.
 
-    Docker, buildah, podman and kaniko all read the ignore file from the **root of the build
-    context** — and every call site (`.github/workflows/image.yml`, `deploy/jenkins/lib/image.sh`)
-    passes the repository root as the context. BuildKit alone also honours
-    `<dockerfile-path>.dockerignore`, which is why `deploy/Containerfile.dockerignore` looks like
-    the tidy answer and is not: `IMAGE_BUILDER` offers four builders and three of them would go on
-    ignoring it.
-
-    Inert, the context is the whole tree — 6.9 GB of it, `.venv` and `.git` included, plus any root
-    `.env`, `*.pem` or `*.key` — sent to the daemon or, under `IMAGE_BUILDER=kaniko`, uploaded to a
-    shared builder. Nothing lands *in* the image (the `COPY` set is explicit), so what this costs is
-    exposure of the context and the transfer, not a contaminated image. The file's own header says
-    "keep the build context lean and secret-free", which is the claim being restored rather than
-    made.
+    Docker, buildah, podman and kaniko read it from the context root, and every call site passes the
+    repository root as the context; only BuildKit honours `<dockerfile>.dockerignore`. Without it
+    the whole tree (`.venv`, `.git`, any root `.env` or key) is sent to the daemon or a shared
+    kaniko builder — exposure of the context, not a contaminated image, since the `COPY` set is
+    explicit.
     """
     root = DEPLOY.parent
     ignore = root / ".dockerignore"
@@ -251,9 +212,7 @@ def test_the_ignore_file_sits_where_every_builder_that_ships_here_reads_it() -> 
 def _dnf_installed_packages() -> set[str]:
     """Every package the image installs with dnf, parsed rather than substring-matched.
 
-    Matching the literal install line meant a test could keep passing while the thing it named had
-    moved: `"dnf install -y git" in text` is satisfied by `dnf install -y git` and by
-    `dnf install -y github-cli`, and it says nothing about the second package the sync path needs.
+    A substring test on the install line is satisfied by `git` and `github-cli` alike.
     """
     text = (DEPLOY / "Containerfile").read_text()
     return {
@@ -265,12 +224,10 @@ def _dnf_installed_packages() -> set[str]:
 
 
 def test_image_installs_the_binaries_the_knowledge_layer_shells_out_to() -> None:
-    """Both directions of the knowledge layer are shell-outs, and both were not equally supplied.
+    """The knowledge layer shells out to `git` and `rsync`, so the image must install both.
 
-    `git` was installed and asserted from the start — the PR-gate pushes with it. `rsync` was
-    neither: `knowledge-sync.sh` publishes the read replica with it and fell back to
-    `rm -rf "${publish_dir}"/*` when the call failed, with stderr discarded — so a package that was
-    never installed became a silent, recurring deletion of the tree the front door reads live.
+    A missing `rsync` makes the replica publish fail on every tick, which must never turn into
+    deleting the tree the front door reads.
     """
     assert {"git", "rsync"} <= _dnf_installed_packages()
 
@@ -296,20 +253,11 @@ def _note(note_id: str) -> str:
 def test_a_locally_recorded_note_survives_the_sidecar(tmp_path: Path) -> None:
     """The sidecar must not delete a note this pod recorded but has not pushed.
 
-    **This is the coupling `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` created.** Until
-    the gate was deleted, `kg/git_writer.py` committed inside a private worktree and this script
-    was the only writer of the tree readers scan, so publishing a read replica over it with
-    `rsync --delete` could only remove notes that had genuinely left the base branch. The writer
-    commits *there* now, and `tests/test_knowledge.py` asserts that a push which fails still leaves
-    the note committed and readable — which the next sync tick then deleted, permanently: it stays
-    in the local `HEAD`, so no later path-limited `git add` restores it.
-
-    Driven end to end against real git repositories rather than by reading the script, because the
-    shape assertions below all passed on the broken version. The pod is set up the way the chart
-    sets it up — a writer's clone with the notes directory inside it — carrying one note the remote
-    does not have. After a sync it is still there, and what the remote holds has arrived.
-
-    The *diverged* case is its own test below, because the right behaviour there is different.
+    `kg/git_writer.py` commits in the writer's clone, and a push that fails still leaves the note
+    committed and readable (`tests/test_knowledge.py`); an `rsync --delete` sync would then remove
+    it permanently. Driven end to end against real git repositories, set up as the chart sets them
+    up: the local note survives a sync and the remote's notes arrive. The diverged case is its own
+    test.
     """
     if not shutil.which("flock"):  # pragma: no cover - present on every Linux CI image
         pytest.skip("flock is not installed")
@@ -348,11 +296,9 @@ def test_a_locally_recorded_note_survives_the_sidecar(tmp_path: Path) -> None:
 def test_a_diverged_checkout_warns_rather_than_crash_looping_the_pod(tmp_path: Path) -> None:
     """A stranded note *and* a moved remote is a warning, and the pod keeps serving.
 
-    `once` is an init container. Returning non-zero on a divergence would crash-loop the pod on a
-    note whose push failed — trading a stale graph for no graph at all. Resolving the divergence is
-    `kg/git_writer.py`'s job (it replays its own unpushed commits on the next write, see
-    `tests/test_knowledge.py`); this script's job until then is to serve what the pod holds and say
-    so. What it must never do is silently drop the local note, which is the assertion below.
+    `once` is an init container, so failing on divergence would crash-loop the pod. Resolving it is
+    `kg/git_writer.py`'s job (it replays unpushed commits on the next write); this script serves
+    what the pod holds, says so, and never silently drops the local note.
     """
     if not shutil.which("flock"):  # pragma: no cover - present on every Linux CI image
         pytest.skip("flock is not installed")
@@ -408,13 +354,9 @@ def _sync(tmp_path: Path, remote: Path, note_repo: Path) -> "subprocess.Complete
 def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
     """The replica publish must fail loudly rather than empty the directory the app is reading.
 
-    Guarding the *shape* and not just the missing package: reintroducing any `rm -rf` of the publish
-    directory reintroduces the outage even with rsync present, because the destructive branch is
-    reachable on any rsync failure (a dead remote, a full disk, a permission change).
-
-    This covers the replica path, which is now reached only by a pod with no writable clone. The
-    path a pod *with* one takes is asserted behaviourally above, because that is where the
-    `--delete` did real damage.
+    Guards the *shape*: any `rm -rf` of the publish directory is reachable on any rsync failure
+    (dead remote, full disk, permissions). This covers the replica path, reached only by a pod with
+    no writable clone; the clone path is asserted behaviourally above.
     """
     script = (DEPLOY / "knowledge-sync.sh").read_text()
     destructive = [
@@ -432,18 +374,12 @@ def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
 
 
 def test_the_image_carries_the_revision_it_was_built_from() -> None:
-    """`deployment_revision` must be settable by a build, or AG-14 reads as met while being unmet.
+    """`deployment_revision` must be settable by a build, or every audit record reads `"unknown"`.
 
-    `core/config/` has always said the F6 image build injects the revision, and until REV-17
-    no build did: nothing in the Containerfile, the chart or CI set `CHEMCLAW_DEPLOYMENT_REVISION`,
-    so every audit record in every deployment carried the literal `"unknown"`. The whole point of
-    the field is tying a past agent result to the exact prompt/skill/config version that produced
-    it, and a constant answers no such question.
-
-    Pinned in three parts because each is separately droppable: the ARG must exist, it must reach
-    the image's environment under the name the settings prefix reads, and CI must actually pass a
-    value. The image workflow additionally runs the built image and compares — only that can prove
-    the value arrived, and only a built image can do it.
+    The field ties a past result to the prompt/skill/config version that produced it. Pinned in
+    three separately droppable parts: the ARG exists, it reaches the image environment under the
+    name the settings prefix reads, and CI passes a value. The image workflow additionally runs the
+    built image and compares.
     """
     containerfile = (DEPLOY / "Containerfile").read_text()
     assert "ARG CHEMCLAW_REVISION" in containerfile, "the Containerfile declares no revision ARG"
@@ -461,16 +397,10 @@ def test_the_image_carries_the_revision_it_was_built_from() -> None:
 def test_the_chart_gives_each_bundle_the_halves_its_manifest_declares() -> None:
     """`server`/`worker` in values must match the bundle's own `connector.yaml`, both ways.
 
-    These two flags are the chart's only hand-maintained mirror of a manifest, and each direction
-    fails silently in a different way. A bundle with `jobs:` and no `worker: true` gets no pod
-    polling its queue, so every job it starts waits forever — the exact failure
-    `chemclaw.durable.registry`
-    exists to prevent, one layer out. A bundle with `server: true` and no `endpoint:` gets an app
-    Deployment running `uvicorn connectors.<name>.server.app:app` against a module that does not
-    exist, which is a crash loop plus a bogus entry in the front door's address map.
-
-    Derived from the manifests rather than listed, so a new bundle is covered on the day it is
-    created.
+    These flags are the chart's only hand-maintained mirror of a manifest. `jobs:` without
+    `worker: true` leaves the queue unpolled, so every job waits forever; `server: true` without an
+    `endpoint:` crash-loops on a missing module and adds a bogus address. Derived from the
+    manifests, so a new bundle is covered the day it is created.
     """
     from chemclaw.connectors.registry import discovered
 
@@ -482,13 +412,7 @@ def test_the_chart_gives_each_bundle_the_halves_its_manifest_declares() -> None:
 
 
 def test_every_shipped_connector_has_a_chart_entry() -> None:
-    """A bundle with no `connectors` entry could never be given pods — DEP-3's successor.
-
-    The old guard here forced the MCP Deployments *off*, because they would have run a stdio server
-    with no stdin. Connectors are HTTP servers with a health route, so the failure mode inverted:
-    the
-    risk is no longer deploying them, it is shipping a bundle the chart cannot deploy at all.
-    """
+    """A bundle with no `connectors` entry could never be given pods."""
     from chemclaw.connectors.registry import discovered
 
     entries = _values()["connectors"]
@@ -496,19 +420,10 @@ def test_every_shipped_connector_has_a_chart_entry() -> None:
         assert name in entries, f"connector bundle {name!r} has no entry in values.yaml connectors"
         assert "enabled" in entries[name]
         # A count for every half this release actually pods, and none for a half it does not. A
-        # `url:` entry renders no Deployment and no Service by design
-        # (`deployment-connectors.yaml` gates on `and $cfg.server (not $cfg.url)`), so a server
-        # count on one would declare a number of pods that never exist — the kind of value a
-        # reader would later try to tune.
-        #
-        # **The worker half is asked for separately, and that is the hole this used to leave.**
-        # The worker block is deliberately *not* conditioned on `url` — durable jobs run on our own
-        # Temporal queue whoever hosts the tools — while the only count this test demanded was
-        # skipped entirely for a `url:` bundle. One such bundle owning durable work would have
-        # rendered an empty `replicas` (Kubernetes reads that as 1) and contributed `nil | int` = 0
-        # to `chemclaw.fleetPools`, so the connection budget would have been short by exactly
-        # the pods that were running. No shipped bundle is that shape today, which is why it was
-        # latent; the shape is legal, which is why it is checked.
+        # `url:` entry renders no app Deployment or Service (`and $cfg.server (not $cfg.url)`), but
+        # its worker half is *not* conditioned on `url` — durable jobs run on our own Temporal queue
+        # — so it still needs a count, or `replicas` renders empty and `chemclaw.fleetPools`
+        # under-counts its pods.
         entry = entries[name]
         if entry.get("server") and not entry.get("url"):
             assert "serverReplicas" in entry or "replicas" in entry, (
@@ -521,16 +436,11 @@ def test_every_shipped_connector_has_a_chart_entry() -> None:
 
 
 def test_a_connectors_two_deployments_are_sized_separately() -> None:
-    """One knob drove two differently-shaped Deployments, and each cost connections.
+    """A connector's server and worker Deployments are sized by separate knobs.
 
-    `calc` serves MCP requests from one Deployment and polls a Temporal queue from another. Both
-    read `$cfg.replicas`, so scaling the server to 4 for request load also ran four queue pollers
-    and spent four more of `postgres.maxConnections` — a change nobody asked for, made by the
-    knob's shape rather than by anyone's intent.
-
-    Asserted on the template text because rendering needs `helm`, which this offline suite does
-    not have. Both halves must fall back to `replicas`: every bundle shipped here sizes its two
-    halves the same, and the split must not turn that into two values to keep in step.
+    One shared `replicas` meant scaling the server for request load also ran extra queue pollers and
+    spent `postgres.maxConnections` nobody asked for. Both halves fall back to `replicas`, so the
+    common case stays one value. Asserted on template text because this suite has no `helm`.
     """
     template = (CHART / "templates" / "deployment-connectors.yaml").read_text()
     app, worker = (
@@ -549,15 +459,10 @@ def test_a_connectors_two_deployments_are_sized_separately() -> None:
 def test_an_externally_hosted_connector_gets_no_pods_and_no_service() -> None:
     """`url` on a bundle means somebody else runs its server, so the app half must not render.
 
-    Such a bundle still declares an `endpoint:` and therefore still carries `server: true` — that
-    flag mirrors the manifest and nothing else (the test above). What it must not get is a
-    Deployment running `uvicorn connectors.<name>.server.app:app` from our image against a module
-    that does not exist, plus a Service selecting pods that will never appear.
-
-    Pinned as the *absence of an unguarded conditional* rather than the presence of a guarded one:
-    the failure this prevents is a future edit reverting a block to a bare `if $cfg.server`, and
-    only counting both forms can see that. The rendered proof is `make helm-validate`, which runs
-    `helm` — this suite is the offline half and has no renderer.
+    Such a bundle still carries `server: true` (it mirrors the manifest's `endpoint:`); what it must
+    not get is a Deployment against a module that does not exist and a Service selecting no pods.
+    Pinned as the *absence of an unguarded* `if $cfg.server`, the edit this prevents; the rendered
+    proof is `make helm-validate`.
     """
     template = (CHART / "templates" / "deployment-connectors.yaml").read_text()
     assert template.count("{{- if and $cfg.server (not $cfg.url) }}") == 2, (
@@ -575,11 +480,9 @@ def test_an_externally_hosted_connector_gets_no_pods_and_no_service() -> None:
 def test_an_externally_hosted_connector_is_dialled_where_the_operator_says() -> None:
     """The address map must follow the same `url` the pods do, or it names a Service that is absent.
 
-    This is the half that fails silently. `connectors/registry.py::_endpoint_url` lets the computed
-    override beat the manifest's own URL, so a chart that kept computing an in-cluster address for
-    an externally hosted bundle would point the front door at a name resolving to nothing — and the
-    connector degrades rather than erroring (`connectors/transport.py`), so the symptom is a
-    capability that is quietly missing from every turn.
+    `_endpoint_url` lets the computed override beat the manifest's URL, and a connector that cannot
+    be reached degrades rather than erroring, so the symptom would be a capability quietly missing
+    from every turn.
     """
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
     _, _, definition = helpers.partition('define "chemclaw.connectorUrls"')
@@ -593,9 +496,8 @@ def test_an_externally_hosted_connector_is_dialled_where_the_operator_says() -> 
 def test_an_externally_hosted_connector_is_not_counted_against_the_connection_ceiling() -> None:
     """A pod that does not exist may not spend the fleet's Postgres budget.
 
-    `chemclaw.fleetPools` multiplies into the ceiling `Settings` refuses to exceed, so an
-    over-count is not cosmetic: it shrinks the pool every real pod is allowed, or trips the refusal
-    outright and CrashLoops the release.
+    `chemclaw.fleetPools` feeds the ceiling `Settings` refuses to exceed, so an over-count shrinks
+    every real pod's pool or crash-loops the release.
     """
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
     _, _, definition = helpers.partition('define "chemclaw.fleetPools"')
@@ -607,10 +509,8 @@ def test_an_externally_hosted_connector_is_not_counted_against_the_connection_ce
 def test_a_connector_url_is_only_declared_beside_a_server() -> None:
     """`url` on a bundle with no `server` would silently do nothing.
 
-    `chemclaw.connectorUrls` only visits `enabled && server` entries, so an operator who set `url`
-    on a jobs-only bundle (`qm`) would get no error and no effect — the front door would keep the
-    manifest's own address. Vacuous over the shipped values by design: every bundle here is ours.
-    It exists so the first entry that sets `url` is checked against the one shape it works in.
+    `chemclaw.connectorUrls` only visits `enabled && server` entries. Vacuous over the shipped
+    values by design; it checks the first entry that sets `url` against the one shape it works in.
     """
     for name, cfg in _values()["connectors"].items():
         if cfg.get("url"):
@@ -650,15 +550,9 @@ def test_schedules_are_applied_by_a_post_install_hook() -> None:
 def test_the_route_pins_a_browser_to_one_front_door_pod() -> None:
     """Session affinity is a correctness requirement of the front door, not a tuning preference.
 
-    The chart runs the front door at two replicas and autoscales to six. The per-session turn
-    guard is durable (`session_turns`, D-121) and so are uploaded attachments
-    (`session_attachments`, D-2026-10-04-an-upload-is-session-state-not-pod-state), but a running
-    turn is not: its event pump lives in the process that started it, so following or stopping it
-    from a sibling pod answers 404 "no turn is running for this session".
-
-    Asserted rather than left to the haproxy router's default, because a default that is silently
-    flipped cluster-wide would break the live view of every turn with no change to this
-    repository.
+    The turn guard and attachments are durable, but a running turn's event pump lives in the process
+    that started it, so following or stopping it from a sibling pod answers 404. Asserted rather
+    than left to the router's default, which could be flipped cluster-wide.
     """
     route = (CHART / "templates" / "service-route.yaml").read_text()
     assert 'haproxy.router.openshift.io/disable_cookies: "false"' in route
@@ -672,11 +566,9 @@ def test_push_credential_is_declared() -> None:
 def test_connector_urls_are_computed_from_the_deployed_set() -> None:
     """The address the front door dials must come from the values block that creates the Service.
 
-    Hand-writing `CHEMCLAW_CONNECTOR_URLS` in `config` would let it name a connector with no
-    pods, or
-    miss one that has them — a failure that looks like a capability silently disappearing. The
-    ConfigMap therefore *includes* the helper that ranges over `.Values.connectors`, and the helper
-    builds each URL from the Service name and `connectorPort`.
+    A hand-written `CHEMCLAW_CONNECTOR_URLS` could name a connector with no pods or miss one, so the
+    ConfigMap includes the helper that ranges over `.Values.connectors` and builds each URL from the
+    Service name and `connectorPort`.
     """
     config = (CHART / "templates" / "config.yaml").read_text()
     assert 'CHEMCLAW_CONNECTOR_URLS: {{ include "chemclaw.connectorUrls" . | quote }}' in config
@@ -687,19 +579,12 @@ def test_connector_urls_are_computed_from_the_deployed_set() -> None:
 
 
 def test_disabling_a_connector_takes_its_tools_off_the_agent_too() -> None:
-    """`enabled: false` removed the pods and left the tool advertised, for as long as it existed.
+    """`enabled: false` must take the bundle's tools off the agent, not only its pods.
 
-    `values.yaml` said `CHEMCLAW_CONNECTORS_ENABLED` lived "in `config` below" and it was in none
-    of the entries there — so the agent ran the setting's default, which is the empty string, which
-    `registry.enabled()` reads as *every discovered bundle* ("discovery is enablement until you say
-    otherwise"). A disabled `qm` therefore still advertised its jobs: the launcher started the
-    wrapper on the polled queue and its child on `connector-qm`, which nobody polls, and the
-    chemist was told "running" until the 25 h ceiling. Latent only because all seven shipped
-    entries are `enabled: true`; it fires the first time anyone uses the switch the file documents.
-
-    Derived rather than hand-written, for the same reason `CHEMCLAW_CONNECTOR_URLS` is: a second
-    list of the same topology goes stale the first time a bundle is toggled, and this is the copy
-    whose staleness is invisible.
+    An unset `CHEMCLAW_CONNECTORS_ENABLED` means *every discovered bundle*, so a disabled bundle
+    would still be advertised and its jobs would wait on an unpolled queue. Derived from the
+    connectors block, like `CHEMCLAW_CONNECTOR_URLS`, because a second hand-written list goes stale
+    invisibly.
     """
     config = (CHART / "templates" / "config.yaml").read_text()
     assert (
@@ -728,10 +613,8 @@ def test_disabling_a_connector_takes_its_tools_off_the_agent_too() -> None:
 def test_a_release_that_enables_no_connector_is_refused_rather_than_inverted() -> None:
     """The one intent this variable cannot express, so it must not be rendered by accident.
 
-    An empty `CHEMCLAW_CONNECTORS_ENABLED` means "every bundle the image ships". So deriving it
-    from a connectors block where an operator has disabled *everything* would render the empty
-    string and load all of them — the exact opposite of what was asked for, and a worse failure
-    than the one this derivation fixes, because it would arrive by way of the fix.
+    An empty `CHEMCLAW_CONNECTORS_ENABLED` means "every bundle the image ships", so a release that
+    disables everything would load all of them; it is refused instead.
     """
     helper = (CHART / "templates" / "_helpers.tpl").read_text()
     _, _, definition = helper.partition('define "chemclaw.connectorsEnabled"')
@@ -756,14 +639,9 @@ def test_connectors_are_reachable_only_from_chemclaw_pods() -> None:
 def test_a_comment_never_swallows_the_line_after_it() -> None:
     """A `-}}` comment closure strips the following newline, gluing the next line onto the previous.
 
-    Harmless at the top of a document (the next line is an unindented `apiVersion:`, and there is no
-    preceding output to glue it to) and **fatal mid-document**: a `{{- /* … */ -}}` sitting inside a
-    `data:` block appended `CHEMCLAW_NOTE_REPO_DIR:` to the line above, and `helm lint` failed with
-    "did not find expected key".
-
-    The brace-balance and include/values checks above could not see this — it is a *whitespace*
-    bug, not a structural one — so CI's `helm lint` caught it first. This is the offline half:
-    a comment closed with `-}}` must not be followed by an indented line.
+    Harmless at the top of a document, fatal mid-document (`helm lint`: "did not find expected
+    key"). A whitespace bug the structural checks cannot see, so: a comment closed with `-}}` must
+    not be followed by an indented line.
     """
     offenders: list[str] = []
     for path in [*TEMPLATES, CHART / "templates" / "_helpers.tpl"]:
@@ -778,52 +656,28 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 
 
 # CRDs kubeconform validates against the **datreeio catalog** rather than its bundled defaults.
-# These are checked as strictly as a core kind; they are listed apart only because the `Makefile`
-# has to supply the catalog `-schema-location` for them to resolve at all.
-#
-# `ServiceMonitor` sat in `_UNVALIDATED_KINDS` and did not belong there. The CI run that first
-# rendered a `PrometheusRule` reported `29 resources found — Valid: 28, Skipped: 1`: exactly one
-# kind in the whole chart lacks a schema, so both Prometheus-operator CRDs were being validated all
-# along. The exemption had never been checked against what kubeconform actually did.
-#
-# `ScaledObject` and `TriggerAuthentication` (KEDA, `templates/keda-interactive.yaml`) joined it
-# checked rather than assumed: the catalog serves `keda.sh/scaledobject_v1alpha1.json` and
-# `triggerauthentication_v1alpha1.json`, both fetched with a 200 before they were listed here.
+# Checked as strictly as a core kind; listed apart only because the `Makefile` must supply the
+# catalog `-schema-location` for them. Each entry's schema was confirmed to exist in the catalog.
 _CATALOG_VALIDATED_KINDS = frozenset(
     {"ServiceMonitor", "PodMonitor", "PrometheusRule", "ScaledObject", "TriggerAuthentication"}
 )
 
 # The kinds kubeconform genuinely has no schema for, so `make helm-validate` runs with
-# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
-# stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
+# `-ignore-missing-schemas` and *skips* them. Keeping the set explicit stops that flag being a hole.
 #
-# `Route` is the OpenShift one, absent from both kubeconform's defaults and the datreeio catalog.
-# `AlertmanagerConfig` is the second and it was **not listed here until the gate was first run**: it
-# sat in a set called `_UNRENDERED_BY_DEFAULT_KINDS`, whose stated reason was that it "never reaches
-# kubeconform in the validation render and cannot appear in its `Skipped` count". That is false —
-# `make helm-validate`'s union arm sets `monitoring.alertmanager.enabled=true`, so it renders, it
-# reaches kubeconform, and it is skipped (the catalog carries a `v1alpha1` schema for it and no
-# `v1beta1`). A kind is exempt because of what kubeconform can do with it, which is a property of
-# the kind; whether a given arm renders it is a property of the arm, and conflating the two put the
-# second skipped kind in the set defined as the one that cannot be skipped.
+# `Route` is OpenShift's, absent from both schema sources; `AlertmanagerConfig` is rendered by the
+# union arm and the catalog has no `v1beta1` schema for it. A kind is exempt because of what
+# kubeconform can do with it, not because of which arm renders it.
 _UNVALIDATED_KINDS = frozenset({"Route", "AlertmanagerConfig"})
 
 
 def test_only_the_known_crds_are_unvalidated_by_kubeconform() -> None:
     """Pin which kinds the chart renders, so `-ignore-missing-schemas` cannot hide a new one.
 
-    `make helm-validate` must pass `-ignore-missing-schemas` because the chart renders an OpenShift
-    `route.openshift.io/v1 Route`, and no JSON schema for it exists in kubeconform's defaults or in
-    the datreeio CRDs catalog — both 404. Without the flag the target can never pass, which is why
-    it had never been seen to pass: the only workflow that ran it was stranded where GitHub Actions
-    does not read (D-117).
-
-    The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
-    back offline: every kind the chart renders is a core Kubernetes kind, a CRD the catalog covers,
-    or one of the genuinely unvalidated kinds named above. It is a claim about the *kinds*; how many
-    **resources** of them each render arm emits is
-    `test_every_resource_kubeconform_skips_is_one_this_file_declared`, which is a different question
-    and used to be answered by comparing the two.
+    The flag is needed for the OpenShift `Route`; its cost is that an unknown kind is skipped rather
+    than rejected. Every rendered kind must be a core kind, a catalog-covered CRD, or a named
+    unvalidated kind. How many *resources* each arm skips is a different question, answered by
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`.
     """
     core_kinds = {
         "ConfigMap",
@@ -851,11 +705,9 @@ def test_only_the_known_crds_are_unvalidated_by_kubeconform() -> None:
 def _kubeconform_arms() -> list[list[str]]:
     """The flag sets `make helm-validate` actually pipes through kubeconform.
 
-    Read out of the `Makefile`'s own `for flags in …` loop rather than restated here, for the reason
-    `test_the_union_render_covers_every_switch_this_chart_ships_off` gives about that same literal:
-    a copy of the list is a second answer to the question, and it stays green while the gate's
-    render narrows underneath it. Split on whitespace rather than with a second `shlex` pass,
-    because the `--set-json` values carry the quotes helm needs and a posix split strips them.
+    Read out of the `Makefile`'s own `for flags in …` loop rather than copied, so it cannot stay
+    green while the gate's render narrows. Split on whitespace rather than `shlex`, because the
+    `--set-json` values carry quotes helm needs.
     """
     makefile = (DEPLOY.parent / "Makefile").read_text()
     loop = next(line for line in makefile.splitlines() if line.lstrip().startswith("for flags in"))
@@ -872,24 +724,10 @@ def _kubeconform_arms() -> list[list[str]]:
 def test_every_resource_kubeconform_skips_is_one_this_file_declared() -> None:
     """Take the skipped count off the tool, for every arm the gate validates.
 
-    `_UNVALIDATED_KINDS` is a claim about what kubeconform does, and this file used to check it by
-    comparing `len(_UNVALIDATED_KINDS)` against a literal `_EXPECTED_SKIPPED_RESOURCES = 1` sitting
-    six lines below it. Both halves were wrong in a way only running the tool could show, and it had
-    never been run here — `kubeconform` and `promtool` are absent from the sandbox, so `make
-    helm-validate` exits before its first render and the whole target had been taken on trust.
-
-    Run: the default arm reports `Skipped: 1` and the **union arm reports `Skipped: 3`** — two
-    `Route`s (the release's own and `chemclaw-mcp-face`'s) plus the `AlertmanagerConfig` that a set
-    named `_UNRENDERED_BY_DEFAULT_KINDS` claimed could never appear in this count. So the comparison
-    was between a number of *kinds* and a number of *resources*, which are different quantities
-    (`tasks/lessons.md`: two numbers on different bases do not compare, however carefully each was
-    measured); it held at `1 == 1` only because the default arm happens to render exactly one Route.
-
-    The deeper defect is what the comment claimed for itself: the literal was pinned, in its own
-    words, "in a form that can be compared against its actual output rather than believed" — and
-    nothing compared it. Its only reader was an assertion against the `len()` of a set in the same
-    file. So the count is now *derived* from the render per arm and *measured* against kubeconform's
-    own summary line, which is the only thing that can settle a claim about somebody else's tool.
+    `_UNVALIDATED_KINDS` is a claim about what kubeconform does, so the expected number of skipped
+    *resources* per arm is derived from the render and compared with kubeconform's own summary line.
+    Kinds and resources are different quantities (the union arm renders two `Route`s), so a count of
+    the set cannot stand in for it.
     """
     arms = _kubeconform_arms()
     assert len(arms) >= 2, (
@@ -952,14 +790,10 @@ def _kube_version() -> str:
 
 
 def test_something_actually_scrapes_the_metrics_endpoint() -> None:
-    """`/metrics` must be collected, not merely served (REV-2).
+    """`/metrics` must be collected, not merely served.
 
-    The route has existed since DEP-4 and nothing under `deploy/` scraped it — no ServiceMonitor,
-    no PodMonitor, no `prometheus.io/scrape` annotation — so every counter, gauge and histogram in
-    the system was exposed and uncollected in production. That is the quiet way an observability
-    story fails: the code is written, the endpoint answers, and no dashboard or alert has ever had
-    a data point. Three of the metrics this repo added most recently exist specifically so an
-    operator can see a degraded turn or a failing PR-gate; none of them was reaching anyone.
+    Without a ServiceMonitor, PodMonitor or scrape annotation every metric is exposed and
+    uncollected, and no dashboard or alert ever has a data point.
     """
     monitor = next(
         (
@@ -973,16 +807,10 @@ def test_something_actually_scrapes_the_metrics_endpoint() -> None:
 
 
 def test_the_scrape_targets_every_service_by_port_name() -> None:
-    """It must select the Services that serve `/metrics`, on the port those Services name.
+    """It must select every Service that serves `/metrics`, on the port those Services name.
 
-    By *name* rather than number, so a port change cannot silently orphan the scrape.
-
-    And **all** of them. This assertion used to require `component: service` — the front door alone
-    — on the reasoning that a connector records through `chemclaw.core.metrics_bridge`, "whose
-    contract is that a metric recorded outside the front door is a no-op". That reasoning was
-    false: the bridge imports a stdlib-only module, so the import succeeds in every process and a
-    connector's counters were landing in a live registry nothing read. Pinning the narrow selector
-    is how a wrong sentence in a docstring became a wrong deployment and stayed one.
+    By *name* rather than number, so a port change cannot orphan the scrape. Connectors as well as
+    the front door: their counters land in a live registry too.
     """
     text = (CHART / "templates" / "servicemonitor.yaml").read_text()
     assert "app.kubernetes.io/component:" not in text.split("spec:", 1)[1], (
@@ -1002,13 +830,9 @@ def test_the_scrape_targets_every_service_by_port_name() -> None:
 def test_every_worker_is_probed_and_scraped() -> None:
     """The processes with no Service are exactly the ones that were invisible.
 
-    Three chart templates asserted "no probes: liveness is the Temporal poll itself" — an intent
-    nothing enforced. A worker whose poll loop died held its process open, so Kubernetes reported
-    `Running`, no probe disagreed, and no metric reached anyone either: the two gaps hid each other,
-    because both were waiting on the same missing HTTP surface.
-
-    Asserted through the shared helper rather than per template, which is the point of there being
-    one: a connector bundle enabled tomorrow is probed and scraped without an edit here.
+    A worker whose poll loop died keeps its process open, so without a probe and a scrape Kubernetes
+    reports `Running` and no metric disagrees. Asserted through the shared helper, so a connector
+    bundle enabled tomorrow is covered without an edit here.
     """
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
     assert 'define "chemclaw.workerProbes"' in helpers
@@ -1016,10 +840,8 @@ def test_every_worker_is_probed_and_scraped() -> None:
     def _includes(text: str, helper: str) -> bool:
         """Whether `text` *invokes* the helper, as opposed to mentioning it.
 
-        Matched as a template action anchored to its line, because both worker templates also
-        name these helpers in their explanatory comments — and a substring check let a mutation
-        that deleted the connector worker's probes pass on the strength of the comment describing
-        them. A test a comment can satisfy is a test of the comment.
+        Matched as a template action anchored to its line, because the worker templates also name
+        these helpers in comments; a substring check would be satisfied by the comment.
         """
         return re.search(rf'^\s*\{{\{{-\s*include "{helper}"', text, flags=re.MULTILINE) is not None
 
@@ -1041,15 +863,11 @@ def test_every_worker_is_probed_and_scraped() -> None:
 
 
 def test_the_scraped_path_is_a_route_the_app_serves() -> None:
-    """The executed half: the path the chart scrapes has to exist on the real app (D-142).
+    """The executed half: the path the chart scrapes has to exist on the real app.
 
-    A ServiceMonitor naming `/metric` renders, validates, deploys, and collects nothing forever —
-    Prometheus reports the target as down and an operator reads it as a broken pod. Nothing in the
-    chart can catch that, because the chart has no idea what routes the app declares. This is the
-    same lesson as the OTel crash loop: a production value has to be executed, not type-checked.
-
-    One `monitoring.path` now reaches three kinds of process, so all three are checked against the
-    real app they run: the front door, a connector's MCP server, and a worker's probe surface.
+    A wrong path renders, validates and collects nothing forever, and the chart cannot know the
+    app's routes. `monitoring.path` reaches three kinds of process, so all three real apps are
+    checked: the front door, a connector's MCP server, and a worker's probe surface.
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -1088,11 +906,8 @@ _POD_SPECS: dict[str, int] = {
 def test_every_pod_spec_declares_the_restricted_profile() -> None:
     """A `restricted` PSA namespace rejects a pod that does not *declare* it runs as non-root.
 
-    The image has run as a non-root UID since F6-T1, and that is a different statement from the pod
-    saying it must — Pod Security Admission reads the declaration. With none of these present, a
-    namespace labelled `pod-security.kubernetes.io/enforce=restricted` (the default posture for a
-    regulated OpenShift cluster) rejected every workload in this chart. The image being correct is
-    what made it easy to miss: nothing fails until admission, in someone else's cluster.
+    The image running as non-root is not enough: Pod Security Admission reads the pod's
+    declaration, and a missing one fails only at admission, in someone else's cluster.
     """
     for filename, expected in _POD_SPECS.items():
         text = (CHART / "templates" / filename).read_text()
@@ -1105,9 +920,7 @@ def test_every_pod_spec_declares_the_restricted_profile() -> None:
 def test_every_container_drops_its_capabilities() -> None:
     """The container half of the same profile, on main containers, init containers and sidecars.
 
-    PSA evaluates *every* container in the pod, so a compliant app container beside a sidecar that
-    declares nothing still fails admission. The knowledge-sync sidecar and the two init containers
-    are as much a part of this chart's attack surface as the app.
+    PSA evaluates *every* container, so one undeclared sidecar fails admission for the pod.
     """
     containers = sum(
         (CHART / "templates" / name)
@@ -1123,10 +936,8 @@ def test_every_container_drops_its_capabilities() -> None:
 def test_the_restricted_profile_itself_is_not_a_toggle() -> None:
     """`runAsNonRoot`/`drop: ALL`/`seccompProfile` are asserted, never read from values.
 
-    A chart that lets a deployment switch off `allowPrivilegeEscalation: false` is offering a
-    footgun rather than a knob. Only `readOnlyRootFilesystem` — which is *not* part of the
-    restricted profile and cannot be defaulted on while the workers shell out to xtb/crest — is
-    configurable, and it is documented in `values.yaml` with what must be provisioned first.
+    A switch for these is a footgun, not a knob. Only `readOnlyRootFilesystem` — not part of the
+    restricted profile, and not defaultable while workers shell out to xtb/crest — is configurable.
     """
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
     profile = helpers.split('define "chemclaw.podSecurityContext"')[1].split("{{- end -}}")[0]
@@ -1142,15 +953,10 @@ def test_the_restricted_profile_itself_is_not_a_toggle() -> None:
 def test_the_front_door_has_an_ingress_policy_at_all() -> None:
     """Something must bound who may open a connection to the front door.
 
-    The chart's only policy declared `policyTypes: [Egress]`, so no ingress rule existed and any pod
-    in any namespace could reach `chemclaw-service:8080`. This is the rule that closes that.
-
-    It is *not* what makes `/metrics` safe, and this docstring used to say it was — the fourth of
-    four places asserting a control that does not hold. A NetworkPolicy selects peers, not paths;
-    the peer it must allow is the router; and the Route declares no `spec.path`, so every path the
-    front door serves is published on the external host. What bounds the exposition is D-152's
-    declared-label allowlist, asserted in `tests/test_metrics.py`, and `route.ipWhitelist` is the
-    only control at this layer (`tests/test_helm_chart.py`).
+    This ingress rule does *not* make `/metrics` safe: a NetworkPolicy selects peers, not paths, the
+    router must be allowed, and the Route publishes every path. The exposition is bounded by the
+    declared-label allowlist (`tests/test_metrics.py`) and `route.ipWhitelist`
+    (`tests/test_helm_chart.py`).
     """
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     assert "-service-ingress" in policy, "the front door has no ingress NetworkPolicy"
@@ -1159,17 +965,10 @@ def test_the_front_door_has_an_ingress_policy_at_all() -> None:
 
 
 def test_a_new_listening_port_came_with_the_rule_that_bounds_it() -> None:
-    """Opening a port on the worker pods without an ingress rule would have widened the fleet.
+    """A listening port on the worker pods must ship with the ingress rule that bounds it.
 
-    A NetworkPolicy only restricts pods that some Ingress-typed rule selects, and the workers were
-    selected by none — so before they had a listener, "accepts everything" was true and harmless.
-    Giving them `/healthz`, `/readyz` and `/metrics` is what made it matter, so the rule ships in
-    the same change as the port rather than as a follow-up
-    (D-2026-08-01-every-process-carries-its-own-witness).
-
-    The scraper is granted through `monitoringNamespaces` and not `ingressNamespaces`, which is the
-    whole reason the second list exists: the front door needs the router *and* the scraper, and
-    nothing else in the chart should be reachable from the router.
+    The scraper is granted through `monitoringNamespaces`, not `ingressNamespaces`: the front door
+    needs the router *and* the scraper, and nothing else should be reachable from the router.
     """
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     assert "-worker-ingress" in policy, (
@@ -1192,17 +991,12 @@ def test_a_new_listening_port_came_with_the_rule_that_bounds_it() -> None:
 
 
 def test_a_drain_outlasts_the_work_it_interrupts() -> None:
-    """The default 30 s grace period against a 600 s turn and a 120 s activity drain.
+    """Grace periods must outlast the turn and the activity drain they interrupt.
 
-    Every rolling update, node drain and scale-down SIGKILLed whatever was in flight — and for the
-    front door that is worse than lost capacity, because the state that would make a running turn
-    resumable (its event pump, the live `TurnSession`) lives in the pod's memory by design
-    (D-121). For a worker it means Temporal re-runs the activity only after its
-    start-to-close timeout elapses, so the deploy stalls a job for no reason but how it was killed.
-
-    Both grace periods are *derived* from the budget they must outlast, so raising one raises the
-    other. A hand-written number is the failure being avoided: a setting that looks configured and
-    is silently overridden by a kubelet timer nobody thought to move.
+    Otherwise every rollout, drain and scale-down SIGKILLs in-flight work: a front-door turn's state
+    lives in pod memory, and a worker's activity is re-run only after its timeout. Both grace
+    periods are *derived* from the budget they must outlast, so a kubelet timer cannot silently
+    override it.
     """
     service = (CHART / "templates" / "deployment-service.yaml").read_text()
     assert "CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS" in service, (
@@ -1231,13 +1025,11 @@ def test_a_drain_outlasts_the_work_it_interrupts() -> None:
 
 
 def test_the_drain_budget_the_chart_grants_covers_the_one_the_code_takes() -> None:
-    """The two halves have to agree, and only one of them is in the chart.
+    """The chart's grace period must exceed the drain the code takes.
 
-    `durable/serve.py` waits `worker_graceful_shutdown_seconds` for in-flight activities; the
-    kubelet SIGKILLs at `terminationGracePeriodSeconds`. If the second is not strictly larger the
-    code change buys nothing — the drain is interrupted at exactly the point it was added to avoid.
-    Executed against the real default rather than asserted about the YAML, because the number that
-    matters is the one the worker process actually reads.
+    `durable/serve.py` waits `worker_graceful_shutdown_seconds`; the kubelet SIGKILLs at
+    `terminationGracePeriodSeconds`, which must be strictly larger. Executed against the real
+    default, the number the worker actually reads.
     """
     from chemclaw.core.config import settings
 
@@ -1259,14 +1051,9 @@ def test_the_drain_budget_the_chart_grants_covers_the_one_the_code_takes() -> No
 def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
     """`minReplicas: 2` bounds what the HPA runs and nothing about where it lands or what may go.
 
-    Both replicas could be scheduled onto one node, and a drain could evict both at once — so the
-    second replica bought nothing against either failure it exists for. That matters more here than
-    for a stateless service: the Route pins a browser to one pod on purpose (D-121), so losing a
-    node loses conversation state and not merely capacity.
-
-    Deliberately front-door only. A PDB over the singleton background worker would be worse than
-    none — `minAvailable: 1` makes it un-evictable and blocks every node drain forever — and the
-    singleton is a separate open row needing a distributed checkout lock, not a policy object.
+    Anti-affinity and a PDB keep the two replicas off one node and out of one eviction; it matters
+    because the Route pins a browser to one pod. Front-door only: a PDB over the singleton
+    background worker would make it un-evictable and block every node drain.
     """
     service = (CHART / "templates" / "deployment-service.yaml").read_text()
     assert "chemclaw.spreadAcrossNodes" in service, "both front-door replicas may land on one node"
@@ -1284,10 +1071,8 @@ def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
     assert _values()["service"]["disruptionBudget"]["enabled"] is True
 
     workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
-    # Comments stripped first, for the same reason the `minAvailable` check above parses keys: this
-    # template's whole argument is *about* the background worker, and one of the ADRs it now cites
-    # has that name inside its own slug. A substring check over the prose reads the explanation as
-    # the thing it warns against — the trap this test already documents, met a third time.
+    # Comments stripped first: this template's prose discusses the background worker by name, so a
+    # substring check over it would match the explanation.
     rendered_body = re.sub(r"\{\{-?\s*/\*.*?\*/\s*-?\}\}", "", budget, flags=re.DOTALL)
     assert "PodDisruptionBudget" not in workers and "-background-worker" not in rendered_body, (
         "a PDB over a replicas:1 worker either blocks every node drain in the cluster or permits "
@@ -1298,15 +1083,10 @@ def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
 def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None:
     """The chart may not declare a ceiling its own autoscaling shape exceeds.
 
-    The admission cap is per-process by design (SCALE-1 rejected a fleet-wide counter as a durable
-    write and a heartbeat per turn to bound a resource). Its consequence was left unstated: the load
-    the shared LLM endpoint sees is `maxReplicas × uvicorn workers × the cap`, and with the shipped
-    values that is 48 while the only number anyone reads is 8.
-
-    `Settings` now refuses a configuration whose product exceeds the declared ceiling — but a pod
-    only validates the values it was *given*, so raising `maxReplicas` here would ship a chart that
-    CrashLoops every front-door pod on first deploy. This is the check that catches it before then,
-    against the same arithmetic the validator performs.
+    The admission cap is per process, so the shared LLM endpoint sees
+    `maxReplicas × uvicorn workers × the cap`. `Settings` refuses a product over the declared
+    ceiling, but only for the values a pod was given, so a raised `maxReplicas` would crash-loop
+    every front-door pod; this catches it first, with the validator's arithmetic.
     """
     values = _values()
     autoscaling = values["service"]["autoscaling"]
@@ -1323,10 +1103,8 @@ def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None
         f"{declared}; every front-door pod would refuse to start"
     )
 
-    # The fleet size must be *derived* from the autoscaling block, not written beside it. A second
-    # copy of `maxReplicas` in `config:` goes stale the first time someone scales the front door —
-    # which is precisely the silent multiplication the ceiling exists to catch, reintroduced by the
-    # mechanism meant to catch it.
+    # The fleet size must be *derived* from the autoscaling block, not copied into `config:`, where
+    # it would go stale the first time someone scales the front door.
     assert "CHEMCLAW_SERVICE_FLEET_REPLICAS" not in values["config"], (
         "the fleet size must be derived from service.autoscaling in templates/config.yaml, not "
         "hand-written as a second copy of maxReplicas"
@@ -1347,20 +1125,10 @@ def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None
 def test_the_autoscaler_scales_on_the_quantity_that_actually_runs_out() -> None:
     """CPU cannot see this service saturate, so an HPA that only watches CPU never scales it.
 
-    Measured with the admission semaphore 100% full — every permit held plus 150 idle SSE streams —
-    the pod drew 218 millicores against the then-350 mC scale-up target: 62% of it while completely
-    full, near the threshold rather than blind to it. This docstring said "44%", which is 218/500 —
-    utilization against the *request*, mislabelled as a fraction of the target. The load lane
-    reached the same place from the other side, shedding 33 of 48 offered turns at 35.0% of one
-    core. The cause is structural rather than tunable: a turn is 8.32 s of wall clock and 0.581 s
-    of CPU, so occupancy runs ~14x CPU and no CPU threshold tracks it. `values.yaml` named this as
-    gap DEP-4 for a year with both gauges already exported.
-
-    Four things, each of which was individually enough to leave the fleet at `minReplicas`:
-    the occupancy metric exists, its target is *derived* from the permit count the pods enforce
-    (a literal here goes stale the first time the cap moves, which is the drift the whole chart
-    fights), it fires before the ceiling rather than at it, and the CPU metric stays as the
-    fallback for a cluster whose custom-metrics API cannot serve the series.
+    A turn is mostly wall clock rather than CPU, so a pod with every admission permit held stays
+    near or below a CPU target. The occupancy metric must exist, its target must be *derived* from
+    the permit count the pods enforce, it must fire before the ceiling rather than at it, and CPU
+    stays as a fallback for clusters without the custom-metrics API.
     """
     values = _values()
     hpa = (CHART / "templates" / "service-route.yaml").read_text()
@@ -1396,15 +1164,11 @@ def test_the_autoscaler_scales_on_the_quantity_that_actually_runs_out() -> None:
 
 
 def test_the_capacity_refusal_is_alertable_even_though_it_answers_200() -> None:
-    """A platform refusing two thirds of its chemists reports 100% availability.
+    """A platform refusing most of its chemists can report 100% availability.
 
-    Measured at 400 and 800 offered turns, the wire shape of a shed is `HTTP 200` followed by an SSE
-    `{"type":"error","code":"at_capacity","retryable":true}` frame — 743 of them, invisible to every
-    5xx-based alarm and to any uptime probe. `chemclaw_turns_shed_total` is the only signal, and the
-    one rule on it fired at `> 0`, which cannot distinguish a busy afternoon from an outage.
-
-    So: a *share* alert at `critical` beside the existing any-shedding one, and the leading
-    indicator over the pair of gauges the HPA now scales on, which fires before anything is refused.
+    A shed is `HTTP 200` plus an SSE `at_capacity` frame, invisible to 5xx alarms and uptime probes.
+    So: a *share* alert at `critical` beside the any-shedding one, and a leading indicator over the
+    occupancy gauges that fires before anything is refused.
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     severity = dict(re.findall(r"- alert: (\w+)(?:.|\n)*?severity: (\w+)", rules))
@@ -1427,10 +1191,8 @@ def test_the_capacity_refusal_is_alertable_even_though_it_answers_200() -> None:
 def test_the_fleet_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
     """Startup validation sees the rendered shape once; a cluster keeps changing after that.
 
-    `kubectl scale`, an HPA edited in place, or a rollout that leaves both generations up all push
-    the fleet past its ceiling while every individual pod's configuration stays perfectly valid.
-    Only summing the live per-pod capacity against the declared ceiling can see that, which is why
-    the ceiling is exported as a gauge and not merely validated.
+    `kubectl scale`, an HPA edited in place, or an overlapping rollout push the fleet past its
+    ceiling while every pod stays valid, so the ceiling is exported as a gauge and summed live.
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "ChemclawFleetAboveItsTurnCeiling" in rules
@@ -1462,13 +1224,8 @@ the other. This constant stays a pool count because that is what `chemclaw.fleet
 def _fleet_pools(values: dict[str, Any]) -> int:
     """The Postgres pools this chart renders — the helper's arithmetic.
 
-    **Pools, not pods**, which is the defect this file used to share with the validator: both
-    multiplied `pg_pool_max_size` by a process count, so a front door measured at three pools and
-    48 connections was charged 16 and the shipped chart declared 136 against a real floor of 208.
-
-    Kept here rather than read out of the template because the point of the test is to check the
-    template against the topology *independently*; reading its own answer back would assert
-    nothing.
+    Pools, not pods: a front door holds several pools. Kept here rather than read from the template
+    so the template is checked against the topology independently.
     """
     autoscaling = values["service"]["autoscaling"]
     front_door = (
@@ -1497,12 +1254,7 @@ def _fleet_pools(values: dict[str, Any]) -> int:
 
 
 def _helper_body(name: str) -> str:
-    """One `define` block out of `_helpers.tpl`, for checks a renderless suite can still make.
-
-    `make helm-validate` renders; this file does not, which is why several assertions here compare
-    a render to another render and a whole class of defect walks through. Reading a helper's own
-    text is the half that is available offline.
-    """
+    """One `define` block out of `_helpers.tpl`, for checks a renderless suite can still make."""
     source = (CHART / "templates" / "_helpers.tpl").read_text()
     start = source.index(f'{{{{- define "{name}"')
     # To the next `define`, not the next `end`: the block nests `if`/`range`, so the first `end`
@@ -1517,19 +1269,9 @@ def _helper_body(name: str) -> str:
 def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() -> None:
     """The chart's own numbers must clear the validator every pod runs at startup.
 
-    `core/config/store.py` stated "the deployment total is max_size × processes, which must stay
-    under the server's max_connections" and nothing computed it, so the chart set no pool key at
-    all: every pod ran the code default of 16, and seventeen pooled processes made the fleet's
-    ceiling ~272 against the `max_connections=100` D-119 measured against. `Settings` now refuses
-    the product — which means shipping a chart whose own values exceed it would CrashLoop every
-    pod on first deploy. This is the check that catches that here instead.
-
-    **Checked by constructing a real `Settings`, not by re-implementing the comparison.** This test
-    used to assert `processes * per_pool <= declared` itself, so when the validator's own
-    arithmetic counted *processes* where the front door holds three pools, this test agreed with it
-    and both were wrong together — a declared 136 against a measured floor of 208. Feeding the
-    rendered numbers to the validator leaves exactly one arithmetic in the repository, and any
-    future correction to it lands here on the same commit.
+    `Settings` refuses a pool total over `max_connections`, so a chart whose values exceed it would
+    crash-loop every pod. Checked by constructing a real `Settings` from the rendered numbers rather
+    than re-implementing the comparison, so the repository has exactly one arithmetic.
     """
     from chemclaw.core.config import Settings
 
@@ -1537,10 +1279,8 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     pools = _fleet_pools(values)
     per_pool = int(values["config"]["CHEMCLAW_PG_POOL_MAX_SIZE"])
     declared = int(values["postgres"]["maxConnections"])
-    # The front-door replica ceiling is a *second* input to this budget, not only to the turn one:
-    # one pool per front door is the `/readyz` probe's and one connection wide. Omitting it here
-    # would leave the test constructing a `Settings` at the code default of one replica — passing
-    # on arithmetic no rendered pod runs.
+    # The front-door replica ceiling is a second input to this budget (one `/readyz` pool per front
+    # door); omitting it would construct `Settings` at the default of one replica.
     autoscaling = values["service"]["autoscaling"]
     replicas = (
         autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
@@ -1568,13 +1308,9 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     # pool lands on one server and the second figure must be zero. A release that started
     # declaring a split here without declaring its ceiling would warn on every pod's startup.
     assert settings.fleet_connections_per_server()[1] == 0
-    # **Every number the helper adds comes from the topology, not from a literal.** This suite is
-    # offline and cannot render, so it cannot compare `chemclaw.fleetPools`' answer to the
-    # derivation above — which is how a constant added inside the helper survived: measured, a `+5`
-    # made the chart declare 31 pools for a topology of 26 and all 199 tests here stayed green,
-    # because they compare one render to another or a difference to a difference. What is checkable
-    # without a renderer is the helper's *shape*: the only bare integer in it is the 3 a front door
-    # holds, and every other term is a `.Values` path.
+    # Every number the helper adds must come from the topology, not a literal. Unable to render,
+    # this suite checks the helper's *shape*: the only bare integer is the pools a front door holds,
+    # and every other term is a `.Values` path.
     body = _helper_body("chemclaw.fleetPools")
     literals = {int(n) for n in re.findall(r"\b(\d+)\b", body)}
     assert literals == {3}, (
@@ -1589,12 +1325,7 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     assert "CHEMCLAW_PG_FLEET_POOLS" not in values["config"], (
         "the fleet pool count must be derived in templates/_helpers.tpl, not hand-written"
     )
-    # And not restated in prose either, which is how it went wrong: two comments in this values file
-    # said "17 pooled processes" and "seventeen of them" while the helper rendered
-    # 14, so the arithmetic beside `maxConnections` produced a number the chart does not render.
-    # `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` is the rule; this is its pin.
-    # It covers "pools" as well as "pooled processes" since 2026-09-05, because that is what the
-    # helper counts now and a rename is a way for a pin to stop pinning anything.
+    # And not restated as a count in prose either, where it goes stale against the helper.
     prose = (CHART / "values.yaml").read_text()
     restated = re.findall(
         r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
@@ -1640,41 +1371,27 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
 def _alert_expression(rules: str, name: str) -> str:
     """One alert's `expr:` block, out of the un-rendered template text.
 
-    This suite is deliberately offline (`helm` is `make helm-validate`'s job), so the rule is read
-    as text — and text is the whole file, which is what made an assertion on PromQL fragments pass
-    against the alert's own `description` once that description started quoting them. Slicing from
-    `- alert: <name>` to the next `for:` keeps the comparison in view and leaves the annotations,
-    and the Helm comments above the alert, out of it.
+    Sliced from `- alert: <name>` to the next `for:`, so assertions on PromQL fragments cannot be
+    satisfied by the alert's own `description` or by Helm comments quoting them.
     """
     start = rules.index(f"- alert: {name}")
     return rules[start : rules.index("for:", start)]
 
 
 def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
-    """The same blind spot the turn ceiling has, for the same reason, needing the same pair.
+    """The connection ceiling needs a runtime check, as the turn ceiling does.
 
-    Startup validation sees the shape the chart rendered, once. A `kubectl scale`, an HPA edited in
-    the cluster, or a rollout leaving both generations up all push the live sum past the server's
-    ceiling while every pod's own configuration stays valid.
-
-    The saturation alert is the other half and is the older gap: `requests_waiting` has existed
-    since D-119 as *the* reading that separates an undersized pool from an unreachable database,
-    and nothing consumed it — so the signal was collected and never watched.
+    Scaling or an overlapping rollout pushes the live sum past the server's ceiling while every pod
+    stays valid. The saturation alert on `requests_waiting` is the other half: the reading that
+    separates an undersized pool from an unreachable database.
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "ChemclawFleetAboveItsConnectionCeiling" in rules
-    # **Sliced to the `expr:` block, because searching the whole file made this vacuous.** The
-    # assertions below name PromQL fragments, and the alert's own `description` quotes those
-    # fragments at an operator — so once the annotation explained the two comparisons, every one of
-    # these passed against documentation text. Measured: the expression gained `or vector(0)` on
-    # both `sum()`s and not one assertion moved. A guard that reads prose is not reading the rule.
+    # Sliced to the `expr:` block, because the alert's `description` quotes these fragments.
     expr = _alert_expression(rules, "ChemclawFleetAboveItsConnectionCeiling")
-    # Each server against its own ceiling, and *not* a sum against a sum: enumerated over 200,000
-    # random draws, `sum(pools) > primary + session` never fired with both servers inside their
-    # ceilings and stayed silent in 49,993 where one was over — it can only miss. It also paged a
-    # healthy split whose second ceiling was undeclared, pointing remediation at the wrong server.
-    # The primary's side is the total minus the split store's; with no split the subtrahend is 0 in
-    # every pod and both branches are exactly the comparison this shipped with.
+    # Each server against its own ceiling, not a sum against a sum, which can miss an over-ceiling
+    # server and page a healthy split. The primary's side is the total minus the split store's; with
+    # no split the subtrahend is 0.
     assert "sum(chemclaw_pg_pool_max_size)" in expr
     assert "- sum(chemclaw_pg_session_pool_max_size" in expr
     assert "> max(chemclaw_pg_fleet_max_connections)" in expr
@@ -1685,16 +1402,12 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
         "a bare sum() of the session gauge is a vector join that goes empty when a pod has opened "
         "no pool, which silences the comparison it is part of"
     )
-    # Each branch self-disabling on *its own* ceiling. Sharing the primary's guard meant
-    # `postgres.maxConnections: 0` — a documented "no ceiling" — also silenced a declared
-    # `sessionStoreMaxConnections`: measured, a session store at 500 against 180 with nothing
-    # firing. Two independent ceilings, two independent guards.
+    # Each branch self-disables on *its own* ceiling, so `postgres.maxConnections: 0` ("no ceiling")
+    # does not silence a declared `sessionStoreMaxConnections`.
     assert "max(chemclaw_pg_session_fleet_max_connections) > 0" in expr
     assert "max(chemclaw_pg_fleet_max_connections) > 0" in expr
-    # **Disjoined, and this is the assertion the substrings could not make.** Every check above
-    # holds when the two branches are joined by `and` instead of `or` — measured, and an `and`
-    # there means the alert fires only when *both* servers are over, i.e. effectively never. The
-    # operator that combines them is the whole semantics; a fragment list cannot see it.
+    # The branches must be joined by `or`: with `and` the alert fires only when both servers are
+    # over, and every fragment check above would still pass.
     joined = " ".join(expr.split())
     assert ") or ( max(chemclaw_pg_session_fleet_max_connections)" in joined, (
         "the two per-server comparisons are joined by something other than `or`; either one being "
@@ -1724,35 +1437,13 @@ def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do(
 
 
 def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
-    """`replicas: 1` is not one process; it is one process *at steady state*.
+    """`replicas: 1` is one process only at steady state; a rollout must not overlap two.
 
-    No Deployment in this chart declared a `strategy`, so all of them take the Kubernetes default
-    `RollingUpdate` with `maxSurge: 25%` / `maxUnavailable: 25%` — which for a single replica rounds
-    to `maxSurge: 1, maxUnavailable: 0`: the new pod is started and becomes Ready *before* the old
-    one is told to stop, and the old one then has up to its `terminationGracePeriodSeconds` (150) to
-    finish. Two background workers poll `background-jobs` for that whole window.
-
-    **The reason this test was written is gone, and it is kept for the other one.** It was the
-    corpus interleaving `D-2026-08-27-what-a-second-background-worker-would-race-on` named: during
-    the overlap the new pod's clone is fresh and the old pod's is up to a sidecar interval stale, so
-    a reindex landing on the old one retired the freshly merged notes' rows and then re-embedded
-    everything on the way back. Both halves are closed — the prune is bounded by the corpus revision
-    a row was built from (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`) and the
-    fingerprint is a hash of the note's bytes rather than of the mtime its own checkout wrote
-    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two pods
-    holding one commit now agree about every note.
-
-    What still needs `Recreate` is replay: with no overlap every unfinished run on
-    `background-jobs` is resumed by exactly one code version, so the new image must be able to
-    replay the histories the old one wrote
-    (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). That justification
-    never depended on the replica count, which is why this assertion outlives the race it was
-    written for — and why the premise assertion below is about `replicas` being *readable* rather
-    than about it still being the reason.
-
-    `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
-    Temporal redelivers an activity whose worker vanished — so the honest statement is that the old
-    process is gone before the new one starts.
+    The default `RollingUpdate` for one replica starts the new pod before the old one stops, so two
+    background workers poll `background-jobs` for the whole grace period. `Recreate` means every
+    unfinished run is resumed by exactly one code version, which is what replay requires. It, rather
+    than `maxSurge: 0`, because a singleton worker has no availability to protect: Temporal
+    redelivers an activity whose worker vanished.
     """
     text = (CHART / "templates" / "deployment-workers.yaml").read_text()
     assert _values()["workers"]["background"]["replicas"] == 1, (
@@ -1769,15 +1460,10 @@ def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
 def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     """Helm waits for a `pre-upgrade` hook, so a Job with no deadline is an unbounded wait.
 
-    A migration that keeps failing — most often on a lock it cannot get — would retry to its
-    `backoffLimit` and leave the release in `pending-upgrade`, a state that blocks every later
-    `helm upgrade` and needs a recovery an operator has to already know. With a deadline the Job
-    fails, Helm reports it, and `docs/guides/runbook.md` §(xi) documents the way out.
-
-    Unlike the Deployments' grace periods this one is *not* derived, and deliberately: it bounds the
-    Job including its retries, and the term it would need — how long this deployment's slowest
-    `CREATE INDEX` takes on its own data — is not something the chart can know. A stated default an
-    operator raises beats a formula that pretends to compute one.
+    A migration failing on a lock would leave the release in `pending-upgrade`, blocking every later
+    upgrade; with a deadline Helm reports it and `docs/guides/runbook.md` documents the way out. Not
+    derived, unlike the grace periods: the chart cannot know how long this deployment's slowest
+    `CREATE INDEX` takes, so it is a stated default an operator raises.
     """
     job = (CHART / "templates" / "migrate-job.yaml").read_text()
     assert re.search(r"^\s*activeDeadlineSeconds:", job, flags=re.MULTILINE), (
@@ -1789,37 +1475,19 @@ def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     )
 
 
-# What an interpolated `--set` value stands in as, once it is substituted rather than dropped. A
-# string, because the one flag that needs it is a Temporal namespace; a future interpolated flag
-# whose value may not be a string (a boolean posture, a number) has to be given a representative
-# value **here**, deliberately, and until it is it will fail the render below rather than vanish
-# from the basis. That failure is the correct one: this helper's whole claim is that the pipeline
-# can state every posture, and a posture nobody has said how to state is not stated.
+# What an interpolated `--set` value stands in as, once substituted rather than dropped. A string,
+# because the one such flag is a Temporal namespace; a future interpolated flag needing another
+# type must be given a representative value here, and fails the render below until it is.
 _JENKINS_INTERPOLATED = "jenkins-interpolated"
 
 
 def _jenkins_render_flags() -> list[str]:
     """Every `--set` the release pipeline's render stage can emit, with all its postures stated.
 
-    Read out of the `Jenkinsfile` rather than restated here: the point of the test below is that
-    the *pipeline's own* flags are enough to render this chart, so a copy of them would be a second
-    answer to the question and would stay green while the pipeline broke.
-
-    **Two different grounds for not taking a flag at face value, which used to be one condition.**
-    `image.digest`/`image.repository` are dropped because a validation render has no published
-    digest and neither is a posture. An *interpolated* value is a different case entirely: the
-    pipeline can state it — that is what a Jenkins parameter is — it simply cannot be resolved
-    outside a Jenkins run. Dropping it silently narrows this helper's own first sentence, so it is
-    **substituted** with `_JENKINS_INTERPOLATED` instead, and the render then actually exercises
-    the posture the pipeline claims to be able to state.
-
-    **The old condition never fired, and measuring is how that surfaced.** The value pattern was
-    `[A-Za-z0-9_.:/-]+`, which does not admit `$`, `{` or `}` — so `--set
-    temporal.namespace=${params.TEMPORAL_NAMESPACE}` was not *dropped by the `$` guard*, it failed
-    to match at all, and so did both `image.*` flags. Driven over the shipped stage, the regex
-    returned two flags and the `"$" in match.group(0)` arm was reached zero times. A guard that
-    cannot fire is not the reason a thing is missing, and reading it as one is how the third
-    posture came to be invisible here with no line of this file looking wrong.
+    Read out of the `Jenkinsfile` rather than copied, so the test proves the pipeline's own flags
+    render the chart. `image.digest`/`image.repository` are dropped (no published digest, not a
+    posture); an *interpolated* value is substituted with `_JENKINS_INTERPOLATED`, so the render
+    exercises a posture the pipeline can state but only resolves inside Jenkins.
     """
     # Split on the stage declarations at their own indentation, not on the bare string: a stage
     # name quoted inside a comment in the body would otherwise truncate the block being read.
@@ -1839,25 +1507,12 @@ def _jenkins_render_flags() -> list[str]:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> None:
-    """The chart refuses to render until a release states a posture, and there are three of them.
+    """The chart refuses to render an unstated posture; the pipeline must be able to state each.
 
-    `templates/networkpolicy.yaml` refuses without an egress posture and `templates/config.yaml`
-    refuses without a retention posture — both deliberate
-    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`). The pipeline grew a parameter and an
-    `egress_flags()` helper for the first and **nothing at all** for the second, and
-    `deploy/jenkins/environments/` ships empty by design, so `fileExists(VALUES_FILE)` is false and
-    no `--values` supplies it either. Every `DEPLOY_TARGET=openshift` run therefore died in
-    `stage('Render the chart')`: the system could not be deployed by its own delivery pipeline.
-
-    Rendered with the pipeline's flags rather than asserted as strings, because "a parameter named
-    `ACCEPT_UNBOUNDED_GROWTH` exists" is not the claim — the claim is that what the pipeline can say
-    is enough for the chart to render, and only helm answers that. The docstring here used to end
-    "a third posture guard added to the chart later fails this test with the message the operator
-    would have got in the namespace", and that is exactly what happened: `temporal.namespace` is
-    the third. It is not an escape hatch but a discriminator — the one string separating two
-    ChemClaw releases on a shared broker — so the pipeline states it from a parameter with no
-    default, and `_jenkins_render_flags` substitutes a placeholder rather than dropping it, because
-    "the pipeline can state it" is the whole of what this test asks.
+    Egress, retention and `temporal.namespace` each block the render when unstated, and
+    `deploy/jenkins/environments/` ships empty, so the pipeline's own flags must be enough. Rendered
+    with those flags rather than asserted as strings, because only helm can answer whether they
+    suffice; a posture guard added later fails here with the message the operator would get.
     """
     flags = _jenkins_render_flags()
     result = subprocess.run(
@@ -1895,22 +1550,11 @@ _DISARMED_ALERTS = ("ChemclawEgressGuardDisarmed", "ChemclawEgressPreloadDisarme
     reason="helm is not installed (or promtool is): both render and evaluate the rule",
 )
 def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
-    """`max(...) < 1` over a per-pod gauge cannot fire while any one pod is armed.
+    """`max(...) < 1` over a per-pod gauge cannot fire while any one pod is armed; use `min`.
 
-    Which is the condition. This wave exists because one process kind out of four was unguarded
-    while three were fine, and the alerts written to catch the compiled layer's version of that
-    failure shipped reading `max` — 1 as soon as a single pod reports armed, so a fleet with one
-    disarmed pod never alerts and the runbook entry's first listed cause is a **per-pod** one.
-
-    Evaluated rather than read: `make helm-validate` runs `promtool check rules`, which parses an
-    expression and says nothing about what it evaluates to. The two-pod series below is the whole
-    difference — driven against the shipped `max` shape it produced **no alert**, and against `min`
-    it produced one.
-
-    The rule bodies are rebuilt from the render with only `alert` and `expr` kept, deliberately: a
-    `promtool` unit test matches annotations exactly, so carrying them here would put a second copy
-    of the alert's prose in this file, which is the duplication every other gate in this repository
-    is arranged to avoid.
+    Evaluated with `promtool test rules` rather than read, because `promtool check rules` only
+    parses. Rule bodies are rebuilt with only `alert` and `expr`, since a unit test matches
+    annotations exactly and copying them would duplicate the alert's prose.
     """
     render = subprocess.run(
         [
@@ -2005,23 +1649,12 @@ def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
 
 
 def test_no_delivery_script_deploys_this_chart_atomically() -> None:
-    """`--atomic` turns the `post-upgrade` convert Job back into a release gate it was moved out of.
+    """`--atomic` turns the `post-upgrade` convert Job back into a release gate.
 
-    `chemclaw-convert` is a `post-upgrade` hook for one measured reason
-    (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step): it rewrites
-    `session_messages` rows into a shape the *previous* release's reader raises on, so a rollback
-    after it has run leaves a converted table behind a reader that cannot read it. Helm neither
-    undoes a data conversion nor re-runs the hook. `--atomic` rolls back on any failed hook, so a
-    backfill that merely hits its `activeDeadlineSeconds` takes a healthy release with it.
-
-    `migrate-job.yaml` says this at the point of the annotation — "so do not run this chart with
-    `--atomic`" — and the shipped delivery script did exactly that. A sentence in a template is not
-    a control over a script in another directory, which is what this test is.
-
-    The scanned set is every file that runs `helm` against this chart, not every `*.sh` under
-    `deploy/jenkins/`: the `Jenkinsfile` is the other file in another directory that invokes helm
-    (it only renders today, and "today" is what a control is for), and the `Makefile` runs the two
-    validation renders.
+    `chemclaw-convert` rewrites `session_messages` into a shape the previous release cannot read, so
+    it runs after the upgrade and a rollback after it has run is wrong; `--atomic` rolls back on any
+    failed hook, taking a healthy release with it. Scans every file that runs `helm` against the
+    chart (delivery scripts, the `Jenkinsfile`, the `Makefile`).
     """
     scripts = [
         *sorted((DEPLOY / "jenkins").rglob("*.sh")),
@@ -2042,11 +1675,9 @@ def test_no_delivery_script_deploys_this_chart_atomically() -> None:
 
 _OPENSHIFT_SH = DEPLOY / "jenkins" / "targets" / "openshift.sh"
 
-# Each case is (values-file body, does it state the egress posture, does it state the retention
-# posture). A *mentioned* key is not a stated posture, which is what the shipped greps could not
-# tell: `^\s*(windows|unboundedGrowthAccepted):` matched an operator writing down what they did not
-# want, suppressed the `--set`, and left the deploy to die inside `templates/config.yaml` with a
-# Go-template `fail` instead of the script's own sentence.
+# Each case is (values-file body, states the egress posture, states the retention posture). A
+# *mentioned* key is not a stated posture: `unboundedGrowthAccepted: false` must not suppress the
+# `--set` and leave the deploy to fail inside the chart.
 _POSTURE_CASES: dict[str, tuple[str, bool, bool]] = {
     "declined": (
         "networkPolicy:\n  allowAnyDestination: false\nretention:\n"
@@ -2084,9 +1715,9 @@ _POSTURE_CASES: dict[str, tuple[str, bool, bool]] = {
 def _posture_verdict(helper: str, values_file: Path) -> bool:
     """Run one of `openshift.sh`'s posture helpers and report whether it read a stated posture.
 
-    Sourced rather than executed, which is what the file's `main` guard is for: the helpers are the
-    unit under test and a deploy is not. `set +e` afterwards because sourcing a `set -euo pipefail`
-    script arms the calling shell too, and a helper *refusing* is one of the two answers.
+    Sourced rather than executed (the file's `main` guard allows it); `set +e` afterwards because
+    sourcing a `set -euo pipefail` script arms the calling shell, and a helper refusing is one of
+    the two answers.
     """
     probe = subprocess.run(
         [
@@ -2105,16 +1736,12 @@ def _posture_verdict(helper: str, values_file: Path) -> bool:
 def test_the_deploy_script_reads_a_stated_posture_and_not_a_mentioned_key(
     case: str, tmp_path: Path
 ) -> None:
-    """`unboundedGrowthAccepted: false` is a posture declined, and it was read as one stated.
+    """A posture declined (`false`) must not read as a posture stated.
 
-    With neither opt-in environment variable set, a helper returns 0 only when the values file
-    already states the posture — so `false` returning 0 is the defect: no `--set`, no message, and
-    the operator gets the chart's `fail` instead of the sentence naming the two ways out. Driven
-    against the real functions rather than asserted about their source, because the difference
-    between "matches a key" and "reads a value" is only visible in an execution.
-
-    The chart's own `values.yaml` is the last case and states neither, which is exactly why every
-    caller of this chart passes both flags.
+    With neither opt-in variable set, a helper returns 0 only when the values file states the
+    posture. Driven against the real functions, since "matches a key" versus "reads a value" is only
+    visible in execution. The chart's own `values.yaml` states neither, which is why every caller
+    passes both flags.
     """
     body, states_egress, states_retention = _POSTURE_CASES[case]
     values_file = tmp_path / "values.yaml"
@@ -2124,24 +1751,12 @@ def test_the_deploy_script_reads_a_stated_posture_and_not_a_mentioned_key(
 
 
 def test_the_release_path_adopts_the_two_objects_the_previous_chart_left_unowned() -> None:
-    """Every release installed before this chart is stuck at `helm upgrade` until two are adopted.
+    """The release path must adopt the two objects the previous chart created as unowned hooks.
 
-    On the previous chart `chemclaw-config` and the runtime ServiceAccount were `pre-install,
-    pre-upgrade` hooks with `hook-delete-policy: before-hook-creation`, so they persist between
-    releases — and Helm creates hook resources with a plain `Create`, no metadata visitor, so they
-    carry no `meta.helm.sh/release-name`/`-namespace`. This chart claims the same two names as
-    tracked resources, and the ownership check refuses to import them: measured on k3s v1.29.9,
-    `helm upgrade` fails at prepare time with "exists and cannot be imported into the current
-    release", and `--dry-run` fails identically — so nothing is half-applied, and `DRY_RUN=true` is
-    this script's default.
-
-    A grep over a script is the weakest shape of assertion in this file, and it is what is available
-    here: the act is `oc annotate` against a live namespace, which no offline test performs. The
-    behaviour itself was measured — dry run reports and changes nothing, the real run adopts both,
-    a foreign ConfigMap in the same namespace is untouched, a second run is a no-op, and the upgrade
-    that failed then succeeds. What this pins is that the release path still carries the step at
-    all, and that the two documents an operator reads for the hand-run path still carry the
-    annotation keys.
+    `chemclaw-config` and the runtime ServiceAccount were persistent hooks carrying no
+    `meta.helm.sh/release-*` annotations, so `helm upgrade` refuses to import them as tracked
+    resources. The adoption is `oc annotate` against a live namespace, which no offline test runs;
+    this pins that the release path carries the step and the hand-run documents carry the keys.
     """
     script = _OPENSHIFT_SH.read_text()
     assert "adopt_leftover_hook_objects" in script, (
@@ -2164,18 +1779,9 @@ def test_the_release_path_adopts_the_two_objects_the_previous_chart_left_unowned
 def test_the_front_door_is_launched_with_transport_bounds() -> None:
     """Three limits the application cannot impose on itself, so they have to be uvicorn flags.
 
-    By the time a request reaches an ASGI app, the socket is accepted and the headers are parsed —
-    so a connection flood, a hoard of idle keep-alives and a dribbled unbounded header block are all
-    ways to exhaust the process without ever sending a request the app could refuse.
-    `_BodySizeLimit` covers the request body; these cover everything before it.
-
-    Every value comes from a setting rather than a literal in the script, for the usual reason and
-    for a second one: these are the only knobs an operator must tune against the *connection* count,
-    and buried in a shell script is where they would never be found.
-
-    The bash fallback values (the `:-N` defaults in the entrypoint) must match the Python `Settings`
-    field defaults so that neither side can drift from the other. They currently agree; this test
-    is a regression guard, not a discovery (verify by changing one side and watching it fail).
+    Connection floods, idle keep-alives and dribbled headers exhaust the process before any request
+    reaches the app (`_BodySizeLimit` covers only the body). Each value comes from a setting, and
+    the entrypoint's `:-N` fallbacks must equal the `Settings` defaults so neither side drifts.
     """
     entrypoint = (DEPLOY / "entrypoint.sh").read_text()
     # Mapping: env var name → (flag name, Settings field name)
@@ -2218,15 +1824,9 @@ def test_the_front_door_is_launched_with_transport_bounds() -> None:
 def test_every_pod_takes_the_same_image_reference() -> None:
     """A digest has to be honoured everywhere or it is honoured nowhere.
 
-    `values.yaml` deployed a mutable tag and nine templates each interpolated
-    `repository:tag` themselves. A tag is a pointer: `helm rollback` to a release naming `0.1.0`
-    fetches whatever `0.1.0` means *now*, which is the one thing a rollback must not do — and this
-    system stamps a build revision onto every audit record (AG-14), so "which bytes produced this
-    result" stops being answerable the moment a tag is re-pushed.
-
-    Asserted as "no template builds its own reference" rather than "the helper exists", because the
-    failure mode is a tenth pod spec added later that interpolates the tag directly and quietly
-    ignores the digest the other nine honour.
+    A tag is mutable, so `helm rollback` would fetch whatever it means now and the revision stamped
+    on audit records would stop identifying the bytes. Asserted as "no template builds its own image
+    reference", since the failure is a new pod spec interpolating the tag directly.
     """
     for path, text in _template_text().items():
         assert "Values.image.repository" not in text or path.name == "_helpers.tpl", (
@@ -2242,12 +1842,10 @@ def test_every_pod_takes_the_same_image_reference() -> None:
 
 
 def test_a_private_registry_is_reachable() -> None:
-    """`imagePullSecrets` did not exist as a field, on any pod spec.
+    """Every pod spec must accept `imagePullSecrets`.
 
-    An operator whose registry needs authentication had nothing to set and no signal that the chart
-    assumed an open one — the pods simply fail to pull, which reads as a broken image rather than a
-    missing credential. Every pod spec, because a half-covered fleet is a deployment that comes up
-    partly.
+    Otherwise a private registry fails to pull, reading as a broken image rather than a missing
+    credential; every pod spec, because a half-covered fleet comes up partly.
     """
     for name, pods in _POD_SPECS.items():
         text = (CHART / "templates" / name).read_text()
@@ -2264,12 +1862,10 @@ def test_a_private_registry_is_reachable() -> None:
 
 
 def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
-    """Three controls the row said were absent, and the property that makes them controls.
+    """The supply-chain controls exist and are *blocking*.
 
-    Each is *blocking*. A non-blocking scanner is a scanner nobody reads, which is the same failure
-    the ServiceMonitor row had one layer down: the control exists, produces output, and reports to
-    nobody. `make deps-audit` is the same command CI runs, so a developer can reproduce a red build
-    rather than guessing at it.
+    A non-blocking scanner is one nobody reads. `make deps-audit` is the command CI runs, so a red
+    build reproduces locally.
     """
     image_workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
     assert "make deps-audit" in image_workflow, "no dependency scan in workflow"
@@ -2277,22 +1873,14 @@ def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
     assert "pip-audit" in (DEPLOY.parent / "Makefile").read_text(), (
         "deps-audit target must invoke pip-audit"
     )
-    # The *image* scan is deliberately not asserted here, and the reason is in `BACKLOG.md`: it
-    # ran, it found three real classes of problem now fixed in `deploy/Containerfile`, and it then
-    # reported two packages the build's own exhaustive filesystem listing says are not present.
-    # Shipping a gate whose last word contradicts the artifact it scanned would make every future
-    # red build ambiguous, so it goes back on with its own change rather than riding along here.
+    # The *image* scan is deliberately not asserted here: this target audits the locked closure.
 
 
 def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> None:
-    """A gate only `image.yml` runs is not a gate on the thing developers do all day.
+    """The dependency audit must gate every branch push and `make ci`, not only `image.yml`.
 
-    The test above proves the audit exists and is blocking; it proved that of the *image* workflow,
-    which triggers on `push: main` and `pull_request` only. So every branch push went green against
-    the lockfile, and so did `make ci` — the target CLAUDE.md calls "the full pre-push gate" and
-    whose contract is "a green `make` locally means a green CI". Measured on the tree that found
-    this, that lockfile carried two known CVEs in `pypdf`. Both wirings are asserted here because
-    each is one word in a list, which is exactly the kind of thing a later edit drops silently.
+    `image.yml` runs on `main` and pull requests only, so branch pushes and the local gate would go
+    green against a vulnerable lockfile. Each wiring is one word in a list, easily dropped.
     """
     ci_workflow = (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
     assert "make deps-audit" in ci_workflow, (
@@ -2309,41 +1897,18 @@ def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> No
     assert "deps-audit" in ci_target, f"`make ci` does not depend on deps-audit: {ci_target}"
 
 
-#: Binaries a `shutil.which(...)` skip guard may rely on with no CI install step, because the
-#: runner image guarantees them. `bash`, `git` and `make` are what a GitHub Actions job *is* — a
-#: workflow that had to install `bash` would be describing a different problem — and `flock` is
-#: util-linux, present on every Ubuntu image. The point of the allowlist is that it is short and
-#: each entry is a claim about the image rather than about this repository.
+#: Binaries a `shutil.which(...)` skip guard may rely on without a CI install step, because the
+#: runner image guarantees them (`flock` is util-linux). Each entry is a claim about the image.
 _RUNNER_IMAGE_BINARIES = frozenset({"bash", "flock", "git", "make"})
 
 
 def test_every_binary_the_suite_skips_on_is_installed_where_the_suite_runs() -> None:
-    """A `skipif(shutil.which(...))` is a promise that CI has the binary. Three of them did not.
+    """A `skipif(shutil.which(...))` is a promise that CI has the binary.
 
-    Forty-eight places in this suite gate on seven binaries, and a missing one is a **skip**, which
-    reports green: driven with none of the three chart binaries on `PATH`, 75 tests skip across
-    `test_deploy_chart.py` and `test_retention.py` alone. (48 is the number of `shutil.which` calls,
-    not of tests — one decorator can cover a parametrised family, which is the whole gap between the
-    two figures and the reason both are stated as what they are.) So a skip guard is worth exactly
-    what the CI job running the suite installs, and nothing checked that. Measured when the
-    `kubeconform` test above was written and the obvious question was put to it: where does it
-    run?
-
-    Nowhere. `check` runs `make cov` and installed only `helm`; `chart` has `kubeconform` and
-    `promtool` and runs `make helm-validate` and no pytest. So the three tests gated on those two
-    binaries could not execute in either job —
-    `test_every_resource_kubeconform_skips_is_one_this_file_declared`,
-    `test_a_single_disarmed_pod_is_what_these_alerts_are_for`, and the `promtool` arm of
-    `tests/test_retention.py`. The latter two are the PromQL checks, and their whole subject is a
-    failure the cluster reports as `Valid` while the alerts silently never evaluate: written to
-    close that hole, and never once run by CI.
-
-    `check` installs all three binaries now. This test is the mechanism rather than the instance,
-    which is the distinction `test_every_gate_make_ci_runs_is_a_step_ci_yml_runs` below draws about
-    its own subject: the next binary-gated test added to this suite fails here on the day it is
-    written instead of skipping quietly for a month.
-
-    Both directions, because an allowlist nobody prunes is the other half of the same defect.
+    A missing binary is a skip, which reports green, so a skip guard is worth exactly what the CI
+    job running the suite installs. Every binary a guard names must be installed by that job or be
+    on the runner-image allowlist, so the next binary-gated test fails here instead of skipping
+    quietly. Both directions, because an allowlist nobody prunes is the same defect.
     """
     sources = "\n".join(
         path.read_text() for path in sorted((DEPLOY.parent / "tests").rglob("*.py"))
@@ -2387,15 +1952,9 @@ def test_every_binary_the_suite_skips_on_is_installed_where_the_suite_runs() -> 
         f"_RUNNER_IMAGE_BINARIES exempts {stale}, which no test in this suite gates on any more"
     )
 
-    # And the exemption has to be **earned**, or it is the hole rather than the guard. Driven: with
-    # only the two assertions above, moving `kubeconform` into the allowlist and deleting its
-    # install step passed — the escape hatch silenced exactly the defect this test was written for.
-    #
-    # An entry here claims the runner image guarantees the binary, which is a fact about somebody
-    # else's image and unverifiable from this tree. What *is* verifiable is the contrapositive: a
-    # binary this repository installs somewhere, or tells a human to install, is one it already
-    # knows is not guaranteed. So the two lists must be disjoint, and `kubeconform` cannot be
-    # exempted while `chart` installs it and the runbook names it under "install these".
+    # The exemption has to be earned, or it is the hole. The runner image's guarantees are
+    # unverifiable here, but a binary this repository installs somewhere or tells a human to install
+    # is known not to be guaranteed, so the two lists must be disjoint.
     install_steps = "\n".join(
         str(step)
         for job in jobs.values()
@@ -2423,36 +1982,12 @@ def test_every_binary_the_suite_skips_on_is_installed_where_the_suite_runs() -> 
 
 
 def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
-    """Two hand-maintained lists whose whole contract is that they agree, and nothing checked it.
+    """Every gate `make ci` runs is a step `ci.yml` runs, and vice versa.
 
-    CLAUDE.md's claim is "CI runs exactly these, so a green `make` locally means a green CI". That
-    is one word in a `Makefile` prerequisite list and one step in a workflow, kept in step by
-    memory — which is exactly how `deps-audit` came to be in neither. That instance was fixed and
-    pinned; the *mechanism* was not, so the next gate to be added to one list and forgotten in the
-    other fails nothing. This closes the class instead of the instance.
-
-    `helm-validate` is the one gate deliberately in a job of its own, so it runs in `chart` in
-    parallel rather than lengthening `check`. The split is asserted rather than tolerated — a gate
-    quietly moving between jobs is a change to what blocks a merge.
-
-    The reason used to be stated as "it needs `helm` and `kubeconform` and no Python", and both
-    halves have since stopped being true. It needs `promtool` as well, and it needs Python: the
-    target unwraps its own render to feed the rule files to `promtool`, which is why `chart` grew a
-    `uv sync` step. And `check` now installs all three binaries too — not to run this gate, which
-    stays here, but because three tests in this suite gate on `kubeconform`/`promtool` and could
-    therefore run in neither job: they skipped in `check` for want of the binary, and `chart` runs
-    no pytest. The split is about which *gate* lives where, not about which binaries a job may have.
-
-    **Both directions, and the second one is why this test was rewritten.** It used to slice the
-    file in two on a literal newline-plus-`  chart:` and call the halves `check_job` and
-    `chart_job`, which stopped being true the moment a third job (`static`, holding lint and
-    type) was added:
-    the first "half" then silently contained two jobs. It still passed, because a union of two
-    buckets does not care how the text was cut — a test that survives the change it should have
-    noticed. Parsing the jobs is what makes the claim checkable. And a step in `ci.yml` that
-    `make ci` does *not* run breaks the same contract from the other side: CLAUDE.md promises "a
-    green `make` locally means a green CI", so CI running one extra gate makes the local gate a
-    weaker answer than it says it is.
+    "A green `make` locally means a green CI" rests on two hand-maintained lists agreeing; this
+    closes the class rather than an instance. `helm-validate` deliberately runs in its own `chart`
+    job, and that split is asserted, since a gate moving between jobs changes what blocks a merge.
+    The jobs are parsed rather than sliced as text, so adding a job cannot make the check vacuous.
     """
     ci_target = next(
         line
@@ -2485,10 +2020,9 @@ def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
         f"`make ci` runs {missing} and no step in ci.yml does, so a green local gate is not a "
         "green CI — the exact drift that let deps-audit sit in neither list"
     )
-    # `db-migrate` is the one target in the workflow that is not a gate: it builds the database the
-    # Postgres-backed tests then run against, which is why `make ci` does not depend on it (a
-    # developer's database already exists; a fresh runner's does not). Named rather than pattern-
-    # matched, so a *second* non-gate step has to be argued for here instead of slipping in.
+    # `db-migrate` is the one workflow target that is not a gate: it builds the database the
+    # Postgres-backed tests run against. Named rather than pattern-matched, so a second non-gate
+    # step has to be argued for here.
     setup = {"db-migrate"}
     extra = [target for target in everywhere if target not in set(gates) | setup]
     assert not extra, (
@@ -2500,16 +2034,9 @@ def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
 def test_the_default_branch_is_never_cancelled_mid_gate() -> None:
     """A cancelled run on `main` is not a superseded answer, it is a missing one.
 
-    Both workflows key their concurrency group on the branch and cancel the loser, which is right
-    for a topic branch: the newer push has the answer the older one was computing. On the default
-    branch the two runs are about *different commits*, and nothing ever re-runs the cancelled one.
-    Measured over the 30 `ci` runs to 2026-08-26, three commits that are ancestors of `origin/main`
-    today have no completed run of that workflow at all — `548266233b`, cancelled 9.4 minutes in,
-    plus `9dfb02a5f6` and `3937fe568d`. The gate's entire claim is that what is on `main` passed
-    it.
-
-    Asserted as an expression rather than by name so the fix cannot be reverted to a bare `true`
-    while the comment above it still explains why it must not be.
+    Cancelling the older run is right on a topic branch; on the default branch the runs are about
+    different commits and nothing re-runs the cancelled one, so a commit on `main` could have no
+    completed gate. Asserted as the expression, so it cannot be reverted to a bare `true`.
     """
     for name in ("ci.yml", "image.yml"):
         workflow = (DEPLOY.parent / ".github" / "workflows" / name).read_text()
@@ -2525,16 +2052,11 @@ def test_the_default_branch_is_never_cancelled_mid_gate() -> None:
 
 
 def test_every_action_is_pinned_to_a_commit_not_a_tag() -> None:
-    """The pipeline pins its Python closure with `--locked` and audits it; its actions floated.
+    """Every action is pinned to a commit, not a mutable tag.
 
-    `actions/checkout@v4` is a *mutable* reference — the tag is repointed on every v4 release, and
-    a compromised or retagged action runs with this workflow's token in the job that builds the
-    shipped image. That is the same threat class `deps-audit` and the SBOM exist to cover, left
-    open in the one place the repository executes third-party code on every push.
-
-    The readable version is kept as a trailing `# vX.Y.Z` comment, which is also the form
-    Dependabot rewrites — `.github/dependabot.yml` has a `github-actions` entry precisely because a
-    pin with no updater trades a supply-chain risk for a staleness one.
+    A retagged or compromised action runs with the workflow token in the job that builds the shipped
+    image. The readable version stays as a trailing `# vX.Y.Z` comment, the form Dependabot
+    rewrites (`.github/dependabot.yml` has a `github-actions` entry).
     """
     unpinned: list[str] = []
     for workflow in sorted((DEPLOY.parent / ".github" / "workflows").glob("*.yml")):
@@ -2551,18 +2073,11 @@ def test_every_action_is_pinned_to_a_commit_not_a_tag() -> None:
 
 
 def test_the_mutation_run_is_scheduled_and_has_a_database_to_run_against() -> None:
-    """The two properties of `mutants.yml` whose loss is silent, and one of them manufactures a lie.
+    """The two properties of `mutants.yml` whose loss is silent.
 
-    The schedule is the whole point: `make mutants` sat in the `Makefile` for months with nothing
-    running it, so the seven invariant-bearing modules had a mutation control that had executed once
-    (`D-2026-08-27-a-survivor-is-not-a-failing-build`).
-
-    The Postgres service is the subtler half. Six of the eighteen files in
-    `pytest_add_cli_args_test_selection` gate on `tests/pg.py::migrated_db_or_skip`, so without a
-    database they skip and still report green — and every mutant in `science/calc/store.py` and
-    `agent/audit_store.py` is then scored SURVIVED for a reason that has nothing to do with the
-    mutation. Dropping the service would not break the job; it would make it report invented
-    survivors in two of the seven modules it exists for, which is worse than not running it.
+    The schedule is what makes the mutation control run at all. The Postgres service matters because
+    Postgres-backed tests skip without it, and every mutant in the modules they cover would then be
+    scored SURVIVED for a reason unrelated to the mutation.
     """
     document: Any = yaml.safe_load(
         (DEPLOY.parent / ".github" / "workflows" / "mutants.yml").read_text()
@@ -2585,17 +2100,11 @@ def test_the_mutation_run_is_scheduled_and_has_a_database_to_run_against() -> No
 
 
 def test_every_downloaded_binary_is_checksummed_before_it_runs() -> None:
-    """A release asset is mutable in a way a git tag is not, and both of these execute as root.
+    """Every downloaded binary is checksummed before it runs.
 
-    `kubeconform` validates the chart that describes the deployment; `syft`'s installer runs on the
-    runner that just built the shipped image. Neither was verified — the kubeconform tarball was
-    taken on trust, and the syft installer was piped straight into `sh`, which additionally runs a
-    truncated download because a half-transferred script is a valid prefix.
-
-    The check is that a `curl` of one of these is accompanied by a `sha256sum -c`, not that any
-    particular digest is correct — a digest goes stale by design when the pinned version moves, and
-    the failure this guards against is somebody adding a third download with no verification at
-    all.
+    A release asset is mutable and these execute on the runner (`kubeconform`, the `syft`
+    installer, which piped into `sh` would also run a truncated download). The check is that each
+    `curl` is accompanied by a `sha256sum -c`, not that a digest is current.
     """
     for name, marker in (("ci.yml", "kubeconform"), ("image.yml", "syft")):
         workflow = (DEPLOY.parent / ".github" / "workflows" / name).read_text()
@@ -2618,17 +2127,10 @@ def _run_deps_audit(
 ) -> subprocess.CompletedProcess[str]:
     """Run `make deps-audit` against a stubbed `uvx pip-audit`, with `CI` set or unset.
 
-    The tool is stubbed rather than the network blocked because the two events under test — a
-    found vulnerability and an unreachable advisory database — are distinguished by `pip-audit`'s
-    *output*, and only one of them can be produced by unplugging a cable. `pip-audit` also caches
-    its responses, so an offline run after an online one legitimately succeeds; a stub is the only
-    way to ask the question deterministically.
-
-    `stale_log` sets up the one situation these stubs used to be blind to: a `tee` that cannot
-    write, with bytes already sitting at the log path it was meant to overwrite. It stubs `tee`
-    itself as a command that writes nothing and fails, seeds that text at the historical
-    `AUDIT_LOG` path, and passes that path on the command line — everything the deleted
-    file-reading recipe needed to classify the wrong bytes. Nothing under test may consult it.
+    Stubbed because a found vulnerability and an unreachable advisory database are distinguished by
+    `pip-audit`'s *output*, and its cache makes a real offline run nondeterministic. `stale_log`
+    makes `tee` fail while stale text sits at the old log path, which nothing under test may
+    consult.
     """
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
@@ -2671,11 +2173,8 @@ def test_an_unreachable_advisory_database_does_not_fail_a_developers_offline_gat
 ) -> None:
     """`make ci` runs `deps-audit`, and a laptop with no network must still get a usable gate.
 
-    `pip-audit` exits 1 both when it finds a vulnerability and when it cannot reach the advisory
-    database, so the exit status alone cannot separate them. Measured under `unshare -rn` before
-    this classification existed: `uvx` failing to fetch the tool gave make error 2, and `pip-audit`
-    dying inside `requests` gave make error 1 — the same 1 a real finding gives. The row this
-    lane's commit deleted from `BACKLOG.md` said this cost was unpriced; this is the price.
+    `pip-audit` exits 1 both on a finding and on an unreachable database, so the output is
+    classified rather than the status.
     """
     result = _run_deps_audit(tmp_path, _UNREACHABLE, 1, ci=None)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2687,9 +2186,8 @@ def test_an_unreachable_advisory_database_does_not_fail_a_developers_offline_gat
 def test_an_unreachable_advisory_database_fails_in_ci(tmp_path: Path) -> None:
     """The other half, and the half that makes the tolerance safe.
 
-    In CI the network is a given, so "unreachable" is a real failure — tolerating it there would
-    be a supply-chain hole that reads as a green build forever, which is the exact shape
-    `deps-audit` was wired into `ci.yml` to close.
+    In CI the network is a given, so "unreachable" must fail; tolerating it would be a supply-chain
+    hole that reads green forever.
     """
     result = _run_deps_audit(tmp_path, _UNREACHABLE, 1, ci="true")
     assert result.returncode != 0, result.stdout + result.stderr
@@ -2713,23 +2211,12 @@ def test_a_real_finding_fails_even_offline(tmp_path: Path) -> None:
 def test_the_audit_classifies_what_the_command_said_not_what_a_file_holds(
     tmp_path: Path,
 ) -> None:
-    """The hole the three tests above could not see: the classified bytes came from a *file*.
+    """The audit classifies what the command said, not what a file holds.
 
-    The recipe piped `pip-audit` into `tee $(AUDIT_LOG)`, took the status from `PIPESTATUS[0]` and
-    then grepped the log. `tee`'s own failure is `PIPESTATUS[1]` and was never examined, so a `tee`
-    that could not write left the greps reading whatever already sat at that fixed, world-writable
-    path. Measured against the deleted recipe with a real (not stubbed) `tee` failure — an EROFS
-    mount — a stale log holding a connection error, and `pip-audit` reporting two vulnerabilities:
-
-        deps-audit: SKIPPED - the advisory database is unreachable and CI is unset.
-        make exit=0
-
-    A vulnerable lockfile, reported as an outage, on the target that exists to prevent exactly
-    that. The three tests above all passed throughout, because none of them ever made `tee` fail.
-
-    Both halves are asserted. The behavioural half hands the run every ingredient that used to
-    flip it; the structural half is what keeps this from passing vacuously if the file ever comes
-    back under another variable's name — the classification's input has to be the captured output.
+    If the classification read a log file written by `tee`, a `tee` that could not write would leave
+    stale bytes to be classified, e.g. a vulnerable lockfile reported as an outage. The behavioural
+    half hands the run every such ingredient; the structural half requires the classification's
+    input to be the captured output, so this cannot pass vacuously.
     """
     result = _run_deps_audit(tmp_path, _FOUND, 1, ci=None, stale_log=_UNREACHABLE)
     assert result.returncode != 0, result.stdout + result.stderr
@@ -2737,7 +2224,8 @@ def test_the_audit_classifies_what_the_command_said_not_what_a_file_holds(
     assert "Found 2 known vulnerabilities" in result.stdout, (
         "the operator never even saw the finding"
     )
-    recipe = (DEPLOY.parent / "Makefile").read_text().split("deps-audit:")[1].split("\nexplain:")[0]
+    after = (DEPLOY.parent / "Makefile").read_text().split("\ndeps-audit:")[1]
+    recipe = re.split(r"\n[a-z][a-z0-9-]*:", after, maxsplit=1)[0]
     commands = [line for line in recipe.splitlines() if not line.lstrip().startswith(("@#", "#"))]
     assert not any("tee" in line for line in commands), (
         "deps-audit pipes into tee again, so its classification reads a file rather than the "
@@ -2754,17 +2242,11 @@ def test_a_clean_audit_passes(tmp_path: Path) -> None:
 
 
 def test_no_calculation_binary_ships_in_this_image() -> None:
-    """The licence decision this repository no longer has to take, and why it stopped needing to.
+    """No calculation binary ships in this image.
 
-    `xtb` (LGPL-3.0) and `crest` (GPL-3.0) were installed here for `calc.xtb_cli` and
-    `calc.crest_cli`, and `--build-arg INCLUDE_CREST=false` existed so that declining to
-    *distribute* the GPL binary was a flag rather than a patch (D-2026-08-01-a-tag-is-a-pointer).
-    Both callers moved to `Chemclaw3-mcp` with the physics, so the layer was building ~200 MB into
-    every image — front door, every worker, every connector pod — for no caller, and taking a
-    redistribution decision on behalf of a product that no longer runs the programs.
-
-    Asserted as an *absence*, so re-adding a binary here has to argue for itself: whatever needs
-    one belongs in the repository whose code invokes it.
+    `xtb` and `crest` are invoked by `Chemclaw3-mcp`, not here, so shipping them would add size to
+    every pod and take a redistribution (LGPL/GPL) decision for programs this product does not run.
+    Asserted as an absence, so re-adding one has to argue for itself.
     """
     containerfile = (DEPLOY / "Containerfile").read_text()
     # The declarations and the download URLs, not the words: the comment above the removal explains
@@ -2782,13 +2264,8 @@ def test_no_calculation_binary_ships_in_this_image() -> None:
 def test_egress_destinations_are_declarable() -> None:
     """`to: []` in a NetworkPolicy means *any destination*, not none.
 
-    The egress rule shipped as `to: []` on the HTTPS/LLM/Temporal/Postgres ports, so TCP/443 to the
-    whole internet was permitted from every pod — while `tests/test_no_egress.py` enforced D-089
-    ("this system takes no external sources") by scanning source code for host literals. A source
-    scan catches a developer adding a data source and catches nothing at runtime.
-
-    The addresses are deployment-specific, so the chart cannot default them; what it can do is
-    make the choice visible and available rather than silent.
+    A source scan for host literals catches nothing at runtime. Destinations are deployment-specific
+    and cannot be defaulted, so the chart makes the choice declarable and visible.
     """
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     assert ".Values.networkPolicy.egressDestinations" in policy
@@ -2798,18 +2275,10 @@ def test_egress_destinations_are_declarable() -> None:
 def test_the_destination_list_says_which_layer_it_is_the_only_one_of() -> None:
     """An operator sizing this list has to know which shapes it is the whole control for.
 
-    The comment block above `egressDestinations` explained `to: []` and stopped there. What it did
-    not say is that the in-process guard patches `socket.socket` and therefore bounds **no**
-    gRPC or Temporal traffic at all — measured, three such clients reached an off-allowlist listener
-    with the refusal counter flat — and that a **loopback sidecar shares the pod's network
-    namespace**, so no entry here can see a service mesh or egress gateway's traffic. An operator
-    who read the old block came away believing a destination list was defence in depth where it was
-    the only layer, and believing it covered a shape it structurally cannot.
-
-    Pinned as prose because that is what the file carries and what a deployer reads; this repository
-    already pins chart prose this way (`test_the_connection_arithmetic_is_not_restated_in_prose`).
-    The phrases are the *claims*, not the wording around them, so a rewrite that keeps the meaning
-    keeps this green.
+    The in-process guard patches `socket.socket`, so it bounds no gRPC or Temporal traffic, and a
+    loopback sidecar shares the pod's network namespace, so no entry can see mesh or egress-gateway
+    traffic. The `values.yaml` comment must say so. The phrases checked are the claims, so a
+    rewording that keeps the meaning stays green.
     """
     prose = (CHART / "values.yaml").read_text()
     _, _, after = prose.partition("egressPorts:")
@@ -2829,19 +2298,9 @@ def test_the_destination_list_says_which_layer_it_is_the_only_one_of() -> None:
 def _makefile_renders() -> list[list[str]]:
     """Every `helm template` of this chart in the Makefile, as its whole (continued) command.
 
-    A render is a backslash-continued block, so "does this one pass the flag" is a question about
-    the block and not about the line the command starts on. Returned as a list of lines per render
-    so a caller can ask what each one carries.
-
-    Replaces a pair of `len(...) == 2` assertions. The count was the *point* of those tests — every
-    render must pay the escape hatch — and pinning it as a literal meant that adding a third render
-    failed them for the one reason that is not a defect. The invariant is "each", not "two".
-
-    **Renders of the shipped defaults only.** A render that passes a values file (`-f`) is
-    rendering *that* file's postures — `kind-validate`'s `deploy/kind/values-kind.yaml` states its
-    egress, retention and namespace in the file — so demanding the `--set` escape hatches of it
-    would demand a second, contradicting statement. What such a file states is
-    `tests/test_kind_deploy.py`'s to check, and it renders the file itself.
+    Returned as lines per render, since a backslash-continued block is what carries a flag, so
+    callers assert on *each* render rather than a count. Only renders of the shipped defaults: a
+    render passing `-f` states that file's postures, which `tests/test_kind_deploy.py` checks.
     """
     lines = (DEPLOY.parent / "Makefile").read_text().splitlines()
     renders: list[list[str]] = []
@@ -2859,20 +2318,12 @@ def _makefile_renders() -> list[list[str]]:
 
 
 def test_an_unstated_egress_posture_refuses_to_render() -> None:
-    """Available and visible was not enough: the chart must not render a posture nobody chose.
+    """The chart must not render an egress posture nobody chose.
 
-    A declarable knob left empty is still `to: []` in the cluster — every destination on five
-    ports — behind an object an operator reads as "egress is restricted". The comment saying so
-    lived in `values.yaml`, which nobody re-reads after the first install. So the render now fails
-    unless exactly one of the two is stated: a destination list, or `allowAnyDestination: true`.
-
-    Asserted on the template text and the shipped values rather than by rendering, because `helm`
-    is a live-edge dependency this suite does not have — the same reason every other check here
-    parses. What that cannot see is the *logic* of the condition, so it is written to be readable
-    as one line: `empty` on both sides, failing when the two agree.
-
-    The escape hatch defaults to `false`, which means `helm template` on these defaults needs one
-    `--set`. That is the cost of the guard and it is paid in the three places that render.
+    An empty destination list is still `to: []`, every destination, behind an object that reads as
+    restricted. The render fails unless exactly one of a destination list or
+    `allowAnyDestination: true` is stated. Asserted on template text (no `helm` here), with the
+    condition kept readable as one line. Every render site pays one `--set` for the default.
     """
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     guard = (
@@ -2881,10 +2332,9 @@ def test_an_unstated_egress_posture_refuses_to_render() -> None:
     )
     assert guard in policy, "the egress posture can be left unstated"
     assert "{{- fail " in policy, "the guard warns rather than refusing"
-    # A quoted boolean is the failure the emptiness check alone could not see: Go templates treat a
-    # non-empty string as truthy and `empty` treats it as non-empty, so `--set-string
-    # allowAnyDestination=false` rendered the allow-any policy while reading as off. The type guard
-    # refuses a string outright so the emptiness logic only ever sees a real bool.
+    # A quoted boolean is truthy to Go templates and non-empty to `empty`, so `--set-string
+    # allowAnyDestination=false` would render allow-any while reading as off; the type guard refuses
+    # a string so the emptiness logic only sees a real bool.
     assert 'kindIs "string" .Values.networkPolicy.allowAnyDestination' in policy, (
         "a quoted allowAnyDestination (--set-string) would render allow-any while reading as off"
     )
@@ -2905,16 +2355,11 @@ def test_an_unstated_egress_posture_refuses_to_render() -> None:
 
 
 def test_an_unstated_retention_posture_refuses_to_render() -> None:
-    """The sibling of the egress guard, for the same reason: a knob nobody set is a wrong default.
+    """The sibling of the egress guard: an unstated retention posture refuses to render.
 
-    Every `CHEMCLAW_RETENTION_*` window in `Settings` defaults to `0` (disabled) — a deliberate
-    policy stated in `core/config/memory.py`, not a code default this chart should silently ship —
-    so a release that never states its retention posture would run with every durable table
-    growing forever under a `values.yaml` comment nobody re-reads. The render now fails unless
-    exactly one of `retention.windows` or `retention.unboundedGrowthAccepted: true` is stated.
-
-    Asserted on the template text, exactly like the egress guard above and for the same reason:
-    `helm` is a live-edge dependency this suite does not have.
+    Every retention window defaults to `0` (disabled) by deliberate policy, so a release that never
+    states one would grow every durable table forever. The render fails unless exactly one of
+    `retention.windows` or `retention.unboundedGrowthAccepted: true` is stated.
     """
     config = (CHART / "templates" / "config.yaml").read_text()
     guard = "eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted)"
@@ -2935,13 +2380,9 @@ def test_an_unstated_retention_posture_refuses_to_render() -> None:
     assert _values()["retention"]["unboundedGrowthAccepted"] is False, (
         "the shipped default grants a permission the release never wrote down"
     )
-    # Every render must state a retention posture, or it cannot render at all — the same renders
-    # the egress test walks. **A disjunction rather than the escape hatch by name**, because the
-    # guard above is an exclusive-or and the escape hatch is only one of its two arms: the
-    # `helm-validate` render that exists to parse `ChemclawRetentionNotSweeping` states
-    # `retention.windows` instead, since that rule renders on *that* arm and on no other. Asserting
-    # the flag by name would have failed the one render that covers the rule this half of the gate
-    # is about — and demanding both flags would fail every render, which is the guard working.
+    # Every render must state a retention posture. A disjunction rather than the escape hatch by
+    # name, because the guard is an exclusive-or: the `helm-validate` render that parses
+    # `ChemclawRetentionNotSweeping` states `retention.windows` instead.
     stated = ("--set retention.unboundedGrowthAccepted=true", "--set retention.windows")
     unflagged = [
         block[0].strip()
@@ -2956,9 +2397,8 @@ def test_an_unstated_retention_posture_refuses_to_render() -> None:
 def test_dns_egress_survives_narrowing_the_destinations() -> None:
     """DNS is its own rule, so scoping the destinations cannot take name resolution with it.
 
-    Folded into the destination-scoped rule, setting `egressDestinations` to the database CIDR
-    would silently stop DNS — which presents as every dependency being unreachable at once, the
-    hardest possible symptom to trace back to a values change.
+    Otherwise narrowing `egressDestinations` would stop DNS and present as every dependency being
+    unreachable at once.
     """
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     egress = policy.split("policyTypes:")[1].split("---")[0]
@@ -2970,21 +2410,9 @@ def test_dns_egress_survives_narrowing_the_destinations() -> None:
 def _alert_expressions() -> str:
     """Every rule's PromQL, and nothing else.
 
-    The annotations legitimately name metrics in prose — `ChemclawDurableJobsFailing`'s description
-    tells an operator to break the ratio down with three other series — so any check that reads the
-    file as text will call a metric "alerted" because a sentence mentioned it. That is the exact
-    shape of false coverage these tests exist to prevent, so the expressions are extracted first.
-
-    **The terminator is `for` *or* `labels` *or* `annotations`, and reading only `for` was this
-    function doing the thing it exists to prevent.** `for` is optional in a Prometheus rule — it
-    means "fire on the first evaluation" when omitted — and every one of the 51 rules here happened
-    to carry one, so the narrower pattern was correct by coincidence rather than by construction.
-    The first rule without one (`ChemclawBudgetNearingItsCap`, whose trigger is a step rather than a
-    rate) made the match run past its own annotations and the Go-template comment after them into
-    the *next* rule's `for`, so a metric named in somebody's prose read as alerted — false coverage,
-    from the guard against false coverage. `labels` and `annotations` are the only other keys that
-    can follow `expr`, and every rule has both. Verified behaviour-preserving: over the 51 rules
-    that predate this, the two patterns extract byte-identical text.
+    Annotations name metrics in prose, so reading the file as text would count a mentioned metric as
+    alerted. `expr` ends at `for`, `labels` or `annotations`: `for` is optional, so ending only at
+    `for` would run into the next rule.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     return " ".join(
@@ -3012,15 +2440,10 @@ def _dashboard_expressions() -> str:
     )
 
 
-# Counters ending `_failures_total` or `_dropped_total` that deliberately have no alert, each with
-# the reason it is not one. The set is small on purpose: it is what stops the rule below from being
-# satisfied by adding a name to a list.
-#
-# Both entries share one property — the increment is *caused by the caller* and its steady-state
-# rate is not zero. A rule on either would page on an expired token or a malformed request body,
-# which is the failure mode that trains people to ignore an alert channel. They are dashboard
-# series (`Chemclaw front door` -> "Refused before the handler"), and a rise in either is a security
-# or client question rather than a system one.
+# Counters ending `_failures_total` or `_dropped_total` that deliberately have no alert, with the
+# reason. Kept small so the rule below is not satisfied by adding a name. Both are caused by the
+# caller with a non-zero steady-state rate (expired tokens, malformed bodies); they are dashboard
+# series, and alerting on them would train people to ignore the channel.
 _COUNTERS_WITH_NO_ALERT: dict[str, str] = {
     "chemclaw_auth_failures_total": (
         "a rejected credential is a caller's mistake with a non-zero steady state; alerting on the "
@@ -3034,21 +2457,12 @@ _COUNTERS_WITH_NO_ALERT: dict[str, str] = {
 
 
 def test_every_counter_that_can_fail_silently_has_an_alert() -> None:
-    """The coverage rule, stated so that a counter added tomorrow is covered by it.
+    """Every counter whose name says it counts a silent failure has an alert or a stated exemption.
 
-    This test used to name eight metrics and check they appeared somewhere in the rule file. That
-    direction is worth keeping (it is the test below, which catches a rename that leaves its alert
-    behind) but it proves nothing about *coverage*: a ninth counter shipped with no rule passed it,
-    and several did — `chemclaw_pushback_dropped_total`,
-    `chemclaw_fan_out_children_dropped_total`, `chemclaw_result_publish_failures_total` and
-    `chemclaw_result_projection_failures_total` were all unalerted while the exactly-analogous
-    `chemclaw_notes_publish_failures_total` was alerted, which is one failure class with two
-    different answers.
-
-    So it is inverted: the *registry* is the list, and every counter whose name says it counts a
-    silent failure must either appear in an alert expression or be exempted here with a reason.
-    `_failures_total` and `_dropped_total` are the two suffixes this codebase uses for "something
-    was swallowed", which is what makes the selection mechanical rather than a judgement call.
+    The *registry* is the list, so a counter added tomorrow is covered. `_failures_total` and
+    `_dropped_total` are this codebase's suffixes for "something was swallowed", which makes the
+    selection mechanical. The test below covers the other direction (a rename leaving its alert
+    behind).
     """
     from chemclaw.core.metrics import _COUNTERS
 
@@ -3072,11 +2486,9 @@ def test_every_counter_that_can_fail_silently_has_an_alert() -> None:
 def _degraded_sites_with_their_own_counter() -> dict[str, set[str]]:
     """Subsystem name -> the counters incremented within a few lines of its `degraded()` call.
 
-    `metrics_bridge.degraded` increments `chemclaw_degraded_total{subsystem=...}` on every call, so
-    a site that *also* increments a counter of its own puts one event on two series. If both series
-    are alerted, one failure raises two alerts — which is the duplication this reads for. Derived
-    from the source in the same spirit as `tests/test_degraded.py`, which reads the subsystem
-    literals out of the tree rather than keeping a list beside them.
+    `metrics_bridge.degraded` already increments `chemclaw_degraded_total{subsystem=...}`, so a site
+    with its own counter puts one event on two series. Derived from the source, like
+    `tests/test_degraded.py`.
     """
     sites: dict[str, set[str]] = {}
     for path in sorted(Path("src").rglob("*.py")):
@@ -3094,18 +2506,12 @@ def _degraded_sites_with_their_own_counter() -> dict[str, set[str]]:
 
 
 def test_no_two_alerts_fire_on_one_event() -> None:
-    """One failed retrieval leg raised two alerts, and the umbrella's was the less useful one.
+    """One event must not raise two alerts.
 
-    `retrieval/fanout.py`'s failure arm calls `degraded(logger, "evidence_source", ...)` and
-    increments `chemclaw_evidence_source_failures_total` on the same exception. Both series were
-    alerted, both at `warning`, both over a 15-minute window and both at `for: 0m` — so a single
-    broken leg produced `ChemclawSubsystemDegraded{subsystem="evidence_source"}` *and*
-    `ChemclawEvidenceSourceFailing{source=...}`, of which only the second says which leg.
-
-    The fix is an exclusion in the umbrella's selector, and this is what stops that exclusion from
-    becoming a hand-maintained list: the set is derived from the `degraded()` call sites, so a
-    second site that grows its own alerted counter fails here until it is either excluded from the
-    umbrella or left with one rule.
+    A `degraded()` site that also increments its own alerted counter fires both the umbrella and the
+    specific alert, of which only the specific one names the cause. The umbrella's selector excludes
+    such subsystems, and this derives that set from the call sites so it cannot become a
+    hand-maintained list.
     """
     alerted = _series_referenced(_alert_expressions())
     duplicated = {
@@ -3126,17 +2532,11 @@ def test_no_two_alerts_fire_on_one_event() -> None:
 
 
 def test_severity_is_monotonic_in_how_final_the_loss_is() -> None:
-    """The retryable half outranked the terminal half, which is the wrong way round.
+    """Severity is monotonic in how final the loss is.
 
-    `publish/outbox.py` spends one attempt and leaves the row `pending`, so
-    `chemclaw_result_publish_failures_total` is "we are still trying" —
-    `chemclaw_results_dead_lettered_total` is that same publication after its retries are gone, and
-    nothing will attempt it again. The first carried `critical` and the second `warning`, so the
-    channel that meant "we have stopped" was the quieter one. A projection failure is terminal by
-    construction (the rule's own description says retrying will not help) and belongs with it.
-
-    Pinned as an ordering between named alerts rather than as three literals, because the claim is
-    the ordering: a later edit that lowers a terminal alert or raises the retryable one fails here.
+    A publish failure leaves the row `pending` ("still trying"); a dead-lettered result or a
+    projection failure will never be retried, so they must not be quieter. Pinned as an ordering
+    between named alerts, because the claim is the ordering.
     """
     severity = dict(
         re.findall(
@@ -3157,31 +2557,10 @@ def test_severity_is_monotonic_in_how_final_the_loss_is() -> None:
 def test_every_ratio_alert_has_a_traffic_floor() -> None:
     """`rate(errors) / rate(total)` is 100% on a single error in an otherwise idle window.
 
-    Both ratio alerts shipped with `clamp_min(denominator, 0.001)`, which is a division-by-zero
-    guard and reads as a floor. It is not one — it makes the empty window *worse*, turning "no
-    sample" into a large finite ratio. Measured with `promtool test rules` on the shipped
-    expressions: one failed turn and one started turn in a ten-minute window evaluated to `1.0`
-    against a 0.1 threshold, and one failed durable job in an idle half hour to `0.56` against
-    0.2. Both now require their own denominator to clear an absolute rate first.
-
-    Derived rather than listed: any expression that divides one range vector by another is a ratio,
-    so a third one added tomorrow is covered on the day it is added.
-
-    **That sentence was false the day it was written, and `increase()` is why.** The detector
-    matched `rate(` only, so the third ratio — added in the same commit as this docstring's claim —
-    carried a `clamp_min` denominator and no floor and was simply not seen: `ChemclawAnswer
-    RevisionsNotHelping` divides `increase()` by `increase()`. Both functions produce a range
-    vector and both have the same idle-window problem, so both are matched now, and the floor may
-    be expressed with either.
-
-    **And a second time, one level in: `sum by (…)`.** The floor pattern required a bare
-    `and sum(rate(`, which is every ratio this chart happened to hold — all three are
-    fleet-wide. `ChemclawToolCallsFailing` is per `tool`, so both its halves are
-    `sum by (tool) (rate(…))` and its floor, which is *stronger* than a fleet-wide one because it is
-    charged per series, did not match the pattern at all. The grouping clause is optional in the
-    pattern now. The lesson both instances carry is the one in `tasks/lessons.md`: a derived scope
-    that is derived by a *string shape* is only as general as the shapes its author happened to have
-    in front of them, and the detector, not the rules, is what goes stale.
+    `clamp_min(denominator, …)` is a division-by-zero guard, not a floor, so every ratio must first
+    require its denominator to clear an absolute rate. Ratios are detected rather than listed: any
+    expression dividing one `rate()`/`increase()` by another, with or without a `sum by (…)`
+    grouping, so a new ratio is covered when it is added.
     """
     rules = re.split(r"\n\s*- alert: ", (CHART / "templates" / "prometheusrule.yaml").read_text())
     ratios = []
@@ -3210,14 +2589,8 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
 def test_every_declared_metric_has_a_consumer() -> None:
     """A metric with no panel and no rule is a number nobody has ever seen.
 
-    This is the failure the ServiceMonitor fixed one level down, one level up. Before the dashboards
-    existed, sixteen of the registry's series had an alert and the other eighty-eight had no reader
-    of *any* kind — computed on a hot path, exposed, scraped, retained, and read by nobody.
-    `deploy/README.md` said so outright.
-
-    Asserted against the registry rather than against a list here, so the obligation lands on
-    whoever declares the metric: a series added tomorrow with no panel and no rule fails here, which
-    is the only moment anyone is in a position to say what question it answers.
+    Asserted against the registry, so the obligation lands on whoever declares the metric, the only
+    moment anyone can say what question it answers.
     """
     from chemclaw.core.metrics import _COUNTERS, _GAUGE_FAMILIES, _GAUGES, _HISTOGRAMS
 
@@ -3238,22 +2611,11 @@ def test_every_declared_metric_has_a_consumer() -> None:
 def test_no_dashboard_panel_queries_a_series_nothing_produces() -> None:
     """A panel over a series no producer emits is a graph that can never draw.
 
-    Two shipped this way and they failed differently, which is why this reads *every* identifier
-    rather than only the `chemclaw_`-prefixed ones. "Temporal worker task slots" and "Temporal
-    pollers" queried `temporal_worker_task_slots_*` and `temporal_num_pollers` — the Temporal SDK's
-    own exporter, which `monitoring.temporalSdkMetrics` ships **off** and which
-    `durable/serve.py` does not bind at all, so nothing anywhere emits those series. The rule that
-    reads them (`ChemclawWorkerNotPolling`) is rendered only under that flag; the panels were
-    unconditional, which is the whole defect. They are deleted rather than flag-gated, by this
-    repository's own "no 'for later' stubs" rule — the change that adds the bind is the change that
-    adds the panels back, and `values.yaml` says so where the flag lives.
-
-    "Connector reachability" failed the other way: `chemclaw_connector_unhealthy` *is* declared, so
-    the existing declared-vs-queried check passed it, and the gauge family was bound by nothing —
-    caught by `tests/test_service.py::test_the_per_connector_health_gauge_actually_renders_a_series`
-    instead, which reads the exposition.
-
-    `up` and `absent()` are Prometheus's own and stay allowed; nothing else foreign is.
+    Every identifier is checked, not only `chemclaw_` ones: Temporal SDK series are emitted only
+    under `monitoring.temporalSdkMetrics`, so an unconditional panel over them never draws. A
+    declared but unbound gauge is caught separately by
+    `tests/test_service.py::test_the_per_connector_health_gauge_actually_renders_a_series`. `up` and
+    `absent()` are Prometheus's own and stay allowed.
     """
     from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
 
@@ -3281,40 +2643,14 @@ def test_no_dashboard_panel_queries_a_series_nothing_produces() -> None:
 
 
 def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
-    """Collected-and-un-alerted is the same failure REV-2 fixed one level down.
+    """The metrics designed to alert actually alert.
 
-    The ServiceMonitor made the metrics visible; not one of them fired anything, because no
-    PrometheusRule existed anywhere in the repo. The clearest case is the audit-sink failure
-    counter, whose emitter logs a stable `audit_sink_failure` marker at ERROR with a comment
-    saying a lost audit record "must be ALERTABLE" — and nothing was watching.
-
-    Pinned by metric name rather than by rule count so renaming a metric without moving its alert
-    fails here, which is the drift that makes an alerting stack quietly stop covering anything.
-
-    **The last three were added on 2026-09-19 and each was a control that read as present.**
-    `test_every_declared_metric_has_a_consumer` is satisfied by a *dashboard panel*, so each had a
-    reader and no rule, and the operability audit measured what that bought:
-
-    - `chemclaw_connectors_unreachable_total` was the **only** series that moved for a connector
-      answering 500 on `/mcp` while its `/healthz` answered 200 — the readiness gauge held 0, so
-      `ChemclawConnectorsUnhealthy` could not fire and nothing else read this one;
-    - `chemclaw_tool_calls_total{outcome="error"}` is the same fact for a connector that *does* come
-      up and then fails its calls, and had panels only;
-    - `chemclaw_turns_finished_total` carries `outcome="spend_capped"`, which `values.yaml` tells an
-      operator in as many words "is what says whether the number you chose is biting" — a chart
-      pointing at a control that did not exist.
-
-    The runbook half is guarded separately and derivably by
-    `test_every_alert_carries_a_runbook_url_that_resolves`, so an alert added here without an entry
-    there fails without needing a fourth name in this list.
-
-    **Read off the rules' PromQL, not off the file, and this test was doing the very thing
-    `_alert_expressions` exists to prevent.** It asserted `metric in rule` over the whole template,
-    so a Go-template comment or an annotation *mentioning* a series made it "alerted". Driven: the
-    `ChemclawToolCallsFailing` expression was repointed at another counter entirely and this test
-    stayed green, satisfied by the comment above that rule naming `chemclaw_tool_calls_total`. That
-    is the same false coverage `_alert_expressions`' own docstring describes, in the test one screen
-    away from it.
+    Pinned by metric name, so renaming a metric without moving its alert fails. A dashboard panel
+    satisfies `test_every_declared_metric_has_a_consumer`, so these need their own check: each is
+    the only signal for its failure (a connector answering 500 on `/mcp` with a green `/healthz`,
+    tool calls failing, the spend cap biting). Read off the rules' PromQL, not the file, so a
+    comment mentioning a series does not count; runbook entries are guarded by
+    `test_every_alert_carries_a_runbook_url_that_resolves`.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "kind: PrometheusRule" in rule
@@ -3340,18 +2676,11 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_no_alert_pages_for_a_pod_that_is_merely_still_starting() -> None:
-    """`ChemclawTargetDown` is `critical`, and it fired on an ordinary rollout.
+    """No `critical` alert pages for a pod that is merely still starting.
 
-    `up` says a target did not answer; it says nothing about readiness, and neither discovery
-    mechanism this chart uses waits for it — a PodMonitor's `role: pod` has no readiness filter and
-    an Endpoints object carries `notReadyAddresses`. So a pod is a target from the moment it
-    exists, `up` is 0 for the whole cold start, and every `probes.*.startup` block here allows
-    300 s of cold start on purpose (RDKit, the agent stack, the connector registry). A `for: 5m`
-    sat inside that budget.
-
-    Asserted as the relation and not the number, because the number is the derivation: the alert
-    must outlast the *largest* startup budget the chart grants, so raising a budget cannot leave it
-    behind.
+    `up` is 0 from the moment a pod is a target, through its whole cold start, so
+    `ChemclawTargetDown` must outlast the *largest* startup budget the chart grants. Asserted as
+    that relation, so raising a budget cannot leave the alert behind.
     """
     budgets = {
         component: int(probe["startup"]["periodSeconds"])
@@ -3372,21 +2701,11 @@ def test_no_alert_pages_for_a_pod_that_is_merely_still_starting() -> None:
 
 
 def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> None:
-    """The claim the rule file makes about itself, checked instead of written down.
+    """Only the fleet group alerts on a series this system does not emit.
 
-    Its header argued that every rule reads an application counter — "so a process that is gone
-    emits silence" — which is what makes `up` and `absent()` necessary. The sentence carried a
-    count ("all sixteen") that was thirty-seven by the time anyone read it, and the count was never
-    the interesting half: the *split* is. A short list of rules read Prometheus's own synthesised
-    `up` and every other rule reads a series this registry declares, and that is what the header
-    now says and this asserts. The list is enumerated below rather than counted here, for the
-    reason the count it replaced failed: a number in this docstring is stale the next time somebody
-    adds a rule, while a set that must match exactly is not.
-
-    A third rule written against a series nothing here emits would be green forever, which reads
-    exactly like the condition never occurring — the same failure
-    `test_no_dashboard_panel_queries_a_series_nothing_produces` catches one surface over.
-    `temporal_num_pollers` is the sanctioned exception and is rendered only behind its own flag.
+    Every other rule reads a series this registry declares; a rule against a series nothing emits
+    would be green forever, reading like the condition never occurring. The allowed set is
+    enumerated exactly rather than counted.
     """
     from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
 
@@ -3407,16 +2726,10 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
             )
         for series in re.findall(r"\bchemclaw_[a-z0-9_]+\b", expr):
             assert series in declared, f"{name} reads {series}, which this registry never declares"
-    # `ChemclawWorkerNotPolling` is the sanctioned third, and its difference from the two deleted
-    # dashboard panels is the whole reason it survives: it is rendered only under
-    # `monitoring.temporalSdkMetrics.enabled`, which is the same flag that renders the port the
-    # exporter would bind, so it is absent from every shipped configuration rather than green
-    # forever in one. The panels were unconditional.
-    # `ChemclawNoBackgroundWorkerIsScraped` is the fourth and belongs to the same fleet group as
-    # the first two: the shared-endpoint `absent()` beside it cannot see a background worker that
-    # is missing, because connectors and the front door serve the same `metrics` port and keep it
-    # satisfied. It reads `up` for exactly the reason the other two do — a pod that never became a
-    # target emits no first-party series to alert on.
+    # `ChemclawWorkerNotPolling` is rendered only under `monitoring.temporalSdkMetrics.enabled`, the
+    # flag that renders the exporter's port, so it is absent rather than green forever.
+    # `ChemclawNoBackgroundWorkerIsScraped` reads `up` because the shared-endpoint `absent()` cannot
+    # see a missing background worker while other pods keep the `metrics` port satisfied.
     assert on_up == {
         "ChemclawTargetDown",
         "ChemclawNoWorkerIsScraped",
@@ -3429,18 +2742,11 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
 
 
 def test_no_alert_asks_for_to_suppress_what_only_a_threshold_can() -> None:
-    """`for:` cannot mean "sustained" over an `increase(...) > 0`, and two rules claimed it did.
+    """`for:` cannot mean "sustained" over an `increase(...) > 0`.
 
-    `increase(c[10m]) > 0` returns a sample continuously for ~10 minutes after a *single*
-    increment, so a `for:` shorter than the range window is satisfied by one blip: the alert is not
-    suppressed, only late. `ChemclawDurableUnreachable` was annotated "`for: 5m` because a single
-    broker blip … needs no page" while paging on exactly that, five minutes afterwards;
-    `ChemclawRollbackWatermarkUnavailable` had the same shape with a 5m window and a 5m `for:`.
-    Both now put the judgement in the count, where it can actually be made.
-
-    The rule is general because the mistake is: a threshold of `0` over a range window admits no
-    `for:` short enough to filter anything. `for: 0m` on a `> 0` is correct and stays — three
-    alerts here mean the first increment and say so.
+    `increase(c[w]) > 0` stays true for the whole window after one increment, so a shorter `for:`
+    only delays the page. The judgement belongs in the count. `for: 0m` on `> 0` is correct for
+    alerts that mean the first increment.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     for block in re.split(r"\n\s*- alert: ", rule)[1:]:
@@ -3460,20 +2766,11 @@ def test_no_alert_asks_for_to_suppress_what_only_a_threshold_can() -> None:
 
 
 def test_the_corpus_alert_can_fire_for_the_case_it_calls_the_sharper_one() -> None:
-    """A sentinel below every legal threshold is a case a `>` comparison can never reach.
+    """The corpus alert must fire for the empty-tree sentinel, which a `>` comparison never reaches.
 
-    `chemclaw_knowledge_sync_age_seconds` reports `kg/graph.py::NO_NOTES` (-1) for a tree holding no
-    note at all — negative on purpose, so an unpopulated volume could never be misread as a corpus
-    that had just refreshed. `ChemclawKnowledgeCorpusStale` was `age > {{ threshold }}` and rendered
-    only when the threshold is positive, so -1 could not satisfy it under any configuration: the
-    alert's own description named that case as the sharper failure while being structurally unable
-    to fire for it. The dashboard panel showed it to whoever was looking; nothing paged.
-
-    The opt-in is asserted in the same test because it is the constraint the fix had to respect. An
-    empty tree needs no site-specific budget to interpret, which is a real argument for alerting on
-    it unconditionally — but the gauge is bound in every process that imports `kg.graph`, and a
-    deployment not using the knowledge graph has an empty tree by design. Both arms stay behind the
-    one threshold, so opting out is still one number.
+    `chemclaw_knowledge_sync_age_seconds` reports `kg/graph.py::NO_NOTES` (-1) for a tree with no
+    note at all, the sharper failure. Both arms stay behind the one threshold, because a deployment
+    not using the knowledge graph has an empty tree by design; opting out is still one number.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     block = re.split(r"\n\s*- alert: ", rule)[1:]
@@ -3511,11 +2808,8 @@ def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     # Only the PromQL, not the prose: the annotations legitimately name metrics in explanations.
     expressions = " ".join(re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*for:", rule))
-    # A histogram is queried through its derived series — `_bucket` for `histogram_quantile`, and
-    # `_sum`/`_count` for an average — and none of those three is a name the registry declares. The
-    # suffix is Prometheus's, not this system's, so stripping it is what makes the comparison a
-    # comparison about metric *names*. Gauge families are queried by their bare name and need no
-    # such treatment; they are in `declared` below for the first time here.
+    # Histograms are queried through `_bucket`/`_sum`/`_count`, Prometheus's suffixes and not
+    # declared names, so they are stripped; gauge families are queried by their bare name.
     referenced = {
         re.sub(r"_(bucket|sum|count)$", "", name)
         for name in re.findall(r"\b(chemclaw_[a-z_]+)\b", expressions)
@@ -3525,13 +2819,9 @@ def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     assert not unknown, f"alerts reference metrics the app never emits: {sorted(unknown)}"
 
 
-# Supply-chain tooling the runbook's gate section is allowed to name, and the only vocabulary this
-# check knows. A named watch-list rather than every backticked token in the section, for the reason
-# `tests/test_third_party_layering.py` gives its `_STACKS`: the prose around the table legitimately
-# backticks `uv lock`, `BACKLOG.md`, an ADR id and two CVE'd package names, and a check that read
-# all of them as gate claims would fail on the next paragraph anyone writes. That is a real limit —
-# a scanner nobody named cannot be policed — so a tool that enters this conversation belongs here in
-# the same commit that documents it.
+# Supply-chain tooling the runbook's gate section may name — the only vocabulary this check knows.
+# A named watch-list rather than every backticked token, since the surrounding prose legitimately
+# backticks other things; a tool entering that section belongs here in the same commit.
 _SUPPLY_CHAIN_TOOLS = frozenset(
     {
         "trivy",
@@ -3557,19 +2847,9 @@ _ABSENCE_MARKERS = ("nowhere", "there is no", "used to say", "is a real gap", "d
 def _invoked_commands(workflow: str) -> set[str]:
     """Every program `image.yml` actually *invokes*, plus each `make` target and each `uses`.
 
-    Parsed as YAML rather than read as one blob, because a comment is not a control. Comments are
-    the largest thing in this workflow — the file is more rationale than command — so a substring
-    search over its text answers "is this word written down here", which is the question the runbook
-    already answers and not the one worth asking of CI. Shell comments inside a `run:` block survive
-    YAML parsing and are stripped for the same reason.
-
-    **Command words, not substrings, and the difference is a whole gate.** This used to return the
-    executable text and callers asked `gate in executed`. Driven as a mutation: replacing
-    `trivy image ...` with `echo image ...` — a workflow that downloads the scanner and never runs
-    it — left the check green, because the installer's own URL and filename both contain the word.
-    Fetching a tool is not running it. So each fragment of each script is reduced to the program it
-    starts with, and `make <target>` contributes the target too, since that is how this workflow
-    spells several gates.
+    Parsed as YAML, with shell comments stripped, because a comment is not a control. Reduced to
+    command words rather than substrings: downloading a scanner is not running it, and its URL
+    contains its name.
     """
     document: Any = yaml.safe_load(workflow)
     commands: set[str] = set()
@@ -3596,29 +2876,10 @@ def _invoked_commands(workflow: str) -> set[str]:
 def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
     """A documented control that does not run is worse than a missing one.
 
-    The runbook's supply-chain section described **three** blocking gates and explained how the
-    middle one was tuned, in the present tense. `trivy` appeared nowhere in the workflow, the
-    Makefile, or anything else that executes — so an operator reading that page believed the image's
-    base OS layers were scanned and that a red build would tell them. Prose is not covered by any
-    gate, which is exactly why this assertion exists rather than a fourth careful sentence.
-
-    **Both halves of it were defeatable, and an audit defeated both while it stayed green.**
-
-    1. *A comment satisfied it.* `gate in workflow` was a substring over the whole file, and this
-       workflow is mostly rationale — so `# NOTE: a trivy image scan is deliberately not run here
-       yet.` made the phantom row pass, which is the same phantom control with a second document
-       now agreeing with it. Fixed by asking whether the gate *runs*: the workflow is parsed as
-       YAML and only each step's `uses`/`run` counts, with shell comments inside a `run:` block
-       stripped for the same reason.
-    2. *Prose was invisible.* Only rows starting with ``| ` `` were read, so the sentence beside
-       the table — which is how this section describes `trivy` today — claimed whatever it liked.
-       Fixed by reading the section's sentences too: a sentence naming a supply-chain tool claims
-       it runs unless it carries one of `_ABSENCE_MARKERS`, which is how the current text says the
-       scan is a gap rather than a gate.
-
-    Still keyed on the gate *names*, not on a count: adding a real scan should make this pass by
-    making the claim true, and re-adding a phantom one — in the table or in a sentence — should
-    make it fail.
+    Every supply-chain tool the runbook's gate section names — in any table cell or in a sentence —
+    must be invoked by `image.yml` (parsed `uses`/`run`, comments stripped), unless the sentence
+    carries one of `_ABSENCE_MARKERS`. Keyed on names, not a count: adding a real scan passes by
+    making the claim true, re-adding a phantom one fails.
     """
     runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
     workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
@@ -3629,11 +2890,7 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
         "the gate table was not found — this check is reading the wrong section"
     )
 
-    # **Every backticked tool in a table row, not just the row's first cell.** Reading only the
-    # leading `| \`gate\`` cell left the SBOM row — whose *third* cell says "it only fails if
-    # `syft` cannot run" — entirely unchecked: driven as a mutation, replacing `syft chemclaw:ci`
-    # with `echo chemclaw:ci` kept this green while the runbook went on naming the tool. A claim in
-    # a cell is a claim.
+    # Every backticked tool in a table row, not just the first cell: a claim in any cell is a claim.
     named = {
         token
         for line in table
@@ -3670,11 +2927,8 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
         "a gate, and neither is a sentence next to the table."
     )
 
-    # **And a gate that runs is not yet a gate that blocks**, which this check did not ask and the
-    # `BACKLOG.md` row said so in as many words: "it does not prove the named gate is *blocking*,
-    # only that something runs it". A step carrying `continue-on-error: true` executes, reports,
-    # and lets the merge through — a scanner nobody reads, which is the failure the image
-    # workflow's own comment names as the reason `pip-audit` blocks.
+    # A gate that runs is not yet a gate that blocks: a step with `continue-on-error: true` executes
+    # and lets the merge through.
     document: Any = yaml.safe_load(workflow)
     non_blocking: list[str] = []
     for job in (document.get("jobs") or {}).values():
@@ -3694,36 +2948,20 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
 
 # --- Rendered-chart assertions (need the `helm` binary) ----------------------------------------
 #
-# Everything above reads the template *source*. That cannot see what a value's *absence* renders
-# to, and absence is where this chart's derivations fail silently: `int nil` is `0` and
-# `{{ .Values.config.X }}` on a missing key is the empty string, so a derived number degrades to a
-# plausible wrong one rather than refusing. Skipped where `helm` is not installed — the same split
-# `tests/test_helm_chart.py`'s docstring describes, with `make helm-validate` as the CI half.
+# The source checks above cannot see what a value's *absence* renders to (`int nil` is `0`, a
+# missing key is ""), which is where derivations fail silently. Skipped without `helm`;
+# `make helm-validate` is the CI half.
 
 
 @cache
 def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
-    """`helm template` on the chart, with the egress and retention postures stated.
+    """`helm template` on the chart, with the egress, retention and namespace postures stated.
 
-    Cached on the overrides, because `helm template` is a subprocess and the chart on disk does
-    not change during a session: 18 of the 42 calls in this file pass no overrides at all and were
-    18 identical renders. Measured over the whole file, two runs each: 51.7 s / 51.1 s before,
-    43.5 s / 43.4 s after. The returned `CompletedProcess` is therefore shared between tests —
-    every reader here treats it as the immutable record of a render, which is what it is.
-
-    `networkPolicy.allowAnyDestination=true` is the same flag the Makefile's two renders, the
-    runbook and `deploy/README.md` all pass: the chart refuses to render until a release states
-    where its pods may talk, and a validation render has no destinations to enumerate.
-    `retention.unboundedGrowthAccepted=true` is the same shape for the sibling guard
-    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`'s retention half): a validation
-    render states no disposal policy either, and both flags are what every other caller of this
-    chart pays too — see `test_the_shipped_defaults_still_render`.
-
-    `temporal.namespace=chemclaw` is the third, and it is not a posture: it is the one string that
-    separates two ChemClaw releases sharing a broker, which the chart shipped as a constant inside
-    `config` and now refuses to default. A validation render has no site to name, so it names the
-    value the chart used to hard-code — see
-    `test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render`.
+    Cached on the overrides because the chart does not change during a session; the returned
+    `CompletedProcess` is shared and treated as immutable. `allowAnyDestination=true` and
+    `unboundedGrowthAccepted=true` are the flags every caller of the chart passes, and
+    `temporal.namespace=chemclaw` names a namespace, which the chart refuses to default because it
+    is what separates releases on a shared broker.
     """
     return subprocess.run(
         [
@@ -3759,28 +2997,12 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
 def test_a_derived_value_refuses_rather_than_rendering_a_plausible_wrong_one(
     key: str, helper: str
 ) -> None:
-    """Three templates derive a value from a `config` key. Removing the key must stop the render.
+    """A derived value must refuse to render when its source `config` key is removed.
 
-    Deriving is the right instinct — `_helpers.tpl`'s own comment argues it at length: "a path that
-    only has to *agree* with another path eventually does not, so this one is derived rather than
-    declared". What the derivations lacked was the other half, which `deployment-connectors.yaml`
-    already had: `required`. Without it the degradation is silent and each one is worse than a
-    crash —
-
-    * `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` absent rendered `terminationGracePeriodSeconds: 15`
-      on the front door (`0 + drainSeconds`) while `Settings` still ran turns to 600 s, so every
-      rolling update and node drain SIGKILLed in-flight conversations — the exact regression
-      `deployment-service.yaml`'s comment says it fixed;
-    * `CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS` absent rendered 30 s against a 120 s drain;
-    * `CHEMCLAW_KNOWLEDGE_DIR` absent published to `<noteRepoPath>/` while every reader resolves
-      `note_repo_dir / knowledge_dir` — the silent empty-knowledge-tree failure the same helper's
-      comment narrates and claims to have made impossible;
-    * either half of the `/readyz` budget absent renders a readiness `timeoutSeconds` a whole
-      budget short, so the kubelet drains a front door that is still inside the time the app was
-      configured to take.
-
-    An operator reaches this by moving one key into an ExternalSecret, a sidecar-injected env, or
-    simply `--set config.<KEY>=null` after deciding the code default is fine.
+    Without `required`, each degrades to a plausible wrong value: a front-door grace period shorter
+    than a turn, a worker grace period shorter than its drain, a knowledge path readers never look
+    at, or a readiness timeout a budget short. An operator reaches this by moving a key into an
+    ExternalSecret or `--set config.<KEY>=null`.
     """
     result = _render("--set", f"config.{key}=null")
     assert result.returncode != 0, (
@@ -3795,11 +3017,8 @@ def test_a_derived_value_refuses_rather_than_rendering_a_plausible_wrong_one(
     [
         pytest.param(("--set", "connectors=null"), id="block-removed"),
         pytest.param(
-            # Derived from the values file rather than typed out. It *was* typed out, as the seven
-            # bundles that existed the day it was written, and the eighth (`rxnpredict`) turned
-            # "all disabled" into "all but one disabled" — so the release rendered, correctly, and
-            # this arm failed reporting a guard that had not broken. A list of the whole set is a
-            # thing only the whole set can supply.
+            # Derived from the values file, so "all disabled" stays all of them when a bundle is
+            # added.
             tuple(
                 arg
                 for name in sorted(_values()["connectors"])
@@ -3810,21 +3029,11 @@ def test_a_derived_value_refuses_rather_than_rendering_a_plausible_wrong_one(
     ],
 )
 def test_a_release_that_enables_no_connector_does_not_render(overrides: tuple[str, ...]) -> None:
-    """Both spellings of "no connectors", because the `fail` only ever caught one of them.
+    """Both spellings of "no connectors" must refuse.
 
-    `chemclaw.connectorsEnabled` refused the all-disabled release and told the operator to *remove
-    the connectors block entirely* instead — a remedy that skipped the guard's own
-    `and .Values.connectors` condition and rendered `CHEMCLAW_CONNECTORS_ENABLED: ""`, which
-    `connectors_enabled_list` reads as **every discovered bundle**. Together with
-    `CHEMCLAW_CONNECTOR_URLS: "{}"` every bundle then fell back to its manifest's loopback dev
-    address, so the front door advertised all seven bundles' tools while dialling its own pod: the
-    "pods gone, tools advertised" regression that helper exists to close, reached through the door
-    the message left open.
-
-    It also rendered `matchExpressions … values: null` on the connector-ingress NetworkPolicy,
-    which the Kubernetes API rejects and `kubeconform -strict` passes — so `--atomic` rolled the
-    release back with an error naming neither connectors nor the values file. That selector is
-    unreachable once this render refuses, which is why there is no separate guard on it.
+    An absent connectors block renders `CHEMCLAW_CONNECTORS_ENABLED: ""`, which means *every*
+    bundle, and with an empty URL map each falls back to its loopback dev address: tools advertised,
+    pods gone. It also renders a `values: null` selector the API rejects but `kubeconform` passes.
     """
     result = _render(*overrides)
     assert result.returncode != 0, f"a connector-less release rendered:\n{result.stdout[:2000]}"
@@ -3858,16 +3067,9 @@ def _retention_env_names() -> set[str]:
 def _render_windows(*keys: str) -> subprocess.CompletedProcess[str]:
     """`helm template` with `retention.windows` stated, instead of unbounded growth accepted.
 
-    `_render` states the *other* retention posture and the gate refuses when both are set, so the
-    escape hatch is overridden back to `false` rather than dropped: `--set` is last-wins, which
-    leaves exactly one posture stated — the one under test.
-
-    `exhibitsGrowthAccepted=true` likewise, unless the artefacts' own window is among `keys`.
-    `artifactGrowthAccepted=true` is here because stating a window is what makes the artifact-store
-    posture mandatory: the nine `CHEMCLAW_RETENTION_*` windows bound nine tables and none of them
-    is `artifact_blobs`, so a release that says "I bound my growth" is asked the second half.
-    Only on this arm — `_render`'s `unboundedGrowthAccepted` already covers that table by saying
-    everything grows.
+    The escape hatch is overridden back to `false` (`--set` is last-wins), leaving exactly the
+    posture under test. Stating windows makes the artifact-store and exhibits postures mandatory
+    too, so those are accepted here unless the exhibits window is among `keys`.
     """
     exhibits = "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS"
     accepted = () if exhibits in keys else ("--set", "retention.exhibitsGrowthAccepted=true")
@@ -3883,24 +3085,13 @@ def _render_windows(*keys: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_a_retention_window_naming_no_setting_refuses_to_render() -> None:
-    """A misspelled window key used to *satisfy* the posture gate and disable every window.
+    """A retention window naming no setting refuses to render.
 
-    `retention.windows` is rendered into the ConfigMap key by key, and pydantic-settings ignores an
-    unknown prefixed environment variable — so a typo installed cleanly, put
-    `CHEMCLAW_RETENTION_ENABLED: "true"` in front of the operator, and left all five windows at
-    their disabled default. The sweep then ran on schedule and skipped every table
-    (`durable/retention.py` treats a window of `0` as off) while every signal said retention was
-    on: unbounded growth reached through the escape hatch of the gate that exists to prevent it.
-
-    `CHEMCLAW_RETENTION_AUDIT_DAYS` is the misspelling this drives because it is the one that
-    actually happened — it was the worked example in `_POSTURE_CASES` above, in this repository's
-    own guard, and there is no `retention_audit_days` field.
-
-    Both directions, through a real render rather than a model of one. Re-deriving the chart is how
-    the existing guard missed this: `test_chart_config_keys_have_a_consumer` in
-    `tests/test_helm_chart.py` is exactly the right check and cannot see `retention.windows`,
-    because the shipped `values.yaml` leaves it `{}` and the windows arrive at install time,
-    where nothing looked.
+    pydantic-settings ignores an unknown prefixed variable, so a misspelled key would satisfy the
+    posture gate, report retention enabled, and leave every window disabled.
+    `CHEMCLAW_RETENTION_AUDIT_DAYS` is a realistic misspelling (there is no such field). Driven
+    through a real render, because the shipped `values.yaml` leaves `windows` empty and the keys
+    arrive at install time.
     """
     typo = _render_windows("CHEMCLAW_RETENTION_AUDIT_DAYS")
     assert typo.returncode != 0, (
@@ -3931,33 +3122,13 @@ def test_a_retention_window_naming_no_setting_refuses_to_render() -> None:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render() -> None:
-    """Two releases land on one Temporal namespace, and the chart shipped that as the default.
+    """A release that does not name its Temporal namespace refuses to render.
 
-    `config.CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster — its own `temporal`
-    Kubernetes namespace, not one per release — and `CHEMCLAW_TEMPORAL_NAMESPACE` sat beside it as
-    the constant `"chemclaw"`. Inside that broker the namespace is the only boundary there is:
-    `CHEMCLAW_BACKGROUND_TASK_QUEUE` is the constant `background-jobs`, `OWNED_SCHEDULE_IDS` is a
-    set of bare constants, and a job's workflow id carries no site. The layout this repository
-    documents — `dev.yaml`/`staging.yaml`/`prod.yaml` in `deploy/jenkins/environments/`, three
-    Kubernetes namespaces, one shared Temporal — therefore put every release on one namespace, one
-    queue and one schedule-id space.
-
-    Measured against a live broker through the shipped `apply_schedules`/`_prune`, ids
-    probe-prefixed and deleted afterwards::
-
-        site A applied:  eln-sync -> workflow=SiteAWorkflow  interval=0:30:00
-        site B applied:  eln-sync -> workflow=SiteBWorkflow  interval=0:05:00   <-- overwritten
-        site A's schedules, settled:  ['eln-sync', 'eval-drift']
-        after site B's apply pruned:  ['eln-sync']                              <-- deleted
-
-    `_prune` deletes every id in `OWNED_SCHEDULE_IDS` that this release did not plan; it cannot tell
-    a peer's Schedule from a leftover of its own, and the comment above that set already anticipates
-    "a shared Temporal namespace" while protecting only *other software's* schedules.
-
-    Driven to the refusal **and** to a render, because a gate nobody has watched refuse is a claim
-    that a gate exists. The third arm is the duplicate: derived into the ConfigMap from
-    `temporal.namespace`, the key written in `config` as well would render twice and every parser
-    keeps the last, leaving this gate checking a value nothing reads.
+    The broker is cluster-shared and the namespace is the only boundary in it: the task queue and
+    the owned Schedule ids are constants, and `_prune` deletes any owned Schedule id this release
+    did not plan, so two releases on one namespace overwrite and delete each other's Schedules.
+    Driven to the refusal, to a render, and to the duplicate case (the key also written in `config`
+    would render twice and the last wins).
     """
     # Built by hand rather than through `_render`, which states all three: `--set` is last-wins and
     # there is no "unset", so `temporal.namespace=` would state the empty string — which is what
@@ -4002,11 +3173,8 @@ def test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render()
     assert both.returncode != 0, both.stdout[:2000]
     assert "CHEMCLAW_TEMPORAL_NAMESPACE" in both.stderr, both.stderr
 
-    # And every shipped-defaults render in the `Makefile` must carry the flag, exactly as
-    # `test_an_unstated_egress_posture_refuses_to_render` demands of its own: this is the third
-    # thing `helm template` on these defaults cannot render without, so a render site that has not
-    # learned it does not fail *later*, it fails at once — which is what makes the omission cheap
-    # to find and worth asserting rather than remembering.
+    # Every shipped-defaults render in the `Makefile` must carry the flag too, since these defaults
+    # cannot render without it.
     renders = _makefile_renders()
     assert renders, "no `helm template` found in the Makefile — the extraction is broken"
     unflagged = [
@@ -4021,25 +3189,12 @@ def test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render()
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_a_quoted_retention_escape_hatch_refuses_to_render() -> None:
-    """`unboundedGrowthAccepted: "false"` used to *satisfy* the retention gate and disable disposal.
+    """A quoted retention escape hatch refuses to render.
 
-    Go templates treat every non-empty string as truthy and `empty` agrees, so a quoted boolean —
-    an operator writing down what they do *not* want, or `--set-string`, which
-    `templates/networkpolicy.yaml` calls "the single most likely way to get this wrong" — read as
-    *stated* to the gate and as *off* to everyone else. That twin has carried a `kindIs "string"`
-    guard since it shipped; this half never grew one, so the retention gate could be walked through
-    its own escape hatch. Measured with the guard removed, on otherwise shipped defaults:
-
-        helm template … --set-string retention.unboundedGrowthAccepted=false
-        -> 32 objects rendered, `CHEMCLAW_RETENTION_ENABLED` present 0 times
-
-    A release that wrote down "not unbounded growth" and installed cleanly with every durable table
-    growing forever, which is the exact end state this gate exists to make impossible.
-
-    Driven rather than read, because the sibling text assertion in
-    `test_an_unstated_retention_posture_refuses_to_render` can see the guard's *presence* and not
-    what `empty` does with a string — and it was the second of those, not the first, that made this
-    reachable.
+    A non-empty string is truthy to Go templates and to `empty`, so
+    `--set-string retention.unboundedGrowthAccepted=false` would satisfy the gate while disabling
+    retention. Driven rather than read, because the text test can see the `kindIs "string"` guard's
+    presence but not what `empty` does with a string.
     """
     quoted = subprocess.run(
         [
@@ -4072,20 +3227,12 @@ def test_a_quoted_retention_escape_hatch_refuses_to_render() -> None:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_stating_retention_windows_also_requires_an_artifact_store_posture() -> None:
-    """The retention gate bounds nine tables; `artifact_blobs` is not one of them.
+    """Stating retention windows also requires an artifact-store posture.
 
-    `artifact_store_max_bytes` and `artifact_evict_idle_days` both default to 0 = off, they carry no
-    `CHEMCLAW_RETENTION_` prefix, and the sweep that reads them is a different workflow on a
-    different schedule. So a release that stated `retention.windows`, satisfied the posture gate and
-    believed its growth bounded still accumulated calculation by-products for the deployment's
-    lifetime — the gate's own escape hatch, one table over, which is the shape
-    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` exists to close.
-
-    **Asked only on the `windows` arm, and that is what keeps the shipped defaults at two `--set`
-    flags rather than three.** `unboundedGrowthAccepted: true` already says the durable tables grow
-    forever, which is true of this table too; there is nothing further for such a release to state.
-    The first arm below is what pins that, because a gate that fired on both arms would look
-    correct here and cost every render site a flag.
+    `artifact_blobs` is outside the retention windows (its bounds have their own settings and
+    sweep), so a release that states windows still needs to state this. Asked only on the `windows`
+    arm: `unboundedGrowthAccepted: true` already covers it, and the first arm pins that so the
+    shipped defaults stay at two `--set` flags.
     """
     accepted = _render()  # the `unboundedGrowthAccepted` arm, unchanged
     assert accepted.returncode == 0, (
@@ -4137,10 +3284,7 @@ def test_stating_retention_windows_also_requires_an_artifact_store_posture() -> 
     assert cadence_only.returncode != 0, cadence_only.stdout[:2000]
     assert "CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES" in cadence_only.stderr, cadence_only.stderr
 
-    # And the escape hatch must be a real boolean. `networkpolicy.yaml` calls `--set-string` on one
-    # of these "the single most likely way to get this wrong": a quoted boolean is truthy in Helm
-    # and `empty` agrees, so it would satisfy the gate while reading as off — this gate reached
-    # through the misspelling of its own escape hatch.
+    # And the escape hatch must be a real boolean: a quoted one is truthy to Helm and to `empty`.
     quoted = _render(
         "--set",
         "retention.unboundedGrowthAccepted=false",
@@ -4157,10 +3301,8 @@ def test_stating_retention_windows_also_requires_an_artifact_store_posture() -> 
 def test_stating_retention_windows_also_requires_an_artefact_posture() -> None:
     """Windows without the artefacts' window, or an accepted growth, refuse; either one renders.
 
-    `windows` is free-form, so a release could state a policy, leave
-    CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS out and keep every artefact — and every session that
-    made one, which the ownership sweep then holds back — for its lifetime. Mirrors the artifact
-    store's gate above: exactly one, and a real boolean.
+    `windows` is free-form, so a release could omit `CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` and
+    keep every artefact (and its session) forever. Exactly one, and a real boolean.
     """
     base = (
         "--set",
@@ -4198,11 +3340,9 @@ def test_stating_retention_windows_also_requires_an_artefact_posture() -> None:
     assert "now refuses to render" in runbook and refusal in " ".join(runbook.split())
 
 
-# What a switch needs *besides itself* to render the branch it gates. The only literal here, and it
-# is a statement about prerequisites rather than a list of switches: `monitoring.alertmanager`
-# refuses to render with no receivers (deliberately — `templates/alertmanagerconfig.yaml`), and
-# `mcpFace.route` renders nothing at all without the Deployment it publishes. A switch absent from
-# this map needs nothing.
+# What a switch needs *besides itself* to render the branch it gates: `monitoring.alertmanager`
+# refuses with no receivers, and `mcpFace.route` renders nothing without its Deployment. A switch
+# absent from this map needs nothing.
 _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
     "monitoring.alertmanager.enabled": (
         "--set-json",
@@ -4210,11 +3350,8 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
         "--set",
         "monitoring.alertmanager.defaultReceiver=chemclaw-oncall",
     ),
-    # Two, and the second is a posture rather than a prerequisite object: the chart refuses to
-    # publish the face until a deployment names who may reach it, because the `mcp-face-ingress`
-    # policy would otherwise drop every request the Route admits. Stated here as the router's own
-    # selector — the value the front door's list already ships — so this render is the posture a
-    # real publishing release takes.
+    # The second is a posture: the chart refuses to publish the face until a deployment names who
+    # may reach it; stated here as the router's selector, as a real publishing release would.
     "mcpFace.route.enabled": (
         "--set",
         "mcpFace.enabled=true",
@@ -4227,20 +3364,9 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
 def _off_by_default_switches() -> list[str]:
     """Every `enabled`/`create` boolean `values.yaml` ships **false** that a template reads.
 
-    Derived, because the set this shares with the `Makefile` is exactly the set no gate has ever
-    rendered — `make helm-validate`, the CI `chart` job and every `_render()` above take the shipped
-    defaults, so a template behind one of these flags is validated by nobody until an operator turns
-    it on in their own cluster. Two of them rendered objects the API server rejects.
-
-    It shipped as a hand-written dict of three under a comment claiming "a flag added next year is
-    covered the day it is added rather than the day someone remembers to widen a test", which is the
-    one thing a literal cannot do: `secrets.create`, `mcpFace.route.enabled` and
-    `monitoring.alertmanager.enabled` were already missing from it, and the first two were rendered
-    by nothing anywhere in `tests/`, the `Makefile` or `.github/`.
-
-    A *switch* is a key named `enabled` or `create`, which is this chart's own convention and the
-    line that keeps the two posture flags (`allowAnyDestination`, `unboundedGrowthAccepted`) out —
-    those are not features, they are the statements `_render` already makes on every call.
+    Derived, because templates behind these flags are rendered by no default gate until an operator
+    turns one on. A switch is a key named `enabled` or `create` (the chart's convention), which
+    keeps the two posture flags out; `_render` states those on every call.
     """
     templates = "\n".join(_template_text().values())
     switches: list[str] = []
@@ -4277,11 +3403,8 @@ _OFF_BY_DEFAULT_RENDERS = _off_by_default_renders()
 def test_the_union_render_covers_every_switch_this_chart_ships_off() -> None:
     """`make helm-validate`'s second arm claims "every switch this chart ships **off**"; check it.
 
-    That arm is the only place an off-by-default template is put through `kubeconform` at all, and
-    its flag list is a literal in a shell loop — so the claim above it goes stale the first time a
-    switch is added, exactly as it already had (three of six). Read out of the `Makefile` rather
-    than restated here, the same way `_jenkins_render_flags` reads the pipeline: a copy of the list
-    would be a second answer to the question and would stay green while the render narrowed.
+    That arm is the only place an off-by-default template meets `kubeconform`. Its flag list is read
+    out of the `Makefile`, so a copy here cannot stay green while the render narrows.
     """
     makefile = (DEPLOY.parent / "Makefile").read_text()
     arm = makefile.split("helm-validate:", 1)[1].split("\nupstream-check:", 1)[0]
@@ -4295,23 +3418,12 @@ def test_the_union_render_covers_every_switch_this_chart_ships_off() -> None:
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 @pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
 def test_every_waited_on_hook_job_carries_a_deadline(overrides: tuple[str, ...]) -> None:
-    """The same argument as the test above, applied to every hook rather than the one that made it.
+    """Every hook Job Helm waits on carries `activeDeadlineSeconds`.
 
-    Helm waits for each hook Job it creates, so *any* of them with no `activeDeadlineSeconds` can
-    hold the release in `pending-install`/`pending-upgrade` indefinitely — and `backoffLimit` does
-    not help, because it bounds failures and a hang is not a failure. `migrate` and `convert` each
-    carry one and argue for it; the Schedules Job carried neither a deadline nor a value to set one.
-
-    Its hang is a real shape rather than a theoretical one: `chemclaw.cli.schedules` connects to
-    Temporal and calls `list_schedules`/`create_schedule`, and temporalio's `DEFAULT_RPC_TIMEOUT`
-    is `None` — a frontend that completes the gRPC handshake and then stalls leaves the pod running
-    forever. (A *refused* frontend does terminate, which is why this went unnoticed.)
-
-    Over the **rendered** manifests rather than the templates matching `*job*.yaml`, because the
-    thing being asserted is a property of hook Jobs and the glob was a property of filenames: a hook
-    Job in `templates/backfill.yaml` is outside it, and so is one a `define` emits. Parametrised
-    over the off-by-default variants for the same reason — a hook Job behind a feature flag is a
-    hook Job Helm waits for.
+    Without one a hang holds the release pending indefinitely; `backoffLimit` bounds failures, not
+    hangs (temporalio's default RPC timeout is `None`, so a stalled frontend hangs the Schedules
+    Job). Checked over rendered manifests, including off-by-default variants, since hook Jobs are a
+    property of the render, not of filenames.
     """
     for document in yaml.safe_load_all(_render(*overrides).stdout):
         if not document or document.get("kind") != "Job":
@@ -4331,21 +3443,12 @@ def test_every_waited_on_hook_job_carries_a_deadline(overrides: tuple[str, ...])
 def test_no_http_served_container_starts_without_a_head_start_or_a_drain(
     overrides: tuple[str, ...],
 ) -> None:
-    """The two guards `values.yaml`'s `probes:` block argues for, asserted where they can be seen.
+    """Every HTTP-served container has a startup probe, stated probe bounds and a grace period.
 
-    `test_a_connector_server_is_not_sigkilled_before_it_finishes_starting` makes the case in full
-    and reads exactly one template, so the component that needed it most was outside it: `mcp-face`
-    declared `initialDelaySeconds`/`periodSeconds` and left `timeoutSeconds: 1` and
-    `failureThreshold: 3` to Kubernetes, with no startup probe at all — first liveness kill about
-    100 s after start — while importing strictly *more* than the connector server that probe was
-    written for (measured 2800 ms against 1646 ms; `agent.tool_modules` seeds the whole tool
-    registry). It also had no `terminationGracePeriodSeconds`, so it took the 30 s default where the
-    front door has 615 and a connector 3610.
-
-    Rendered rather than read, so a probe supplied by a helper (`chemclaw.workerProbes`) counts the
-    same as one written into a template, and every future component is covered without being named.
-    Containers whose only probe is an `exec` — the knowledge-sync sidecar — are out of scope: they
-    serve nothing, and a startup probe on a loop that has no first response is meaningless.
+    Otherwise Kubernetes defaults (1 s timeout, three failures, no startup probe, 30 s grace) kill a
+    slow cold start and cut drains short. Rendered, so probes from helpers count and new components
+    are covered. `exec`-only containers (the knowledge-sync sidecar) serve nothing and are out of
+    scope.
     """
     result = _render(*overrides)
     assert result.returncode == 0, result.stderr
@@ -4388,20 +3491,11 @@ def test_no_http_served_container_starts_without_a_head_start_or_a_drain(
 def test_every_pod_a_service_routes_to_stops_being_chosen_before_it_stops_accepting(
     overrides: tuple[str, ...],
 ) -> None:
-    """The other half of the drain, and `mcp-face` shipped with only the half that cannot do it.
+    """Every pod a Service routes to sleeps in `preStop` before it stops accepting.
 
-    Kubernetes removes a terminating pod's Endpoint and sends SIGTERM **concurrently**, so a router
-    keeps choosing a pod that has already stopped accepting. `terminationGracePeriodSeconds` bounds
-    how long the kubelet waits *after* SIGTERM and so touches none of that; the `preStop` sleep is
-    what closes it, which is what `deploy/README.md` states and what the front door and every
-    connector server render. `mcp-face` was given the front door's 615 s grace period under a
-    comment claiming the Endpoint race was the thing being fixed, and no sleep — so its rollouts,
-    node drains and scale-downs still reset connections to the calling agent.
-
-    Scoped to pods a **Service** selects, derived from the same render rather than named: an HTTP
-    probe is a kubelet asking, not traffic arriving, and the Temporal workers serve `/healthz` on
-    their metrics port with no Service in front of them. Nothing routes to them, so there is nothing
-    to stop routing.
+    Kubernetes removes the Endpoint and sends SIGTERM concurrently, so without the sleep a router
+    keeps choosing a pod that has stopped; a grace period alone does nothing for that. Scoped to
+    pods a Service selects, derived from the render: workers' probe ports have no Service.
     """
     rendered = _render(*overrides)
     assert rendered.returncode == 0, rendered.stderr
@@ -4445,9 +3539,8 @@ def _pod_labels(documents: list[dict[str, Any]], workload_name: str) -> dict[str
 def _render_manifest_only(*overrides: str) -> str:
     """The render Helm actually *tracks* as the release: `--no-hooks`.
 
-    Helm keeps hook resources out of the release manifest entirely, so `--no-hooks` is exactly the
-    set that `helm rollback` restores and `helm uninstall` removes. That makes it the honest way to
-    ask "is this object part of the release" without a cluster.
+    Hook resources stay out of the release manifest, so this is exactly what `helm rollback`
+    restores and `helm uninstall` removes.
     """
     result = subprocess.run(
         [
@@ -4474,28 +3567,12 @@ def _render_manifest_only(*overrides: str) -> str:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_configuration_the_pods_read_is_part_of_the_release() -> None:
-    """`helm rollback` restored the pods and left the new release's configuration live.
+    """The configuration the pods read is part of the release, not a hook.
 
-    The entire non-secret configuration was a `pre-install,pre-upgrade` hook. Helm does not record
-    hook resources in the release manifest, and `helm rollback` runs only `pre-rollback`/
-    `post-rollback` hooks — of which this chart declares none — so a rollback reverted every
-    Deployment (including its `checksum/config` annotation, restarting every pod) while the
-    ConfigMap those pods read still held the *new* release's values. Measured against a real API
-    server, rolling back a release that had set `connectors.bo.enabled=false` restored
-    `chemclaw-connector-bo`'s Deployment and Service while `CHEMCLAW_CONNECTORS_ENABLED` still
-    omitted `bo`: the pods run and the capability stays dark. `helm uninstall` left both objects
-    behind for the same reason.
-
-    The rename is half of the fix and this docstring shipped calling it the whole of it ("the fix is
-    not an annotation but a rename"): two objects cannot share a name across the hook/manifest
-    boundary, so the *hook* copies the pre-install migrate Job needs took new names and the names
-    the running pods reference became ordinary tracked resources — and that leaves the tracked pair
-    claiming two names every live release already holds. What the boundary costs in both directions,
-    and what pays it, is
-    `test_the_pair_the_previous_chart_hooked_is_not_deleted_by_a_rollback_across_the_boundary`
-    below.
-
-    Asserted through `--no-hooks`, which is precisely the set Helm tracks.
+    `helm rollback` does not restore hook resources, so a hooked ConfigMap would keep the new
+    release's values behind rolled-back pods. The hook copies the pre-install Job needs take new
+    names; the names pods reference are tracked resources. The cost of that move is covered by
+    `test_the_pair_the_previous_chart_hooked_is_not_deleted_by_a_rollback_across_the_boundary`.
     """
     tracked = {
         (doc["kind"], doc["metadata"]["name"])
@@ -4526,24 +3603,12 @@ def test_the_configuration_the_pods_read_is_part_of_the_release() -> None:
 def test_the_pair_the_previous_chart_hooked_is_not_deleted_by_a_rollback_across_the_boundary() -> (
     None
 ):
-    """Moving two objects into the manifest made `helm rollback` across that move an outage.
+    """A rollback across the hook-to-manifest move must not delete the ConfigMap and ServiceAccount.
 
-    `helm rollback` deletes anything in the current manifest that the target revision's manifest
-    lacks — and a revision installed by the previous chart has no ConfigMap and no ServiceAccount in
-    its manifest at all, because both were hooks. So rolling back across the boundary deletes the
-    configuration and the identity that the very Deployments it is restoring name in a non-optional
-    `envFrom` and a `serviceAccountName`, and prints "Rollback was a success!".
-
-    Measured against a real API server (k3s v1.29.9), release installed from `d247224`'s chart and
-    upgraded to this one: after `helm rollback <rel> 1`, `configmaps "chemclaw-config" not found`
-    and `serviceaccounts "chemclaw" not found`. With the annotation this test pins, the same
-    sequence leaves both standing. **That is what actually proves it, and this assertion is not
-    that** — a render cannot execute a rollback. What a render *can* pin is the one input Helm reads
-    at deletion time, so the annotation cannot be dropped by someone who has not met the cluster.
-
-    The cost is stated in `templates/config.yaml` and in `deploy/README.md`: `helm uninstall` leaves
-    these two behind. `keep` skips deletion only, so a rollback inside this chart's own lineage
-    still restores the previous revision's `data:` — which is the whole point of having moved them.
+    `helm rollback` deletes what the target revision's manifest lacks, and a revision from the
+    previous chart lists neither, so the pods it restores would lose their config and identity. The
+    `helm.sh/resource-policy: keep` annotation prevents it; a render cannot run a rollback, so this
+    pins the one input Helm reads at deletion time. The cost: `helm uninstall` leaves both behind.
     """
     tracked = {
         (document["kind"], document["metadata"]["name"]): document["metadata"].get("annotations")
@@ -4564,25 +3629,12 @@ def test_the_pair_the_previous_chart_hooked_is_not_deleted_by_a_rollback_across_
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -> None:
-    """The other half, and the reason the hook copies exist at all.
+    """The pre-install hook reads configuration that exists when it runs.
 
-    Helm runs `pre-install` hooks *before* any ordinary resource is applied, so a migrate Job that
-    referenced the now-tracked `chemclaw-config`/ServiceAccount would fail on a fresh install
-    against objects that do not exist yet — trading a rollback defect for an install defect. It
-    therefore reads hook-scoped copies, rendered from the same values in the same release. On an
-    *upgrade* that is also the more correct source: at `pre-upgrade` the tracked ConfigMap still
-    holds the previous release's values, and the hook copy holds this one's.
-
-    The `post-install`/`post-upgrade` Jobs read the tracked objects deliberately — by then the
-    manifest is applied, and `convert` runs as the runtime role against the release that is now
-    live, so the configuration it should see is the one the pods see.
-
-    `chemclaw-migrate` also runs on `pre-rollback`
-    (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step): the grant file is a full
-    restatement, so it *narrows*, and `helm rollback` runs neither of the two hook points above —
-    without it a rolled-back release restores the older image against the newer ACL. The hook-scoped
-    configuration this test is about is the right source there for the same reason it is at
-    `pre-upgrade`: it is the target revision's own, rendered in the release being restored.
+    `pre-install` hooks run before ordinary resources exist, so the migrate Job reads hook-scoped
+    copies rendered from the same values; at `pre-upgrade` and `pre-rollback` those copies are also
+    the target revision's own values. The post-install/upgrade Jobs read the tracked objects, which
+    by then are live.
     """
     hooks = {
         doc["metadata"]["name"]: doc
@@ -4613,11 +3665,8 @@ def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -
     migrate_events = set(migrate_annotations["helm.sh/hook"].split(","))
     for name in (pre_sa, pre_config):
         assert name in hooks, f"the migrate Job reads {name!r}, which is neither a hook nor tracked"
-        # **Every event the Job runs on, not a subset.** The copies are `hook-succeeded`, so none
-        # outlives the release that created it; an event that runs the Job without them hands it
-        # objects that do not exist. Pinned as `pre-install,pre-upgrade` here, this test held the
-        # defect in place: measured, `helm rollback` ran the Job on `pre-rollback`, its pod was
-        # refused (`error looking up service account`) and the rollback failed.
+        # Every event the Job runs on, not a subset: the copies are `hook-succeeded`, so an event
+        # that runs the Job without them hands it objects that do not exist.
         events = set(hooks[name]["metadata"]["annotations"]["helm.sh/hook"].split(","))
         assert events == migrate_events, (
             f"{name} is a hook on {sorted(events)} but the migrate Job that reads it runs on "
@@ -4646,23 +3695,9 @@ def _declared_fleet_pools(*overrides: str) -> int:
 def test_the_connection_ceiling_covers_the_rollout_peak_and_not_only_the_steady_state() -> None:
     """The declared ceiling must contain what an *upgrade* opens, not what the fleet settles at.
 
-    A rolling update runs both generations, so for its duration every surging Deployment holds its
-    pools twice and the fleet holds the most connections it ever holds. Nothing charged the ceiling
-    for that: `chemclaw.fleetPools` counted one generation, and the first sign of the gap would be
-    `ChemclawFleetAboveItsConnectionCeiling` — which reads a *live* sum — firing on a correct
-    deployment while every pod's own configuration validated.
-
-    Driven through the real `Settings` against a real render rather than re-implemented here, so
-    this asserts the arithmetic the pods run. Measured on the shipped chart: 26 pools steady and 36
-    at the peak, 6 front-door processes and 7, giving **166 connections steady and 239 at the peak**
-    against a declared 256.
-
-    **The peak already fits, which is the finding.** An earlier version of this work multiplied the
-    old `pools × pg_pool_max_size` product by the surge and asked for 336 — a 31% provisioning rise.
-    That product charged every narrow `/readyz` pool the full width; `fleet_connections_per_server`
-    charges it the one connection it asks for, and against *that* arithmetic the same surge costs 73
-    connections rather than 128 and lands inside the ceiling already declared. The guard is what
-    this adds; the ask is nothing.
+    A rolling update runs both generations, so surging Deployments hold their pools twice. Driven
+    through the real `Settings` against a real render, so this asserts the arithmetic the pods run;
+    `fleet_connections_per_server` charges each narrow `/readyz` pool one connection.
     """
     values = _values()
     rendered = _render()
@@ -4702,20 +3737,10 @@ def test_the_connection_ceiling_covers_the_rollout_peak_and_not_only_the_steady_
 def test_every_pool_holding_deployment_surges_by_the_number_the_budget_counts() -> None:
     """The peak arithmetic multiplies by a surge; this is what makes that surge real.
 
-    `chemclaw.fleetPoolsAtRolloutPeak` adds one surge per rolling Deployment. That is only true if
-    the Deployments actually carry it — and with no strategy declared, Kubernetes defaults
-    `maxSurge` to 25% rounded up, which at `maxReplicas: 6` is *two* front-door pods rather than
-    one and puts the real peak above the counted one.
-
-    So both halves are asserted. Every rolling pool-holder renders exactly `rollout.maxSurgePods`,
-    and the background worker is the only role that opts out — `Recreate`, because two of it race on
-    a host-local knowledge checkout, which is why the peak arithmetic leaves exactly its term
-    unsurged.
-
-    And every Deployment whose pods read this release's config — which is what carries the DSN, so
-    it is what opens a pool — is a role the arithmetic has a term for. That third direction is the
-    one that costs connections: a Deployment can carry the surge correctly and still be absent from
-    the count.
+    Every rolling pool-holder renders exactly `rollout.maxSurgePods` (the Kubernetes default of 25%
+    rounded up can exceed it); the background worker alone uses `Recreate` and is the one unsurged
+    term; and every Deployment that reads this release's config (and so opens a pool) has a term in
+    the arithmetic.
     """
     rendered = _render("--set", "mcpFace.enabled=true")
     assert rendered.returncode == 0, rendered.stderr
@@ -4775,23 +3800,11 @@ def test_every_pool_holding_deployment_surges_by_the_number_the_budget_counts() 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() -> None:
-    """`mcp-face` opens a Postgres pool like every other pooled process and was counted by nobody.
+    """Turning on `mcp-face` moves the declared connection budget.
 
-    It runs `connectors/server.py` over the in-process read-only tool set — knowledge search,
-    fingerprint search, precedent lookup — so it holds up to `CHEMCLAW_PG_POOL_MAX_SIZE`
-    connections per replica. `chemclaw.fleetPools` summed the front door (or its HPA maximum),
-    the background worker and each connector half, and never visited `.Values.mcpFace`. The startup
-    guard in `core/config` checks the *declared* number against `postgres.maxConnections`, so an
-    undercount cannot make it fire: at ten face replicas the fleet opens 192 connections against a
-    declared ceiling of 136 and every pod's `Settings` validation passes. The only thing left is the
-    runtime `ChemclawFleetAboveItsConnectionCeiling` alert — a failure found after the pods are up.
-
-    Asserted as the *difference* between two renders rather than against a modelled total: that
-    isolates the term this test is about, needs no second copy of the helper's arithmetic here, and
-    keeps saying the same thing when a replica default moves. One pool per face replica, not the
-    front door's three: it serves read-only tools and takes no turn, so it holds neither a
-    checkpointer pool nor a readiness probe's.
-
+    It opens a Postgres pool per replica, and an undercount cannot trip the startup guard, which
+    checks the declared number. Asserted as the difference between two renders, isolating this term
+    without copying the helper's arithmetic: one pool per face replica, since it takes no turn.
     """
     baseline = _declared_fleet_pools()
     for replicas in (1, 10):
@@ -4807,16 +3820,11 @@ def test_turning_on_a_pooled_component_moves_the_declared_connection_budget() ->
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_scaling_the_front_door_moves_the_budget_by_the_pools_a_front_door_holds() -> None:
-    """One more front-door replica is three more pools, and the chart used to say one.
+    """One more front-door replica is three more pools.
 
-    The measured shape (`tests/test_fleet_pools.py`): a front-door process holds the stores' pool,
-    the `/readyz` probe's own key and the checkpointer's registered pool — 3 × `pg_pool_max_size`
-    connections, not one pool's worth. Counting pods is what let the shipped chart declare 136 for
-    a fleet whose floor is 208, and it is the front door that scales, so the error grew with the
-    HPA rather than staying a fixed offset.
-
-    A difference between two renders for the same reason the face test takes one: it isolates the
-    term and survives a change to any other replica default.
+    A front-door process holds the stores' pool, the `/readyz` probe's and the checkpointer's
+    (`tests/test_fleet_pools.py`), and it is the front door that scales. A difference between two
+    renders, for the same reason as the face test.
     """
     baseline = _declared_fleet_pools()
     ceiling = int(_values()["service"]["autoscaling"]["maxReplicas"])
@@ -4846,9 +3854,8 @@ def _pod_specs(rendered: str) -> list[tuple[str, dict[str, Any]]]:
 def test_a_connector_server_that_declares_its_own_sizing_gets_it_and_no_other_does() -> None:
     """`connectors.<name>.serverResources` reaches that bundle's server pod and only that one.
 
-    The shared `resources.connector` budget OOM-killed the `bo` server on every start (measured
-    864 MiB peak against a 512Mi limit), so `bo` declares its own sizing — and a knob that rendered
-    nothing would leave the crash loop in place while the values file read as fixed.
+    Some servers outgrow the shared `resources.connector` budget (`bo` is OOM-killed on start under
+    it), and a knob that rendered nothing would leave the crash loop while the values read as fixed.
     """
     result = _render()
     assert result.returncode == 0, result.stderr
@@ -4875,15 +3882,12 @@ def test_a_connector_server_that_declares_its_own_sizing_gets_it_and_no_other_do
 def test_no_pod_is_handed_its_own_front_door_s_address_as_a_setting(
     overrides: tuple[str, ...],
 ) -> None:
-    """Service links off on every pod, because this chart's Service *is* a setting's name.
+    """Service links are off on every pod, because this chart's Service name is a setting's prefix.
 
-    Kubernetes gives every container `<SERVICE>_HOST` and `<SERVICE>_PORT=tcp://<ip>:<port>` for
-    each Service in its namespace, and the front door's Service is `chemclaw-service` — so a pod
-    restarted after the first install read `CHEMCLAW_SERVICE_PORT=tcp://10.96.x.y:8080` as
-    `Settings.service_port` and died at import. Measured on a kind cluster, where every component
-    of a fresh install crash-looped on exactly that `int_parsing` error once its first restart
-    came; on any cluster the first rollout or drain after install does the same. Asserted over every
-    pod spec of every variant, since a new template inherits the defect by omission.
+    Kubernetes injects `<SERVICE>_PORT=tcp://<ip>:<port>`, and `chemclaw-service` yields
+    `CHEMCLAW_SERVICE_PORT`, which `Settings.service_port` fails to parse after the first restart.
+    Asserted over every pod spec of every variant, since a new template inherits the defect by
+    omission.
     """
     result = _render(*overrides)
     assert result.returncode == 0, result.stderr
@@ -4898,19 +3902,10 @@ def test_no_pod_is_handed_its_own_front_door_s_address_as_a_setting(
 def test_every_mounted_volume_is_a_volume_the_pod_declares(overrides: tuple[str, ...]) -> None:
     """A `volumeMounts` entry naming no volume is rejected at apply, and by nothing before it.
 
-    `kubeconform` validates each object against its OpenAPI schema, and "this mount names a volume
-    in the same pod" is a cross-field invariant no schema expresses — so the whole render gate says
-    `Valid` and the API server says `spec.template.spec.containers[0].volumeMounts[1].name: Not
-    found: "note-repo"`. Under `--atomic` that failure rolls a whole release back.
-
-    That is what `mcpFace.enabled=true` shipped: the face includes `chemclaw.knowledgeMounts` (which
-    carries `chemclaw.noteRepoMount`) exactly as `deployment-service.yaml` and
-    `deployment-workers.yaml` do, and was the only one of the three that did not also include
-    `chemclaw.noteRepoVolume` beside `chemclaw.volumes`. Three containers — the server, the
-    knowledge-sync sidecar and its init container — mounted a volume the pod never declared.
-
-    Asserted over every pod spec rather than that one template, because the defect is a *pairing*
-    between two helpers and any future template can get the pairing wrong the same way.
+    `kubeconform` validates objects against schemas, and mount-to-volume is a cross-field invariant
+    no schema expresses; under `--atomic` it rolls the release back. The defect is a pairing between
+    two helpers (`chemclaw.knowledgeMounts` needs `chemclaw.noteRepoVolume`), so every pod spec is
+    checked.
     """
     result = _render(*overrides)
     assert result.returncode == 0, result.stderr
@@ -4929,16 +3924,8 @@ def test_every_mounted_volume_is_a_volume_the_pod_declares(overrides: tuple[str,
 def test_every_container_port_name_is_one_kubernetes_accepts(overrides: tuple[str, ...]) -> None:
     """A container port name is an `IANA_SVC_NAME`: at most 15 characters.
 
-    `kubeconform` agrees with any length, so nothing in the render gate sees it.
-
-    `monitoring.temporalSdkMetrics.enabled=true` named the port `temporal-metrics` — 16 characters
-    — in `chemclaw.workerProbes`, which every worker Deployment in the chart includes, so one
-    supported switch made all four invalid at apply time at once. The switch is fully built out
-    around that name (a PodMonitor endpoint, a NetworkPolicy port, the `ChemclawWorkerNotPolling`
-    alert), which is what made a render nobody ran the only thing between it and a cluster.
-
-    The length is the rule that bit; the character class is asserted with it because the same
-    validator enforces both and a name like `Temporal_SDK` fails for the other half.
+    `kubeconform` accepts any length, and a shared helper can make every worker invalid at apply at
+    once. The character class is checked too, since the same validator enforces both.
     """
     result = _render(*overrides)
     assert result.returncode == 0, result.stderr
@@ -4958,19 +3945,12 @@ def test_every_container_port_name_is_one_kubernetes_accepts(overrides: tuple[st
 
 
 def test_a_connector_server_is_not_sigkilled_before_it_finishes_starting() -> None:
-    """The one latent outage in this pass, and it was an *absence* of numbers rather than bad ones.
+    """A connector server is not SIGKILLed before it finishes starting.
 
-    `deployment-connectors.yaml` declared `readinessProbe` and `livenessProbe` with no
-    `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds` or `failureThreshold` at all.
-    Kubernetes' defaults then apply — liveness from t=0, a 10 s period, a 1 s timeout and three
-    failures — so the kubelet SIGKILLs the container about thirty seconds after start. `calc` and
-    `molfp` import RDKit and open a Postgres pool during FastAPI lifespan and uvicorn accepts
-    nothing until lifespan returns, so a cold start on a throttled node crash-loops forever with
-    nothing wrong anywhere in it. The workers were never exposed to it because
-    `define "chemclaw.workerProbes"` states its thresholds and argues for them.
-
-    Pinned as "a startup probe exists and buys more than a minute", not as the exact numbers: the
-    budget is a deployment's to tune and the invariant is that a cold start is not a restart.
+    With no probe thresholds, Kubernetes defaults kill the container about thirty seconds after
+    start, while RDKit imports and a Postgres pool open during lifespan; a cold start on a throttled
+    node would crash-loop forever. Pinned as "a startup probe exists and buys more than a minute",
+    since the exact budget is a deployment's to tune.
     """
     text = (CHART / "templates" / "deployment-connectors.yaml").read_text()
     assert "startupProbe:" in text, (
@@ -5005,20 +3985,13 @@ def test_a_connector_server_is_not_sigkilled_before_it_finishes_starting() -> No
 def test_a_connector_app_is_killed_only_by_a_route_that_consults_nothing(
     overrides: tuple[str, ...],
 ) -> None:
-    """Liveness and readiness on one route make every readiness check a restart trigger.
+    """A `connector_app` pod's liveness probe reads `/livez`, which consults nothing.
 
-    Every pod served by `connectors.server.connector_app` — each bundle's server and the MCP face —
-    pointed both probes at `/healthz`. That route is static today, so nothing has been killed by
-    it; the defect is the shape, which `Chemclaw3-mcp` forbids fleet-wide after it killed a pod
-    that was merely missing an optional predictor: the first dependency anybody teaches
-    `/healthz` to check becomes, with no chart change, a reason to SIGKILL a pod a restart cannot
-    repair. `/livez` consults nothing (`tests/test_connector_identity.py::
-    test_liveness_is_its_own_route_and_consults_nothing` drives that), and is what liveness reads.
-
-    Rendered, and the containers found by the component they run rather than by template, so a
-    third `connector_app` role is covered on the day it renders. Both paths are checked against
-    the routes the app actually serves, because a probe at a path the app does not answer is a
-    crash loop that `kubeconform` passes.
+    On a shared route, the first dependency anyone teaches `/healthz` to check would become a reason
+    to kill a pod a restart cannot repair (`/livez` is driven by
+    `tests/test_connector_identity.py::test_liveness_is_its_own_route_and_consults_nothing`).
+    Containers are found by component in the render, and both paths are checked against the routes
+    the app serves.
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -5066,12 +4039,9 @@ def test_the_front_door_gets_the_same_head_start() -> None:
 def test_the_readiness_probe_states_a_timeout_at_all() -> None:
     """The offline half: neither front-door probe may leave a bound to a Kubernetes default.
 
-    `timeoutSeconds` defaults to 1 and `failureThreshold` to 3, and `/readyz` is the one route in
-    this chart whose own answer has a budget — a connector sweep (for a jobs-only bundle, a
-    `DescribeTaskQueue` RPC) and then Postgres. Under the default a blackholed broker took ~2 s per
-    poll and three of those removed a perfectly serving front door from its Service after ~30 s of
-    somebody else's outage. Text-only, so it runs where `helm` is absent; whether the number is
-    *large enough* is a question about rendered values, and the test below renders them.
+    `/readyz` does budgeted work (a connector sweep, then Postgres), so a 1 s default timeout would
+    drain a serving front door during somebody else's outage. Whether the number is large enough is
+    checked on rendered values below.
     """
     text = (CHART / "templates" / "deployment-service.yaml").read_text()
     for probe in ("readinessProbe", "livenessProbe"):
@@ -5099,9 +4069,7 @@ def _service_probes(rendered: str) -> dict[str, Any]:
 def _rendered_config(rendered: str) -> dict[str, str]:
     """`.Values.config` as the pods actually receive it: the rendered ConfigMap's data.
 
-    The ConfigMap rather than `values.yaml`, because that is the artefact an override reaches. A
-    guard that parses the file on disk cannot see `--set config.X=…`, an ExternalSecret, or a
-    values overlay — which is the whole class of drift this pair of tests exists for.
+    That is the artefact an override (`--set`, an overlay) reaches; the file on disk is not.
     """
     for doc in yaml.safe_load_all(rendered):
         if doc and doc.get("kind") == "ConfigMap" and doc["metadata"]["name"] == "chemclaw-config":
@@ -5115,17 +4083,10 @@ def _rendered_config(rendered: str) -> dict[str, str]:
 def test_the_readiness_probe_outlasts_the_work_readyz_does() -> None:
     """The kubelet's patience and the app's own budgets, checked against each other as rendered.
 
-    `/readyz` may spend `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS` sweeping the connectors and
-    `CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS` asking Postgres. If the probe gives up first,
-    the kubelet drains a front door that is answering correctly — the failure this whole block
-    exists to prevent, arrived at from the other side.
-
-    **The comparison is between two rendered numbers, and that is the fix.** This test used to
-    derive its floor from the *test runner's* `Settings` object, so it compared the chart's probe
-    against the code defaults — a pair that agree in CI no matter what a release does. An operator
-    raising the connector budget through `.Values.config` (the honest response to a slow fleet)
-    rendered an unchanged `timeoutSeconds: 5` and this test stayed green, which is precisely the
-    drift it was written to catch. Both sides now come out of one `helm template`.
+    `/readyz` may spend the connector health timeout plus the readiness DB timeout; if the probe
+    gives up first the kubelet drains a serving front door. Both sides come from one `helm
+    template`, so a raised app budget is compared with the probe it actually renders, not with code
+    defaults.
     """
     result = _render()
     assert result.returncode == 0, result.stderr
@@ -5145,10 +4106,8 @@ def test_the_readiness_probe_outlasts_the_work_readyz_does() -> None:
 def test_raising_the_apps_readiness_budget_raises_the_probe_that_waits_for_it() -> None:
     """The drift itself, driven: move the app-side budget and the kubelet must move with it.
 
-    A literal `timeoutSeconds: 5` beside two configurable budgets is a number that only has to
-    *agree* with them, and the derivation is what makes it one number instead of two. 9 s is chosen
-    to exceed the old literal on its own, so a template that kept it fails here rather than passing
-    on a coincidence of margins.
+    9 s exceeds the old literal `timeoutSeconds: 5` on its own, so a template that kept the literal
+    fails here.
     """
     result = _render("--set", "config.CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS=9")
     assert result.returncode == 0, result.stderr
@@ -5175,12 +4134,10 @@ def test_a_fractional_budget_rounds_the_probe_up_rather_than_down() -> None:
 
 
 def test_the_chart_states_the_readiness_budgets_the_code_defaults_to() -> None:
-    """The third pair: what the chart declares and what `Settings` falls back to must not diverge.
+    """The chart's declared readiness budgets equal the `Settings` defaults.
 
-    The two tests above hold the chart together internally — probe against rendered config — and
-    would stay green with both numbers wrong in the same direction. This one is the other axis: a
-    developer reading the code default and an operator reading `values.yaml` have to be looking at
-    the same system — the shape the worker drain's own budget test already holds.
+    The two tests above would stay green with both numbers wrong in the same direction; this holds
+    the code default and `values.yaml` to the same system.
     """
     from chemclaw.core.config import settings
 
@@ -5194,13 +4151,11 @@ def test_the_chart_states_the_readiness_budgets_the_code_defaults_to() -> None:
 
 
 def test_a_connector_pod_drains_before_it_dies() -> None:
-    """The half of D-121's drain the connector pods never got.
+    """A connector pod drains before it dies.
 
-    The front door has a `preStop` sleep and a derived grace period and the workers have a derived
-    one; a connector pod had neither, so it took the 30 s default. That pod is the one holding an
-    in-flight MCP tool call *and* an endpoint the front door is still routing to — Kubernetes
-    removes the Endpoint and sends SIGTERM concurrently, so without the sleep a rolling update
-    refuses calls the caller is still making.
+    It holds in-flight MCP calls behind an Endpoint the front door still routes to, and Kubernetes
+    removes the Endpoint and sends SIGTERM concurrently, so it needs the `preStop` sleep and a
+    derived grace period like the front door.
     """
     text = (CHART / "templates" / "deployment-connectors.yaml").read_text()
     assert "preStop:" in text, "a connector pod stops accepting while the front door still dials it"
@@ -5211,25 +4166,13 @@ def test_a_connector_pod_drains_before_it_dies() -> None:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_a_connector_pod_outlives_the_call_it_may_be_holding() -> None:
-    """The grace period and the calc client's own bounds were two independent numbers.
+    """A connector pod outlives the calc call it may be holding.
 
-    `connectorGracePeriodSeconds: 120` shipped beside `calc_server_timeout_seconds: 900` and
-    `calc_atomic_timeout_seconds: 3600`, with a comment arguing that the heavy science "is not in
-    process — it is `Chemclaw3-mcp`'s `servers/calc`, dialled over HTTP". That is the right
-    description of the wait and the wrong conclusion about the number: the HTTP call *is* the
-    in-process wait, so a synchronous `optimize_geometry` or `compute_atomic_descriptors` was
-    SIGKILLed at 120 s into a call this repository is prepared to wait 900 s or 3600 s for. Worse
-    than losing the answer: `cached_compute` stores a result only once the call returns, so the
-    retry recomputed from zero instead of reading the D-011 cache.
-
-    Asserted against `CalculatorSettings`' own defaults rather than against the numbers in
-    `values.yaml`, so raising either bound in code fails here instead of silently outgrowing the
-    pod's ceiling — which is the drift that produced the pair this test exists for.
-
-    `calc_sampling_timeout_seconds` (14400 s) is excluded deliberately and the exclusion is checked:
-    the two CREST searches it bounds are reachable only from `connectors/calc/activities.py`, which
-    runs on a Temporal *worker* pod under the chart's workerGracePeriod helper, with the broker's
-    retry behind it, never from a connector server's synchronous tool surface.
+    The synchronous HTTP call to `servers/calc` is the in-process wait, so a shorter grace period
+    kills a call this repository will wait for, and `cached_compute` stores only on return, so the
+    retry recomputes. Asserted against `CalculatorSettings`' defaults so raising a bound in code
+    fails here. `calc_sampling_timeout_seconds` is excluded, checked: CREST searches run only on
+    Temporal worker pods.
     """
     from chemclaw.core.config import settings
 
@@ -5261,14 +4204,10 @@ def test_a_connector_pod_outlives_the_call_it_may_be_holding() -> None:
 
 
 def test_every_alert_carries_a_runbook_url_that_resolves() -> None:
-    """An alert at 03:00 with no link is a name and a sentence.
+    """Every alert carries a `runbook_url` that resolves, and every runbook heading is reached.
 
-    The runbook never mentioned a single alert by name (`grep -n "Chemclaw[A-Z]"` returned nothing)
-    and no rule carried a `runbook_url`, so the two halves of the on-call story existed and did not
-    know about each other. The descriptions were already good; this was a wiring problem.
-
-    Both directions, because either alone rots: a rule whose link points at a heading that was
-    renamed, and a heading nobody reaches because its alert lost its annotation.
+    Both directions, because either alone rots: a link to a renamed heading, or a heading whose
+    alert lost its annotation.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
@@ -5293,18 +4232,9 @@ def test_every_alert_carries_a_runbook_url_that_resolves() -> None:
 def test_the_liveness_alerts_read_the_port_the_monitors_actually_scrape() -> None:
     """`ChemclawNoWorkerIsScraped` matches on `endpoint`, which is the PodMonitor's port name.
 
-    Nothing else in this file alerts on a process being *gone* — every other rule reads an
-    application counter, and a pod that is not running emits none, which is what a healthy idle
-    system also does. `up` and `absent()` are the only two shapes that invert that.
-
-    `kube_pod_status_ready` would say more and is not available: kube-state-metrics is scraped by
-    the *platform* Prometheus in `openshift-monitoring`, while a user-workload PrometheusRule is
-    evaluated by the user-workload instance, which does not hold those series. A rule written
-    against them would be permanently empty — green forever, which reads exactly like "the
-    condition never occurred".
-
-    The label the substitute leans on is the operator's, so this pins it against the monitor rather
-    than against a memory of what the operator does.
+    A gone process emits no counter, so `up` and `absent()` are the only shapes that detect it;
+    `kube_pod_status_ready` lives in the platform Prometheus, which user-workload rules cannot read.
+    The label is pinned against the monitor rather than memory of the operator's behaviour.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
@@ -5326,17 +4256,11 @@ def test_the_liveness_alerts_read_the_port_the_monitors_actually_scrape() -> Non
 
 
 def test_the_chart_tells_an_operator_to_turn_user_workload_monitoring_on() -> None:
-    """The prerequisite that makes the whole monitoring stack work, documented nowhere.
+    """The chart tells an operator to turn user-workload monitoring on.
 
-    On a stock OpenShift cluster user-workload monitoring is off, which makes every ServiceMonitor,
-    PodMonitor and PrometheusRule this chart ships an inert custom resource: `oc get servicemonitor`
-    lists them, nothing scrapes, no rule loads, and there is no error anywhere. A search across
-    `deploy/`, the runbook and `.github/` for `enableUserWorkload` or `cluster-monitoring-config`
-    returned zero hits — this is the single highest-probability way the stack ships and does
-    nothing.
-
-    Pinned on the exact ConfigMap and key rather than on prose, because "monitoring must be
-    enabled" is advice and `openshift-monitoring/cluster-monitoring-config` is an instruction.
+    On stock OpenShift it is off, which makes every ServiceMonitor, PodMonitor and PrometheusRule
+    here inert with no error anywhere. Pinned on the exact ConfigMap and key
+    (`openshift-monitoring/cluster-monitoring-config`), which is an instruction rather than advice.
     """
     notes = (CHART / "templates" / "NOTES.txt").read_text()
     runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
@@ -5352,11 +4276,10 @@ def test_the_chart_tells_an_operator_to_turn_user_workload_monitoring_on() -> No
 
 
 def test_the_alertmanager_config_refuses_to_route_to_nothing() -> None:
-    """The route that closes the second of the three absences the rule file's header names.
+    """The AlertmanagerConfig refuses to route to nothing.
 
-    Values-gated because a receiver is a deployment fact — a Slack webhook, a PagerDuty key — and
-    *refusing* when enabled without one, by the same rule as the egress and retention postures: an
-    object that exists and routes nowhere is worse than no object, because it reads as coverage.
+    Values-gated because a receiver is a deployment fact, and refusing when enabled without one,
+    like the egress and retention postures: a route to nowhere reads as coverage.
     """
     text = (CHART / "templates" / "alertmanagerconfig.yaml").read_text()
     assert "kind: AlertmanagerConfig" in text
@@ -5371,18 +4294,11 @@ def test_the_alertmanager_config_refuses_to_route_to_nothing() -> None:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_enabling_the_route_without_the_rules_refuses_rather_than_rendering_nothing() -> None:
-    """Every guard in `alertmanagerconfig.yaml` was unreachable through one door.
+    """Enabling the route without the rules refuses rather than rendering nothing.
 
-    The file's own `{{ if }}` required `monitoring.enabled` *and* `monitoring.alerts.enabled`
-    before any of its four `fail`s could run, so a release that turned the routing on while the
-    rules were off got no object, no output and no error — measured, `helm template` exited 0 with
-    no AlertmanagerConfig in the render. That is
-    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` with the stakes raised: the switch the
-    operator just moved is the one that decides whether an alert reaches a person, and silence
-    reads as success.
-
-    Both directions, because a refusal that also refuses the good case is worse than the no-op: the
-    shipped defaults must still render, and a release with real receivers must still get its route.
+    Otherwise the template's own `{{ if }}` skips every `fail`, so the switch that decides whether
+    an alert reaches a person silently does nothing. Both directions: the shipped defaults still
+    render, and real receivers still get their route.
     """
     silent = _render(
         "--set", "monitoring.alerts.enabled=false", "--set", "monitoring.alertmanager.enabled=true"
@@ -5413,12 +4329,10 @@ def test_enabling_the_route_without_the_rules_refuses_rather_than_rendering_noth
 
 
 def test_the_dashboards_carry_the_label_their_reader_selects_on() -> None:
-    """A dashboard is only a dashboard to something that reads it, and the readers disagree.
+    """The dashboards carry the label each reader selects on.
 
-    The OpenShift console selects `console.openshift.io/dashboard: "true"`; a self-managed Grafana's
-    sidecar selects `grafana_dashboard: "1"`. Shipping the JSON with neither would be five files
-    nothing ever opens, which is the same "computed and read by nobody" failure the panels exist to
-    end.
+    The OpenShift console selects `console.openshift.io/dashboard: "true"`, a Grafana sidecar
+    `grafana_dashboard: "1"`; with neither, nothing opens them.
     """
     import json
 
@@ -5439,16 +4353,10 @@ def test_the_dashboards_carry_the_label_their_reader_selects_on() -> None:
 
 
 def test_every_process_role_names_itself_in_its_traces() -> None:
-    """All four roles reported `service.name=chemclaw`, so a span could not say who emitted it.
+    """Every process role names itself in its traces (`OTEL_SERVICE_NAME` per Deployment).
 
-    `core/logging.py` argues for exactly this ("a deployment that wants the front door and each
-    worker to appear as separate services sets `OTEL_SERVICE_NAME` per Deployment") and the chart
-    set `CHEMCLAW_OTEL_ENABLED`, `_ENDPOINT`, `_LLM_SPANS`, `_INCLUDE_SENSITIVE_DATA` and nothing
-    else — so the advice was in the source and unfollowed by the only thing that could follow it.
-
-    The ordering assertion is the one that would fail silently: Kubernetes expands `$(VAR)` only
-    against variables declared *earlier in the same container*, so a pod whose attribute string
-    precedes `POD_NAME` exports the two literals with no error anywhere.
+    The ordering matters: Kubernetes expands `$(VAR)` only against variables declared earlier in the
+    same container, so an attribute string before `POD_NAME` exports literals silently.
     """
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
     body = helpers.split('define "chemclaw.otelResourceEnv"')[1].split("{{- end -}}")[0]
@@ -5472,12 +4380,9 @@ def test_every_process_role_names_itself_in_its_traces() -> None:
 def test_the_gate_parses_the_promql_rather_than_the_yaml() -> None:
     """`kubeconform` validates that `expr` is a string, not that the string is PromQL.
 
-    So a syntax error passed `make helm-validate`, passed the API server, and was rejected by
-    Prometheus at rule-group load — taking the **whole group** with it, silently, with the object
-    still reading as `Valid` in the cluster. Nothing else in this repository parses PromQL, and the
-    dashboards' panel queries had no gate of any kind.
-
-    Both places are asserted, because a target CI does not run is not a gate.
+    A syntax error would pass the render gate and the API server, then Prometheus would drop the
+    whole rule group at load. The gate parses rule and dashboard queries, and both the `Makefile`
+    and CI are asserted, because a target CI does not run is not a gate.
     """
     makefile = (DEPLOY.parent / "Makefile").read_text()
     workflow = (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
@@ -5494,11 +4399,8 @@ def test_the_gate_parses_the_promql_rather_than_the_yaml() -> None:
 def test_no_ingress_policy_reaches_another_release_s_pods() -> None:
     """A `podSelector` is namespace-scoped, and `component` alone is not a name this release owns.
 
-    `connector-ingress` selected on `app.kubernetes.io/component` with no release labels, so in a
-    namespace holding a second Chemclaw release — a staging copy beside production is the ordinary
-    case — it applied to *their* connector pods as well, imposing an ingress rule naming our pods as
-    the permitted peer and cutting theirs off from their own front door. Its three sibling policies
-    in the same file all carry the `define "chemclaw.selectorLabels"` helper.
+    Without the release selector labels, an ingress policy would also apply to a second release's
+    pods in the same namespace and cut them off from their own front door.
     """
     text = (CHART / "templates" / "networkpolicy.yaml").read_text()
     documents = [d for d in text.split("\n---\n") if "kind: NetworkPolicy" in d]
@@ -5513,18 +4415,12 @@ def test_no_ingress_policy_reaches_another_release_s_pods() -> None:
 
 
 def test_a_wedged_knowledge_sync_can_be_seen_from_outside_the_pod() -> None:
-    """The sidecar catches a failing refresh on purpose, and that made a stuck one invisible.
+    """A wedged knowledge sync can be seen from outside the pod.
 
-    `loop` swallows a refresh failure so a dead git remote cannot kill the pod — correct — and the
-    consequence was that an expired push credential left the container logging one WARNING per
-    interval forever while serving a frozen corpus. No metric, no probe, no alert.
-    `ChemclawKnowledgeNotesLost` covers notes going *out*; the graph coming *in* had nothing.
-
-    The real fix is a last-success gauge the reading process exposes (`docs/planning/BACKLOG.md`).
-    This is the half that lives in `deploy/`: a heartbeat file on each successful refresh, and a
-    liveness probe reading its age, so a stopped loop becomes a restarting container instead of a
-    quiet one. Liveness and *not* readiness deliberately — a sidecar's readiness is the pod's, and a
-    three-hour-old corpus beats a connection error.
+    `loop` swallows refresh failures so a dead remote cannot kill the pod, which makes a stuck loop
+    invisible. A heartbeat file on each successful refresh and a liveness probe on its age turn a
+    stopped loop into a restarting container. Liveness, not readiness: a sidecar's readiness is the
+    pod's, and a stale corpus beats a connection error.
     """
     script = (DEPLOY / "knowledge-sync.sh").read_text()
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
@@ -5543,11 +4439,9 @@ def test_a_wedged_knowledge_sync_can_be_seen_from_outside_the_pod() -> None:
 def test_service_account_does_not_automount_the_api_token() -> None:
     """The ServiceAccount refuses the projected API token no component uses.
 
-    No code under `src/` calls the Kubernetes API, so the token every pod would otherwise mount is
-    unused attack surface. The cluster default is to mount it, so the guard must be an explicit
-    `false` in values and a rendered field on the ServiceAccount — an omission is the insecure
-    posture. Entra workload identity uses a federated token, not this mount, so this is orthogonal
-    to identity.
+    Nothing under `src/` calls the Kubernetes API, and the cluster default mounts the token, so the
+    guard must be an explicit `false` in values and on the rendered ServiceAccount. Entra workload
+    identity uses a federated token, so this is orthogonal to identity.
     """
     assert _values()["serviceAccount"]["automountServiceAccountToken"] is False
     config = (CHART / "templates" / "config.yaml").read_text()
@@ -5564,19 +4458,10 @@ _INFRASTRUCTURE_EGRESS = frozenset({"postgres", "temporal", "https", "llm", "ote
 
 
 def test_the_runbook_connector_section_defers_the_sibling_ports_to_the_chart() -> None:
-    """The step that exists to prevent a silent NetworkPolicy drop listed three ports out of five.
+    """The runbook's connector section defers the sibling ports to the chart.
 
-    It read "the three bundles `Chemclaw3-mcp` serves are plain HTTP on 8858/8859/8860" — two wrong
-    things cancelling into a plausible sentence. "Three bundles" counts the bundles this repo
-    declares with an `endpoint:` and no `server/` (chem, safety, **rxnpredict**); "8858/8859/8860"
-    is a different triple (chem, safety, **calc**). The intersection omits `rxnpredict` (8857) and
-    `rxnlabel` (8865), which `egressPorts` has entries for — so an operator following the paragraph
-    opens three ports and two servers stay dropped, which is the exact failure the surrounding
-    sentence warns about. `values.yaml` calls that omission "the misreading this chart used to
-    ship": the chart was fixed and the runbook was not.
-
-    So the assertion is that the section carries **no** sibling port literal and points at
-    `networkPolicy.egressPorts` instead — one maintained roster, in the file a deployer edits.
+    A port list in prose drifts from `networkPolicy.egressPorts` and an operator following it leaves
+    servers dropped. So the section carries no sibling port literal and points at that one roster.
     """
     ports = _values()["networkPolicy"]["egressPorts"]
     siblings = {name: port for name, port in ports.items() if name not in _INFRASTRUCTURE_EGRESS}
@@ -5602,18 +4487,10 @@ def test_the_runbook_connector_section_defers_the_sibling_ports_to_the_chart() -
 
 
 def test_no_shipped_document_states_a_coverage_floor_other_than_fail_under() -> None:
-    """`pyproject.toml` moved the floor 80 -> 84 and two readers did not move with it.
+    """No shipped document states a coverage floor; `pyproject.toml`'s `fail_under` is the one.
 
-    `tests/README.md` and this repository's own CI workflow both went on saying "the 80% floor" —
-    and an audit had already reported that exact mismatch in both files, after which a second
-    finding recorded "the earlier documented 80/84 mismatch is fixed here" while `ci.yml` was never
-    touched. A prose claim that a number was corrected, over a number that is still wrong, is the
-    defect one level up, so the fix was to delete both figures rather than re-transcribe them —
-    `CLAUDE.md` already says only "`make cov` adds the coverage floor".
-
-    This asserts the deletion holds: a shipped `.md` or workflow may name the floor, but it may not
-    state a percentage for it. `docs/archive/`, `docs/decisions/` and `tasks/` are excluded — a
-    merged ADR and an archived report are accurate about the commit they describe.
+    A shipped `.md` or workflow may name the floor but not state a percentage. `docs/archive/`,
+    `docs/decisions/` and `tasks/` are excluded, being accurate about the commit they describe.
     """
     import tomllib
 
@@ -5653,19 +4530,10 @@ def test_no_shipped_document_states_a_coverage_floor_other_than_fail_under() -> 
 
 
 def test_no_shipped_document_states_how_many_alerts_the_rule_file_holds() -> None:
-    """Two documents stated the alert count, disagreed with each other, and were both a quarter low.
+    """No shipped document states how many alerts the rule file holds.
 
-    `deploy/README.md` opened a section "Thirty-six alerts across eight groups"; `runbook.md` §(x-b)
-    said "a PrometheusRule with thirty-five alerts". The rendered rule file holds considerably more
-    than either, and the *groups* and *dashboards* in the same sentences were right — so only the
-    number that grows with every added alert had rotted, in the direction that understates an
-    operator's alerting and noise surface. That the two disagreed is the diagnostic: at most one
-    could ever have been right and no reader could tell which.
-
-    The fix was to stop stating it, which is what `api/routes/README.md` ("**No count is written
-    here**") and `deploy/README.md`'s own runbook-index sentence already do three lines below the
-    offender. This asserts the roster stays the roster: no alert *count* in either document, while
-    the group and dashboard counts stay checked by their own tests.
+    The count grows with every alert and goes stale in prose, understating the alerting surface. The
+    group and dashboard counts stay, checked by their own tests.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     alerts = len(re.findall(r"^\s*- alert:", rule, re.MULTILINE))
@@ -5688,31 +4556,19 @@ def test_no_shipped_document_states_how_many_alerts_the_rule_file_holds() -> Non
     )
 
 
-# --- The D-120 seam on the target stack -------------------------------------------------------
+# --- The connector seam on the target stack ---------------------------------------------------
 #
-# D-120 states the connector seam as "a new bundle is one directory plus its name in
-# `CHEMCLAW_DATA_SOURCES`/`CHEMCLAW_CONNECTORS_DIR`, with zero core edits", and the fleet's
-# `manifests/README.md` says the same in the other direction: "registering this whole fleet is one
-# environment variable and no code change on either side". Both were true of `make connectors` and
-# false of the chart, in two places measured on 2026-09-07 — see
-# `docs/decisions/D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam.md`. These are the two
-# halves, each asserted against a **rendered** manifest rather than the template text, because both
-# defects were of the shape "the value is accepted and nothing comes out".
+# A new bundle is one directory plus its name, with zero core edits; these two tests hold that for
+# the chart, against a **rendered** manifest, since both failure shapes are "the value is accepted
+# and nothing comes out" (`D-2026-09-07-a-seam-that-stops-at-the-chart-is-not-a-seam`).
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_an_egress_port_an_operator_adds_actually_reaches_the_policy() -> None:
-    """`networkPolicy.egressPorts` is a map, and the rule used to emit six hand-named keys of it.
+    """An egress port an operator adds to `networkPolicy.egressPorts` reaches the rendered policy.
 
-    `test_no_egress_port_is_declared_without_being_emitted` in `tests/test_helm_chart.py` asks this
-    of the entries **this file ships** and reads the template as text, so it could only ever see
-    the keys somebody had already written a line for. An operator adding their own — which is
-    exactly what a third-party bundle on its own port needs — added a key the template does not
-    name, and a NetworkPolicy drop is silent: the connector reports as merely unreachable and its
-    tools degrade.
-
-    Measured before the fix: `--set networkPolicy.egressPorts.props=8850` rendered **zero**
-    occurrences of `port: 8850`.
+    The rule ranges the map rather than naming keys, so a third-party bundle's own port is emitted;
+    a NetworkPolicy drop is silent and reads as an unreachable connector.
     """
     rendered = _render("--set", "networkPolicy.egressPorts.props=8850").stdout
     policies = [
@@ -5738,11 +4594,8 @@ def test_an_egress_port_an_operator_adds_actually_reaches_the_policy() -> None:
 def test_every_declared_egress_port_reaches_the_rendered_policy() -> None:
     """The other direction of the test above, over the roster this chart ships.
 
-    A port entry no rule emits permits nothing, and reads in review as a control that had been set
-    up. `tests/test_helm_chart.py` used to ask this as `f"egressPorts.{key}" in <template text>` —
-    which answers "did somebody write a line naming this key", a question that stops meaning
-    anything once the rule ranges the map, and that never reached a key an operator adds in their
-    own values file.
+    A port entry no rule emits permits nothing and reads in review as a control; checked on the
+    render, not on template text.
     """
     rendered = _render().stdout
     permitted = {
@@ -5763,32 +4616,14 @@ def test_every_declared_egress_port_reaches_the_rendered_policy() -> None:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_a_bundle_this_image_does_not_ship_can_be_mounted_and_discovered() -> None:
-    """A third-party bundle needs its manifest on `CHEMCLAW_CONNECTORS_DIR`; the chart had no value.
+    """A third-party bundle can be mounted onto `CHEMCLAW_CONNECTORS_DIR` and discovered.
 
-    The image ships `src/chemclaw/connectors` and nothing else, and no chart value set that
-    variable or mounted anything into a pod — so `Chemclaw3-mcp`'s `props` and `pyexec`, both real
-    and both shipped, were unreachable from an OpenShift release by any means short of editing the
-    chart. Worse than unreachable, measured: `chemclaw.connectorsEnabled` derives from the same
-    `connectors:` block, so an operator following D-120 gets `props` into
-    `CHEMCLAW_CONNECTORS_ENABLED` with no bundle behind it, and `registry.enabled()` raises
-    `ConnectorError: connectors_enabled names unknown connector(s) ['props']` — in every pod, at
-    import, as a crash loop.
-
-    Asserted over every pod spec the render produces rather than over the ConfigMap alone, because
-    the variable is set once in a ConfigMap every component reads: a mount present on some pods and
-    absent on others is that same crash loop on the pods that missed it.
-
-    **Two exemptions, both measured rather than assumed.** The knowledge-sync containers are
-    recognised by what they run — `/usr/local/bin/chemclaw-knowledge-sync` is a shell script that
-    constructs no `Settings`. The `migrate` and `convert` hook Jobs are named, because no manifest
-    field distinguishes them: importing `chemclaw.core.migrate` and
-    `chemclaw.agent.message_migration` under `CHEMCLAW_CONNECTORS_ENABLED=molfp:props` leaves
-    `chemclaw.connectors.registry` out of `sys.modules` entirely, so neither can raise on a name it
-    cannot discover. They are exempt in the direction that matters too: `migrate` is a
-    `pre-install` hook, and a hook Job that mounts an operator-supplied ConfigMap cannot start
-    until that object exists, which would make a first install fail on a directory it never reads.
-    The set is asserted to be exactly those two, so a third component quietly losing the mount is a
-    failure rather than a widening.
+    Otherwise naming it in the connectors block puts it in `CHEMCLAW_CONNECTORS_ENABLED` with no
+    manifest behind it, and `registry.enabled()` raises in every pod. Asserted over every pod spec,
+    since the variable is set once in the shared ConfigMap and any pod lacking the mount
+    crash-loops. Exactly two exemptions: the knowledge-sync containers (a shell script, no
+    `Settings`) and the `migrate`/`convert` hook Jobs (never import the registry, and a pre-install
+    hook cannot mount an operator ConfigMap that does not exist yet).
     """
     rendered = _render(
         "--set",
@@ -5872,17 +4707,10 @@ def _pod_spec(document: dict[str, Any]) -> dict[str, Any] | None:
 def test_the_shipped_connector_path_is_the_path_the_image_has() -> None:
     """`extraConnectors.shippedPath` restates the image's layout, so it is derived and compared.
 
-    Setting `CHEMCLAW_CONNECTORS_DIR` replaces `connectors_dir`'s default outright — it is a plain
-    pathsep list with no "and also the built-in" token — so the chart has to name the directory the
-    image already ships, and that is a fact `deploy/Containerfile` owns rather than `values.yaml`.
-    A wrong value there is the quiet direction of this whole finding: `_bundle_dirs` skips a
-    directory that is not there without a word, so the release would mount `props` and lose `calc`,
-    `bo`, `molfp`, `rxnfp`, `results`, `chem` and `safety` — and then fail loudly on
-    `connectors_enabled`, naming a bundle that *is* mounted as the one it cannot find.
-
-    Derived from the two sources that between them decide it: the Containerfile's `WORKDIR` and its
-    `COPY src ./src` (an editable install, so the package stays under `/app/src`), and this
-    package's own location relative to the checkout.
+    Setting `CHEMCLAW_CONNECTORS_DIR` replaces the default outright, so the chart must name the
+    directory the image ships; `_bundle_dirs` skips a missing directory silently, losing every
+    shipped bundle. Derived from the Containerfile's `WORKDIR` and `COPY src ./src` (editable
+    install) and this package's location in the checkout.
     """
     import chemclaw.connectors
 
@@ -5905,17 +4733,9 @@ def test_the_shipped_connector_path_is_the_path_the_image_has() -> None:
 def test_the_image_workflow_derives_component_modules_that_actually_import() -> None:
     """`image.yml` derives the smoke list by grepping `entrypoint.sh`, and a grep reads prose.
 
-    Deriving the list from the script rather than restating it is right — a second list drifts from
-    the script in either direction, which is the defect that derivation exists to prevent. But the
-    derivation has to read the script the way the shell does, and it did not: a **comment** saying
-    that every ``exec python -m chemclaw<...>`` line resolved to the wrong interpreter was matched
-    by ``grep -oE 'python -m [a-z_][a-z0-9_.]*'``, so the workflow smoke-tested a component named
-    ``chemclaw<...>`` and died on ``SyntaxError: invalid syntax``. The fix strips whole-line
-    comments first; this holds it, offline, without building an image.
-
-    Asserting *importability* rather than "no ellipsis" on purpose. A rule naming the one shape that
-    broke would pass the next comment that happens to contain a plausible dotted path, and the
-    property the workflow actually needs is that every name it derives can be imported.
+    The derivation must read the script as the shell does, so whole-line comments are stripped
+    first. Asserted as *importability* of every derived name rather than the absence of one broken
+    shape, because that is the property the workflow needs.
     """
     import importlib.util
     import re
@@ -5944,22 +4764,12 @@ def test_the_image_workflow_derives_component_modules_that_actually_import() -> 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_a_release_on_the_memory_session_store_refuses_to_render() -> None:
-    """The one lock that stops two pods racing a note write is gated on the postgres store.
+    """A release on the memory session store refuses to render.
 
-    `kg/git_writer.py::GitNoteWriter._cluster_lock` takes a Postgres advisory lock keyed on the
-    git remote and
-    skips it entirely when `session_store != "postgres"` — correctly, because a memory-store
-    deployment is single-process *as a CLI or a test*. A chart release is not: this chart renders a
-    front door and a background worker as separate pods, each with its own `emptyDir` clone, so the
-    host-local `flock` beneath that lock excludes nothing between them and two pods proposing one
-    note id are last-writer-wins with no error. Its own docstring named that combination as the
-    case it does not cover; a chart is the one place it is knowable, because the process cannot
-    count its own replicas.
-
-    Both arms, because a gate nobody has watched refuse is a claim that a gate exists — and the
-    positive arm is the load-bearing one here: the shipped `values.yaml` already says `postgres`,
-    which is what makes refusing safe rather than a break for every existing release
-    (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`).
+    `GitNoteWriter._cluster_lock` takes its Postgres advisory lock only when
+    `session_store == "postgres"`; a chart release runs separate pods with separate clones, so
+    without it two pods writing one note id are last-writer-wins. Both arms: the shipped `postgres`
+    must still render, which is what makes refusing safe.
     """
     refused = _render("--set", "config.CHEMCLAW_SESSION_STORE=memory")
     assert refused.returncode != 0, (
@@ -5983,22 +4793,11 @@ _ACCEPTED_RISK = "ACCEPTED RISK"
 
 
 def test_every_declared_ecosystem_is_audited_or_accepted() -> None:
-    """A dependency gate that covers one of two declared ecosystems, claiming both.
+    """Every ecosystem `.github/dependabot.yml` declares is audited or accepted as a risk.
 
-    `.github/dependabot.yml` opened with "the pipeline already *detects* a vulnerable closure —
-    `make deps-audit` runs `pip-audit` against `uv.lock`, blocking, in both workflows", twelve
-    lines above an updater for `github-actions`, which nothing in `make ci` reads. The sentence was
-    true of Python and silent about the ecosystem the file itself adds below it, so a reader
-    checking whether this repository's dependencies were gated got a yes for half a claim
-    (`D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file`).
-
-    **Asserted as a choice rather than as coverage**, because the measurement says widening the
-    gate to `github-actions` would close nothing today: every action this repository uses carries
-    zero advisories at any version, and the seven findings GitHub reports are PyPI, at versions
-    this lockfile does not contain. So the requirement is that each declared ecosystem is either
-    audited by a target `make ci` actually runs, or named in the file as an accepted risk. Adding a
-    third ecosystem without doing one of the two fails here, and so does dropping `deps-audit` from
-    `make ci` while the claim about it stands.
+    Asserted as a choice rather than coverage: widening the audit to `github-actions` closes nothing
+    today, so each declared ecosystem must be audited by a target `make ci` runs or named as an
+    accepted risk. A new ecosystem, or `deps-audit` dropped from `make ci`, fails here.
     """
     dependabot = DEPLOY.parent / ".github" / "dependabot.yml"
     document: Any = yaml.safe_load(dependabot.read_text(encoding="utf-8"))
@@ -6032,20 +4831,11 @@ def test_every_declared_ecosystem_is_audited_or_accepted() -> None:
 
 
 def test_the_background_worker_has_an_alert_the_shared_endpoint_cannot_give_it() -> None:
-    """The shared-endpoint alert cannot see a background worker that is missing entirely.
+    """The background worker has an alert the shared-endpoint alert cannot give it.
 
-    `Recreate` is what makes that state reachable.
-
-    `deployment-workers.yaml` is the only Deployment in this chart carrying a `strategy:` block,
-    and it is `Recreate` — deliberately, because two background workers racing on one corpus clone
-    is what `D-2026-08-27-what-a-second-background-worker-would-race-on` pins the replica count to
-    prevent. The cost is that the old pod is gone before the new one is tried, so a worker that
-    cannot start leaves the release with none.
-
-    `ChemclawNoWorkerIsScraped` does not cover that, and its own comment used to claim it did:
-    connector workers serve the same `metrics` port (`deployment-connectors.yaml` says so), as do
-    the front door and mcp-face, so its `absent()` is false whenever any of them is up. The
-    distinguishing label has to be in the expression, not in the reasoning about it.
+    Its `Recreate` strategy (one worker per corpus clone) means a worker that cannot start leaves
+    none. `ChemclawNoWorkerIsScraped`'s `absent()` is satisfied by any pod serving the shared
+    `metrics` port, so the distinguishing label has to be in the expression.
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "ChemclawNoBackgroundWorkerIsScraped" in rules
@@ -6069,19 +4859,9 @@ def test_the_background_worker_has_an_alert_the_shared_endpoint_cannot_give_it()
 def test_the_component_label_the_worker_alert_reads_is_one_the_podmonitor_stamps() -> None:
     """An alert label the scrape config does not produce is a rule that is wrong.
 
-    And for an `absent()` it is wrong in the *loud* direction.
-
-    `podTargetLabels` is what turns a pod label into a sample label, so an alert selecting on
-    `app_kubernetes_io_component` is only meaningful while the PodMonitor copies it. Held in both
-    directions so neither side can be edited alone.
-
-    **Which way it fails is worth stating, because this docstring said the opposite.** For a
-    positive expression — the fleet group's `kube_pod_status_ready` — a label no sample carries
-    means the vector is empty and the rule is green forever, which is the failure that reads as
-    "the condition never occurred". `ChemclawNoBackgroundWorkerIsScraped` is an `absent()`, and
-    `absent()` of a vector that matches nothing is **1**: drop the label and a `severity: critical`
-    alert pages permanently, for every release, until somebody deletes the rule. The condition this
-    test catches is the same; the symptom it sends a reader looking for is not.
+    `podTargetLabels` is what copies `app_kubernetes_io_component` onto samples, so the alert and
+    the PodMonitor are held together in both directions. For an `absent()` a missing label fails
+    loudly: the vector matches nothing, so a `critical` alert pages permanently.
     """
     monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
     assert "app.kubernetes.io/component" in monitor.split("podTargetLabels:")[1][:200], (
@@ -6098,22 +4878,10 @@ def test_the_component_label_the_worker_alert_reads_is_one_the_podmonitor_stamps
 def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
     """kube-state-metrics is platform monitoring; these rules are evaluated by user-workload.
 
-    The fleet group's comment already argues this for `kube_pod_status_ready`, and a backlog row
-    nevertheless proposed `kube_deployment_status_replicas_unavailable` for a stuck rollout — the
-    obvious expression, and one that would have been permanently empty here. Green forever reads
-    exactly like "the condition never occurred", which is the failure mode this whole file is
-    arranged against.
-
-    So the constraint is asserted rather than left in a comment for the next person to miss. If a
-    deployment ever federates those series, this test is the one place that has to change, and it
-    says why.
-
-    **Every alert, including one with no `for:`.** The haystack was `if "for:" in block`, which
-    dropped an alert without a hold-down entirely — `ChemclawBudgetNearingItsCap` has none, so a
-    `kube_*` series added there would have passed. The cut is now at whichever of `for:`, `labels:`
-    or `annotations:` comes first, because what has to be excluded is the *annotation prose* (a
-    description may legitimately name `kube_pod_status_ready` while arguing why it is not used),
-    and every alert has at least one of the three.
+    So a `kube_*` series in an alert is permanently empty, green forever. Asserted here so the next
+    person cannot miss it; if a deployment federates those series, this is the one place to change.
+    Every alert's expression is checked, cut at the first of `for:`, `labels:` or `annotations:`,
+    because annotation prose may legitimately name those series.
     """
     rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
     alerts = rules.split("- alert: ")[1:]
@@ -6135,28 +4903,10 @@ def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
 
 #: What the front door holds before it parses anything, in MiB.
 #:
-#: Measured on the real serving object — `uvicorn chemclaw.api.app:create_app --factory` against the
-#: dev Postgres, lifespan run, `/healthz` served — at 445,204 kB resident and 442,270 kB of `Pss`,
-#: which is 431.9 MiB.
-#:
-#: **`Pss` is not "unique pages", and the sentence here that said so was wrong**
-#: (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`). A memory cgroup charges
-#: a page in full to whichever cgroup first touched it, once; `Pss` divides a shared page by the
-#: number of processes mapping it *system-wide*, which is a different quantity and one that moves
-#: with what else is running on the node. So `Pss` understates this pod's charge whenever a page it
-#: brought in is also mapped outside it. **Driven here rather than argued**: one unchanged process
-#: with the parsers imported reads 53,118 kB of `Pss` alone, 47,653 kB while six unrelated siblings
-#: map the same shared objects, and 53,130 kB again when they exit — 10.3% of the reading belonged
-#: to what else was running, where `Rss` moved 12 kB (0.016%) across the same three samples. It is
-#: kept as the number this constant was derived
-#: from because re-deriving the front door's resident set is not what that ADR set out to do, and
-#: because every use of it here is a *floor* argument ("the pod already holds at least this"); the
-#: quantity a later derivation should use is the cgroup's own `memory.max_usage_in_bytes`, which is
-#: what the parse measurements below now use.
-#:
-#: A floor rather than a ceiling, and deliberately so: that process had compiled no agent graph,
-#: opened no connector session and served no turn. What it does not include is the subject of a
-#: `docs/planning/BACKLOG.md` row of its own.
+#: Measured on the real serving object (uvicorn factory, lifespan run, `/healthz` served) as its
+#: `Pss`. A floor: no agent graph compiled, no connector session, no turn. `Pss` is a system-wide
+#: share and moves with what else maps the same pages, which is acceptable only because every use
+#: here is a floor; a new derivation should use the cgroup's own peak charge.
 FRONT_DOOR_RESIDENT_MIB = 432
 
 #: The same for the background worker (`python -m chemclaw.durable.background_worker`), which starts
@@ -6166,206 +4916,69 @@ WORKER_RESIDENT_MIB = 279
 
 #: What warming the parse forkserver costs the pod, in MiB.
 #:
-#: The forkserver's own `Pss`. Measured, the pod-level delta is 76.1 MiB under pytest, 79.1 MiB
-#: under the worker and 83.5 MiB under the front door, against a forkserver `Pss` of
-#: 90.0–91.0 MiB across five parents and two virtualenvs — so this number is above every delta
-#: measured for it, which is the property the budget uses. The reason given for that ordering used
-#: to be an argument about `Pss` being unique pages; see `FRONT_DOOR_RESIDENT_MIB` for why that
-#: argument does not hold and why the ordering is carried as a measurement instead.
-#:
-#: **It is not the 109 MiB `docs/planning/BACKLOG.md` carried**, which was `VmRSS`. The process
-#: really is a second full resident copy of pypdf, python-docx, openpyxl and python-pptx —
-#: `forkserver` starts its server by fork *and exec*, so nothing is copy-on-write — but 18.6 MiB of
-#: what `VmRSS` attributes to it is a shared object the front door already has mapped, and the pod's
-#: measured delta is 23–30% below it.
-#:
-#: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against` is the live guard
-#: on it, and it measures `VmRSS` rather than this number — see that test for why.
-#:
-#: **Re-measured 2026-09-19 and unchanged, on the run that moved the ceiling below.** Five readings
-#: of the same forkserver: `Pss` 82.5–84.9 (peer-dependent, as ever, which is why it is not the
-#: ratchet), and the pages that belong to it alone — `Private_Dirty` + `Private_Clean`, which is
-#: what a cgroup is charged once for and therefore the closest thing to the pod-level delta —
-#: **76.0–76.1 MiB**, flat to 0.1. Both are
-#: *under* this constant, so it remains the over-estimate it was derived as, and neither
-#: `resources.service` nor `resources.worker` needs re-deriving: the assertion below has 117 MiB of
-#: headroom at the front door (432 + 91 against a 640Mi request) and 654 at the worker, so even
-#: charging the pod the forkserver's whole `VmRSS` would fit. What moved is the `VmRSS` ratchet, and
-#: it moved for a reason that is not this quantity.
+#: The forkserver's `Pss`, which sits above every pod-level delta measured for it — the property the
+#: budget relies on. `forkserver` starts its server by fork *and exec*, so it is a full second copy
+#: of the parser libraries, nothing copy-on-write. The live guard,
+#: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`, ratchets `VmRSS`
+#: instead (see there).
 FORKSERVER_POD_COST_MIB = 91
 
 #: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.
 #:
-#: `VmRSS` and not `Pss` because this is the quantity that belongs to the process alone, and that
-#: half is now driven rather than asserted: **109 readings across twelve arms** — a bare parent, a
-#: 417 MiB one, pytest's own 459 MiB one, `--cov`, eight CPU hogs, the compose stack plus four peers
-#: holding 2.4 GB and mapping these same libraries, a dropped page cache, a deleted `__pycache__`,
-#: 1/25/100 parses through the singleton, one CPU — read **108.56–109.05 MiB**, a 0.5% spread. The
-#: same forkserver's `Pss` read 93.4 MiB quiet and **81.1 MiB** with those four peers up: 12.3 MiB
-#: apart with nothing whatever touching the closure, which is the reason the test below gives for
-#: rejecting `Pss`, measured instead of argued.
+#: `VmRSS` rather than `Pss` because it belongs to the process alone and is stable under load and
+#: peers, while `Pss` swings with whatever else maps the same libraries. It moves with the preload
+#: closure, which is what it ratchets (adding `jinja2` passes; `pandas`, `chemclaw.core.chem` or the
+#: agent graph red). The measurement runs in a child with `_PTH_INJECTORS` dropped, because
+#: `forkserver` inherits the environment and a coverage `.pth` would load `coverage` into it.
 #:
-#: **What the closure is not is the only thing that moves `VmRSS`, and this comment used to say it
-#: was.** `forkserver` starts its server by fork *and exec*, so the server inherits the process's
-#: *environment* — and `site` then runs this virtualenv's `a1_coverage.pth` inside it, which imports
-#: `coverage` whenever `COVERAGE_PROCESS_START` is set. Driven: **113.81–113.90 MiB** against 108.9,
-#: `_PRELOAD` untouched, which is not a dent in the 3 MiB margin below but straight through this
-#: ceiling — the shape this test had until today reds outright on a gate run with subprocess
-#: coverage on, and names the preload list as the thing that grew. That is why the measurement now
-#: happens in a child started with those injectors dropped, rather than against the forkserver this
-#: pytest process happens to be holding.
-#:
-#: The closure is what it is *meant* to move with, and does: driven by editing `_PRELOAD` itself,
-#: adding `chemclaw.agent.langgraph_agent` measures 407.1 MiB, `chemclaw.core.chem` 148.4 and
-#: `jinja2` 110.5 — the last of those passing, correctly, because 1.6 MiB is inside the margin
-#: below.
-#:
-#: **One reading in roughly 150 is not explained by any of this**, and it is recorded rather than
-#: smoothed over: a single sample of that `jinja2` arm read 114.7, 4.1 MiB high in `RssAnon` alone
-#: with everything else flat, and 13 repeats of the identical arm then read 110.45–110.56. Nothing
-#: reproduced it — not 60 consecutive repeats of the shipped closure, not any arm above. It is
-#: larger than the margin below, so a second one reds this gate for a reason nothing here has named,
-#: and the thing to do with it is to read `RssAnon` rather than raise the ceiling.
-#:
-#: The 3.7 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
-#: `FORKSERVER_POD_COST_MIB` — `Pss` is only ever below `VmRSS`, never pinned to it — it is a bound
-#: on the closure both of them are measured from.
-#:
-#: **112 → 120 on 2026-09-19, and the closure did not grow — the reading is environment-dependent,
-#: which every paragraph above denies.** Measured here: 116.19, 116.24, 116.2, 116.2, 116.2, 116.2,
-#: 116.3 MiB, a 0.11 spread, against the 108.56–109.05 recorded above. The decisive experiment is
-#: the one the paragraphs above could not do, because they were written before there was a second
-#: environment to do it in: `git archive 06dfd1bd src` — **the very commit that derived 108.9** —
-#: unpacked beside this checkout and imported over `PYTHONPATH` measures **115.6–115.8 MiB**
-#: in-process over three runs, and this tree measures 115.6–115.8 over three. The two revisions are
-#: the same closure to 0.1 MiB, so whatever moved the reading is not in either. No import
-#: entered the closure in between (`git diff 06dfd1bd..HEAD` over `core/`, `ingest/documents/`,
-#: `uv.lock` and `pyproject.toml` adds `resource`, `pathlib` and two first-party lines and nothing
-#: else), `uv.lock` has not changed since #388, and the closure is the same 1,448 modules with the
-#: same top-level set at both revisions.
-#:
-#: **The arms reproduce and only the base does not, which is what makes it an offset rather than a
-#: growth.** Measured at load average 1.1, five readings each: the shipped closure is 116.2 MiB flat
-#: (`RssAnon` 76.0 + `RssFile` 40.2, 0.0 spread), and adding `jinja2` reads 117.7–117.9 — **+1.6
-#: MiB, the same increment recorded above**, where a closure that had genuinely grown would move
-#: every arm. `chemclaw.core.chem` costs +43.8 here against +39.5 there and
-#: `agent.langgraph_agent` +321.6 against +298.2. So what differs between the two environments is a
-#: ~7.3 MiB constant in the base — anonymous, since `RssFile` is flat across every arm — and not
-#: anything `_PRELOAD` drags in.
-#:
-#: Two host properties were checked and are not it: THP is `madvise` with `AnonHugePages: 0`, and
-#: there is one interpreter (`/usr/local/bin/python3` is a symlink to `/usr/bin/python3.11`). What
-#: it most likely is — a differently-built wheel's data segment among the large dependencies — is
-#: not claimed, because nothing here can measure the other environment.
-#:
-#: **Load was ruled out, after one reading suggested it.** A single `jinja2` arm read 121.9 MiB at
-#: load average ~10; four repeats at load 1.1 read 117.7–117.9, while the shipped arm read 116.2 at
-#: both. One reading is not a measurement, which is the rule this nearly broke.
-#:
-#: What that costs is stated rather than hidden: on a host reading 108.9 this ceiling now tolerates
-#: ~11 MiB of real closure growth instead of ~3. The documented sensitivity is unchanged in both
-#: environments, and every arm was re-driven here against 120: `jinja2` **passes** at 117.8 as it
-#: passed at 110.5 there (the margin's whole purpose — a patch release must not red the gate),
-#: while `pandas` reds at 147.6, `chemclaw.core.chem` at 160.0 and `agent.langgraph_agent` at
-#: 437.8. The assertion now prints the decomposition and the command that tells a closure growth
-#: from another environment, so the next reader does not spend a second afternoon attributing this
-#: to `_PRELOAD`.
+#: The base reading differs by a few MiB between host environments for the same closure (anonymous
+#: pages, not file pages), so the ceiling leaves room for that plus a patch release. The assertion
+#: prints the `RssAnon`/`RssFile` decomposition so a closure that grew can be told from another
+#: environment.
 FORKSERVER_RSS_CEILING_MIB = 120
 
 #: What one parse in flight costs the pod, per MiB of the budget the *parse* declares.
 #:
-#: **The quantity this is a coefficient of used to be the document's expanded size, and the parse
-#: is not a function of that** — see
-#: `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
-#: Re-measured over a real memory cgroup — `memory.max_usage_in_bytes`, reset immediately
-#: before each parse, over a process tree holding the parent, the forkserver and every parse child,
-#: which is what a container is — one legal document at 99% of `document_max_expanded_bytes`
-#: charged the pod:
+#: A parse is not a function of a document's expanded size (string width and DOM overhead vary it
+#: several-fold), so the coefficient is taken against what the parse may allocate:
+#: `document_parse_memory_bytes`, which `ingest/documents/isolate.py` sets as `RLIMIT_DATA` on the
+#: child before it reads a byte. Measured over a real memory cgroup across formats, width classes
+#: and budgets, the pod's peak per parse stayed under this factor. Above 1.0 because the parent
+#: unpickles a second copy of the text; below 2.0 because the child's intermediates are inside its
+#: limit.
 #:
-#: | shape | ASCII | one `°` (Latin-1) | one `—` (BMP) | one U+1F9EA (astral) |
-#: | --- | --- | --- | --- | --- |
-#: | 63.4 MiB-expanded workbook, 52.2 M chars | 236 MiB | 287 | 337 | 500 |
-#: | 61.0 MiB-expanded `.docx`, 57.8 M chars | 369 MiB | 424 | 480 | 589 |
-#:
-#: — 1.8 to 9.7 MiB per expanded MiB against a constant of 3.1, because CPython stores a `str` at
-#: the width of its widest code point and `_parse_xlsx` builds one document-wide join. Two further
-#: measurements say the expanded size is not merely a noisy predictor but the wrong one: a workbook
-#: whose 5.9 MiB of expanded XML references one shared string 200,000 times yields 96.3 M
-#: characters and charged 321 MiB, and a markup-heavy `.docx` at 79% of the ceiling, holding
-#: 470,000 characters, charged 840 MiB of lxml DOM.
-#:
-#: So the bound moved to the one quantity a coefficient can honestly be taken against: what the
-#: parse is *allowed to allocate*, which `ingest/documents/isolate.py` sets as an `RLIMIT_DATA` on
-#: the child before it reads a byte. Measured against `document_parse_memory_bytes` over fourteen
-#: documents spanning both formats, all four width classes, the shared-string shape and the
-#: markup-heavy shape, at three different budgets, the pod's peak charge per parse ran 0.45–1.33×
-#: the declared budget at concurrency 1 and 0.65–1.32× at concurrency 2. The larger, rounded up. At
-#: the shipped budget and the shipped cap the worst case measured is two 50 MiB plain-text
-#: documents together: 406.7 MiB of pod, against the 448 MiB this constant allows them.
-#:
-#: Above 1.0 because the parent unpickles a second copy of the text the child sent; below 2.0
-#: because the child's own transient intermediates are inside its ceiling rather than beside it.
-#:
-#: **It is a measurement at a basis, and the basis has two terms rather than one**
-#: (`D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap`). The budget bounds
-#: what a parse allocates *beyond* the document it was handed — `_bound_allocations` reads its
-#: baseline after `raw` is unpickled, driven at `VmData` 230.4 MiB before a 50 MiB document and
-#: 280.5 MiB after — so the pod's real charge is a function of the cap too, and the sentence above
-#: that names "the shipped cap" was the only place that said so. `binding.max_file_bytes` now
-#: carries an `le` tied to `PARSE_COEFFICIENT_BASIS_BYTES`, and the test below asserts the two
-#: agree, so a site cannot raise the cap past what this number was measured against without the
-#: gate saying the coefficient needs re-measuring.
+#: The budget bounds allocation *beyond* the document handed in, so the coefficient also depends on
+#: the largest document a binding allows: `PARSE_COEFFICIENT_BASIS_BYTES` is that basis, and the
+#: test below holds `binding.max_file_bytes` to it.
 PARSE_MIB_PER_PARSE_BUDGET_MIB = 1.4
 
-#: What the front door keeps after its first turns, in MiB, over the no-turn floor
-#: `FRONT_DOOR_RESIDENT_MIB` was measured at — the compiled graph's modules, the lazy imports and
-#: the caches a turn fills once.
-#:
-#: Measured as the memory cgroup's anonymous charge (`memory.stat total_rss`, sampled at 10 ms,
-#: because cgroup v1's `max_usage_in_bytes` folds in page cache) on the real uvicorn front door
-#: against the mock LLM (`D-2026-09-24-a-turn-costs-the-thread-it-loads`): +65 to +67 MiB over the
-#: first 50-100 turns at one at a time, in five runs, and flat to within 1 MiB for the next 250.
-#: Rounded up.
+#: What the front door keeps after its first turns, in MiB, over `FRONT_DOOR_RESIDENT_MIB`: the
+#: compiled graph's modules, lazy imports and once-filled caches. Measured as the cgroup's anonymous
+#: charge on the real front door against the mock LLM; flat after warm-up. Rounded up.
 TURN_WARM_MIB = 70
 
-#: What each admitted turn permit adds to the front door, in MiB, on a short thread.
-#:
-#: Stepping concurrency 1 -> 4 -> 8 -> 12 on a warm process added 5.1-6.1 MiB per permit, retained
-#: afterwards as allocator high-water, and 16 or 24 offered turns added nothing more — the
-#: admission cap is what bounds it, which is why it is multiplied by that cap below. Six parallel
-#: tool calls and a forty-call flood per turn added nothing over it once warm. Rounded up.
+#: What each admitted turn permit adds to the front door, in MiB, on a short thread. Retained as
+#: allocator high-water and bounded by the admission cap, which is why it is multiplied by that cap
+#: below. Rounded up.
 TURN_MIB_PER_PERMIT = 6
 
 #: What a turn costs the front door per byte of the thread it continues, in bytes of pod per byte
 #: of the stored `messages` blob (`agent/checkpointer.stored_thread_bytes`).
 #:
-#: **Every turn loads its whole thread** — compaction trims what is sent, not what is held — so
-#: this is a per-permit term in the size of the conversation, and before
-#: `session_max_thread_bytes` nothing bounded that size: twelve threads of 95,000-character
-#: messages drove the front door alone past 1Gi and it was OOM-killed at turn 76. The coefficient
-#: is width-dependent the way the parse one is — CPython holds a `str` at its widest code point
-#: while the blob stays UTF-8 — so it was measured at the widest, one U+1F9EA per 95,000-character
-#: message, and it is noisy: the ratio read 13.4-17.6 across one run's rounds and 11.7 at the end
-#: of another, which reached the same 847 MiB a thread later — allocator high-water moves by
-#: ~50 MiB between runs. One em dash per message read 7.2; a thread of short messages about 1.
-#: This is the largest ratio measured at or under the ceiling, rounded up.
+#: Every turn loads its whole thread (compaction trims what is sent, not what is held), so this is
+#: a per-permit term bounded by `session_max_thread_bytes`. Width-dependent like the parse
+#: coefficient, so measured at the widest code point; the largest ratio at or under the ceiling,
+#: rounded up.
 POD_BYTES_PER_THREAD_BYTE = 18
 
 
 def test_the_parse_coefficient_still_describes_the_largest_document_a_binding_may_declare() -> None:
-    """The coefficient's second term, which nothing used to declare.
+    """The parse coefficient's basis covers the largest document a binding may declare.
 
-    `PARSE_MIB_PER_PARSE_BUDGET_MIB` multiplies `document_parse_memory_bytes`, and that budget is
-    what a parse may allocate **beyond** its document. So the pod's real per-parse charge depends
-    on the largest document a binding will hand it, and that field is set per `datasource.yaml`.
-    It had `ge=1024` and no upper bound: a site binding at 200 MiB moved the real charge to
-    ~360 MiB and moved `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` not
-    at all.
-
-    Asserted as the *agreement* between the two constants rather than as either figure, because
-    what must not drift is that the coefficient was measured at the cap the bindings can reach —
-    406.7 MiB of pod for two concurrent 50 MiB plain-text documents. Raising the cap is legitimate
-    and costs a re-measurement; this is what makes that cost visible instead of silent.
+    The coefficient multiplies a budget that bounds allocation *beyond* the document, so the pod's
+    charge depends on `binding.max_file_bytes` as well. Asserted as agreement between that field's
+    bound and `PARSE_COEFFICIENT_BASIS_BYTES`: raising the cap is legitimate and costs a
+    re-measurement, and this makes that cost visible.
     """
     from chemclaw.ingest.documents.binding import (
         PARSE_COEFFICIENT_BASIS_BYTES,
@@ -6403,18 +5016,10 @@ _PARSE_BUDGET_KEY = "CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES"
 def _parse_budget_mib(override: Any) -> float:
     """What one parse may allocate on a pod, in MiB, resolved the way the kubelet resolves it.
 
-    **Per component, because one number was serving two pods with twice the room between them.**
-    `document_parse_memory_bytes` is derived downwards from the *front door* — a 1Gi limit and two
-    parse slots — and the background worker reads it with four times the limit and four times the
-    slots, so the same inequality allows 332.7 MiB there against 178.9 here.
-
-    Three sources, in the order a container actually sees them: an explicit `env` entry on the
-    Deployment, then the shared ConfigMap the release reaches through `envFrom`, then the code
-    default. **The middle one was missing and that repeated the defect this helper was written for,
-    one layer up**: the front-door arm resolved the budget from `settings` and never looked at
-    `.Values.config`, so a fleet-wide raise — the natural way to raise it — would move every pod's
-    real budget and move no inequality here. Driven: `config` at 512 MiB gives the front door
-    523 + 2 x 1.4 x 512 = 1957 MiB against a 1Gi limit, and this file stayed green.
+    Per component, because the front door and the background worker have different limits and slot
+    counts. Three sources in container order: an explicit `env` entry on the Deployment, then the
+    shared ConfigMap reached through `envFrom`, then the code default — so a fleet-wide raise moves
+    the inequality too.
     """
     from chemclaw.core.config import settings
 
@@ -6431,13 +5036,9 @@ def _parse_peak_mib(concurrent: int, budget_mib: float) -> float:
 def _front_door_turn_mib(config: dict[str, Any]) -> tuple[float, float]:
     """What the front door's turns hold, in MiB: warm at the admission cap, and at its peak.
 
-    The first is what a front door that has served a busy minute keeps with nothing in flight —
-    the warm-up plus every permit's high-water — and belongs under the *request*. The second adds
-    each permit loading a thread at `session_max_thread_bytes`, and belongs under the *limit*.
-
-    Both inputs resolved the way a container sees them, the lesson `_parse_budget_mib` records:
-    the release's shared `config` first, the code default second. A deployment raising the permit
-    count or the thread ceiling for the whole release has to move an inequality here.
+    Warm (warm-up plus every permit's high-water) belongs under the *request*; peak adds each permit
+    loading a thread at `session_max_thread_bytes` and belongs under the *limit*. Inputs resolve as
+    a container sees them: the release's `config` first, then the code default.
     """
     from chemclaw.core.config import settings
 
@@ -6461,32 +5062,12 @@ def _front_door_turn_mib(config: dict[str, Any]) -> tuple[float, float]:
 def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> None:
     """Both components that parse documents are sized against the second process they start.
 
-    Written as an inequality over measured constants and the settings that bound the work, rather
-    than as a number somebody typed, because the failure it replaces is precisely a number typed
-    before `ingest/documents/isolate.py` existed: `resources.service` was sized when a parse ran on
-    a worker thread inside the front door, and a `forkserver` started by fork *and exec* shares no
-    page with it.
-
-    Measured, the request did not satisfy this: 432 MiB resident plus 91 MiB of warm forkserver is
-    523 MiB against a 512Mi request, exceeded while the pod is idle — which is a node oversubscribed
-    by the difference and a pod first in line for eviction, with nothing anywhere saying so.
-
-    **The limit half of this was green on a case that OOM-killed the pod, and what was wrong was
-    the quantity rather than the number**, and
-    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` has the measurements. It
-    read `document_max_expanded_bytes` and multiplied it by a coefficient
-    measured on three ASCII samples; a parse is not a function of a document's expanded size, for
-    the three independent reasons `PARSE_MIB_PER_PARSE_BUDGET_MIB` sets out. Driven in a 1Gi memory
-    cgroup carrying the 523 MiB idle pair: two legal uploads — 1,089,493 bytes on the wire against
-    `attachment_max_bytes` of 2,000,000, 63.4 MiB expanded against a 64 MiB ceiling — with one
-    astral character each took the *parent* with `SIGKILL`, exit 137, while this assertion
-    read 920 against 1024 and passed.
-
-    So what is multiplied here is `document_parse_memory_bytes`, the ceiling the kernel enforces on
-    the process that does the allocating. That is a coefficient of the quantity it is declared
-    against: raising the budget, `attachment_max_concurrent_parses` or
-    `worker_max_concurrent_activities`, or lowering either declaration, fails here instead of in an
-    OOMKill that takes every other connected turn with it.
+    An inequality over measured constants and the settings that bound the work: the resident floor
+    plus the warm forkserver must fit the *request*, and that plus concurrent parses at
+    `document_parse_memory_bytes` times the coefficient (plus turns, on the front door) must fit the
+    *limit*. The multiplied quantity is the ceiling the kernel enforces on the allocating process,
+    so raising the budget or the parse/activity concurrency, or lowering a declaration, fails here
+    instead of in an OOMKill.
     """
     from chemclaw.core.config import settings
 
@@ -6494,21 +5075,15 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
     resources = values["resources"]
     front_door = FRONT_DOOR_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
     worker = WORKER_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
-    # The worker declares its own parse allowance, because the fleet-wide one is derived from the
-    # *front door* and this pod has four times the limit and four times the parse slots. Read out of
-    # the values file rather than restated, so the inequality below is asserted against the number
-    # the Deployment actually renders (`deployment-workers.yaml`).
+    # The worker declares its own parse allowance (the fleet-wide one is derived from the front
+    # door), read from the values file so the inequality uses the number the Deployment renders.
     worker_override = values["workers"]["background"].get("documentParseMemoryBytes")
-    # The fleet-wide entry every component reads through `envFrom`, which is what a deployment
-    # raising this for the whole release would set. Absent from the shipped `config`, so today this
-    # resolves to the code default — but reading it is what stops that raise from moving a real
-    # budget while moving no inequality here.
+    # The fleet-wide entry every component reads through `envFrom`; absent today, but reading it
+    # means a release-wide raise moves the inequality.
     fleet_wide = (values.get("config") or {}).get(_PARSE_BUDGET_KEY)
 
-    # **The turns are the third term, and the one that scales with load**
-    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The two above were measured with no turn
-    # in flight; a front door that has served turns keeps their warm-up and high-water, and one
-    # at its admission cap holds a thread per permit on top. The worker takes no front-door turns.
+    # The turns are the third term and the one that scales with load; the worker takes no front-door
+    # turns.
     turns_warm, turns_peak = _front_door_turn_mib(values.get("config") or {})
 
     for label, key, idle, concurrent, budget_mib, turns_idle, turns in (
@@ -6521,13 +5096,9 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
             turns_warm,
             turns_peak,
         ),
-        # **The worker's count is its activity cap, and it used to be 1** — justified by
-        # `ingest/documents/sync.py` awaiting each `_read_and_parse` in turn, which bounds one
-        # *activity* while this pod runs `worker_max_concurrent_activities` of them. That the
-        # document-sync schedule is `ScheduleOverlapPolicy.SKIP` over a workflow whose activities
-        # are sequential does make 1 the number today, but it is a three-hop argument across two
-        # modules that a second share schedule or one manual run breaks, and the pod fits its cap
-        # outright — so the cap is what is asserted and the argument is not needed.
+        # The worker's count is its activity cap, not 1: the sequential document sync makes 1 true
+        # today only by an argument a second schedule or a manual run breaks, and the pod fits the
+        # cap outright.
         (
             "background worker",
             "worker",
@@ -6559,9 +5130,8 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
 
 #: The program the measurement runs, in a child of this process rather than in it.
 #:
-#: `_PRELOAD` is never named here: the child imports the shipped module and parses through it, so
-#: this stays a ratchet on the real list rather than on a transcription of it. A child that reaches
-#: the end without a forkserver prints nothing, which is the failure the caller names.
+#: It imports the shipped module, so this ratchets the real `_PRELOAD`. A child that ends without a
+#: forkserver prints nothing, which the caller reports.
 _FORKSERVER_RSS_PROGRAM = """
 from multiprocessing import forkserver
 
@@ -6588,10 +5158,9 @@ if pid is not None:
                 break
 """
 
-#: Environment variables that put a module into *every* interpreter this virtualenv starts, through
-#: a `.pth` in `site-packages`, and so into the process being measured rather than into the closure
-#: being measured. Dropped for the measurement: driven, `COVERAGE_PROCESS_START` alone moves the
-#: reading +5.0 MiB with `isolate._PRELOAD` untouched.
+#: Environment variables that load a module into *every* interpreter this virtualenv starts via a
+#: `.pth`, and so into the process being measured rather than the closure. Dropped for the
+#: measurement.
 _PTH_INJECTORS = ("COVERAGE_PROCESS_START", "COVERAGE_PROCESS_CONFIG")
 
 
@@ -6599,35 +5168,12 @@ _PTH_INJECTORS = ("COVERAGE_PROCESS_START", "COVERAGE_PROCESS_CONFIG")
 def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against() -> None:
     """The constant the chart rests on is re-measured here, against the shipped preload list.
 
-    `FORKSERVER_POD_COST_MIB` is the one input to the budget above that is a property of this tree
-    rather than of a declaration: it is whatever `isolate._PRELOAD` drags in, and adding a module to
-    that list — or an import to `ingest/documents/parse.py` — moves it with nothing else changing. A
-    constant transcribed from a measurement five days old is exactly what `docs/planning/BACKLOG.md`
-    carried, and it was 30% out.
-
-    So the closure is measured off a running forkserver rather than restated — **in a child of this
-    process, and no longer the forkserver this one is holding.** That is the correction this test
-    carries, and it is not the one the reading's first flake suggested.
-
-    **What is measured is `VmRSS`, and the first draft of this test measured `Pss` and flaked.**
-    `Pss` is the right unit for the *budget*, because a cgroup is charged once for a unique page; it
-    is the wrong unit for a *ratchet*, because a page's share depends on how many other processes
-    happen to map it. Observed: the first run of that draft inside a freshly created virtualenv read
-    above its 95 MiB ceiling and failed, and five later runs of the identical assertion read
-    90.0–91.0 MiB and passed. That reason is now driven rather than reasoned: four peers mapping
-    these same libraries pulled the forkserver's `Pss` from 93.4 MiB to 81.1 while its `VmRSS`
-    stayed inside 0.1 MiB. `VmRSS` does belong to the process alone, across every arm it was put
-    under — a 417 MiB parent, pytest's own, eight CPU hogs, 2.4 GB of peers, a dropped page cache,
-    a deleted `__pycache__`, a hundred parses through one singleton.
-
-    **What it does not belong to alone is `isolate._PRELOAD`, which is why the measurement moved
-    into a child.** `forkserver` starts its server by fork *and exec*, so the server inherits this
-    process's environment, and `site` runs this virtualenv's `a1_coverage.pth` inside it: with
-    `COVERAGE_PROCESS_START` set, the same untouched preload list measures 113.81–113.90 MiB against
-    108.9 — through the ceiling, not into the margin, so reading the singleton makes *how the gate
-    was invoked* red this assertion and blame `_PRELOAD` for it. A child started with those
-    injectors dropped measures the list and nothing else, and it costs ~2.0 s, of which 0.86 s is
-    the forkserver start this test was paying anyway whenever it ran first in a session.
+    `FORKSERVER_POD_COST_MIB` is a property of this tree: whatever `isolate._PRELOAD` (or an import
+    in `ingest/documents/parse.py`) drags in. Measured as `VmRSS`, which belongs to the process
+    alone, rather than `Pss`, whose share depends on other processes mapping the same pages.
+    Measured in a child with `_PTH_INJECTORS` dropped, because the forkserver inherits the
+    environment and a coverage `.pth` would otherwise make how the gate was invoked red this
+    assertion.
     """
     environment = {k: v for k, v in os.environ.items() if k not in _PTH_INJECTORS}
     child = subprocess.run(
@@ -6666,11 +5212,9 @@ def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_agains
 def test_the_chart_caps_turns_per_actor_strictly_below_the_process_cap() -> None:
     """A fairness cap at or above the pod's own cap enforces nothing while reading as protection.
 
-    The code default is 0 (off) because `chemclaw.cli.live_storm`'s family A sweeps the *admission*
-    cap end to end from one credential, so the production posture lives here — and a posture
-    nothing checks is one that drifts. `>=` is the whole failure mode: at 12
-    against a 12-permit pod the guard is consulted on every request, refuses nothing ever, and a
-    reviewer reading `values.yaml` sees a per-actor limit that does not exist.
+    The code default is 0 (off), because the live storm sweeps the admission cap from one
+    credential, so the production posture lives in the chart and is checked here: strictly below the
+    process cap.
     """
     config = _values()["config"]
     per_actor = int(config["CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR"])
@@ -6691,28 +5235,18 @@ _ROUTER_PEER = 'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
-    """`route.enabled` and an empty peer list published an address this chart's own policy drops.
+    """Publishing the face without a router peer refuses to render.
 
-    The pair the chart shipped: `mcpFace.route.enabled=true` renders a `Route`, and
-    `templates/networkpolicy.yaml`'s `mcp-face-ingress` permits `podSelector` — which NetworkPolicy
-    scopes to the policy's own namespace — plus whatever `mcpFace.ingressNamespaces` names, which
-    defaults to `[]`. The router is in neither, so every request the Route admitted was dropped
-    before it reached the pod. The front door does not have this shape: `networkPolicy.ingress
-    Namespaces` ships the router's selector, in the same file, which is what makes the omission a
-    defect rather than a posture.
+    `mcp-face-ingress` admits only same-namespace pods plus `mcpFace.ingressNamespaces` (default
+    empty), so a `Route` with no router peer publishes an address the policy drops. Three
+    directions through a real render, because a `fail` is easy to write too wide:
 
-    **Asserted through a real render in three directions**, because a `fail` is as easy to write too
-    wide as too narrow, and the too-wide version — refusing whenever `ingressNamespaces` is empty —
-    would break the coherent posture of a face reachable only from inside the cluster:
+    1. route on, list empty: refused, naming the key to set;
+    2. route on, list named: renders the `Route` and the policy with the peer;
+    3. face on, route off: renders with an empty peer list, a stated in-cluster posture.
 
-    1. route on, list empty: refused, and the message names the key an operator has to set;
-    2. route on, list named: renders, and both the `Route` and the policy are there with the peer;
-    3. face on, route off: renders, with an empty peer list, because that is a stated posture.
-
-    Not defaulted from `networkPolicy.ingressNamespaces`, and the chart says why in the same words
-    the guard does: that list answers who may reach a surface behind Entra, this one answers who may
-    reach a surface whose whole authorization is one bearer token, and inheriting the first to grant
-    the second is the widening the two-list split exists to prevent.
+    Not defaulted from `networkPolicy.ingressNamespaces`: that list grants access to a surface
+    behind Entra, this one to a surface guarded by one bearer token.
     """
     unstated = _render("--set", "mcpFace.enabled=true", "--set", "mcpFace.route.enabled=true")
     assert unstated.returncode != 0, (
@@ -6774,35 +5308,12 @@ def test_no_rendered_setting_reaches_a_pod_in_scientific_notation(
 ) -> None:
     """Helm renders a large or fractional values entry as a float, and `Settings` cannot read one.
 
-    **Driven, on the change that added the first one.** `workers.background.
-    documentParseMemoryBytes: 335544320` reached the container as `"3.3554432e+08"`, because Helm
-    parses the values entry as a float and `| quote` renders a float the way Go prints one.
-    `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic `int_parsing` error, so every
-    background worker would have crash-looped on start — a whole Deployment down, from a values file
-    that reads correctly and a chart that renders without complaint.
-
-    **The blind spot is why this is a general guard rather than a `%.0f` and a comment.** Every
-    other assertion in this file about that budget reads `values.yaml` through `yaml.safe_load`,
-    where the same entry is an ordinary `int` — so the arithmetic was checked against a number no
-    pod ever sees, and the render was the only place the defect existed. Any future numeric
-    override on any Deployment has the identical trap.
-
-    **And the ConfigMap is the bigger half, which the first version of this guard did not read.**
-    `config.yaml` renders `.Values.config`, `retention.windows` and `retention.artifactStore` with
-    `| quote` too, and those reach *every* pod through `envFrom: configMapRef` — so one float there
-    crash-loops the whole release rather than one Deployment. Driven through a values file (which is
-    where the trap lives; `--set` goes through Helm's strvals parser and keeps an int64):
-    `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 10737418240` renders as `"1.073741824e+10"`. So this reads
-    container `env`, `envFrom` sources, and the `data` of every ConfigMap and Secret the chart
-    renders.
-
-    Parametrised over `_OFF_BY_DEFAULT_RENDERS` for the reason its two siblings are: a template
-    behind a switch is validated by nobody otherwise, and `CHEMCLAW_TEMPORAL_METRICS_PORT` exists
-    only under `monitoring.temporalSdkMetrics.enabled` and takes its value straight from the values
-    file through `| quote`.
-
-    Scoped to `CHEMCLAW_*`, because those are the names `Settings` parses; a float in someone
-    else's variable is that consumer's business.
+    A values-file integer like `335544320` piped through `| quote` reaches the pod as
+    `"3.3554432e+08"`, a pydantic `int_parsing` error and a crash loop, invisible to every check
+    that reads `values.yaml` with `yaml.safe_load`. So this reads container `env`, `envFrom` sources
+    and the `data` of every rendered ConfigMap and Secret (a float there crash-loops the whole
+    release), over `_OFF_BY_DEFAULT_RENDERS` too. Scoped to `CHEMCLAW_*`, the names `Settings`
+    parses.
     """
     rendered = _render(*overrides)
     assert rendered.returncode == 0, rendered.stderr
@@ -6859,24 +5370,11 @@ def test_a_release_with_no_front_door_refuses_to_render(
 ) -> None:
     """A zero front door renders a release in which every pod refuses to start.
 
-    `service_fleet_replicas` is `Field(default=1, gt=0)` and `config.yaml` renders this number into
-    the ConfigMap **every** pod reads through `envFrom`, so a zero does not scale the front door
-    down. It fails `Settings()` at `core/config/__init__.py`'s module-level singleton — which is why
-    this is not a question of which component reads the setting. Driven over nine entrypoints, all
-    nine exit 1, and `deploy/entrypoint.sh` runs `python -m chemclaw.cli.egress_preload` under
-    `set -euo pipefail` *before* its `case`, so every container dies in the shell prologue: the
-    seven connector Deployments, the background worker, and the migrate/schedules/convert hook Jobs
-    — so `helm upgrade` never converges either.
-
-    **Both arms, because the backlog row's own reproducer is not one of them.** It named
-    `--set service.replicas=0`, which on the shipped defaults changes not one byte: the HPA ships
-    enabled and `chemclaw.frontDoorProcesses` reads `maxReplicas` in that branch. The two that do
-    reach it are parametrised here.
-
-    Neither `helm template` nor `kubeconform` could catch this — the value is a valid string in a
-    valid ConfigMap — and `make helm-validate` renders only the defaults plus the flag union, so it
-    never sets a replica count. A render-time `fail` naming the key is the only thing between an
-    operator's `--set` and eleven crash-looping pods.
+    `service_fleet_replicas` is `gt=0` and rendered into the ConfigMap every pod reads, and the
+    entrypoint constructs `Settings` before dispatching, so every container and hook Job would
+    crash-loop and `helm upgrade` would never converge. Neither `helm template` nor `kubeconform`
+    can see it, so a render-time `fail` naming the key is the guard. Both reachable arms are
+    parametrised (`service.replicas=0` alone changes nothing while the HPA is on).
     """
     refused = _render(*overrides)
 
@@ -6895,10 +5393,8 @@ def test_a_release_with_no_front_door_refuses_to_render(
 def test_the_front_door_count_the_chart_refuses_is_the_one_settings_refuses() -> None:
     """The chart's bound and `Settings`' bound are one decision, asserted against each other.
 
-    Two places state "at least one front door" and a chart guard that drifted from the field would
-    be the worst of both: a render that succeeds into a crash-loop, or one that refuses a value the
-    code would have taken. Read off `model_fields` rather than transcribed, so moving the field
-    moves this.
+    A drifted chart guard would either render into a crash loop or refuse a value the code accepts.
+    Read off `model_fields`, so moving the field moves this.
     """
     from chemclaw.core.config import Settings
 
@@ -6917,15 +5413,9 @@ def test_the_front_door_count_the_chart_refuses_is_the_one_settings_refuses() ->
 def test_the_fixed_replica_count_renders_nowhere_while_the_hpa_is_on() -> None:
     """`service.replicas` is dead config on the shipped defaults, and that is now written down.
 
-    The backlog row behind this change was built on `--set service.replicas=0` reaching the
-    ConfigMap. It does not: `service.autoscaling.enabled` ships true, `chemclaw.frontDoorProcesses`
-    reads `maxReplicas` in that branch, and `deployment-service.yaml` omits `replicas` entirely
-    because the HPA owns it. So a `--set` an operator would reasonably expect to scale the front
-    door silently does nothing.
-
-    Pinned as a test rather than left to the comment in `values.yaml`, because the comment is only
-    true while this remains true — and if a later change makes `service.replicas` live under the
-    HPA, this reds and that comment gets corrected with it.
+    With the HPA on, `chemclaw.frontDoorProcesses` reads `maxReplicas` and the Deployment omits
+    `replicas`, so a `--set service.replicas` does nothing. Pinned so the `values.yaml` comment
+    saying so is corrected if that ever changes.
     """
     baseline = _render()
     overridden = _render("--set", "service.replicas=1")
@@ -6948,13 +5438,11 @@ def _containers(rendered: str) -> list[tuple[str, dict[str, Any], dict[str, Any]
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_push_token_is_required_only_where_something_pushes() -> None:
-    """`secrets.keys.knowledgeRepoToken` was required on every pod of every release.
+    """The push token is required only where something pushes.
 
-    With `knowledge.sync.repoUrl` empty no writer checkout is cloned (`knowledge-sync.sh checkout`
-    exits early), so nothing can push and nothing reads the token — yet an absent key took every
-    pod into `CreateContainerConfigError`. It is now `optional: true` there and required, as
-    before, once a remote is configured, which is the release where an absent token fails every
-    note at push. Still *mounted* in both, so a release that sets it keeps it.
+    With `knowledge.sync.repoUrl` empty nothing clones a writer checkout or pushes, so the key is
+    `optional: true`; with a remote configured it is required, since every note push would fail
+    without it. Mounted in both cases.
     """
     name = _values()["secrets"]["keys"]["knowledgeRepoToken"]
 
@@ -7000,15 +5488,11 @@ def _service_ingress_peers(rendered: str) -> list[dict[str, Any]]:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_ui_beside_the_release_may_reach_the_front_door() -> None:
-    """The `Chemclaw3_ui` BFF dials `chemclaw-service:8080` from this namespace and was dropped.
+    """The `Chemclaw3_ui` BFF beside the release may reach the front door.
 
-    The front door's ingress admitted this release's own pods and whole namespaces, and the UI is
-    neither — so the one call the whole UI goes through was refused by the policy unless an
-    operator admitted the entire release namespace. `networkPolicy.uiPodSelector` admits the UI's
-    pods by label, from this namespace only (a bare `podSelector`), and `null` removes it.
-
-    The labels are checked against the UI's own Deployment when that checkout is present, because
-    a selector that no longer matches the pods it names admits nothing and fails silently.
+    `networkPolicy.uiPodSelector` admits the UI's pods by label from this namespace only (a bare
+    `podSelector`); `null` removes it. The labels are checked against the UI's own Deployment when
+    that checkout is present, since a stale selector admits nothing silently.
     """
     selector = _values()["networkPolicy"]["uiPodSelector"]
     assert selector, "the shipped chart admits no UI pod"
@@ -7049,11 +5533,9 @@ def test_the_ui_beside_the_release_may_reach_the_front_door() -> None:
 def test_a_private_ca_reaches_every_container_that_reads_the_settings_pointing_at_it() -> None:
     """`trustedCA` mounts one PEM bundle into every container and points opted-in settings at it.
 
-    `CHEMCLAW_LLM_TLS_CA_BUNDLE`, `CHEMCLAW_ENTRA_CA_BUNDLE` and a DSN's `sslrootcert=` are file
-    paths, and the chart had no value that put a file anywhere. Asserted over every container the
-    render produces — the migrate and convert hook Jobs included, since both dial Postgres with the
-    DSN that names the file — because a container that reads the setting and lacks the mount is a
-    pod that cannot reach its database. Off, nothing renders; misconfigured, the render refuses.
+    The CA settings and a DSN's `sslrootcert=` are file paths, so every container that reads them
+    (the migrate and convert hook Jobs included) needs the mount or cannot reach its database. Off,
+    nothing renders; misconfigured, the render refuses.
     """
     path = "/etc/chemclaw/ca/ca.crt"
     rendered = _render(
@@ -7110,11 +5592,8 @@ def test_a_private_ca_reaches_every_container_that_reads_the_settings_pointing_a
 def test_a_result_sink_this_image_does_not_ship_can_be_mounted_and_discovered() -> None:
     """`extraSinks` puts a `sink.yaml` folder on `CHEMCLAW_RESULT_SINKS_DIR` in every pod.
 
-    `result_sinks_dir` has always been a discovery path where earlier directories win, and the
-    chart could not use it: no value mounted a folder or set the variable, so a site that could not
-    use the shipped `postgres` sink's address was told to bake a derived image. Mirrors
-    `extraConnectors` and is asserted the same way — the variable once, in the shared ConfigMap,
-    and the mount on every container that reads it, the two migration hooks excepted.
+    Mirrors `extraConnectors` and is asserted the same way: the variable once, in the shared
+    ConfigMap, and the mount on every container that reads it, the two migration hooks excepted.
     """
     rendered = _render(
         "--set",

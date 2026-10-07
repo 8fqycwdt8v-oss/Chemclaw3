@@ -1,18 +1,13 @@
 """The turn's side of a queued tool call: start it, wait a little, and answer as the tool would.
 
 Installed as a `langchain-mcp-adapters` tool interceptor on a connector whose manifest declares
-`queued:` (`connectors/transport.py::_interceptors`), so the tool the agent binds is the adapter's
-own object and every middleware — authorization, audit, the plan gate, result framing — sees an
-ordinary connector call. Only the last hop differs: instead of `session.call_tool`, the call becomes
-a `QueuedToolWorkflow` on the connector's interactive queue, and this waits for its answer.
+`queued:` (`connectors/transport.py::_interceptors`), so every middleware sees an ordinary
+connector call; only the last hop becomes a `QueuedToolWorkflow` on the interactive queue.
 
-**What the agent gets back is a `CallToolResult`, whichever way it went**, so the adapter converts
-it with its own function: the server's answer when the call finished inside
-`queued.inline_wait_seconds`, a refusal as a refusal, and otherwise a short text naming the durable
-job the call became. That last case is announced with `job_started`, and the answer arrives through
-the session mailbox as `job_completed` — the path every durable job already takes. An answer that
-had to wait for a slot carries one more block saying so (`_with_wait`), because the `tool_queued`
-events the chemist's card reads never reach the model.
+The agent always gets a `CallToolResult`: the server's answer if it arrived within
+`queued.inline_wait_seconds`, a refusal as a refusal, otherwise a text naming the durable job
+(announced with `job_started`, answered later as `job_completed`). An answer that waited for a
+slot says so (`_with_wait`), since the `tool_queued` events never reach the model.
 """
 
 import asyncio
@@ -54,13 +49,10 @@ logger = logging.getLogger(__name__)
 
 Handler = Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]]
 
-#: The last backlog read per interactive queue, as `(monotonic time, count)`. Every turn waiting on
-#: one connector would otherwise ask the broker the same question each tick; one read per queue per
-#: tick answers all of them (`_backlog`).
+#: Last backlog read per interactive queue, as `(monotonic time, count)`: one broker read per queue
+#: per tick serves every waiting turn.
 _BACKLOG: dict[str, tuple[float, int | None]] = {}
-#: Set once the broker has answered a stats request without stats — a server too old to report
-#: them (Temporal 1.25.2, measured). Not asked again in this process: the answer will not change,
-#: and the round trip would be paid every tick for nothing.
+#: Set once the broker answers a stats request without stats (too old a server); never asked again.
 _STATS_UNSUPPORTED = False
 
 
@@ -71,8 +63,8 @@ class QueueUnavailable(Exception):
 def queued_workflow_id(connector: str, tool: str, arguments: dict[str, Any]) -> str:
     """The id identical queued calls share, so concurrent ones join one run.
 
-    A function of the call alone — never of who asked — which is why only a tool whose answer is a
-    function of its arguments may be queued (`manifest.QueuedDispatch`).
+    A function of the call alone, never of who asked, which is why only a tool whose answer depends
+    only on its arguments may be queued (`manifest.QueuedDispatch`).
     """
     return f"queued-{connector}-{tool}-{stable_hash([connector, tool, arguments])}"
 
@@ -95,10 +87,9 @@ def queued_interceptor(
                 call_timeout=call_timeout,
             )
         except QueueUnavailable:
-            # **The queue must not become the reason a capability is down.** Nothing was started,
-            # so the call goes the way it went before queues existed: straight to the server, which
-            # admits it or says it is full. Counted, because a broker outage that quietly turns
-            # every queued call direct is the load shape this design exists to prevent.
+            # The queue must not take a capability down: nothing was started, so call the server
+            # directly. Counted, because a broker outage silently making every call direct is the
+            # load this design avoids.
             logger.warning("queue unreachable; calling %s.%s directly", connector, request.name)
             record_metric(
                 lambda m: m.increment(
@@ -115,15 +106,8 @@ async def dispatch_queued(
 ) -> CallToolResult:
     """Queue one call and answer as the tool would, within `inline_wait` or as a job id.
 
-    Args:
-        connector: The connector serving `tool`.
-        tool: The tool being called.
-        arguments: Its arguments, as the model sent them.
-        inline_wait: How long the turn waits for the answer before handing back a job id.
-        call_timeout: How long the call may run once it has a slot.
-
-    Returns:
-        The server's `CallToolResult`, a refusal as `isError`, or a text naming the job.
+    `call_timeout` bounds the call once it has a slot. Returns the server's `CallToolResult`, a
+    refusal as `isError`, or a text naming the job.
     """
     call = QueuedToolCall(
         connector=connector,
@@ -140,9 +124,8 @@ async def dispatch_queued(
             call,
             id=queued_workflow_id(connector, tool, arguments),
             task_queue=interactive_queue(connector),
-            # An open run under this id is the identical call already waiting or running: join
-            # it. A closed one is history, and a new ask computes again (behind `cached_compute`,
-            # cheaply).
+            # An open run under this id is the identical call: join it. A closed one is history, and
+            # a new ask runs again (cheaply, behind `cached_compute`).
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
             memo={
@@ -180,21 +163,9 @@ async def dispatch_queued(
 def _with_wait(result: CallToolResult, connector: str, waited: float | None) -> CallToolResult:
     """`result` with one sentence saying the call waited for a slot, when it did.
 
-    **The model has to be able to see the queue, or it answers about it from nothing.** The
-    `tool_queued` events go to the chemist's stream and nowhere else, so on the 2026-10-02 lane two
-    of four parallel `run_python` calls sat queued for about 8 and 14 s and the answer said "No call
-    waited, queued, or was refused" — the only claim about the queue the model could make was a
-    guess. A call that was seen waiting now says so, and roughly for how long, in the result the
-    model reads; a call that never waited is returned exactly as the server answered.
-
-    A separate block after the server's own, so the server's payload stays byte-for-byte what it
-    returned and every reader that takes the first block for it still does.
-
-    **The block carries its own separator**, the convention `chemclaw_agent._INSTRUCTION_BLOCKS`
-    states for the prompt: every reader that flattens a result joins its text blocks with `""`
-    (`tool_result_size.full_text`, and the provider adapters do the same), so without it the model
-    read `…}(Queue: this call waited …)` — the note glued onto the server's JSON, which a reader
-    could take for part of the payload or for a malformed one.
+    The `tool_queued` events reach only the chemist's stream, so without this the model can only
+    guess about the queue. Appended as a separate block so the server's payload stays byte-for-byte
+    intact, and the block starts with its own separator because readers join text blocks with `""`.
     """
     if waited is None:
         return result
@@ -221,16 +192,10 @@ async def _wait_reporting(
 ) -> tuple[ConnectorJobResult, float | None]:
     """The run's result within `budget` seconds, saying meanwhile whether it waits or runs.
 
-    Without this the tool-call card reads "running" for the whole wait, which is false while the
-    call sits in the queue — and on a busy deployment that wait is the part a chemist is watching.
-    So every `queued_tool_progress_seconds` the run is asked where it is, and a `tool_queued` event
-    goes out only when the answer changes. The asking is best-effort (`_progress`): a broker that
-    will not answer costs the card its annotation, never the call its result.
-
-    Returns the result and, when the call was ever seen `queued`, how long it waited: from the
-    start of the wait to the tick it was first seen running, or to its answer if no tick saw it
-    run. `None` when no tick saw it queued — which is the honest reading at this resolution, and
-    the one `_with_wait` turns into "nothing to say".
+    Every `queued_tool_progress_seconds` the run is asked where it is, and a `tool_queued` event
+    goes out when the answer changes, so the card does not read "running" while the call is queued.
+    Best-effort (`_progress`). Also returns how long the call was seen waiting, or `None` if no tick
+    saw it queued.
 
     Raises:
         TimeoutError: `budget` ran out first; the run itself is untouched and keeps going.
@@ -296,20 +261,11 @@ async def _progress(
 ) -> tuple[Literal["queued", "running"], int | None] | None:
     """Whether the run's call is still waiting for a slot, and how many calls wait with it.
 
-    `running` once a worker has started the activity; `queued` while it is scheduled and not
-    started — including between retries after a full server. The count is the broker's
-    approximate backlog on the connector's interactive queue — this call included — read only
-    while the activity is scheduled. `None` when the broker could not be asked: the annotation is
-    a courtesy, and this must never fail the call.
-
-    **With no pending activity, `started` decides.** Once this call has been seen running, an
-    empty list means it has just finished or is between attempts, and that tick says nothing
-    rather than flip a running call back to "queued". Before that, an empty list means no worker
-    has picked the run up yet — the activity is not even scheduled — and that *is* queued: it is
-    the state of every call on a queue nothing polls. This used to answer `None` there too, so a
-    lane with no interactive worker showed a card reading "running" for the whole wait and never
-    emitted one `tool_queued`. The count is unknown in that state (the run is not in the activity
-    backlog yet), so it is `None` rather than a number that would leave this call out.
+    `running` once a worker started the activity; `queued` while it is scheduled but not started,
+    including between retries. The count is the broker's approximate backlog on the interactive
+    queue, this call included. With no pending activity, `started` decides: after the call was seen
+    running it says nothing, before that it is queued (nothing has picked the run up) with an
+    unknown count. `None` when the broker could not be asked; this must never fail the call.
     """
     try:
         description = await handle.describe(rpc_timeout=timedelta(seconds=rpc_timeout))
@@ -330,8 +286,7 @@ async def _backlog(client: Client, connector: str, rpc_timeout: float) -> int | 
     """The approximate backlog on `connector`'s interactive queue, read at most once a tick.
 
     `None` from a server that does not report task-queue stats; after the first such answer the
-    process stops asking (`_STATS_UNSUPPORTED`). A failed read raises to `_progress`, which drops
-    the tick's annotation.
+    process stops asking (`_STATS_UNSUPPORTED`). A failed read raises to `_progress`.
     """
     global _STATS_UNSUPPORTED
     if _STATS_UNSUPPORTED:
@@ -363,8 +318,7 @@ async def _detach(
 ) -> bool:
     """Ask the run to deliver its answer to this session; False if the run has already closed.
 
-    Temporal does not lose a signal that races a completion — a run that finishes with a signal
-    pending is made to process it first — so "not found" here means the answer exists.
+    Temporal processes a signal that races a completion, so "not found" means the answer exists.
     """
     try:
         await handle.signal(QueuedToolWorkflow.detach, session_id)

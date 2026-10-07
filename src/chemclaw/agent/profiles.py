@@ -1,33 +1,14 @@
-"""Named agent profiles — the seam for per-use-case agent configuration (Stage 1).
+"""Named agent profiles — the seam for per-use-case agent configuration.
 
-Why this exists: today there is exactly one global agent. Every dimension a use case would
-vary — the instructions, the advertised tool subset, the MCP subset, whether the harness runs
-and in which mode — is already an input `build_langgraph_agent` draws from module constants or
-global config, but there is no way to bind those into a named, selectable bundle. This module adds
-that bundle without a new execution engine: a profile is an *override set* over
-`build_langgraph_agent`'s existing dimensions, and the sole `"default"` profile reproduces today's
-agent byte-for-byte.
+A profile is an override set over `build_langgraph_agent`'s existing dimensions (instructions, tool
+and MCP subsets, harness mode, model route, skills). Every field defaults to `None`, meaning "use
+the global default", so this module imports neither the agent nor `settings`, and
+`AgentProfile(name="default")` is today's agent.
 
-Design (see `docs/archive/audit/10-config-extensibility.md` §6):
-
-- **`None` means "use the global default."** Every override field defaults to `None`, and
-  `build_langgraph_agent` resolves `None` against the module instructions / `settings` — so this
-  module imports neither `chemclaw_agent` nor `settings` (no cycle, no second config source), and
-  the default profile is simply `AgentProfile(name="default")` with every field unset.
-- **A profile *attenuates*, it never *authorizes*.** The tool/MCP subsets can only *narrow* the
-  advertised surface. The audit + per-tool authz middleware and the skill role-gates run in
-  `build_langgraph_agent` *after* this narrowing, so a profile that names a tool the caller may not
-  use is still denied at call time, and a profile that omits the knowledge-writing tools merely
-  removes capability. A profile is a narrowing seam layered *under* RBAC, never a bypass.
-- **Files, not code.** A profile is a YAML file discovered from `data/profiles/` or from a connector
-  bundle (`chemclaw.agent.profile_discovery`, D-112), selected per session by name. This module
-  holds the
-  model and the registry those files populate; nothing here needs editing to add one.
-
-The registry mirrors `chemclaw.ingest.sources.registry` / `chemclaw.science.bo.objectives` (a
-`{name: thing}` dict + a resolver that
-raises with the valid keys), and `AgentProfile` is a small pydantic spec like every other manifest
-in the tree. No new pattern is introduced.
+A profile attenuates and never authorizes: the subsets only narrow the advertised surface, and
+audit, authz and skill role gates run after the narrowing. Profiles are YAML files
+(`chemclaw.agent.profile_discovery`); this module holds the model and the `{name: profile}`
+registry.
 """
 
 from typing import Literal
@@ -53,102 +34,33 @@ class AgentProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(min_length=1)
-    # Bounded like every other manifest-supplied prose field, and this is the one where the bound
-    # is load-bearing rather than defence in depth: `instructions` *is* the system prompt, so an
-    # unbounded value is unbounded spend on every model call of every turn on that profile, outside
-    # the ratchet `tests/test_context_floor.py` holds. Measured before the bound: 500,000 characters
-    # went straight into the prefix
-    # (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`).
+    # Bounded because `instructions` is the system prompt: an unbounded value is unbounded spend on
+    # every model call.
     instructions: str | None = Field(default=None, max_length=MAX_MANIFEST_TEXT_CHARS)
     tool_names: frozenset[str] | None = None
     mcp_server_names: frozenset[str] | None = None
     harness_enabled: bool | None = None
-    # `HarnessAutonomy`, not `str`: `extra="forbid"` above rejects a misspelled field *name*, and
-    # this rejects a misspelled *value*. Without it a profile saying `plan-only` loaded silently and
-    # took the plan gate off — see the alias's own note for why that is worse than not adding one.
+    # `HarnessAutonomy`, not `str`, so a misspelled value (e.g. `plan-only`) is rejected instead of
+    # silently taking the plan gate off.
     harness_autonomy: HarnessAutonomy | None = None
-    # How hard this agent is asked to think, overriding `llm_effort` for builds on this profile.
-    # A `Literal` rather than `str` for the reason the field above is one: `extra="forbid"` catches
-    # a misspelled field *name*, and only the type catches a misspelled *value*. That matters more
-    # here than for most settings — the value is sent to the endpoint as a parameter, and
-    # `ChatOpenAI` is `extra="ignore"`, so a rejected value is either dropped in silence or comes
-    # back as a 400 that `llm_provider._failover_exceptions` deliberately does not fail over.
-    #
-    # Typed here as a literal rather than imported from `LlmSettings` because this module
-    # deliberately imports no settings (see the module docstring); the two are pinned against each
-    # other by `tests/test_llm_effort.py` instead, the way `harness_autonomy` already is.
-    #
-    # **Usable on every deployment**, which it was not: `build_chat_model` used to *raise* on a
-    # non-`None` effort whenever the provider was Anthropic, because there the same parameter
-    # enables extended thinking rather than setting an effort level (measured). With one gateway
-    # there is one meaning, so the guard is gone
-    # (`D-2026-09-04-a-gateway-is-the-only-provider`). Whether the gateway honours the parameter is
-    # the gateway's business — it is `extra="ignore"` all the way down, which is why
-    # `tests/test_llm_effort.py` asserts the request payload rather than an attribute.
+    # Reasoning effort, overriding `llm_effort` for this profile. A `Literal` so a misspelled value
+    # is rejected: the endpoint would drop it silently or answer 400. Kept in sync with
+    # `LlmSettings` by `tests/test_llm_effort.py`, since this module imports no settings.
     effort: Literal["low", "medium", "high"] | None = None
-    # Which entry of `settings.model_routes` this agent's model is built from — a **route key**,
-    # never a model id. `build_chat_model(task)` already resolves a key to whatever model id a
-    # deployment mapped it to, and that indirection is the whole point of the field: a model id
-    # written here would be a site's model name checked into this repository, which is exactly what
-    # `model_routes` exists so that nobody has to do. `None` takes the `"agent"` route, which is
-    # what every build has always used.
-    #
-    # **Unlike the two fields above, this one does not narrow, and it does not need to.** A profile
-    # attenuates a *tool surface*; which model answers is not a capability and carries no authority,
-    # so a route pointing at a larger model is not a widening. What it can move is cost, and cost
-    # already has its own bound one layer down — `agent/spend_cap.py` meters a turn's bill in a
-    # `TurnTotal` channel that a fan-out shares rather than multiplies.
-    #
-    # The reason it exists is the helper: `agent/subagents.py` derives a profile whose route is
-    # `"helper"`, so a deployment makes delegated reading cheaper with
-    # `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` and no code change. A session
-    # profile may name one too — `property-lookup` is the shipped profile whose own header calls it
-    # "the question a chemist asks dozens of times a day".
-    #
-    # **A key with no entry in `model_routes` reuses the model already built** rather than building
-    # a second, identical client per turn, so an unconfigured route is today's behaviour exactly.
-    # `build_chat_model`'s own contract for an unrouted task is the same answer stated one level
-    # down (it falls back to `llm_model`); this only declines to pay for that twice.
+    # Which entry of `settings.model_routes` builds this agent's model — a route key, never a model
+    # id, so no site's model name is checked in. `None` takes the `"agent"` route. A model is not a
+    # capability, so this does not need to narrow; cost is bounded by `agent/spend_cap.py`. A key
+    # with no entry in `model_routes` reuses the model already built.
     model_route: str | None = None
-    # Which skills this agent may reach, narrowing the discovered set to the named subset. `None`
-    # leaves the skill surface to the three narrowings `agent/skill_access.py` already composes —
-    # deployment enablement, tool reachability, and the caller's roles — and a name here is a
-    # fourth, applied the same way and only ever removing.
-    #
-    # **It exists because nothing could vary skills independently of tools, and that made a skill
-    # unmeasurable.** The A/B harness pairs two arms across *profile files*
-    # (`evals/tool_utility.paired_tasks`), so an arm is whatever an `AgentProfile` can express —
-    # and a profile could express a tool surface and a prompt and nothing else. `ToolScopedSkills`
-    # then couples the two in the direction that defeats the measurement: narrowing `tool_names`
-    # to isolate a skill also removes every *other* skill whose declared tools went with them, so
-    # the delta is a prompt-and-tools-and-skills delta. That is
-    # `D-2026-09-14-tools-were-never-the-variable` one field over, and this field is what lets an
-    # arm hold the tool surface still and move only the skill.
-    #
-    # A name with no discovered skill behind it is caught by `make skill-validate` rather than at
-    # build time, for the reason the enable-list and the role-gate map are: the skills tree is
-    # configuration a deployment supplies, so a profile shipped here cannot be validated against a
-    # tree that does not exist until a deployment names one. The failure mode is the benign one —
-    # a name nothing backs narrows to nothing and removes no skill anybody has.
+    # Which skills this agent may reach, narrowing the discovered set; `None` leaves the surface to
+    # `agent/skill_access.py`. It lets an A/B arm vary skills while holding the tool surface still.
+    # An unknown name is caught by `make skill-validate`, not at build time, because the skills tree
+    # is deployment configuration; it narrows to nothing.
     skill_names: frozenset[str] | None = None
-    # What this profile is *for*, in one sentence, written for the model that decides whether to
-    # delegate to it. Unset on a profile nobody rosters, which is every profile a session picks by
-    # name — a session profile is chosen by a person who already knows what they want.
-    #
-    # **It exists because the last roster's descriptions were derived, and derived identically.**
-    # `D-2026-08-12-a-supervisor-that-holds-every-tool-has-no-reason-to-delegate` measured a
-    # five-specialist roster whose menu was built as `instructions.split(". ")[0]` — and all five
-    # profiles open with "You are Chemclaw's `<name>` specialist", so the menu the model read
-    # carried the names and nothing else. Fixing it to carry capability changed 1 of 15 to 1 of 15;
-    # the delegation only moved when the `task` description was rewritten too. A field is the fix
-    # that cannot regress: prose written to be a description is not prose that happens to be the
-    # first sentence of something else.
-    #
-    # It is only half of what the model reads. `subagents.describe_helper` appends the tool names
-    # the compiled helper actually bound, so the capability half is *derived from the graph* and
-    # cannot drift from it — which matters more here than anywhere, because a rostered profile's
-    # helper is narrower than the profile (every tool that acts is subtracted), so a sentence
-    # written about the profile would describe a surface the helper does not have.
+    # What this profile is for, in one sentence, written for the model deciding whether to delegate
+    # to it; unset on profiles nobody rosters. A written field rather than a derived first sentence,
+    # so roster entries are distinguishable. `subagents.describe_helper` appends the tools the
+    # helper actually bound.
     description: str | None = Field(default=None, max_length=MAX_MANIFEST_TEXT_CHARS)
 
 

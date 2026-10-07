@@ -1,16 +1,9 @@
 """A generated job launcher is an ordinary tool — including everything that gates an ordinary tool.
 
-The value of generating these is only real if the generated tool is not a special case, so most
-of this file is about *sameness*: the schema the model sees is a proper typed one, the name is
-the authorization key, the expensive-trigger gate and the dry-run gate both fire, an actor is
-demanded before any durable work, and re-launching the identical job returns the existing id
-instead of paying twice. Those are the five properties the four hand-written adapters had, now
-asserted once against the factory that replaced them.
-
-Temporal is faked at the client seam (`chemclaw.connectors.jobs`) because none of this is
-about
-Temporal's behavior — `test_connector_job_workflow.py` covers that against a real server. What
-is under test here is what happens *before* the workflow starts, which is where the gates live.
+Asserted against the factory: the model sees a typed schema, the name is the authorization key,
+the expensive-trigger and dry-run gates fire, an actor is required before durable work, and
+re-launching the identical job returns the existing id. Temporal is faked at the client seam
+(`chemclaw.connectors.jobs`); `test_connector_job_workflow.py` covers the real server.
 """
 
 import asyncio
@@ -62,9 +55,7 @@ _SPEC = JobSpec.model_validate(
 class _FakeHandle:
     """A started-workflow handle, carrying the id the tool returns and the run's server status.
 
-    `describe()` is what the rejoin path asks before announcing a run it did not start; the status
-    is settable per test because the whole point of that branch is that a *running* rejoin and a
-    *finished* one must be treated differently.
+    The status is settable because a running rejoin and a finished one are treated differently.
     """
 
     def __init__(self, workflow_id: str, status: Any = WorkflowExecutionStatus.RUNNING) -> None:
@@ -116,12 +107,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
 
 
 def _params(tool: Any, **values: Any) -> BaseModel:
-    """Build the tool's generated params model from `values` — the *convenient* caller's shape.
+    """Build the tool's generated params model from `values` — the convenient caller's shape.
 
-    Deliberately not described as "what MAF does": it is not, and believing it was is what let
-    every declared job ship broken (D-138). The two tests below drive the framework's real
-    invocation path instead; this helper stays because most tests here are about the gates, not
-    the argument shape, and a constructed model keeps those readable.
+    The framework actually passes a raw `dict` (driven by the two tests below); a constructed model
+    keeps the gate tests readable.
     """
     model: type[BaseModel] = tool.__annotations__["params"]
     return model(**values)
@@ -139,10 +128,8 @@ class _DryRunContext:
 def _launch(tool: Any, rationale: str = "why the tests run it", **values: Any) -> str:
     """Call the generated tool with `values` and a stated reason.
 
-    A sync wrapper because the suite has no pytest-asyncio: each test drives one event loop
-    through `asyncio.run`, which is the convention everywhere else here. The rationale has a
-    default so the tests that are about something else stay about that; the ones that are about
-    the reason itself (D-157) pass their own.
+    A sync wrapper over `asyncio.run`, the suite's convention. The rationale defaults so tests about
+    other things stay focused.
     """
     return str(asyncio.run(tool(_params(tool, **values), rationale)))
 
@@ -150,9 +137,8 @@ def _launch(tool: Any, rationale: str = "why the tests run it", **values: Any) -
 async def _alaunch(tool: Any, rationale: str = "why the tests run it", **values: Any) -> str:
     """`_launch` without the `asyncio.run`, for a caller that already owns the loop.
 
-    Which is every test that also wants the tool's *signals*: those only exist while a graph is
-    streaming (`tests/signals.collect_signals`), so the call has to happen inside that stream
-    rather than in its own event loop.
+    Needed to collect the tool's signals, which exist only inside a streaming graph
+    (`tests/signals.collect_signals`).
     """
     return str(await tool(_params(tool, **values), rationale))
 
@@ -182,12 +168,10 @@ def test_the_schema_is_typed_not_a_free_dict() -> None:
 
 
 def test_a_referenced_model_gives_full_fidelity_for_a_structured_input() -> None:
-    """The escape hatch that makes "any tool" true: a domain model is referenced, not copied.
+    """A referenced model gives full fidelity for a structured input.
 
-    `CampaignSpec` nests an optimization problem with discriminated feature kinds — a shape the
-    closed inline param types cannot express, and re-declaring it in YAML would be a second
-    source of truth
-    for a schema that already exists and is already validated in code.
+    `CampaignSpec` nests discriminated feature kinds that inline param types cannot express, and
+    re-declaring it in YAML would be a second source of truth.
     """
     referenced = JobSpec.model_validate(
         {
@@ -205,12 +189,10 @@ def test_a_referenced_model_gives_full_fidelity_for_a_structured_input() -> None
 def test_an_unresolvable_model_reference_fails_with_a_named_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Caught by `make connector-validate`, not when a chemist first calls the tool.
+    """An unresolvable model reference fails with a named error at `make connector-validate`.
 
-    The unimportable arm has to name an *allowed* package now, because a reference is refused for
-    its package before anything tries to import it
-    (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`) — and a test asserting "cannot
-    import" against a reference that never reaches the import would be asserting the wrong refusal.
+    The unimportable arm names an allowed package, because a disallowed package is refused before
+    any import (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`).
     """
     monkeypatch.setattr(settings, "manifest_driver_packages", "no")
     with pytest.raises(ConnectorJobError, match="cannot import"):
@@ -224,11 +206,10 @@ def test_an_unresolvable_model_reference_fails_with_a_named_error(
 def test_launching_starts_the_declared_workflow_on_the_bundles_own_queue(
     client: _FakeClient,
 ) -> None:
-    """The workflow type name binds the run to a connector; the queue is derived from the bundle.
+    """Launching starts the declared workflow on the bundle's own derived queue.
 
-    `connector-calc` appears in no manifest (D-150) — it is `bundle_queue("calc")`, computed at
-    dispatch. Asserting it on the launch payload is what keeps that derivation honest, since a
-    wrong queue is not an error anywhere: the job would start and then wait forever.
+    `connector-calc` is `bundle_queue("calc")`, computed at dispatch (D-150); a wrong queue is not
+    an error anywhere, the job would just wait forever.
     """
     tool = build_job_tool("calc", _SPEC)
     job_id = _launch(tool, smiles="CCO")
@@ -244,14 +225,10 @@ def test_launching_starts_the_declared_workflow_on_the_bundles_own_queue(
 def test_launching_works_when_the_argument_arrives_as_the_raw_json_object(
     client: _FakeClient,
 ) -> None:
-    """The shape the framework actually passes is a `dict`, and it must launch (D-138).
+    """Launching works when the argument arrives as the raw JSON object (D-138).
 
-    Every other launch test in this file hands the tool a constructed model, which is why all of
-    them passed while every declared job — `compute_reaction_energy`, `compare_solvents`,
-    `start_optimization_campaign`, `sample_conformers` — failed on its first real use with
-    `'dict' object has no attribute 'model_dump'`. The parameter's annotation is a pydantic model
-    and its JSON schema is published, but the body is handed the decoded JSON object; nothing
-    between the wire and the tool builds the model.
+    The parameter is annotated as a pydantic model, but the body receives the decoded JSON `dict`;
+    nothing between the wire and the tool builds the model.
     """
     tool = build_job_tool("calc", _SPEC)
     job_id = str(asyncio.run(tool({"smiles": "CCO", "cycles": 3}, "why the tests run it")))
@@ -262,11 +239,10 @@ def test_launching_works_when_the_argument_arrives_as_the_raw_json_object(
 
 
 def test_the_raw_object_is_validated_rather_than_passed_through(client: _FakeClient) -> None:
-    """Accepting a dict must not mean accepting *any* dict — the schema still has to hold.
+    """The raw object is validated rather than passed through.
 
-    The failure this guards against is the lazy repair: dropping the model and forwarding whatever
-    arrived. The declared type would then be advertised to the model and enforced nowhere, and a
-    mistyped argument would reach the workflow instead of the tool call.
+    Otherwise the declared type is advertised but enforced nowhere, and a mistyped argument reaches
+    the workflow.
     """
     tool = build_job_tool("calc", _SPEC)
     with pytest.raises(ValidationError):
@@ -277,13 +253,10 @@ def test_the_raw_object_is_validated_rather_than_passed_through(client: _FakeCli
 
 
 def test_launching_survives_the_framework_s_own_invocation_path(client: _FakeClient) -> None:
-    """End-to-end through the framework's own dispatcher, not our idea of it.
+    """Launching survives the framework's own invocation path.
 
-    The test above encodes today's observed behaviour (a `dict` arrives). This one encodes the
-    property that actually matters and survives the framework changing its mind: whatever the
-    dispatcher hands the body, a launch driven through it starts the declared workflow. It ran
-    through MAF's `tool(...).invoke()` before the rebuild and runs through LangChain's
-    `StructuredTool.ainvoke` now — the same question of the engine that is actually wired.
+    Driven through LangChain's `StructuredTool.ainvoke`: whatever the dispatcher hands the body, the
+    declared workflow starts.
     """
     from langchain_core.tools import StructuredTool
 
@@ -343,13 +316,10 @@ def test_a_duplicate_submit_returns_the_existing_id_rather_than_erroring(
 def test_a_rejoined_run_that_is_still_going_is_announced_to_the_second_chemist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Chemist B asks for a job chemist A already started, and hears about it (BACKLOG §3).
+    """A rejoined run that is still going is announced to the second chemist.
 
-    The rejoin used to be silent in both directions, justified by "it may already be finished" —
-    true of one case and false of the other, and the cost fell entirely on the second asker: no
-    turn-stream `job_started`, therefore no `job_completed` a surface could match to it, and
-    nothing for `agent/job_results.py` to wait on. They were told "in progress" and had to poll by
-    hand forever. `describe()` answers the question the comment was guessing at.
+    Otherwise the second asker gets no `job_started`, so no `job_completed` a surface could match
+    and nothing for `agent/job_results.py` to wait on. `describe()` says whether the run is running.
     """
     fake = _FakeClient(
         error=WorkflowAlreadyStartedError("already", "CalculationWorkflow", run_id=None),
@@ -379,15 +349,11 @@ def test_a_rejoined_run_that_is_still_going_is_announced_to_the_second_chemist(
 def test_a_rejoined_run_that_is_not_running_is_still_silent(
     monkeypatch: pytest.MonkeyPatch, status: Any
 ) -> None:
-    """The half the old silence was right about, kept — including when the server will not say.
+    """A rejoined run that is not running stays silent, including when describe fails.
 
-    A finished, failed or terminated run will never emit the `job_completed` that clears the row an
-    announcement draws, so announcing one is worse than saying nothing. A describe that *fails* is
-    the same case for a different reason: this is a best-effort question asked only to decide
-    whether to speak, so an unanswered one must not become a tool error on a successful rejoin.
-
-    Parametrized across all four because the previous version of this branch held one axis constant
-    — every rejoin finished — which is why the running case went unnoticed for as long as it did.
+    A finished run never emits the `job_completed` that would clear an announcement, so announcing
+    it is worse than silence; a failed describe must not turn a successful rejoin into a tool error.
+    Parametrized over every non-running status.
     """
     fake = _FakeClient(
         error=WorkflowAlreadyStartedError("already", "CalculationWorkflow", run_id=None),
@@ -407,13 +373,10 @@ def test_a_rejoined_run_that_is_not_running_is_still_silent(
 def test_a_generic_start_workflow_failure_is_framed_not_raised_raw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gap one call after `connect()`: a launch fault must not reach MAF as a raw exception.
+    """A generic `start_workflow` failure is framed, not raised raw.
 
-    `connect()` succeeding and `start_workflow` then failing (an unregistered task queue, a
-    transient RPC timeout, a bad payload) is exactly the "Error: Function failed." symptom the
-    `connect()` framing was written to prevent, one call later. Unlike a `connect()` failure, this
-    cannot promise nothing started — so the message says only what it knows, and points at
-    `get_durable_job_status` rather than overclaiming.
+    After a successful `connect()`, a start failure cannot promise nothing started, so the message
+    says only what it knows and points at `get_durable_job_status`.
     """
     fake = _FakeClient(error=RuntimeError("task queue has no registered worker"))
 
@@ -470,13 +433,10 @@ def test_a_launch_with_no_ambient_session_does_not_crash(
 
 
 def test_a_generated_launcher_is_covered_by_the_dry_run_gate() -> None:
-    """A declared job is refused on a dry run without the factory checking for itself.
+    """A generated launcher is covered by the dry-run gate.
 
-    The launcher used to test `is_dry_run()` in its own body. That worked and did not scale: every
-    write the three hand-written checks did not cover ran on a `dry_run: true` turn, including the
-    two that push a branch to the knowledge repository. The check now lives at the tool-invocation
-    boundary over `side_effecting_tools()`, so what has to hold here is that a generated job's name
-    is *in* that set — which it is by construction, since every declared job is durable work.
+    The gate lives at the tool-invocation boundary over `side_effecting_tools()`; what must hold is
+    that a generated job's name is in that set, which it is by construction.
     """
     declared = {job.name for manifest in enabled() for job in manifest.jobs}
     assert declared, "no connector declares a job; this test would prove nothing"
@@ -506,11 +466,10 @@ def test_a_generated_launcher_is_covered_by_the_dry_run_gate() -> None:
 def test_an_expensive_job_is_authorized_before_any_durable_work(
     client: _FakeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`authorize_trigger` fires for `expensive: true`, so a plan cannot outrun entitlements.
+    """An expensive job is authorized before any durable work.
 
-    Enforcement is only active under Entra, so the gate is switched on here with the same two
-    config tokens a real deployment sets — asserting the wiring, not re-testing
-    `chemclaw.agent.authz`.
+    `authorize_trigger` fires for `expensive: true`. Enforcement is switched on with the config a
+    real Entra deployment sets, testing the wiring rather than `chemclaw.agent.authz`.
     """
     expensive = JobSpec.model_validate({**_SPEC.model_dump(exclude_none=True), "expensive": True})
     tool = build_job_tool("calc", expensive)
@@ -710,19 +669,11 @@ def test_re_asking_a_finished_job_returns_its_result_not_its_id(
 def test_an_inline_result_reaches_the_model_with_no_live_delimiter(
     monkeypatch: pytest.MonkeyPatch, rejoined: bool
 ) -> None:
-    """A job answering inside the turn is a tool result, so its text may not spell the envelope.
+    """An inline result reaches the model with no live delimiter.
 
-    The launcher carries no `SERVED_BY` stamp — it is built here, not handed back by an MCP
-    handshake — so `agent/tool_framing.frame_connector_results` leaves its result exactly as it
-    came. Measured before this: an envelope whose summary and whose `data` carried a live
-    `</retrieved-note-…>` reached the model with both delimiters intact, which ends the envelope
-    around everything framed after it in the same turn. Five of the shipped jobs declare an
-    `inline_wait_seconds`, so this is the common path.
-
-    Driven through the real tool rather than through `_await_briefly`, and over **both** ways a
-    result is awaited: the freshly-started run and the rejoined one. A guard written at one of those
-    two call sites is the defect `_await_briefly`'s own docstring records, so the test that would
-    not have caught it is the one that drives a single path.
+    The launcher has no `SERVED_BY` stamp, so `agent/tool_framing.frame_connector_results` leaves
+    its result untouched; the launcher itself must defang text that could close the envelope. Driven
+    through the real tool over both the fresh and the rejoined await paths.
     """
     from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -767,11 +718,9 @@ def test_a_launch_must_say_why_it_is_being_started(client: _FakeClient) -> None:
 
 
 def test_the_reason_reaches_the_run_without_entering_its_identity(client: _FakeClient) -> None:
-    """The rationale is recorded, and two differently-worded asks for one job stay one run.
+    """The rationale is recorded, and two differently worded asks for one job stay one run.
 
-    The second half is why it is not in `payload`: the id hashes the payload, so a reason folded
-    in there would turn "the same campaign, explained differently" into a second expensive run
-    (D-011).
+    The id hashes `payload`, so the reason stays out of it (D-011).
     """
     tool = build_job_tool("calc", _SPEC)
     first = _launch(tool, "the reviewer questioned the barrier", smiles="CCO")

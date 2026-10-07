@@ -1,31 +1,15 @@
 """The narrow database seam the binding engine runs against — Protocols, and nothing else.
 
-This module imports no driver and no third-party package, on purpose. It is what lets the rest of
-the engine — SQL generation, mapping, unit conversion, similarity search — be exercised in CI
-against a fake, on a machine with no warehouse and no vendor client installed. The real client
-lives alone in `chemclaw.ingest.eln.warehouse.databricks`, imported only when a binding names it.
+Imports no driver or third-party package, so SQL generation, mapping and search are tested against a
+fake. The real client lives in `chemclaw.ingest.eln.warehouse.databricks`.
 
-**Why a Protocol rather than reusing `chemclaw.core.db`.** That module is the *application's*
-Postgres: one DSN from settings, one pool, one statement timeout. A warehouse is a different thing
-attached differently — its credentials come from a manifest's environment names, its connection is
-per-source rather than per-process, and its dialect is not Postgres. Sharing the helper would have
-meant teaching it about both, which is how a connection helper becomes a configuration union.
+Not `chemclaw.core.db`: that is the application's own Postgres (one DSN, one pool); a warehouse
+takes credentials from a manifest, connects per source and speaks another dialect.
 
-**`placeholder` is on the connection because parameter style is a dialect fact.** Databricks binds
-`?`, psycopg binds `%s`, and the alternative to asking is a module-level `paramstyle` mutation in
-the vendor client — a global that every other user of that client in the process inherits. Asking
-keeps `sql.py` dialect-neutral and lets a test assert the exact string that would be sent.
-
-**`vector_dialect` is here for exactly the same reason, and it arrived late.** How a warehouse
-spells a similarity search is as much a dialect fact as how it spells a parameter, and `sql.py` was
-neutral about the second while hardcoding the first: one vendor's function names and its
-`?::VECTOR(FLOAT, n)` cast sat in a module whose docstring claims to contribute only structure. A
-second driver is what exposed it. A dialect owns the two things vendors genuinely differ on — what
-the similarity function is called and how a query vector is *bound*, which is the sharper half: a
-warehouse with a native vector type binds a Python list against a cast, while one with no array
-parameter type has to take the vector as a scalar and parse it server-side. A driver that offers no
-dialect cannot serve a `vector:` block at all, and says so rather than emitting SQL its server will
-reject.
+Dialect facts live on the connection so `sql.py` stays neutral: `placeholder` (`?` vs `%s`) and
+`vector_dialect` (the similarity function's name and how a query vector is bound — against a native
+vector cast, or as a scalar parsed server-side). A driver with no dialect cannot serve a `vector:`
+block and says so.
 """
 
 from collections.abc import Sequence
@@ -38,11 +22,9 @@ from chemclaw.core.errors import ChemclawError
 class WarehouseQueryError(ChemclawError):
     """A query the warehouse refused: a relation that does not exist, a column, a type.
 
-    A `ChemclawError` (so a `ValueError`), which `chemclaw.durable.publish` marks non-retryable by
-    class name. That is the right stance here: a binding naming a column the site renamed will fail
-    identically on every retry, and burning a Temporal retry budget on it only delays the operator
-    seeing the message. An *unreachable* warehouse is the opposite case and raises `ConnectionError`
-    instead — the same split `chemclaw.core.db` makes, for the same reason.
+    A `ChemclawError`, which `chemclaw.durable.publish` treats as non-retryable: a renamed column
+    fails identically every time. An unreachable warehouse raises `ConnectionError` instead, as
+    `chemclaw.core.db` does.
     """
 
 
@@ -50,31 +32,26 @@ class WarehouseQueryError(ChemclawError):
 class VectorDialect(Protocol):
     """How one warehouse spells a similarity search. Owned by the driver, used by `sql.py`.
 
-    Two methods, because a vendor differs on exactly two things here and `sql.py` contributes the
-    rest of the statement unchanged.
+    Two methods for the two things vendors differ on; `sql.py` writes the rest.
     """
 
     def similarity(self, metric: str) -> tuple[str, str]:
         """The function that computes `metric`, and the direction it sorts.
 
-        One call rather than two lookups because the pair moves together: a distance sorts ascending
-        and a similarity descending, and a metric added with the wrong pairing would return the
-        *least* similar rows while looking entirely correct.
+        Returned together so a distance is never paired with a descending sort (or vice versa),
+        which would silently return the least similar rows.
 
         Raises:
-            WarehouseQueryError: This warehouse has no function for that metric. Non-retryable,
-                because a binding asking for one it does not have fails identically every time.
+            WarehouseQueryError: This warehouse has no function for that metric; non-retryable.
         """
         ...
 
     def query_vector(self, placeholder: str, vector: Sequence[float], dim: int) -> tuple[str, Any]:
         """The expression standing in for the query vector, and the single value bound into it.
 
-        Returned as a pair rather than as a rendered literal because the vector is a *value* — the
-        one thing `sql.py` never writes into a statement — and because the encoding differs: a
-        warehouse with a native vector type binds the list, one without has to take a scalar it can
-        parse. `dim` is the configured embedding width, which a typed cast needs and a parsed one
-        does not.
+        A pair because the vector is a value `sql.py` never writes into a statement, and its
+        encoding differs (native list vs parsed scalar). `dim` is the embedding width a typed cast
+        needs.
         """
         ...
 
@@ -83,9 +60,8 @@ class VectorDialect(Protocol):
 class WarehouseCursor(Protocol):
     """One in-flight statement. Rows come back as column-keyed dicts, never tuples.
 
-    Dicts because the whole engine is column-name-driven: a binding says `AMOUNT_G`, and resolving
-    that through a positional index would mean threading the `SELECT` list's order through every
-    layer that touches a row. It also means a fake is a list of dicts.
+    The engine is column-name driven (a binding says `AMOUNT_G`), and a fake is then just a list of
+    dicts.
     """
 
     async def execute(self, sql: str, params: Sequence[Any]) -> None:
@@ -101,31 +77,17 @@ class WarehouseCursor(Protocol):
 class BatchingCursor(Protocol):
     """A cursor that can run one statement over many parameter sets in one go.
 
-    **A second Protocol rather than a method on `WarehouseCursor`, because a site brings its own
-    driver.** `D-2026-08-26-the-driver-s-signature-is-the-schema` makes the connection block that
-    driver's own keyword arguments, and the corollary is that this repository cannot require a
-    method of a class it does not ship: adding `executemany` to `WarehouseCursor` would make every
-    site driver written against the two-method seam fail the `isinstance` check `SqlResultSink`
-    already performs, for a capability that is an optimisation. Declared separately and probed with
-    `execute_many` below, an optional capability is exactly that — present, used; absent, unnoticed.
-
-    Named for what the caller gets rather than for psycopg, though psycopg is why it is worth
-    having: `AsyncCursor.executemany` runs the parameter sets in **pipeline** mode, so N statements
-    cost one network round trip instead of N.
+    A separate Protocol because sites bring their own drivers: requiring `executemany` on
+    `WarehouseCursor` would break every two-method driver for an optimisation. Probed by
+    `execute_many`. psycopg runs the sets in pipeline mode, one round trip for N statements.
     """
 
     async def executemany(self, sql: str, params_seq: Sequence[Sequence[Any]]) -> None:
         """Run `sql` once per entry in `params_seq`, binding each positionally.
 
-        The same statement every time — this is a bulk *bind*, not a bulk statement.
-
-        **What a failed set leaves behind is the driver's, and this Protocol does not settle it.**
-        Measured for psycopg, which is the implementation that matters here: `executemany` runs the
-        set inside one implicit transaction *even on an autocommit connection*, so a four-entry set
-        failing on its third leaves none of the four. A driver that loops `execute` on an
-        autocommit connection leaves the entries before the failure. Both are correct for a caller
-        whose statement is an idempotent upsert, which is the only kind of caller this has — and a
-        caller for whom the difference matters must not use this method.
+        A bulk bind of one statement. What a failed set leaves behind is driver-specific (psycopg
+        rolls back the whole set even under autocommit; a looping driver keeps earlier entries), so
+        only idempotent upserts may use this.
         """
         ...
 
@@ -135,10 +97,8 @@ async def execute_many(
 ) -> None:
     """Run `sql` over every parameter set — in one round trip where the driver can, else in N.
 
-    The one place the optional capability above is probed, so a caller writes the batched form and
-    gets the row-at-a-time one for free on a driver that cannot batch. `isinstance` against a
-    `runtime_checkable` Protocol is a `hasattr` check, which is the right test here: what matters is
-    whether this object has the method, not whose base class it inherited.
+    The one place the optional capability is probed; a `runtime_checkable` `isinstance` is a
+    `hasattr` check, which is the right test.
     """
     if isinstance(cursor, BatchingCursor):
         await cursor.executemany(sql, params_seq)
@@ -160,36 +120,18 @@ class Warehouse(Protocol):
     def vector_dialect(self) -> "VectorDialect | None":
         """How this warehouse spells a similarity search, or `None` if it cannot do one.
 
-        `None` is a real answer, not an omission: the ingest half is ordinary ANSI `SELECT` work
-        that every warehouse here can serve, while an in-warehouse similarity search needs a
-        function this driver has verified exists. A binding that declares a `vector:` block against
-        a driver answering `None` is refused with a message naming the driver, which is a better
-        failure than a server rejecting a function it has never heard of on the first query.
+        `None` is a real answer: a binding with a `vector:` block against such a driver is refused
+        with a message naming the driver, rather than the server rejecting an unknown function.
         """
         ...
 
     def cursor(self) -> AbstractAsyncContextManager[WarehouseCursor]:
         """A cursor for one statement, released on exit.
 
-        The only method, and there is deliberately no `close`. There is no lifecycle hook to call
-        one from — the data-source seam builds a retrieve half per `gather_evidence` call and
-        disposes it as garbage — so a `close()` nobody can reach would be an interface promise with
-        no mechanism behind it. A driver that needs teardown does it in its own `__del__` or leaves
-        it to the process exit its session timeout already assumes.
-
-        **What makes that defensible is `connect.open_warehouse`, not this seam.** This docstring
-        used to say the seam "builds a half and never disposes it", which was the wrong half of the
-        sentence: it disposes one on every tool call, and while the connection was opened per half
-        each of those calls leaked a SQL session no code could reach. The connection is now
-        remembered per `connection:` block instead, so "a connection lives for the process's life"
-        is a property of one function that can be read rather than a claim about a seam that was
-        not true. See `open_warehouse` for the measurement.
-
-        **"For the process's life" is about the connection, not about one session.** A driver whose
-        session can die under it — an expiring SQL-warehouse session, a warehouse scaled to zero —
-        drops that session on a transient failure and opens a new one on the next call, which is
-        its own business and needs nothing here. What it must not do is keep serving a handle it
-        already knows is dead: that is a permanent outage wearing a retry's clothes
-        (`DatabricksWarehouse._session_lost`).
+        The only method; there is no `close` because nothing could call it: retrieve halves are
+        rebuilt per call and discarded. `connect.open_warehouse` keeps one connection per
+        `connection:` block for the process's life. A driver whose session can die drops it on a
+        transient failure and reconnects on the next call (`DatabricksWarehouse._session_lost`); it
+        must never keep serving a handle it knows is dead.
         """
         ...

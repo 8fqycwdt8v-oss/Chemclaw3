@@ -1,102 +1,24 @@
 """What a model call is really about to cost, and what the context policy may therefore spend.
 
-`agent/compaction.py` bounds the *thread* against a number in `settings`. Three things were wrong
-with that, and all three are properties of the arithmetic rather than of the edits:
+`agent/compaction.py` bounds the thread against budgets in billed tokens. This module supplies
+the arithmetic:
 
-**The unit was not the unit anybody meant.** Both triggers count with
-`count_tokens_approximately` — chars/4 — and that estimator is content dependent in one direction.
-Re-measured 2026-09-06 against real BPE encodings (`o200k_base`, the family a current gateway
-serves) over payloads this system actually handles: the observed `default` prefix bills **0.985**
-estimated tokens' worth per estimated token, a knowledge-graph note **0.996** — and results called
-from `Chemclaw3-mcp`'s own `chem` server bill **1.24x** (`describe_sites`, 8.4 kB) to **1.67x**
-(`enumerate_bond_cleavages`), **1.34x** over all of them concatenated. So chars/4 is within 2% on
-prose and schemas and undercounts structured chemistry by a quarter to two thirds, which is
-precisely the payload class the two triggers exist to reclaim. The figures this paragraph used to
-carry — "0.45x", i.e. 2.2x billed per estimated — do not reproduce against the fleet's real
-results, and `agent_context_calibration_max_factor` was justified by them; `core/config/agent.py`
-carries what that ceiling now rests on.
+- **Unit conversion.** The edits count with `count_tokens_approximately` (chars/4), which is close
+  on prose and schemas but undercounts structured chemistry results. `note_model_call` compares
+  each request's estimate with the provider's billed `input_tokens`, and `estimator_ratio` (an
+  EWMA, clamped at 1.0 from below so it can only tighten) converts budgets into estimator units.
+- **Exact prefix.** The system message and tool schemas are counted with a BPE encoding
+  (`llm_token_encoding`) where one is baked into the image; the thread stays on the estimator,
+  because exact counting there would cost loop time on every call.
+- **Prefix charging.** The prefix is billed but is not in the thread, so `MeasureRequestPrefix`
+  publishes it in a contextvar and `effective_trigger` subtracts it, up to
+  `agent_context_prefix_basis`. `agent_context_token_budget` therefore bounds request spend.
+- **Window.** When `llm_context_window_tokens` is declared, the trigger is also capped at what the
+  model can hold after the output reservation.
 
-No constant fixes that, because the error is a property of the content. What does is the number the
-provider already returns: `usage_metadata["input_tokens"]` is the billed size of the request this
-system just estimated, so the ratio between them is measurable — and it is measurable at exactly
-one place, because `RecordContextCompaction` computes the estimate and then awaits the call that
-reports the bill. `note_model_call` is that comparison, and `estimator_ratio` is what the triggers
-are divided by.
-
-**The prefix is now counted rather than estimated, and the thread deliberately is not.** A BPE
-encoding is available offline (`llm_token_encoding`, `o200k_base` by default), so the question is
-where it pays, and it is not where it was expected to. Measured 2026-09-16 on a compiled `default`
-graph with the connector surface bound, 98 tools, `o200k_base` against chars/4:
-
-- The **tool schemas** — the largest single term, 61,093 estimated — bill **61,123**. The estimator
-  is within **0.05%** of the encoding on JSON schemas, so counting them exactly corrects 30 tokens
-  in 61,093 and is kept only because it is free: `_SCHEMA_TOKENS` memoises the sweep per bound
-  surface for the life of the process, and it costs 92.7 ms against 50.5 ms, once.
-- The **system message** bills **6,574** against **7,755** estimated — the estimator is **18%
-  high** on this repository's own prompt, and that is where the whole correction is. 1.62 ms per
-  model call, on a thread `awrap_model_call` already keeps off the loop.
-
-End to end through the middleware the prefix falls **68,828 → 67,667, -1,161 tokens (-1.69%)**, and
-those are thread the policy was cutting for nothing: the clamp below means an over-estimate of the
-whole request is never refunded, only an under-estimate is corrected.
-
-The **thread** is the term where chars/4 is most wrong — measured at **2.08x** on a thread of dense
-`enumerate_bond_cleavages`-shaped results — and it is still the term left to the estimator, because
-counting it exactly costs **24.2 ms against 0.03 ms** per count at the shipped thread allowance
-(49.6 against 0.07 at 113,250), a count happens at least three times per model call, and two of the
-three are `RecordContextCompaction`'s, *on the event loop that serves every SSE stream on the pod*.
-~72 ms of loop time per model call, to sharpen a term the whole-request conversion below already
-converts away in aggregate, is the wrong trade. **So the calibration stays**, and not as a fallback
-for the prefix alone: a gateway fronting a non-OpenAI vendor tokenizes differently from any encoding
-named here, and the provider's own framing is in no local count either.
-
-**It only ever tightens.** `estimator_ratio` is clamped at 1.0 from below, so a mismeasurement can
-make the policy compact earlier than it needed to; it can never make it believe a request is
-smaller than it is. That asymmetry is deliberate: the failure being closed is a hard context-length
-error at the provider, which costs the whole turn, and the price of the other direction is one
-conversation group dropped early.
-
-**Nothing knew what the model could hold.** There was no context-window number anywhere in the
-tree — the ceiling was discovered from a `BadRequestError` after the request had been assembled,
-sent and rejected. `llm_context_window_tokens` is that number, 0 when a deployment cannot state it,
-and `effective_trigger` caps the budget at `window - output reservation` when it can.
-
-**The prefix has to be measured per request, which is why there is a contextvar here, and it is
-charged whether or not a window is declared.** The system message, the skills listing and every
-bound tool schema are part of the request the provider bills and are not in the thread — a figure
-no line here may hold, because it moves on any tool-schema merge in this repository *or* in
-`Chemclaw3-mcp`, and this paragraph shipped carrying 43,175, the connector-less number the
-2026-09-05 sweep corrected in five other places and missed here. What a shipped `default` turn
-sends is what `tests/test_context_floor.py` measures, bounded by its ceiling — so a budget that
-does not charge it bounds nothing the provider sees. Charging it only under a declared window,
-which is what D-2026-08-28 shipped, meant charging it against nothing in every real deployment:
-measured end to end, a thread the policy cut to its 90,030-token budget left as a 137,301-token
-request. So `effective_trigger` subtracts it unconditionally, and `agent_context_token_budget` is
-therefore a bound on **request** spend rather than on thread spend. A `ContextEdit` cannot see the
-prefix: upstream's protocol hands `apply` a message list and a counter and nothing else. A
-middleware can, so `MeasureRequestPrefix` publishes it and the edits read it — the same shape
-`core/turn_flags.py` and `agent/repeat_guard.py` already use for a fact that belongs to the call
-in flight.
-
-**What that costs, stated rather than discovered.** At a fixed configured budget every deployment's
-thread allowance falls by the prefix — up to `agent_context_prefix_basis`, past which the excess is
-paid in spend (`effective_trigger` says why) — and a configured budget *below* the prefix leaves a
-trigger of 1, which means "reduce on every model call". `agent_tool_result_clear_trigger` has twice
-shipped in exactly that state — once against a prefix measured with no connector bound — and that is
-why `_note_floored_trigger` exists — the floor has to be said rather than arrive silently. The same
-commit that charged the prefix raised the default above the prefix, and it is **derived** from
-`tests/test_context_floor.PREFIX_BOUND` — that file's ratchet ceiling plus the allowance for the
-bundles it cannot serve — plus 30,000 of thread, so it moves whenever either half does, and no
-figure for it is written down here. The shipped configuration is therefore not floored;
-`_note_floored_trigger` serves the deployment that lowers it, which is the case it was written for.
-The live numbers are whatever `tests/test_compaction.py` and `tests/test_context_floor.py` measure,
-not these, for the reason `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` gives.
-
-**And the turn's own context record lives here** rather than on the repeat guard's watch, which is
-where `peak_reclaimed` sat because compaction had nowhere else to put it. Two per-turn ambients
-with two subjects, each started by the callers that bracket a turn (`api/runner.py`,
-`durable/template_activities.py`), is what lets `turn_costs` say whether a turn was compacted at
-all — the join between the policy and the bill it exists to reduce, which no series could make.
+Live figures come from `tests/test_context_floor.py` and `tests/test_compaction.py`; the defaults
+are derived in `core/config/agent.py`. `TurnContext` records per turn whether compaction acted,
+for `turn_costs`.
 """
 
 import asyncio
@@ -126,13 +48,9 @@ logger = logging.getLogger(__name__)
 class TurnContext:
     """What the context policy did to the turn in flight, for the readers that outlive a model call.
 
-    `peak_reclaimed` is the high-water reduction, and it is the reason the metrics are not
-    incremented per model call: both edits are non-destructive, so the same standing reduction is
-    re-derived on every call of a turn and a 30-step turn would report one compaction thirty times.
-
-    The two booleans are what `turn_costs` records. They are separate because they are separate
-    facts and a turn can carry both: an early model call reduced the thread, a later one was over a
-    trigger and could not be reduced at all.
+    `peak_reclaimed` is a high-water mark because the edits are non-destructive and re-derive the
+    same reduction every call; per-call counting would multiply one compaction. The two booleans are
+    separate facts `turn_costs` records: reduced, and over a trigger but irreducible.
     """
 
     peak_reclaimed: float = 0.0
@@ -141,9 +59,8 @@ class TurnContext:
 
 
 _turn: ContextVar[TurnContext | None] = ContextVar("chemclaw_turn_context", default=None)
-# The estimated size of the current model call's prefix — the system message plus every bound tool
-# schema. 0 off the request path, which makes every rule below inert exactly where there is no
-# request to bound.
+# The estimated size of the current model call's prefix (system message plus bound tool schemas).
+# 0 off the request path, which makes the prefix rules inert there.
 _prefix: ContextVar[int] = ContextVar("chemclaw_request_prefix_tokens", default=0)
 
 
@@ -170,43 +87,17 @@ def prefix_tokens() -> int:
 class _Calibration:
     """The process's running estimate of `billed / estimated`, and the lock around it.
 
-    **An EWMA rather than a mean**, because the quantity being tracked genuinely moves: a
-    deployment's traffic shifts between prose turns and evidence sweeps, and the ratio for those is
-    1.0 against 2.2. A mean over the life of a process would keep answering with last week's mix.
-
-    **The average is of the samples, not of the samples and a fiction.** An EWMA seeded at 1.0 is
-    `(1-a)^n` parts seed after `n` samples, so with `a = 0.1` a process's first twenty calls answer
-    with a number that is mostly the initial guess — and that guess is the *unsafe* end, because
-    the clamp below means believing a sample can only tighten. Dividing the seed back out
-    (`(ewma - (1-a)^n) / (1 - (1-a)^n)`, the standard bias correction) makes this the properly
-    weighted average of what has actually been observed, and nothing else: one sample answers with
-    that sample, twenty answer with their weighted mean. Measured 2026-09-06 on a compiled graph
-    with the connector surface bound, a dense connector-JSON thread and the shipped budget, the
-    number of model calls that went out over a 128k model's input ceiling: **20** with the seed
-    left in and the sample floor at 20, **19** with the floor alone lowered to 1, **1** with both —
-    and that one is the process's very first call, before any sample exists, which no policy can
-    bound.
-
-    **The sample floor stays as a setting and its default is 1**, because there is nothing left for
-    it to protect against. The fear it was written for — "one unusual first call must not move a
-    budget" — is the fear of a *loose* budget, and `ratio` is clamped at 1.0 from below, so a
-    single sample can only make the policy compact earlier. Its actual effect was to hold every
-    pod's first twenty model calls at the uncalibrated end; measured on that arm, those calls billed
-    164,989 against 123,904 of permitted input. `_ALPHA` is the real sample floor: one sample of a
-    thread that happened to be one geometry moves the answer by its own weight and then decays.
-
-    Per process rather than per session: it is a property of the *tokenizer*, which is a property
-    of the endpoint, and a per-session estimate would spend every session's first turns learning
-    what the process next door already knows.
+    An EWMA because the traffic mix moves. The 1.0 seed is divided back out (standard bias
+    correction), so the estimate is the weighted average of real samples from the first one; a seed
+    would hold early calls at the unsafe uncalibrated end. One sample suffices because the ratio can
+    only tighten. Per process because the ratio is a property of the endpoint's tokenizer.
     """
 
-    #: How much of a new sample the average takes. 0.1 gives roughly a twenty-call memory, which is
-    #: the same order as the sample floor — fast enough to follow a traffic shift within a session,
-    #: slow enough that one outlier moves the budget by a few percent.
+    #: Weight of a new sample: roughly a twenty-call memory, so one outlier moves the budget by a
+    #: few percent.
     _ALPHA = 0.1
-    #: A single call's ratio outside this range is a measurement fault rather than a tokenizer
-    #: difference — a provider reporting usage for a different request, a cached read counted
-    #: differently — and it is dropped rather than smoothed in.
+    #: A single call's ratio outside this range is a measurement fault, not a tokenizer difference,
+    #: and is dropped.
     _SANE = (0.2, 8.0)
 
     def __init__(self) -> None:
@@ -228,12 +119,8 @@ class _Calibration:
     def ratio(self) -> float:
         """The factor to divide a billed-token budget by, clamped so it can only tighten.
 
-        The seed is divided back out before the clamp — see the class docstring: `_ratio` carries
-        `(1 - _ALPHA) ** calls` of the 1.0 it started at, and returning that blend is what kept a
-        fresh process budgeting at the uncalibrated end for twenty calls. `calls >= 1` is
-        guaranteed by the floor above (`agent_context_calibration_min_calls` is `ge=1`), so the
-        divisor is never 0; a run of samples below the seed can make the numerator negative, and
-        the clamp turns that into 1.0, which is the same answer an over-estimate always gets.
+        The seed's `(1 - _ALPHA) ** calls` weight is divided back out before the clamp; `calls >= 1`
+        is guaranteed by the sample floor, and a negative numerator clamps to 1.0.
         """
         if not settings.agent_context_calibration_enabled:
             return 1.0
@@ -259,8 +146,8 @@ def note_model_call(estimated: int, billed: int) -> None:
     """Record that a request this system estimated at `estimated` tokens was billed `billed`.
 
     Args:
-        estimated: This system's own estimate of the whole request — prefix and thread together,
-            because `input_tokens` counts the whole request and half a comparison is not one.
+        estimated: This system's estimate of the whole request (prefix and thread), matching what
+            `input_tokens` counts.
         billed: The provider's `usage_metadata["input_tokens"]` for that call.
     """
     _CALIBRATION.note(estimated, billed)
@@ -279,11 +166,8 @@ def reset_calibration() -> None:
 METRICS.bind_gauge("chemclaw_context_estimator_ratio", estimator_ratio)
 
 
-#: `(configured, prefix, window)` triples whose trigger has already floored and been reported.
-#: A floor is a *configuration* fault rather than an event: it is constant for a deployment's
-#: settings and bound tool surface, so it is said once per distinct triple instead of on every
-#: model call of every turn. Capped because a caller passing arbitrary budgets — a test sweep, a
-#: future per-profile budget — would otherwise mint a triple per call and grow this without bound.
+#: `(configured, prefix, window)` triples whose floored trigger was already reported: a static
+#: configuration fault, said once per triple. Capped so arbitrary budgets cannot grow it unbounded.
 _REPORTED_FLOORS: set[tuple[int, int, int]] = set()
 _FLOOR_LOCK = threading.Lock()
 _MAX_REPORTED_FLOORS = 64
@@ -292,37 +176,17 @@ _MAX_REPORTED_FLOORS = 64
 def _note_floored_trigger(configured: int, prefix: int, window: int, ratio: float) -> None:
     """Say, once, that a configured budget left the thread nothing and the trigger floored at 1.
 
-    **A trigger of 1 is not a budget, it is "reduce on every model call".** The edit reading it
-    compares a thread against 1 estimated token, which every non-empty thread exceeds, so
-    `ClearOlderToolResultsEdit` replaces every reclaimable tool result on every call and the
-    conversation window cuts back to its newest group. That is a defensible thing for a deployment
-    to have asked for and an indefensible thing for it to arrive at silently — which is precisely
-    what happens when the prefix is charged unconditionally and a configured budget is smaller than
-    the prefix. That was the shipped default's own state twice — the second time because the prefix
-    it was derived from had been measured with no connector bound — until it was re-derived from
-    `tests/test_context_floor.PREFIX_BOUND` plus 30,000 of thread, which is where a live figure
-    comes from and why none is written here. It now fires for a deployment that configures a budget
-    under its own prefix, a corner that stays reachable because the prefix grows with every bound
-    tool — and, since the conversion moved onto the whole budget, for one whose *calibrated* budget
-    falls under it, which is why the line names the ratio too.
-
-    WARNING rather than a counter, and the choice is about what an operator can do with it. The
-    condition is static — the same for every turn of a process, decided by two settings and the
-    bound tool surface — so a rate carries no information a single line does not, and this
-    repository's own `tests/test_deploy_chart.py` obliges every declared series to earn a panel or
-    an alert. The line names both numbers and the setting to move, which is the whole remedy.
+    A trigger of 1 means "reduce on every model call". It is reachable when a configured (or
+    calibrated) budget falls below the prefix, so it must be said rather than arrive silently. A
+    WARNING rather than a metric: the condition is static per process, and the line names the
+    numbers and the setting to move.
 
     Args:
         configured: The configured budget in billed tokens, as passed to `effective_trigger`.
         prefix: This request's measured prefix in estimated tokens, 0 off the request path.
         window: `llm_context_window_tokens`, 0 when the deployment declares none.
-        ratio: `estimator_ratio()` at the moment of the floor. It is named in the line but is
-            deliberately **not** in the key: since the conversion moved onto the whole budget it is
-            a third way to reach the floor (a budget above the prefix still floors once
-            `budget / ratio` falls under it), and a float in the key would mint a distinct triple
-            per call, which is the growth `_MAX_REPORTED_FLOORS` exists to refuse. Keyed on the
-            static three, a calibration-driven floor is said once and the number that caused it is
-            in the message.
+        ratio: `estimator_ratio()` at the moment of the floor; named in the message but not in the
+            dedup key, since a float key would mint an entry per call.
     """
     key = (configured, prefix, window)
     with _FLOOR_LOCK:
@@ -357,11 +221,8 @@ _REPORTED_EXCESS: set[tuple[int, int]] = set()
 def _note_prefix_over_basis(prefix: int, basis: int) -> None:
     """Say, once per surface, that this request's prefix is larger than the budgets were sized for.
 
-    The thread is not what pays for it any more (`effective_trigger`), so nothing a chemist sees
-    degrades — which is exactly why it has to be said: a request may now bill past
-    `agent_context_token_budget` by the excess, and the operator who bound the extra bundles is the
-    one who can decide whether that is the trade they meant. WARNING and once, for the reasons
-    `_note_floored_trigger` gives; the line names the three remedies.
+    The excess is paid in spend rather than thread, so nothing the chemist sees degrades; the
+    operator who bound the extra bundles is told, with the remedies.
 
     Args:
         prefix: This request's measured prefix in estimated tokens.
@@ -400,102 +261,27 @@ def reset_floor_reports() -> None:
 def effective_trigger(configured: int) -> int:
     """The trigger to compare an *estimated* token count against, given a budget in billed tokens.
 
-    Three corrections, and the middle one may be inert:
+    `configured / ratio - min(prefix, basis)`, further capped by
+    `(window - llm_max_tokens) / ratio - prefix` when a window is declared, floored at 1.
 
-    - **The unit.** `configured` is what the deployment is willing to spend in billed tokens; the
-      edits count in the estimator's unit; `estimator_ratio` is the measured conversion, and it is
-      1.0 until the process has seen enough calls to say otherwise.
-    - **The window.** When `llm_context_window_tokens` is declared, the thread may not have more
-      room than the model has left after the output reservation. The smaller of the two budgets
-      wins, so declaring a large window never *raises* what a deployment asked to spend.
-    - **The prefix, and it is charged whether or not a window is declared.** The system message,
-      the skills listing and every bound tool schema are part of the request and are not in the
-      thread, so a budget that does not charge them is not a bound on anything the provider sees.
-      Against the budget it is charged up to `agent_context_prefix_basis`; against a declared
-      window, whole — see "charged up to `agent_context_prefix_basis`" below.
+    - The budget is converted once, whole, and the prefix subtracted in estimator units afterwards,
+      so `billed = ratio * (prefix + thread) <= budget` holds with no assumption about how prefix
+      and thread tokenize differently. The residual lag of a running ratio is bounded in
+      `tests/test_compaction._TRACKING_SLACK`.
+    - The prefix is charged only up to `agent_context_prefix_basis`, the surface the defaults were
+      derived from; a deployment binding more bundles pays the excess in spend, not thread, and is
+      told once. A declared window charges the whole prefix, since it is the provider's hard limit.
+    - The window never raises what a deployment asked to spend; the smaller trigger wins.
 
-    **That last subtraction changes what `agent_context_token_budget` means, deliberately.** It was
-    a bound on *thread* spend; it is now a bound on *request* spend, and the difference is the
-    prefix. `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` charged it only `if window:`,
-    and no deployment declares one, so in the shipped configuration the prefix was charged against
-    nothing: measured end to end, a thread the policy cut to 90,030 estimated tokens went out as a
-    137,301-token request with the overrun indicator flat. The reason this is the right subtraction
-    rather than an extra one is that both numbers are in the same request: what the provider counts
-    is `prefix + thread`, and only one of the two was ever budgeted.
-
-    **How big the prefix is is not written here, and the last two attempts to write it here were
-    both wrong.** The first carried 43,175 — a graph compiled with no connector bound. The second
-    replaced it with "eight connector bundles and 75,695 estimated tokens", which was a bundle
-    count nobody re-derived (`connector_specs(get_profile("default"))` returns **seven**) beside a
-    token figure that goes stale on a sibling repository's merge schedule. The ratchet is the place
-    a live figure comes from (`tests/test_context_floor.py`, whose ceiling is the only figure worth
-    quoting) and `core/config/agent.py` carries the derivation; a number repeated here is a third
-    copy that can go stale on its own, which is exactly what both of them did.
-
-    **The order of those last two is the whole arithmetic, and it was wrong.** This function used
-    to compute `(budget - prefix) / ratio`: subtract an *estimated* prefix from a *billed* budget,
-    then convert only the remainder. Its own docstring defended that as "deliberate rather than
-    sloppy", on the ground that the prefix is the content where the two units agree — and that
-    ground is the part that was never measured on this prefix. It converts to
-    `prefix * 1 + thread * ratio <= budget`, which is true only if the prefix bills at exactly one
-    billed token per estimated token. `note_model_call` measures `ratio` over the **whole**
-    request, so spending it on the remainder alone credits the prefix's over-estimate against the
-    thread's under-estimate and then lets the thread grow into the credit. Measured 2026-09-06 on a
-    compiled graph with the connector surface bound, shipped defaults, a 128k window declared and a
-    thread of real `chem.enumerate_bond_cleavages` results, billed by `o200k_base` over the whole
-    113-tool surface a shipped turn binds: the converged request billed **133,803** against a
-    119,000 budget and the 123,904 such a model accepts, with `chemclaw_context_unreducible_total`
-    flat on all 40 turns — because the prefix is 63% of that request and bills at 0.985, the thread
-    bills at 1.675, and the blend the policy divided by was 1.208.
-
-    So the budget is converted **once, whole**, and the prefix is subtracted in the estimator's own
-    unit afterwards. Then `billed = ratio * (prefix + thread) <= ratio * (budget / ratio) = budget`
-    identically, with no assumption about how the two populations differ — the ratio is applied to
-    exactly the quantity it was measured over, which is the property the split could not have. On
-    the same arm: **118,589 billed**, inside the budget by 411. It costs that thread ~9,000
-    estimated tokens, which is the trade the budget exists to make.
-
-    **It is a near-identity rather than an identity, and the residue is measured rather than
-    assumed away.** The conversion uses the ratio as it stands *before* the call it is about, so a
-    request is budgeted against a slightly stale average of a sequence the trigger itself steers.
-    Driven to a fixed point that lag shows as a two-state cycle a fraction of a percent over the
-    budget — `tests/test_compaction._TRACKING_SLACK` measures it and holds the bound, and the
-    criterion that matters (does the request fit the model) clears by thousands of tokens.
-
-    **The prefix is charged up to `agent_context_prefix_basis` and not beyond it, and that is the
-    fourth correction.** Both defaults are derived from one connector surface —
-    `tests/test_context_floor.PREFIX_BOUND`, the chart's — and binding another bundle is a
-    per-deployment choice
-    (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`) that moves the
-    prefix and not the budget. Subtracting the whole prefix made that choice cost
-    *thread*, silently: measured 2026-10-02 on the four-repo lane, which binds every bundle the
-    fleet publishes, the prefix was 109,743 estimated tokens, the window was left 8,957 and the
-    lossless edit 1,857, so tool results were cleared on almost every model call, the repeat
-    guard's counters were forgiven each time, and research turns re-fetched the same notes until
-    the loop cap — while no floor warning fired, because neither trigger reached 1. So the excess
-    over the basis is paid in *spend*, which is what binding a bundle was always documented to
-    cost, and the thread keeps what the derivation gave it; the excess is reported once
-    (`context.prefix_over_basis`). A declared window still charges the whole prefix, because a
-    provider's limit is not a budget a basis can buy room in, and `agent/spend_cap.py` still bounds
-    the turn. `D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread`
-    records the choice.
-
-    **This can only tighten**, so it needs no second safety argument: `budget/ratio - prefix` is
-    below `(budget - prefix)/ratio` for every `ratio >= 1`, and the ratio is clamped at 1.0 from
-    below. At `ratio == 1.0` — an uncalibrated process — the two are the same number, which is why
-    every unit test of this function passed either way and only an end-to-end drive can see it.
+    This can only tighten: the ratio is clamped at 1.0 from below.
 
     Args:
         configured: The configured budget, in billed tokens (`agent_context_token_budget` or
             `agent_tool_result_clear_trigger`).
 
     Returns:
-        The estimated-token count above which the edit should act. Never below 1: an edit whose
-        trigger reached 0 would fire on an empty thread, and raising instead would fail the turn
-        from inside a middleware, which is the worse trade. A floor is reported once by
-        `_note_floored_trigger` rather than returned silently, because with the prefix charged
-        unconditionally the floor is reachable from a plain misconfiguration and not only from the
-        window corner it used to need.
+        The estimated-token count above which the edit should act. Never below 1 (raising inside a
+        middleware would fail the turn); a floor is reported once by `_note_floored_trigger`.
     """
     window = settings.llm_context_window_tokens
     prefix = prefix_tokens()
@@ -516,10 +302,9 @@ def effective_trigger(configured: int) -> int:
     return trigger
 
 
-#: The process's BPE encoding: empty before the one attempt, `[None]` when exact counting is not
-#: available here, `[encoding]` when it is. A list rather than a flag-plus-value pair because
-#: "not resolved yet" and "resolved to nothing" are different states and conflating them is how a
-#: failed resolution gets retried on every model call.
+#: The process's BPE encoding: empty before the one attempt, `[None]` when exact counting is
+#: unavailable, `[encoding]` when it is. A list so "not resolved yet" differs from "resolved to
+#: nothing", and a failed resolution is not retried every call.
 _ENCODING: list[Any] = []
 _ENCODING_LOCK = threading.Lock()
 
@@ -527,34 +312,12 @@ _ENCODING_LOCK = threading.Lock()
 def _baked_cache_dir() -> Path | None:
     """The merge-table cache `tiktoken` would read, when a deployment has actually baked one.
 
-    **This is a precondition rather than an optimisation, and the reason is the egress posture.**
-    `tiktoken.get_encoding` fetches its merge table over HTTPS on a miss — measured here with an
-    empty cache and no network, `requests.exceptions.ProxyError` (an `OSError`) after 0.03 s
-    where the proxy refuses at once and 0.2 s where it is dialled, and
-    on a network that drops rather than refuses the packet that becomes a connect timeout on the
-    thread measuring the prefix. Production is air-gapped, so the right behaviour is not to reach
-    the network and recover; it is not to reach it. Asking whether a cache has been baked at all
-    means the common misconfiguration — an image built without one — never makes the call.
-
-    **The resolution below is `tiktoken.load.read_file_cached`'s own, and it is transcribed rather
-    than paraphrased because a paraphrase of it was wrong in the direction that dials.** That
-    function decides on *presence* (`"TIKTOKEN_CACHE_DIR" in os.environ`) and treats an empty value
-    as *caching disabled — fetch every time*. This function asked `os.environ.get(...) or ...`,
-    which is truthiness: an empty `TIKTOKEN_CACHE_DIR` fell through to `DATA_GYM_CACHE_DIR` and
-    then to the temp-directory default, and where that default happened to be populated — which it
-    is on any host that has ever loaded an encoding — this function answered "a table is baked
-    here, it is safe to load". Measured with `TIKTOKEN_CACHE_DIR=""` and a populated
-    `/tmp/data-gym-cache`: this returned that directory, `tiktoken.get_encoding("o200k_base")`
-    then ignored it exactly as upstream says it will, and the resolve dialled. A guard that says
-    "no network will be reached" and is then the reason one is reached is worse than no guard, so
-    the two spellings are now the same spelling. Nothing else here may be loosened the same way:
-    upstream compares `cache_dir == ""` exactly, so a value of `" "` is a directory named `" "`
-    and is not stripped here either.
-
-    What it does not close, said rather than implied: a *populated* cache that does not hold the
-    configured encoding still attempts one fetch per process, which is the deployment that changed
-    `llm_token_encoding` without re-baking. `_resolve_encoding` says what bounds that and what
-    does not.
+    A precondition, not an optimisation: on a cache miss `tiktoken` fetches over HTTPS, and
+    production is air-gapped, so without a baked cache it must not be called at all. The resolution
+    transcribes `tiktoken.load.read_file_cached` exactly — presence of `TIKTOKEN_CACHE_DIR`, with an
+    empty value meaning "caching disabled" — because any looser reading would approve a load that
+    then dials. A populated cache lacking the configured encoding still attempts one fetch per
+    process (see `_resolve_encoding`).
 
     Returns:
         The directory, or `None` when there is nothing baked there to read — including the
@@ -578,40 +341,14 @@ def _baked_cache_dir() -> Path | None:
 def _resolve_encoding() -> Any | None:
     """Load the configured encoding once, or say why the budget is counting with chars/4 instead.
 
-    **Never raises and never fails a turn.** Every caller has a working answer without it — the
-    estimator this module has always used — so a missing table, an unknown encoding name or a
-    `tiktoken` that is not installed costs accuracy and nothing else.
+    Never raises and never fails a turn: every caller can fall back to the estimator. The name is
+    configured because the gateway does not say what model it fronts; against a non-OpenAI vendor
+    the count is an approximation and `_Calibration` absorbs the residual.
 
-    **The name is configured because the model is not knowable.** Every model call goes to one
-    OpenAI-compatible gateway (`D-2026-09-04-a-gateway-is-the-only-provider`), which does not say
-    what it fronts, so `encoding_for_model` has nothing to be given. `llm_token_encoding` is
-    therefore a statement by the deployment about its own endpoint, and where that endpoint fronts
-    a non-OpenAI vendor the count is a *closer approximation* rather than the bill: the residual is
-    what `_Calibration` above measures and divides out, which is why it stays.
-
-    **The swallow below bounds an exception and the residual is a hang, so what bounds the hang is
-    stated here rather than assumed.** `tiktoken.load.read_file` calls `requests.get(blobpath)`
-    with no timeout at all, so on a network that *drops* rather than refuses there is no exception
-    to catch and this function does not return. Three things are true about that, measured rather
-    than reasoned:
-
-    - **`_baked_cache_dir` closes the common path**, and after the transcription above it closes it
-      for the empty-value spelling too: with nothing baked — or with caching deliberately disabled
-      — `tiktoken` is never imported and never called, so no fetch exists to hang. Measured on the
-      arm that used to dial (`TIKTOKEN_CACHE_DIR=""`, a populated `/tmp/data-gym-cache`): hosts
-      dialled went from `['127.0.0.1']` to none.
-    - **The residual is bounded one layer down, at the resolver rather than at a timeout.**
-      `core/netguard.py` arms at `chemclaw.core.config` import, which this module's own import
-      chain makes, and `requests` is pure Python so the patched `socket.getaddrinfo` sees it.
-      Measured with the guard armed and no proxy variable set: a fetch of `o200k_base` is refused
-      in **0.003 s** as `requests.ConnectionError`, which the `except Exception` here then turns
-      into the degradation this function already reports. What is *not* bounded is named rather
-      than glossed: a deployment running `CHEMCLAW_EGRESS_GUARD_ENABLED=false`, and an ambient
-      proxy variable whose proxy is loopback or allowlisted — the guard must exempt loopback, so it
-      sees a legitimate dial. That second case is how the defect above was measured dialling
-      `127.0.0.1` with the guard armed and reporting no refusal.
-    - **Moving the lock is not one of the three, and that is a measurement rather than a
-      preference** — see `_encoding`.
+    `tiktoken`'s fetch has no timeout, so a dropping network could hang rather than raise. That is
+    bounded by `_baked_cache_dir` (no baked table, no call) and by `core/netguard.py`, which refuses
+    the DNS lookup; it is not bounded with the egress guard disabled or behind a loopback or
+    allowlisted proxy.
     """
     name = settings.llm_token_encoding
     if not name:
@@ -657,26 +394,9 @@ def _resolve_encoding() -> Any | None:
 def _encoding() -> Any | None:
     """The process's encoding, resolved at most once. `None` means "count with the estimator".
 
-    Under the lock for the whole resolution rather than around a memo read: loading `o200k_base`
-    from a warm cache measures **357 ms** and builds a 3.6 MB table, and two turns racing a cold
-    process should wait for one load rather than each do their own.
-
-    **It stays there, and the reason is that releasing it bounds nothing.** The worry it answers is
-    real — `_resolve_encoding`'s fetch has no timeout, so a dropping network makes the resolution
-    never return — but the lock is not what turns one stall into many. Driven with a 3.0 s stall
-    standing in for that fetch and four concurrent prefix measurements: **lock held, 1 fetch, wall
-    3.00 s, every thread 3.0 s; lock released, 4 fetches, wall 3.02 s, every thread 3.0 s.** Nobody
-    waits any less without it, because the thing they are waiting for is the fetch and the memo is
-    still empty until it returns — so a fifth turn arriving at second 2 blocks either way. All
-    releasing it buys is one hung socket per concurrent turn instead of one per process, which is
-    the wrong direction on an air-gapped estate.
-
-    So the bound is `_baked_cache_dir` declining to call at all, and the egress guard refusing the
-    residual at the resolver in 0.003 s; both are in `_resolve_encoding`'s docstring with their
-    measurements, including the two postures neither covers. A `concurrent.futures` future with a
-    join timeout was the obvious third option and is declined: it stops the *waiting* without
-    stopping the socket or the thread, which is a control that reads as one and is not — the same
-    trade `Chemclaw3-mcp` records for a per-tool-call wall clock over `asyncio.to_thread`.
+    The whole resolution runs under the lock so concurrent cold turns share one load. Releasing it
+    would not reduce anyone's wait during a stalled fetch, only multiply the hung sockets; a
+    timed-out future would stop the waiting but not the socket or thread.
     """
     with _ENCODING_LOCK:
         if not _ENCODING:
@@ -693,20 +413,9 @@ def reset_encoding() -> None:
 def _text_tokens(content: Any, encoding: Any) -> int | None:
     """Exact tokens of a message's content, or `None` when this content cannot be counted that way.
 
-    **A block list rather than only a string, because the system message this repository sends is
-    one.** The first version of this function tested `isinstance(content, str)` and fell back
-    otherwise — which measured as a no-op on the exact term it was written for: the prompt a turn
-    is handed arrives as `[{"type": "text", "text": ...}]`, so the whole 15% over-estimate stayed.
-    A fallback that is never taken and a fallback that is always taken look identical from the
-    number that comes out, which is why `tests/test_context_budget.py` asserts the count *changed*.
-
-    `None` for anything else, deliberately: an image block is priced by
-    `count_tokens_approximately` at a flat 85 tokens and by an encoding not at all, so a message
-    carrying one is counted by the estimator whole rather than half each way.
-
-    **`encode_ordinary`, not `encode`.** `encode` raises `ValueError` on a text containing a
-    special-token spelling such as `<|endoftext|>`, and a tool result is text a server wrote — a
-    counter that can raise on its own input would fail the turn it exists to make cheaper.
+    Handles block lists as well as strings, because the system message arrives as text blocks.
+    Anything else (e.g. an image) returns `None` so the whole message falls back to the estimator.
+    Uses `encode_ordinary`, since `encode` raises on special-token spellings in tool output.
     """
     if isinstance(content, str):
         return len(encoding.encode_ordinary(content))
@@ -729,13 +438,9 @@ def _text_tokens(content: Any, encoding: Any) -> int | None:
 def _message_tokens(message: BaseMessage) -> int:
     """One message's size: exactly where the encoding can be had, by chars/4 where it cannot.
 
-    **The envelope is still the estimator's, and deliberately.** `count_tokens_approximately`
-    charges a per-message constant (upstream's `extra_tokens_per_message`, plus the role, the name,
-    an `AIMessage`'s tool calls and a `ToolMessage`'s call id) that stands in for the provider's
-    own framing, and no local tokenizer knows what that framing is. So this counts the *content*
-    with the encoding and asks the estimator what the rest of the message costs — which keeps the
-    two units addable, the property `_clear_older_tool_results` relies on when it reclaims the
-    difference of two single-message counts.
+    Content is encoded; the per-message envelope (role, name, tool calls, call id) stays the
+    estimator's, since no local tokenizer knows the provider's framing. This keeps counts addable,
+    which `_clear_older_tool_results` relies on.
     """
     encoding = _encoding()
     content = None if encoding is None else _text_tokens(message.content, encoding)
@@ -762,24 +467,9 @@ def _tool_name(tool: Any) -> str:
 def estimate_tool_schemas(tools: Sequence[Any]) -> int:
     """Tokens of the tool schemas as a provider is sent them, counted with the best unit available.
 
-    Through `convert_to_openai_tool`, which is the function LangChain itself calls when binding
-    tools to a model — the same choice `tests/test_context_floor.py` made and for the same reason:
-    reading `.name`/`.description` off a plain decorated callable finds a repr, an empty string and
-    `None`, and measures the whole surface at ~11 tokens per tool.
-
-    **Exact where the encoding can be had, and this is the cheapest place in the system for it**:
-    `_schema_tokens` memoises the result per bound surface for the life of the process, so the
-    whole sweep is one encode per surface rather than one per model call. **And it is the term the
-    correction turned out not to be about.** Measured 2026-09-16 over the `default` profile's 98
-    bound tools, `o200k_base` against chars/4: **61,123 against 61,093** — the estimator is within
-    **0.05%** on JSON schemas, which is 30 tokens in 61,093. The sweep costs 92.7 ms against
-    50.5 ms, once per process per surface, so this is kept for costing nothing rather than for
-    buying anything; the term beside it is where the error is
-    (`MeasureRequestPrefix._measure`).
-
-    Never raises. A tool whose schema cannot be derived contributes nothing rather than costing the
-    turn, because this number exists to *bound* a budget and a missing summand only makes the bound
-    more generous.
+    Uses `convert_to_openai_tool`, as LangChain does when binding, because reading attributes off a
+    decorated callable misses the schema. Memoised per surface by `_schema_tokens`. Never raises: an
+    underivable schema contributes nothing, which only makes the bound more generous.
     """
     from langchain_core.utils.function_calling import convert_to_openai_tool
 
@@ -794,38 +484,18 @@ def estimate_tool_schemas(tools: Sequence[Any]) -> int:
 
 #: Tool-schema token totals for the life of the process, keyed by the names bound to the call.
 #:
-#: **Process-scoped, because the middleware that reads it is per turn.** `MeasureRequestPrefix` is
-#: constructed inside the compaction group of a graph that `langgraph_agent` compiles per turn, so
-#: an instance memo is cold at every turn's first model call and the whole `convert_to_openai_tool`
-#: sweep ran again on the front door's one event loop.
-#:
-#: **How long that is, is not stated here any more.** This comment carried "~100 ms for the
-#: process's first surface, ~20 ms for every turn after it, 210 ms for 12 concurrent turns", and
-#: the sweep re-measured on the same 92-tool `default` surface on 2026-09-06 takes **16 ms** cold
-#: and **0.01 ms** warm. Neither figure is *provably* wrong, because the conditions the originals
-#: were taken under — loop occupancy rather than wall time, a 1 ms heartbeat, twelve turns racing
-#: — are not recoverable from the text, and that is the defect: a duration nothing re-runs is a
-#: claim about a machine, not about this code. What is asserted, and is what the memo is for, is
-#: the **count**: `tests/test_context_budget.py` drives many turns over one surface and requires
-#: exactly one sweep, and drives a cold burst and requires the loop to stay schedulable through it.
-#:
-#: A process serves one profile set over one connector fleet, so the distinct surfaces it ever sees
-#: are its profiles times the bundles that happen to be reachable — a bounded handful of entries,
-#: not a cache that grows with traffic.
-#:
-#: **What the key assumes, stated because it now spans turns.** The bound names determine the
-#: schemas. Within a turn that was already assumed; across turns it additionally means a bundle
-#: redeployed with changed schemas under unchanged tool names is measured stale until this process
-#: restarts. The thing that goes stale is an estimate used to *bound* a budget, and it is charged
-#: against a sweep every model call of every turn otherwise paid for.
+#: Process-scoped because `MeasureRequestPrefix` is built per turn, so an instance memo would redo
+#: the sweep every turn on the event loop. Entries are bounded by profiles times reachable bundles.
+#: Keying by name assumes names determine schemas: a bundle redeployed with changed schemas under
+#: unchanged names is measured stale until restart. `tests/test_context_budget.py` asserts one sweep
+#: per surface.
 _SCHEMA_TOKENS: dict[tuple[str, ...], int] = {}
 
 
 def _schema_tokens(tools: Sequence[Any]) -> int:
     """`estimate_tool_schemas` over this surface, computed once per process per distinct surface.
 
-    Unlocked deliberately: two threads racing a surface neither has seen both compute and both
-    store the same number, which costs one redundant sweep and cannot produce a wrong one.
+    Unlocked: a race computes the same number twice, never a wrong one.
     """
     key = tuple(_tool_name(tool) for tool in tools)
     total = _SCHEMA_TOKENS.get(key)
@@ -846,40 +516,18 @@ def _as_message(schema: Any) -> BaseMessage:
 class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
     """Publish the size of this model call's prefix, so the edits below can subtract it.
 
-    **Outermost of the compaction group**, because a `ContextEdit` runs inside
-    `ContextEditingMiddleware` and reads only the message list — the system message and the tool
-    schemas are on the request, which only a middleware holds. Publishing it into a contextvar is
-    what lets an edit that cannot see the request nevertheless budget against the whole of it.
-
-    **The schema half is memoised for the life of the process, not of the middleware.** A graph is
-    compiled per turn (`langgraph_agent`) and this middleware is constructed with it, so an
-    instance memo is cold at every turn's first model call and every turn re-ran the whole
-    `convert_to_openai_tool` sweep — see `_SCHEMA_TOKENS` for what that measured and what keying it
-    by name assumes. The instructions half is per request and is counted every call, which is free.
-
-    Both hooks, for the reason `RecordContextCompaction` gives: `create_agent` puts a middleware
-    declaring either hook into both chains, so an async-only middleware fails every synchronous
-    `graph.invoke()`.
+    Outermost of the compaction group, because a `ContextEdit` sees only the message list while the
+    system message and schemas are on the request. The schema half is memoised per process
+    (`_SCHEMA_TOKENS`); the instructions half is counted every call. Implements both sync and async
+    hooks, since `create_agent` puts it in both chains.
     """
 
     def _measure(self, request: ModelRequest[Any]) -> int:
         """This request's prefix, the schema half memoised per bound surface.
 
-        **The instructions are the half chars/4 is actually wrong about, and it over-charges.**
-        Measured 2026-09-16 on the `default` profile's observed system message — instructions, the
-        skills listing and the middleware sections — `o200k_base` bills **6,574** against the
-        estimator's **7,755**: the estimator is **18% high**, where on the schema half beside it it
-        is 0.05% low. Through this method the whole prefix measures **67,667 against 68,828**, and
-        the 1,161 tokens between them are thread the policy was cutting for nothing.
-
-        **The calibration cannot give them back, which is why this is worth an encode.**
-        `estimator_ratio` is clamped at 1.0 from below, so a request whose billed size is *under*
-        what this system estimated converts at 1.0 and the over-estimate is kept, not refunded. The
-        clamp is right — it is what makes a mismeasurement cost a compaction rather than a turn —
-        and counting the prefix where it is cheap is the way to stop paying for it.
-
-        It costs **1.62 ms** per model call at that size, on the worker thread `awrap_model_call`
-        already measures in.
+        The instructions are encoded exactly because chars/4 over-estimates them, and the clamped
+        calibration never refunds an over-estimate; counting exactly is what returns that thread
+        budget.
         """
         system = request.system_message
         instructions = _message_tokens(system) if system is not None else 0
@@ -888,9 +536,8 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
     def _measured(self, request: ModelRequest[Any]) -> int | None:
         """This request's prefix, or `None` — with the degradation recorded — if it cannot be had.
 
-        Separate from `_publish` because the async path measures this half in a worker thread, and
-        `ContextVar.set` there would set the variable in that thread's context rather than in the
-        turn's.
+        Separate from `_publish` because the async path measures in a worker thread, where
+        `ContextVar.set` would not reach the turn's context.
         """
         try:
             return self._measure(request)
@@ -924,19 +571,9 @@ class MeasureRequestPrefix(AgentMiddleware[Any, Any, Any]):
     ) -> Any:
         """The path a turn actually takes — measured off the loop, published on it.
 
-        **Off the loop because a memo miss is pure CPU over every bound tool schema and this
-        process has one loop.** The front door pins itself to one uvicorn worker, so that loop
-        carries every SSE stream, both kubelet probes and the submission side of every token
-        validation, and the sweep ran to completion on it.
-
-        **What this line buys and what it does not, stated as a shape rather than as milliseconds**
-        — see `_SCHEMA_TOKENS` for why the figures that used to be here are gone. A burst that
-        misses together (a pod's first turns, or a bundle whose tools have come back under new
-        names) still does the work: `asyncio.to_thread` is a halving rather than an elimination,
-        because a thread buys no parallelism against the GIL and CPU-bound threads starve the loop
-        thread of it for much of the burst. What is asserted is that the loop stays schedulable
-        through such a burst (`tests/test_context_budget.py`), not a duration. `api/runner.py`
-        makes the same trade for the graph build.
+        A memo miss is pure CPU over every schema, and the front door has one event loop serving
+        every stream and probe. A thread does not remove the work (GIL) but keeps the loop
+        schedulable, which `tests/test_context_budget.py` asserts.
         """
         token = self._publish(await asyncio.to_thread(self._measured, request))
         try:

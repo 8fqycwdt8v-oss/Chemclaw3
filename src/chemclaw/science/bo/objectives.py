@@ -1,13 +1,4 @@
-"""Named BO objectives (plan steps 1d.3, 1d.4).
-
-A Temporal workflow cannot carry a Python callable across its boundary, so a
-durable campaign references its objective by name and the evaluate activity
-resolves it here. This registry is the generic-dispatch point that justifies a
-lookup table (Rule of Three): the durable campaign resolves by name, and a
-calculator-backed objective (1d.3) registers alongside the reaction benchmark.
-Objectives are built lazily and cached per process where construction is
-expensive (e.g. fitting a surrogate).
-"""
+"""Named BO objectives, resolved by name because a Temporal workflow cannot carry a callable."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,14 +9,8 @@ from chemclaw.science.bo.problem import ParamValue
 
 Objective = Callable[[dict[str, ParamValue]], Awaitable[float]]
 
-# How a calculator-backed objective obtains one molecule's predicted log S.
-#
-# **Injected rather than imported**, for the reason `science/bo/featurize.py` states at length: the
-# solubility model moved to `Chemclaw3-mcp` and the client that reaches it lives one package above
-# this one, which `science` may not import (`tests/test_layering.py`). The binding lives in
-# `connectors/bo/calculators.py`. The property this objective always advertised is now the client's:
-# a molecule revisited during a search is served from the calculation store and never recomputed
-# (D-011).
+# How a calculator-backed objective obtains one molecule's predicted log S. Injected for the
+# reason `featurize.PropertiesFor` is; bound in `connectors/bo/calculators.py`.
 LogSFor = Callable[[str], Awaitable[float]]
 
 # The parameter key a molecule-scoring objective reads its candidate from.
@@ -35,12 +20,8 @@ MOLECULE_KEY = "molecule"
 def solubility_objective(log_s_for: LogSFor) -> Objective:
     """A BO objective that scores a candidate molecule by cached predicted log S.
 
-    This is the calculator-backed objective of plan step 1d.3: each evaluation asks the calculator
-    through the calculation store, so a molecule revisited during a search is served from the store
-    and never recomputed (D-011). The scorer is injected so the objective is testable without a
-    database or a server. The candidate molecule is read from `params[MOLECULE_KEY]`, so a campaign
-    naming this objective declares a categorical parameter of that name whose levels are SMILES —
-    that shape is what makes the objective resolvable, and `CampaignSpec` carries it directly.
+    Reads the SMILES from `params[MOLECULE_KEY]`, so the campaign declares a categorical of that
+    name.
     """
 
     async def evaluate(params: dict[str, ParamValue]) -> float:
@@ -60,46 +41,21 @@ def _reizman_suzuki() -> Objective:
 class RegisteredObjective:
     """A named objective a durable campaign can run: how to build it, and which way is better.
 
-    **The direction is here because it is a property of the objective, not of the request.** A
-    campaign carries the direction twice — once in `CampaignSpec.problem.objectives[0].direction`,
-    which is what BoFire optimizes, and once implicitly in what the registered function *means* —
-    and nothing compared them. A caller pairing `solubility_max` with `direction="minimize"` got a
-    campaign that ran to completion, wrote a `bo-candidate` note, and recommended the **least**
-    soluble molecule in the library as its best point. Every number in it is correct; the
-    recommendation is inverted, which is the class of wrongness a reviewer is least able to catch
-    from the note alone.
-
-    So the registry states it, `require_campaign_startable` checks it, and the mismatch becomes a
-    refusal at launch instead of a plausible answer hours later.
-
-    **`requires` is the same argument about the other half of the same mismatch.** An objective is
-    a function over *named* parameters, and nothing compared those names either: a spec naming
-    `reizman_suzuki` over an unrelated decision space was accepted at launch and failed at evaluate
-    time with a bare `KeyError: 'catalyst'` — hours in, after the seed rounds had been paid for,
-    and as an exception neither `SurrogateFitError` nor `_BAD_DATA_TYPES` reads. What a function
-    reads is a property of the function, so it is declared beside the direction rather than
-    inferred by whoever launches a campaign.
+    `direction` and `requires` let `require_campaign_startable` refuse a mismatched spec at launch.
     """
 
     factory: Callable[[LogSFor], Objective]
     #: `"maximize"` or `"minimize"` — the same vocabulary `problem.Objective.direction` uses,
     #: because the whole point is that the two are compared as equals.
     direction: str
-    #: The parameter names this objective reads out of a candidate's `params`. Every entry declares
-    #: at least one: a row declaring none would pass the launch check vacuously and hand the
-    #: `KeyError` back to whatever is registered next.
+    #: The parameter names this objective reads out of a candidate's `params`. Never empty, or the
+    #: launch check would pass vacuously.
     requires: tuple[str, ...]
 
 
-#: The objective that is not a function: the numbers come back from a bench, not from a process.
-#:
-#: **This is the name that makes a real screening campaign expressible.** Every entry in the
-#: registry below is `Callable[..., Awaitable[float]]`, which is exactly what a *simulated* campaign
-#: needs and exactly what a chemist's campaign is not — BO's value to a process chemist is proposing
-#: eight conditions, waiting a week for the plates, and proposing eight more. The registry cannot
-#: hold that, because there is no function to register; the durable workflow suspends on a wait
-#: instead (`durable/awaiting.py`), so this name is deliberately absent from `_REGISTRY` and is
-#: recognised by `is_measured` rather than resolved by `get_objective`.
+#: The objective that is not a function: results come back from the bench. Deliberately absent
+#: from `_REGISTRY`; the durable workflow suspends on a wait instead (`durable/awaiting.py`), and
+#: `is_measured` recognises the name.
 MEASURED_OBJECTIVE = "measured"
 
 
@@ -108,10 +64,8 @@ def is_measured(name: str) -> bool:
     return name == MEASURED_OBJECTIVE
 
 
-# Name → the objective it stands for. Every factory takes the calculator seam, so the registry has
-# one shape even though the benchmark objective — a surrogate fitted from a bundled dataset — needs
-# no calculator at all. A per-entry signature would push the branch into `get_objective` and make
-# adding a calculator-backed objective a change to the resolver rather than a row here.
+# Name → objective. Every factory takes the calculator seam, even where unused, so adding an
+# objective is a row here rather than a change to `get_objective`.
 _REGISTRY: dict[str, RegisteredObjective] = {
     # Reaction yield: more is better. The four names are the emulator's own encoding order
     # (`benchmarks.reizman_suzuki.YieldSurrogate._encode`), which is what a candidate must supply.
@@ -126,10 +80,9 @@ _REGISTRY: dict[str, RegisteredObjective] = {
 
 
 def get_objective(name: str, log_s_for: LogSFor) -> Objective:
-    """Resolve a named objective, or raise with the known names (gate G4).
+    """Resolve a named objective, or raise with the known names.
 
-    `log_s_for` is the calculator a calculator-backed objective evaluates through; see `LogSFor`
-    for why it arrives as an argument rather than as an import.
+    `log_s_for` is the calculator a calculator-backed objective evaluates through (see `LogSFor`).
     """
     if is_measured(name):
         raise ValueError(
@@ -146,9 +99,7 @@ def get_objective(name: str, log_s_for: LogSFor) -> Objective:
 def registered_parameters(name: str) -> tuple[str, ...]:
     """The parameter names this registered objective reads, or raise with the known names.
 
-    Split from `get_objective` for the reason `registered_direction` gives: the launch-time
-    precondition must answer this *without building the objective*, and a campaign refused for a
-    mismatch should cost nothing.
+    Answers without building the objective, so a refused launch costs nothing.
     """
     registered = _REGISTRY.get(name)
     if registered is None:
@@ -159,10 +110,8 @@ def registered_parameters(name: str) -> tuple[str, ...]:
 def registered_direction(name: str) -> str:
     """Which way this registered objective is better, or raise with the known names.
 
-    Split from `get_objective` because the caller that needs it — the launch-time precondition —
-    must answer the question *without building the objective*: `solubility_objective` closes over a
-    calculator client the precondition has no business constructing, and `_reizman_suzuki` fits a
-    surrogate. A campaign refused for a direction mismatch should cost nothing.
+    Answers without building the objective (which may need a calculator client or a fitted
+    surrogate), so a refused launch costs nothing.
     """
     registered = _REGISTRY.get(name)
     if registered is None:

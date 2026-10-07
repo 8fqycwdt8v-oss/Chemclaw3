@@ -1,9 +1,7 @@
-"""Tests for `GitNoteWriter` — the one path a note takes from this system into the graph.
+"""Tests for `GitNoteWriter`, the one path a note takes from this system into the graph.
 
-A bundle *builds* a note and cannot *write* one: core writes whatever note the job envelope
-carries (D-118), which is why nothing here writes a note on a connector's behalf —
-`tests/test_connector_job_workflow.py` owns that half, and the last test in this file asserts that
-no bundle has a second way in.
+A bundle builds a note and core writes it (`tests/test_connector_job_workflow.py` covers that
+half); the last test here asserts no bundle has a second way in.
 """
 
 import ast
@@ -52,10 +50,8 @@ def _make_remote_and_clone(tmp_path: Path) -> tuple[Path, Path]:
     subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "init"], check=True)
     subprocess.run(["git", "-C", str(work), "branch", "-M", "main"], check=True)
     subprocess.run(["git", "-C", str(work), "push", "-q", "-u", "origin", "main"], check=True)
-    # Point the bare remote's HEAD at `main`, so a fresh clone checks out the base branch rather
-    # than an unborn `master`. That is what a real notes remote looks like, and the writer now
-    # *requires* it: it commits on the base branch rather than creating one per note, so a clone
-    # parked elsewhere is refused rather than quietly writing to the wrong branch.
+    # Point the bare remote's HEAD at `main` so a fresh clone checks out the base branch; the writer
+    # commits on the base branch and refuses a clone parked elsewhere.
     subprocess.run(
         ["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True
     )
@@ -81,11 +77,9 @@ def _current_branch(work: Path) -> str:
 
 
 def test_a_write_commits_the_note_on_the_base_branch_and_pushes(tmp_path: Path) -> None:
-    """The whole of the new write path: the file lands in the tree, is committed, and is pushed.
+    """A write commits the note on the base branch and pushes.
 
-    The reference is the *commit*, not a branch. That is the shape change
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` made: there is nothing to review and
-    nothing to merge, so what a caller can be handed is what landed.
+    The reference returned is the commit, since there is nothing to review or merge.
     """
     _, work = _make_remote_and_clone(tmp_path)
 
@@ -116,13 +110,10 @@ def test_a_write_commits_the_note_on_the_base_branch_and_pushes(tmp_path: Path) 
 
 
 def test_a_write_stays_on_base_and_the_note_is_readable_there(tmp_path: Path) -> None:
-    """The checkout stays on `base`, and the note is in it — which is the inversion.
+    """The checkout stays on `base`, and the note is readable there.
 
-    This test used to assert the opposite of its second half: under the PR-gate the note lived on
-    `note/<id>` and a reader pointed at this checkout saw *nothing*, which was the isolation the
-    gate depended on. `settings.notes_path` resolves to exactly this tree, so the note being here
-    is what "global the moment it is learned" means
-    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
+    `settings.notes_path` resolves to this tree, so the note is visible to readers as soon as it is
+    written.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -133,17 +124,9 @@ def test_a_write_stays_on_base_and_the_note_is_readable_there(tmp_path: Path) ->
 
 
 def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> None:
-    """A push that fails leaves the checkout on its base branch, with the note committed locally.
+    """A rejected push leaves the checkout on its base branch, with the note committed locally.
 
-    Historically this was the PR-gate bypass a `try/finally` closed: a rejected push (a dead
-    remote, a protected ref, a hook) left `note_repo_dir` on `note/<id>` with the unreviewed note
-    in the working tree, served as merged knowledge by every reader and counted as merged by the
-    ELN sync's corpus scan (since deleted with the ELN half of the gate, D-2026-08-25).
-
-    The tree is no longer switched at all, so what is left to assert is what the failure *does*
-    leave: the base branch, and a local commit the next successful write carries. Nothing here
-    claims a worktree is disposed of — there is no worktree — and an earlier version of this
-    docstring said so while the body asserted nothing of the kind.
+    The next successful write carries the local commit.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -155,25 +138,17 @@ def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> No
         asyncio.run(writer.write(_note_write("job-unreviewed")))
 
     assert _current_branch(work) == "main"
-    # **The note is on disk and committed locally**, which is a real behaviour change and is
-    # asserted rather than glossed: the write happens in the tree readers scan, so a push that
-    # fails leaves the note *readable here* and absent from the remote. The next successful write
-    # fast-forwards and carries it. What must not have happened is a silent success.
+    # The note is on disk and committed locally: readable here, absent from the remote until the
+    # next successful write fast-forwards and carries it. What must not happen is a silent success.
     assert (work / "knowledge" / "job-result" / "job-unreviewed.md").exists()
 
 
 def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) -> None:
     """A write that dies on any file leaves none of them in the tree readers scan.
 
-    A write carries a note *and its dependencies*, so it can die part-way — here on the containment
-    check of the second file. Under the PR-gate the half-written pair lived in a worktree no reader
-    scanned, so this cost nothing; writing into the tree readers *do* scan, a surviving first file
-    is a published half-unit.
-
-    **This test's name asserted that and its body asserted the opposite**, because the first version
-    of the direct writer validated each path as it wrote. Paths are now resolved and checked in a
-    pass of their own before any byte lands, and anything already written is restored if a later
-    step raises — so the name is true again.
+    A write carries a note and its dependencies, so it can fail part-way (here on the second file's
+    containment check). Paths are resolved and checked before any byte lands, and anything already
+    written is restored if a later step raises.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -211,15 +186,11 @@ def _refuse_every_commit(work: Path) -> Path:
 def test_a_failed_commit_leaves_nothing_staged_and_the_pod_can_write_again(
     tmp_path: Path,
 ) -> None:
-    """A commit that fails after `git add` un-stages what it staged — or it wedges the pod.
+    """A commit that fails after `git add` un-stages what it staged, so the pod can write again.
 
-    The failure is real rather than injected: a `pre-commit` hook that exits non-zero, which is
-    also what an `index.lock` or `_exec`'s timeout kill looks like from here. The rollback used to
-    restore only the *working tree*, so the retracted blob stayed in the index. Two things follow,
-    and both are asserted: the un-published content sits staged in the clone an operator and the
-    knowledge-sync sidecar share, and the next `merge --ff-only` refuses because of it — after
-    which `_replay_our_unpushed_commits` finds no commits of ours to replay and refuses in turn,
-    so **every** later write on this pod fails forever.
+    A failing `pre-commit` hook stands in for an `index.lock` or a timeout kill. If the index kept
+    the retracted blob, the content would sit staged in the shared clone and every later `merge
+    --ff-only` would refuse, wedging the pod.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     note = work / "knowledge" / "job-result" / "job-x.md"
@@ -262,10 +233,8 @@ def test_a_checkout_with_no_local_commits_is_not_reported_as_unauthored_ones(
 ) -> None:
     """A dirty checkout that blocks the fast-forward says so, rather than naming 0 commits.
 
-    `_replay_our_unpushed_commits` is reached on *any* failed fast-forward, and a person's
-    uncommitted edit in the notes clone is one of them. The arithmetic then reported
-    `0 local commit(s) this system did not write` — a refusal naming commits that do not exist,
-    which sends an operator looking for a rebase problem instead of at their own working tree.
+    `_replay_our_unpushed_commits` runs on any failed fast-forward, and an uncommitted edit in the
+    clone must be reported as such so the operator looks at the working tree.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     note = work / "knowledge" / "job-result" / "job-x.md"
@@ -291,16 +260,10 @@ def test_a_checkout_with_no_local_commits_is_not_reported_as_unauthored_ones(
 def test_a_write_busts_a_readers_cache_because_it_does_touch_their_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The inverse of what this test asserted, twice over, and the clearest statement of the change.
+    """A write busts readers' graph caches, because it touches their tree.
 
-    It first asserted that a submission *cleared* every cached graph (the shared tree was rewritten
-    into `note/<id>` and back), then — once the gate moved into a worktree under `.git/` — that it
-    left the cache **alone**, because busting would advertise a tree change that had not happened.
-
-    Both were right about their own design and both are wrong about this one. The write lands in
-    the tree readers scan, so a surviving cache is a reader serving a graph that is missing the
-    note just recorded — for up to `graph_cache_ttl_seconds`. "Global the moment it is learned"
-    is exactly this assertion.
+    A surviving cache would serve a graph missing the note just recorded for up to
+    `graph_cache_ttl_seconds`.
     """
     from chemclaw.kg import graph as kg_graph
 
@@ -339,10 +302,8 @@ def test_a_write_busts_a_readers_cache_because_it_does_touch_their_tree(
 def test_concurrent_writes_serialize_and_both_notes_land(tmp_path: Path) -> None:
     """Two concurrent writes serialize, and the base branch ends up holding both notes.
 
-    The lock matters *more* without branches, not less: both writes now target one branch and one
-    working tree, so unserialized they would stage each other's files and race the same push. The
-    failure this pins is not an error — it is one note's commit silently carrying the other's file,
-    or one of the two never reaching the remote at all.
+    Both target one branch and one working tree, so unserialized they would stage each other's files
+    or race the same push.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -368,22 +329,10 @@ def test_concurrent_writes_serialize_and_both_notes_land(tmp_path: Path) -> None
 def test_two_sequential_event_loops_can_both_write_concurrently(tmp_path: Path) -> None:
     """The write lock survives a second event loop in the same process.
 
-    **This is the regression test for a hang, so it is written as "the second one returns".**
-    `_WRITE_LOCK` was a module-level `asyncio.Lock`, which binds to the first loop that *contends*
-    on it — so the test above passed, and an identical second call in the same process never came
-    back. What happens is that the second loop's waiter raises `RuntimeError: ... is bound to a
-    different event loop` while the holder still has the lock, and `asyncio.run`'s shutdown then
-    cannot finish cancelling that holder.
-
-    Measured before the fix: 3.4 s for the first `asyncio.run` and no return at all from the second,
-    killed at pytest-timeout's 180 s and again at 720 s under `PYTEST_TIMEOUT_SCALE=4`. It is what
-    stopped `make mutants` from completing, since `mutmut` runs the suite through `pytest.main()`
-    once per mutant in one process — and the mechanism, with its sibling in
-    `core/temporal_client`, is `tests/test_loop_local_locks.py`'s subject.
-
-    Two loops rather than three because two is the whole property, and each has to *contend*: a
-    single write would take `asyncio.Lock`'s fast path and never resolve a loop, which is exactly
-    why this went unnoticed.
+    A module-level `asyncio.Lock` binds to the first loop that contends on it, so a second
+    `asyncio.run` in one process (as `mutmut`'s `pytest.main()` runs do) would hang. Two loops, each
+    contending, since an uncontended acquire takes the fast path and binds nothing.
+    `tests/test_loop_local_locks.py` covers the mechanism.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -414,12 +363,11 @@ def test_two_sequential_event_loops_can_both_write_concurrently(tmp_path: Path) 
 
 
 def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None:
-    """A submit against a checkout flocked by *another process* fails fast, then recovers.
+    """A submit against a checkout flocked by another process fails fast, then recovers.
 
-    Cross-process ownership of `note_repo_dir` is enforced with an exclusive
-    `flock` on `.git/chemclaw-submit.lock`. A real child process takes the lock;
-    the submit must raise `GitWriteError` instead of interleaving checkouts, and
-    must succeed once the child releases it.
+    Cross-process ownership of `note_repo_dir` is an exclusive `flock` on
+    `.git/chemclaw-submit.lock`. A child process takes it; the submit raises `GitWriteError`, then
+    succeeds once it is released.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -452,12 +400,10 @@ def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None
 
 
 def test_lock_is_released_after_a_failed_write(tmp_path: Path) -> None:
-    """The flock does not outlive a write that errored (no wedged checkout).
+    """The flock does not outlive a write that errored.
 
-    A failed write must not leave the checkout permanently 'in use': the next one acquires the
-    lock and runs normally. The failure is forced by naming a base branch this checkout is not on,
-    which is the guard `_write_locked` runs first — it fails *inside* the lock, which is what makes
-    this a test of the release rather than of the guard.
+    The failure is forced by naming a base branch the checkout is not on, which `_write_locked`
+    checks inside the lock, so this tests the release.
     """
     _, work = _make_remote_and_clone(tmp_path)
     bad = GitNoteWriter(repo_dir=str(work), base_branch="no-such-base", remote="origin")
@@ -469,21 +415,17 @@ def test_lock_is_released_after_a_failed_write(tmp_path: Path) -> None:
 
 
 def test_rewriting_a_note_from_a_second_clone_lands_on_the_shared_base(tmp_path: Path) -> None:
-    """A second clone recording a newer version of the same note replaces it on the base branch.
+    """A second clone recording a newer version of the same note replaces it on the shared base.
 
-    Under the PR-gate this exercised `--force-with-lease` against a `note/<id>` ref the fresh clone
-    had never fetched. There is no such ref now, and the equivalent hazard moved: two clones write
-    the *same* branch, so the second must fast-forward onto what the first pushed before committing
-    — otherwise its push is rejected or, worse, it commits on a base that has silently gone stale.
+    Two clones write the same branch, so the second must fast-forward onto what the first pushed
+    before committing.
     """
     remote, work_a = _make_remote_and_clone(tmp_path)
     v1 = _note_write("job-x", content="v1\n")
     submitter_a = GitNoteWriter(repo_dir=str(work_a), base_branch="main", remote="origin")
 
-    # **Cloned before the first write, so it is genuinely behind.** Cloning it afterwards is what
-    # this test used to do, and it made the fast-forward inert: the second clone already held
-    # everything the first had pushed, so removing `--ff-only` from the writer left this test
-    # green. Stale, the same removal fails the push as a non-fast-forward.
+    # Cloned before the first write, so it is genuinely behind; cloned after, the fast-forward would
+    # be inert and removing `--ff-only` would stay green.
     work_b = _clone(remote, tmp_path / "fresh")
     asyncio.run(submitter_a.write(v1))
 
@@ -516,14 +458,10 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
 def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
     tmp_path: Path,
 ) -> None:
-    """A note path starting with `-` must be added as a file, never parsed as a git option (Sec-4).
+    """A note path starting with `-` reaches `git add` as a pathspec, not an option.
 
-    `_contained_note_path` only checks containment: `repo_root / "-u"` resolves *inside*
-    `repo_root`, so this path passes it and reaches `git add` as a bare positional argument.
-    Without `--` ending option parsing first, git reads `-u` as `--update` (stage only
-    already-tracked changes, no pathspec) instead of the file it names — nothing new gets staged,
-    `_write_and_commit`'s idempotence check trips, and the write reports the unchanged tree as if
-    it had succeeded while the note is never committed or pushed.
+    `repo_root / "-u"` passes containment; without `--`, git reads `-u` as `--update`, stages
+    nothing, and the idempotence check reports success while the note is never committed.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -554,21 +492,12 @@ def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
 def test_a_write_refuses_the_checkout_the_process_runs_from(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A submitter pointed at the process's own checkout is refused before any git op.
+    """A write refuses the checkout the process runs from, before any git operation.
 
-    The reason has changed twice and the guard has not. It used to protect uncommitted work from
-    the `reset --hard` + `clean -fd` every submission ran, then the force-push of a `note/<id>`
-    branch. Neither happens now, and what remains is the plainest form of it: a write commits into
-    the tree it is handed and pushes that tree's origin, so pointed at the ChemClaw source checkout
-    — which the `note_repo_dir="."` default resolves to — it would commit into the running
-    application's own source tree and publish the note into the code repository.
-
-    Asserted as the absence of the mutation rather than as an exception alone: the refusal must
-    come *before* anything is written, so the checkout holds no new file and no new commit.
-
-    Two assertions used to stand here instead — no `note/*` branch, no `.git/chemclaw-worktrees`
-    — and both were unconditionally true, because nothing in this code creates either any more. An
-    assertion that cannot fail is a claim that a control exists.
+    A write commits into the tree it is handed and pushes its origin, so pointed at the
+    application's own source checkout (the `note_repo_dir="."` default) it would publish the note
+    into the code repository. Asserted as the absence of the mutation: no new file and no new
+    commit.
     """
     _, work = _make_remote_and_clone(tmp_path)
     uncommitted = work / "work-in-progress.txt"
@@ -588,10 +517,8 @@ def test_a_write_refuses_the_checkout_the_process_runs_from(
     with pytest.raises(GitWriteError, match="CHEMCLAW_NOTE_REPO_DIR"):
         asyncio.run(writer.write(_note_write("job-own")))
 
-    # Nothing ran. (The untracked file surviving is no longer evidence of anything — the writer
-    # could not destroy it even without the guard.) What *would* have happened without the guard is
-    # a file on disk and a commit on HEAD, so both are asserted: this is the tree the note would
-    # have landed in.
+    # Nothing ran: without the guard there would be a file on disk and a commit on HEAD, so both are
+    # asserted absent.
     assert uncommitted.read_text(encoding="utf-8") == "do not destroy\n"
     assert not (work / "knowledge" / "job-result" / "job-own.md").exists()
     log = subprocess.run(
@@ -606,15 +533,9 @@ def test_a_write_refuses_the_checkout_the_process_runs_from(
 def test_poisoned_index_does_not_leak_into_the_next_write(tmp_path: Path) -> None:
     """Residue staged in the shared checkout is not committed into the next note's commit.
 
-    **This test found a real regression and is why the commit is path-limited.** The gate this
-    replaced committed inside a linked worktree with its own index, so a stray staged in the shared
-    checkout structurally could not reach a note's commit. Writing directly, there is only one
-    index — and a plain `git commit` would have swept the stray into a commit named after the note.
-    `_write_and_commit` therefore passes `-- <written paths>`, and the idempotence check is scoped
-    the same way for the same reason.
-
-    The stray stays staged afterwards, which is asserted here too: it is not this writer's to
-    discard, and dropping it silently would be the mirror of the defect above.
+    There is one index, so `_write_and_commit` passes `-- <written paths>` and scopes the
+    idempotence check the same way. The stray stays staged afterwards: it is not this writer's to
+    discard.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     stray = work / "knowledge" / "job-result" / "job-stray.md"
@@ -645,11 +566,8 @@ def test_poisoned_index_does_not_leak_into_the_next_write(tmp_path: Path) -> Non
 def test_symlinked_directory_on_base_is_refused(tmp_path: Path) -> None:
     """A symlinked `knowledge` dir committed on the base branch cannot redirect the write.
 
-    Containment must hold against the tree as it exists *after* the base branch is materialized:
-    a symlink merged onto base would otherwise resolve as a real directory beforehand, pass the
-    check, then be followed by the write. This is also the test that forbids creating the
-    write against an unmaterialized tree: with nothing on disk there is no symlink to resolve, the
-    check passes vacuously, and this inverts.
+    Containment is checked against the tree after the base branch is materialized; on an
+    unmaterialized tree there would be no symlink to resolve and the check would pass vacuously.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -717,18 +635,11 @@ def test_git_command_timeout_kills_the_child_and_raises(
 async def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cancellation must not orphan a git process, whichever helper issued the command.
+    """A cancelled git read kills its child like every other git command.
 
-    `_run`'s docstring says "**Every** git command goes through here ... the timeout and the
-    kill-on-cancel are properties of this function, and a command issued any other way would be
-    unbounded and invisible at once". `_read` issued its own `create_subprocess_exec` and is
-    called three times per submission from `_require_gate_authored_tip`. Half of that claim was
-    already false in the reassuring direction — `_read` did carry `git_command_timeout_seconds` —
-    but it had no `except asyncio.CancelledError` arm, so a submission cancelled mid-read (a
-    Temporal activity timeout is the live case) left the `git rev-parse`/`git log` child running.
-
-    Driven on `_read` directly rather than through `submit`, because the property is the helper's
-    and a submission would reach it only after a real checkout.
+    `_run` owns the timeout and kill-on-cancel for every git command; `_read` must too, or a
+    submission cancelled mid-read (a Temporal activity timeout) leaves the `git rev-parse`/`git log`
+    child running. Driven on `_read` directly.
     """
     killed = {"value": False}
 
@@ -763,20 +674,11 @@ async def test_a_cancelled_git_read_kills_its_child_like_every_other_git_command
 
 
 def test_no_connector_bundle_can_reach_the_note_write_path() -> None:
-    """A bundle *builds* a note; core writes it. Structurally, rather than by convention.
+    """No connector bundle can reach the note write path.
 
-    A bundle used to own a `write_knowledge_node` activity calling `record_note` directly, which
-    made "core owns the write path" something the bundle chose to honour rather than a boundary it
-    could not cross. Core writes the envelope's note now, so this is what keeps it that way.
-    `chemclaw.connectors -> chemclaw.kg` is an allowed edge in `tests/test_layering.py` — bundles
-    legitimately build `Note` objects — so this is the rule that narrows that edge to *building*.
-
-    **Two spellings of the same reach used to walk past it.** The scan matched a bare
-    `ast.Name` and an import of `kg.pr_gate` — a module that no longer exists, so half of it could
-    never fire again — which left `import chemclaw.kg.record as r; r.record_note(...)` and
-    `from chemclaw.kg.record import record_note` both green. It now asserts over the *write
-    surface* by name rather than over one call spelling: any import that binds a writing name, and
-    any attribute access ending in one.
+    `chemclaw.connectors -> chemclaw.kg` is an allowed layering edge so bundles can build `Note`
+    objects; this narrows it to building. Asserted over the write surface by name: any import
+    binding a writing name and any attribute access ending in one, so aliased spellings are caught.
     """
     #: The names that reach the graph. `default_writer` is here beside `record_note` because
     #: constructing the writer is the other half of the same reach — a bundle holding one can
@@ -814,9 +716,8 @@ def test_no_connector_bundle_can_reach_the_note_write_path() -> None:
 def test_a_dependency_never_overwrites_a_human_edited_file(tmp_path: Path) -> None:
     """`overwrite=False` files are written only where the base branch has none.
 
-    A machine-rendered compound note re-rides on every proposal that links it; written
-    unconditionally, it silently reverted a chemist's post-merge edit inside a PR titled as an
-    addition.
+    A machine-rendered compound note rides along with every note linking it and must not revert a
+    chemist's edit.
     """
     _, work = _make_remote_and_clone(tmp_path)
     # The base branch already carries the dependency, edited by a human after merge.
@@ -856,9 +757,8 @@ def test_git_child_env_scrubs_app_secrets_but_keeps_git_credential(
 ) -> None:
     """`_git_child_env` hands git the environment minus this process's own secret values.
 
-    Least privilege: a git remote, credential helper or hook must not find the LLM key, a DSN or the
-    framing HMAC in its environment. The notes-remote token and PATH are not secrets git can do
-    without, so they survive — that survival is what keeps `push` working.
+    A remote, credential helper or hook must not see the LLM key, a DSN or the framing HMAC. The
+    notes-remote token and PATH survive, which keeps `push` working.
     """
     from chemclaw.kg.git_writer import _git_child_env
 
@@ -944,16 +844,12 @@ def _basic_auth_git_remote(root: Path, token: str) -> tuple[str, ThreadingHTTPSe
 def test_the_note_writer_can_push_to_a_remote_that_needs_the_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The writer's push authenticates with the repo token, through the image's askpass helper.
+    """The note writer pushes to a remote that needs the token, through the image's askpass helper.
 
-    `knowledge-sync.sh checkout` clones the writer's checkout *with* the token and leaves a remote
-    URL that carries none, by design. The push then runs in a different container — the front door
-    or the background worker — and the only credential path the chart had was a helper that script
-    wrote into its *own* container's `/tmp`. So the token reached `_git_child_env()` (the test above
-    asserts it survives the scrub) and nothing handed it to git: driven here against a Basic-auth
-    remote, the push is refused with the token in the environment, and succeeds once `GIT_ASKPASS`
-    names `deploy/git-askpass.sh` — which is what `deploy/entrypoint.sh` now arms in every
-    application container. The token ends up in neither the clone's config nor its remote URL.
+    `knowledge-sync.sh checkout` leaves a remote URL without the token, and the push runs in another
+    container. Driven against a Basic-auth remote: the push succeeds once `GIT_ASKPASS` names
+    `deploy/git-askpass.sh`, which `deploy/entrypoint.sh` arms in every application container. The
+    token ends up in neither the clone's config nor its remote URL.
     """
     if subprocess.run(["git", "http-backend"], capture_output=True, env={}).returncode == 127:
         pytest.skip("git http-backend is not installed")
@@ -1012,12 +908,10 @@ def test_the_note_writer_can_push_to_a_remote_that_needs_the_token(
 
 
 def test_every_container_that_runs_git_against_the_notes_remote_arms_the_same_askpass() -> None:
-    """One helper, at one path, armed by both scripts that start git: the push's and the sync's.
+    """Every container that runs git against the notes remote arms the same askpass helper.
 
-    The defect the test above drives was a credential path that existed in one container and not
-    the other. So the three places that must agree are read against each other: the Containerfile
-    installs `deploy/git-askpass.sh` at the path `deploy/entrypoint.sh` arms for the application
-    components and `deploy/knowledge-sync.sh` arms for the sync containers.
+    The Containerfile installs `deploy/git-askpass.sh` at the path both `deploy/entrypoint.sh` and
+    `deploy/knowledge-sync.sh` arm; the three are read against each other.
     """
     deploy = _ASKPASS.parent
     containerfile = (deploy / "Containerfile").read_text(encoding="utf-8")
@@ -1082,12 +976,9 @@ def test_git_subprocess_receives_the_scrubbed_env(
 
 
 def test_a_push_that_failed_is_pushed_by_the_next_attempt_of_the_same_note(tmp_path: Path) -> None:
-    """A stranded commit must not be swallowed by the idempotence that makes a re-record cheap.
+    """A push that failed is pushed by the next attempt of the same note.
 
-    Measured on the first version of this writer: a transient push rejection left the commit on the
-    local base branch; the retry rewrote byte-identical content, staged nothing, and returned
-    `written=False` **without pushing** — so the note was on one pod's disk, reported to the chemist
-    as recorded, and on no remote. `_push` therefore decides by whether the local base is ahead of
+    A byte-identical retry stages nothing, so `_push` decides by whether the local base is ahead of
     its remote-tracking ref, not by whether this call staged anything.
     """
     remote, work = _make_remote_and_clone(tmp_path)
@@ -1112,12 +1003,11 @@ def test_a_push_that_failed_is_pushed_by_the_next_attempt_of_the_same_note(tmp_p
 
 
 def test_an_agent_write_may_not_overwrite_a_note_a_human_authored(tmp_path: Path) -> None:
-    """The control the PR-gate used to be, and the one the deletion ADR did not account for.
+    """An agent write may not overwrite a note a human authored.
 
-    `record_note` checks `created_by` on the note it is handed, which says nothing about what is
-    already at that path. Under the gate a reviewer saw "this modifies a human-authored file" in the
-    diff; nothing sees it now, so the writer refuses. The ADR's replacement control is a note that
-    *contradicts* curated knowledge — which only works while the thing to contradict still exists.
+    `record_note` checks `created_by` on the incoming note, which says nothing about the file
+    already at that path, so the writer checks. Contradiction only works while the curated note
+    still exists.
     """
     _, work = _make_remote_and_clone(tmp_path)
     curated = work / "knowledge" / "playbook" / "playbook-suzuki.md"
@@ -1151,18 +1041,11 @@ def test_an_agent_write_may_not_overwrite_a_note_a_human_authored(tmp_path: Path
 def test_a_retirement_of_a_persons_note_is_dropped_and_the_new_note_still_lands(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The refusal above applies to the subject note, and must not take the unit down with it.
+    """A retirement of a person's note is dropped, and the new note still lands.
 
-    `record_failure` puts the `failure-mode` note and the retirement of what it refutes in **one**
-    `NoteWrite`, and the writer validated every file before writing any — so refusing the
-    retirement discarded the observation as well. That is the shipped case rather than an edge:
-    every `playbook` a refutation exists to refute is human-authored, and the refusal even told
-    the caller to "record a new note that contradicts it instead", which is exactly what it had
-    just thrown away.
-
-    So the amendment steps aside and says so, leaving what `close_refuted_note` documents as the
-    truthful state for a claim this system may not close: the curated note stays open and served,
-    and the new note marks it as contradicted.
+    `record_failure` puts the failure note and the retirement in one `NoteWrite`; refusing the
+    retirement must not discard the observation. The curated note stays open and served, and the new
+    note marks it as contradicted, as `close_refuted_note` documents.
     """
     _, work = _make_remote_and_clone(tmp_path)
     curated = work / "knowledge" / "playbook" / "playbook-suzuki.md"
@@ -1205,12 +1088,10 @@ def test_a_retirement_of_a_persons_note_is_dropped_and_the_new_note_still_lands(
 
 
 def test_a_note_is_replaced_in_one_step_so_a_reader_never_sees_half_of_it(tmp_path: Path) -> None:
-    """`write_text` truncates then writes; readers of this tree hold no lock.
+    """A note is replaced in one step, so a reader never sees half of it.
 
-    Measured on the first version: ~80% of reads overlapping a rewrite saw a partial file, and a
-    note whose frontmatter survived the cut *parses cleanly* with half its body — so its wikilinks
-    go missing from the graph rather than the file being skipped. Asserted here at the mechanism
-    rather than by racing threads, because a race that passes once proves nothing.
+    Readers hold no lock, and a truncated note whose frontmatter survives parses cleanly with half
+    its body. Asserted at the mechanism (atomic replace) rather than by racing threads.
     """
     target = tmp_path / "note.md"
     target.write_text("---\nid: n\ntype: reaction\ncreated_by: agent\n---\nold\n", encoding="utf-8")
@@ -1226,12 +1107,10 @@ def test_a_note_is_replaced_in_one_step_so_a_reader_never_sees_half_of_it(tmp_pa
 def test_a_replacement_keeps_the_notes_permissions_rather_than_the_temporary_files(
     tmp_path: Path,
 ) -> None:
-    """`os.replace` carries the *temporary* file's mode onto the note, and 0600 is not a note's.
+    """A replacement keeps the note's permissions rather than the temporary file's.
 
-    `NamedTemporaryFile` creates 0600 because it is making a temporary file. Driven: every note
-    this writer touched came out owner-read-only, and an existing 0644 was silently downgraded — in
-    a Git checkout the sync sidecar clones and every reader scans, which is where a permission
-    nobody chose gets debugged rather than noticed.
+    `NamedTemporaryFile` creates 0600, and `os.replace` would carry that onto a note in a checkout
+    the sync sidecar and every reader use.
     """
     existing = tmp_path / "existing.md"
     existing.write_text("old\n", encoding="utf-8")
@@ -1254,17 +1133,11 @@ def test_a_replacement_keeps_the_notes_permissions_rather_than_the_temporary_fil
 
 
 def test_a_no_op_rewrite_beside_a_stray_stage_is_a_no_op_and_not_an_error(tmp_path: Path) -> None:
-    """The idempotence check is scoped to *our* paths, and unscoped it fails loudly.
+    """A no-op rewrite beside a stray stage is a no-op, not an error.
 
-    `test_poisoned_index_does_not_leak_into_the_next_write` covers the commit limiter; this covers
-    the `diff --cached` above it, which nothing reached. The combination that separates them is a
-    **byte-identical re-write** with something else already staged: scoped, git stages nothing and
-    the write returns `written=False`. Unscoped, the stray makes `diff --cached` report a change,
-    the path-limited `git commit` then finds nothing to commit on those paths and exits non-zero,
-    and the caller gets a non-retryable `GitWriteError` — `durable/publish.py` drops the note.
-
-    (The comment in `git_writer` used to predict the other failure — "would turn a no-op into a
-    commit". It cannot: the commit is path-limited too. Measured, and the comment now says so.)
+    The idempotence check (`diff --cached`) is scoped to this writer's paths. Unscoped, the stray
+    would report a change, the path-limited commit would find nothing and fail, and the caller would
+    get a non-retryable `GitWriteError` that drops the note.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -1297,17 +1170,11 @@ def _diverge(remote: Path, tmp_path: Path, name: str) -> None:
 
 
 def test_a_failed_push_does_not_wedge_every_later_write_on_this_pod(tmp_path: Path) -> None:
-    """A stranded commit plus a moved remote must resolve, not fail forever.
+    """A failed push does not wedge every later write on this pod.
 
-    **The two halves of this module contradicted each other and the suite held both.** A push that
-    fails deliberately leaves the note committed locally (asserted above). `_push`'s docstring then
-    says the next attempt "fetches, fast-forwards past whatever landed, and pushes this commit
-    along with its own" — which `--ff-only` cannot do once the remote has moved, because the clone
-    has diverged. So the *first* failed push wedged the pod: every later write raised
-    `GitRemoteError` on the fast-forward, forever, and no amount of retrying reached the push.
-
-    Driven the way it happens: a push fails, somebody else pushes, and the next write must land
-    both notes on the remote.
+    After a failed push leaves a local commit and someone else pushes, `--ff-only` cannot proceed,
+    so the writer replays its own unpushed commits. Driven as it happens: a push fails, another
+    pushes, and the next write must land both notes on the remote.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -1335,21 +1202,13 @@ def test_a_failed_push_does_not_wedge_every_later_write_on_this_pod(tmp_path: Pa
 def test_a_clone_with_no_identity_of_its_own_still_records_and_replays_notes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The writer states who its commits are by; it never depends on git finding someone.
+    """A clone with no identity of its own still records and replays notes.
 
-    **Every note write failed in a container, and every other test in this file hid it**: their
-    clones are made by `_clone`, which writes `user.*` into the clone, and the developer's or
-    runner's own global config filled in anything else. A deployed clone has neither — nothing in
-    the chart or `deploy/knowledge-sync.sh` sets one — and git's last resort is a guess from the
-    hostname, `root@<id>.(none)` in a container, which it refuses. So the commit failed
-    `Author identity unknown` as the non-retryable `GitWriteError` and the note was dropped.
-
-    The environment here has none of the three sources: an empty `HOME`/XDG, no system config, a
-    clone without `user.*`, and `user.useConfigOnly` so git's hostname guess cannot rescue the run
-    on a box whose hostname happens to carry a domain — the arm first proves a plain commit fails,
-    or the assertions after it would be about the box. Both identity-taking paths are driven: the
-    commit, and the rebase that replays a note whose push failed (which sets a committer too).
-    Non-default settings are used so the author is shown to come from config, not from a literal.
+    A deployed clone has no `user.*` and no global config, and git refuses its hostname guess, so
+    the writer states the commit identity itself. The environment here has no identity source at
+    all, with `user.useConfigOnly` set; the arm first proves a plain commit fails. Both the commit
+    and the replay rebase (which sets a committer) are driven, with non-default settings to show the
+    identity comes from config.
     """
     remote, _ = _make_remote_and_clone(tmp_path)
     work = tmp_path / "bare-identity"
@@ -1413,12 +1272,10 @@ def test_a_clone_with_no_identity_of_its_own_still_records_and_replays_notes(
 
 
 def test_a_persons_local_commit_is_never_replayed(tmp_path: Path) -> None:
-    """The refusal the fast-forward was really protecting, kept and made precise.
+    """A person's local commit is never replayed.
 
-    Rebasing is safe only while every replayed commit is this writer's own — unpushed and carrying
-    `_RECORD_TRAILER`. A commit somebody made by hand in the notes clone is not, and moving it is
-    not a decision this writer takes on its own. The old `--ff-only`-and-raise refused this case
-    correctly and refused the recoverable one above identically, which is why it read as safe.
+    Rebasing is safe only while every replayed commit is this writer's own (unpushed, carrying
+    `_RECORD_TRAILER`); a hand-made commit in the clone is refused.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     by_hand = work / "knowledge" / "job-result" / "job-by-hand.md"
@@ -1439,17 +1296,11 @@ def test_a_persons_local_commit_is_never_replayed(tmp_path: Path) -> None:
     [".git/config", ".git/hooks/pre-commit", "knowledge/../.git/config"],
 )
 def test_a_note_path_may_not_reach_into_the_git_directory(tmp_path: Path, relative: str) -> None:
-    """`.git/` is inside the checkout, so containment alone lets a note write repository metadata.
+    """A note path may not reach into the git directory.
 
-    `_contained_note_path` refuses what escapes `root`; every path here resolves *within* it.
-    `.git/config` decides where this checkout pushes, `.git/hooks/pre-commit` runs on the next
-    commit, and `.git/chemclaw-submit.lock` is the lock guarding the very write doing it.
-
-    Nothing reaches that function with such a path today — `record._note_file` builds every one
-    through `note_relative_path`, whose segments are slug-validated — which is the argument that
-    made containment "defense in depth" in the first place. Depth that stops one directory short of
-    the interesting one is not depth, so the third case is here too: the traversal is *resolved*,
-    so a path that climbs out of the knowledge tree and back into `.git` is the same path.
+    `.git/` is inside the checkout, so containment alone would allow writing `.git/config`, a hook,
+    or the submit lock. Paths are resolved first, so a traversal that climbs back into `.git` is the
+    same path.
     """
     _, work = _make_remote_and_clone(tmp_path)
     writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
@@ -1468,9 +1319,7 @@ def test_a_note_path_may_not_reach_into_the_git_directory(tmp_path: Path, relati
 def _stage_without_committing(work: Path, relative: str, content: str) -> None:
     """Leave `relative` written and staged, exactly as a `SIGKILL` between add and commit does.
 
-    Not an injected state: `probe_git.py after_add` (wave 6) produced this by `os.kill(getpid(),
-    SIGKILL)` inside the writer, and the porcelain output was identical. Built with plain git here
-    because a test may not kill the process running it.
+    Built with plain git because a test may not kill the process running it.
     """
     path = work / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1481,16 +1330,11 @@ def _stage_without_committing(work: Path, relative: str, content: str) -> None:
 def test_a_hard_kill_between_add_and_commit_does_not_wedge_the_pod_forever(
     tmp_path: Path,
 ) -> None:
-    """The rollback that clears the index is in-process, and a pod eviction does not run it.
+    """A hard kill between add and commit does not wedge the pod forever.
 
-    `test_a_failed_commit_leaves_nothing_staged_and_the_pod_can_write_again` covers the arm where
-    the handler *does* run. This is the arm defined by it not running — an OOMKill, a node drain
-    past the grace period — which leaves the note's blobs staged and uncommitted with nothing
-    anywhere to clear them. Measured before the fix: another pod pushing the same paths made every
-    later write on this pod raise `GitRemoteError` ("no local commits to replay"), forever, three
-    unrelated notes in a row, with the index still staged after each. The sidecar cannot recover it
-    either — `knowledge-sync.sh::refresh_note_repo` fast-forwards with the same `--ff-only` and
-    treats a divergence as a warning by design.
+    The in-process rollback does not run on an OOMKill or eviction, leaving blobs staged. Without
+    recovery, another pod pushing the same paths makes every later write here fail, and the
+    sidecar's `--ff-only` cannot clear it either.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     _stage_without_committing(work, "knowledge/job-result/job-killed.md", "half a write\n")
@@ -1521,13 +1365,10 @@ def test_a_hard_kill_between_add_and_commit_does_not_wedge_the_pod_forever(
 
 
 def test_a_staged_note_survives_every_write_the_checkout_can_still_serve(tmp_path: Path) -> None:
-    """The recovery is on demand, and this is the arm where the demand never comes.
+    """A staged note survives every write the checkout can still serve.
 
-    A staged note in this clone is *indistinguishable* from a killed write's residue — that is what
-    a kill leaves — so the only thing that can separate "recover" from "discard an operator's
-    work" is whether the checkout still moves. While it does, nothing is discarded: this is
-    `test_poisoned_index_does_not_leak_into_the_next_write` driven across three further writes, so
-    a sweep that ran unconditionally would fail here rather than only there.
+    Staged residue is indistinguishable from an operator's staged work, so recovery runs only when
+    the checkout cannot move; while it can, nothing is discarded across three further writes.
     """
     _, work = _make_remote_and_clone(tmp_path)
     _stage_without_committing(work, "knowledge/job-result/job-staged.md", "an operator's work\n")
@@ -1552,11 +1393,10 @@ def test_a_staged_note_survives_every_write_the_checkout_can_still_serve(tmp_pat
 def test_a_blocker_outside_the_knowledge_tree_is_still_reported_rather_than_discarded(
     tmp_path: Path,
 ) -> None:
-    """The discard is scoped to every path this writer can stage, and to nothing else.
+    """A blocker outside the knowledge tree is still reported rather than discarded.
 
-    `record._note_file` builds every path as `<knowledge_dir>/…`, so a staged change outside it is
-    not this writer's residue whatever git says about the fast-forward — it keeps the refusal that
-    names it, which is the message an operator needs to find the real blocker.
+    Every path this writer stages is under `<knowledge_dir>/`, so a staged change elsewhere is not
+    its residue and keeps the refusal that names it.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     (work / "README.md").write_text("an operator's uncommitted edit\n", encoding="utf-8")
@@ -1573,19 +1413,11 @@ def test_a_blocker_outside_the_knowledge_tree_is_still_reported_rather_than_disc
 
 
 def test_a_stale_index_lock_is_cleared_and_a_fresh_one_is_retryable(tmp_path: Path) -> None:
-    """A killed `git commit` leaves `.git/index.lock`, and nothing used to remove it.
+    """A stale index lock is cleared, and a fresh one is retryable.
 
-    Two halves, and they need each other. **Classification:** `Unable to create index.lock: File
-    exists` used to raise the non-retryable `GitWriteError` — it is a local command — so it sat in
-    `durable/publish._BAD_DATA_TYPES`, `note_publish_retry` spent no attempt on it and
-    `publish_note_best_effort` swallowed it. Every note on the pod was dropped until a human
-    deleted a file. **Removal:** a *stale* lock is cleared under the flock, which is the evidence
-    that no peer writer is mid-write; the age bound is what covers the one holder the flock does
-    not exclude, a person running git in the clone by hand.
-
-    `_exec`'s docstring claimed this state was unreachable ("can never … orphan a git child holding
-    `.git/index.lock`") — measured, `SIGKILL` of a `git commit` leaves the file. It no longer
-    claims it.
+    A killed `git commit` leaves `.git/index.lock`. Classification: the lock error is retryable, not
+    a `GitWriteError` that drops the note. Removal: a stale lock is cleared under the flock (no peer
+    writer mid-write), and the age bound covers a person running git in the clone by hand.
     """
     _, work = _make_remote_and_clone(tmp_path)
     lock = work / ".git" / "index.lock"
@@ -1615,18 +1447,11 @@ def test_a_stale_index_lock_is_cleared_and_a_fresh_one_is_retryable(tmp_path: Pa
 def test_a_forge_denying_the_push_is_not_retried_against_the_same_credential(
     tmp_path: Path, wording: str
 ) -> None:
-    """A forge denial reaches the classifier written for it, because the push now goes through it.
+    """A forge denying the push is not retried against the same credential.
 
-    Every wording `_AUTH_FAILURE_MARKERS` surveyed is a *push* refusal, and the push had no path to
-    the classifier: `_is_auth_failure` was reached only from `_git(transient=True)`, whose one call
-    site is the fetch, while `_push` raised `GitRemoteError` unconditionally. Measured, all
-    five came back retryable while the classifier answered True about the same stderr — so a
-    read-only token (the fetch succeeds, only the push is denied) burned `note_write_max_attempts`
-    against a credential no retry installs.
-
-    Driven through `write()` rather than by calling the classifier, deliberately: two tests already
-    call it directly, which is the shape CLAUDE.md names — a guard whose only caller is its own
-    test is a claim that a control exists.
+    `_push` routes its failure through `_is_auth_failure`, so a read-only token (fetch succeeds,
+    push denied) does not burn `note_write_max_attempts`. Driven through `write()` rather than the
+    classifier.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -1642,11 +1467,10 @@ def test_a_forge_denying_the_push_is_not_retried_against_the_same_credential(
 
 
 def test_a_rejected_push_that_is_not_a_denial_is_still_retryable(tmp_path: Path) -> None:
-    """The other arm of the same classification, so the fix cannot be "call everything auth".
+    """A rejected push that is not a denial is still retryable.
 
-    `_is_auth_failure`'s own docstring argues that a bare status code is not enough because a 403
-    is also a secondary rate limit; this is that argument driven through the push, where a
-    transient server-side rejection must keep the retryable class.
+    A bare 403 can be a secondary rate limit, so a transient server-side rejection keeps the
+    retryable class.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -1659,13 +1483,11 @@ def test_a_rejected_push_that_is_not_a_denial_is_still_retryable(tmp_path: Path)
 
 
 def test_a_failed_push_tells_the_caller_the_note_is_already_readable_here(tmp_path: Path) -> None:
-    """A note whose push failed is *live* in this pod's graph, and the error said only "failed".
+    """A failed push tells the caller the note is already readable here.
 
-    `_write_and_commit` lands the bytes in the tree `load_notes` scans and busts the cache before
-    the push, deliberately. So "the write failed" is false in the half that matters to the reader,
-    and `GitWriteError`'s docstring records what the model does when told a note write failed: it
-    retried five times permuting its arguments and then printed the ungated document into the chat.
-    `surface_domain_errors` shows this text to the model, so this is where that is fixed.
+    The bytes land in the scanned tree before the push, so "the write failed" would be false where
+    it matters, and a model told so retries or prints the document into chat.
+    `surface_domain_errors` shows this text to the model.
     """
     remote, work = _make_remote_and_clone(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -1687,17 +1509,10 @@ def test_a_failed_push_tells_the_caller_the_note_is_already_readable_here(tmp_pa
 def test_the_refusal_names_the_file_the_graph_actually_serves_for_that_id(
     tmp_path: Path,
 ) -> None:
-    """Two human claimants, so the *ordering* half of the refusal is load-bearing.
+    """The refusal names the file the graph actually serves for that id.
 
-    `_persons_notes_claiming`'s docstring says ties go to the **first in path order**, "which is the
-    file the graph serves" — and its sibling test above cannot check that: with one human claimant
-    there is nothing to order, so `candidate.stem in found` (the short-circuit that keeps the first)
-    can be deleted and every assertion still passes. Driven: deleting it is green over 121 tests,
-    and the refusal then names the *last* claimant in path order — a file that is on disk but is not
-    what any query answers with, so the chemist is sent to the wrong note.
-
-    `campaign` sorts before `playbook`, which is why the graph serves the campaign file, and why the
-    refusal must name that one.
+    With two human claimants, ties go to the first in path order (`campaign` before `playbook`),
+    which is the file the graph serves, so the refusal must name it.
     """
     _, work = _make_remote_and_clone(tmp_path)
     for note_type, solvent in (("campaign", "2-MeTHF"), ("playbook", "toluene")):
@@ -1746,19 +1561,11 @@ def test_the_refusal_names_the_file_the_graph_actually_serves_for_that_id(
 def test_an_agent_write_may_not_take_the_id_of_a_human_note_filed_under_another_type(
     tmp_path: Path,
 ) -> None:
-    """A note's identity is its id; the refusal above was scoped to a path, which is not the same.
+    """An agent write may not take the id of a human note filed under another type.
 
-    `graph._parse_notes` resolves two files claiming one id by keeping the **first in path order**,
-    so an agent note at `campaign/<id>.md` takes an id a chemist curated at `playbook/<id>.md` —
-    `campaign` sorts first — without ever touching their file. Driven before the fix: the served
-    note's `created_by` went `human` -> `agent` and its body became the agent's, while the curated
-    file sat untouched on disk and unreachable by every query. Both types are legitimate, so this
-    needs no malformed input.
-
-    `note_file_fingerprints` keys on `path.stem` the same way, so `reindex_notes` then re-embeds the
-    agent's text under the curated id — the eviction takes retrieval with it. And `contradicts`,
-    which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` names as the replacement for the
-    review that used to catch this, only works while the thing to be contradicted is still served.
+    `graph._parse_notes` keeps the first file in path order, so an agent note at `campaign/<id>.md`
+    would displace a curated `playbook/<id>.md` from every query and from `reindex_notes`, without
+    touching its file. The check is by id, not path.
     """
     _, work = _make_remote_and_clone(tmp_path)
     curated = work / "knowledge" / "playbook" / "shared-id.md"
@@ -1809,12 +1616,10 @@ def test_an_agent_write_may_not_take_the_id_of_a_human_note_filed_under_another_
 def test_a_retirement_of_a_persons_note_under_another_type_is_dropped_not_refused(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The amendment half of the same id-scoping, which must keep stepping aside rather than refuse.
+    """A retirement of a person's note under another type is dropped, not refused.
 
-    `record_failure` puts the failure note and the retirement of what it refutes in one `NoteWrite`,
-    so a refusal here discards the observation as well as the date. Making the clobber check answer
-    on the *id* must not turn an amendment against a curated note into that refusal just because
-    the id resolves to a file at a path the amendment did not name.
+    `record_failure` writes the failure note and the retirement in one `NoteWrite`, so the id-scoped
+    check must still let the amendment step aside rather than refuse the whole unit.
     """
     _, work = _make_remote_and_clone(tmp_path)
     curated = work / "knowledge" / "playbook" / "shared-id.md"
@@ -1861,17 +1666,11 @@ def test_a_retirement_of_a_persons_note_under_another_type_is_dropped_not_refuse
 def test_a_failed_write_restores_every_file_even_one_holding_non_utf8_bytes(
     tmp_path: Path,
 ) -> None:
-    """The all-or-nothing rollback used to raise from inside its own `except BaseException`.
+    """A failed write restores every file, even one holding non-UTF-8 bytes.
 
-    `prior` holds each target's bytes, and the restore decoded them to `str` — so a note carrying a
-    cp1252 `°` out of an exported ELN raised `UnicodeDecodeError` *inside* the handler. Driven:
-    every restore after it was skipped, the index un-stage never ran, and the escaping exception —
-    neither a `ChemclawError` (so the model never learns the reason) nor a registered non-retryable
-    type — replaced the real `GitWriteError`. Such a file reaches the plan pass because
-    `_is_a_persons_note` catches `NoteError` and answers False.
-
-    Two files, the undecodable one first, so a rollback that stops at its first failure leaves the
-    second rewritten and both blobs staged.
+    The rollback restores bytes, not decoded text; decoding would raise inside the handler, skip
+    later restores and the un-stage, and replace the real `GitWriteError`. The undecodable file is
+    first, so stopping early would leave the second rewritten.
     """
     _, work = _make_remote_and_clone(tmp_path)
     notes = work / "knowledge" / "reaction"
@@ -1933,17 +1732,11 @@ def test_a_failed_write_restores_every_file_even_one_holding_non_utf8_bytes(
 def test_a_restore_that_fails_does_not_skip_the_remaining_restores_or_the_unstage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The guarantee the rollback exists to make cannot be conditional on the first file.
+    """A restore that fails does not skip the remaining restores or the un-stage.
 
-    The `UnicodeDecodeError` above is one way a restore raises and it is now structurally gone, but
-    a restore still touches the filesystem — a full disk, a revoked permission on the note's
-    directory — and the handler's promise is that *no* half-written unit is left readable. So the
-    failure is injected at the restore itself rather than at a cause, because the cause is not the
-    invariant: the first file's restore raises, and the second file and the index un-stage must
-    still happen.
-
-    Injected rather than provoked because this suite runs as root, where `chmod` grants no
-    permission failure to observe.
+    A restore still touches the filesystem (full disk, revoked permission), so the failure is
+    injected at the restore itself; injected because this suite runs as root, where `chmod` produces
+    no failure.
     """
     _, work = _make_remote_and_clone(tmp_path)
     notes = work / "knowledge" / "reaction"

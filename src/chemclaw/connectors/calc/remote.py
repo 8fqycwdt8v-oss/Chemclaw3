@@ -1,31 +1,17 @@
 """The calculation client: ask the physics server for a key, then for the answer.
 
-The engines moved to `Chemclaw3-mcp`'s `servers/calc`
-(`D-2026-08-16-the-physics-leaves-the-cache-stays`). What stays here is the D-011 cache, the
-calibration ledger and the orchestration — so every calculator in this repository is now
-*lookup-then-maybe-compute* across a wire instead of in a process.
+The engines run in `Chemclaw3-mcp`'s `servers/calc`; this repository keeps the D-011 cache, the
+calibration ledger and the orchestration, so every calculator here is lookup-then-maybe-compute
+across a wire.
 
-**Why two calls and not one.** `science.calc.store.cached_compute` needs the `CalculationKey`
-*before* the compute, because the key is what it looks up. A result that carries its own key is
-necessary but not sufficient: on a hit there is no result to read one off. So the server exposes
-`calculation_key`, which derives the identity without running anything, and the sequence is
-key → lookup → compute-only-on-a-miss. A hit costs one cheap round trip instead of an SCF.
+Two calls, not one: `cached_compute` needs the `CalculationKey` before computing, so the server's
+`calculation_key` derives the identity without running anything (key -> lookup -> compute only on
+a miss). Nothing here derives a `calc_version`: it is half the cache key and the calibration
+ledger's primary key, and only the server can see what it is built from — a locally derived one
+would be well-formed and match nothing.
 
-**Nothing here derives a `calc_version`, and that is the point rather than an implementation
-detail.** The version is half the cache key *and* the primary key of the calibration ledger
-(`predictions`, unique on `(calc_type, calc_version, input_hash)`, exact-match by D-139). It is
-built from `xtb --version`, distribution versions and seven calibration settings — none of which
-this process can see any more. Worse, `binary_version()` answered the literal string `"absent"`
-rather than raising when a binary was missing, so a client deriving its own would produce a
-*well-formed* version matching zero rows: `calculator_trust("pka")` would report a confident
-`UNCALIBRATED`, every historical residual would become unreachable, and nothing would look broken.
-`tests/test_calc_remote.py` asserts no derivation survives in this package.
-
-**A session per call, not one per process.** `connectors.identity` is explicit that the MCP
-transport's tasks inherit the context of whoever opened the connection, so a shared session
-misattributes concurrent callers to each other. The cost is a connect per calculation, which is
-noise against an SCF and measurable against a cache hit — `calculation_key` is the only call on
-the hit path, so that is the one worth watching.
+One session per call, because MCP transport tasks inherit the context of whoever opened the
+connection, and a shared session would misattribute concurrent callers.
 """
 
 import logging
@@ -64,120 +50,58 @@ from chemclaw.science.calc.store import (
 
 logger = logging.getLogger(__name__)
 
-# Every calculation in this system now crosses this wire, and until this module imported `logging`
-# at all — it did not — an outage of the calculation backend produced **no first-party signal of
-# any kind**: not a log line, not a counter. The classification here is already exactly right
-# (`CalcServerError` for an outage, `CalcToolError` for a refusal, split across
-# `durable/publish.py`'s `_BAD_DATA_TYPES` so one is retried and the other is not), and neither
-# half was observable — so a dead backend burned `activity_max_attempts` on every job with only
-# the Temporal SDK's own WARNING to show for it.
-#
-# Only the **outage** paths are counted, and that is the distinction rather than an omission. A
-# refusal is the server working: an unparameterised solvent or an atom index past the molecule is
-# bad data, it reaches the chemist as a written sentence, and counting it under a degradation
-# marker would put a user's typo on the same series as a down pod. One subsystem name for all
-# three outage sites, because to an operator they are one thing — the calculation backend is not
-# answering — and three labels would split one alert into three.
-# Written out at each call site rather than shared through a constant, deliberately:
-# `tests/test_degraded.py` reads these arguments out of the source to bound the
-# metric's label value space, and it can only do that for a literal.
+# Only outage paths are counted under `degraded`; a refusal is the server working and must not share
+# a series with a down pod. One subsystem name for all outage sites, written as a literal at each:
+# `tests/test_degraded.py` reads these arguments from source to bound the label space.
 
 
 class CalcServerError(SubsystemUnavailableError):
     """The calculation server could not be reached, so the calculation never began.
 
-    **This was one error for both failures, and wiring the client into a Temporal activity is what
-    made that wrong.** The original reasoning — "the caller's options are identical in every case:
-    a calculation did not happen" — holds for a tool, which surfaces either one to a chemist. It is
-    false for a durable job, where the two are opposites: an unreachable server is fixed by exactly
-    one thing, a retry, and a refused *request* is fixed by exactly one thing that is not a retry.
-    Conflating them means either burning `activity_max_attempts` on an unparameterised solvent, or
-    giving up on a pod restart. So the transport failure is a `SubsystemUnavailableError` — the
-    retryable hierarchy, deliberately absent from `durable/publish.py`'s non-retryable list — and a
-    refusal is `CalcToolError` below.
-
-    The message is written for the **chemist**, because `agent/tool_authz.py` hands it to the model
-    verbatim: it says the calculators are unavailable and that this is an outage rather than a
-    problem with what was asked. The address and the driver text ride on `__cause__`, for the log
-    and the operator.
+    Retryable (a `SubsystemUnavailableError`, absent from `durable/publish.py`'s non-retryable
+    list), unlike a refusal (`CalcToolError`). The message is written for the chemist, because
+    `agent/tool_authz.py` hands it to the model verbatim; address and driver text ride on
+    `__cause__`.
     """
 
 
 class CalcToolError(ChemclawError):
     """The calculation server was reached and refused, or answered something unusable.
 
-    Bad data by the same test as every other `ChemclawError`: an unparameterised solvent, an atom
-    index past the molecule, a SMILES the predictor's domain excludes. The identical call fails
-    identically on the next attempt, so it is registered non-retryable in
-    `durable/publish.py::_BAD_DATA_TYPES` and a durable job fails fast instead of paying for the
-    same refusal three more times.
-
-    **A full pod is not this**, and it used to be. `CalcBusyError` below is that third case; the
-    premise this class is registered on — "the identical call fails identically" — is precisely
-    what a saturation refusal violates.
+    Bad data: the identical call fails identically next time, so it is registered non-retryable in
+    `durable/publish.py::_BAD_DATA_TYPES`. A full pod is `CalcBusyError`, not this.
     """
 
 
 class CalcTimeBudgetError(CalcToolError):
     """The calculation server's inline wall clock stopped this calculation before it answered.
 
-    **Still a refusal, and still non-retryable** — registered in `durable/publish.py`'s
-    `_BAD_DATA_TYPES` under its own name, because Temporal matches by name and a subclass inherits
-    nothing there. The budget is spent work, not an empty slot: a retry re-runs the same calculation
-    against the same clock, and pays for it again, which is the opposite of `CalcBusyError` below.
-    What the class buys is the *name*: wall clock depends on load, so this is the one refusal that
-    is not a property of the input, and a screen that answers per item records it as a time-budget
-    stop rather than beside a structure that would not embed
-    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`).
+    Still non-retryable (registered by its own name, since Temporal matches by name): a retry
+    re-runs the same work against the same clock. The distinct name lets a per-item screen record a
+    time-budget stop rather than an input failure, since wall clock depends on load.
     """
 
 
 class CalcBusyError(AtCapacityError):
     """The calculation server was reached, ran nothing, and refused because every slot was busy.
 
-    **The taxonomy above has two buckets and saturation is a third one it did not have.** A
-    `ValueError` from `servers/calc`'s admission gate arrived here indistinguishable from an
-    unparameterised solvent — `McpRequestRefused` -> `CalcToolError` -> `_BAD_DATA_TYPES` -> the
-    durable job marked non-retryable and failed on attempt 1, carrying the serving side's own
-    sentence "Retry once one finishes" to the chemist. That composition of two locally correct
-    decisions only bites under load, which is exactly when a shared calculation backend is full:
-    one CREST search costs the whole pod, so at target load essentially every cache *miss* failed
-    permanently while warm molecules kept working.
-
-    `SubsystemUnavailableError` rather than `ChemclawError`, and that single choice is the fix:
-    that hierarchy is asserted *absent* from `_BAD_DATA_TYPES` (`tests/test_publish.py`), so this
-    is retryable by construction and cannot be made non-retryable by a later edit without failing
-    a test that explains why. The backoff that keeps a retry from becoming a storm is the activity's
-    (`durable/publish.py::calculation_retry`), because that is the layer that can wait minutes
-    without holding a worker slot.
-
-    The message is written for the chemist, who is told their molecule is fine and what actually
-    happens next — and it names both paths, because this class is raised on the durable one, where
-    the retry is automatic, and on the in-process tool surface, where it is not
-    (`agent/tool_authz.py` returns it to the model as an ordinary domain error).
+    Retryable by construction: `SubsystemUnavailableError`'s hierarchy is asserted absent from
+    `_BAD_DATA_TYPES` (`tests/test_publish.py`), so saturation is never failed as bad data. The
+    backoff is the activity's (`durable/publish.py::calculation_retry`). The message tells the
+    chemist the molecule is fine and covers both the durable path (automatic retry) and the tool
+    path (none).
     """
 
     server = "calc"
 
 
-# The transport, the timeout ordering, the credential-rejection walk and the internal-error
-# string all live in `core/mcp_session.py` now — this file worked them out against a live server
-# and the reaction labeller became the second client that needs every one of them. What stays
-# here is the part that genuinely differs: which of the two error classes a failure belongs in,
-# and the wording a chemist reads.
+# Transport, timeouts and credential handling live in `core/mcp_session.py`; this module adds the
+# error classification and the wording a chemist reads.
 
 
-#: How many sessions to the calculation server this process is holding open right now — the live
-#: half of that backend's admission budget
-#: (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Not a registry counter, because a
-#: gauge has to read *current* state and this has to fall on every exit path, a failed open
-#: included: a count that only came down on success would climb by one per attempt during an
-#: outage and fire the saturation alert on an idle pod.
-#:
-#: Locked rather than argued to be safe. Today every dispatcher is one event loop, so `+= 1` would
-#: be fine — but `+= 1` is three bytecodes, the argument is about which threads exist rather than
-#: about this file, and the failure it would produce is a gauge that never returns to zero, which
-#: is the exact defect the lock costs two lines to make impossible.
+#: Sessions to the calculation server this process holds open now: the live half of that backend's
+#: admission budget. A plain locked counter rather than a registry metric, because it must fall on
+#: every exit path, a failed open included, or it climbs during an outage.
 _IN_FLIGHT = 0
 _IN_FLIGHT_LOCK = threading.Lock()
 
@@ -189,11 +113,7 @@ def _dispatching(delta: int) -> None:
         _IN_FLIGHT += delta
 
 
-# Bound at import, because importing this module is what makes a process able to dispatch: a `calc`
-# worker (via its activities) and that bundle's own MCP server pods both do, and neither shares the
-# other's concurrency cap. The same rule `core.db.pooling` follows for the pool gauges — a process
-# cannot acquire the resource without also acquiring its witness — and the reason those gauges were
-# missing from eleven of seventeen pods before it did.
+# Bound at import: any process that can dispatch a calculation also publishes this gauge.
 METRICS.bind_gauge("chemclaw_calc_requests_in_flight", lambda: float(_IN_FLIGHT))
 METRICS.bind_gauge(
     "chemclaw_calc_backend_max_concurrent_requests",
@@ -205,24 +125,13 @@ METRICS.bind_gauge(
 async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[ClientSession]:
     """Open one MCP session to the calculation server, and name its failures for a chemist.
 
-    Everything about *how* the session is opened — the connection-scoped bearer, the short connect
-    bound behind a long read bound, the ordering that keeps the MCP session's timeout the one that
-    trips — is `core.mcp_session.open_session`. What this adds is the classification: a refused
-    credential is bad data (a 401 never comes back on its own, so a durable job must not spend
-    `activity_max_attempts` being told the same thing), and an unreachable host is an outage.
+    Session mechanics are `core.mcp_session.open_session`'s. This adds the classification: a refused
+    credential is bad data (it never fixes itself), an unreachable host is an outage. It is also
+    where backend load is counted, as sessions held, since every remote calculation passes through
+    here.
 
-    `timeout_seconds` overrides the default read bound for the one call class that outgrew it: a
-    CREST search is minutes to hours where every other primitive here is seconds to minutes, and a
-    client bound shorter than the server's own means the server finishes a calculation nobody is
-    still waiting for. Left unset it is `calc_server_timeout_seconds`, which is right for
-    everything that is not sampling.
-
-    **This is also where the backend's load is counted**, because it is the one place every remote
-    calculation passes through — `remote_call`, `remote_version` and `cached_remote` all open their
-    session here. The count is of sessions held rather than of round trips in flight, which is the
-    honest reading of what the server is being asked to hold: a session is one connection on that
-    pod for as long as the block runs, and `cached_remote` deliberately keeps one open across its
-    key lookup so a miss does not pay a second connect.
+    `timeout_seconds` overrides the read bound (default `calc_server_timeout_seconds`) for CREST
+    searches, which run minutes to hours; a client bound shorter than the server's wastes the work.
     """
     _dispatching(+1)
     try:
@@ -230,17 +139,9 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             settings.calc_server_url,
             token_env=settings.calc_server_token_env,
             timeout_seconds=timeout_seconds or settings.calc_server_timeout_seconds,
-            # The same hook every other connector's client carries
-            # (`connectors/registry.connector_http_client`), and deliberately not a second one: it
-            # brings the W3C `traceparent`, the correlation id, the actor and the session, *and*
-            # the origin-strip guard that removes them again if a redirect leaves the endpoint's
-            # origin. Without it this connection sent `Authorization` alone — so the most expensive
-            # work in the system was the one call nobody could trace or correlate.
-            #
-            # "Removes them again" covers all six only since the guard stopped walking a
-            # hand-written list of the four `X-Chemclaw-*` names: `traceparent`, `tracestate` and
-            # `baggage` were copied through to a redirect's target. It matters more here than
-            # anywhere else, because `short_connect_client` follows redirects — see its docstring.
+            # The same hook every connector client carries: trace context, correlation id, actor and
+            # session, plus the origin-strip guard that removes them on a cross-origin redirect
+            # (this client follows redirects).
             request_hook=turn_identity_hook(settings.calc_server_url),
         ) as session:
             yield session
@@ -271,44 +172,24 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
 async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) -> Any:
     """Invoke one tool and return its decoded payload, in this service's error vocabulary.
 
-    `core.mcp_session.invoke` draws three distinctions — the server refused you, the server is
-    full, the server broke — and this maps them onto the classes a durable activity's retry policy
-    reads. A *domain* refusal carries the server's own message, because that message is the whole
-    content of the refusal (which solvent is unparameterised, which atom index is out of range). A
-    saturation refusal does not: the server's sentence names its own admission knob and reads as an
-    error about the molecule, so it is replaced with one that says what is actually happening and
-    kept on `__cause__` for the log.
+    Maps `core.mcp_session.invoke`'s refused / full / broken onto the classes a durable retry policy
+    reads. A domain refusal keeps the server's message (it is the whole content); a saturation
+    refusal is reworded, with the original on `__cause__`.
     """
     try:
         return await invoke(session, tool, arguments)
     except McpAtCapacity as exc:
-        # Before `McpRequestRefused`, of which this is a subclass: order is the whole behaviour.
-        #
-        # Logged at WARNING rather than through `degraded`, deliberately. A full pod is the gate
-        # working — the backend refusing promptly instead of queueing a calculation nobody will
-        # still be waiting for — so putting it on `chemclaw_degraded_total{subsystem=calc_server}`
-        # would fire the outage alert on ordinary busy-ness and make the one series an operator
-        # trusts for "the backend is dark" mean two different things. It gets a counter of its own
-        # instead: `chemclaw_calc_backend_at_capacity_total` is the calculation tier's saturation
-        # signal, and the only thing in the system that asks for more calc capacity.
+        # Must precede `McpRequestRefused`, its base class. A full pod is the gate working, so it
+        # gets its own saturation counter rather than the `degraded` outage series.
         record_metric(
             lambda m: m.increment("chemclaw_calc_backend_at_capacity_total", labels={"tool": tool})
         )
-        # Not "the job will be retried": this line is one above the sentence corrected for exactly
-        # that promise, and it was left carrying it. Both paths reach here — a durable job, whose
-        # `calculation_retry` backoff does wait and ask again, and the in-process tool surface,
-        # where nothing does — and the log cannot tell which, because this function is called the
-        # same way from both. What it can say is what happened.
+        # Says what happened, not "will be retried": this is reached from both the durable and the
+        # tool path.
         logger.warning(
             "the calculation server refused %s because every calculation slot was taken", tool
         )
-        # **Worded so it is true on both paths, which is what it was not.** It promised "the
-        # system will wait and ask again" — true of a durable job, whose `calculation_retry`
-        # backoff does exactly that, and false of the in-process tool surface, where
-        # `agent/tool_authz.py`'s domain-error converter hands this sentence to the model as an
-        # ordinary refusal and nothing retries anything. The model then had a promise instead of
-        # the actionable advice the server's own refusal used to carry ("Retry once one
-        # finishes"). One sentence naming both paths costs nothing and cannot be false on either.
+        # Worded to be true on both paths: the durable job retries, the tool surface does not.
         raise CalcBusyError(
             f"the calculation service is busy: every calculation slot was taken when {tool} was "
             "asked for, so it was turned away before any work started. Nothing is wrong with what "
@@ -365,12 +246,7 @@ class KeyedCalculation(BaseModel):
 
 
 async def _identity(session: ClientSession, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """`calculation_key`'s answer for `tool`, refused in this service's words unless an object.
-
-    Both readers call `.get` on it, so anything else — `None` from a server that answered with no
-    content (`core.mcp_session.invoke`), or a JSON list — was an `AttributeError` rather than the
-    `CalcToolError` a caller of this module handles.
-    """
+    """`calculation_key`'s answer for `tool`, refused as `CalcToolError` unless it is an object."""
     identity = await _call(session, "calculation_key", {"tool": tool, "arguments": arguments})
     if not isinstance(identity, dict):
         raise CalcToolError(f"calculation_key returned {type(identity).__name__} for {tool}")
@@ -382,34 +258,17 @@ async def remote_key(
 ) -> KeyedCalculation | None:
     """The `CalculationKey` this tool would stamp on its result, without computing anything.
 
-    `None` when the server reports the calculation has no derivable key. Exactly one tool answers
-    that way — the server's own `predict_logd`, which has no cache row because its expensive half
-    is a *cached* pKa and the rest is a Crippen sum. This repository never calls it: it composes
-    logD client-side from those same two parts, so in practice every tool that reaches here is
-    keyed. `cached_remote` therefore treats a `None` as a miswiring and refuses, rather than
-    computing uncached forever.
-
-    The key comes back as its four parts rather than as the flat `type@version:input:params`
-    string, and the reason is measured rather than stylistic: a real `calc_version` contains both
-    delimiters — `esol-delaney@2004` carries the `@`, `cal-0.28733:-29.3116` carries the `:` — so a
-    client splitting the flat form would build a key that misses forever.
+    `None` when the server reports no derivable key; `cached_remote` treats that as a miswiring. The
+    key arrives as its four parts, not the flat string, because a real `calc_version` can contain
+    both `@` and `:`.
     """
     identity = await _identity(session, tool, arguments)
     key = identity.get("key")
     if key is None:
         return None
-    # **The epoch is folded in on this side, because nothing else does it any more.**
-    # `CalculationKey.build` is where `CALCULATION_EPOCH` enters a key, and after the physics left
-    # it had exactly one caller — the removed DFT bundle's cache. Every `calc` key now comes
-    # back from the server as its four parts and is rebuilt field-by-field here, so bumping the
-    # epoch invalidated DFT rows and nothing else, while `science/calc/store.py`, `science/calc`'s
-    # `__init__` and `tests/test_calc_payload_schemas.py`'s own failure message all prescribed
-    # bumping it as the remedy for a stored payload changing meaning. It would have appeared to
-    # work.
-    #
-    # Folded into `params_hash` rather than into the type or the version, so it composes with the
-    # server's own params digest the same way `build` composes it with a local one, and a bump
-    # invalidates every `calc` row without touching what the server considers its identity.
+    # `CALCULATION_EPOCH` is folded into `params_hash` here, because these keys are rebuilt field by
+    # field rather than through `CalculationKey.build`; bumping it invalidates every `calc` row
+    # without touching the server's notion of identity.
     try:
         return KeyedCalculation(
             key=CalculationKey(
@@ -420,9 +279,7 @@ async def remote_key(
                     {"epoch": CALCULATION_EPOCH, "remote_params": key["params_hash"]}
                 ),
             ),
-            # The server's own answer, never re-derived here — the same rule this module states for
-            # `calc_version`, and for the same reason: a locally-derived value would be well-formed
-            # and would match nothing. Absent for a molecule-keyed calculation.
+            # The server's own value, never re-derived; absent for a molecule-keyed calculation.
             structure_id=str(identity.get("structure_id") or ""),
         )
     except (KeyError, TypeError) as exc:
@@ -440,52 +297,27 @@ async def remote_compute(
 
 
 async def remote_call(tool: str, arguments: dict[str, Any]) -> ResultPayload:
-    """One round trip to a tool that has **no cache row**, in its own session.
+    """One round trip to a tool that has no cache row, in its own session.
 
-    Two tools on the server are like this and both are geometry rather than physics:
-    `embed_structure` (ETKDG plus a force-field cleanup) and `combine_structures` (centre two
-    monomers and offset one along x). `calculation_key` refuses them by name — they are not compute
-    tools — so routing them through `cached_remote` would spend a round trip learning that, then
-    call them anyway.
-
-    They are on the server rather than here because their output is an *input to a key*: a geometry
-    embedded by a different RDKit build is a different `structure_id`, and every cached relaxation
-    and Hessian downstream of it would miss. Deriving it locally would put the two repositories'
-    RDKit versions into an agreement nothing checks.
+    For `embed_structure` and `combine_structures`, which `calculation_key` refuses. They run on the
+    server because their output feeds a key: a geometry from a different RDKit build would change
+    every downstream `structure_id`.
     """
     async with calc_session() as session:
         return await remote_compute(session, tool, arguments)
 
 
-#: The fleet tools whose current version this repository asks for — the calibrated calculators, and
-#: the only names `remote_version` accepts.
-#:
-#: **A type rather than a `str`, because the caller never passes a literal.**
-#: `connectors/calc/server/tools.py::_CALIBRATED` maps a property to its tool and `_calibrated`
-#: hands the looked-up value on, so the name reaches the wire out of a dict value that
-#: `tests/test_sibling_manifest_agreement.py`'s call-site walker cannot read — and a third
-#: calibrated row naming a tool the fleet does not serve would have been checked by nothing. Here
-#: the names are part of the dispatcher's own signature: `mypy --strict` refuses a table row naming
-#: anything else, and the seam walker reads this `Literal` as the resolution of every
-#: `remote_version` call site, so each member is checked against the fleet's recorded surface.
-#: Adding a calibrated calculator is therefore two edits, and the second is the one that checks it.
+#: The calibrated calculators, and the only tools `remote_version` accepts. A `Literal` rather than
+#: `str` so mypy and the sibling-manifest seam walker check every call site against the fleet.
 CalibratedTool = Literal["predict_solubility", "predict_pka"]
 
 
 async def remote_version(tool: CalibratedTool, arguments: dict[str, Any]) -> str:
     """The `calc_version` this tool would stamp on a result, without computing one.
 
-    The one way this repository is allowed to learn a calculator's current version, and the reason
-    it needs one at all is the calibration ledger: `predictions` is keyed exactly on
-    `(calc_type, calc_version, input_hash)` with no version pooling (D-139), so `calculator_trust`
-    has to ask "what version would answer this question *now*" before it can score anything against
-    it. A result carries its own version, but a trust report has no result — that is the question.
-
-    `arguments` are needed because `calculation_key` derives an identity and an identity is of
-    something; the version it returns does not depend on the molecule, only on the programs and the
-    calibration behind the calculator. `settings.calc_version_probe_smiles` is what that argument
-    is, named in configuration rather than inlined so it is one visible fact rather than a literal
-    repeated at each call site.
+    The only way to learn a calculator's current version, which `calculator_trust` needs because the
+    calibration ledger is keyed exactly on version. `arguments` are required by `calculation_key`
+    but do not affect the version; callers pass `settings.calc_version_probe_smiles`.
     """
     async with calc_session() as session:
         identity = await _identity(session, tool, arguments)
@@ -495,11 +327,9 @@ async def remote_version(tool: CalibratedTool, arguments: dict[str, Any]) -> str
     return version
 
 
-# Every calculation key reached inside the current `collecting()` block, in first-seen order.
-# A contextvar for the reasons `chemclaw.core.turn_signals` gives for its own buffer: it is
-# task-local, so two concurrent activities on one worker cannot see each other's keys; it is empty
-# off that path, so the tool surface and every direct caller are unaffected; and it is *mutated*
-# rather than rebound, so it stays visible when the work runs in a task of its own.
+# Calculation keys reached inside the current `collecting()` block, in first-seen order. A
+# contextvar so concurrent activities stay separate, and mutated rather than rebound so it stays
+# visible across child tasks.
 _collected: ContextVar[list[str] | None] = ContextVar("chemclaw_calc_refs", default=None)
 
 
@@ -507,18 +337,9 @@ _collected: ContextVar[list[str] | None] = ContextVar("chemclaw_calc_refs", defa
 def collecting() -> Iterator[list[str]]:
     """Collect the calculation keys reached inside this block, for a run to cite afterwards.
 
-    **Why a collector rather than a return value.** A composite reaches between two and a few dozen
-    cached primitives across four call layers, and none of them is the place that reports a result —
-    threading a key list back through `relax`, `hessian`, `relax_to_minimum`, `_species_energy` and
-    `reaction_energy` would put cache bookkeeping in the signature of every piece of chemistry here
-    for one consumer at the top.
-
-    The consumer is the durable job, which puts them on its envelope so a note drafted from the run
-    can cite what it rested on (D-2026-08-21). `record_knowledge_note` has advertised exactly that
-    since D-133 — "get them from a job's result envelope" — against an envelope that carried none.
-
-    De-duplicated, order preserved: a reaction relaxes a shared species once and the key is reached
-    once per lookup, and a citation list that repeats a key says nothing extra.
+    A collector rather than a return value, so cache bookkeeping stays out of every chemistry
+    signature between a durable job and its primitives. The job puts the keys on its envelope so a
+    note drafted from the run can cite them. De-duplicated, order preserved.
     """
     keys: list[str] = []
     token = _collected.set(keys)
@@ -547,29 +368,9 @@ async def cached_remote(
 ) -> tuple[ResultPayload, bool]:
     """One calculation: look it up by the server's own key, compute remotely only on a miss.
 
-    This is what the per-calculator `run_cached_*` wrappers in `science/calc/store.py` *became*
-    when the physics left, and the whole point of leaving the cache behind. Past tense and no
-    count, deliberately: none of those symbols exists in `src/` any more, so a present-tense
-    sentence naming a number of them sends a reader to a `grep` that returns nothing — which is
-    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` over a symbol family instead of a
-    `make` target. D-011's rule is that a *persisted* result is never recomputed, and it survives
-    the split unchanged — what changed is only that the miss path crosses a wire.
-
-    One session for both calls rather than one each, which is the only sharing that is safe: both
-    belong to the same caller, so there is no concurrent-caller attribution to lose
-    (`connectors.identity`). On a hit the compute call is never made, so a hit costs one
-    `calculation_key` round trip.
-
-    **A tool the server will not key is a caller error here, not a silent uncached compute.** This
-    used to fall through to computing every time, on the reasoning that `predict_logd` had no cache
-    row of its own. That reasoning was right and the branch was still wrong: `predict_logd` is
-    composed *client-side* from a cached remote pKa plus a local Crippen sum, so it never reaches
-    this function — measured, every tool this tree actually passes here returns a key, and the
-    server refuses to key exactly one tool, which is the one that never arrives. The figure that
-    stood here said eleven against fifteen literal tool names at the call sites, which is the same
-    staleness one sentence apart. A
-    branch that cannot execute is not a safety net; it is a place for a future miswiring to land
-    quietly and recompute forever.
+    A persisted result is never recomputed. Both calls share one session, which is safe because they
+    belong to one caller; a hit costs one `calculation_key` round trip. A tool the server will not
+    key is a caller error, not a silent uncached compute.
     """
     async with calc_session(timeout_seconds) as session:
         keyed = await remote_key(session, tool, arguments)
@@ -580,9 +381,7 @@ async def cached_remote(
                 "should be called with remote_call."
             )
 
-        # Recorded on hit and miss alike: what a run *rested on* is the same either way, and a
-        # citation list that thinned out as the cache warmed would be the least useful version of
-        # itself.
+        # Recorded on hit and miss alike: what a run rested on is the same either way.
         _record(keyed.key)
 
         async def _compute() -> ResultPayload:

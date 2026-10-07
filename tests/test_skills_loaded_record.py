@@ -1,12 +1,7 @@
-"""The producer the guard reads, driven from a skill body to a persisted row.
+"""The `skills_loaded` record, driven from a skill body to a persisted row.
 
-**A guard reading a column nobody writes is a claim that a control exists**, which this repository
-has deleted twice — `map_to_hpc_identity`, and `audit_events.agent`, empty on every row that trail
-ever wrote while three docstrings said in the present tense that it named the agent. So the chain
-is driven rather than assumed: a backend delivers a skill body, the signal rides the turn's own
-stream, the ledger folds it in, and the row carries the names.
-
-`tests/test_distiller.py` drives the predicate. This drives the thing it reads.
+A backend delivers a skill body, the signal rides the turn's stream, the ledger folds it in, and
+the row carries the names. `tests/test_distiller.py` drives the predicate that reads them.
 """
 
 import asyncio
@@ -28,12 +23,7 @@ _BODY = "---\nname: cold-quench\ndescription: how to quench this class cold\n---
 
 @pytest.fixture
 def emitted(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Every signal the turn would have published, captured off the one publish point.
-
-    Patched at `_emit` rather than at LangGraph's writer, because what this test is about is
-    whether the *backends* announce a load at all — and a graph-shaped fixture would put the thing
-    under test behind two layers that can each swallow it silently.
-    """
+    """Every signal the turn would have published, captured at `_emit`, the one publish point."""
     published: list[Any] = []
     monkeypatch.setattr(turn_signals, "_emit", published.append)
     return published
@@ -94,12 +84,7 @@ def test_a_read_that_delivered_nothing_announces_nothing(emitted: list[Any]) -> 
 
 
 def test_the_ledger_folds_both_tiers_into_one_set() -> None:
-    """What the row carries: names, deduplicated, sorted, both tiers together.
-
-    A duplicate would make "how many turns loaded this" wrong in the direction that admits
-    self-confirming evidence, and a per-tier split would make the guard ask two questions where the
-    rule asks one.
-    """
+    """The row carries skill names deduplicated, sorted, with both tiers in one set."""
     from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _TurnLedger
 
@@ -115,16 +100,10 @@ def test_the_ledger_folds_both_tiers_into_one_set() -> None:
 
 
 def test_a_revision_round_still_records_what_it_loaded() -> None:
-    """The second and third graph runs of a turn drop job launches and keep everything else.
+    """A revision round still records the skills it loaded.
 
-    `_resume_on_job_results` and `_revise_answer` both passed `on_signal=lambda _signal: None`, a
-    blanket over the whole union written for one member of it: a resume that fed its own job ids
-    back into `started_jobs` would chain durable jobs inside a single request. Nothing about a
-    second run makes a *skill* read untrue, and `answer_review_max_rounds` ships at 2 — so a skill
-    read only during a revision round left this row empty, and
-    `agent/distiller.py::independent_sessions` then counted that session as independent evidence for
-    proposing the skill that was acting in it. The guard failed open, which is the one direction it
-    exists to close.
+    Later graph runs of a turn suppress only job launches; a skill read during revision must still
+    be recorded, or the distiller would count that session as independent evidence.
     """
     from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _TurnLedger
@@ -139,12 +118,7 @@ def test_a_revision_round_still_records_what_it_loaded() -> None:
 
 
 def test_no_graph_run_of_a_turn_suppresses_the_whole_signal_union() -> None:
-    """An absence test, because the defect above is spelled as a plausible-looking lambda.
-
-    A blanket `lambda _signal: None` reads as "this run announces nothing", which is never what any
-    caller here means — every one of them means "this run must not add to what the turn waits for".
-    Whoever writes the next second-run helper gets the named callback or this fails.
-    """
+    """No graph run of a turn suppresses the whole signal union with a blanket lambda."""
     from pathlib import Path
 
     source = Path("src/chemclaw/api/runner.py").read_text()
@@ -158,18 +132,10 @@ def test_no_graph_run_of_a_turn_suppresses_the_whole_signal_union() -> None:
 async def test_the_row_really_carries_what_the_ledger_folded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The last hop, which this file's docstring claimed and no assertion reached.
+    """The persisted row really carries what the ledger folded.
 
-    Everything above stops at the in-process `_TurnLedger`, so two independent one-line mutations —
-    dropping `"skills_loaded"` from `turn_cost_store._COLUMNS`, and booking `skills_loaded=[]`
-    instead of the ledger's set — left 467 tests passing. The column is the entire subject of
-    `D-2026-09-18-a-guard-with-nothing-to-read-is-not-a-guard`, and a guard reading a column nobody
-    writes is the `map_to_hpc_identity` shape that ADR invokes, one layer past where the tests
-    stopped.
-
-    So this drives the shipped producer — `_book_turn_spend` over a real ledger into the real
-    Postgres sink — and reads it back through the distiller's own query. Both ends, because a test
-    that wrote the row itself would prove the schema and not the wiring.
+    Drives `_book_turn_spend` over a real ledger into the real Postgres sink and reads it back
+    through the distiller's own query.
     """
     from chemclaw.agent import turn_cost
     from chemclaw.agent.session import TurnSession

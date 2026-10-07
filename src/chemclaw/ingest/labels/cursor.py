@@ -1,40 +1,14 @@
 """Persistent keyset cursor for an append-only reaction feed's drain.
 
-`corpus_sync.py` carries its keyset position *inside one run* and stores nothing, because a corpus
-release is a versioned load: re-walking an unchanged one is a no-op, and a new one has to be walked
-from the top anyway. A live feed is the other case — every daily fire would read the whole corpus to
-find the rows added since yesterday — so a source whose binding says `append_only: true` keeps its
-position here, in `corpus_cursors` (`infra/sql/072_…`).
+A versioned corpus release keeps its position only within one run; a live feed (`append_only: true`)
+stores it here, in `corpus_cursors`, so a daily fire does not re-read the whole corpus. Its own
+table because `sync_cursors` holds datetime watermarks, while a keyset position is text in the
+source's own domain.
 
-**Its own table rather than a row in `sync_cursors`.** That column is `TIMESTAMPTZ` and its contract
-is a datetime watermark; a keyset position is a `TEXT` key in the source's own domain, which may be
-a bigint, a ULID or a padded string.
-
-**And that is why the upsert here stays blind where `ingest/eln/cursor.py`'s became `GREATEST`.**
-The two statements read identically, which is the invitation to copy the fix across; the column
-types are what decide it. `GREATEST` on text is lexicographic — measured on this repository's own
-Postgres, `GREATEST('9'::text, '10'::text)` is `'9'` — so on a bigint feed the high-water spelling
-would pin the position at the first single-digit id it reached and *skip* every row past it.
-Blind, the worst a concurrent write can do is move the position back, which costs a re-drain of an
-append-only feed whose writes are upserts. Forwards past unread rows is the direction that loses
-data, and only the high-water spelling can go there. `tests/test_cursor.py` asserts the absence and
-measures the ordering, so the reason stays checkable rather than remembered.
-
-**No lag gauge, unlike `ingest/eln/cursor.py`, and the absence is deliberate.** That module can say
-how far behind a cursor is because a datetime subtracts from `now()`. A keyset value is opaque —
-nothing here can tell how many rows sit beyond it — so a gauge would have to invent a number.
-
-**What that leaves is weaker than it first reads, and saying so is the point.** A first draft of
-this docstring claimed `ReactionCorpusWorkflow` covers it by reporting `read`/`recorded` per pass;
-it does not — that workflow returns one report aggregated over every source at the end of the whole
-`continue_as_new` chain. So a *stalled* feed has no first-party signal today: `updated_at` is here
-for an operator reading the table, and nothing reads it. Closing that means a per-source outcome or
-a staleness gauge over `updated_at`, and neither is invented here on the way past.
-
-What *is* done here is the half that makes such a gauge possible later: `drain_reaction_corpus`
-stores a position only when the drain advanced, so `updated_at` means "when this feed last moved"
-rather than "when it was last looked at". Written unconditionally — as the first draft did — the
-column refreshes on every fire and a stalled feed reads as freshly synced forever.
+The upsert is deliberately blind, not `GREATEST`: text comparison is lexicographic (`'9' > '10'`),
+so a high-water upsert could skip rows on a numeric feed, while a blind one can at worst move back
+and re-drain idempotently. No lag gauge, because a keyset value says nothing about how many rows lie
+beyond it. A position is stored only when the drain advanced, so `updated_at` means "last moved".
 """
 
 from chemclaw.core import db
@@ -50,9 +24,7 @@ _UPSERT = (
 async def load_corpus_cursor(source: str, dsn: str | None = None) -> str:
     """Return the stored keyset position for `source`, or `""` to start at the beginning.
 
-    `""` is what a source that has never drained holds, and it is also what an operator leaves
-    behind by deleting the row — the supported way to force a full re-walk. Both mean the same
-    thing to `drain_corpus`, which is why neither is distinguished here.
+    Deleting the row is the supported way to force a full re-walk.
     """
     target = dsn if dsn is not None else settings.postgres_dsn
     async with db.connection(target, operation="corpus_cursor_load") as conn:
@@ -64,8 +36,7 @@ async def load_corpus_cursor(source: str, dsn: str | None = None) -> str:
 async def store_corpus_cursor(source: str, after: str, dsn: str | None = None) -> None:
     """Persist the advanced keyset position for `source` (upsert).
 
-    An empty `after` is not stored: a pass that advanced past nothing has nothing to resume after,
-    and writing it would overwrite a real position with a restart.
+    An empty `after` is not stored, so it cannot overwrite a real position with a restart.
     """
     if not after:
         return

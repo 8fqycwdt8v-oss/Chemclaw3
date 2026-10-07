@@ -1,17 +1,9 @@
 """The rotational profile: naming the bond, releasing the wells, and timing the barrier.
 
-Driven end to end through the real composite against `calc_server_fake`, whose torsional potential
-is n-butane-shaped — three wells, the anti one lowest — so every claim below is checked against a
-surface that could contradict it. Nothing here is mocked at the composite's own boundary: the scan
-points, the relaxations and the Hessians all go through `cached_remote` and the D-011 store.
-
-The four things this file exists to hold:
-
-- **A wrong handle is refused**, because the failure it replaces is silent — a scan of the wrong
-  bond returns a well-formed profile, not an error.
-- **A well is released**, not reported as the constrained scan point it came from.
-- **A barrier has a direction**, and the one out of the populated well is the one that matters.
-- **A half-life is a range**, because Eyring is exponential in a number carrying ±3 kcal/mol.
+Driven end to end through the real composite against `calc_server_fake`'s n-butane-shaped
+three-well torsion, with every primitive going through `cached_remote` and the D-011 store. Held
+here: a wrong handle is refused (a wrong-bond scan is otherwise a silent well-formed profile), a
+well is released from its constraint, a barrier has a direction, and a half-life is a range.
 """
 
 import asyncio
@@ -105,10 +97,8 @@ class TestTheBondIsCheckedNotTrusted:
     def test_a_top_is_refused_for_having_no_heavy_dihedral(self, server: FakeCalcServer) -> None:
         """A methyl rotation is real and is not this job — the message says where it is counted.
 
-        n-butane's *terminal* C-C, which is what a methyl top actually is. It named the central bond
-        while this refusal was reached by counting the dihedral's atoms, so any entry with an empty
-        `atoms` produced the methyl sentence whatever bond it named — which is the very conflation
-        `TestARotorWhoseEndCarriesOnlyHydrogens` below exists to undo.
+        Uses n-butane's terminal C-C, which is what a methyl top is; an empty `atoms` alone must not
+        produce the methyl sentence (see `TestARotorWhoseEndCarriesOnlyHydrogens`).
         """
         top = _torsion(
             bond=(0, 1),
@@ -133,9 +123,7 @@ class TestTheBondIsCheckedNotTrusted:
 class TestTheDihedralIsCheckedToo:
     """The handle guards `bond`; these guard `atoms`, which is what is actually driven.
 
-    Every one of these returned a **full profile with a plausible barrier and no error** before the
-    check existed — the exact silent-wrong-answer shape the handle was introduced to remove, one
-    field along from where it was being watched for.
+    Without the check each of these returns a plausible profile with no error.
     """
 
     def test_a_negative_index_is_refused(self, server: FakeCalcServer) -> None:
@@ -147,7 +135,7 @@ class TestTheDihedralIsCheckedToo:
     def test_an_index_past_the_molecule_is_refused_before_the_geometry_arithmetic(
         self, server: FakeCalcServer
     ) -> None:
-        """It used to escape as a bare numpy IndexError from inside the dihedral computation."""
+        """Refused by name, not as a numpy IndexError from the dihedral arithmetic."""
         with pytest.raises(ValueError, match="not four atoms"):
             _profile(server, bond=_torsion(atoms=[0, 1, 2, 99]))
 
@@ -197,14 +185,10 @@ class TestTheProfile:
         assert sum(rotamer.population for rotamer in profile.rotamers) == pytest.approx(1.0)
 
     def test_a_well_is_released_from_its_constraint(self, server: FakeCalcServer) -> None:
-        """The point that matters most, and the one a bare scan cannot make.
+        """A well is released from its constraint, not reported as its constrained scan point.
 
-        A scan point is optimized with the dihedral *frozen*, so the bottom of a well is the best
-        constrained geometry rather than a minimum of the molecule. Shown here on a grid that does
-        not line up with the wells: at 45 degrees the profile's own minima sit at 45, 180 and 315,
-        and the released rotamers must sit at 60, 180 and 300 — where the surface actually has its
-        minima. A composite that reported its scan points as rotamers would come back with the
-        first list, which is why the step is chosen to make the two differ.
+        The 45-degree grid does not line up with the wells, so the scan minima (45, 180, 315) differ
+        from the released rotamers (60, 180, 300), which is what the test asserts.
         """
         profile = _profile(server, step_degrees=45.0)
         angles = sorted(round(rotamer.dihedral_degrees) for rotamer in profile.rotamers)
@@ -284,9 +268,8 @@ class TestTheBarrier:
     def test_the_wrap_around_barrier_is_not_lost(self, server: FakeCalcServer) -> None:
         """A torsion is a ring: the pass between the last well and the first is a real pass.
 
-        Treating the profile as a line rather than a ring drops exactly one barrier, and on a
-        three-fold rotor it is the one across 0 degrees — which for n-butane is the *syn* barrier,
-        the highest on the surface.
+        Treating it as a line drops the barrier across 0 degrees — for n-butane the syn barrier, the
+        highest on the surface.
         """
         profile = _profile(server)
         assert len(profile.barriers) == len(profile.rotamers)
@@ -295,17 +278,12 @@ class TestTheBarrier:
         )
 
     def test_a_single_well_per_period_still_has_a_barrier(self, server: FakeCalcServer) -> None:
-        """The case the whole capability exists for, and the one that reported nothing.
+        """A single well per period still has a barrier.
 
-        A hindered rotation with one populated form per period — an amide, a biaryl with a single
-        minimum — rotates into its *own symmetry image* over the pass between them. That is the
-        barrier variable-temperature NMR measures. Measured against the live GFN2 server before
-        this was fixed: N,N-dimethylacetamide's profile rises to 18.1 kcal/mol at 96 degrees, one
-        planar well per 180 degrees, and `barriers` came back **empty** — the number was computed
-        and then dropped, because pairing adjacent wells around a ring silently produces a
-        zero-length arc when there is only one of them.
-
-        Driven here over a third of the fake's three-fold potential, which holds exactly one well.
+        An amide or a single-minimum biaryl rotates into its own symmetry image; that pass is the
+        barrier VT-NMR measures. Pairing adjacent wells around a ring must not yield a zero-length
+        arc when there is only one. Driven over a third of the fake's three-fold potential, which
+        holds one well.
         """
         profile = _profile(server, bond=_torsion(symmetry_order=3, period_degrees=120.0))
         assert len(profile.rotamers) == 1
@@ -336,16 +314,11 @@ class TestTheWarnings:
     def test_a_steep_real_barrier_is_not_reported_as_a_discontinuity(
         self, server: FakeCalcServer
     ) -> None:
-        """The false positive measured against live GFN2, and the reason the rule is a ratio.
+        """A steep real barrier is not reported as a discontinuity.
 
-        N,N-dimethylacetamide climbs an ordinary 18 kcal/mol amide barrier and therefore steps
-        8.8 kcal/mol between two 30-degree points. Against the old absolute bound — the method's
-        3 kcal/mol reaction uncertainty — that was warned about as "a point relaxed into a
-        different basin", so the check fired on precisely the hindered rotations this capability
-        exists for and stayed silent on the freely-rotating ones.
-
-        A discontinuity is a step *out of line with its neighbours*, not a large step. Here the
-        fake's own smooth three-fold profile stands in: it must produce no such warning.
+        A discontinuity is a step out of line with its neighbours, not a large step, so the rule is
+        a ratio; an absolute bound would fire on exactly the hindered rotations this capability is
+        for. The fake's smooth profile must produce no warning.
         """
         warnings = _profile(server).warnings
         assert not [warning for warning in warnings if "different basin" in warning], warnings
@@ -372,24 +345,17 @@ class TestTheWarnings:
 
 
 class TestTheBarrierArithmetic:
-    """One energy zero, and a free energy that is one.
-
-    Both defects here were invisible to this file as it stood: the mixed zero is small on the
-    fake's own surface, and the `thorough` path could not run at all because the fake's pass
-    Hessians reported no imaginary mode.
-    """
+    """One energy zero, and a free energy that is a difference."""
 
     def test_a_barrier_is_measured_from_the_released_well_not_the_scan_point(
         self, server: FakeCalcServer
     ) -> None:
-        """The two zeros the code used to mix, checked as a number rather than as a rule.
+        """A barrier is measured from the released well, not the constrained scan point.
 
-        A barrier's height above its own well plus that well's height above the lowest well is the
-        pass's height above the **lowest released minimum**. The profile's own `relative_kcal` is
-        measured from the lowest **constrained** scan point instead, and releasing a well lowers
-        it — so the first quantity must come out *larger* than the second, by exactly the lowest
-        well's relaxation. On the live GFN2 server that gap is 0.118 kcal/mol on n-butane; mixing
-        the two zeros understated every barrier by it, and could in principle make one negative.
+        Barrier above its well plus well above the lowest well is the pass height above the lowest
+        released minimum, which must exceed the profile's `relative_kcal` (measured from the lowest
+        constrained point) by exactly that well's relaxation. Mixing the two zeros understates
+        barriers.
         """
         profile = _profile(server)
         assert profile.barriers, "the premise failed: no barrier to measure"
@@ -407,12 +373,10 @@ class TestTheBarrierArithmetic:
     def test_a_thorough_barrier_is_a_free_energy_difference_not_an_absolute_correction(
         self, server: FakeCalcServer
     ) -> None:
-        """The defect that produced 70 kcal/mol barriers, and the reason nothing caught it.
+        """A thorough barrier is `G(pass) - G(well)`, not an absolute `G - E` correction.
 
-        `G - E` for a molecule is its whole thermal-plus-entropic term — tens of kcal/mol — and it
-        was added to an electronic barrier whose well had none subtracted. A free-energy barrier is
-        `G(pass) - G(well)`, so on a surface whose Hessian is the same everywhere the thermal terms
-        cancel and the answer must stay close to the electronic barrier rather than exploding.
+        On a surface whose Hessian is the same everywhere the thermal terms cancel, so the answer
+        stays close to the electronic barrier.
         """
         electronic = _profile(server)
         free = _profile(server, level="thorough")
@@ -429,16 +393,11 @@ class TestTheBarrierArithmetic:
     def test_a_rotamer_is_the_geometry_its_free_energy_was_computed_at(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Above `quick` the refinement can move the geometry, and the result must move with it.
+        """A rotamer is the geometry its free energy was computed at.
 
-        `relax_to_minimum` displaces along an imaginary mode and re-optimizes when the first
-        geometry is a saddle, and its *last* Hessian is the one the free energy comes from. Keeping
-        the pre-refinement structure published a `structure_id`, a dihedral and an electronic
-        energy for one geometry beside a free energy for another.
-
-        `saddle_first` forces exactly that escape on the first well, so the last Hessian is taken
-        somewhere the un-refined code never reports. Asserting that the last Hessian's geometry is
-        one of the published rotamers is what separates the two.
+        Above `quick`, `relax_to_minimum` may escape a saddle and re-optimize; the last Hessian's
+        geometry is the one published. `saddle_first` forces that escape on the first well, and the
+        test asserts the last Hessian's geometry is one of the published rotamers.
         """
         server = install(monkeypatch, FakeCalcServer(torsion=(0, 1, 2, 3), saddle_first=True))
         profile = _profile(server, level="standard")
@@ -510,10 +469,8 @@ class TestEyring:
     ) -> None:
         """`t½ = ln2 / k`, `k = (kB T/h) exp(-dG‡/RT)`, transmission coefficient 1 at 298.15 K.
 
-        Pinned as literals because these four numbers are what `skills/atropisomer-assessment` uses
-        to classify a compound, and the prose table they replaced was wrong by up to two orders of
-        magnitude at the top of the range — which is the difference between "about a day" and
-        eighty days, on a decision boundary.
+        Pinned as literals because `skills/atropisomer-assessment` classifies compounds on these
+        numbers.
         """
         assert half_life_from_barrier(barrier, 298.15, 0.0).half_life_seconds == pytest.approx(
             seconds, rel=0.01
@@ -531,29 +488,20 @@ def _with_dihedral_at(degrees: float) -> dict[str, object]:
 
 
 class TestARotorWhoseEndCarriesOnlyHydrogens:
-    """`top` and `xh` are two different rotors, and only one of them is already accounted for.
+    """`top` and `xh` are two different rotors, and only a `top` is already accounted for.
 
-    `Chemclaw3-mcp`'s `enumerate_torsions` reports both with **no** dihedral atoms, because a
-    dihedral through either needs a hydrogen index and one of those means something only inside one
-    explicit-H numbering. It stopped reporting them as one kind for a measured reason: a methyl's
-    barrier really is inside the quasi-RRHO free-rotor treatment of the low modes, while acetamide's
-    amide N-H (16-18 kcal/mol) and acetic acid's syn/anti O-H (5-6) are not — and calling those a
-    methyl told the model its barrier was already counted.
-
-    This side had one refusal for both, naming "a methyl or tert-butyl rotation". So the O-H was
-    refused, and refused with a sentence that was false about it.
+    `enumerate_torsions` reports both without dihedral atoms. A methyl barrier is inside the
+    quasi-RRHO free-rotor treatment; an amide N-H or a carboxylic O-H is not, so an X-H rotor is
+    scanned rather than refused with the methyl sentence.
     """
 
     def test_an_x_h_rotor_is_scanned_in_the_explicit_hydrogen_numbering(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Ethanol's O-H profiles, driven about C0-C1-O2-H8 — a dihedral ending on a hydrogen.
+        """Ethanol's O-H profile, driven about C0-C1-O2-H8 — a dihedral ending on a hydrogen.
 
-        The numbering is the structure's own: every geometry here is `AddHs` over the canonical
-        SMILES, heavy atoms first and hydrogens appended by parent, which is the alignment the
-        calculation server states and `scan_point` validates against `len(structure.elements)`.
-        So nothing on the far side has to change for this to be scannable — the dihedral simply has
-        to be built, and this side was the one refusing to build it.
+        The numbering is the structure's own explicit-H order (heavy atoms first, hydrogens by
+        parent), which `scan_point` validates against `len(structure.elements)`.
         """
         server = install(monkeypatch, FakeCalcServer(torsion=(0, 1, 2, 8)))
         hydroxyl = _torsion(
@@ -572,11 +520,10 @@ class TestARotorWhoseEndCarriesOnlyHydrogens:
     def test_a_dihedral_less_entry_for_a_bond_that_has_one_is_refused_as_malformed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Neither kind: n-butane's central bond has a heavy dihedral, so an empty `atoms` is wrong.
+        """An empty `atoms` on a bond with a heavy dihedral is malformed.
 
-        Assembled by hand rather than copied from `enumerate_torsions`, which is the failure mode
-        every check in `_verified_torsion` is about — and it must not be answered with a sentence
-        about methyl rotations, because it is not one.
+        n-butane's central bond is neither a top nor an X-H rotor, so it must not be answered with
+        the methyl-rotation sentence.
         """
         install(monkeypatch, FakeCalcServer())
         malformed = _torsion(atoms=[])
@@ -587,17 +534,10 @@ class TestARotorWhoseEndCarriesOnlyHydrogens:
 def test_a_published_profile_names_the_method_the_server_ran(
     server: FakeCalcServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`RotationProfile.method` must come off the result, never off local config.
+    """`RotationProfile.method` comes off the result, never off local config.
 
-    The same rule `tests/test_calc_ensembles.py` pins for `bond_dissociation_survey`, and this was
-    the one composite still stamping `settings.xtb_method` on a published record. The physics is
-    `Chemclaw3-mcp`'s since `D-2026-08-16-the-physics-leaves-the-cache-stays`, so that setting is a
-    label this pod holds and not a fact about the calculation — and `publish/project.py` turns this
-    field into a `TheoryLevel` beside a `rotational_barrier` fact, so a deployment whose env
-    disagreed with its server published a barrier asserting the wrong level of theory.
-
-    The setting is moved rather than the server's answer, so the test fails for the right reason:
-    with the defect present the profile reports "WRONG-METHOD" because that is what the env said.
+    `publish/project.py` turns it into a published `TheoryLevel`, so a local setting would assert
+    the wrong level of theory. The setting is moved so the test fails for the right reason.
     """
     monkeypatch.setattr(settings, "xtb_method", "WRONG-METHOD")
 

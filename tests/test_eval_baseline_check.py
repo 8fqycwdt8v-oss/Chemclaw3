@@ -1,14 +1,8 @@
 """The offline baseline comparison (`python -m chemclaw.evals.harness --baseline`).
 
-`data/evals/baseline.json` records what the case-set scored at a known-good point, and for a long
-time the only code that read it was `durable/eval_drift.py` — a Temporal workflow disabled by
-default. "The case-set scored against the recorded baseline" was therefore not something anyone
-could run. These tests pin the command that now does it, and above all pin the two ways it must
-*not* mislead: it must not fail on an improvement, and it must not produce a number at all when the
-run and the baseline scored different case-sets.
-
-Every assertion goes through the real `compare_to_baseline`/`main`; nothing here mocks the thing
-under test, because a mock of a comparison would agree with whatever it was told.
+Scores the case-set against `data/evals/baseline.json`. Pins the two ways it must not mislead: it
+does not fail on an improvement, and it produces no number when run and baseline scored different
+case-sets. Everything goes through the real `compare_to_baseline`/`main`.
 """
 
 from pathlib import Path
@@ -61,11 +55,10 @@ def _compare(baseline_metrics: dict[str, float], **scores: float) -> list[str]:
 
 
 def test_every_registered_metric_declares_a_direction() -> None:
-    """Without a direction the comparison cannot tell an improvement from a regression.
+    """Every registered metric declares a direction.
 
-    Asserted over the whole registry rather than a sample: a metric added without one would make
-    `--baseline` report that metric backwards, and there is no value at which that is detectable
-    from the number alone (0.9 is a good `f1` and a bad `prediction_error`).
+    Without one the comparison cannot tell an improvement from a regression (0.9 is a good `f1` and
+    a bad `prediction_error`).
     """
     assert registered_names()  # the registry is populated, so this proves something
     for name in registered_names():
@@ -124,11 +117,10 @@ def test_a_vanished_metric_is_a_failure_and_is_not_reported_as_zero() -> None:
 
 
 def test_a_case_set_mismatch_refuses_to_report_a_number() -> None:
-    """The most dangerous failure: a delta across two case-sets looks like a result and is not.
+    """A case-set mismatch refuses to report a number.
 
-    An aggregate is a mean over a population of cases; comparing the mean of one population with
-    the mean of another shares only the metric's *name*. So the comparison raises instead of
-    producing rows, and the message names both versions.
+    A mean over one population compared with a mean over another shares only the metric's name, so
+    the comparison raises and names both versions.
     """
     baseline = Baseline(case_set_version="autonomy-2026-08-01", metrics={"f1": 0.80})
     with pytest.raises(CaseSetMismatchError) as excinfo:
@@ -157,9 +149,8 @@ def test_the_committed_baseline_scores_green_offline(
 ) -> None:
     """The shipped command over the shipped baseline: exit 0, with the actual numbers printed.
 
-    Also the guard that the comparison is *meaningful*: it asserts a row per committed baseline
-    metric, so a baseline that stopped overlapping the case-set (which would make the check pass
-    vacuously) fails here instead.
+    It asserts a row per committed baseline metric, so a baseline that stopped overlapping the
+    case-set (a vacuous pass) fails here.
     """
     assert main(["--case-set-version", COMMITTED_VERSION, "--baseline"]) == 0
     out = capsys.readouterr().out
@@ -217,20 +208,12 @@ def test_a_hard_gate_failure_outranks_the_drift_verdict(
 
 
 def test_the_summary_says_how_many_of_the_watched_metrics_are_live() -> None:
-    """The gate's summary reads as thirteen watched quantities, and two of them are quantities.
+    """The summary says how many of the watched metrics execute product code.
 
-    `make ci` gates on `--baseline`, whose own documentation asks "did anything get *worse* than
-    last time?". Eleven of the thirteen baseline metrics — `e_factor`, `pmi`, `prediction_error`,
-    `bo_regret`, `precision`, `recall`, `f1`, `plan_quality`, `runaway_rate`,
-    `plan_execute_utility`, `turn_cost_ratio` — are pure arithmetic over literals committed in the
-    case files, so no change to retrieval, memory, the agent or a prompt can move them; only
-    editing a data file or the metric formula can. Only `retrieval_recall` and
-    `retrieval_precision` execute product code. Individual case files say so; the *gate* said
-    nothing, so a change that halved dense-leg recall passed a green CI step that looked like
-    thirteen guarded numbers.
-
-    The label is derived from the metric registry rather than from a second list, because a list of
-    live metric names beside the registry is the thing that goes stale the first time one is added.
+    Most baseline metrics are arithmetic over literals committed in the case files, so no product
+    change can move them; only the retrieval metrics run product code. The gate's summary must say
+    so, or a recall regression passes behind a list of guarded-looking numbers. The label is derived
+    from the metric registry, not a second list.
     """
     committed = load_baseline(settings.eval_baseline_path)
     cases = load_eval_cases(settings.eval_case_dir)

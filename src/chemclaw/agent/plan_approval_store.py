@@ -1,57 +1,15 @@
-"""Durable record of the human decision on a harness plan (REV-1, D-137).
+"""Durable record of the human decision on a harness plan (D-137).
 
-The store behind `plan_approvals`. Kept beside `chemclaw.agent.session_store` and using the same DSN
-resolution, because a plan approval is durable session-scoped evidence with exactly the lifetime
-of the session's history — one database, one connection story (D-002).
+The store behind `plan_approvals`, using `session_store`'s DSN resolution. An approval must have
+exactly the lifetime of the mode it authorizes, so the backend follows the session store: Postgres
+for durable sessions, in-process for `session_store="memory"` (the CLI). Both backends behave
+identically and fail closed.
 
-Why a store at all, rather than session state: an approval that lived only in the front door's
-in-process session would be lost on a pod restart or an LRU eviction, and the mode it authorized
-would survive it (the mode lives in the session's own persisted state). A control that silently
-disappears while its effect persists is worse than no control — the audit would show a session
-running in execute mode with nothing recording who allowed it.
-
-**Two backends, chosen the way `default_audit_sink` chooses one** (D-167). Enforcing the approval
-raised a question recording it never had to answer: what does a deployment with no Postgres do —
-fail open, and the approval gate is decorative, or fail closed, and `make chat --admin` cannot run a
-single state-changing tool? Both answers are bad, and the question is malformed. The paragraph
-above is the whole argument for durability and it is an argument about a *mismatch*: the approval
-must not outlive, or be outlived by, the mode it authorizes. Under `session_store="memory"` that
-mode lives in an in-process session and dies with the process, so a process-lifetime approval
-matches it exactly. So the backend follows the session store, there is no third posture to
-configure, and the gate is fail-closed everywhere — a plan that was never approved is never
-approved, whichever backend answered.
-
-**Both halves of the control are durable, and for a while only one was.** A decision row here
-survived anything; the marker recording that the row had been *spent* lived in `session.state`
-(`harness_mode._CONSUMED_STATE_KEY`), which an LRU eviction or a pod roll drops —
-`chemclaw.api.deps._rehydrate_session` rebuilds the session handle over the durable history alone.
-So a session that reconstructed a byte-identical todo list after an eviction hashed to the same plan
-and met its own already-spent approval looking fresh: an authorization revived by an infrastructure
-event rather than by a person, outside the one-turn limit D-167 states.
-
-Consumption is therefore recorded where the decision is — `plan_approvals.consumed_at`
-(`infra/sql/034_plan_approval_consumption.sql`), stamped by `consume` and folded into `decision`,
-which reports a spent approval as *not approved* while still naming who decided. That fold is the
-point: every caller already asks this store one question ("is this plan approved right now?") and
-now gets one answer, instead of asking here and then asking session state whether the answer still
-counts. It also deletes the seam — there is no longer a `plan_consumed` for a caller to forget.
-
-The in-memory backend mirrors it exactly, which costs nothing and matters: `session_store="memory"`
-is a real deployment (the CLI is one), and a control with two implementations that disagree about
-when an approval is spent is a control nobody can reason about.
-
-**A row also carries what the approval permits**
-(`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`,
-`infra/sql/095_plan_approval_scope.sql`). Until that migration a decision said *which plan* a person
-said yes to and nothing about what saying yes let the agent do, so one approval of a read-only plan
-authorized every state-changing tool the deployment had. `scope` is the set of tool names the plan's
-steps declared when the human read it, stamped by the decision and never re-derived from the model's
-plan afterwards — which is what keeps a rewrite *after* the approval from widening it. A rewrite
-*before* the approval is the other half and needed its own decision
-(`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`): the hash this
-column is keyed beside covers each step's declaration as well as its text, so a widened plan is a
-different plan and the chemist's own hash no longer matches it. Neither half covers a `status` flip,
-deliberately — an approved plan must be able to make progress without revoking itself.
+Consumption is recorded on the row (`consumed_at`) and folded into `decision`, so an approval is
+spent durably and cannot be revived by a session rebuild. Each row also carries `scope`, the tool
+names the plan's steps declared when the human read it, stamped by the decision and never re-derived
+from the live plan; the plan hash covers each step's declaration, so a widened plan is a different
+plan. A `status` flip changes neither.
 """
 
 from collections.abc import Collection
@@ -67,48 +25,33 @@ from psycopg.rows import TupleRow
 from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.core.config import settings
 
-# Append-only: every decision is a record of something a person did at a moment, so a second
-# decision on the same plan is a second row rather than an update of the first. That is also what
-# re-arms a plan: approving an unchanged plan again inserts a fresh, unspent row, so "yes, again"
-# needs no separate operation and cannot be performed by anything but a decision.
+# Append-only: each decision is a separate act, so re-approving an unchanged plan inserts a fresh,
+# unspent row.
 _INSERT = (
     "INSERT INTO plan_approvals (session_id, plan_hash, actor, approved, scope) "
     "VALUES (%s, %s, %s, %s, %s)"
 )
 
-# The latest decision wins, so a rejection recorded after an approval revokes it — which is what a
-# person clicking "no" second means. `LIMIT 1` over the covering index; no sort at run time.
-#
-# `approved AND consumed_at IS NULL` is the *effective* verdict: an approval that has had its turn
-# is no longer an approval (D-167). The actor comes back either way, because "approved earlier,
-# already used" is a different thing for a surface to show than "nobody has decided".
+# The latest decision wins, so a later rejection revokes an approval. `approved AND consumed_at IS
+# NULL` is the effective verdict; the actor is returned either way so "already used" differs from
+# "nobody decided".
 _LATEST = (
     "SELECT approved AND consumed_at IS NULL, actor, scope FROM plan_approvals "
     "WHERE session_id = %s AND plan_hash = %s "
     "ORDER BY decided_at DESC, id DESC LIMIT 1"
 )
 
-# Spend every still-unspent approval this session holds, whatever plan each was recorded against.
-# Session-wide rather than hash-targeted, because hash-targeted consumption leaked: a turn that
-# reworded its plan mid-flight hashed the *new* plan at turn end, found no decision for it, and
-# left the *old* plan's approval live — re-authorizing any future turn whose todo list hashed back
-# to it, outside D-167's one-turn limit. "The turn used its authorization" is a fact about the
-# session's turn, not about whichever plan identity survived to the end of it. Scoped by
-# `approved AND consumed_at IS NULL` so it is idempotent and can never stamp a rejection.
+# Spend every unspent approval in the session, whatever plan it was recorded against: a turn that
+# reworded its plan must not leave the old plan's approval live. Idempotent, and never stamps a
+# rejection.
 _CONSUME_ALL = (
     "UPDATE plan_approvals SET consumed_at = now() "
     "WHERE session_id = %s AND approved AND consumed_at IS NULL"
 )
 
 
-# Whose turn last wrote a plan, keyed by the plan's identity (`infra/sql/110_shared_sessions.sql`,
-# `D-2026-09-27-in-a-shared-session-the-sender-governs`). **Last writer wins**: the turn that last
-# wrote a plan is the one standing behind it, and a member whose turn re-affirms a plan another
-# person's turn proposed may then decide on it — while a first-writer rule would leave them unable
-# ever to approve that text. Guarded on the ownership row rather than left to the foreign key: a
-# session with no `session_owners` row (a test's, a template step's) records no author, and the
-# decision route then falls back to the owner rule it has always applied, instead of the insert
-# failing a turn.
+# Whose turn last wrote a plan, keyed by plan identity; last writer wins. A session with no
+# `session_owners` row records no author, and the decision route falls back to the owner rule.
 _AUTHOR_UPSERT = (
     "INSERT INTO plan_authors (session_id, plan_hash, actor) "
     "SELECT o.session_id, %s, %s FROM session_owners o WHERE o.session_id = %s "
@@ -121,15 +64,8 @@ _AUTHOR = "SELECT actor FROM plan_authors WHERE session_id = %s AND plan_hash = 
 class Decision(NamedTuple):
     """One decision as the store answers it: the verdict, who took it, and what it permits.
 
-    A `NamedTuple` rather than a dataclass because the two indexed readers that predate `scope`
-    (`api/routes/plan.py`, `cli/chat.py`) were reading `decision[0]` and `decision[1]`, and a third
-    field must not be an occasion to rewrite what the first two mean. New readers use the names.
-
-    `scope` is the set of tool names this approval authorizes — `plan_approvals.scope`, stamped by
-    the human's act and never re-derived from the model's plan
-    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Empty is a real answer
-    and the one every row recorded before that migration carries: an approval that permits no
-    state-changing tool at all.
+    A `NamedTuple` because older readers index `[0]` and `[1]`. `scope` is the set of tool names the
+    approval authorizes; empty (every pre-scope row) authorizes no state-changing tool.
     """
 
     approved: bool
@@ -190,10 +126,8 @@ class PlanApprovalStore:
     ) -> None:
         """Record one human decision about one specific plan, and what it authorizes.
 
-        `scope` has no default, deliberately: it is the whole of what the approval permits, and a
-        caller that forgot it would silently record an approval authorizing nothing — a control
-        that fails closed, but by accident rather than by a decision. Written sorted so two
-        approvals of the same declaration compare equal in the trail.
+        `scope` has no default so no caller records an empty authorization by accident. Stored
+        sorted.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -203,10 +137,7 @@ class PlanApprovalStore:
     async def consume_all(self, session_id: str) -> None:
         """Stamp every live approval this session holds as spent — durably.
 
-        Idempotent by construction (`_CONSUME_ALL` matches only unspent approvals), because the
-        callers cannot guarantee they run once: a turn that answers and is then torn down, and a
-        turn that fails after running tools, both spend the same approvals. Session-wide for the
-        drift-leak reason the SQL's own comment carries.
+        Idempotent, because more than one teardown path may spend the same approvals.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -231,19 +162,8 @@ class PlanApprovalStore:
     async def decision(self, session_id: str, plan_hash: str) -> Decision | None:
         """The latest *effective* decision, or None if nobody has decided.
 
-        Effective, not merely recorded: an approval that has already had its turn comes back
-        `approved=False` (`_LATEST` folds `consumed_at IS NULL` into the verdict). Returning the
-        actor as well is what lets a caller say *who* decided rather than only *that* it was
-        approved — the difference between a usable record and a flag, and what separates
-        "approved earlier, already used" from "nobody has decided". The third field is what the
-        approval authorizes; a row written before `infra/sql/095_plan_approval_scope.sql` carries
-        the empty set, which authorizes no state-changing tool at all — the column is
-        `TEXT[] NOT NULL DEFAULT '{}'`, so that backfill is the database's and not this reader's.
-        **`frozenset(row[2] or ())` was how this line read**, and the `or ()` was a fail-open branch
-        nothing can reach: a `NOT NULL` column cannot hand back `None`, and if it somehow did, an
-        empty scope is the *narrow* answer rather than the safe-looking one, so the branch was
-        defending against a case it would have got right by crashing. A guard with no reachable
-        input reads as a control and is not one.
+        A spent approval comes back `approved=False`, still naming the actor. `scope` is `NOT NULL
+        DEFAULT '{}'`, so rows predating it read as authorizing nothing.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -258,8 +178,7 @@ class PlanApprovalStore:
 class _Decision:
     """One recorded decision, with the moment it was spent — the in-memory row of `plan_approvals`.
 
-    A mutable record rather than a tuple precisely because `consumed_at` is the one field that
-    changes after the fact, exactly as migration 034 makes it the one column an UPDATE may touch.
+    Mutable because `consumed_at` changes after the fact.
     """
 
     session_id: str
@@ -273,24 +192,9 @@ class _Decision:
 class InMemoryPlanApprovalStore:
     """The same contract for a deployment whose sessions are in-process too.
 
-    Append-only like its Postgres sibling, and for the same reason: a second decision on one plan
-    is a second thing a person did, not an edit of the first, so a rejection after an approval
-    revokes rather than overwrites, and re-approving an unchanged plan re-arms it. Reading the last
-    matching entry and folding `consumed_at` into the verdict reproduces `_LATEST` exactly; spending
-    the latest unspent approval reproduces `_CONSUME`.
-
-    It is *not* a test double. It is the backend a `session_store="memory"` deployment gets, and
-    the CLI is a real one of those — so the harness gate holds there rather than being waived, and
-    what it holds against has precisely the lifetime of the session state it authorizes.
-
-    **The list is append-only and `_latest` scans it backwards, and that is measured rather than
-    defended.** A review filed the unbounded growth as a defect; the numbers say otherwise, so they
-    are here instead of a bounded structure nobody needs. At 100 decisions — a long CLI session —
-    the worst-case lookup is 0.005 ms; at 10,000 it is 0.2 ms and 0.6 MB; at 200,000, which no
-    process reaching this backend will see, 3.5 ms and 12.8 MB. The shipped chart sets
-    `session_store="postgres"`, so a deployed fleet uses `PlanApprovalStore` and never this. Adding
-    an eviction policy here would buy nothing and cost a second definition of "which approval is
-    live" — the one thing the two backends must not disagree about.
+    Not a test double: it is the backend `session_store="memory"` deployments (the CLI) get, so the
+    gate holds there too. Append-only and scanned backwards to reproduce `_LATEST` exactly; growth
+    is bounded in practice by one process's session and deployed fleets use Postgres.
     """
 
     def __init__(self) -> None:
@@ -346,16 +250,8 @@ class InMemoryPlanApprovalStore:
 def plan_approval_store() -> ApprovalStore:
     """The approval store this deployment gets: durable where its sessions are durable.
 
-    One instance per process, because the two callers must see the same decisions: the front door's
-    `POST /sessions/{id}/plan/decision` writes, and `chemclaw.agent.plan_gate` reads. Under Postgres
-    that would hold anyway; under the in-memory backend a second instance would be a second, empty
-    store, and an approval recorded through the route would be invisible to the gate — which fails
-    closed, so the symptom would be "approving does nothing" rather than anything unsafe, but it
-    would still be broken.
-
-    Gated on `session_store` for the reason the module docstring gives, and matching the polarity
-    `default_audit_sink` and `history_provider` already use: that switch is a deployment's statement
-    that a Postgres exists and durable records belong in it.
+    One instance per process so the decision route and `plan_gate` see the same in-memory store.
+    Gated on `session_store`, like `default_audit_sink` and `history_provider`.
     """
     if settings.session_store == "postgres":
         return PlanApprovalStore()

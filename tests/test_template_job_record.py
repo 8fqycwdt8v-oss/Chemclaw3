@@ -1,23 +1,8 @@
-"""A template run leaves a durable record — and used to leave none at all.
+"""A template run leaves a durable `job_records` row.
 
-`record_job` had exactly one caller in this tree, `durable/connector_job.py`, and the omission was
-invisible from every direction: a template run pushed a completion event to its session, returned
-every step's result, and ended. What it did not do was write a `job_records` row, so:
-
-- `find_past_jobs` could never return it — nine shipped `run_*` procedures, permanently absent from
-  the retrospective view of "what has this system run";
-- `get_durable_job_status` answered for its id only until Temporal retained the history away, and
-  `null` thereafter, while `agent/durable_tools.py` said in the present tense that it "answers for
-  finished jobs indefinitely";
-- a failing run left nothing anywhere, which is the run somebody actually goes looking for.
-
-`hazard-briefing` is the case that makes it concrete: its entire product is a chemist-facing brief,
-and the brief was unrecoverable the moment the conversation closed.
-
-These tests drive the two pure builders rather than the workflow. That is deliberate and is the same
-split `job_record_for` already takes — the workflow needs a live broker, and "the record carries
-what ran, for whom, and what every step produced" is a property the offline suite should hold rather
-than one only CI ever checks.
+Without it `find_past_jobs` cannot return the run, `get_durable_job_status` answers only while
+Temporal retains the history, and a failed run leaves nothing. These tests drive the two pure
+builders offline, the same split `job_record_for` takes; the workflow test needs a broker.
 """
 
 from pathlib import Path
@@ -78,11 +63,9 @@ def _run(session_id: str = "sess-1") -> TemplateRunInput:
 
 
 def test_a_finished_template_run_records_what_it_ran_and_what_each_step_produced() -> None:
-    """The row reconstructs the run without Temporal, without the chat and without the graph.
+    """The row reconstructs the run without Temporal, the chat or the graph.
 
-    Every step is kept rather than only the last, because a fixed procedure's whole value is being
-    able to show what each stage produced — the same argument `TemplateRunResult` makes for keeping
-    them in the return value, applied to the copy that outlives the workflow.
+    Every step is kept, since a fixed procedure's value is showing what each stage produced.
     """
     results: dict[str, Any] = {"screen": {"flags": ["peroxide"]}, "write": "the brief text"}
     record = template_job_record("wf-1", _run(), results, "template 'hazard-briefing' completed")
@@ -100,25 +83,19 @@ def test_a_finished_template_run_records_what_it_ran_and_what_each_step_produced
 
 
 def test_a_template_run_records_no_rationale_and_that_is_the_design() -> None:
-    """Empty means "a declared procedure, launched by name", never a forgotten field.
+    """A template run records no rationale, by design.
 
-    A connector job's payload is a decision space or a geometry and says nothing about intent, so
-    its rationale is the one thing no other store holds. A template's `job` column names a reviewed
-    `data/templates/<name>.yaml` whose own `summary` states what the procedure is for — copying
-    that into a field documented as *the requester's own words* would be asserting an attribution
-    nobody wrote.
+    The rationale field holds the requester's own words; a template is a reviewed procedure launched
+    by name, and copying its `summary` there would assert an attribution nobody wrote.
     """
     assert template_job_record("wf-1", _run(), {}, "done").rationale == ""
 
 
 def test_a_connector_job_still_cannot_be_recorded_without_a_rationale() -> None:
-    """The guarantee is pinned where it actually lives, now that the model no longer carries it.
+    """A connector job still cannot be launched without a rationale.
 
-    `JobRecord.rationale` used to be `min_length=1`, and relaxing it looks like a weakening of the
-    connector-job contract. It is not: that contract was never enforced by this model.
-    `connectors/jobs.py` refuses a blank rationale *at the launcher*, with a message written for
-    the model, and its own comment says the check belongs there. This test is the assertion that
-    the refusal is still real — if it is ever moved back onto the model, this fails and says so.
+    The guarantee lives in `connectors/jobs.py`'s launcher, not in `JobRecord`; this fails if it is
+    moved.
     """
     from chemclaw.connectors import jobs
 
@@ -131,11 +108,10 @@ def test_a_connector_job_still_cannot_be_recorded_without_a_rationale() -> None:
 
 
 def test_a_failed_template_run_records_where_it_stopped_and_keeps_the_steps_that_ran() -> None:
-    """A run that failed is the one somebody goes looking for, and it used to leave nothing.
+    """A failed template run records where it stopped and keeps the steps that ran.
 
-    `summary` stays empty because a summary is what a run *produced*; the reason goes in
-    `failure_reason`, so a listing can tell a result from a failure without opening either — the
-    same pair of columns `failed_job_record` argues for one module over.
+    `summary` stays empty and the reason goes in `failure_reason`, so a listing can tell a result
+    from a failure.
     """
     completed: dict[str, Any] = {"screen": {"flags": []}}
     record = failed_template_record("wf-2", _run(), "write", "the model timed out", completed)
@@ -144,11 +120,8 @@ def test_a_failed_template_run_records_where_it_stopped_and_keeps_the_steps_that
     assert record.summary == ""
     assert "write" in record.failure_reason
     assert "the model timed out" in record.failure_reason
-    # The four steps a five-step procedure completed before dying are real work, not noise — and
-    # since they are what the next attempt resumes from, the row also says which version of the
-    # template produced them. A run's id is a hash of the name and the inputs and says nothing
-    # about the steps, so without this a relaunch after an edit would fold one procedure's results
-    # into another's.
+    # Completed steps are what the next attempt resumes from, so the row records the template
+    # version that produced them; a run's id hashes only the name and inputs.
     assert record.result == {
         "steps": completed,
         "template_fingerprint": template_fingerprint(_run().template),
@@ -156,11 +129,10 @@ def test_a_failed_template_run_records_where_it_stopped_and_keeps_the_steps_that
 
 
 def test_a_step_stopped_by_a_cancellation_is_recorded_as_cancelled() -> None:
-    """A cancelled step reaches the failure path wrapped, and the row says what the broker says.
+    """A step stopped by a cancellation is recorded as cancelled.
 
-    `_run_wave` re-raises a bare `CancelledError`, but a step whose activity or child reports the
-    cancellation as its cause arrives as `_StepFailed`; `connector_job.ended_state` reads either,
-    so the template's row agrees with `GET /jobs/{id}` the way a connector job's now does.
+    A step reporting cancellation as its cause arrives as `_StepFailed`; `connector_job.ended_state`
+    reads either form, so the row agrees with `GET /jobs/{id}`.
     """
     from temporalio.exceptions import CancelledError
 
@@ -203,16 +175,11 @@ def test_a_run_off_the_service_path_records_an_empty_session_rather_than_failing
 
 
 async def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_own() -> None:
-    """Driven on a real broker, because the builders being right proves nothing about the caller.
+    """A real template run writes its row, and a failing one writes its own.
 
-    This is the test that would have caught the original defect. Both records above could have been
-    perfect and `TemplateWorkflow.run` still call neither — which is exactly the state this tree was
-    in, and exactly the shape `record_kept_chunks` was in when it shipped with no caller and a test
-    that invoked it directly. A helper nothing calls is covered and dead.
-
-    The `record_job` activity is stubbed rather than reaching Postgres: what is under test is that
-    the workflow *asks* for a record on both paths and with the right content, not that the store
-    can write one — `tests/test_job_record_postgres.py` owns that half.
+    Correct builders prove nothing if `TemplateWorkflow.run` never calls them. `record_job` is
+    stubbed: the test is that the workflow asks for a record with the right content on both paths;
+    `tests/test_job_record_postgres.py` owns the store.
     """
     from datetime import timedelta
 
@@ -298,16 +265,11 @@ async def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_o
 
 
 def test_a_cancelled_template_run_is_listed_as_cancelled_not_failed() -> None:
-    """`DELETE /jobs/{id}` on a running template: the row exists, and it agrees with the detail.
+    """A cancelled template run is listed as cancelled, not failed.
 
-    Measured on a real-time dev server before the fix: cancelling a run mid-step closed it
-    **FAILED**, not CANCELED, and its row said `failed`. The step's `ActivityError` carries the
-    `CancelledError` as its cause, and `TemplateWorkflow.run` re-raised it `from None`, which
-    erases the cause the SDK reads to decide a cancellation — so the broker, `GET /jobs/{id}` and
-    `GET /jobs` all said "failed" for a run a person stopped. A cancellation that surfaces bare
-    rather than through the step (`_run_wave` re-raises those unwrapped) wrote no row at all; that
-    branch now records too. The cancel reaches the in-flight step the way `cancel_durable_job`
-    delivers it.
+    The step's `ActivityError` carries the `CancelledError` as its cause, which the workflow must
+    not erase, so the broker, `GET /jobs/{id}` and `GET /jobs` agree. A cancellation surfacing bare
+    also writes a row.
     """
     import asyncio
     from datetime import timedelta
@@ -401,10 +363,8 @@ def test_a_cancelled_template_run_is_listed_as_cancelled_not_failed() -> None:
 def test_a_relaunch_after_a_cancel_resumes_the_steps_that_finished() -> None:
     """Cancel after step one finished, relaunch the same id: step one is not run again.
 
-    Recording a cancel as `cancelled` rather than `failed` must not turn a relaunch into a rerun
-    from step one: `completed_steps` gated resume on `state == "failed"`, so it would have — and a
-    finished step's result is not recomputed (D-011). Driven end to end on a real-time dev server:
-    the record the cancelled run writes is the one the relaunch's real `completed_steps` reads.
+    Resume must accept a cancelled run as well as a failed one, since a finished step is never
+    recomputed.
     """
     import asyncio
     from datetime import timedelta
@@ -504,12 +464,10 @@ def test_a_relaunch_after_a_cancel_resumes_the_steps_that_finished() -> None:
 async def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_template(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The three conditions, against a real row rather than a stubbed store.
+    """Resume answers only for a failed run of the same template.
 
-    Each is a way resume could be *wrong* rather than merely absent, which is why none of them is
-    left to the caller: `job_records` is upserted on `job_id`, so a completed run's row would
-    otherwise be replayed as a resume of itself; and a run's id is a hash of the template name and
-    its inputs, so an edited file relaunches under the same id carrying a different procedure.
+    `job_records` is upserted on `job_id`, so a completed run would otherwise resume itself, and an
+    edited template relaunches under the same id with a different procedure.
     """
     from chemclaw.core.config import settings
     from chemclaw.durable.job_record import record_job

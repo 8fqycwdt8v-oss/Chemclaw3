@@ -1,17 +1,8 @@
-"""Heartbeat-while-waiting: one idiom, extracted once it had three independent copies (Conn-F2).
+"""Heartbeat-while-waiting for an activity wrapping one opaque call.
 
-`connectors.calc`'s two CREST-backed jobs (ensemble, complex) beat a Temporal activity's
-heartbeat at a cadence derived from a *configured* heartbeat timeout, because each wraps a wait
-with nothing finer to report than "still running" — a single opaque CREST subprocess with no unit
-boundary to hook a progress callback into. `connectors.bo`'s BoFire fit/acquisition step is the
-third instance of exactly the same shape (the fit is one opaque call into `botorch`, with the same
-"no unit to report progress at" property), which is the Rule of Three CLAUDE.md asks for: a third
-copy is a helper, not a pattern.
-
-Deliberately narrow: this covers the "opaque single call" case only. `connectors.calc`'s
-species/scan-point loops have a natural per-iteration boundary already and heartbeat directly at it
-(`activity.heartbeat` passed as `progress`) — that shape needs no wrapper, and forcing it through
-this one would only hide the loop it is already heartbeating from.
+Used where there is nothing finer to report than "still running" — a single CREST subprocess, a
+BoFire fit. Loops with a natural per-iteration boundary heartbeat directly at it and need no
+wrapper.
 """
 
 import asyncio
@@ -23,9 +14,8 @@ from temporalio import activity
 
 _Result = TypeVar("_Result")
 
-# Beats per heartbeat timeout. Several, not one: a single beat placed exactly at the deadline
-# leaves no margin for scheduling jitter, and Temporal only needs to hear *something* before the
-# configured timeout lapses.
+# Beats per heartbeat timeout: several, so scheduling jitter cannot push the only beat past the
+# deadline.
 _HEARTBEATS_PER_TIMEOUT = 4.0
 
 
@@ -34,33 +24,13 @@ async def beating(
 ) -> _Result:
     """Await `awaitable` while heartbeating, so a long opaque run is not declared dead.
 
-    `heartbeat_timeout_seconds` is the caller's own configured `heartbeat_timeout` for this
-    activity — the beat interval is derived from it rather than fixed, so a deployment that
-    shortens the timeout shortens the beat with it and the two can never drift apart. A timer
-    rather than a progress callback because there is genuinely nothing to report inside the
-    wait: the honest signal is "still running", and pretending to know how far along it is would
-    be a worse lie than saying nothing.
+    The beat interval is derived from the caller's `heartbeat_timeout_seconds`, so the two cannot
+    drift apart.
 
-    **No exit from this wrapper leaves the wrapped work running.** The awaitable runs as a task so
-    the timer can run beside it, and `asyncio.wait` does *not* cancel what it was waiting on when
-    the waiter is cancelled — so without the `finally` below, an activity that stopped waiting
-    would return while its real work carried on detached, still writing.
-
-    Two things make that a `finally` and not an `except asyncio.CancelledError`, and both were
-    measured rather than reasoned:
-
-    - **Cancellation is not the only way out.** `activity.heartbeat` raises outside an activity
-      context, and can raise inside one if the details payload fails to serialise. A handler keyed
-      on `CancelledError` let that exception past while the task ran on — the same detached-write
-      defect through a different door.
-    - **`task.cancel()` only files the request.** Re-raising immediately after it unwound the
-      caller while the work was still inside its own `except`/`finally`, which is where the DB
-      commit lives: the window shrank from unbounded to "the length of the work's cleanup" rather
-      than closing. Awaiting the cancelled task is what makes `beating(x)` behave-alike to
-      `await x` — the caller does not resume until the work has finished unwinding — and that is
-      the only thing a caller wrapping an existing `await` in it can reasonably assume. It
-      inherits the same limit `await x` has: work that refuses cancellation blocks here exactly as
-      it would there.
+    No exit from this wrapper leaves the wrapped work running: the `finally` cancels the task and
+    then awaits it, so the caller resumes only after the work has finished unwinding (including its
+    own cleanup, where a DB commit may live) — the same behaviour as `await x`. A `finally` rather
+    than `except CancelledError`, because `activity.heartbeat` itself can raise.
     """
     task = asyncio.ensure_future(awaitable)
     interval = max(1.0, heartbeat_timeout_seconds / _HEARTBEATS_PER_TIMEOUT)

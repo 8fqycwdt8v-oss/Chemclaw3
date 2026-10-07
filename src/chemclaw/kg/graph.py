@@ -1,9 +1,8 @@
-"""NetworkX index of the knowledge graph (plan step 2.3).
+"""NetworkX index of the knowledge graph.
 
-Builds a directed graph from a directory of notes: nodes are note ids (each
-carrying its parsed `Note`), edges are `[[wikilink]]` relations. Retrieval is
-graph traversal (D-004), so this indexer is the substrate the query skill walks
-(1–2 hops), not a vector index.
+Builds a directed graph from a directory of notes: nodes are note ids (each carrying its parsed
+`Note`), edges are `[[wikilink]]` relations. Retrieval is graph traversal (1-2 hops), not a vector
+index. Parsing and assembly are cached per directory behind a stat fingerprint.
 """
 
 import contextlib
@@ -31,108 +30,47 @@ log = logging.getLogger(__name__)
 # would tune, and a hung `git` on the scheduled reindex path must not hold the pass open.
 _GIT_REVISION_TIMEOUT_SECONDS = 10
 
-# A directory's stat fingerprint: (path, mtime_ns, size) per note file. Cheap *per file* (stat only,
-# no read/parse) and busts on any add, edit, or delete — so the cache below skips the expensive
-# parse when nothing changed (KM-14). It is still O(notes) in total, which is why
-# `graph_cache_ttl_seconds` bounds how often it runs (DA-5).
-#
-# Public, like `cached_notes` that hands it out: it is the key type of every cache derived from the
-# corpus, here and in `chemclaw.kg.conflicts`, and a derived cache cannot annotate its own key
-# without naming it.
+# A directory's stat fingerprint: (path, mtime_ns, size) per note file. Stat-only, busts on any add,
+# edit or delete; still O(notes), so `graph_cache_ttl_seconds` bounds how often it runs. Public
+# because every corpus-derived cache (here and `kg.conflicts`) keys on it.
 NotesFingerprint = frozenset[tuple[str, int, int]]
 
-# Parsed-notes cache, keyed by directory. Guarded by a lock because retrieval offloads `load_notes`
-# to worker threads (`asyncio.to_thread`). One entry per directory; production reads one
-# `knowledge_dir`, so this does not grow unbounded.
-#
-# **That sentence is about the number of entries, and it was read as being about memory.** One
-# entry is the whole parsed corpus, held for the life of the process, so the resident cost tracks
-# the corpus — measured at ~5.1 kB per note of realistic size (+101 MB warm on 20 000 notes,
-# reclaimed only by `invalidate_cache`), in every front-door, worker and mcp-face pod that mounts
-# the tree. Since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` the agent grows that
-# corpus itself, so it is usage-rate rather than curation-rate.
-#
-# **A note-count ceiling that falls back to the uncached parse is not the fix**, and that was
-# measured rather than reasoned about: with `graph_cache_enabled` false there is no cache *and* no
-# `_corpus_lock`, so every concurrent reader parses and assembles its own full copy. On the same
-# 20 000-note corpus, four concurrent readers peaked at +194 MB uncached against +102 MB cached.
-# The cache is one shared copy of what a query has to materialize anyway; refusing it multiplies
-# the peak by the number of readers, which is the OOM such a ceiling would exist to prevent.
+# Parsed-notes cache, keyed by directory and guarded by a lock because `load_notes` runs in worker
+# threads. One entry holds the whole parsed corpus for the process's life, so memory tracks corpus
+# size. Disabling the cache does not reduce peak memory: each concurrent reader then parses its own
+# full copy.
 _CACHE_LOCK = threading.Lock()
 _NOTES_CACHE: dict[str, tuple[NotesFingerprint, list[Note]]] = {}
 
-# Per-**file** parse results, keyed by directory then by path, so a corpus that changed by one note
-# is re-parsed by one note (`D-2026-09-06-one-note-changed-is-not-the-corpus-changed`).
+# Per-file parse results, keyed by directory then path, so a corpus that changed by one note is
+# re-parsed by one note.
 #
-# **The cache above answers "has anything changed"; this one answers "what".** `invalidate_cache`
-# clears every directory on every note write — deliberately, because under-clearing serves a note
-# the caller just wrote as absent — and `kg/git_writer.py` calls it on every write. Since
-# `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` the agent is a writer, so the corpus
-# changes at *usage* rate, and the next reader paid a full re-parse of everything: measured,
-# 155 / 688 / 2,969 ms of `load_notes` at 1,000 / 5,000 / 20,000 notes, and 4,032 ms of
-# `build_graph` after touching one file. A third of that is taken from the event loop even under
-# `to_thread`, because the parse holds the GIL.
-#
-# The entry is `(mtime_ns, size, outcome)` — the same two stat fields `_dir_fingerprint` already
-# compares, so the two agree by construction rather than by a second convention. The outcome is the
-# parsed `Note`, `None` for a file `read_note` says is not a note, or the `NoteError` message, so a
-# reused entry re-emits exactly the warning, the metric and the summary count a fresh parse would:
-# the log's denominator is a property of the corpus, not of what this process happened to re-read.
-#
-# **Not cleared by `invalidate_cache` by default, which is the whole point.** It holds no aggregate
-# — every entry is independently keyed on the file's own stat — so it cannot serve a stale corpus
-# the way `_NOTES_CACHE` can. Entries for files that are gone are dropped by the scan that no longer
-# mentions them. Memory is dict overhead over `Note` objects `_NOTES_CACHE` is holding anyway.
-#
-# **"By default" is new, and the exception is a caller that pairs this cache against a *content*
-# hash** (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`). The
-# argument above turns on the two being wrong in the same cases: a write invisible to `(mtime_ns,
-# size)` was invisible to both. `note_file_fingerprints` stopped being a stat pair and became a
-# hash of the file's bytes, so it now sees a same-size, same-mtime edit that this cache does not —
-# measured, the fingerprint moves and `load_notes` returns the previous body. Anyone diffing the
-# two must ask for `reparse=True`.
+# `_NOTES_CACHE` answers "has anything changed"; this answers "what". Each entry is `(mtime_ns,
+# size, outcome)`, the same stat fields `_dir_fingerprint` compares; the outcome is the parsed
+# `Note`, `None` for a non-note file, or the `NoteError` message, so a reused entry re-emits the
+# same warning and counts as a fresh parse would. Not cleared by `invalidate_cache` by default,
+# since each entry is keyed on its own file's stat; entries for vanished files are dropped by the
+# next scan. A caller comparing against the content hash of `note_file_fingerprints` must pass
+# `reparse=True`, because a same-size, same-mtime edit is invisible to the stat.
 _PARSED_FILES: dict[str, dict[str, tuple[int, int, Note | str | None]]] = {}
 
-# Assembled-graph cache, same key and same fingerprint as `_NOTES_CACHE`. The notes cache spares the
-# parse, but every `find_notes`/`expand_note` call still re-added every node and edge — measured at
-# ~86 ms per call for 10k notes, and the agent's documented flow (`find_notes` then `expand_note`)
-# pays it twice per turn. Caching the assembled graph makes a warm interactive query O(1) work plus
-# the stat scan, instead of O(N) node/edge insertion.
+# Assembled-graph cache, same key and fingerprint as `_NOTES_CACHE`, so a warm query skips re-adding
+# every node and edge.
 _GRAPH_CACHE: dict[str, tuple[NotesFingerprint, nx.DiGraph]] = {}
 
-# When each directory was last stat-scanned (`time.monotonic`), so `graph_cache_ttl_seconds` can
-# skip the scan itself on a warm query — the scan is O(notes) and is paid even on a cache hit, so
-# it is the floor on interactive latency (DA-5). Monotonic, not wall-clock: a clock adjustment
-# must not make a scan look arbitrarily old (harmless) or arbitrarily fresh (a stale read).
+# When each directory was last stat-scanned, so `graph_cache_ttl_seconds` can skip the scan on a
+# warm query. Monotonic, so a clock adjustment cannot make a scan look fresh.
 _LAST_SCAN: dict[str, float] = {}
 
-# One re-entrant lock per directory, held across the *filling* of the caches above rather than
-# merely around the dict accesses — the distinction `chemclaw.kg.conflicts` already draws for the
-# conflict index and this module did not.
-#
-# Measured, on a 2,000-note corpus: one thread parsing a cold tree costs 198 ms, four concurrent
-# threads cost 2,521 ms and eight cost 6,219 ms. Eight callers did not pay 8× the work, they paid
-# 31×, because eight parses of the same tree contend on the GIL as well as duplicating each other.
-# That shape is not exotic here: a `gather_evidence` sweep runs its sources under `asyncio.gather`
-# with `load_notes` offloaded to a thread each, and every cold start and every `invalidate_cache`
-# (a note write, the note reindex) puts them all on a miss together.
-#
-# Re-entrant because `build_graph` holds it across `cached_notes`, so the parse and the assembly
-# behind one fingerprint happen once between all callers rather than once each.
-#
-# Never removed, including by `invalidate_cache`: dropping a lock another thread is standing in
-# would hand the next caller a different lock object and quietly restore the duplication this
-# exists to prevent. A `threading.RLock` per notes directory is a few dozen bytes and production
-# reads one directory.
+# One re-entrant lock per directory, held across filling the caches above, so concurrent cold
+# readers share one parse instead of duplicating it under GIL contention. Re-entrant because
+# `build_graph` holds it across `cached_notes`. Never removed, including by `invalidate_cache`:
+# replacing a lock another thread is waiting on would reintroduce the duplication.
 _COMPUTE_LOCKS: dict[str, threading.RLock] = {}
 
-# The newest note's mtime per knowledge tree, with the `time.monotonic()` of the scan that found it:
-# `path -> (scanned_at, newest_mtime or None)`. `None` is a tree holding no note, kept as a cached
-# answer rather than a cache miss so an empty volume does not rescan on every scrape.
-#
-# Separate from `_LAST_SCAN` above, which stamps the *notes* cache: that one is only refreshed when
-# somebody reads the graph, so binding the gauge to it would make the metric's freshness depend on
-# whether a chemist happened to run a query.
+# Newest note mtime per tree with the monotonic time of the scan that found it:
+# `path -> (scanned_at, newest_mtime or None)`; `None` is a cached "no notes". Separate from
+# `_LAST_SCAN` so the gauge's freshness does not depend on someone querying the graph.
 _NEWEST_MTIME: dict[str, tuple[float, float | None]] = {}
 
 
@@ -140,8 +78,7 @@ _NEWEST_MTIME: dict[str, tuple[float, float | None]] = {}
 def _corpus_lock(key: str) -> Iterator[None]:
     """Hold the computation lock for one notes directory, unless caching is off.
 
-    With `graph_cache_enabled` false there is nothing to fill and nothing to share, so every
-    caller is asking for its own parse and serializing them would answer a question nobody asked.
+    With caching off there is nothing to share, so callers are not serialized.
     """
     if not settings.graph_cache_enabled:
         yield
@@ -155,42 +92,18 @@ def _corpus_lock(key: str) -> Iterator[None]:
 def invalidate_cache(notes_dir: Path | None = None, *, reparse: bool = False) -> None:
     """Drop cached notes/age so the next read re-scans immediately (the explicit bust hook).
 
-    The TTL window trades a little freshness for latency, but a change this process *makes* should
-    never wait it out — so every local writer of notes (today: `kg/git_writer.py`) calls this
-    and the authoring loop stays instant. Clearing every directory by default is deliberate: note
-    writes are rare next to queries, so the cost of over-clearing is one extra scan, while the cost
-    of under-clearing is serving a note the caller just wrote as absent.
+    Every local writer of notes calls this so its own write is visible at once rather than after the
+    TTL. Clearing every directory by default is deliberate: over-clearing costs one scan,
+    under-clearing serves a just-written note as absent.
 
-    **`_GRAPH_CACHE` is deliberately kept, and it is the one cache here that can be**, which is
-    what makes `_patch_graph` reach the path it exists for. Every other entry dropped below is
-    reachable without re-checking the corpus: `_LAST_SCAN` is what lets `_within_ttl` hand back
-    `_NOTES_CACHE` *without* a scan, so a stale pair there is served as current. The graph cache has
-    no such window — `build_graph` returns its entry only on exact fingerprint equality, and
-    otherwise uses it purely as the base to patch. Clearing it did not buy freshness; it bought a
-    full reassembly of the whole corpus after every note the agent writes, which since
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` is every turn that learns something.
-
-    It adds no class of staleness that is not already accepted: after this call a file whose
-    `(mtime_ns, size)` has not moved is served from `_PARSED_FILES` unchanged
-    (`D-2026-09-06-one-note-changed-is-not-the-corpus-changed`), so a write invisible to the
-    *stat* is already invisible to the parse. The graph is keyed on the same two stat fields and can
-    therefore be wrong in exactly the same cases and no others.
-
-    **That was a claim about `note_file_fingerprints` too, and it stopped being true when that
-    function became a content hash** — which is what `reparse` is for
-    (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`). A caller that
-    diffs a *hash* against the notes this returns is comparing two answers to "what changed" that
-    no longer agree, and the direction of the disagreement is the harmful one: the hash says
-    changed, the parse hands back the old body, and whatever is derived from the pair is written
-    under a digest that will match for ever. `reparse=True` drops the per-file parses as well, at
-    the cost of a full re-parse — which only the re-index job pays, because it is about to
-    re-embed the corpus anyway.
+    `_GRAPH_CACHE` is kept: `build_graph` returns it only on exact fingerprint equality and
+    otherwise uses it as the base for `_patch_graph`, so it cannot be served stale. The per-file
+    parse cache is kept too unless `reparse` is set.
 
     Args:
         notes_dir: The corpus to drop, or `None` for every one this process has read.
-        reparse: Also drop the per-file parse cache, so the next read comes off disk. Needed only
-            by a caller that pairs the result against a content hash; a note write does not, and
-            paying it there is the cost `D-2026-09-06` measured and removed.
+        reparse: Also drop the per-file parse cache, so the next read comes off disk. Needed only by
+            a caller that pairs the result against a content hash, such as the re-index job.
     """
     with _CACHE_LOCK:
         if notes_dir is None:
@@ -211,15 +124,9 @@ def invalidate_cache(notes_dir: Path | None = None, *, reparse: bool = False) ->
 def scan_notes_dir(notes_dir: Path) -> Iterator[tuple[Path, os.stat_result]]:
     """Every note file under `notes_dir` with its stat, in path order.
 
-    The one definition of "what is a note file here" and the one place the race is tolerated. It
-    was written out four times — twice in this module, once in `chemclaw.kg.validate`, and once
-    more in `chemclaw.evals.retrieval`, whose own comment conceded it was "matching
-    `chemclaw.kg.graph`'s fingerprint tolerance". Four copies of a glob is four chances for one of
-    them to disagree about the extension, the recursion or the ordering.
-
-    A file that vanishes between listing and stat (a `git pull` rewriting the tree under a live
-    query) is skipped rather than raised: it simply drops out, which reads correctly as "changed"
-    to a caller diffing fingerprints and never crashes a query.
+    The one definition of "what is a note file here". A file that vanishes between listing and stat
+    (e.g. a `git pull` under a live query) is skipped, which reads as "changed" to a caller diffing
+    fingerprints.
     """
     for path in sorted(notes_dir.rglob("*.md")):
         try:
@@ -236,67 +143,23 @@ def _dir_fingerprint(notes_dir: Path) -> NotesFingerprint:
     )
 
 
-#: The fingerprint of a note file that is on disk and would not open. Never equal to a `sha256:`
-#: digest, so the note re-embeds once when it becomes readable again; constant, so it does not
-#: re-embed every pass while it stays broken. Its real job is to keep the note inside
-#: `reindex_notes`'s `keep` set, which is what stops a transient I/O fault retiring an index row.
+#: The fingerprint of a note file that exists but would not open. Never equal to a `sha256:` digest
+#: and constant, so the note stays in `reindex_notes`'s `keep` set (a transient I/O fault does not
+#: retire its index row) without re-embedding every pass.
 UNREADABLE = "unreadable"
 
 
 def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
     """A per-note change signal: `note id -> "sha256:<hex>"` over the file's own bytes.
 
-    Keyed per note id (the file's stem — `note.type/note.id.md` is the one filename shape a note is
-    written under, `chemclaw.kg.record.NoteFile`) rather than folded into the single aggregate
-    `_dir_fingerprint` builds for the whole-tree cache. One aggregate can only answer "did anything
-    change"; this answers "which ones", which is what an incremental rebuild needs —
-    `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its entry here
-    differs from what was stored at the last index run, instead of the whole corpus on every
-    scheduled pass (D-2026-08-02-embed-only-what-changed).
+    Keyed by note id (the file stem) so `retrieval.vector_index.reindex_notes` re-embeds only the
+    notes whose entry differs from the last index run. A content hash rather than `mtime_ns:size`,
+    because the index is shared between pods while each pod's checkout sets its own mtimes; the
+    algorithm prefix makes the format visible in stored rows.
 
-    **It hashes the content rather than reading `mtime_ns:size`, because the thing it is
-    compared against is shared between pods and an mtime is not**
-    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`).
-    `note_index` is one table; the checkout under it is an `emptyDir` each pod's sidecar clones,
-    and a checkout sets a file's mtime when it *writes* the file. So two pods holding the identical
-    commit produce entirely disjoint fingerprint sets, and each pod's pass reads every note the
-    other just indexed as changed. Driven over two real clones of one commit against one index, the
-    incremental rebuild degenerated to a full one: 3 of 3 notes re-embedded on every pass after the
-    first, for ever. A hash of the bytes is a property of the content, which is the thing the two
-    pods actually share.
-
-    The cost is one read per note per scan where a stat costs none — the trade D-2026-08-02 declined
-    when the alternative was an embedding call, and now the cheaper side of that same trade by
-    orders of magnitude. `_dir_fingerprint` keeps the stat deliberately: its cache is *per process*,
-    so one checkout's mtimes are all it ever compares, and it is paid on interactive query latency
-    (DA-5) rather than once an hour.
-
-    The digest carries its algorithm as a prefix so the format change is visible in a stored row
-    rather than inferred: no `mtime_ns:size` string can equal a `sha256:` one, so every row written
-    before this reads as changed exactly once and the corpus is re-embedded one final time on
-    upgrade — the same one-time cost migration 035 paid to introduce the column.
-
-    Two files claiming one id resolve **first in path order**, the same way `_parse_notes` and
-    `chemclaw.kg.validate` resolve one. It used to be a dict comprehension, where the *last* file
-    won — so the served corpus held one note and the reindex diffed the other, and `reindex_notes`
-    could embed one file's text under the other's id. Two scans of one tree disagreeing about which
-    file is a note is worse than either answer.
-
-    **A file that cannot be read keeps an entry, and that is not the same choice `scan_notes_dir`
-    makes one function up.** That one drops a file whose *stat* fails, because a file that vanished
-    between the listing and the stat is a file that is gone. Reading opens a second, wider window —
-    a permission change or an I/O error leaves a file that is still very much there — and dropping
-    those would quietly widen a hole `reindex_notes` deliberately closed: it builds its `keep` set
-    from this dict precisely so a note it cannot *parse* is not retired from the index, measured at
-    40 rows lost per 40 broken notes. A note that will not open is a stricter case of the same
-    thing, so it gets the same protection: `UNREADABLE` keeps it in `keep`, and being a constant it
-    does not churn an embedding either — the note is absent from `load_notes` too, so it is never
-    in `changed`. When the file opens again its bytes are compared against what was indexed, so it
-    is re-embedded only if they actually differ. **That last clause is measured rather than
-    reasoned**: this docstring first claimed "re-embeds it exactly once", and driving it showed a
-    fault that heals to the same content costs *nothing*, because the stored digest was never wrong
-    in the first place. A stat-based signal could not have said that — the repair would have moved
-    the mtime.
+    Two files claiming one id resolve first in path order, as `_parse_notes` and `kg.validate` do. A
+    file that cannot be read keeps an entry (`UNREADABLE`) so the reindex does not retire it; once
+    readable, it re-embeds only if its bytes differ from what was indexed.
     """
     fingerprints: dict[str, str] = {}
     for path, _stat in scan_notes_dir(notes_dir):
@@ -327,30 +190,14 @@ def _git_stdout(notes_dir: Path, *args: str) -> str | None:
 def corpus_revision(notes_dir: Path) -> int | None:
     """How many commits this corpus's checkout has behind it, or `None` if unknowable.
 
-    **The one comparable fact two pods holding differently-aged clones of one corpus share.**
-    `note_index` is shared; the checkout under it is an `emptyDir` each pod's own sidecar
-    refreshes, so a pod cannot tell "this note was deleted" from "my sidecar has not run yet" by
-    looking at its own disk — and `reindex_notes` retiring on the second reading is
-    `D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`.
+    Lets pods with differently aged clones of one corpus compare which is newer, so `reindex_notes`
+    does not retire a note just because this pod's sidecar has not synced yet. A commit count (`git
+    rev-list --count HEAD`) is monotone under ancestry and needs no clock; a timestamp has second
+    resolution and a commit id is not orderable. Two divergent branches with equal counts cannot be
+    ordered, which a single-remote deployment never produces.
 
-    `git rev-list --count HEAD`, not a commit timestamp and not a commit id. A timestamp was the
-    first attempt and it does not work: `%cI` has second resolution, so two commits made in the
-    same second compare equal and the lagging pod retires the newer note anyway — a guard that
-    passes its own probe while doing nothing. A commit *id* is not orderable by a pod that has not
-    fetched the other side. A commit **count** is monotone under ancestry (a descendant reaches
-    strictly more commits than its ancestor), is one number, and involves no clock.
-
-    What it cannot order is two genuinely divergent branches with equal counts. That is not this
-    deployment — every pod's sidecar fetches one remote — and the failure there is the one the
-    prune already had, not a new one.
-
-    `None` is returned for every case where the answer is not knowable, and each is ordinary rather
-    than exceptional: a corpus that is not a git work tree (a tarball deploy, a developer's scratch
-    directory, every offline test), no `git` on PATH, or a repository with no commits. Callers must
-    read `None` as "no constraint" and behave as they did before this existed — a prune that
-    refuses without evidence would make a fresh deployment unable to ever remove a note.
-
-    One `git rev-list` per reindex pass, not per note.
+    `None` (not a work tree, no `git`, no commits) means "no constraint": callers behave as if this
+    did not exist.
     """
     out = _git_stdout(notes_dir, "rev-list", "--count", "HEAD")
     if out is None:
@@ -361,10 +208,8 @@ def corpus_revision(notes_dir: Path) -> int | None:
         return None
 
 
-#: `notes_dir -> (HEAD commit, note id -> the date its file was first committed)`, per process.
-#: Kept so a later call scans only the commits since the one it remembers: measured on a 10,000-note
-#: corpus written one commit per note, the full scan is ~2.9 s and the scan of the last 100
-#: commits 78 ms, so the hourly digest pays the full cost once per worker process.
+#: `notes_dir -> (HEAD commit, note id -> date its file was first committed)`, per process, so a
+#: later call scans only commits since the remembered one.
 _ARRIVALS: dict[Path, tuple[str, dict[str, date]]] = {}
 _ARRIVALS_LOCK = threading.Lock()
 
@@ -372,16 +217,10 @@ _ARRIVALS_LOCK = threading.Lock()
 def _added_since(notes_dir: Path, since: str | None) -> dict[str, date] | None:
     """Note id -> date of the commit that added its file, over `since..HEAD` (or all of history).
 
-    `--no-renames`, so a file's arrival is the commit that put *that path* there: a note moved
-    between type directories reads as arriving on the day it moved. That is the one false positive
-    this has, and it is the right direction for a digest — told once more, rather than never.
-
-    `--first-parent -m`, so a note is dated by the commit that brought it onto *this* branch. A
-    note arriving through a `--no-ff` merge (a merge-commit pull request into the knowledge repo)
-    was otherwise dated by its side-branch commit — measured, a note committed on a branch on
-    01-02 and merged on 02-01 read as 01-02 — so a subscriber told of everything up to 01-15
-    was never told of it at all. Walking first parents only, the merge commit's diff against the
-    branch it joined is where the file appears, with the merge's own date.
+    `--no-renames`: a note moved between type directories reads as arriving on the day it moved,
+    which errs toward telling a digest subscriber once more. `--first-parent -m`: a note merged
+    through a `--no-ff` merge is dated by the merge commit on this branch, not its side-branch
+    commit, so it is not dated before a subscriber's watermark.
     """
     revisions = [f"{since}..HEAD"] if since else []
     out = _git_stdout(
@@ -406,9 +245,8 @@ def _added_since(notes_dir: Path, since: str | None) -> dict[str, date] | None:
     # re-added arrives on its re-add — it is new again to anyone who was told it was gone.
     for line in out.splitlines():
         if line.startswith("\x00"):
-            # `%ct`, a Unix timestamp, rather than `%cs`: the latter is the date in the committer's
-            # own offset, so a note committed at 23:30 -05:00 read as a day earlier than the UTC
-            # watermark it is compared with, and was never reported.
+            # `%ct` (UTC timestamp) rather than `%cs` (committer's local date), so the day compares
+            # correctly against the UTC watermark.
             day = datetime.fromtimestamp(int(line[1:].strip()), UTC).date()
         elif line.endswith(".md") and day is not None:
             added.setdefault(Path(line).stem, day)
@@ -416,20 +254,12 @@ def _added_since(notes_dir: Path, since: str | None) -> dict[str, date] | None:
 
 
 def note_arrivals(notes_dir: Path) -> dict[str, date]:
-    """When each note *arrived* in this corpus: the date the commit that added its file was made.
+    """When each note arrived in this corpus: the date of the commit that added its file.
 
-    **A signal separate from `valid_from`, which answers a different question.** `valid_from` is
-    when a fact became true, and a note the model could not date carries none — correctly, because
-    defaulting it to today would be a false claim about chemistry. But a digest asks "what is new
-    to this subscriber", and for that the arrival is the answer; before this, `durable/digest`
-    read an undated note as never new, and 34 of the shipped corpus's 41 notes are undated.
-
-    Read from the notes repository's own history rather than stored anywhere, because every write
-    already goes through `kg/record.py`'s commit and every pod's clone carries the same commits:
-    a commit date is a property of the corpus, where a file mtime is a property of one checkout.
-
-    Empty where the corpus is not a git work tree or `git` cannot answer — the same "no constraint"
-    reading `corpus_revision` takes — so a caller behaves exactly as it did before this existed.
+    Separate from `valid_from` (when a fact became true, often unknown): a digest asks what is new
+    to a subscriber, and arrival answers that. Read from the notes repository's history, which every
+    pod's clone shares, unlike file mtimes. Empty when the corpus is not a git work tree or `git`
+    cannot answer, meaning "no constraint".
     """
     head = _git_stdout(notes_dir, "rev-parse", "HEAD")
     if head is None:
@@ -447,9 +277,8 @@ def note_arrivals(notes_dir: Path) -> dict[str, date]:
         since = cached[0]
     added = _added_since(notes_dir, since)
     if added is None:
-        # `rev-parse` answered, so this is a work tree and the scan itself failed — a timeout on a
-        # large cold corpus, an unsafe-directory refusal. Said, because the result reads exactly
-        # like a corpus with nothing new in it, and the next run pays the full scan again.
+        # `rev-parse` answered, so this is a work tree and the scan itself failed (timeout, unsafe
+        # directory). Logged because the empty result looks like "nothing new".
         log.warning(
             "kg.note_arrivals_unreadable: could not read when notes arrived in %s; undated notes "
             "are judged as they were before arrivals existed until this succeeds",
@@ -465,16 +294,8 @@ def note_arrivals(notes_dir: Path) -> dict[str, date]:
 def note_in(graph: "nx.DiGraph[str]", note_id: str) -> Note | None:
     """The note `note_id` names in `graph`, or `None` when the graph does not define one.
 
-    **`note_id in graph` is not that question, and the difference is a shipped defect.**
-    `_assemble_graph` mints a bare node for every cited-but-undefined link target — that is what
-    lets `dangling_links` find them — so an id cited by any note is a member of the graph whether
-    or not anything defines it. A caller testing membership therefore gets `True` for exactly the
-    ids that resolve to nothing.
-
-    Two callers asked this and spelled it differently: `agent.protocol_tools.condense_protocols`
-    read the `note` attribute and was right, `agent.graph_tools.expand_note` tested membership and
-    was wrong — so every `reaction-<id>` cited by a campaign or playbook skipped its store fallback
-    and raised "no note with id". One definition, so the two cannot disagree again.
+    Not the same as `note_id in graph`: `_assemble_graph` mints a bare node for every
+    cited-but-undefined link target, so membership is true for ids that resolve to nothing.
     """
     return graph.nodes[note_id].get("note") if note_id in graph else None
 
@@ -482,21 +303,9 @@ def note_in(graph: "nx.DiGraph[str]", note_id: str) -> Note | None:
 def dangling_links(notes: list[Note]) -> list[tuple[str, str]]:
     """Every `(source id, target id)` link in `notes` pointing at an id no note in `notes` defines.
 
-    Sorted, so two callers reporting it produce the same order. There were two implementations of
-    this — `chemclaw.kg.validate`, which fails a merge on it, and `chemclaw.kg.analytics`, which
-    reports it as a gap in the graph a deployment is serving. They are different *uses* of one
-    question, and the question is asked here once.
-
-    Deliberately over a note list rather than over the assembled graph: a dangling target is a node
-    with no `note` attribute there, which is the same fact expressed in a form that only one of the
-    two callers has.
-
-    A target in an **external id namespace** is not dangling (`kg.note.resolves_outside_graph`): it
-    names a row in a store rather than a note in this tree. Since D-2026-08-25 an ELN transcription
-    is data in `reaction_records`, while `memory.campaign` and `memory.optimization` still cite each
-    run as `[[reaction-<id>]]` — so without this every campaign and optimization note would be
-    reported broken for links that resolve. What is genuinely lost is stated at the constant: this
-    function can no longer tell a real record from a typo'd one, and the live lane checks that.
+    Sorted, so callers (`kg.validate`, `kg.analytics`) report the same order. A target in an
+    external id namespace (`kg.note.resolves_outside_graph`, e.g. `reaction-<id>` rows in
+    `reaction_records`) is not dangling; this cannot tell a real record id from a mistyped one.
     """
     defined = {note.id for note in notes}
     return sorted(
@@ -510,10 +319,8 @@ def dangling_links(notes: list[Note]) -> list[tuple[str, str]]:
 def _parsed_files(notes_dir: Path) -> list[tuple[Path, os.stat_result]]:
     """The tree's note files, with the per-file parse cache trimmed to exactly them.
 
-    Materialized rather than yielded because the trim needs the whole set: an entry whose file is
-    gone has to be dropped, and a generator would leave it until the next full pass. That is not
-    only memory — a path deleted and later recreated with a *smaller* file at the same `mtime_ns`
-    would otherwise be served from the stale entry.
+    Materialized because the trim needs the whole set: a stale entry for a deleted path could
+    otherwise serve a recreated file with matching stat.
     """
     found = list(scan_notes_dir(notes_dir))
     if not settings.graph_cache_enabled:
@@ -529,17 +336,11 @@ def _parsed_files(notes_dir: Path) -> list[tuple[Path, os.stat_result]]:
 def _note_for(notes_dir: Path, path: Path, stat: os.stat_result) -> tuple[Note | str | None, int]:
     """One file's parse outcome, reused when its `(mtime_ns, size)` has not moved.
 
-    Returns `(outcome, reused)` where the outcome is the parsed `Note`, `None` for a file that is
-    not a note, or the `NoteError`'s message — the three cases `_parse_notes` already distinguishes
-    — and `reused` is 1 when nothing was read from disk. Kept as a tuple rather than raising through
-    the cache because a cached *failure* has to reproduce the same warning and the same metric: the
-    per-file line names the file to fix, and a corpus with four thousand bad notes must not look
-    like one with two just because this process read neither of them again.
-
-    The stat is the one the scan already took, so this adds no syscall of its own.
+    The outcome is the parsed `Note`, `None` for a non-note file, or the `NoteError` message, so a
+    cached failure reproduces the same warning and metric as a fresh parse.
 
     Args:
-        notes_dir: The corpus this file belongs to — the cache's first key.
+        notes_dir: The corpus this file belongs to, the cache's first key.
         path: The note file.
         stat: That file's stat from the same scan the fingerprint was taken from.
 
@@ -567,22 +368,10 @@ def _note_for(notes_dir: Path, path: Path, stat: os.stat_result) -> tuple[Note |
 def _parse_notes(notes_dir: Path) -> list[Note]:
     """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files.
 
-    A file the schema rejects is skipped so one bad note cannot block every query — but it is
-    *said*, at WARNING, and counted. It used to be dropped in silence on the argument that
-    `kg-validate` reports it, which is true of the repository and not of the tree a pod is
-    serving: a note corrupted by a partial sync leaves a deployment retrieving less than it
-    should with nothing anywhere saying so.
-
-    **A second file claiming an id already taken is skipped on exactly the same terms**, and for
-    exactly the same reason. It used to be neither reported nor decided: the notes were both
-    returned, `_assemble_graph` then called `add_node` twice on one id, and whichever file sorted
-    *last* silently replaced the other — so one of two curated notes was unreachable by every
-    query, with the winner depending on a directory name. `kg-validate` fails a duplicate id, which
-    again is a property of the repository rather than of the tree a pod is serving; an rsync that
-    lands a renamed note before removing the old one produces this state in a healthy deployment.
-
-    First in path order wins, matching `chemclaw.kg.validate`'s `id_to_path` and
-    `note_file_fingerprints`, so every reader of one tree names the same file.
+    A file the schema rejects is skipped so one bad note cannot block every query, but it is logged
+    at WARNING and counted, since the served tree can differ from the validated repository. A second
+    file claiming an id already taken is skipped and reported the same way; first in path order
+    wins, matching `kg.validate` and `note_file_fingerprints`.
     """
     started = time.perf_counter()
     notes: dict[str, tuple[Path, Note]] = {}
@@ -613,11 +402,8 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
             continue
         notes[note.id] = (path, note)
     skipped = unparseable + duplicate
-    # **The per-file warnings have no denominator, and that is what makes them unreadable.** A
-    # corpus where two notes in ten thousand fail to parse and one where four thousand do produce
-    # the same *kind* of line, so an operator scrolling a log cannot tell a typo from a partial
-    # sync that has taken 40% of the knowledge graph out of retrieval. One summary per parse pass
-    # is the denominator; the per-file lines stay, because they are what names the file to fix.
+    # One summary per pass gives the per-file warnings a denominator, so a typo can be told from a
+    # partial sync that dropped much of the corpus.
     log_event(
         log,
         "kg.indexed",
@@ -641,23 +427,10 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
 def cached_notes(notes_dir: Path) -> tuple[NotesFingerprint | None, list[Note]]:
     """The parsed notes plus the fingerprint they were parsed at (`None` when caching is off).
 
-    Handing the fingerprint back is what lets `build_graph` reuse it to key its own cache: the
-    stat scan is the dominant cost of a warm read (~76 ms for 10k notes), so computing it once
-    per call rather than once per cache layer matters.
-
-    **Public because it is the seam every derived-from-notes cache keys on.** The fingerprint is
-    the answer to "may I reuse what I computed last time", and any artifact derived from the whole
-    corpus — the assembled graph here, the conflict index in `chemclaw.kg.conflicts` — needs
-    exactly that token and nothing else. A second derivation that computed its own fingerprint
-    would pay the stat scan twice and, worse, could disagree with this one about whether the corpus
-    had changed.
-
-    **Concurrent misses wait rather than duplicate.** The scan and the parse happen under this
-    directory's `_corpus_lock`, so eight threads arriving on a cold cache together produce one
-    parse and seven waiters instead of eight parses fighting over the GIL — measured at 6,219 ms
-    against the 198 ms of the single parse they were all repeating. A waiter that reaches the lock
-    finds the answer it queued for and never rescans, because the winner has just stamped
-    `_LAST_SCAN`.
+    The fingerprint is returned so derived caches (`build_graph`, `kg.conflicts`) key on the same
+    token without paying the stat scan again or disagreeing about whether the corpus changed. The
+    scan and parse run under the directory's `_corpus_lock`, so concurrent cold callers wait for one
+    parse instead of each doing their own.
     """
     if not settings.graph_cache_enabled:
         return None, _parse_notes(notes_dir)
@@ -678,20 +451,13 @@ def cached_notes(notes_dir: Path) -> tuple[NotesFingerprint | None, list[Note]]:
             cached = _NOTES_CACHE.get(key)
             if cached is not None and cached[0] == fingerprint:
                 _LAST_SCAN[key] = now
-                # A shallow copy, not the live list: this function is public and `kg/README.md`
-                # names it "the seam every derived-from-notes cache keys on" — a caller that
-                # sorted the shared list in place would corrupt the cache for every reader.
-                # `Note` itself is frozen, so copying the list is the whole cost.
+                # A shallow copy so a caller that sorts in place cannot corrupt the shared cache;
+                # `Note` is frozen.
                 return fingerprint, list(cached[1])
         notes = _parse_notes(notes_dir)
         with _CACHE_LOCK:
-            # The scan is stamped only once the notes it validated are actually in the cache.
-            # It used to be stamped *before* the parse, which opened a window the docstring's
-            # "a waiter finds the answer it queued for" claim did not survive: a second thread
-            # hitting the TTL fast path inside that window paired a fresh `scanned_at` with the
-            # *old* `_NOTES_CACHE` entry and returned the pre-change corpus without waiting —
-            # measured, reader B was served the stale note list while A was mid-parse. The window
-            # scaled with parse time, i.e. with exactly the corpus size where it matters.
+            # Stamp the scan only once its notes are in the cache; stamping earlier lets a
+            # concurrent TTL fast path pair a fresh timestamp with the old corpus.
             _NOTES_CACHE[key] = (fingerprint, notes)
             _LAST_SCAN[key] = now
         return fingerprint, list(notes)
@@ -700,12 +466,8 @@ def cached_notes(notes_dir: Path) -> tuple[NotesFingerprint | None, list[Note]]:
 def _within_ttl(key: str, ttl: float) -> tuple[NotesFingerprint, list[Note]] | None:
     """The cached entry for `key` while its last scan is still inside `ttl`, else None.
 
-    Inside the window the last scan is trusted and this one is skipped: the scan is O(notes) and is
-    paid even on a cache hit, so it is the floor on interactive latency (DA-5). The cached
-    fingerprint comes back unchanged, so `build_graph` still keys its own cache consistently.
-
-    A function rather than an inlined branch because `cached_notes` asks the question twice — once
-    to stay off the lock, once after waiting on it — and the two must not drift.
+    Inside the window the scan is skipped. A function because `cached_notes` asks it twice, before
+    and after waiting on the lock.
     """
     if ttl <= 0:
         return None
@@ -722,59 +484,27 @@ def _within_ttl(key: str, ttl: float) -> tuple[NotesFingerprint, list[Note]] | N
 def load_notes(notes_dir: Path) -> list[Note]:
     """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files.
 
-    A malformed note (bad YAML or a schema violation) is skipped, not raised: graph building
-    and evidence retrieval must not be blocked by one bad file. Reporting those failures is
-    `chemclaw.kg.validate`'s job (it reads notes with its own error-collecting loop), so the two do
-    not
-    conflict — the indexer stays resilient, the validator stays strict.
-
-    The result is cached per directory behind a stat fingerprint (KM-14), so interactive retrieval
-    does not re-parse the whole tree on every query; any change to a note busts the cache. Within
-    `graph_cache_ttl_seconds` the scan itself is skipped too (DA-5), so an externally-made change
-    can lag by up to that window — local writers call `invalidate_cache` to bypass it, and `0`
-    restores always-scan. `cached_notes` already returns a fresh shallow copy on every path, so a
-    caller cannot mutate the cached list, and `Note` is frozen, so the shared note instances
-    cannot be mutated either.
+    A malformed note is skipped, not raised, so one bad file cannot block retrieval; strict
+    reporting is `kg.validate`'s job. Cached behind a stat fingerprint; within
+    `graph_cache_ttl_seconds` an external change may lag (local writers call `invalidate_cache`, and
+    `0` always scans). Returns a fresh shallow copy of frozen notes.
     """
     return cached_notes(notes_dir)[1]
 
 
-#: The share of the corpus that may change before an incremental patch stops being worth taking.
-#:
-#: A break-even, measured rather than reasoned about — and the reasoned guess that stood here first
-#: was wrong by a factor of two and a half, which is why the measurement is written down. A patch
-#: costs one `DiGraph.copy()` of the whole graph plus per-changed-note work; a rebuild costs
-#: `_assemble_graph` over the whole corpus. On a 20,000-note corpus, against an 884 ms rebuild:
-#:
-#:     0.01% changed   399 ms      15% changed   520 ms      30% changed   641 ms
-#:        5% changed   445 ms      20% changed   559 ms      50% changed   981 ms
-#:
-#: So the copy is a ~400 ms floor and a changed note costs ~58 µs against `_assemble_graph`'s
-#: ~44 µs, and the curves cross near **42%** — not near a sixth, which is what a per-note ratio
-#: argued before anyone ran it. 0.25 keeps a wide margin under the crossing, because the two sides
-#: of the error are not symmetric: a patch declined is a rebuild, which is what this module did
-#: before and is never wrong, while a patch taken past the crossing is slower than the thing it
-#: replaced.
-#:
-#: The write path this exists for changes **one** note (`kg/git_writer.py` calls `invalidate_cache`
-#: after each write), so the ratio that decides production is 1/N and every value above is margin
-#: for a bulk arrival — an rsync from `deploy/knowledge-sync.sh` landing part of a tree.
+#: Share of the corpus that may change before a rebuild is preferred to an incremental patch. A
+#: patch costs a graph copy plus per-note work, and breaks even with a rebuild near 40%; 0.25
+#: leaves margin because declining a patch is never wrong, only slower. A single note write changes
+#: 1/N.
 _MAX_PATCHED_FRACTION = 0.25
 
 
 def _attach_edges(graph: nx.DiGraph, note: Note) -> None:
     """Write `note`'s outgoing edges into `graph`, each carrying the relations it asserts.
 
-    One definition, shared by the full rebuild and the incremental patch, because the whole
-    correctness claim of the patch is that it produces the graph the rebuild would have. Two loops
-    deriving "what edges does this note contribute" is two places for that claim to stop being
-    true — and the drift would be silent, since a graph missing one relation still answers every
-    other query.
-
-    Grouped by target before writing: `nx.DiGraph` holds one edge per pair, so two relations
-    between the same two notes are one edge with a two-tuple (see `_assemble_graph` for why this is
-    not a multigraph). `add_edge` mints a bare, note-less node for a target nothing defines, which
-    is what `dangling_links` and `neighborhood` are documented to see.
+    Shared by the full rebuild and the incremental patch so both produce the same graph. Relations
+    to one target share one edge (`nx.DiGraph`). `add_edge` mints a bare node for an undefined
+    target, which `dangling_links` and `neighborhood` rely on.
     """
     by_target: dict[str, list[Relation]] = defaultdict(list)
     for relation in note.outgoing_relations():
@@ -786,28 +516,18 @@ def _attach_edges(graph: nx.DiGraph, note: Note) -> None:
 def _drop_if_uncited(graph: nx.DiGraph, node_id: str) -> None:
     """Remove `node_id` if it is a bare node nothing links to or from any more.
 
-    A rebuild only mints a note-less node because some note cites it. So after a detach, a bare
-    node at degree zero is a node the rebuild would not have produced, and leaving it behind would
-    make `dangling_links`, `neighborhood` and `note_in` answer about an id no longer in the corpus.
-    A node carrying a `note` is never dropped here however isolated it is: an uncited note is still
-    a note.
+    A rebuild would not produce such a node. A node carrying a `note` is never dropped here.
     """
     if "note" not in graph.nodes[node_id] and graph.degree(node_id) == 0:
         graph.remove_node(node_id)
 
 
 def _detach_note(graph: nx.DiGraph, note_id: str) -> None:
-    """Undo everything the note `note_id` *defines* contributed to `graph`, keeping its citations.
+    """Undo everything the note `note_id` defines contributed to `graph`, keeping its citations.
 
-    **`graph.remove_node(note_id)` is the obvious way to do this and it is silently wrong.**
-    NetworkX removes a node's **in**-edges with it, and those belong to *other* notes — so
-    re-adding the changed note afterwards would come back without a single citation *into* it, on
-    a graph that still looks well-formed. `D-2026-09-06-one-note-changed-is-not-the-corpus-changed`
-    named that trap when it deferred this work; every query would keep answering, with fewer edges.
-
-    So this removes only what this note authored: its out-edges, and its own `note` attribute. What
-    is left is exactly what a rebuild of the corpus-without-this-note produces — a bare node if
-    anything still cites the id, nothing at all if not.
+    Not `graph.remove_node`, which also drops in-edges that belong to other notes. Only this note's
+    out-edges and its `note` attribute are removed, leaving what a rebuild without this note would
+    produce.
     """
     for target in [target for _, target in graph.out_edges(note_id)]:
         graph.remove_edge(note_id, target)
@@ -819,32 +539,13 @@ def _detach_note(graph: nx.DiGraph, note_id: str) -> None:
 def _patch_graph(previous: nx.DiGraph, notes: list[Note]) -> nx.DiGraph | None:
     """`previous` brought up to `notes` by touching only what changed, or None to rebuild instead.
 
-    The assembly was the residual `D-2026-09-06-one-note-changed-is-not-the-corpus-changed` left:
-    that ADR made the *parse* per file and the whole graph was still rebuilt on any change, which
-    since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` is paid at the agent's writing
-    rate rather than at a human's commit rate.
-
-    **What changed is decided by object identity, not by comparing note contents.** `_PARSED_FILES`
-    hands back the very same frozen `Note` for a file whose `(mtime_ns, size)` has not moved, so
-    `is` answers exactly "did this file get re-read" — in O(1) per note, where an equality check
-    would walk every field of every note and give the rebuild's cost back. It errs only toward
-    *more* work: a note re-read and found identical is patched rather than skipped.
-
-    **The previous note set is read off the graph itself** rather than cached beside it. The graph
-    already holds every note on a node attribute, so a second copy would be memory spent to store
-    what is one dict comprehension away — and, worse, a second thing to keep in step with the
-    graph it describes.
-
-    **Patched on a copy, never in place.** `build_graph` hands every caller the same frozen graph
-    instance and its docstring is explicit that freezing is what makes that sharing safe; mutating
-    the cached graph would break that for a reader mid-traversal, which in NetworkX is a
-    `RuntimeError` out of an adjacency iteration in whatever query happened to be running. The copy
-    is the price of keeping "a graph handed out never changes underneath you" true, and it is what
-    the ~400 ms floor at `_MAX_PATCHED_FRACTION` is: 45% of a rebuild rather than 100%.
+    Changed notes are found by object identity: `_PARSED_FILES` returns the same frozen `Note` for
+    an unchanged file, so `is` is O(1) and errs only toward extra work. The previous note set is
+    read off the graph's node attributes. The patch is applied to a copy, because the cached graph
+    is shared and frozen and may be mid-traversal in another reader.
 
     Returns:
-        The patched graph, or None when the change is too large a share of the corpus to be worth
-        patching (`_MAX_PATCHED_FRACTION`) — the caller then rebuilds.
+        The patched graph, or None when the change exceeds `_MAX_PATCHED_FRACTION` of the corpus.
     """
     current = {note.id: note for note in notes}
     before = {node: data["note"] for node, data in previous.nodes(data=True) if "note" in data}
@@ -853,9 +554,7 @@ def _patch_graph(previous: nx.DiGraph, notes: list[Note]) -> nx.DiGraph | None:
     if len(changed) + len(gone) > len(current) * _MAX_PATCHED_FRACTION:
         return None
     graph = previous.copy()
-    # Every detach before any attach, so the intermediate state is a rebuild of the unchanged
-    # corpus. Interleaving would let one note's attach re-mint a bare node another note's detach is
-    # about to reconsider, and make the result depend on iteration order.
+    # All detaches before any attach, so the result does not depend on iteration order.
     for note_id in gone:
         _detach_note(graph, note_id)
     for note_id in changed:
@@ -882,22 +581,9 @@ def _patch_graph(previous: nx.DiGraph, notes: list[Note]) -> nx.DiGraph | None:
 def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
     """Assemble the directed note graph from already-parsed notes, edges carrying their relations.
 
-    Every edge gets a `relations` attribute: the tuple of `Relation` objects asserted between those
-    two notes (STO-8). Until this, `add_edge(note.id, target)` recorded no attributes at all, so
-    nothing could ask for a compound's precursors or for the note that contradicts another — the
-    links existed and the relations did not.
-
-    **Kept on `nx.DiGraph` with a tuple per edge, rather than moved to `nx.MultiDiGraph`.** A
-    multigraph models parallel edges properly, and would change the meaning of `graph[a][b]` for
-    every existing reader — `neighborhood`, `chemclaw.kg.analytics`, the retrievers — to solve a
-    case that
-    does not arise: two notes standing in several relations at once is rare, and a tuple represents
-    it exactly as well for every query anyone actually runs. The cost is that an edge is a set of
-    relations rather than one, which is why the attribute is named in the plural.
-
-    One node per id is `_parse_notes`'s guarantee, not this loop's: `add_node` would happily
-    overwrite, and did, which is why the duplicate is now resolved and reported where the files are
-    still in hand to name.
+    Every edge's `relations` attribute is the tuple of `Relation`s asserted between those two notes.
+    A `DiGraph` with a tuple per edge rather than a `MultiDiGraph`, so `graph[a][b]` keeps its
+    meaning for existing readers. One node per id is guaranteed by `_parse_notes`.
     """
     graph: nx.DiGraph = nx.DiGraph()
     for note in notes:
@@ -910,27 +596,14 @@ def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
 def build_graph(notes_dir: Path) -> nx.DiGraph:
     """Build the directed note graph from `notes_dir`.
 
-    Every note becomes a node keyed by its id with the `Note` on the `note`
-    attribute. Each `[[wikilink]]` becomes an edge id → target. A link to an
-    unknown id still creates the edge (a dangling node with no `note` attribute),
-    so `chemclaw.kg.validate` can report it rather than the graph silently dropping it.
+    Every note becomes a node keyed by its id with the `Note` on the `note` attribute; each
+    `[[wikilink]]` becomes an edge. A link to an unknown id still creates a bare node, so
+    `kg.validate` can report it.
 
-    Cached behind the same stat fingerprint as the parsed notes, so a warm interactive query
-    skips reassembly entirely. The cached graph is **frozen** (`nx.freeze`) rather than copied:
-    copying a large graph would give back most of the saving, and freezing makes the shared
-    instance safe for the same reason `Note` is frozen — no reader can corrupt it for the next
-    query. Readers (`expand_note`, `neighborhood`) only traverse; a caller that genuinely needs a
-    mutable graph should take `graph.copy()`.
-
-    **A stale cached graph is patched rather than rebuilt** (`_patch_graph`): the notes whose files
-    moved are detached and re-attached on a copy, so a one-note write costs a graph copy instead of
-    re-adding every node and edge. It falls back to the full assembly whenever too much of the
-    corpus changed at once, and the fallback is also the cold path — nothing to patch from.
-
-    The corpus lock is taken around the parse *and* the assembly, not around each separately, so
-    concurrent cold callers share one of each. `_corpus_lock` is re-entrant for exactly this:
-    `cached_notes` takes it again inside, and re-acquiring a lock this thread already holds is the
-    difference between one assembly and one per caller.
+    Cached behind the notes fingerprint and frozen (`nx.freeze`) so the shared instance cannot be
+    mutated; a caller needing a mutable graph takes `graph.copy()`. A stale cached graph is patched
+    (`_patch_graph`) unless too much changed. The re-entrant corpus lock spans parse and assembly,
+    so concurrent cold callers share one of each.
     """
     key = str(notes_dir)
     with _corpus_lock(key):
@@ -951,19 +624,9 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
 def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None) -> list[str]:
     """The ids `note_id` points at through relation `rel`, ordered.
 
-    The query typed edges exist to make possible: "what are this compound's precursors", "what does
-    this note contradict". Directed on purpose, unlike `neighborhood` — a relation has a direction
-    and a *reversed* one usually means something different (`precursor-of` reversed is not
-    `precursor-of`), so the caller asks about the direction it means.
-
-    `as_of` applies the edge's own validity window (STO-9), so a relation that stopped holding is
-    excluded from a current-evidence query while remaining in git and in the graph. Omit it to see
-    every asserted edge regardless of when it held.
-
-    The unknown-id check goes through `note_in`, not `in graph` — its docstring calls the
-    difference "a shipped defect", and this function shipped it anyway: a *dangling* id (cited by
-    some note, defined by none) is a member of the graph, so the membership test let it through
-    and the query returned `[]`, which reads as "no precursors" for a note that does not exist.
+    Directed, since a reversed relation usually means something else. `as_of` applies each edge's
+    validity window; omit it to see every asserted edge. An id that the graph does not define
+    (checked via `note_in`) is an error, not an empty answer.
     """
     if note_in(graph, note_id) is None:
         raise KeyError(f"unknown note id: {note_id!r}")
@@ -982,10 +645,8 @@ def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None
 def _replaced_by(graph: nx.DiGraph, node_id: str) -> set[str]:
     """The ids a supersede link names as `node_id`'s replacement, from either end of the link.
 
-    Both ends, because the two halves land separately and either can be the only one there: the
-    replacement's `supersedes` is written with it, while the retired note's `superseded-by` is an
-    amendment the writer refuses for a note a person wrote — and a replacement may name an old id
-    no note in this tree defines at all.
+    Both ends, because either half may be absent: a person's retired note never receives its
+    `superseded-by` amendment, and a replacement may name an id no note defines.
     """
     forward = {
         target
@@ -1003,14 +664,9 @@ def _replaced_by(graph: nx.DiGraph, node_id: str) -> set[str]:
 def current_successor(graph: nx.DiGraph, node_id: str, as_of: date) -> Note | None:
     """The first current note a chain of supersede links leads to from `node_id`, or `None`.
 
-    What a reader asks of an id whose own note is retired or was never written: *what replaced
-    it?* A standardization bump that moves a compound's id makes this a chain rather than a pair —
-    `std11`'s id is superseded by `std12`'s, which a later bump may supersede again — so the walk
-    follows links until it reaches a note current on `as_of`, breadth-first and in id order so two
-    readers asking the same question get the same answer. A cycle ends the walk rather than looping.
-
-    The caller decides whether to ask. `node_id` itself is never the answer, so asking about a
-    current note returns whatever replaced it, if anything claims to have.
+    Follows links (an id may be superseded repeatedly) breadth-first in id order until a note
+    current on `as_of`, so answers are deterministic; a cycle ends the walk. `node_id` itself is
+    never the answer.
     """
     if node_id not in graph:
         return None
@@ -1032,16 +688,9 @@ def current_successor(graph: nx.DiGraph, node_id: str, as_of: date) -> Note | No
 def neighborhood(graph: nx.DiGraph, note_id: str, hops: int = 1) -> set[str]:
     """Return graph node ids within `hops` of `note_id`, following links both ways.
 
-    Chemical relations are meaningful in both directions (a precursor and a
-    product reference each other), so traversal is undirected over the directed
-    graph — the 1–2 hop expansion the query skill uses (D-004).
-
-    **The result holds node ids, not necessarily note ids**, and the anchor may itself be a
-    dangling node: `_assemble_graph` mints a bare node for every cited-but-undefined target, and
-    an external `reaction-<id>` citation is exactly such a node — dropping those here would hide
-    the ELN records a campaign's neighbourhood is mostly made of. A caller that needs real notes
-    filters through `note_in`, as `agent.graph_tools.expand_note` does; a caller that indexes
-    `graph.nodes[nid]["note"]` unguarded will `KeyError` on the first dangling neighbour.
+    Chemical relations are meaningful in both directions, so traversal is undirected. The result
+    holds node ids, not necessarily note ids: dangling nodes such as external `reaction-<id>`
+    citations are included, so a caller needing notes filters through `note_in`.
     """
     if note_id not in graph:
         raise KeyError(f"unknown note id: {note_id!r}")
@@ -1053,43 +702,12 @@ def neighborhood(graph: nx.DiGraph, note_id: str, hops: int = 1) -> set[str]:
 def _newest_note_mtime(notes_dir: Path) -> float | None:
     """The newest note's mtime under `notes_dir`, or None for a tree with no note in it.
 
-    One stat scan per `knowledge_age_scan_ttl_seconds`, not one per caller. The scan is O(notes) —
-    the same sweep `_dir_fingerprint` pays on a cold graph read — and its only caller is a *live*
-    gauge callback, so before this it ran on every Prometheus scrape: measured, `METRICS.render()`
-    went from 0.128 ms on an empty tree to 8.7 ms at 1k notes and 102.6 ms at 10k, and because
-    `api/routes/ops.py::metrics` renders synchronously inside an `async def`, that is the front
-    door's whole event loop stalled every 30 s rather than one request's latency.
-
-    **Why a cached scan rather than `asyncio.to_thread` at the route.** Threading would take the
-    stall off the loop and leave the cost paid in full on every scrape, per pod — and it would have
-    to be repeated at all three renderers (`api/routes/ops.py`, `connectors/server.py`,
-    `core/worker_http.py`), because what is expensive is the gauge, not the route that happens to
-    read it. Fixing it at the source is the smaller change and the one every future reader
-    inherits, and it is already this codebase's answer to an expensive read on an unauthenticated
-    infra endpoint — `/readyz`, the sibling route in that same file, caches its database round trip
-    for `service_readiness_cache_seconds` on exactly this argument.
-
-    **What is cached is the mtime, and that is what makes the window safe.** The *age* is
-    recomputed from `time.time()` against this value on every scrape, so a pod whose sync stopped
-    six hours ago reports six hours and keeps counting, however long the entry lives — the failure
-    the gauge exists for cannot be cached away, because nothing about it is stored. The window
-    delays only the opposite observation, that the corpus got *newer*, which makes a reading at most
-    `ttl` seconds too old: it errs toward firing `ChemclawKnowledgeCorpusStale` and never toward
-    silencing it. `invalidate_cache` drops it with the rest, so a note this process writes is
-    reflected at once.
-
-    **Deliberately not under `_corpus_lock`.** A scrape must never queue behind a cold
-    `_parse_notes` of the same tree — 198 ms for 2k notes, seconds under concurrency. Two scrapes
-    racing a cold entry both scan, which costs one duplicated stat sweep — **and the write-back is
-    ordered by `scanned_at`, not by finish order, which is what makes that duplicated sweep free of
-    consequence rather than merely cheap.** Two scans can finish in either order: one that started
-    first can be the slower of the two (scheduling, disk contention) and land its write *after* one
-    that started later and already finished. A plain last-writer-wins store would then keep the
-    earlier, possibly-stale view — silently reverting a fresher answer to a staler one for up to one
-    more `ttl` window, exactly the failure the module comment above `_NEWEST_MTIME` claims costs
-    "nothing else". The guard below is what actually makes that true: a write is applied only when
-    no fresher scan (larger `scanned_at`) is already cached, so whichever scan looked at the corpus
-    *last* is the one whose `newest` survives, regardless of which happened to finish last.
+    The scan is O(notes) and its caller is a gauge rendered on every scrape (synchronously, on the
+    event loop), so it is cached for `knowledge_age_scan_ttl_seconds`. Only the mtime is cached; the
+    age is recomputed against `time.time()` on every read, so a stalled corpus keeps ageing and the
+    cache can only delay noticing a newer corpus. Not under `_corpus_lock`, so a scrape never waits
+    on a parse. Concurrent scans write back ordered by `scanned_at`, so the latest-started scan
+    wins.
     """
     key = str(notes_dir)
     ttl = settings.knowledge_age_scan_ttl_seconds
@@ -1103,47 +721,25 @@ def _newest_note_mtime(notes_dir: Path) -> float | None:
     scanned_at = time.monotonic()
     newest = max((stat.st_mtime for _, stat in scan_notes_dir(notes_dir)), default=None)
     with _CACHE_LOCK:
-        # Monotonic write: skip if a scan that started at or after this one already wrote its
-        # result. Without this check the write below is last-writer-wins regardless of
-        # `scanned_at`, which is exactly the ordering hole a slower-but-earlier scan exploits to
-        # clobber a fresher concurrent result (see the docstring above).
+        # Skip if a scan that started at or after this one already wrote its result.
         cached = _NEWEST_MTIME.get(key)
         if cached is None or scanned_at >= cached[0]:
             _NEWEST_MTIME[key] = (scanned_at, newest)
     return newest
 
 
-#: What `knowledge_sync_age_seconds` reports for a tree that holds no note at all. Negative so it
-#: can never be read as an age — the direction matters, because the fabricated alternative (0) is
-#: indistinguishable from a corpus that has just been refreshed, which is the reassuring lie. A
-#: pod whose knowledge volume never got populated is the worst form of the failure this gauge is
-#: for, and this is what makes it visible rather than absent.
+#: What `knowledge_sync_age_seconds` reports for a tree with no note. Negative so it cannot be read
+#: as an age; 0 would look like a fresh corpus.
 NO_NOTES = -1.0
 
 
 def knowledge_sync_age_seconds() -> float:
-    """Seconds since the newest note on *this pod's* knowledge tree was last written.
+    """Seconds since the newest note on this pod's knowledge tree was last written.
 
-    **The reader's half of a signal that only had a writer's half.** `deploy/knowledge-sync.sh`'s
-    `loop` catches a failed refresh so a dead remote cannot kill the pod, and the pod then serves a
-    frozen corpus indefinitely while logging one WARNING per interval into a stream nobody tails.
-    The sidecar stamps a heartbeat and its liveness probe reads the age of it — but that heartbeat
-    is per-container state in `/tmp` by design, so it is unreachable from here, and a container
-    restart is not a metric anyway: alerting on one needs kube-state-metrics, whose series are not
-    in the user-workload Prometheus that evaluates this chart's rules. This is a first-party series
-    read from the volume itself, so it works on any cluster.
-
-    **What it measures, stated exactly, because the two are not the same question.** The publish is
-    `rsync -a` from a `git reset --hard` checkout, so a note's mtime is when its *content* last
-    reached this pod — not when the sync last ran. So this is the age of the newest thing this pod
-    knows, and a corpus nobody has added to for a fortnight reads as a fortnight old. That is the
-    number's meaning rather than a defect in it: it is exactly "the graph stopped moving and every
-    answer keeps citing it", and it cannot distinguish a wedged sync from a quiet one. Which is why
-    the threshold is a deployment's to state (`monitoring.alerts.knowledgeCorpusStaleSeconds`, off
-    by default) and the sidecar's own probe stays as the sync-side half.
-
-    **The scan behind it is cached; the age is not.** See `_newest_note_mtime` for why those are
-    different budgets, and why the cache cannot make a frozen corpus read as a fresh one.
+    Read from the volume itself, so a sync sidecar that silently stopped refreshing becomes visible
+    as a metric. It measures the age of the newest content on this pod, not of the last sync run, so
+    a quiet corpus also ages; the alert threshold is deployment-specific
+    (`monitoring.alerts.knowledgeCorpusStaleSeconds`).
     """
     newest = _newest_note_mtime(settings.knowledge_path)
     if newest is None:
@@ -1153,9 +749,7 @@ def knowledge_sync_age_seconds() -> float:
     return max(0.0, time.time() - newest)
 
 
-# Bound at import, for the reason `ingest/eln/cursor.py` binds its cursor lag there: the reading
-# lives in this module — it is the tree this module resolves — so a process that reads the graph is
-# exactly a process that can report its age, and there is no second place to remember it in.
+# Bound at import: any process that reads the graph can report its age.
 record_metric(
     lambda m: m.bind_gauge("chemclaw_knowledge_sync_age_seconds", knowledge_sync_age_seconds)
 )

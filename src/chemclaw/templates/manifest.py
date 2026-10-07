@@ -1,28 +1,14 @@
 """The template contract: a fixed sequence of steps, validated before anything can run it.
 
-A template is the deterministic counterpart to a profile. A profile configures an agent and lets the
-model choose the order of work; a template fixes the order and lets the model fill the gaps. That is
-the whole distinction, and it is why the two are separate things rather than one thing with a flag —
-they answer different questions and fail in different ways (`src/chemclaw/templates/README.md`).
+Everything here makes a bad template impossible to start, rather than discovered halfway through a
+durable run. References are strict for the same reason: a `${steps.missing.result}` that became
+"None" would feed a null into a calculation.
 
-Everything here is about making a bad template impossible to *start*, because the alternative is
-discovering it halfway through a durable run that has already spent money. The reference resolver is
-strict for the same reason: a `${steps.missing.result}` that quietly became the string "None" would
-put a null into a calculation and produce a confident wrong answer, which is the worst failure this
-system can have.
-
-Deliberately *not* a template language. There are no conditionals, no loops and no expressions —
-only `${inputs.x}`, `${steps.id.result}` and a dotted field path into that result. Adding more is
-how a config format becomes a programming language with no debugger, and the moment a procedure
-needs branching it wants an agent (a profile) or real code (a connector workflow), neither of which
-is more YAML.
-
-The field path is the one addition, and it is addressing rather than computation: without it a
-`job` step's result could only be passed on *whole* — a `ConnectorJobResult` envelope, which
-satisfies no next step's argument schema — so every template carrying a computed value from one
-step to the next had to launder it through an `agent` step that re-typed it. That put a language
-model in the middle of the one execution mode whose purpose is to keep it out
-(`D-2026-08-21-a-geometry-is-an-address-not-a-payload`).
+Deliberately not a template language: no conditionals, loops or expressions, only `${inputs.x}`,
+`${steps.id.result}` and a dotted field path into that result. The field path is addressing, not
+computation; it lets a `job` step's computed value reach the next step without an `agent` step
+re-typing it (`D-2026-08-21-a-geometry-is-an-address-not-a-payload`). Branching belongs in an agent
+or a connector workflow.
 """
 
 import re
@@ -33,29 +19,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.manifest_io import MAX_MANIFEST_TEXT_CHARS
 
-# A reference to an input, to an earlier step's result, or to a field inside that result. Anchored
-# and closed. The field path is a dotted attribute walk and nothing else — no indexing, no
-# wildcards, no expressions — which keeps the "deliberately not a template language" line exactly
-# where the module docstring draws it while letting a step chain a value the run already holds
-# (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+# A reference to an input, an earlier step's result, or a field inside that result. Anchored and
+# closed; the field path is a dotted attribute walk only.
 _REFERENCE = re.compile(
     r"\$\{(inputs\.[a-z][a-z0-9_]*|steps\.[a-z][a-z0-9_-]*\.result(?:\.[a-z][a-z0-9_]*)*)\}"
 )
-# Anything shaped like a reference, well-formed or not. This exists because being strict about what
-# a reference *is* does not, on its own, reject a typo: `_REFERENCE` **finds** references, so a
-# span it cannot match is not a bad reference but no reference at all — nothing to check, nothing
-# to fail, and `resolve` then hands the tool the literal text `"${step.x.result}"`. That is a
-# strictly worse version of the failure this module's docstring says the resolver is strict to
-# prevent, so `_references_are_well_formed` compares the two patterns and refuses the difference.
+# Anything shaped like a reference, well-formed or not. `_REFERENCE` only finds valid references, so
+# a typo would pass as a literal string; `_references_are_well_formed` refuses the difference
+# between the two patterns.
 _ANY_REFERENCE = re.compile(r"\$\{[^}]*\}")
-# The step whose result a reference names, dropping any field path after it. The *step* is what
-# validation can check; whether the field exists depends on what the tool returns at run time, and
-# a manifest check that pretended otherwise would be guessing.
+# The step a reference names, without any field path: the step is checkable at load time, the field
+# only at run time.
 _STEP_RESULT = re.compile(r"^(steps\.[a-z][a-z0-9_-]*\.result)")
 
-# The declared type of a template input, reusing the closed set a connector job's params use — the
-# same reasoning applies (a schema the model can always fill correctly beats an open type language),
-# and one vocabulary across both is one less thing for an author to look up.
+# The declared type of a template input, the same closed set connector job params use.
 InputType = Literal["string", "integer", "number", "boolean", "string[]", "number[]", "object"]
 
 
@@ -75,11 +52,10 @@ class _Step(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # Hyphens allowed (unlike a tool name) because a step id is never a Python or tool identifier —
-    # it is only a key inside this file and in `${steps.<id>.result}`.
+    # Hyphens allowed: a step id is only a key in this file and in `${steps.<id>.result}`, never a
+    # Python or tool identifier.
     id: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_-]*$")
-    # Why the step is here. Not model-facing: it is for the human reading the template and for the
-    # run's own trace, which is what an auditor reads when asking what a procedure did.
+    # Why the step is here; not model-facing, for human readers and the run's trace.
     purpose: str = ""
 
 
@@ -141,10 +117,7 @@ Step = Annotated[ToolStep | JobStep | AgentStep, Field(discriminator="kind")]
 def _strings(value: Any) -> Iterator[str]:
     """Every string inside an argument tree, recursing through lists and dicts.
 
-    Recursive because arguments are arbitrary JSON: a reference is as likely to be the third element
-    of a list as a top-level value, and a resolver that only looked at the top level would silently
-    pass `${inputs.smiles}` through as a literal string. One walker rather than one per pattern, so
-    a reference and a *malformed* reference can never be looked for in different places.
+    One walker so references and malformed references are looked for in the same places.
     """
     if isinstance(value, str):
         yield value
@@ -164,8 +137,7 @@ def references(value: Any) -> set[str]:
 def malformed_references(value: Any) -> set[str]:
     """Every `${…}` span inside a value that is *not* a legal reference.
 
-    The complement of `references`, and the two must be read together: what `references` returns
-    is what validation can resolve, and what this returns is what it would otherwise never see.
+    The complement of `references`: what validation would otherwise never see.
     """
     return {
         span
@@ -185,11 +157,8 @@ class Template(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_-]*$")
-    # The first line of the generated tool's docstring — what the model reads when deciding to run
-    # this — and `description` is the rest, exactly as a connector job declares them.
-    # Bounded for the reason `JobSpec.summary` is, and by the same constant: these two are the
-    # generated `run_<template>` tool's docstring, so an unbounded value here is unbounded prompt.
-    # Measured, a 400,000-character `summary:` loaded and reached the tool untouched.
+    # The first line of the generated `run_<template>` tool's docstring, with `description` the
+    # rest. Bounded by the same constant as `JobSpec.summary`, since it is prompt text.
     summary: str = Field(min_length=1, max_length=MAX_MANIFEST_TEXT_CHARS)
     description: str = Field(default="", max_length=MAX_MANIFEST_TEXT_CHARS)
     inputs: list[TemplateInput] = Field(default_factory=list)
@@ -211,13 +180,8 @@ class Template(BaseModel):
     def _references_are_well_formed(self) -> Self:
         """Reject a `${…}` span that is not a reference at all — a typo, not a literal.
 
-        This has to run as its own rule rather than fall out of the resolution check below,
-        because the two see different things: `_references_resolve_and_point_backwards` asks
-        whether every reference it *found* can resolve, and a misspelled one (`${step.x.result}`,
-        `${steps.x.output}`, `${ inputs.x }`) is found by nothing. Left unchecked it survives
-        validation, survives `make template-validate` — which reads argument keys, never values —
-        and is handed to the tool as the literal ten-character string, which is the same wrong
-        answer as a null with a more confusing cause.
+        A separate rule because the resolution check only sees references it found, and a misspelled
+        one is found by nothing; it would otherwise reach the tool as literal text.
         """
         for step in self.steps:
             malformed = sorted(malformed_references(_step_value(step)))
@@ -233,9 +197,7 @@ class Template(BaseModel):
     def _references_resolve_and_point_backwards(self) -> Self:
         """Reject a reference to an unknown input, an unknown step, or a step that has not run yet.
 
-        The forward-reference check is the one worth spelling out: `steps` is an *ordered* list
-        and a step can only use what already happened, so naming a later step is not a subtle
-        timing bug to debug at run time — it is a template that can never work, and it fails here.
+        `steps` is ordered, so a forward reference can never work and fails here.
         """
         known_inputs = {f"inputs.{item.name}" for item in self.inputs}
         available: set[str] = set()
@@ -264,9 +226,7 @@ def _step_value(step: Step) -> Any:
 def step_references(step: Step) -> set[str]:
     """Every reference one step makes, whichever kind it is.
 
-    Public because it is the dependency graph, and `templates/schedule.py` reads it to decide which
-    steps may run at the same time. That it was already here is the reason concurrency needed no
-    new YAML key: a `${steps.<id>.result}` is an edge, and the validators above make the declared
-    order a topological order of the DAG those edges form.
+    Public because it is the dependency graph `templates/schedule.py` reads; the validators make the
+    declared order a topological order of it.
     """
     return references(_step_value(step))

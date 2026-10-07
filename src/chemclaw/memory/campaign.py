@@ -1,24 +1,10 @@
-"""Build a `campaign` note from a detected chain (plan steps 5.1, 5.3, deterministic core).
+"""Build a `campaign` note from a detected chain.
 
-The episodic memory note: it narrates a chain of experiments and **cites every one** via a
-`[[reaction-<id>]]` wikilink. Those citations resolve *outside* the markdown graph
-(`kg.note.EXTERNAL_ID_PREFIXES`): a run is a row in `reaction_records`, written by ELN sync before
-synthesis ever reads the corpus, and `kg.validate` checks the ids against that store. This
-paragraph used to state a precondition instead — a human had merged each reaction's *note* first,
-and the gate enforced the ordering on the campaign's own PR — and both halves are gone:
-D-2026-08-25 made the transcription a row and
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the PR. This builder produces the
-citable, factual skeleton (the transformation sequence and its evidence); the richer prose
-narrative is the `campaign-narrative-synthesis` skill's judgment (per plan 5.3), not invented here.
-
-**Nothing layers it automatically, and this used to say it did.** That skill is loaded on demand
-in a chat turn; no durable path invokes it, so a campaign note stays the skeleton unless a model
-reaches for the skill and writes over it. Phrased as though something applied it, it read as a
-pipeline — the shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`
-names, a present-tense claim about a producer with no caller. The skeleton is complete and useful
-as it stands, which is why this corrects the prose and not the builder; the one note whose
-body was *not* usable on its own is the cross-project playbook, and
-`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` is what changed there.
+The episodic memory note narrates a chain of experiments and cites every one via a
+`[[reaction-<id>]]` wikilink. Those ids resolve outside the markdown graph
+(`kg.note.EXTERNAL_ID_PREFIXES`) against `reaction_records`, and `kg.validate` checks them. This
+builds the factual skeleton (transformation sequence and evidence); a richer narrative is the
+on-demand `campaign-narrative-synthesis` skill's job, and nothing applies it automatically.
 """
 
 from datetime import date
@@ -34,18 +20,12 @@ def campaign_note_from_chain(
 ) -> Note:
     """Map a chain to an agent `campaign` note that links to each member reaction.
 
-    `reactions` maps reaction id → the `OrdReaction`, for the per-step SMILES. The body
-    lists the chain in order, each step wikilinking its reaction note (the evidence), then
-    the product→reactant handoffs that make it a campaign. The project (if the members share
-    one) is carried so the semantic layer can group campaigns across projects.
+    `reactions` maps reaction id to its `OrdReaction` for per-step SMILES. The project, if members
+    share one, is carried so the semantic layer can group campaigns across projects.
 
-    `minted_on` becomes `valid_from` — the day this chain's *anchor* run was performed, which
-    `jobs.supported_from` derives from `min(reaction_ids)`, the single member id this note's id is
-    also keyed on. Said the other way because the wording here was wrong and the error mattered:
-    the id is **not** a function of the member set, so a date derived from the set moves under a
-    stable id every time the cluster grows. Without a date the note is open-ended, which
-    `durable/digest._is_new` correctly reads as "not news" and which is therefore silence rather
-    than a default.
+    `minted_on` becomes `valid_from`: the date of the anchor run (`min(reaction_ids)`), the same id
+    the note id is keyed on, so the date stays fixed as the cluster grows. Without it the note is
+    open-ended, which the digest reads as "not news".
     """
     steps = []
     for position, reaction_id in enumerate(chain.reaction_ids, start=1):

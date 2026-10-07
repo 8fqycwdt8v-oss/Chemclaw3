@@ -1,9 +1,7 @@
-"""High-level reaction search over a fingerprint store (plan step 3.4).
+"""High-level reaction search over a fingerprint store.
 
-The reaction capability entry point: `find_similar_reactions` (Tanimoto neighbors over
-DRFP). Takes the store as a seam so it is backend-agnostic and testable with the in-memory
-store. Reactions have no substructure search — DRFP is a whole-reaction difference
-fingerprint, not a substructure screen — so this module exposes similarity only.
+`find_similar_reactions` ranks Tanimoto neighbours over DRFP, with the store as a seam. Similarity
+only: DRFP is a whole-reaction difference fingerprint, not a substructure screen.
 """
 
 from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring, reaction_definition
@@ -36,19 +34,13 @@ async def find_similar_reactions(
 ) -> FingerprintSearch[Match]:
     """Return reactions similar to `reaction_smiles`, most similar first.
 
-    `top_k` and `threshold` default to the configured values. Raises `FingerprintError`
-    on an invalid reaction so the caller never searches with a meaningless fingerprint.
+    `top_k` and `threshold` default to the configured values. Raises `FingerprintError` on an
+    invalid reaction.
 
-    Returns a `FingerprintSearch`, not a bare list: this is the tool a chemist asks "have we ever
-    run something like this?", and an unindexed corpus must not answer it with "no" (see that
-    model's docstring for the live run that did exactly that). `hits_truncated` answers the other
-    half of the same question — a page of `top_k` out of more that qualified is a floor, not the
-    number of precedents on file. `approximate` answers the third: a deployment may search the
-    index approximately (`fingerprint_search_exactness`), and then even a complete-looking page is
-    the best the index proposed rather than the best on file. `index_partial` answers the fourth:
-    a corpus mid-rebuild after a fingerprint-definition change holds rows this store cannot
-    compare, and one rebuilt row is enough to make `index_empty` False while the search still
-    answers over a fraction of the corpus.
+    Returns a `FingerprintSearch` rather than a list, so an empty answer is not read as "no
+    precedent": `index_empty`, `index_partial` (mid-rebuild after a definition change),
+    `hits_truncated` (a full page is a floor) and `approximate` (approximate index search) qualify
+    it.
     """
     matches, truncated = await find_matches(
         store, drfp_bitstring(reaction_smiles), top_k, threshold

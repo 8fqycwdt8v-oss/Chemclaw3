@@ -19,7 +19,7 @@
 A share is a **retrieve-only** source: the ingest half of this seam is reaction-shaped
 (`ElnAdapter.map_to_ord`) and a PowerPoint is not a reaction, so its index is filled by a background
 job — the shape `vector` and `lexical` already had, and the reason the "universal ingest
-abstraction" in `DEFERRED.md` still has no second caller.
+abstraction" in `BACKLOG.md` still has no second caller.
 
 The acceptance test for the seam is in `tests/test_datasource_seam.py`: it attaches a source the way
 an operator would, by writing a manifest into a directory, and touches no core Python at all.

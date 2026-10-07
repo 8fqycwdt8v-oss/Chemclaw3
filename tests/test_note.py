@@ -179,14 +179,11 @@ def test_agent_authored_provenance(tmp_path: Path) -> None:
 
 
 def test_mentioned_ids_reads_the_serializations_the_real_tools_emit() -> None:
-    """The drift guard `mentioned_ids`' comment promises.
+    """`mentioned_ids` reads the two note serializations real tools emit.
 
-    `mentioned_ids` scans for this system's *own* two note serializations, which is what makes
-    scanning honest rather than a guess about arbitrary text — and worthless the moment a tool
-    starts emitting a third. These two fixtures are verbatim shapes taken off a live run's tool
-    results (`docs/archive/live-grounded-2026-08-03.md`): a `gather_evidence` chunk envelope and a
-    JSON-dumped note. A serialization change breaks this instead of silently narrowing the scan
-    back to what it was.
+    The fixtures are verbatim shapes from tool results (a `gather_evidence` chunk envelope and a
+    JSON-dumped note), so a serialization change breaks this rather than silently narrowing the
+    scan.
     """
     gathered = '[{"content": "<retrieved-note-4216b6a377548e22 id=\\"rxn-suzuki-biaryl\\">\\nSuzuki'
     expanded = '{"note": {"id": "opt-suzuki-conditions", "type": "optimization-campaign", "tags":'
@@ -198,9 +195,7 @@ def test_mentioned_ids_reads_the_serializations_the_real_tools_emit() -> None:
 def test_mentioned_ids_counts_an_id_a_retrieved_body_cites() -> None:
     """A wikilink inside a returned note body was in front of the model, so it grounds a citation.
 
-    The alternative reading — only ids the tool named as *its own* result count — would flag an
-    answer for repeating a link it demonstrably read, which is a stricter question than "did this
-    turn see it" and not the one the grounding check asks.
+    The grounding check asks "did this turn see it", not "did the tool name it as its own result".
     """
     body = '{"note": {"id": "campaign-biaryl-scope"}, "body": "supersedes [[playbook-degassing]]"}'
     assert mentioned_ids(body) == ["campaign-biaryl-scope", "playbook-degassing"]
@@ -213,13 +208,9 @@ def test_mentioned_ids_deduplicates_and_keeps_first_seen_order() -> None:
 
 
 def test_external_record_id_strips_whichever_prefix_matched() -> None:
-    """The strip is driven by the constant, so growing the namespace cannot break the lookup.
+    """The strip is driven by `EXTERNAL_ID_PREFIXES`, so growing the namespace is safe.
 
-    `EXTERNAL_ID_PREFIXES` is a *tuple* and has one entry today, which is exactly what makes a
-    hand-rolled `removeprefix("reaction-")` look correct while being a latent defect: it reads
-    the constant's only current value rather than the constant. Driving the function over a
-    two-entry tuple is what tells the two apart — a hand-rolled strip returns the id with the
-    second prefix still attached, and the store is then queried for something that cannot exist.
+    A two-entry tuple distinguishes this from a hand-rolled `removeprefix` of the one current value.
     """
     with mock.patch.object(note_module, "EXTERNAL_ID_PREFIXES", ("reaction-", "measurement-")):
         assert external_record_id("reaction-EXP-1001") == "EXP-1001"
@@ -229,13 +220,10 @@ def test_external_record_id_strips_whichever_prefix_matched() -> None:
 
 
 def test_no_reader_hand_rolls_the_external_id_strip() -> None:
-    """`external_record_id` has one definition, and this is what keeps it the only one.
+    """`external_record_id` stays the only definition of the external-prefix strip.
 
-    Its own docstring names the hand-rolled form as the defect it exists to prevent, and two
-    readers spelled it anyway — `agent.graph_tools.expand_note` and `agent.protocol_tools`, both
-    of which already imported from this module. Prose did not stop that and a type checker
-    cannot see it, so the rule is a scan: nothing outside this module's own docstring may strip
-    an external prefix by literal.
+    A type checker cannot see a hand-rolled copy, so the rule is a scan: nothing outside this module
+    strips an external prefix by literal.
     """
     src = Path(__file__).resolve().parent.parent / "src" / "chemclaw"
     offenders = [
@@ -251,22 +239,15 @@ def test_no_reader_hand_rolls_the_external_id_strip() -> None:
 # --------------------------------------------------------------------------------------------
 # A calculation citation must accept every key the calculation store can write.
 #
-# `_CALC_REF` restates `CalculationKey`'s four field patterns, because `kg` may import
-# `chemclaw.core` and nothing else while `CalculationKey` lives in `science`. A restatement with
-# nothing holding it to its original is a copy that drifts, and this one had: the version segment
-# barred `:` where the store leaves it free on purpose, and the two hashes demanded lowercase hex
-# where the store admits any non-colon text. The consequence was silent from the caller's side —
-# `record_knowledge_note(calc_refs=[...])` raised a `ValidationError` on a key read straight out of
-# the cache, so a note resting on a *calibrated* calculation could not be written at all.
+# `_CALC_REF` restates `CalculationKey`'s field patterns because `kg` cannot import `science`;
+# these tests hold the restatement to its original so a cached key is always citable.
 # --------------------------------------------------------------------------------------------
 
 
 def test_every_calculation_key_the_store_accepts_can_be_cited() -> None:
     """Round-trip: `CalculationKey.as_str()` in, `Note.calc_refs` accepts it.
 
-    The calibrated key is the case that failed, and it is not hypothetical — it is the shape a
-    deployment's `calculation_results` actually holds, and the shape `connectors/calc/remote.py`
-    states the calculation server returns over the wire.
+    Includes the calibrated key, the shape the calculation server returns and the cache holds.
     """
     from chemclaw.science.calc.store import CalculationKey
 
@@ -308,12 +289,10 @@ def test_every_calculation_key_the_store_accepts_can_be_cited() -> None:
 
 
 def test_the_citation_pattern_restates_the_store_s_own_field_patterns() -> None:
-    """The restatement is bound to its original, segment by segment.
+    """The citation pattern restates the store's field patterns, segment by segment.
 
-    A round-trip test proves today's keys are citable; this proves the *rule* did not diverge, so
-    loosening or tightening a `CalculationKey` field fails here rather than at a chemist's note
-    months later. Read off `model_fields` rather than retyped, for the reason
-    `message_pairing` imports the shape stamp instead of restating it.
+    Read off `model_fields` rather than retyped, so loosening or tightening a `CalculationKey` field
+    fails here.
     """
     from chemclaw.science.calc.store import CalculationKey
 
@@ -343,22 +322,12 @@ def test_a_calculation_citation_still_refuses_what_is_not_a_key() -> None:
 def test_a_note_written_to_the_graph_carries_no_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Git is the one store that leaves the pod, and nothing scrubbed what was committed into it.
+    """A note written to the graph carries no configured credential.
 
-    Since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` a note is written the moment it
-    is learned, `created_by: agent`, and the writer commits and pushes it. A note *body* is model
-    prose over whatever the turn discussed — a pasted credential, an untrusted share document's
-    contents, a chemist's question — and `render_note` serialises it verbatim.
-
-    Measured before the fix: a body holding an LLM key and a warehouse DSN password rendered both
-    into the committed file, while the identical strings in a log line came out `***` from the same
-    process's own inventory. That asymmetry is the finding — and it matters more here than on the
-    log path, because `deploy/knowledge-sync.sh` pushes the tree to a remote and a secret in a
-    merged commit survives every later correction. Contradiction and supersession, which are the
-    stated safety argument for writing knowledge directly, cannot reach it.
-
-    A redaction is applied rather than a refusal: a note that names its secret `***` is still the
-    record, and a false positive is visible and correctable while a committed credential is not.
+    Notes are committed and pushed as soon as they are learned, and a note body is model prose that
+    may contain a pasted secret; a secret in a pushed commit cannot be corrected away. So
+    `render_note` redacts the process's credential inventory to `***` rather than refusing: a false
+    positive stays visible and correctable.
     """
     from chemclaw.kg.record import _note_file
 
@@ -387,20 +356,10 @@ def test_a_note_written_to_the_graph_carries_no_credential(
 
 
 def test_a_committed_note_carries_no_credential_a_driver_quoted_back_as_json() -> None:
-    r"""The same guarantee for a credential this process does *not* hold, in the escaped spelling.
+    r"""A credential this process does not hold, quoted back as escaped JSON, is redacted too.
 
-    The test above holds the **value** inventory: two credentials this deployment configured, which
-    `redact_secrets` matches by exact string. This one holds the **structural** half, which is the
-    only one that can reach a credential belonging to somebody else — a warehouse driver quoting its
-    own `key=value` binding back in an error, which a turn then records as what it learned.
-
-    **Measured leaking, and the escaping is the reason.** A driver's message routinely carries a
-    JSON document *inside* a JSON string, so the body reaches the rules as
-    `{\"connection\": {\"password\": \"...\"}}` — and every key-anchored rule framed its separator
-    `["']?\s*[=:]`, which a literal backslash defeats. The note is committed and pushed, and
-    `_note_file`'s own docstring is explicit that a merged commit is append-only in practice: no
-    later correction can reach it. `core/logging._KEY_FRAMING` is the fix, and this is the exit path
-    that makes it more than log hygiene.
+    The structural rules must match a driver's error carrying `{\"password\": \"...\"}` inside a
+    JSON string, where a literal backslash sits before the separator (`core/logging._KEY_FRAMING`).
     """
     import json
 

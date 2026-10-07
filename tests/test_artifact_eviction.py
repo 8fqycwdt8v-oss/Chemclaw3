@@ -1,23 +1,9 @@
 """Artifact eviction reclaims by cost, and never touches an answer (STO-6).
 
-`durable/retention.py` prunes by age and explicitly refuses `calculation_results`, because
-evicting a cached result silently turns a cache hit into a recomputation (D-011) — a cost question,
-not a retention clock. That refusal is only *survivable* because something else bounds the growth
-D-124 introduced, and this job is that something else: it reclaims **blobs**, whose loss costs at
-most a recomputation of something the system already knows how to redo.
-
-Two kinds of test live here, and the second kind exists because the first kind is not enough.
-The substring assertions below pin the statements' *shape* — which tables they name, that they
-report what they removed. They are cheap and they read well, and every one of them survives a
-rewrite of the `WHERE` clause that changes which rows are deleted, because a substring cannot see
-a predicate's meaning. Four mutations proved that in this campaign, including one that deleted
-every blob in the store and one that evicted the most expensive artifacts first — the exact
-inversion of the policy the file's own docstrings argue for.
-
-So the ordering and the windowing are pinned against a real database, seeding blobs with known
-costs and idle times and asserting on *which ones survive* — the shape
-`tests/test_retention.py` takes, and for the same reason: a policy is only stated by the rows it
-leaves behind. The Postgres round trip skips offline like every other PG test.
+`durable/retention.py` refuses to prune `calculation_results` (D-011); this job bounds growth by
+reclaiming blobs, whose loss costs at most a recomputation. Substring tests pin the statements'
+shape; the policy (ordering, windowing) is pinned against a real database by which seeded rows
+survive, since a substring cannot see a predicate's meaning. The Postgres tests skip offline.
 """
 
 import asyncio
@@ -41,10 +27,7 @@ _STATEMENTS = (_EVICT_IDLE, _EVICT_TO_FIT)
 def test_nothing_this_job_deletes_is_a_calculation_result() -> None:
     """The load-bearing property, asserted against the SQL itself.
 
-    D-011 ("never compute twice") and `durable/retention.py`'s standing refusal to prune the
-    calculation cache both remain literally true *only* because eviction targets blobs alone. A
-    statement that reached `calculation_results` would quietly convert a cache hit into a re-run
-    and make two written decisions false at once.
+    Eviction targets blobs alone; reaching `calculation_results` would turn cache hits into re-runs.
     """
     for statement in _STATEMENTS:
         assert "calculation_results" not in statement
@@ -54,21 +37,18 @@ def test_nothing_this_job_deletes_is_a_calculation_result() -> None:
 def test_the_link_rows_are_left_to_the_foreign_key() -> None:
     """`calculation_artifacts.content_hash` is `ON DELETE CASCADE` (migration 019).
 
-    So a blob's link rows go with it and no dangling reference can survive. Deleting them here as
-    well would be a second, drifting definition of what a reclaim means — and it is the `DELETE`
-    this job must *not* contain that proves the cascade is being relied on.
+    So link rows go with their blob; deleting them here too would be a second definition of a
+    reclaim.
     """
     for statement in _STATEMENTS:
         assert "DELETE FROM calculation_artifacts" not in statement
 
 
 def test_eviction_is_ordered_by_what_a_blob_cost_to_produce() -> None:
-    """The cost policy `retention.py` named and correctly refused to fake with an age cutoff.
+    """Eviction is ordered by what a blob cost to produce.
 
-    D-124 started recording `compute_seconds` for exactly this. An eviction that ordered by age
-    alone would reclaim a four-minute Hessian before a cheap geometry simply because it was written
-    first, which is the failure mode that made "a cache is bounded by cost, not by a clock" worth
-    writing down.
+    Ordering by age would reclaim an expensive Hessian before a cheap geometry written later
+    (`compute_seconds`, D-124).
     """
     assert "compute_seconds" in _EVICT_TO_FIT
     assert "last_access_at" in _EVICT_TO_FIT  # cost *over idle time*, not cost alone
@@ -77,9 +57,7 @@ def test_eviction_is_ordered_by_what_a_blob_cost_to_produce() -> None:
 def test_both_triggers_are_off_until_a_deployment_states_a_policy() -> None:
     """Nothing is reclaimed until a deployment says what it can afford to lose.
 
-    Inheriting a deletion default from code is wrong here for the same reason it is in
-    `retention.py`: a deployment chooses what it can afford to recompute, and silence is not a
-    choice. Both knobs default to 0, and 0 means the corresponding sweep does not run.
+    Both knobs default to 0, meaning the sweep does not run.
     """
     assert settings.artifact_store_max_bytes == 0
     assert settings.artifact_evict_idle_days == 0
@@ -88,9 +66,7 @@ def test_both_triggers_are_off_until_a_deployment_states_a_policy() -> None:
 def test_with_no_policy_the_job_reclaims_nothing_and_says_so() -> None:
     """Runs for real: with both triggers off it returns before opening a connection.
 
-    Reporting the skips rather than returning an empty success is the point — an operator reading
-    the job's own result should be able to tell "nothing was old enough" from "this was never
-    switched on".
+    It reports the skips, so an operator can tell "nothing old enough" from "never switched on".
     """
     outcome = asyncio.run(evict_cold_artifacts())
     assert (outcome.idle_blobs, outcome.oversize_blobs) == (0, 0)
@@ -98,13 +74,8 @@ def test_with_no_policy_the_job_reclaims_nothing_and_says_so() -> None:
     assert outcome.skipped == ["artifact eviction disabled (no idle window, no size ceiling)"]
 
 
-# "The size sweep selects by a running total rather than a fixed count" was asserted here as
-# `"SUM(b.stored_bytes) OVER" in _EVICT_TO_FIT` and `"cumulative >" in _EVICT_TO_FIT`, and is
-# asserted below on rows instead. `cumulative` is a CTE column name: renaming it failed the check
-# with the behaviour identical, and rewriting the window into a correlated subquery — a real change
-# to how the sweep selects — passed it. `test_the_size_sweep_keeps_the_valuable_blobs_and_drops_
-# the_cheap_idle_ones` seeds four equal-sized blobs against an 800-byte ceiling and asserts exactly
-# two survive, which is the same claim stated where a top-N delete cannot satisfy it.
+# The size sweep's running-total selection is asserted on rows, in
+# `test_the_size_sweep_keeps_the_valuable_blobs_and_drops_the_cheap_idle_ones`, not on SQL text.
 
 
 def test_every_reclaim_reports_what_it_removed() -> None:
@@ -115,8 +86,7 @@ def test_every_reclaim_reports_what_it_removed() -> None:
 
 # --- the policy itself, against a real database -------------------------------------------------
 #
-# Everything above reads the SQL as text. What follows reads the rows the SQL leaves behind, which
-# is the only place the *policy* is observable.
+# What follows asserts on the rows the SQL leaves behind, where the policy is observable.
 
 
 async def _seed_blob(
@@ -124,8 +94,7 @@ async def _seed_blob(
 ) -> None:
     """Insert one blob with a chosen size and idle age, plus the link row carrying its cost.
 
-    The cost lives on `calculation_artifacts`, not on the blob, so a blob only becomes rankable
-    through its link — seeding one without the other would silently test the `COALESCE(..., 0)`
+    The cost lives on the link row; seeding a blob without it would test the `COALESCE(..., 0)`
     branch instead of the ordering.
     """
     async with db.connection(settings.postgres_dsn) as conn:
@@ -148,9 +117,7 @@ async def _seed_blob(
 async def _clear_artifacts() -> None:
     """Empty the blob table (and, by cascade, its link rows) before seeding.
 
-    Both eviction statements are global, so a blob another test left behind lands inside the
-    ranking and shifts every cumulative total — the same reason `test_retention.py` clears whole
-    tables rather than a prefix.
+    Both eviction statements are global, so a leftover blob would shift every cumulative total.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -170,14 +137,9 @@ def test_the_size_sweep_keeps_the_valuable_blobs_and_drops_the_cheap_idle_ones(
 ) -> None:
     """The ordering, asserted on rows: an expensive artifact outlives a cheap one of equal size.
 
-    Four blobs of 400 bytes each, all idle for ten days, differing only in what they cost to
-    produce. With an 800-byte ceiling exactly two must survive, and *which* two is the whole
-    policy: `retention.py` refused to prune the cache by age precisely because an age cutoff would
-    reclaim a four-minute Hessian before a cheap geometry that happened to be written later.
-
-    A substring assertion cannot see this. Replacing the selection predicate with
-    `cumulative >= 0 AND %s IS NOT NULL` (deletes every blob) or reversing the value `ORDER BY`
-    to `ASC` (evicts the most expensive first) leaves every text assertion in this file green.
+    Four 400-byte blobs, equally idle, differing only in cost; under an 800-byte ceiling exactly the
+    two most valuable must survive. A predicate that deletes everything or an inverted `ORDER BY`
+    would pass every text assertion.
     """
     monkeypatch.setattr(settings, "artifact_store_max_bytes", 800)
     monkeypatch.setattr(settings, "artifact_evict_idle_days", 0)
@@ -206,10 +168,8 @@ def test_a_cheap_blob_read_yesterday_outranks_an_expensive_one_nobody_has_opened
 ) -> None:
     """Value is cost *per idle day*, not cost — the second half of the ranking expression.
 
-    Ten seconds of compute read yesterday beats a hundred seconds unread for a hundred days,
-    because the ranking divides by idle time. The two axes disagree here on purpose: a test where
-    the cheap blob is also the stale one cannot tell the divisor from the tiebreaker, and
-    `MAX(a.compute_seconds)` alone survives it (measured — it did).
+    Ten seconds read yesterday beats a hundred seconds unread for a hundred days. The axes disagree
+    on purpose, so ranking by cost alone fails.
     """
     monkeypatch.setattr(settings, "artifact_store_max_bytes", 400)
     monkeypatch.setattr(settings, "artifact_evict_idle_days", 0)
@@ -230,10 +190,7 @@ def test_the_idle_sweep_removes_only_blobs_past_the_stated_window(
 ) -> None:
     """The idle trigger is a window, not a switch.
 
-    A blob inside the window stays however cheap it was, because the ceiling is the instrument for
-    "too much"; idle eviction only answers "nobody wants this any more". Widening the predicate to
-    `last_access_at < now()` — which reads almost identically — would reclaim the whole store on
-    every pass, and no assertion on the statement text would notice.
+    A blob inside the window stays however cheap; `last_access_at < now()` would reclaim everything.
     """
     monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
     monkeypatch.setattr(settings, "artifact_store_max_bytes", 0)
@@ -257,12 +214,9 @@ def test_an_evicted_blob_takes_its_link_row_and_leaves_the_answer(
 ) -> None:
     """The load-bearing property, asserted on rows rather than on the absence of a substring.
 
-    Two halves, and each fails differently. `calculation_results` must survive: evicting an answer
-    turns a D-011 cache hit into a full re-run, and `retention.py`'s standing refusal to prune the
-    cache is only true because this job cannot reach it. And the link row must *not* survive: the
-    `ON DELETE CASCADE` in migration 019 is what stops `list_for` handing back a ref whose bytes
-    are gone, and a test that only asserts the job contains no `DELETE FROM calculation_artifacts`
-    passes just as well if that cascade were dropped from the schema tomorrow.
+    `calculation_results` must survive (D-011), and the link row must not: the `ON DELETE CASCADE`
+    from migration 019 stops `list_for` returning a ref whose bytes are gone, and only rows can show
+    the cascade is still there.
     """
     monkeypatch.setattr(settings, "artifact_evict_idle_days", 30)
     monkeypatch.setattr(settings, "artifact_store_max_bytes", 0)

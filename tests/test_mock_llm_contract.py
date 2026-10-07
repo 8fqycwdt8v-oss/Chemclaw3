@@ -1,23 +1,9 @@
-"""What `cli/mock_llm` promises the real gateway also does — driven over its own wire.
+"""What `cli/mock_llm` promises the real gateway also does, driven over its own wire.
 
-**Every green result in the live lane is evidence about this mock.** `make live-storm`,
-`live-soak`, `live-degradation`, `live-probes` and `infra/live/e2e-full-stack` all run against it,
-so a divergence between what it emits and what an OpenAI-compatible gateway emits is not a
-cosmetic inaccuracy — it is a control that reports itself working on traffic that could never have
-exercised it. Measured 2026-09-07: nothing in this suite drove a turn through the mock's wire at
-all (`grep -rln "chat.completion.chunk|ChatCompletionChunk" tests/` matched no file), so a
-frame-shape regression in `_chat_stream` was caught by nothing, and four divergences had accumulated
-behind that silence. `D-2026-09-07-a-mock-that-answers-unasked-hides-the-lane-that-asks-nothing`
-records them.
-
-**The numbers asserted here were measured against a real gateway, and the mock is what runs.** That
-split is deliberate and is the only shape that works offline: the expectations come from
-`https://api.anthropic.com/v1/chat/completions` — an OpenAI-compatible endpoint — probed on
-2026-09-07, and each test says in its docstring what came back; the test itself needs no network
-and no credential, because it drives `build_app` in process over `httpx.ASGITransport`. A real
-`langchain_openai.ChatOpenAI` sits on top, so what is asserted is what the client *assembles*, not
-what the mock intended — the same argument `cli/mock_llm` makes for talking HTTP rather than
-injecting a chat client, one layer up.
+Every live lane runs against this mock, so a divergence from an OpenAI-compatible gateway makes a
+control look exercised when it was not. The expectations were measured against a real gateway;
+the tests need no network, driving `build_app` in process over `httpx.ASGITransport` with a real
+`langchain_openai.ChatOpenAI` on top, so what is asserted is what the client assembles.
 """
 
 from __future__ import annotations
@@ -87,19 +73,12 @@ def _post(app: Any, payload: dict[str, Any]) -> httpx.Response:
 
 
 def test_streamed_usage_arrives_only_when_the_request_asked_for_it() -> None:
-    """`llm_stream_usage=False` must book zero here, because it books zero against a gateway.
+    """Streamed usage arrives only when the request asked for it.
 
-    Measured 2026-09-07, streaming with no `stream_options`: the gateway put usage on **0 of 7**
-    frames and `ChatOpenAI(stream_usage=False)` assembled `usage_metadata: None`. The mock put it
-    on 1 of 7 unconditionally and reported `{"input_tokens": 900, …}` — so the one configuration
-    `llm_stream_usage` exists to serve (an endpoint that rejects `stream_options`) looked, on every
-    mock-driven lane, exactly like the metered one.
-
-    That is not a cosmetic difference. `turn_usage`, `api/budget.py`, `agent/spend_cap.py` and
-    `context_budget.note_model_call` all read this one field, so the escape hatch disarms metering
-    — and `_openai_compatible_model`'s docstring records that failure having shipped once already,
-    reached by a different route. The assertion is the red line: a deployment that turns the hatch
-    off meters nothing, and this is where that is said rather than believed.
+    A gateway sends no usage without `stream_options`, so `ChatOpenAI(stream_usage=False)` assembles
+    `usage_metadata: None`. The mock must match, or the escape hatch for endpoints rejecting
+    `stream_options` looks metered in every lane while `turn_usage`, `api/budget.py`,
+    `agent/spend_cap.py` and `context_budget.note_model_call` would in fact read nothing.
     """
     app = _app(Behaviour(name="plain", text="Done."))
 
@@ -115,14 +94,12 @@ def test_streamed_usage_arrives_only_when_the_request_asked_for_it() -> None:
 
 
 def test_a_streamed_tool_call_assembles_to_exactly_one_call_and_a_tool_calls_finish() -> None:
-    """The frame shape nothing in this suite was watching, pinned against the gateway's own.
+    """A streamed tool call assembles to exactly one call and a `tool_calls` finish.
 
-    Measured 2026-09-07 against the gateway: a streamed call arrives as an indexed slot carrying
-    `id`/`type`/`function.name` once, then argument-only fragments on the same `index`, and the
-    terminal chunk carries `finish_reason: "tool_calls"` with usage on that same chunk rather than
-    on a trailing choice-less one. `fragments=3` here because repeating the name on a fragment is
-    what makes a client assemble two calls out of one — the hazard `_chat_stream` documents and
-    that no test could see.
+    As the gateway streams it: `id`/`type`/`function.name` once on an indexed slot, then
+    argument-only fragments on the same `index`, and the terminal chunk carries `finish_reason:
+    "tool_calls"` with usage. Three fragments, because repeating the name on a fragment makes a
+    client assemble two calls.
     """
     app = _app(
         Behaviour(
@@ -166,18 +143,12 @@ def test_the_non_streaming_body_reports_the_same_turn_as_the_streamed_one() -> N
 
 
 def test_billed_input_follows_the_request_when_the_behaviour_names_no_constant() -> None:
-    """A constant bill pins the estimator calibration at its clamp, whatever the lane does.
+    """Billed input follows the request size when the behaviour names no constant.
 
-    Measured 2026-09-07: the gateway billed 12, 321 and 12,509 input tokens for prompts of 25,
-    2,500 and 100,000 characters; the mock billed **900** for all three. `_Calibration.ratio()`
-    clamps at 1.0 from below, so a lane whose bill never grows can only ever observe a ratio under
-    1 and reports exactly 1.0 — the EWMA, `agent_context_calibration_max_factor` and the ">1.0
-    tightens the budget" branch that D-2026-08-28 and D-2026-09-04 both rest on are unreachable
-    from any measurement, only from hand-fed unit numbers.
-
-    `input_tokens=None` with a factor of 0.5 is an endpoint whose tokenizer bills twice what
-    `count_tokens_approximately` estimates — the direction that matters, because that is the one
-    the clamp lets through.
+    A gateway bills in proportion to the prompt. `_Calibration.ratio()` clamps at 1.0 from below, so
+    a constant bill could only ever show 1.0 and the calibration's tightening branch would be
+    unreachable. `input_tokens=None` with factor 0.5 models an endpoint billing twice the
+    approximate estimate, the direction the clamp lets through.
     """
     app = _app(
         Behaviour(name="plain", text="Done."),
@@ -217,19 +188,12 @@ def test_billed_input_follows_the_request_when_the_behaviour_names_no_constant()
 
 
 def test_a_thread_over_the_endpoints_limit_is_refused_as_context_length() -> None:
-    """The one request-level failure `http_status` cannot express, and the label it unlocks.
+    """A thread over the endpoint's limit is refused as a context-length 400.
 
-    Measured 2026-09-07, a 300,000-word prompt to the gateway: `400` with
-    `{"error": {"code": "invalid_request_error", "message": "prompt is too long: 300024 tokens >
-    200000 maximum", "type": "invalid_request_error", "param": null}}`. The mock answered **200**
-    to the same request, so `llm_provider._is_context_length` — and therefore
-    `classify_model_failure`'s `context_length` label, and the `_failover_exceptions` decision not
-    to fail a 400 over — had no lane that could reach it. The marker it matches on
-    (`"prompt is too long"`) had been added on faith; this is the arm that checks it.
-
-    A *request*-level knob rather than a per-behaviour status because that is the whole point: the
-    same behaviour serves a short thread and refuses a grown one, which is what a compaction lane
-    needs and what an injected status can never be.
+    Matches the gateway's `400` with `"prompt is too long: ..."`, so
+    `llm_provider._is_context_length`, `classify_model_failure`'s `context_length` label and the
+    no-failover decision for a 400 are reachable from a lane. A request-level knob, so one behaviour
+    serves a short thread and refuses a grown one, as a compaction lane needs.
     """
     app = _app(
         Behaviour(name="tight", text="Done.", input_tokens=None, refuse_over_input_tokens=200)
@@ -256,29 +220,21 @@ def test_a_thread_over_the_endpoints_limit_is_refused_as_context_length() -> Non
 
 
 def test_refusing_by_size_while_billing_a_constant_is_refused_at_startup() -> None:
-    """The two knobs only mean anything together, so the mock says so before it serves.
+    """Refusing by size while billing a constant is refused at startup.
 
-    A behaviour that refuses over a token count while billing a constant refuses every request or
-    none, whatever the thread does — which is the per-behaviour failure `http_status` already is,
-    wearing the name of a request-level one.
+    Such a behaviour would refuse every request or none, regardless of the thread.
     """
     with pytest.raises(ValueError, match="billing a constant"):
         MockLlm([Behaviour(name="bad", refuse_over_input_tokens=100)])
 
 
 def test_a_cached_prefix_reaches_the_price_split_through_the_service_tier_prefix() -> None:
-    """`prompt_tokens_details.cached_tokens`, and the tier prefix that hides it.
+    """A cached prefix reaches the price split, through the service-tier prefix.
 
-    `turn_usage.graph_usage_tokens` carries ~60 lines of arithmetic about cache reads and the
-    service-tier prefixes upstream puts on them (`priority_cache_read`), and every line of it was
-    covered by hand-built mappings only: the mock omitted `prompt_tokens_details` entirely, so
-    `chemclaw_cache_read_tokens_total` read 0 on every lane and no lane could have shown otherwise.
-    Measured 2026-09-07, the gateway this gets probed against reports no
-    `prompt_tokens_details` either — an OpenAI, vLLM or LiteLLM gateway does — so the mock is the
-    only place the price split can be driven over a wire at all.
-
-    The cached share is *inside* `prompt_tokens`, which is OpenAI's own definition and why the
-    reader subtracts it: 900 billed with 400 cached is 500 of priced input, not 1,300.
+    The mock can emit `prompt_tokens_details.cached_tokens` so `turn_usage.graph_usage_tokens`'
+    cache-read arithmetic (including tier prefixes like `priority_cache_read`) is driven over a
+    wire. The cached share is inside `prompt_tokens`, so 900 billed with 400 cached is 500 priced
+    input.
     """
     app = _app(
         Behaviour(name="cached", text="Done.", cached_tokens=400, service_tier="priority"),
@@ -299,11 +255,9 @@ def test_a_cached_prefix_reaches_the_price_split_through_the_service_tier_prefix
 
 
 async def test_the_default_request_is_unchanged_on_the_wire() -> None:
-    """A behaviour that names none of the new knobs emits exactly what every lane already gets.
+    """A behaviour naming none of the new knobs emits exactly what every lane already gets.
 
-    The regression guard on all of the above: `prompt_tokens_details` and `service_tier` are
-    *absent* rather than null-valued when unused, so a live lane's frames are byte-identical to the
-    ones it was passing on before this contract existed.
+    `prompt_tokens_details` and `service_tier` are absent rather than null when unused.
     """
     app = _app(Behaviour(name="plain", text="Done."))
 
@@ -339,12 +293,9 @@ async def test_the_default_request_is_unchanged_on_the_wire() -> None:
 def _cross_wire_payload(name: str, *, chars: int = 0, tool_result: bool = False) -> dict[str, Any]:
     """One request body both handlers accept, so their decisions are comparable byte for byte.
 
-    `messages` rather than `input` on purpose, and it is not a chat-completions bias: `select`
-    scans both keys and `already_has_tool_results` reads both shapes, so a single body reaches the
-    same behaviour and the same collapse verdict on either route. It has to be *one* body rather
-    than two equivalent ones because `_billed_input_tokens` bills `len(json.dumps(payload))` when
-    the behaviour names no constant — two spellings of the same turn would bill differently and
-    the comparison would be about the payloads instead of about the handlers.
+    `select` and `already_has_tool_results` read both `messages` and `input`, so one body reaches
+    the same behaviour on either route. It must be one body, since `_billed_input_tokens` bills
+    `len(json.dumps(payload))` and two spellings would bill differently.
     """
     messages: list[dict[str, Any]] = [{"role": "user", "content": f"[[{name}]]" + "x" * chars}]
     if tool_result:
@@ -397,10 +348,8 @@ def _stats(app: Any) -> dict[str, int]:
 def _decided(app: Any, route: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Everything the two handlers' shared prelude decides, read back off whichever wire answered.
 
-    Deliberately *not* the frame shapes: those differ by protocol and are each pinned above. What
-    is compared here is the sequence of decisions — which behaviour was selected, whether the
-    turn collapsed to an answer, what the request was billed, whether a status was injected and
-    whether the request was refused for its size.
+    Not the frame shapes, which differ by protocol and are pinned above: the selected behaviour,
+    collapse to an answer, billed input, injected status, and size refusal.
     """
     before = _stats(app)
     status, body = _frames(app, route, payload)
@@ -456,27 +405,13 @@ def _decided(app: Any, route: str, payload: dict[str, Any]) -> dict[str, Any]:
 def test_both_routes_decide_one_turn_the_same_way(
     behaviour: Behaviour, chars: int, tool_result: bool
 ) -> None:
-    """The property `chat_completions`'s docstring asserts in prose, driven over both wires.
+    """Both routes decide one turn the same way, over every behaviour in every catalogue.
 
-    That docstring says the handler is "deliberately the *same sequence of decisions* as the
-    Responses one", and until this existed the only thing holding the two copies together was that
-    sentence — a property asserted in prose across two transcriptions of it, which is the shape
-    this repository spends `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` arguing
-    against. The whole storm catalogue is driven because the divergence that matters is the one in
-    a behaviour nobody re-read: every lane in `infra/live/` selects by name out of *this* list.
-
-    **Every catalogue, because the property is the wire's and not one catalogue's.** The `e2e`
-    entries read the request through a script, which is one more reason to drive them here: a
-    script that read a field only one route's body carries would decide differently per wire.
-    `cli/mock_llm.catalogue` serves one set per process and `make live-delegation` serves the
-    delegation one, so a divergence reached only by a `task`-calling behaviour would be exactly as
-    invisible as the divergence this test was written for.
-
-    Three probes per behaviour, because three of the shared decisions are properties of the
-    request rather than of the behaviour: a short turn, one grown past `refuse_over_input_tokens`,
-    and a second pass carrying a tool result (the collapse to an answer). `think_seconds` is
-    zeroed, and so is `stream_seconds` — latency is the one thing in a behaviour that is not a
-    decision, and `f-slow` declares eight seconds of it, `e2e:slow` twenty.
+    `chat_completions` and the Responses handler are two transcriptions of one decision sequence.
+    Every catalogue is driven, since lanes select behaviours by name from each. Three probes per
+    behaviour cover request-dependent decisions: a short turn, one over `refuse_over_input_tokens`,
+    and a pass carrying a tool result. `think_seconds` and `stream_seconds` are zeroed, as latency
+    is not a decision.
     """
     served = replace(behaviour, think_seconds=0.0, stream_seconds=0.0)
     app = _app(served)
@@ -491,11 +426,9 @@ def test_both_routes_decide_one_turn_the_same_way(
 def test_the_bind_address_defaults_to_loopback_and_a_pod_can_widen_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--host` lets `deploy/kind/` serve the mock to other pods; omitted, it stays on loopback.
+    """`--host` lets a pod serve the mock to other pods; omitted, it binds loopback.
 
-    A mock bound to 127.0.0.1 inside a pod answers nobody, so the cluster lane names `0.0.0.0` —
-    and every existing caller (the live lane, the storm) passes no flag and must keep exposing
-    exactly what it exposed before.
+    Existing callers pass no flag and must keep exposing exactly what they did.
     """
     from chemclaw.cli import mock_llm
 

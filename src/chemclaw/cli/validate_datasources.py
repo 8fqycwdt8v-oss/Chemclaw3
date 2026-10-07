@@ -1,42 +1,19 @@
 """Validate the data-source manifests: real halves, real signatures, real enable tokens.
 
-`make datasource-validate`, the gate this seam did not have. It was the only registry in the repo
-with no validator, which was defensible while a source was a lambda in a Python file that `mypy`
-already checked — and stopped being defensible the moment a source became a YAML manifest naming
-its half as a string (D-120). Late binding buys the isolation this seam exists for; the bill is
-that nothing is checked until something asks for that half, in whichever process asks first.
+`make datasource-validate`. Manifests name their halves as strings (late binding), so nothing is
+checked until a half is first used, possibly hours later in a worker. Beyond pydantic's per-file
+schema this checks:
 
-This gate pays the bill up front. Pydantic already rejects a malformed manifest at load; the three
-things a per-file schema cannot see are:
+1. **A half that does not resolve** (a typo in a `module:attr` reference).
+2. **`config:` the half's constructor will not accept** — the callable's signature is the schema,
+   bound here with the manifest's `config:` plus the `name` the registry passes.
+3. **A `labels:` block that does not match the source** — a `provides` with no column, or labels on
+   a source that contributes no reactions; the coverage report repeats such claims to chemists.
+4. **An enabled source no manifest declares**, which would silently stop being searched.
 
-1. **A half that does not resolve.** `ingest: chemclaw.ingest.eln.json_adapter:JsonExprotAdapter`
-is a perfectly
-   valid string. It fails at the first sync, in a worker, hours after the deploy that introduced
-   it — the worst place and time to learn about a typo.
-2. **`config:` the half's constructor will not accept.** Free-form config is the deliberate trade
-   (the callable's signature *is* the schema, so there is no second model to keep in step with the
-   adapter) and this is what makes it safe: the kwargs are bound against the real signature here —
-   the manifest's `config:` *plus* the `name` the registry passes to every half, which is the only
-   thing this gate can get wrong in the direction that ships a broken adapter (see `_check_half`).
-3. **A `labels:` block that does not match the source.** A `provides` naming a group the source
-   has no column for is not inert: it is read by the coverage report, so the manifest's claim ends
-   up in a sentence a chemist reads. And a `labels:` block on a source that contributes no
-   reactions at all is a policy nothing will ever apply.
-4. **An enabled source no manifest declares.** `data_sources` naming a missing source would
-   otherwise be a corpus that silently stops being searched — indistinguishable, from the chemist's
-   side, from a corpus with no matches.
-
-Resolving every half is exactly the eager import the runtime seam avoids, which is the point: this
-runs in CI, in its own process, where importing everything is free and finding out early is not.
-
-**`--construct` goes one step further, opt-in.** Binding kwargs checks their *names*; it cannot see
-whether the values make sense. That gap was academic while every `config:` was a directory path, and
-stopped being academic when a source's config became a whole binding document
-(`chemclaw.ingest.eln.warehouse`): a mistyped column path or an unknown transform binds perfectly
-and fails when the half is built. `--construct` builds each half, which is where such a config is
-validated. Opt-in rather than default because construction is a half's own code — the shipped ones
-open nothing, but this gate cannot promise that of a source a deployment mounted. It is the check to
-run after mounting your own manifest directory, and it needs no warehouse to be reachable.
+Resolving every half is the eager import the runtime avoids; in CI that is cheap. `--construct`
+(opt-in) also builds each half, which is where a binding document's values (column paths,
+transforms) are validated; opt-in because construction runs a site's own code. Needs no warehouse.
 
 Read-only; touches nothing.
 """
@@ -65,20 +42,10 @@ from chemclaw.ingest.sources.registry import (
 def _check_half(name: str, field: str, reference: str, config: dict[str, object]) -> list[str]:
     """Resolve one half and bind the manifest's config against its signature (rules 1 and 2).
 
-    Bound against **exactly what the registry passes**, which is the manifest's `config:` *plus*
-    `name=<the manifest's name>` — for every half, because `_build_ingest_half`,
-    `_build_retrieve_half` and `_build_commitments_half` all pass it, each for the same reason: a
-    half that guesses its own name collapses two instances of one engine into one identity (see
-    `_build_retrieve_half` for the `sharedrive` failure that argument was written about).
-
-    Binding the config alone reports a half that correctly requires `name` as broken, and passes one
-    that refuses it — in both directions the opposite of the truth, which is the only thing worse
-    than not checking. It bound `name` for `retrieve` alone while the registry had come to pass it
-    to all three, so a site's own ingest adapter written to the documented contract passed this gate
-    in CI and raised `TypeError: unexpected keyword argument 'name'` at worker startup. There is no
-    per-field branch left to drift: what the registry passes is uniform, so what is bound here is
-    too, and `tests/test_datasource_seam.py` asserts the gate and the build agree in both
-    directions.
+    Bound against exactly what the registry passes for every half: the manifest's `config:` plus
+    `name=<the manifest's name>`. Binding config alone would fail a half that correctly requires
+    `name` and pass one that refuses it. `tests/test_datasource_seam.py` asserts the gate and the
+    build agree.
     """
     try:
         factory = resolve_half(reference)
@@ -89,12 +56,9 @@ def _check_half(name: str, field: str, reference: str, config: dict[str, object]
         inspect.signature(factory).bind(**passed)
     except TypeError as exc:
         return [f"{name}: {field}: {reference} will not accept config {sorted(passed)}: {exc}"]
-    # **And what it was given, not only what it accepts.** `bind` above proves the *keys* are real;
-    # this proves a scalar value is the type the parameter declares. The gap was not academic:
-    # `snapshot: "false"` bound cleanly here and armed a destructive sweep, because every non-empty
-    # string is truthy and a manifest value is passed through exactly as YAML parsed it
-    # (`D-2026-09-16-a-truthy-string-is-not-the-flag-somebody-wrote`). `_build_half` raises on the
-    # same condition, so this gate and the build agree rather than one of them being the real one.
+    # `bind` proves the keys are real; this proves each scalar value has the declared type — a YAML
+    # string `"false"` is truthy. `_build_half` raises on the same condition, so gate and build
+    # agree.
     if mismatch := option_type_mismatch(factory, config):
         return [f"{name}: {field}: {reference} was given {mismatch}"]
     return []
@@ -103,8 +67,8 @@ def _check_half(name: str, field: str, reference: str, config: dict[str, object]
 def _check_construction(name: str) -> list[str]:
     """Build every declared half, so a config the constructor rejects is found here (opt-in).
 
-    Reported with the source name in front, because the error a half raises describes the *binding*
-    ("unknown transform 'exek'") and says nothing about which source carried it.
+    The source name is prefixed because a half's error describes the binding, not which source
+    carried it.
     """
     try:
         make_data_source(name)
@@ -116,16 +80,9 @@ def _check_construction(name: str) -> list[str]:
 def _check_connection(name: str, manifest: DataSourceManifest) -> list[str]:
     """Bind a `connection:` block against its driver's signature, with nothing connected.
 
-    This is the offline half of "the driver's signature is the schema"
-    (`D-2026-08-26-the-driver-s-signature-is-the-schema`), and it is what replaced a model that
-    enumerated one vendor's connection fields. `ConnectionBinding` is `extra="allow"` precisely
-    because a Postgres, a lakehouse and a vector database share no vocabulary — so the check that a
-    key is real cannot live in a model, and lives here instead, against the callable that owns the
-    words. Every `*_env` key is bound under its stem, because that is the keyword the driver will
-    actually be built with once the variable is read.
-
-    The driver is *resolved*, not called: resolution imports the vendor client, which is the same
-    eager import this gate already makes for every half, and construction would need credentials.
+    `ConnectionBinding` is `extra="allow"` because drivers share no vocabulary, so key validity is
+    checked here against the callable. Every `*_env` key is bound under its stem, the keyword the
+    driver is built with. The driver is resolved, not called: construction would need credentials.
     """
     raw = manifest.config.get("binding")
     if not isinstance(raw, dict):
@@ -149,14 +106,9 @@ def _check_connection(name: str, manifest: DataSourceManifest) -> list[str]:
 def _check_labels(name: str, manifest: DataSourceManifest) -> list[str]:
     """Rule 3: a `labels:` block must describe a source that actually contributes reactions.
 
-    Two checks, and both are about a claim reaching a chemist rather than about a crash. A block on
-    a source with neither an ingest half nor a `corpus:` binding is a policy nothing will ever
-    apply — it looks like labelling is configured when nothing is being labelled. And a `provides`
-    naming a group the binding maps no column for is a lie the coverage report repeats: it would
-    say "this source provided the name" for rows where nothing did.
-
-    The binding is read straight out of `config:` rather than by constructing the half, so this
-    runs in the default gate and needs no driver.
+    A block on a source with neither an ingest half nor a `corpus:` binding is a policy nothing
+    applies; a `provides` naming a group the binding maps no column for would make the coverage
+    report claim the source provided it. Read from `config:` directly, so no driver is needed.
     """
     if manifest.labels is None:
         return []
@@ -181,9 +133,8 @@ def _check_labels(name: str, manifest: DataSourceManifest) -> list[str]:
 def _corpus_binding(manifest: DataSourceManifest) -> CorpusBinding | None:
     """The manifest's `corpus:` binding, or `None` when it declares no warehouse binding at all.
 
-    A malformed binding is not reported here: `--construct` builds the half and surfaces it with
-    the binding validator's own message, which names the offending path. Two reports of one typo in
-    two vocabularies is what the `resolved` guard above exists to avoid.
+    A malformed binding is not reported here; `--construct` surfaces it with the binding
+    validator's own message, so one typo is reported once.
     """
     raw = manifest.config.get("binding")
     if not isinstance(raw, dict):
@@ -211,9 +162,7 @@ def validate_datasources(construct: bool = False) -> list[str]:
 
     for name, manifest in sorted(manifests.items()):
         resolved = []
-        # Every declared half, because the registry builds every declared half. `commitments` was
-        # missing here from the day it was added, so the third seam had no gate at all — and a half
-        # that is not checked is one whose first report of a typo is a worker crash.
+        # Every declared half, because the registry builds every declared half.
         for field, reference in (
             ("ingest", manifest.ingest),
             ("retrieve", manifest.retrieve),

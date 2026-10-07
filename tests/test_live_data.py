@@ -1,19 +1,12 @@
 """The corpus-fidelity lane's own logic, offline.
 
-`make live-data` is by definition run against a seeded checkout and a live database, so what is
-testable here is not "did the corpus arrive" — that needs the corpus. What is testable is the part
-that decides *whether a green result means anything*, and every invariant below is one this lane
-already got wrong once while being written:
+What is testable without a live database is whether a green result means anything:
 
-- A 0% yield read through a truthiness test becomes "unknown". The first verification script had
-  exactly that bug and mis-reported 21 of 400 records; 644 of the seeded corpus are 0.00%.
-- A blank cell in a published table is an omitted reagent — a real control condition, 480 no-ligand
-  and 720 no-base rows in one screen — and has to compare equal to the seeded record's *absent*
-  input rather than to an empty string. The first version raised `KeyError` and could not read a
-  fifth of that dataset at all.
-- A citation-only dataset whose records start arriving *structured* is the failure that matters
-  most, because the only way there is to have invented a structure the source never published.
-  A check that only looked for regressions in one direction would call that green.
+- a 0% yield must not be read as "unknown" through a truthiness test;
+- a blank cell in a published table is an omitted reagent and must equal the seeded record's
+  absent input, not an empty string;
+- a citation-only dataset whose records arrive structured is a failure, since the structure was
+  invented.
 """
 
 from __future__ import annotations
@@ -233,12 +226,7 @@ def test_the_report_names_every_failed_check() -> None:
 
 
 def test_a_procedure_run_at_zero_degrees_is_read_as_zero() -> None:
-    """A step reading "cooled to 0 °C" is a condition, not the absence of one.
-
-    One seeded fixture runs at exactly 0 °C. Anywhere a truthiness test stands in for
-    `is not None` — in the regex handling, in the comparison, in the record — that record's
-    temperature disappears and the extraction reads as a failure it is not.
-    """
+    """A step reading "cooled to 0 °C" is read as 0, not as no condition."""
     match = _PROSE_TEMPERATURE.search("The mixture was cooled to 0 °C and stirred for 3.0 h.")
     assert match is not None
     assert float(match.group(1)) == 0.0
@@ -253,18 +241,11 @@ def test_a_temperature_is_only_read_from_a_temperature() -> None:
 
 
 def test_the_factor_tables_are_found_from_the_export_dir_the_lane_actually_sets() -> None:
-    """The default `--real-data` path, against the mock layout both lanes really configure.
+    """The default `--real-data` path, against the mock layout both lanes configure.
 
-    This is the check that was missing when the derivation walked up three levels instead of four
-    and produced `<repo>/data/app/eln/real_data`. Nothing failed loudly: `up.sh` logged a warning
-    naming a log file, the bring-up exited 0, and the ORD half of the corpus was simply never
-    reachable — which is the shape of failure this whole lane exists to catch in the *data*, so it
-    is worth catching in the lane itself.
-
-    The literals below are transcribed from `Chemclaw3_mock/start.sh` and
-    `infra/live/e2e-full-stack/up.sh` rather than imported, deliberately and for the reason
-    `Chemclaw3-mcp/tests/test_identity_contract.py` gives about header spellings: importing this
-    module's own constant would let the test agree with the bug.
+    A wrong walk-up depth fails silently: bring-up exits 0 and the ORD half of the corpus is never
+    reached. The literals are transcribed from `Chemclaw3_mock/start.sh` and
+    `infra/live/e2e-full-stack/up.sh` rather than imported, so the test cannot agree with a bug.
     """
     mock_repo = Path("/checkout/Chemclaw3_mock")
     ord_export_dir = mock_repo / "data" / "eln" / "exports" / "ord"
@@ -273,12 +254,7 @@ def test_the_factor_tables_are_found_from_the_export_dir_the_lane_actually_sets(
 
 
 def test_the_factor_tables_are_not_looked_for_under_the_export_tree() -> None:
-    """The specific wrong answer, named so a regression cannot pass by being merely plausible.
-
-    An off-by-one here stays inside the mock checkout and still *looks* like a reasonable path,
-    which is why the original survived review — `<repo>/data/app/eln/real_data` reads fine until
-    somebody lists the directory.
-    """
+    """The factor tables are not looked for under the export tree, a plausible wrong path."""
     ord_export_dir = Path("/checkout/Chemclaw3_mock/data/eln/exports/ord")
 
     resolved = _default_real_data(ord_export_dir)
@@ -292,17 +268,10 @@ def test_the_factor_tables_are_not_looked_for_under_the_export_tree() -> None:
 
 
 def test_the_shipped_default_export_dir_derives_no_tables_rather_than_raising() -> None:
-    """The shipped `ord_export_dir` is relative and three parts deep — the common case, not an edge.
+    """The shipped relative `ord_export_dir` derives no tables rather than raising `IndexError`.
 
-    `data/eln-exports/ord` (`core/config/eln.py`) has no fourth parent, and the first version of
-    this fix indexed `parents[3]` unguarded: every invocation outside the four-repo lane died with
-    a bare `IndexError: 3` raised from inside `pathlib`, which names neither the setting that was
-    wrong nor the flag that fixes it.
-
-    This is the input the two tests above could not read. They were written from the lane's layout,
-    which is the same understanding that produced the off-by-one, so they agreed with it about
-    everything except the count — exactly the failure `tasks/lessons.md` records for tests written
-    alongside their own change.
+    `data/eln-exports/ord` has no fourth parent; an unguarded index would crash every run outside
+    the four-repo lane with a message naming neither the setting nor the flag.
     """
     assert _default_real_data(Path("data/eln-exports/ord")) is None
 
@@ -351,12 +320,10 @@ async def test_a_prose_condition_reaches_a_step(tmp_path: Any) -> None:
 
 @pytest.mark.anyio
 async def test_a_setpoint_derived_from_prose_fails_the_check(tmp_path: Any) -> None:
-    """The half that guards the decision, and the one this check was missing.
+    """A setpoint derived from procedure prose fails the check.
 
-    `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
-    after measuring what it stored: a reaction run at 80 °C for 12 h, recorded as 0 °C for 0.5 h,
-    because a procedure begins by charging a vessel. Reinstating that fallback must turn this red
-    — otherwise the check passes for the wrong reason and the retraction is unguarded offline.
+    Reinstating a prose fallback (which reads "charge the vessel" as the reaction conditions) must
+    turn this red.
     """
     _write_entry(tmp_path, _entry_stating_conditions_only_in_prose())
 

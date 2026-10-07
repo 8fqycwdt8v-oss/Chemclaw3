@@ -1,19 +1,9 @@
-"""The transcription tier: what removing the PR-gate from ELN ingest had to keep (D-2026-08-25).
+"""The transcription tier: ELN reactions as store rows rather than git notes.
 
-Four claims, each of which the change would be wrong without:
-
-1. Ingest performs **no git operation at all** — the property the whole change is for, asserted
-   against a submitter that raises rather than by reading the diff.
-2. A sync run's cost does not grow with the corpus. The old loop parsed every merged note per
-   chunk, which is what made it outgrow `eln_sync_timeout_seconds` at ~700k entries.
-3. The capability survives end to end: a structural hit still expands into its recipe, with no
-   note file on disk and no git repository configured.
-4. A campaign citing `[[reaction-<id>]]` still passes `kg-validate` now that reactions are rows,
-   and a citation to a record that does not exist is still caught — by the half of the check that
-   can see the store.
-
-`tests/test_eln.py` covers the mapping and the sync loop's own bookkeeping; this file covers the
-seam between the tier and everything that reads it.
+Asserts that ingest performs no git operation, that a sync run's cost does not grow with the
+corpus, that a structural hit still expands into its recipe with no note on disk, and that
+`[[reaction-<id>]]` citations are checked against the store. `tests/test_eln.py` covers the
+mapping and the sync loop's bookkeeping.
 """
 
 import asyncio
@@ -109,12 +99,7 @@ class _ExplodingSubmitter:
 
 
 def test_ingesting_a_reaction_opens_no_pull_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The point of the change, asserted where it would break rather than in the diff.
-
-    Every path out of `ingest_reaction` to git is stubbed with something that raises, so a future
-    edit re-introducing the gate fails here instead of quietly costing a reviewer 202 ms of
-    serialized git per ELN entry and a human merge per experiment.
-    """
+    """Every path from `ingest_reaction` to git raises, so re-introducing a git write fails here."""
     monkeypatch.setattr("chemclaw.kg.git_writer.default_writer", lambda: _ExplodingSubmitter())
 
     async def _run() -> ReactionRecord:
@@ -136,14 +121,8 @@ def test_ingesting_a_reaction_opens_no_pull_request(monkeypatch: pytest.MonkeyPa
 async def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
     """Cost is bounded by the page, not by how much has already been ingested.
 
-    The old loop answered "is this entry unchanged?" by parsing every merged note on disk, once
-    per chunk that touched a replay — 425 µs and 2.9 kB per note, linear — so at ~700k entries the
-    lookup alone outlived the activity's 300 s start-to-close and the sync wedged permanently.
-
-    Asserted by counting what the store is *asked* for rather than by timing, because a timing
-    assertion on a small fixture proves nothing: the defect was the shape of the query, and the
-    shape is what this pins. A replay asks for exactly the ids in the batch; a run with no replay
-    at all asks for nothing.
+    Asserted by counting what the store is asked for rather than by timing: a replay asks for
+    exactly the batch's ids, and a run with no replay asks for nothing.
     """
     asked: list[int] = []
 
@@ -184,14 +163,10 @@ async def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None
 
 
 def test_the_unchanged_check_keys_on_the_record_id_not_the_entry_id() -> None:
-    """A record id is not an entry id, and a source where they differ must still skip a replay.
+    """The unchanged check keys on the record id, which may differ from the source's entry id.
 
-    `RawEntry.entry_id` is whatever the source keys its rows on; `OrdReaction.reaction_id` is a
-    separately declared field — in a warehouse binding, two different columns. Looking the store up
-    by one and reading the answer by the other misses on every such source, and misses *silently*:
-    the upsert is idempotent, so the run stays correct and simply re-ingests everything forever
-    while `skipped_existing` reports nothing. This is the shape of that bug, so the fixture makes
-    the two ids deliberately unequal.
+    Keying on the wrong one misses silently (the upsert is idempotent) and re-ingests everything
+    forever, so the fixture makes the two ids deliberately unequal.
     """
 
     class _RenamingAdapter(_ListAdapter):
@@ -226,12 +201,9 @@ def test_the_unchanged_check_keys_on_the_record_id_not_the_entry_id() -> None:
 
 
 def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The capability the user asked to keep: "same product / similar reaction", with the prose.
+    """A structural hit's citation still expands into its recipe via `expand_note`.
 
-    End to end with **no note file on disk and no git repository configured**, which is what makes
-    this a test of the new path rather than of a leftover of the old one. The chunk a structural
-    hit yields is a citation, so the recipe question is answered by handing that citation to
-    `expand_note` — exactly the round trip a chemist takes.
+    Runs with no note file and no git repository configured, so only the store path can answer.
     """
     monkeypatch.setattr(settings, "knowledge_dir", "/nonexistent-knowledge")
 
@@ -258,10 +230,8 @@ def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.Monk
         return cited, view.body
 
     cited, body = asyncio.run(_run())
-    # The literal rather than `note_id_for_reaction(...)`, because deriving the expectation from
-    # the function under test moves both sides together: a retriever that stopped naming the
-    # source it matched in would still pass. The round trip is what makes this a citation and not
-    # a string — `expand_note` below resolves this exact id.
+    # A literal rather than `note_id_for_reaction(...)`, so the expectation is not derived from the
+    # function under test; `expand_note` below resolves this exact id.
     assert cited == ["reaction-test-eln.rxn-recipe"]
     assert "80.0 °C" in body and "Ethanol and acetic acid" in body, (
         "a structural hit must expand into the run's conditions and procedure; a citation with no "
@@ -272,17 +242,10 @@ def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.Monk
 def test_a_reaction_cited_by_a_campaign_still_expands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The common case, and the one the first version of this file could not see.
+    """A reaction cited by a campaign still expands although the graph holds a bare node for it.
 
-    `build_graph` mints a bare node for every cited-but-undefined link target, so a reaction cited
-    by any campaign or playbook **is** a member of the graph while carrying no note. `expand_note`
-    guarded its store fallback on `note_id not in graph`, which is therefore False for exactly the
-    reactions the fallback exists to serve — and `_require_note` raised "no note with id" for a run
-    that was sitting in the corpus.
-
-    The original test missed it by pointing `knowledge_dir` at a nonexistent path, so the graph was
-    empty and membership was never True. This one writes the citing campaign, which is what the
-    corpus actually looks like once `memory.campaign` has run.
+    `build_graph` mints a node for every cited target, so the store fallback must not be guarded on
+    graph membership. The citing campaign is written so the graph is not empty.
     """
     (tmp_path / "campaign").mkdir()
     (tmp_path / "campaign" / "campaign-x.md").write_text(
@@ -321,17 +284,10 @@ async def test_expanding_a_citation_to_an_unknown_record_says_so(
 
 
 def test_condense_protocols_resolves_a_reaction_reference(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`condense_protocols` reads runs out of the store, not only notes out of the graph.
+    """`condense_protocols` resolves runs from the record store, not only notes from the graph.
 
-    Runs left the graph's id space when they became rows, and they are the largest class of
-    protocol this tool exists to compare — the hits `similar_reactions` hands back. Without the
-    record fallback every one of them reads as `missing`: the tool would answer "I could not find
-    those" about the corpus it was built for, which is the silent hole `_from_share` was written to
-    close for share documents, arriving from the other side.
-
-    Asserted through `_from_record` rather than through the whole tool, because condensing calls a
-    model; what is being pinned here is the resolution, including that the figures ride along as
-    numbers rather than being left for the comparison to re-derive from prose.
+    Asserted through `_from_record` because condensing calls a model; it pins the resolution and
+    that figures ride along as numbers.
     """
     monkeypatch.setattr(settings, "knowledge_dir", "/nonexistent-knowledge")
 
@@ -386,11 +342,9 @@ def test_a_campaign_citing_a_reaction_record_is_not_dangling(tmp_path: Path) -> 
 
 
 def test_a_citation_to_a_missing_record_is_still_caught() -> None:
-    """The other half: what `dangling_links` gave up, the store has to answer for.
+    """A citation to a missing record is caught by the store half of the check.
 
-    Offline validation can no longer tell a real run id from a typo'd one — that is the stated cost
-    of the namespace rule. This is the check that takes it back, and it is why `kg-validate` is run
-    in CI with a database rather than without one.
+    Offline validation cannot tell a real run id from a typo, so `kg-validate` runs with a database.
     """
 
     async def _run() -> tuple[list[str], list[str]]:
@@ -418,11 +372,10 @@ def test_a_citation_to_a_missing_record_is_still_caught() -> None:
 
 
 async def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
-    """The two backends must agree, or the ingest tests prove something the deployment does not.
+    """The Postgres store and the in-memory one answer alike.
 
-    Exercises the durable store against a real database: the upsert (including the amendment
-    overwrite), the body lookup, and every arm of the eligibility filter — which is the one piece
-    written twice, once as `ReactionRecord.passes` and once as SQL.
+    Covers the upsert (including amendments), body lookup and every arm of the eligibility filter,
+    which exists twice: as `ReactionRecord.passes` and as SQL.
     """
     await migrated_db_or_skip()
     durable = PostgresReactionRecordStore()
@@ -483,10 +436,8 @@ async def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
 async def _index_behind(statement: str, params: tuple[object, ...]) -> str:
     """The index the planner uses for `statement`, with sequential scans taken away.
 
-    Sequential scans are disabled for the same reason a plan assertion is used at all: a fixture
-    table holds a handful of rows in one page, so the planner is right to scan it and the choice
-    says nothing about which indexes exist. With that option removed, the index it names is the
-    best one the schema offers for the predicate — which is exactly the question here.
+    On a fixture-sized table a sequential scan is correct, so it is disabled to ask which index the
+    schema offers for the predicate.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         await conn.execute("SET LOCAL enable_seqscan = off")
@@ -519,31 +470,10 @@ async def _leading_columns() -> set[str]:
 def test_a_record_lookup_by_id_is_served_by_an_index_leading_with_that_id() -> None:
     """`read()` and `known()` filter on the bare `reaction_id`; an index must lead with it.
 
-    For most of this table's life none did. The primary key is `(ingest_source, reaction_id)`
-    (`056`), `reaction_records_filter_idx` is `(project, performed_at)` (`052`) and the retraction
-    index is partial — so `_SELECT_ONE` reached the pkey with its `Index Cond` on the *non-leading*
-    column, and `_SELECT_KNOWN` did not reach an index at all. Measured on 500 000 records
-    (240 MB): 24.1 ms / 2 467 buffers for one id, and a Parallel Seq Scan of 27 778 buffers
-    (217 MB) at 152.3 ms for a page of 50 — against 0.045 ms and 0.80 ms once `081` adds the
-    index. Both are on live paths: `expand_note` resolves a `reaction-<id>` citation through
-    `read()`, and `kg-validate` and the warehouse retriever ask `known()`.
-
-    **A timing assertion could not have caught this**, which is why there is not one: every fixture
-    in this file holds single-digit rows, where a sequential scan is genuinely the right plan and
-    200x is 0.1 ms either way. So the two halves are asked separately, because only one of them is
-    scale-free:
-
-    * The **plan** for `_SELECT_ONE`, with sequential scans taken away — it names the new index,
-      and named the primary key (`Index Cond` on the non-leading column, the 24 ms plan) before it
-      existed.
-    * The **catalog**, for the batch read. Its plan is not scale-free: at fixture size the planner
-      takes an index-only scan of the whole primary key, which is correct on one page and is the
-      152 ms Parallel Seq Scan at 500 000 rows. What holds at every size is that the schema offers
-      an index leading with the column these statements filter by, so that is what is asserted.
-
-    `_SELECT_BODIES` is checked beside them because it filters on the pair and must keep using the
-    primary key: the index added for the other two must not quietly become the plan for the
-    statement that was already right.
+    Timing cannot show this on fixture-sized tables, so two scale-free checks are used: the plan for
+    `_SELECT_ONE` (with sequential scans disabled) names the new index, and the catalog holds an
+    index leading with `reaction_id` for the batch read. `_SELECT_BODIES` filters on the pair and
+    must keep using the primary key.
     """
 
     async def _run() -> tuple[str, str, set[str]]:
@@ -579,11 +509,10 @@ def test_the_default_store_is_the_durable_one() -> None:
 def test_the_citation_gate_fails_when_it_cannot_reach_the_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A gate that could not look has not passed — it printed a line and returned success.
+    """The citation gate fails when it cannot reach the store, rather than passing with a warning.
 
-    `dangling_links` ignores every `reaction-` target since D-2026-08-25, deliberately, because the
-    graph cannot see the store. That makes this half the *only* thing between a typo'd run id and a
-    merge, so an unreachable database is a failed gate rather than a warning beside a zero exit.
+    `dangling_links` ignores `reaction-` targets, so this check is the only one between a typo'd run
+    id and a merge.
     """
     _campaign_citing(tmp_path, note_id_for_reaction("rxn-1"))
 
@@ -611,13 +540,8 @@ def _sited(reaction_id: str, site: str, body: str) -> ReactionRecord:
 async def test_two_sources_sharing_an_entry_id_do_not_overwrite_each_other() -> None:
     """`EXP-1001` at two sites is two runs, and the row key has to be able to say so.
 
-    `ingest_reaction`'s own docstring names the collision — "two ELNs may legitimately use one entry
-    id" — and answered it with a `source` column beside a bare-id key. That column only records
-    *which one won*: the upsert refreshes every field including `source`, so with two ingest sources
-    enabled the later sync silently replaced the earlier site's transcription, and every
-    `reaction-EXP-1001` citation a playbook carried then resolved to a different run at a different
-    site. `kg-validate` still passed — the citation resolves, to the wrong record. The label index
-    put `(source, reaction_id)` in its key for exactly this reason; this tier did not.
+    With a bare-id key the later sync silently replaced the earlier site's transcription and
+    citations resolved to the wrong run; the key is `(source, reaction_id)`.
     """
     store = InMemoryReactionRecordStore()
     await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
@@ -629,12 +553,7 @@ async def test_two_sources_sharing_an_entry_id_do_not_overwrite_each_other() -> 
 
 
 async def test_a_citation_that_two_sources_could_answer_is_refused_rather_than_guessed() -> None:
-    """`reaction-EXP-1001` names no source, so with two rows behind it there is no right answer.
-
-    Returning either is a coin flip that reads as a fact — the failure mode this whole finding is
-    about — so the read refuses and names both sources. An operator can then scope the sources or
-    the site can re-key its export; what they cannot do is not find out.
-    """
+    """A sourceless citation two rows could answer is refused, naming both sources, not guessed."""
     store = InMemoryReactionRecordStore()
     await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
     await store.record([_sited("EXP-1001", "site-b", "nitration, failed")], source="eln-b")
@@ -659,9 +578,7 @@ async def test_the_postgres_store_keys_transcriptions_by_source_too() -> None:
 async def _write_raw_conditions(reaction_id: str, conditions: object) -> None:
     """Put `conditions` into the column without going through `record`.
 
-    The column is bare `jsonb`, and the payload this test is about is one a *newer build of core*
-    writes during a rolling upgrade — which is not a shape any code in this checkout can produce,
-    so it is written as SQL.
+    The payload is one a newer build writes, which no code in this checkout can produce.
     """
     from psycopg.types.json import Jsonb
 
@@ -678,18 +595,10 @@ async def _write_raw_conditions(reaction_id: str, conditions: object) -> None:
 
 
 def test_a_row_a_newer_build_wrote_is_still_readable_by_an_older_one() -> None:
-    """A rolling upgrade runs both builds against one database, and this read used to forbid extras.
+    """A row a newer build wrote is still readable by an older one.
 
-    `ProcessConditions` is `extra="forbid"` because a typo'd key silently dropped is a number a
-    chemist wrote that nothing will render — an argument about *writing*. On the read side it meant
-    a row carrying one added field raised `ValidationError: pressure_bar_v2 — Extra inputs are not
-    permitted` on every old pod, and because a reaction is looked up by structure that failure
-    landed on a chemist's query for a molecule rather than on the ingest that wrote it. The
-    asymmetry is the same one `D-2026-09-06-a-decode-the-workflow-does-not-do-is-a-failure-nobody-
-    hears` chose on the Temporal wire.
-
-    The known field is asserted alongside, because a read that tolerated the extra by discarding
-    the whole payload would also not raise.
+    `extra="forbid"` guards writes; on reads it would fail a chemist's query during a rolling
+    upgrade. The known field is asserted so a read that discarded the payload would fail too.
     """
 
     async def _run() -> object:
@@ -728,12 +637,7 @@ def test_recorded_but_all_unknown_conditions_are_not_read_as_absent() -> None:
 
 
 def test_a_conditions_payload_that_is_not_an_object_is_refused_by_name() -> None:
-    """The one case that is corruption rather than version skew, and it said nothing useful.
-
-    `ProcessConditions(**row)` on an array gave `TypeError: argument after ** must be a mapping`,
-    naming neither the table nor the reaction. Refused rather than ignored because `read` addresses
-    one reaction by id: the caller asked for this row.
-    """
+    """A non-object conditions payload is refused as corruption, naming table and reaction."""
 
     async def _run() -> str:
         await migrated_db_or_skip()
@@ -749,21 +653,11 @@ def test_a_conditions_payload_that_is_not_an_object_is_refused_by_name() -> None
 
 
 def test_one_entry_reporting_a_non_finite_number_does_not_wedge_every_later_run() -> None:
-    """The wedge the reject-and-continue arm exists to prevent, driven against the real column.
+    """One entry with a non-finite number is rejected and does not wedge every later run.
 
-    `conditions` is `jsonb`, and `NaN` is not JSON. Postgres says so at the wall, as
-    `psycopg.errors.InvalidTextRepresentation` naming a *token* — an exception that is neither
-    `ChemclawError` nor `ValidationError`, so it walked past `sync_entries`' per-entry guard,
-    aborted the pass and returned no summary. Nothing advanced the cursor, the input is
-    deterministic, and the source is re-fetched from the same `since` every run: **one entry holds
-    an entire corpus at a fixed date forever**, while the ELN looks to a chemist as though it
-    stopped producing.
-
-    Driven end to end rather than at the model, because the whole defect is *which layer* the
-    refusal happens in: a `ValidationError` from `ProcessConditions` is one rejected entry with its
-    reason in the ledger, and the identical value one layer later is an outage.
-
-    In-memory stores would prove nothing here — they take a NaN happily, so this needs the column.
+    Postgres rejects `NaN` in `jsonb` with an error outside the per-entry guard, which aborted the
+    pass and pinned the cursor forever. It must be refused earlier, as one rejected entry. Driven
+    against the real column; in-memory stores accept NaN.
     """
 
     def _with_temperature(entry_id: str, celsius: float) -> RawEntry:
@@ -802,18 +696,11 @@ def test_one_entry_reporting_a_non_finite_number_does_not_wedge_every_later_run(
 def test_expanding_a_withdrawn_record_resolves_and_says_it_was_withdrawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retraction a chemist cannot see is a withdrawn run answering as a precedent.
+    """Expanding a withdrawn record resolves and says it was withdrawn.
 
-    The fifth reader of `retracted_at`, and the one that must *not* stop serving. `read()` keeps
-    answering for a retracted row while `eligible()` stops, deliberately: a row is the only
-    readable form of an ELN run, so a campaign note that already cites a withdrawn one has to
-    expand into "this was withdrawn" rather than into "no note with that id", which is
-    indistinguishable from a typo.
-
-    Both halves are asserted. The notice carries `SYSTEM_SPEECH_MARK` and sits *outside* the framed
-    source body, because it is this system speaking and not the ELN; and `valid_to` carries the
-    same fact in the structured half, where every other reader of a `NoteRef` looks for "this
-    stopped being current".
+    `read()` keeps answering for a retracted row while `eligible()` stops, so a citing note expands
+    into "withdrawn" rather than "no note". The notice carries `SYSTEM_SPEECH_MARK` outside the
+    framed body, and `valid_to` carries the same fact in the structured half.
     """
     withdrawn = datetime(2026, 3, 4, tzinfo=UTC)
 

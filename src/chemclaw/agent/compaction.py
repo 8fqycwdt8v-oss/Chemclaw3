@@ -1,151 +1,28 @@
-"""Keep a session's thread inside a token budget — D-025's policy, restored on this engine.
+"""Keep a session's thread inside a token budget.
 
-**What was wrong.** D-025 bounded the model's context with two deterministic, LLM-free strategies:
-collapse older tool-result payloads first (they are this system's largest context consumers), then
-slide the conversation window. Its implementation was `chemclaw_agent._build_compaction`, built out
-of the previous framework's strategy classes, and it left with that framework in M13. Nothing
-replaced it. What survived the removal was the *appearance* of the policy: three settings with no
-reader anywhere in `src/` or `tests/`, a config comment describing a mechanism that no longer ran,
-three rows in `.env.example`, and — the part that reached a chemist — a sentence in the system
-prompt telling the model "this session's context is compacted to a token budget, so an older turn
-can age out of what you currently see". The thread was in fact replayed whole on every turn, and
-the failure at the provider's context limit is a hard error rather than a degradation.
+Two deterministic, LLM-free edits run inside `wrap_model_call`, cheapest first:
 
-This module is that policy again, over the same three settings, with the two halves it always had.
+1. `ClearOlderToolResultsEdit` — lossless: older tool results become a placeholder (keeping the
+   note ids they cited); the model can re-fetch. Its own, lower trigger.
+2. `KeepLastConversationGroupsEdit` — destructive: the oldest conversation groups are cut, on a
+   group boundary, until the thread fits the budget.
 
-**Upstream owned the expensive half until its cost was measured rather than assumed.**
-`ClearToolUsesEdit` is `ToolResultCompactionStrategy` under another name: a token trigger, the
-newest N tool results kept verbatim, everything older replaced by a placeholder. Reusing it was the
-decision — a second copy of somebody else's tested code is a maintenance cost with nothing bought,
-and `langgraph_agent`'s own opening argument applies with more force to a strategy than it did to
-the agent loop. What that argument never weighed is complexity, which is a dependency nothing in
-this tree asserts: upstream's `apply` is **quadratic in thread length**, it runs on every model
-call, and `ContextEditingMiddleware.awrap_model_call` runs it synchronously on the event loop, so
-the cost is borne by every co-tenant session on the pod. Measured on a thread of one tool call per
-turn, `keep=3`, everything above the trigger: 320 ms at 250 turns, 1,310 ms at 500, 5,600 ms at
-1,000, 23,851 ms at 2,000, 96,070 ms at 4,000 — every doubling quadrupling. The trigger engages at
-roughly 130 turns, and nothing shrinks the thread it is handed, so those are reachable numbers
-rather than asymptotics. `_clear_older_tool_results` is that strategy again in one forward pass;
-see it for which of upstream's two quadratic terms actually dominated, and for what a first-party
-copy costs. What upstream does *not* ship at all is a conversation window as a `ContextEdit`, so
-that half was always first-party (`KeepLastConversationGroupsEdit`) — but only the *edit* is: the
-cut itself is `langchain_core`'s `trim_messages`. Re-deriving "which suffix of a message list fits
-a token budget without splitting a tool call from its result" is somebody else's tested code, and
-the first version of this edit is what re-deriving it costs (see its docstring).
+Budgets are in billed tokens and converted by `agent/context_budget.py`, which also charges the
+request prefix. Both edits are non-destructive to graph state: they narrow only the list this
+call is sent, and the next call re-derives the same reduction. The checkpoint tables are bounded
+elsewhere (retention, and `checkpointer._PRUNE_SUPERSEDED`).
 
-**There is a third reducer, it sits *above* both, and this docstring did not name it.**
-`deepagents.FilesystemMiddleware` offloads an oversized `HumanMessage` to a file and leaves the
-model a pointer — a reduction, taken before either edit here, by a middleware this module's prose
-described only as a slot-naming analogy. Measured against the installed distribution (deepagents
-0.7.8) rather than read off its documentation: the threshold is `NUM_CHARS_PER_TOKEN` (4) times
-`human_message_token_limit_before_evict` (50,000) = **200,000 characters**, strictly greater, and
-it inspects `messages[-1]` alone and only when that is an untagged `HumanMessage`. The tool-result
-arm of the same middleware is 20,000 tokens = 80,000 chars, which `tool_result_shape.py` already
-cites. It is configurable — `None` disables it — and `langgraph_agent` passes neither limit, so
-this deployment takes both defaults.
+Upstream's summarizer is installed switched off (`disabled_summarizer`): a summary rewrites
+framed, untrusted evidence into unframed prose replayed every turn. `agent/condense.py` is a tool
+result, not thread history, so it is not an exception to this.
 
-**No shipped path reaches it, and that is what makes the raw preview harmless.** The notice the
-model reads interpolates a head-and-tail `{content_sample}` that is *not* defanged. It grants
-nothing new, because it is a strict substring of a `HumanMessage` that sat in the model's context
-verbatim one call earlier — a chemist's own message is not framed as untrusted data. What the
-offload writes is read back through `read_file`, which `tool_framing.py` routes by stamp first, so
-the offloaded body *is* defanged on the way back in
-(`D-2026-09-04-a-helpers-file-crosses-back-and-stays`). Every producer of a `HumanMessage` here is
-bounded below the threshold: the front door at `service_max_message_chars` (100,000, a 422),
-template steps at `agent_max_tool_result_chars` (via `bounded_prompt`), and `cli/chat.py`
-unbounded — an operator's own paste, not a deployment surface. **That inequality holds by the
-coincidence of three separate settings and nothing asserted it**, so
-`tests/test_compaction.py::test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold`
-does; raising any one of them past 200,000 now fails rather than silently routing a chemist's
-message through an offload nobody designed for.
-
-**It changes how often `chemclaw_context_unreducible_total` ticks and not what it means.** That
-counter is measured on the *outgoing request* — `sent <= effective_trigger(...)` after every edit —
-rather than attributed to a mechanism, so a reducer above the group is simply one more thing that
-may already have run. It counts "still over budget after everything".
-
-**Nothing here is destructive, and that is a change from D-025.** Both edits run inside
-`wrap_model_call`, so they narrow the list *this model call* is sent and leave graph state
-untouched; the next turn re-derives the same reduction from the full thread. D-025 also ran its
-strategy over the persisted history so the next turn "started smaller", and the commit that removed
-the durable half of that named the reason it was wrong: a context heuristic must not edit a record
-somebody else's policy governs. The checkpointer is turn state rather than the durable record — that
-is `session_messages` — but the same argument applies to it one step down, and a reduction that is
-recomputed costs an estimator pass while a reduction that is *applied* costs history.
-
-**What bounds the checkpoint tables is now two things, and only one of them is a policy.** Age, in
-`durable/retention.py`, is the deployment's own statement about how long a thread is kept — and it
-is off by default, so on a shipped deployment it bounded nothing. Beside it,
-`agent/checkpointer._PRUNE_SUPERSEDED` drops the *copies* a turn superseded: every superstep
-rewrites the whole message list, so a thread stored O(turns²) bytes of copies its newest checkpoint
-still holds in full (measured: 40 turns of conversation, 10.3 MB of `checkpoint_blobs`, 520 rows,
-reduced to 757 kB and 15 rows with the thread resuming identical). That is deduplication rather
-than disposal, which is why it does not contradict the paragraph above: no record is edited, and
-nothing a reader could ask for is gone
-(`D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record`).
-
-**One thing is lost against D-025 and it is named rather than glossed.** Its
-`ToolResultCompactionStrategy` collapsed an older tool result "into a short cited
-`[Tool results: …]` trace"; the edit below replaces the whole payload with a flat placeholder,
-so the citation goes with it. Keeping the trace would mean this module parsing evidence payloads
-for note ids — coupling the context policy to the shape of every tool's result, for a benefit that
-only exists above the budget, where the alternative is a hard context-limit failure and the
-model's own prose in the thread still carries what it concluded. Upstream's `exclude_tools` escape
-hatch is not carried over into `_clear_older_tool_results`: it was never set, and the thing a
-deployment would reach for it to exclude is the evidence sweeps, which are exactly the results this
-edit exists to reclaim. `docs/guides/harness-konzept.md` §9 carries the provenance risk this trades
-against.
-
-**Why no summarizer**, unchanged from D-025 and worth restating because `SummarizationMiddleware`
-is now one import away: a summarizer reads retrieved evidence and writes text that is then replayed
-as conversation, so it is an indirect-prompt-injection surface pointed straight at the thread. The
-char/4 estimator and two deterministic edits need no credential, no extra model call, and no trust.
-
-**This prohibition is about the thread, and `agent/condense.py` is not a counter-example to it**
-(`D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool`). That module does make a
-model call over retrieved evidence, and it is named here because a reader arriving at this
-paragraph as *the* prohibition would otherwise read it as a contradiction. The two reasons above
-are the replay and the envelope, and a tool result is neither: it arrives as a `ToolMessage`, framed
-on the way out, crossing every `wrap_tool_call` gate, carrying its citations, and cleared by
-`ClearOlderToolResultsEdit` like any other result rather than becoming history. Nothing below
-changes for it, and `disabled_summarizer` stays switched off.
-
-**It tells the repeat guard, and that coupling is deliberate.** `agent/repeat_guard.py` refuses a
-third identical call on the stated grounds that the model already holds the first answer. Clearing a
-tool result is exactly what makes that false, and both modules said so and neither acted: this
-module's placeholder lost a "re-run the tool if you still need it" line *because* the guard would
-deny it. One call to `forget_calls` at the moment a reduction is known closes it, and it is here
-rather than in the guard because this is the only place that can see one happen.
-
-**The metric exists because prose about compaction is what caused this defect.**
-`RecordContextCompaction` is the reader that can say the mechanism fired — it compares the full
-thread on the request's state against the list the edits actually produced, so the number is
-measured downstream of the policy rather than asserted beside it.
-
-**One number was not enough, because the two edits are not the same kind of act.** Clearing a tool
-result is lossless and the model can re-fetch; dropping a conversation group is *destructive* and
-the model simply no longer sees what was said. "The agent forgot what I told it three turns ago"
-and "the agent re-ran a tool it had already run" are those two edits, and one unlabelled counter
-answers neither. A label cannot be added to an already-declared counter from this side of
-`core/metrics.py`, so the distinction is published as a structured record instead — one
-`context.compacted` event per turn, on the high-water reduction, naming the reclaimed tokens, the
-tool results cleared *and the tools they belonged to*, and the number of conversation groups
-dropped. Counts and names, never content.
-
-**And nothing this module writes may end a turn.** There used to be no `try` here at all, so a
-raising edit or a `count_tokens_approximately` that choked on an unfamiliar message shape killed the
-turn as a generic internal error — losing the answer, the tokens already spent and every tool the
-turn had run, in order to save tokens. `GuardedEdit` and `_record_reduction` degrade instead, and
-the request proceeds uncompacted, which is the direction with a chance of being answered.
-
-**The guard covers the edits and the observer, not the whole path, and the difference is upstream's
-code.** `GuardedEdit` wraps `ContextEdit.apply`; `ContextEditingMiddleware.wrap_model_call` itself
-deep-copies the message list and builds the `count_tokens` closure *before* it calls any `apply`,
-and neither is inside anything this module wrote. A `deepcopy` that chokes on a message a provider
-put in the thread, or a `get_num_tokens_from_messages` that raises under the non-approximate
-counting method, still ends the turn. Both are one `try` further out than anything reachable from
-here, so the honest statement is the narrow one — and stating it narrowly is what keeps the next
-reader from assuming a guard that is not there.
+A reduction tells the repeat guard which calls were cleared (`forget_calls`), and
+`RecordContextCompaction` measures what the edits actually did: the compaction counter, one
+`context.compacted` event per turn (reclaimed tokens, cleared tools, groups dropped) and the
+over-budget counter. Edit and observer failures degrade to an uncompacted request instead of
+ending the turn; upstream's own deep copy and counter setup are outside that guard.
+`deepagents.FilesystemMiddleware` offloads an oversized final `HumanMessage` before this group;
+`tests/test_compaction.py` holds every shipped producer below its threshold.
 """
 
 import asyncio
@@ -182,35 +59,10 @@ from chemclaw.kg.note import is_note_slug
 
 logger = logging.getLogger(__name__)
 
-# What a cleared tool result leaves behind. Not upstream's bare "[cleared]": the model is being
-# shown a message it can see it once received, and a placeholder that does not say why reads as a
-# tool that returned nothing — a different fact, and one the model would reasonably act on by
-# calling the tool again.
-#
-# **It states the fact and gives no instruction, and that is now for one reason where it used to be
-# two.** An earlier version ended "Re-run the tool if you still need it". That contradicted
-# `agent/repeat_guard.py` — a cleared result could be re-fetched, cleared and re-fetched, and the
-# third identical call in a turn was *refused*, so the placeholder told the model to do what a guard
-# three middlewares away would then deny. **That half is fixed**: a reduction now clears the repeat
-# counters (`_record_reduction` calls `forget_calls`), because after a clearing an identical call is
-# a re-read rather than a repeat. What stands is the cost: this string is repeated once per cleared
-# result, tens of times, in exactly the situation where the budget is already spent. The guidance is
-# paid for once instead, in the system prompt (`chemclaw_agent`), where a sentence costs one copy
-# rather than twenty.
-#
-# **And it carries the system-speech mark, which it did not until `framing._MARK_FORGERY`
-# existed.** This sentence sits in a *tool result* — the position the safety floor otherwise
-# classes as data never to be trusted — and thirteen words are thirteen words any server can type,
-# so the floor had withdrawn the promise and told the model to read the placeholder "as a hint and
-# not as proof". That was the honest thing to say while nothing defanged the mark. Now something
-# does, on every path untrusted text reaches the model by, so the promise is keepable and is kept.
-#
-# The cost is the one the withdrawal named, measured rather than estimated: 26 characters and
-# ~7 estimated tokens per cleared result. Over the 18-result sweep the shipped settings produce,
-# 108 tokens — against 1,458 reclaimed on 400-character results (7.4%), 17,658 on 4 kB ones (0.6%)
-# and 179,658 on results at the per-result ceiling (0.06%). The expensive end of that range is the
-# end where the clearing was not worth running anyway; at the sizes that actually cross the trigger
-# the mark is noise, and what it buys is a marker the model may act on rather than guess about.
+# What a cleared tool result leaves behind. It says why the result is gone (otherwise it reads as a
+# tool that returned nothing) and gives no instruction, since it repeats per cleared result; the
+# guidance lives once in the system prompt. It carries the system-speech mark, which
+# `framing._MARK_FORGERY` makes unforgeable, so the model may trust it.
 _PLACEHOLDER_SENTENCE = ModelProse(
     "Earlier tool result dropped to stay inside this session's context budget."
 )
@@ -219,11 +71,7 @@ _PLACEHOLDER_SENTENCE = ModelProse(
 def _placeholder(extra: str = "") -> str:
     """The one spelling of a cleared result: the sentence, any addition, then the mark.
 
-    A function rather than two string literals because the citation branch below rebuilds the
-    placeholder with the note ids appended, and it used to do that by slicing `[:-1]` off the
-    constant to get its closing bracket back — which silently produced `[system <nonce> It cited:`
-    the moment the mark moved inside those brackets. Composing from one sentence makes the two
-    renderings the same object rather than two strings a reader has to keep in step.
+    Composed from one sentence so the plain and citation renderings cannot drift apart.
     """
     return f"[{_PLACEHOLDER_SENTENCE}{extra}] {SYSTEM_SPEECH_MARK}"
 
@@ -238,17 +86,9 @@ _REQUEST_NOTE = "chemclaw_request_note"
 def request_note(text: str) -> HumanMessage:
     """A human-role note for one request, which the conversation window will not treat as a turn.
 
-    **A group is a chemist's message and everything that answers it, and a note is neither.**
-    `loop_cap.AnswerAtTheCap` appends its wrap-up instruction to the request as a `HumanMessage`,
-    from a middleware *outside* this group, so the window edit receives it as the newest message of
-    its role. Read as a group start, it became the newest group — and the window's one guarantee,
-    "never cut past the newest group", protected the note and cut everything before it. Measured on
-    the 2026-10-02 live lane, where the window had 8,942 tokens of thread: the capped turn's
-    wrap-up call carried the system prompt and the note, the chemist's question had been cut, and
-    the answer the chemist received was "No question has been asked yet".
-
-    Marked in `response_metadata` because that field is never serialised into a provider request,
-    so the note reaches the model exactly as it did before; the mark is read only here.
+    A group is a chemist's message and what answers it; treating a request-only note (e.g.
+    `loop_cap.AnswerAtTheCap`'s wrap-up) as the newest group would let the window cut the chemist's
+    actual question. Marked in `response_metadata`, which is never sent to the provider.
     """
     return HumanMessage(text, response_metadata={_REQUEST_NOTE: True})
 
@@ -256,37 +96,23 @@ def request_note(text: str) -> HumanMessage:
 def _opens_a_group(message: AnyMessage) -> bool:
     """Whether `message` starts a conversation group: a human message the thread holds.
 
-    A `request_note` is human-role and starts nothing, so the newest group is always the one the
-    chemist's own latest message opens — which is what `KeepLastConversationGroupsEdit` clamps to.
+    A `request_note` starts nothing, so the newest group is always the chemist's latest message.
     """
     return isinstance(message, HumanMessage) and not message.response_metadata.get(_REQUEST_NOTE)
 
 
-# The note ids inside a cleared result, so a citation index survives a clearing that its bodies do
-# not. Reads `EvidenceChunk.source_note_id` out of the result's own repr — this repository's model,
-# not an arbitrary tool's, which is the whole of why this is not the coupling the class docstring
-# below refuses.
+# Note ids inside a cleared result, read from `EvidenceChunk.source_note_id` in this repository's
+# own repr, so a citation index survives the clearing.
 _CITED_NOTE_ID = re.compile(r"source_note_id='([^']+)'")
-# How many ids to name before the list is itself a budget problem. A cleared sweep at the shipped
-# `gather_evidence_max_chunks` holds at most 40, and naming twelve of them costs ~60 tokens against
-# the thousands the clearing reclaimed.
+# How many ids to name before the list itself costs real budget.
 _MAX_NAMED_CITATIONS = 12
 
 
 def cited_note_ids(content: object) -> list[str]:
     """Every *resolvable* note id a tool result cites, in first-seen order, deduplicated.
 
-    Public because `tests/test_compaction.py` asserts against it directly: the property that matters
-    is that a cleared evidence sweep still names its sources, and reading that off the rendered
-    placeholder would be asserting the formatting rather than the behaviour.
-
-    **Filtered by `is_note_slug`, because the placeholder does not merely list ids — it tells the
-    model to `expand_note` on them.** `EvidenceChunk.source_note_id` is a chunk's *origin* and only
-    sometimes a note: the mounted document share writes `<share>:<doc>#<ordinal>`, the warehouse
-    ELN `<source>:<key>` and a vendored dataset `vendored:<name>:<index>`, none of which names a
-    file in the knowledge graph. Naming one is an instruction that fails at call time, spending a
-    model call and a tool call to be told the note does not exist — and the ids it would have
-    displaced are the ones that would have worked.
+    Filtered by `is_note_slug`: the placeholder tells the model to `expand_note` these, and chunk
+    origins from shares, ELN warehouses or vendored datasets are not notes. Public for tests.
     """
     seen: dict[str, None] = {}
     for note_id in _CITED_NOTE_ID.findall(str(content)):
@@ -297,42 +123,14 @@ def cited_note_ids(content: object) -> list[str]:
 
 @dataclass(slots=True)
 class ClearOlderToolResultsEdit(ContextEdit):
-    """Upstream's tool-result clearing, with the two bounds it does not have.
+    """Clear older tool results, oldest first, with the bounds upstream's `ClearToolUsesEdit` lacks.
 
-    Upstream's `ClearToolUsesEdit` is the right strategy. Three defects, all measured: two are in
-    what it was handed, and are fixed by computing the arguments per apply instead of once at
-    construction; the third is in how it is written, and is why the strategy itself is now
-    first-party (`_clear_older_tool_results`).
-
-    **It cleared results the model had never seen.** Upstream's `keep` counts the newest tool
-    *results*, not the newest tool-call *step* — a distinction this repository had written down and
-    not acted on. The edit runs in `wrap_model_call`, so the list it reduces already holds the
-    results that came back in the step immediately before; with `agent_keep_last_tool_groups` at 2
-    and `agent_max_parallel_tool_calls` at **8**, a fan-out wider than two lost its own newest
-    results to a placeholder before the model's first look at them. Measured over the shipped
-    settings on a five-way fan-out past the trigger: three of the five replaced, each with a
-    placeholder beginning "Earlier tool result" about a result that was not earlier. What reaches
-    the chemist is not a slow turn — it is an answer that quietly rests on two of five values.
-
-    The two settings are a hundred lines apart in `core/config/agent.py` and contradicted each
-    other. `keep` is now the larger of the configured floor and the number of results belonging to
-    the newest batch, so the batch survives **structurally** rather than because a number happened
-    to be big enough.
-
-    **And it cleared everything when it needed to clear something.** `clear_at_least` defaults to
-    0, which never breaks upstream's loop, so crossing the trigger by one token wiped every result
-    but the newest `keep`: measured, 18 of 20 results on a thread that needed roughly half of that,
-    an 88% cut. Every one of those is re-fetchable, which is what makes the edit lossless — and
-    also what makes over-clearing expensive, because a re-fetch costs a model call, the tool again,
-    and (`repeat_guard.forget_calls`) a forgiveness that lets the same call be cleared again.
-    Passing the overshoot as `clear_at_least` stops the loop at the trigger.
-
-    **And it was quadratic in the length of the thread, on the event loop, every model call.**
-    That is the third defect and the one that is not about arguments, so it is the one that cost
-    the delegation. `_clear_older_tool_results` below carries the measurement and the equivalence;
-    what belongs here is why this class stopped being a wrapper. It is not a wrapper any more:
-    upstream's `apply` is still the whole strategy, but it is a *quadratic* implementation of it,
-    and no choice of arguments makes it linear.
+    - `keep` is raised to cover every result of the newest batch, so a parallel fan-out is never
+      cleared before the model has seen it.
+    - The overshoot is passed as `clear_at_least`, so clearing stops at the trigger rather than
+      wiping everything but `keep`.
+    - The strategy itself is first-party and linear (`_clear_older_tool_results`); upstream's is
+      quadratic in thread length on the event loop.
     """
 
     trigger: int
@@ -356,35 +154,12 @@ class ClearOlderToolResultsEdit(ContextEdit):
         tokens = count_tokens(messages)
         if tokens <= budget:
             return
-        # **Read the citations before upstream deletes the bodies that carry them.** The clearing is
-        # oldest-first, and the oldest result in a research turn is the `gather_evidence` sweep —
-        # the largest payload in the thread by design (`gather_evidence_max_chars` is the
-        # tool-result cap) and therefore both the first candidate and the most attractive one.
-        # Measured: three tool results at the per-result ceiling, or one sweep and eight
-        # `expand_note` calls, and the sweep is gone before the model writes the answer it is
-        # supposed to cite. The chunk *bodies* are correctly reclaimable; the note ids are ~60
-        # tokens that decide whether the answer can cite anything at all, and clearing them with the
-        # bodies is what turned a context saving into a grounding failure.
+        # Read citations before the bodies carrying them are cleared: the oldest result is usually
+        # the evidence sweep, and its note ids decide whether the answer can cite anything.
         #
-        # This is not the "coupling the context policy to the shape of every tool's result" this
-        # class declines one docstring up. It reads one field of one first-party model, and one
-        # known shape is not every shape.
-        #
-        # **Read only from this repository's own retrieval tools, never from a connector's
-        # result.** The regex matches a string, and a connector's payload is text an external
-        # server wrote: a result containing the literal `source_note_id='playbook-degassing'`
-        # would be summarized by a *system-authored* placeholder as having cited that note, and
-        # the model told to go and read it. Framing does not help — `defang` neutralises
-        # delimiters, not the contents of a field this module happens to grep. Scoping to the
-        # tools that legitimately return `EvidenceChunk`s makes the forgery unrepresentable rather
-        # than merely unlikely, and it costs nothing: nothing else emits that repr.
-        #
-        # The name is taken from the **assistant message that made the call**, not from
-        # `ToolMessage.name`. `ToolNode` does set that field, but every result in this stack passes
-        # through `wrap_tool_call` middlewares that rebuild the message, and a scope that depends
-        # on a field surviving three rewrites fails *open* — silently naming nothing, which is
-        # exactly the shape of the defect this whole citation index exists to prevent. A tool call's
-        # own name is what `newest_batch_size` already reads for the same reason.
+        # Only from this repository's own retrieval tools, identified by the tool name on the
+        # calling `AIMessage` (`ToolMessage.name` may not survive middleware rewrites). A
+        # connector's text could otherwise forge a system-authored citation.
         called = {
             call["id"]: call["name"]
             for message in messages
@@ -420,12 +195,9 @@ class ClearOlderToolResultsEdit(ContextEdit):
             )
 
 
-# Upstream's own marker for a result it cleared, kept verbatim now that this repository is the one
-# writing it. `_cleared_calls` reads it to tell the repeat guard which calls were forgiven, and
-# `_clear_older_tool_results` reads it to leave an already-cleared result alone; both used to be
-# reads of a shape upstream promised nothing about, and one of them still is — a result cleared by
-# an upstream `ClearToolUsesEdit` composed by some other middleware would carry this stamp too, and
-# should still be skipped.
+# Upstream's marker for a cleared result, kept verbatim: `_cleared_calls` reads it to forgive
+# calls, and `_clear_older_tool_results` skips results already carrying it, including any cleared
+# by an upstream edit composed elsewhere.
 _CLEARED_MARKER: dict[str, object] = {"cleared": True, "strategy": "clear_tool_uses"}
 
 
@@ -434,23 +206,16 @@ def _preceded_tool_results(
 ) -> list[tuple[int, ToolMessage, AIMessage | None]]:
     """Every tool result with the assistant message that immediately precedes it, oldest first.
 
-    **This is the whole of the first fix, and it is one forward pass.** Upstream re-derives the
-    same association per candidate with `next((m for m in reversed(messages[:idx]) if
-    isinstance(m, AIMessage)), None)` — a fresh list slice of the entire prefix, for each of the
-    ~n/4 tool results in a thread of n messages, which is O(n²) with a small constant.
-
-    The association is positional rather than by call id, deliberately and to match upstream: the
-    caller then checks that the id is in *that* message's `tool_calls`, so a result whose call was
-    made by some earlier assistant message is left alone rather than cleared. A global
-    `id -> AIMessage` map would be cheaper still and would clear it, which is a behaviour change
-    dressed as an optimisation.
+    One forward pass where upstream rescans the prefix per result. Positional like upstream: the
+    caller checks the id is in that message's `tool_calls`, so a result whose call was made earlier
+    is left alone.
 
     Args:
         messages: The thread as the edit received it.
 
     Returns:
         `(index, result, the assistant message before it or None)` per `ToolMessage`, in list
-        order — the order upstream's `keep` slices from the end of.
+        order — the order `keep` slices from the end of.
     """
     found: list[tuple[int, ToolMessage, AIMessage | None]] = []
     latest: AIMessage | None = None
@@ -472,41 +237,19 @@ def _clear_older_tool_results(
 ) -> None:
     """Replace older tool results with `placeholder`, oldest first, until enough is reclaimed.
 
-    `ClearToolUsesEdit.apply` term for term, minus the two options this repository never sets
-    (`clear_tool_inputs`, `exclude_tools`), and **linear in the length of the thread** where
-    upstream is quadratic. `tests/test_compaction.py` holds it to upstream's own output on a thread
-    built to exercise every branch, and to its scaling; the differential is the price of the copy
-    and is paid there rather than argued here.
-
-    **Two quadratic terms, and the review that found this named the smaller one.** Upstream's
-    prefix rescan (`_preceded_tool_results` above) is O(n²) — and measured on a 4,000-message
-    thread it is **18 ms of 5,600**. The term that dominates is `count_tokens(messages)`, called
-    once per cleared result to decide whether `clear_at_least` has been reached: a full O(n) walk
-    of every message's content, ~n/4 times. Split at three sizes with everything else held: 3.8 ms
-    against 318.8 at 1,000 messages, 9.3 against 1,249.7 at 2,000, 18.3 against 5,505.7 at 4,000.
-    **99.7% of the cost is the recount, and this repository is what turns it on** — upstream
-    defaults `clear_at_least` to 0, which never enters that branch, and
-    `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` passed the overshoot to stop the
-    clearing at the trigger. So the expensive half of a defect attributed to a dependency was the
-    first-party argument, which is the only reason the numbers are written down here.
-
-    The recount is now the difference between the result being replaced and what replaces it, which
-    needs no walk of the rest of the thread. That is exact for the estimator this stack ships:
-    `count_tokens_approximately` rounds *per message* precisely so that "individual message token
-    counts add up to the total count for a list of messages" (its own NOTE), asserted rather than
-    trusted in `tests/test_compaction.py`. For a counter that is not additive — the
-    `token_count_method="model"` path, which prepends the system message and the tool schemas to
-    every count — the difference of two single-message counts still cancels that constant overhead,
-    so the reclaim is right and only the absolute counts would have been wrong.
+    `ClearToolUsesEdit.apply` minus the unused `clear_tool_inputs` and `exclude_tools`, and linear
+    in thread length. The reclaim per result is the difference between the result and its
+    placeholder, not a recount of the whole thread; this is exact because
+    `count_tokens_approximately` is additive per message, and a model-based counter's constant
+    overhead cancels in the difference. `tests/test_compaction.py` holds it to upstream's output and
+    to linear scaling.
 
     Args:
         messages: The thread, edited in place — the `ContextEdit` protocol.
         count_tokens: The estimator the middleware resolved, in whatever unit it counts.
-        keep: How many of the newest tool results are protected, counted over *every* result
-            including ones no branch below would clear. Upstream slices before it filters and so
-            protects those too; matching it is the point.
-        clear_at_least: Stop once this many tokens have been reclaimed. `0` means "no floor", which
-            here means clear every candidate — upstream's default and not this module's.
+        keep: How many of the newest tool results are protected, counted over every result
+            (matching upstream, which slices before it filters).
+        clear_at_least: Stop once this many tokens have been reclaimed; `0` clears every candidate.
         placeholder: What a cleared result leaves behind.
     """
     candidates = _preceded_tool_results(messages)
@@ -541,13 +284,8 @@ def _clear_older_tool_results(
 def newest_batch_size(messages: Sequence[AnyMessage]) -> int:
     """How many results in `messages` answer the newest assistant message that called tools.
 
-    The number `keep` has to cover for a fan-out to survive its own model call. It is a count
-    rather than a set of ids because that is what upstream's `keep` takes: it preserves the last N
-    `ToolMessage`s in list order, and a batch's results are exactly the trailing ones — `ToolNode`
-    appends every result of a step after the `AIMessage` that requested it.
-
-    0 when no assistant message in the list called a tool at all — a prose conversation, where
-    there is no batch to protect and the configured floor stands unchanged.
+    `ToolNode` appends a step's results after its `AIMessage`, so they are the trailing ones and a
+    count suffices for `keep`. 0 when no assistant message called a tool.
     """
     for message in reversed(messages):
         calls = getattr(message, "tool_calls", None)
@@ -566,74 +304,16 @@ def newest_batch_size(messages: Sequence[AnyMessage]) -> int:
 class KeepLastConversationGroupsEdit(ContextEdit):
     """Cut the oldest conversation back to the token budget, on a group boundary.
 
-    **Read `keep` before believing that heading.** The cut is `max(by_tokens, by_groups)` — the
-    *more* aggressive of the two arms — so `keep` is a ceiling on what survives and the budget only
-    tightens it further. With a `keep` low enough to bind, this cuts to `keep` groups and the budget
-    is a trigger rather than a target; that is why `agent_keep_last_conversation_groups` now ships
-    at 0. See its config comment for the measurement.
+    What bounds a thread that called no tools. The cut is `max(by_tokens, by_groups)`, the more
+    aggressive arm: by tokens via `trim_messages(strategy="last")`, and by `keep` groups when set.
+    `agent_keep_last_conversation_groups` ships at 0, since a non-zero `keep` usually binds first
+    and makes the budget irrelevant.
 
-    D-025's second strategy, and the only half of the policy upstream does not ship. It is what
-    makes the thread *bounded* rather than merely cheaper: clearing tool results reclaims nothing
-    from a conversation that called no tools, so a long enough exchange of prose would grow past any
-    budget with the first edit doing its job perfectly.
-
-    **The cut is by tokens, and it used to be by group count — which did not bound anything.** The
-    first version triggered on tokens and then dropped everything before the newest `keep` groups,
-    which reduces but does not bound: how much it reclaims depends entirely on how large those
-    `keep` groups happen to be, and it returned without cutting at all whenever the thread had no
-    more groups than `keep`. Measured at the shipped defaults over the 20 tool-free prose groups
-    `tests/test_compaction.py` builds: 300,300 tokens in, **180,180 out, against a 100,000
-    budget** — the edit ran, logged, dropped eight groups, and left the request 80% over. The budget
-    is now `trim_messages` (`strategy="last"`), so what survives is what fits.
-
-    **`keep` survives as a floor rather than the rule, and it now ships off.**
-    `agent_keep_last_conversation_groups` is an ENV-visible knob and renaming or dropping it costs
-    every deployment that sets it, for a word; the same argument this module already makes for
-    `agent_keep_last_tool_groups` at `context_compaction_middleware`. So the window always drops
-    everything older than the newest `keep` groups, and the budget may drop more —
-    `max(by_tokens, by_groups)`.
-
-    **What that composition does when both arms are live was never measured until it was, and the
-    answer inverted the paragraph above.** `max` takes the *larger cut*, so the survivors are the
-    *smaller* of "what fits the budget" and "the newest `keep` groups", and the crossover is
-    `trigger / keep` — 8,333 tokens per group at the old defaults, roughly 33 kB of prose in a
-    single turn. Below that the group arm wins outright: measured over 2,000 prose groups, a
-    329,900-token thread was cut to **1,944 tokens against a 100,000 budget**, and sweeping the
-    budget from 10,000 to 300,000 moved that number not at all. The lossless edit ordered before
-    this one makes the common case *more* extreme rather than less, because a cleared group costs
-    about twenty tokens. So the knob a deployment reaches for was inert, and the one that decided
-    the answer was a count of turns — which is the failure this class's own second paragraph
-    describes, arriving through the arm that was kept to fix it.
-
-    `keep` defaults to 0 for that reason. Nothing here changed: the arm is intact, the clamp is
-    intact, and a deployment that wants the model to see fewer *turns* than the budget allows sets
-    it. What changed is which arm is load-bearing when nobody states an opinion.
-
-    **A group is a human message and everything that answers it**, which is what keeps this safe.
-    A tool call and its result are always emitted between two human messages, so a cut taken at a
-    group boundary can never separate them — the pairing rule `agent/message_pairing.py` states is
-    preserved structurally here rather than checked for afterwards.
-
-    **`start_on="human"` is what buys the boundary from `trim_messages`, and it is load-bearing.**
-    `trim_messages` has no pairing logic of its own — `start_on` becomes an `end_on` on a reversed
-    first-fit pass, i.e. "drop from the front until the first kept message is of this type", and
-    nothing else. Measured without it over a 4-message-per-group thread, sweeping 565 budgets: 24
-    of them left a leading `ToolMessage` whose `tool_use` had just been dropped — a `tool_result`
-    with no call, which a provider rejects exactly as it rejects the reverse. Suffix trimming makes
-    the *call*-side orphan impossible, so this argument is only about the result side; the sweep in
-    `tests/test_compaction.py` pins both, with that module's own `calls_without_adjacent_results`
-    and with an assertion that the survivors start at a `HumanMessage`.
-
-    **The one thing it will not do is empty the list**, and that is a clamp rather than an
-    aspiration. Below the size of the newest group `trim_messages` returns `[]`, and
-    `ContextEditingMiddleware` checks for an empty message list only *before* running its edits — so
-    an emptied list goes to the provider, which rejects it. The cut never passes `starts[-1]`, which
-    means a single group larger than the whole budget is sent over budget rather than not sent. That
-    is the honest failure and it is the tool-result edit's case, not this one's.
-
-    Ordered after the tool-result edit in `context_compaction_middleware`, so it sees a list already
-    as small as the cheap move can make it and drops conversation only when that was not enough.
-    D-025 called this reclaiming cheapest-first; the ordering is the whole of it.
+    A group is a human message and everything answering it, so a cut on that boundary never
+    separates a tool call from its result; `start_on="human"` is what makes `trim_messages` respect
+    it. The cut never passes the newest group, so the list is never emptied: a single group larger
+    than the budget is sent over budget. Ordered after the tool-result edit, so conversation is
+    dropped only when clearing was not enough.
     """
 
     trigger: int = 100_000
@@ -659,27 +339,15 @@ class KeepLastConversationGroupsEdit(ContextEdit):
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
         """Cut `messages` in place back to the effective budget or fewer, when over it.
 
-        Fewer whenever `keep` binds — the two arms are combined with `max`, so the survivors are
-        the smaller of the two sets.
-
-        In place because that is the `ContextEdit` protocol: `ContextEditingMiddleware` deep-copies
-        the request's list once and hands the same list to each edit in turn, so returning a new one
-        would silently discard this edit's work. Hence an index is computed and `del` applied,
-        rather than the list `trim_messages` returns being handed back.
-
-        **`self.trigger` is a budget in billed tokens and `count_tokens` counts estimated ones**, so
-        the two are reconciled by `effective_trigger` rather than compared directly — which is what
-        they used to be. That function also subtracts this request's own prefix, whether or not a
-        window is declared, so the number below is what is left for the *thread* after the system
-        message, the skills listing and every bound tool schema have been paid for
-        (`agent/context_budget.py`).
+        In place per the `ContextEdit` protocol (the middleware hands the same list to each edit),
+        so an index is computed and deleted rather than `trim_messages`' result returned.
+        `self.trigger` is in billed tokens and is reconciled through `effective_trigger`, which also
+        charges the prefix.
         """
         budget = effective_trigger(self.trigger)
         if count_tokens(messages) <= budget:
             return
-        # Group starts are the human messages the *thread* holds — a `request_note` appended to
-        # this request is not one, or the clamp below would protect the note and cut the chemist's
-        # question (see `request_note`).
+        # Only human messages the thread holds start groups; a `request_note` does not.
         starts = [index for index, message in enumerate(messages) if _opens_a_group(message)]
         if not starts:
             # No group boundary to cut on, so no cut this edit can take without stranding a pairing.
@@ -696,25 +364,16 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         # `kept` is a suffix of `messages` — `strategy="last"` with `allow_partial=False` and no
         # system message to re-insert can only drop a prefix — so its length is the cut index.
         by_tokens = len(messages) - len(kept)
-        # The floor, guarded at both ends. `keep == 0` is the **shipped** value rather than
-        # something only a direct construction can reach — this comment said `ge=1` and "a value
-        # the config cannot reach" for a day after `agent_keep_last_conversation_groups` became
-        # `ge=0, default=0`, three lines from the branch it describes. Both guarded values degrade
-        # to "no floor", and for 0 that is now the deployment's intent rather than a rescue: it
-        # takes `starts[0]`, which `trim_messages`' own `end_on` back-off guarantees is `<=
-        # by_tokens`, so `max` returns `by_tokens` and the arm is an exact no-op. `keep` above the
-        # group count would raise `IndexError` inside a middleware, which is a failed turn.
+        # `keep == 0` (the shipped value) and `keep` above the group count both mean "no floor":
+        # `starts[0] <= by_tokens`, so `max` returns `by_tokens`. Indexing past the count would
+        # raise inside a middleware.
         by_groups = starts[-self.keep] if 0 < self.keep <= len(starts) else starts[0]
         # The newest group is the floor on what can be kept, per the clamp in the class docstring.
         cut = min(max(by_tokens, by_groups), starts[-1])
         if cut <= 0:
             return
-        # DEBUG, not INFO, and the demotion is the point. Both edits are non-destructive, so this
-        # runs on *every* model call of a turn and re-derives the same standing cut — a 30-step turn
-        # logged one reduction thirty times at INFO. The turn-level record an operator actually
-        # reads is `_record_reduction`'s single `context.compacted` event, emitted once per turn on
-        # the high-water mark. This line stays because it is the only place the *window*'s own
-        # arithmetic is visible when someone is debugging the cut itself.
+        # DEBUG: this re-derives the same cut on every model call. The once-per-turn record is
+        # `_record_reduction`'s `context.compacted` event.
         logger.debug(
             "context budget exceeded: dropping %d of %d message(s) to fit %d tokens; "
             "%d of %d conversation groups survive",
@@ -730,34 +389,15 @@ class KeepLastConversationGroupsEdit(ContextEdit):
 def disabled_summarizer(model: Any, backend: Any) -> Any:
     """Upstream's summarizer, constructed switched off — it arrives whether or not we want it.
 
-    **This exists because the declination above stopped being free.** While the middleware list was
-    hand-assembled, "no summarizer" was expressed by not importing one. `create_deep_agent` composes
-    a `SummarizationMiddleware` unconditionally, so the same decision now has to be *made* rather
-    than merely not unmade — and an argument this repository has held since D-025 must not be
-    reversed by an upstream default nobody chose.
-
-    The argument is unchanged and the deepagents variant does not escape it. That variant genuinely
-    answers half of it: evicted messages are written to a path the summary embeds, so the evidence
-    stays readable instead of being dropped, and `state["messages"]` is left intact. What it cannot
-    answer is the other half. `agent/framing.py` wraps untrusted tool output in an envelope that
-    marks it as untrusted, and a summary is *new prose written by the model over that content* —
-    the envelope does not survive it. So retrieved text that arrived flagged as external comes back
-    as unflagged narration, and is then re-read on every subsequent turn. That is an
-    indirect-prompt-injection surface pointed straight at the thread, and it is the one thing the
-    two deterministic edits below cannot become.
-
-    **`trigger=None` is upstream's own off state, not a large number standing in for one.**
-    `_should_summarize` opens with `if not self._trigger_clauses: return False`, so no clause means
-    it never fires — asserted in `tests/test_compaction.py` rather than read off that source once.
-    Constructed here and passed through `middleware=` so `_apply_custom_middleware` swaps it into
-    upstream's slot by name, which is the same mechanism `FilesystemMiddleware` uses and for the
-    same reason: the alternative, `HarnessProfile.excluded_middleware`, is resolved by the model's
-    self-reported provider and is silently skipped on a key miss.
+    `create_deep_agent` composes a `SummarizationMiddleware` unconditionally, so "no summarizer"
+    must be decided here. A summary is model prose over framed, untrusted content, so the envelope
+    does not survive and injected text would be replayed every turn. `trigger=None` is upstream's
+    own off state (asserted in `tests/test_compaction.py`). Passed through `middleware=` so upstream
+    swaps it into its slot by name; `excluded_middleware` can silently miss.
 
     Args:
-        model: The turn's resolved chat model. Required by the constructor and never called, since
-            the only thing that would call it is the summarization this disables.
-        backend: The turn's backend. Same: held for the offload path that cannot run.
+        model: The turn's resolved chat model; required by the constructor, never called.
+        backend: The turn's backend; held for the offload path that cannot run.
 
     Returns:
         The middleware to hand `create_deep_agent(middleware=…)` in upstream's slot.
@@ -767,34 +407,17 @@ def disabled_summarizer(model: Any, backend: Any) -> Any:
     return SummarizationMiddleware(model=model, backend=backend, trigger=None)
 
 
-# What has already been reported loudly, by edit class name (and `"reduction"` for the observer).
-# Process-wide rather than per turn, deliberately: the failure this bounds is a *shape* failure —
-# an upstream change, a message a provider put in the thread — and one of those is one fault
-# however many turns meet it.
+# Degradation kinds already reported loudly. Process-wide: a shape failure is one fault however
+# many turns meet it.
 _REPORTED: set[str] = set()
 
 
 def _degrade_once(marker: str, message: str, *args: object, traceback: bool = True) -> None:
     """Count every degradation; report the first of each kind loudly and the rest at DEBUG.
 
-    **Every guard in this module runs inside `wrap_model_call`, which is per model call.** So the
-    realistic failure — an upstream shape change, not a one-off — was one ERROR *with a traceback*
-    per model call, per turn, per pod: a 30-step turn wrote 30 identical tracebacks, and a fleet
-    wrote them continuously until someone shipped a fix. That is the same volume argument
-    `KeepLastConversationGroupsEdit` demotes its own line to DEBUG for, and `_log_narrowing` makes
-    again in `agent/langgraph_agent.py`; it applies here with more force, because a traceback is
-    the most expensive line a process can write and an ERROR is the level an operator pages on.
-
-    **`traceback` is False for the one caller that is not inside an `except`.** Every other
-    degradation here explains itself with the exception that caused it; `OffLoopContextEditing`
-    reports a *contract* that was not met, and `exc_info` with no active exception logs the words
-    "NoneType: None" beneath an ERROR — which is the least useful line a paging level can carry.
-
-    **The count is not latched, only the log line.** `chemclaw_degraded_total{subsystem=...}` is a
-    rate, and a rate that reported one event per process would understate a degradation exactly as
-    the run got worse — which is the failure `metrics_bridge.degraded` exists to correct. So every
-    occurrence increments and the first of each kind carries the traceback that explains all of
-    them.
+    These guards run per model call, so logging every occurrence with a traceback at ERROR would
+    flood. Every occurrence still increments `chemclaw_degraded_total`. `traceback=False` for the
+    one caller not inside an `except`.
     """
     first = marker not in _REPORTED
     _REPORTED.add(marker)
@@ -812,25 +435,9 @@ def _degrade_once(marker: str, message: str, *args: object, traceback: bool = Tr
 class GuardedEdit(ContextEdit):
     """One context edit, wrapped so that a failure inside it costs the reduction and not the turn.
 
-    **There was no `try` anywhere in this module**, and the failure mode that leaves is the wrong
-    way round: a raising edit — a bad slice, a `count_tokens` that chokes on a message shape nobody
-    anticipated, an upstream change to `response_metadata` — propagates out of
-    `ContextEditingMiddleware.wrap_model_call` and ends the turn as a generic internal error. The
-    chemist loses the answer, the tokens already spent and every tool the turn had run, to save
-    tokens.
-
-    Continuing **uncompacted** is the safe direction and not merely the lenient one. The request is
-    then whatever it was: possibly over the provider's limit, in which case the call fails with the
-    provider's own context-length error — which is now classified, counted and *told to the
-    chemist as such* (`agent/model_calls.py`). More often it is under the limit and simply
-    expensive, because both triggers sit well below the hard ceiling. So the degraded path has a
-    good chance of answering, and the failed path has none.
-
-    Wrapping both edits rather than only the destructive one. Both are now first-party, which
-    lowers the odds of a surprise without removing them: each still reads message shapes
-    `langchain_core` owns — `tool_calls`, `response_metadata`, `model_copy` — and either can raise
-    on a shape a provider put in the thread. Two real callers, which is what makes this a wrapper
-    rather than an inlined `try`.
+    Continuing uncompacted is the safe direction: the request is usually under the provider limit,
+    and if not, the provider's context-length error is classified and told to the chemist. Both
+    edits are wrapped, since each reads message shapes `langchain_core` owns.
     """
 
     edit: ContextEdit
@@ -839,11 +446,8 @@ class GuardedEdit(ContextEdit):
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
         """Run the edit, or record that it could not run and leave `messages` as they are.
 
-        In-place mutation is the `ContextEdit` protocol, so an edit that raised half-way through
-        may leave a partially reduced list. That is accepted rather than rolled back: every
-        reduction here is a *suffix* operation on a list the middleware already deep-copied, so a
-        partial result is a smaller valid thread rather than a corrupt one, and copying the list a
-        second time to protect against a case that has never happened is a per-model-call cost.
+        An edit that raised half-way may leave a partially reduced list; every reduction is a suffix
+        operation on a copy, so that is a smaller valid thread, not a corrupt one.
         """
         try:
             self.edit.apply(messages, count_tokens=count_tokens)
@@ -858,46 +462,15 @@ class GuardedEdit(ContextEdit):
 class OffLoopContextEditing(ContextEditingMiddleware):
     """Upstream's editing middleware, with its synchronous work moved off the event loop.
 
-    **A context edit is pure CPU and upstream runs it inline in a coroutine.**
-    `ContextEditingMiddleware.awrap_model_call` deep-copies the message list and then calls each
-    `ContextEdit.apply` directly — no `to_thread` — so every millisecond it spends is a millisecond
-    no other session on this pod is served. That was catastrophic while the tool-result strategy was
-    quadratic (356 s on a 32,000-message thread); `_clear_older_tool_results` made it linear, and
-    what is left is still not small and still not ours. Measured per model call on the same
-    fixture, everything after the linear fix:
+    Upstream's `awrap_model_call` deep-copies and edits inline in the coroutine, and that CPU
+    (mostly the deep copy) blocks every other session on the pod. Rather than copying upstream's
+    method body, this runs the synchronous `wrap_model_call` in a thread with a handler that
+    captures the prepared request, so upstream changes are inherited. If the handler is never
+    called, that is reported rather than silently sending an uncompacted request.
 
-    | messages | deepcopy | count | clear | window |
-    |---|---|---|---|---|
-    | 2,000 | 128.1 ms | 2.9 ms | 8.2 ms | 2.8 ms |
-    | 8,000 | 234.0 ms | 11.5 ms | 30.8 ms | 13.5 ms |
-    | 20,000 | 491.1 ms | 28.7 ms | 79.6 ms | 35.7 ms |
-
-    So the residual is **upstream's `deepcopy`, three quarters of it**, and the two edits together
-    are the minority — which is why this class exists rather than an `asyncio.to_thread` inside a
-    first-party `apply`, where the majority of the cost would not have been reached.
-
-    **It does not copy upstream's method body, and that is the whole design.** The obvious override
-    re-writes `awrap_model_call` — the empty-messages check, `_resolve_token_counter` (private), the
-    deepcopy, the edit loop, `request.override` — and then diverges in silence the first time
-    upstream adds a line to it. Instead the *synchronous* sibling is run in the thread with a
-    handler that captures the request it was about to send, so every one of those steps stays
-    upstream's own code and an upstream change is inherited rather than missed. The one thing this
-    assumes is upstream's own middleware contract: `wrap_model_call` calls its handler with the
-    prepared request. If it ever stops, `edited` is empty — and that is reported rather than
-    silently falling back to an uncompacted request, because a compaction that quietly stops
-    running is the exact defect this whole module was written to end.
-
-    **A worker thread is safe here because nothing in the edit path writes ambient state.** The
-    two things it reads are ambient — `agent/context_budget.py`'s per-request prefix and the
-    measured estimator ratio — and `asyncio.to_thread` runs the call under a copy of the calling
-    context, so both are visible; a contextvar *written* in the thread would not come back, and
-    none is. What the edits do mutate is process-wide and already thread-safe: the metrics registry
-    behind `degraded` takes a lock, and `_note_floored_trigger`'s report set takes its own. The
-    proof that the prefix really does arrive is not this paragraph but
-    `test_the_prefix_is_charged_whether_or_not_a_window_is_declared`, which drives a compiled graph
-    asynchronously and asserts the cut sizes the prefix decides.
-
-    `tests/test_upstream_surface.py` holds that contract.
+    Safe in a worker thread: the edits only read ambient state (the prefix and ratio, visible via
+    the copied context) and only mutate thread-safe process state. `tests/test_upstream_surface.py`
+    holds the handler contract.
     """
 
     async def awrap_model_call(
@@ -934,14 +507,8 @@ class OffLoopContextEditing(ContextEditingMiddleware):
 def context_compaction_middleware() -> list[Any]:
     """The context policy, as the middleware list `build_langgraph_agent` splices in.
 
-    Two entries rather than one because they answer different questions and only one of them is the
-    policy: the editing middleware reduces, and `RecordContextCompaction` observes what the
-    reduction actually did. The observer sits *inside* the editor — later in the list is nested
-    deeper — because it reads the edited list off its own request and the full thread off that
-    request's state, and only the innermost position sees both.
-
-    Returned as a list so the caller splices rather than composes, matching the three other
-    middleware groups `build_langgraph_agent` already splices.
+    The prefix measure is outermost, the editor reduces, and `RecordContextCompaction` observes from
+    innermost, the only position that sees both the edited list and the full thread in state.
     """
     return [
         # Outermost, because everything below budgets against a prefix only a middleware can see.
@@ -950,24 +517,15 @@ def context_compaction_middleware() -> list[Any]:
         # with the session and every millisecond of it is borne by this pod's other sessions.
         OffLoopContextEditing(
             edits=[
-                # Both wrapped, so a raising edit costs the reduction rather than the turn — see
-                # `GuardedEdit`. The wrapper is applied here rather than inside each edit because
-                # one of the two is upstream's.
-                # Upstream counts the newest *tool results*, where D-025's setting counts tool-call
-                # *groups*. The difference is real and the setting's name is the half that is wrong;
-                # renaming an ENV-visible knob to fix a name would cost every deployment that sets
-                # it, so the name stays and `core/config/agent.py` says what it now means — and
-                # `ClearOlderToolResultsEdit` is what stops the difference costing a chemist an
-                # answer, by raising `keep` to cover the newest batch.
+                # Both wrapped, so a raising edit costs the reduction rather than the turn (see
+                # `GuardedEdit`). `agent_keep_last_tool_groups` counts the newest tool *results*
+                # despite its name (kept for ENV compatibility); `ClearOlderToolResultsEdit` raises
+                # `keep` to cover the newest batch.
                 GuardedEdit(
                     ClearOlderToolResultsEdit(
-                        # Its own trigger, well below the budget the window uses. The two edits
-                        # are different instruments: this one is lossless — the `tool_use` record
-                        # survives and the model can re-fetch — so it is cheap enough to run
-                        # early, and every token it reclaims early is a conversation group the
-                        # window below never has to delete. Sharing one threshold meant nothing
-                        # reduced until 100k and then both fired together, which is the expensive
-                        # edit doing work the free one could have done.
+                        # Its own trigger, well below the window's budget: clearing is lossless, so
+                        # running it early spares conversation groups the window would otherwise
+                        # delete.
                         trigger=settings.agent_tool_result_clear_trigger,
                         keep=settings.agent_keep_last_tool_groups,
                         placeholder=TOOL_RESULT_PLACEHOLDER,
@@ -988,15 +546,8 @@ def context_compaction_middleware() -> list[Any]:
 def _record_reduction(request: ModelRequest[Any]) -> None:
     """Publish this model call's reduction, never letting the observation break the call.
 
-    The guard is the whole of this function, and it is separate from `GuardedEdit` because it
-    covers a different failure: this reads `request.state`, estimates two message lists with
-    `count_tokens_approximately`, and inspects `response_metadata` for upstream's cleared-marker —
-    all over shapes this module does not own. A raising *observer* ending a turn would be the worst
-    possible trade, since removing it entirely changes nothing a chemist receives.
-
-    The repeat guard's `forget_calls` is inside the guard too, deliberately. Losing it means a
-    cleared result may earn a refusal it should have been forgiven — one refused tool call, worded
-    and recoverable — where letting the exception out means the turn dies.
+    Separate from `GuardedEdit` because it reads state and metadata shapes this module does not own.
+    `forget_calls` is inside the guard too: losing it costs at most one recoverable refusal.
     """
     try:
         _publish_reduction(request)
@@ -1010,15 +561,9 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
 def _publish_reduction(request: ModelRequest[Any]) -> None:
     """Publish this model call's reduction, if there was one.
 
-    The full thread is read off `request.state`, which the edits above leave alone — `override`
-    replaces the request's message list and copies everything else through — so this compares what
-    the session holds against what the model is being sent, which is the operator's question.
-
-    **Nothing is published when the difference is not positive**, and that one guard carries two
-    cases. A call that needed no reduction must not tick, or "compaction did not need to fire" and
-    "compaction is not wired" become indistinguishable — which is the failure this module exists to
-    correct. And a caller that invoked the graph with messages it did not also put in state would
-    otherwise produce a negative reclaim, which a counter cannot take.
+    Compares the full thread in `request.state` (untouched by the edits) with the list being sent.
+    Nothing is published unless the difference is positive, so "no reduction needed" never ticks
+    and a caller that bypassed state cannot produce a negative reclaim.
 
     Args:
         request: The model request as it stands after the editing middleware above it.
@@ -1031,22 +576,13 @@ def _publish_reduction(request: ModelRequest[Any]) -> None:
     reclaimed = count_tokens_approximately(thread) - sent
     if reclaimed <= 0:
         return
-    # The one place the reduction is *known*, so the one place that can tell the repeat guard its
-    # premise has expired. A cleared tool result leaves the model without the answer the guard
-    # assumes it is holding, and the third identical call was then refused with advice — "answer
-    # from what you already have" — about something it no longer had. See `repeat_guard`.
-    #
-    # The calls are named rather than the counters wiped: clearing keeps the newest results, so a
-    # blanket reset forgave repeats the model can still read. And each is named by its *call id*,
-    # forgiven at most once per turn: the edits are non-destructive, so this observer re-derives
-    # the same standing reduction on every model call, and forgiving it every time reset the
-    # guard's counters as fast as repeats accumulated (`repeat_guard.TurnCallWatch`).
+    # Tell the repeat guard which calls were cleared: the model no longer holds those answers, so
+    # re-calling is a re-read. Named per call id and forgiven at most once per turn, since every
+    # model call re-derives the same reduction.
     cleared = _cleared_calls(request.messages)
     forget_calls(cleared)
-    # The metrics are high-water-marked on the turn's watch for the same re-derivation reason: a
-    # 30-step turn with one standing reduction is one compaction, not thirty, and a reclaimed
-    # token is reclaimed once. Off the request path there is no watch and each call reports
-    # itself, which is what a single-shot `graph.invoke` in a test observes.
+    # High-water-marked on the turn's watch: one standing reduction is one compaction. Off the
+    # request path each call reports itself.
     turn = current_context()
     if turn is None:
         record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
@@ -1062,70 +598,20 @@ def _publish_reduction(request: ModelRequest[Any]) -> None:
     if delta > 0:
         record_metric(lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", delta))
         turn.peak_reclaimed = float(reclaimed)
-        # **The announcement rides the high-water mark, not the first reduction**, which is what
-        # its own docstring has always claimed and what the counter beside it already did. On the
-        # first branch it said `peak_reclaimed == 0` instead, and the two then disagreed about the
-        # same turn: measured, a turn whose first model call reclaimed 999 tokens by clearing a
-        # tool payload and whose second dropped a conversation group reported
-        # `reclaimed_tokens=999, conversation_groups_dropped=0` against a counter high-watered at
-        # 1,031 — so the *destructive* edit, the one this record exists to tell apart from the
-        # lossless one, was invisible. Under `delta > 0` the standing reduction still announces
-        # once, because a re-derivation of it has a delta of exactly 0.
+        # Announce on each new high-water mark (`delta > 0`), not only the first reduction, so a
+        # later destructive cut is reported; a mere re-derivation has delta 0.
         _announce(request, reclaimed, cleared)
 
 
 def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
     """Say, once per turn, that a request is going out over the budget anyway.
 
-    **This is the reading the two compaction counters could not express**, and the claim beside
-    them in `core/metrics.py` was wrong because of it: a flat zero was documented as "never over
-    budget" and in fact meant "never *reduced*". Measured through a compiled graph — one human
-    message and two 200,000-character tool results — the thread was 100,081 estimated tokens
-    (~224,000 billed), both edits ran, and both counters moved by zero. The tool-result edit had
-    exactly `keep` candidates so it cleared nothing; the window edit cannot cut past the newest
-    group so it dropped nothing. The single turn about to fail at the provider's context limit was
-    indistinguishable from a quiet one.
-
-    The comparison is the window edit's own: the thread being sent, against the budget that edit
-    was given. So this fires when the policy has finished and the request is still over — whether
-    it reclaimed nothing at all or reclaimed plenty and could not reach the line. Both are the same
-    fact for an operator.
-
-    **What that fact is evidence *of* is now the same thing in every configuration, and it was not
-    before.** `effective_trigger` used to charge this request's own prefix against the budget only
-    `if window:`. Nothing declares a window, so this counter was comparing a thread against a number
-    the prefix had never met — measured on 2026-09-04 through a compiled graph, the edits left
-    90,030 estimated thread tokens beside a 43,175-token prefix, 137,301 went at a 128k model, and
-    this counter read **flat**. Not a defect in the counter: it reported truthfully on an
-    arithmetic that had left the largest part of the request out.
-
-    The prefix is charged unconditionally now, so `budget` below is what the *request* may cost and
-    a tick is a request the policy could not bring inside it. Re-measured on the same thread: the
-    cut goes to 45,015, the request to 92,286, and this stays silent because there is nothing to
-    report — while a thread the policy genuinely cannot cut that far ticks it where the old
-    arithmetic read clean — **0 before, 1 after**, at the shipped budget with no window declared,
-    which `tests/test_compaction.py` now holds rather than only records here. What
-    `llm_context_window_tokens` still decides is whether that budget is also known to fit the
-    endpoint; declared, a tick is the leading indicator of a context-length failure at the provider
-    rather than of a spend overrun.
-
-    **The window-aware arm this function was once going to grow is still not built, and for a
-    better reason than before.** Swept over (window, prefix, reservation, budget, ratio),
-    `sent <= effective_trigger(budget)` implies `(prefix + sent) * ratio <= budget` — and, where a
-    window is declared, that the request fits it — in every combination except the degenerate corner
-    where the prefix exhausts the budget outright, where the trigger floors at 1 so any real thread
-    ticks anyway. `tests/test_context_budget.py` holds that sweep.
-
-    **That invariant used to be written `prefix + sent * ratio <= budget`, and both the sweep and
-    `effective_trigger` agreed with each other because both said it.** The ratio is measured over
-    the *whole* request, so charging it to the thread alone assumes the prefix bills at exactly 1.0
-    — an assumption nothing measured, and false: measured 2026-09-06, this repository's `default`
-    prefix bills 0.985 and a connector-JSON thread ~1.6, and the request the policy read as clean
-    billed 140,500 against a 119,000 budget. `agent/context_budget.effective_trigger` now converts
-    the budget whole, which is what makes the parenthesis above true rather than assumed.
-
-    Once per turn, for the same reason every other number here is high-water marked: the edits are
-    non-destructive, so a standing overrun is re-derived on every model call of the turn.
+    The compaction counters only say a reduction happened; this says the policy finished and the
+    request is still over — whether nothing was reclaimable or not enough was. The comparison is the
+    window edit's own, against `effective_trigger`, which charges the prefix and converts the whole
+    budget, so `sent <= trigger` implies the request fits the budget (and a declared window), as
+    `tests/test_context_budget.py` sweeps. With a declared window, a tick is a leading indicator of
+    a provider context-length failure. Once per turn, since the overrun is re-derived every call.
 
     Args:
         request: The model request as it stands after the edits above.
@@ -1156,18 +642,9 @@ def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
 def _note_billing(request: ModelRequest[Any], response: Any) -> None:
     """Compare what this call was estimated at with what the provider billed for it.
 
-    **The one place both numbers exist.** The estimate is computed here to decide whether a
-    reduction happened; the bill arrives on the response of the very call this middleware wraps.
-    Nothing compared them, so the budget stayed denominated in a unit that undercounts the payload
-    class it governs by a quarter to two thirds (`agent/context_budget.py` carries the
-    measurement, re-taken 2026-09-06 against the fleet's own results; the 2.2x this sentence used
-    to name does not reproduce).
-
-    The estimate is the *whole* request — the ambient prefix plus the messages actually sent —
-    because `input_tokens` counts the whole request and half a comparison is not one.
-
-    Guarded end to end: this is an observation, and an observation that ended a turn would be the
-    worst trade in this module. A response shape that carries no usage simply teaches nothing.
+    The one place both numbers exist; feeds `context_budget.note_model_call`. The estimate is the
+    whole request (prefix plus sent messages), matching `input_tokens`. Guarded end to end; a
+    response without usage teaches nothing.
     """
     try:
         message = response.result[0] if getattr(response, "result", None) else response
@@ -1188,33 +665,10 @@ def _announce(
 ) -> None:
     """Say, once per turn, what this reduction actually removed — and which of the two edits did it.
 
-    **One counter cannot answer either question a compaction raises.**
-    `chemclaw_context_compactions_total` is unlabelled and the middleware composes two edits with
-    opposite consequences: `ClearOlderToolResultsEdit` is *lossless* — the `tool_use` record
-    survives and the model can re-fetch — while `KeepLastConversationGroupsEdit` is
-    **destructive**, deleting conversation turns from what the model can see. "The agent forgot
-    what I told it three turns ago" and "the agent re-ran a tool it had already run" are precisely
-    those two edits, and one number distinguishes them not at all. A label cannot be added to a
-    declared counter from here, so the distinction lands as a structured record instead, where
-    both halves are separate fields.
-
-    **Counts and names, never content.** The tools whose results were cleared are named because
-    "which tool's answer did the model lose" is the actionable half of the second question; their
-    arguments and their payloads are not, and `_cleared_calls` returns both. A log line is not a
-    place to re-publish a chemist's question or a corpus excerpt.
-
-    Groups dropped is derived here rather than reported by the edit, because only this function sees
-    both lists: a group is a `HumanMessage` and everything answering it, and the window only ever
-    removes a prefix, so the difference in `HumanMessage` counts *is* the number of conversation
-    turns the model no longer sees. Zero means the destructive edit did not fire — the reduction was
-    entirely the lossless one, which is the good case and worth being able to see.
-
-    On the high-water compaction, for the reason the metrics are high-water-marked: the edits are
-    non-destructive, so this same standing reduction is re-derived on every model call of the turn
-    and a per-call line would repeat it thirty times. That makes it once per turn in the ordinary
-    case — a re-derivation reclaims exactly what the last one did — and a second line only where
-    the turn genuinely reduced *further*, which is the case worth hearing about, because a later
-    call is where the destructive edit starts dropping conversation groups.
+    The compaction counter cannot tell lossless clearing from destructive window cuts, so a
+    structured event names reclaimed tokens, the tools whose results were cleared, and conversation
+    groups dropped (the difference in `HumanMessage` counts). Counts and names, never arguments or
+    content. Emitted on each new high-water mark, so a later further reduction is reported too.
     """
     tools = sorted({name for _call_id, name, _args in cleared})
     dropped = _group_count(request.state.get("messages") or []) - _group_count(request.messages)
@@ -1235,29 +689,15 @@ def _announce(
 
 
 def _group_count(messages: Sequence[AnyMessage]) -> int:
-    """How many conversation groups a message list holds — one per `HumanMessage`.
-
-    The same definition `KeepLastConversationGroupsEdit` cuts on, stated once: a group is a human
-    message and everything that answers it, which is why a cut on that boundary can never separate
-    a tool call from its result.
-    """
+    """How many conversation groups a message list holds — one per `HumanMessage`."""
     return sum(1 for message in messages if _opens_a_group(message))
 
 
 def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, str, Any]]:
     """`(call id, tool name, arguments)` per result this reduction replaced with a placeholder.
 
-    `_clear_older_tool_results` stamps `response_metadata["context_editing"]["cleared"]` on a
-    `ToolMessage` it clears, which is the only reliable marker — the placeholder text is first-party
-    and a content match would break the moment it is reworded. The arguments come from the
-    originating `AIMessage`'s `tool_calls`, because the guard's identity is the call, not the tool —
-    and the call *id* rides along because it is what lets the guard forgive each cleared result
-    exactly once across the many model calls that will all re-derive this same standing reduction.
-
-    **The key is upstream's spelling and this is no longer a read of upstream's output**, which is a
-    coupling that got *smaller* rather than one that moved: `_CLEARED_MARKER` is what writes it now,
-    and the reason to keep the spelling is that an upstream `ClearToolUsesEdit` composed elsewhere
-    would stamp the same thing and should be understood here.
+    Detected by the `_CLEARED_MARKER` stamp, not placeholder text. Arguments come from the calling
+    `AIMessage` because the repeat guard keys on the call; the id lets each be forgiven once.
     """
     by_id: dict[str, tuple[str, Any]] = {}
     for message in messages:
@@ -1280,32 +720,9 @@ def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, str, Any]]
 class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):
     """Count a model call whose context was reduced, then run it.
 
-    **Both hooks, not one, and that is the whole reason this is a class rather than a decorated
-    function.** LangChain's `AgentMiddleware` base raises `NotImplementedError` for whichever half a
-    middleware leaves undeclared, and `create_agent` puts a middleware that declares *either* hook
-    into *both* chains — so a `@wrap_model_call` async function makes every synchronous
-    `graph.invoke()`/`stream()` fail, and a sync one fails every real turn. Measured: with only the
-    async half, `build_langgraph_agent(model=fake).invoke(...)` raised "Synchronous implementation
-    of wrap_model_call is not available", while the same graph without this middleware answered.
-    The reachable caller is a synchronous `graph.invoke()` on a turn that calls no tool — what
-    `tests/test_compaction.py` drives, and the reason the sync half must stay. It is **not** the
-    sync `func` deepagents' `task` tool carries beside its coroutine, which is what this sentence
-    used to name: every tool-call middleware attached here is async-only (`@wrap_tool_call` over an
-    `async def` produces no sync half, and the base class raises for it), so a helper reached that
-    way dies at its first tool call. The sync tool path is unsupported by design — the governance
-    chain is async — and a reader deciding what to do about the sync question should start from
-    that, not from a caller that cannot reach it.
-
-    That matters more now than when it was written: `agent/subagents.py` puts a helper behind `task`
-    on every agent, so the sync `func` is present on a real tool rather than a hypothetical one. It
-    is still unreachable for the same reason, and still not what keeps this half alive.
-    `ContextEditingMiddleware` above declares both for the same reason; an observer that narrowed
-    the engine its editor runs on would be reporting on a policy it had just disabled.
-
-    Observation only — it never edits the request, so removing it changes what an operator can see
-    and nothing a chemist gets. That separation is deliberate: the defect this module fixes was a
-    policy everybody believed was running, and a policy whose own middleware reports on itself can
-    be believed for a reason.
+    Implements both hooks: `create_agent` puts a middleware declaring either into both chains, so a
+    missing half breaks synchronous `graph.invoke()` (which tests use) or every real async turn.
+    Observation only — it never edits the request.
     """
 
     def wrap_model_call(

@@ -1,22 +1,9 @@
-"""Every remote calculation inside a durable job beats the heartbeat (REV-3, D-136; Conn-F2).
+"""Every remote calculation inside a durable job beats the heartbeat (REV-3, D-136).
 
-Before the split this mattered for two jobs: the CREST searches were a single opaque subprocess with
-no unit boundary, and against a 600 s heartbeat timeout a longer run was declared dead and retried
-from zero — roughly fifty minutes of saturated CPU spent failing a calculation that would have
-succeeded.
-
-After `D-2026-08-16-the-physics-leaves-the-cache-stays` it matters for **all five**, and for a
-stronger reason: every minute of every job is now spent inside a remote call. A relaxation, a
-Hessian, a scan point and a binding-mode search are each one `await` with nothing finer to report
-than "still running", which is precisely the shape `chemclaw.durable.heartbeat.beating` was
-extracted for. A blocking call with no heartbeat is an activity Temporal declares dead.
-
-The timer itself is tested once, generically, in `tests/test_durable_heartbeat.py`. What is specific
-to this connector — and so tested here — is the **wiring**: that `run_xtb_calculation` actually
-routes its remote calls through the timer with `settings.xtb_job_heartbeat_timeout_seconds`, end to
-end through the real activity entry point, with `beating` unmodified and only `activity.heartbeat`
-stubbed. So a real heartbeat has to fire through the real call chain rather than through a mock
-recording its arguments.
+Every minute of a calc job is spent inside a remote `await`, so each goes through
+`chemclaw.durable.heartbeat.beating`; an unbeating call is declared dead and retried. The timer is
+tested in `tests/test_durable_heartbeat.py`; this tests the wiring through the real activity entry
+point, with only `activity.heartbeat` stubbed.
 """
 
 import asyncio
@@ -73,13 +60,10 @@ def test_a_crest_search_beats_while_it_runs(monkeypatch: pytest.MonkeyPatch) -> 
 def test_a_remote_hessian_inside_a_reaction_beats_while_it_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The case the split created, and the one a per-species progress callback does not cover.
+    """A remote Hessian inside a reaction beats while it runs.
 
-    A reaction reports progress *between* species, which is a real boundary and the better signal
-    where it exists. It says nothing during the minutes one species' second derivatives take, and
-    that wait is now a network call: without the timer underneath it, a single large species
-    silently outlives the heartbeat timeout and the whole job is retried from the cache it already
-    filled.
+    Progress is reported between species, which says nothing during one species' Hessian; the timer
+    covers that wait.
     """
     spec = ReactionJobSpec(
         reactants=["[H][H]", "ClCl"],
@@ -96,24 +80,12 @@ def test_a_remote_hessian_inside_a_reaction_beats_while_it_runs(
 
 
 def test_no_remote_call_in_the_composites_bypasses_its_runner() -> None:
-    """The wiring, checked over the source, because the gap was two calls nobody thought about.
+    """No remote call in the composites bypasses its runner.
 
-    The behavioural tests above each drive *one* job and prove its timer fires. That is the right
-    check for the calls they cover and it says nothing about the ones they do not: `embed_structure`
-    and `combine_structures` were awaited bare — in four and one place respectively — while every
-    neighbouring call in the same functions went through `run`. Nothing was red, because a geometry
-    build is normally fast.
-
-    Normally is not the bound that matters. A remote call may run for
-    `calc_server_timeout_seconds` (900 s) and an activity is declared dead after
-    `xtb_job_heartbeat_timeout_seconds` (600 s), so any un-heartbeated call has a 300-second window
-    in which Temporal retries the job while the original call is still running — the exact failure
-    `beating` was extracted to end, reintroduced by a default argument that made forgetting silent.
-
-    Static rather than behavioural, and deliberately: the defect is *a call site that was never
-    written to heartbeat*, so the test has to see every call site rather than the ones a fixture
-    happens to reach. `remote_version` is exempt — it is a metadata probe on the trust path, not a
-    calculation, and no durable job calls it.
+    A remote call may run for `calc_server_timeout_seconds`, longer than
+    `xtb_job_heartbeat_timeout_seconds`, so any unbeating call lets Temporal retry a job still
+    running. Static, because the defect is a call site never written to heartbeat. `remote_version`
+    is exempt: a metadata probe no durable job calls.
     """
     import ast
     from pathlib import Path

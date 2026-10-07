@@ -1,16 +1,12 @@
 """Knowledge-model completeness: gap queries, type registry, negative results, source tiers.
 
-Four W4 findings that share a theme — the corpus could record and retrieve, but could not reason
-about *itself*:
+The corpus must be able to reason about itself:
 
-- **KNW-5** the graph could only be walked outward from a hit, so "what do we know about X" was
-  answerable and "what don't we know" was not — and the second is the question that steers
-  experimental design.
-- **KNW-6** `type` was an unconstrained slug written from nine call sites, so a typo minted a new
-  type silently and any retrieval filter keyed on type then missed with no error.
-- **KNW-3** nothing marked an experiment as failed, and the distillation is *structurally* biased
-  against failures: playbooks distil what recurs, and failures get abandoned after one attempt.
-- **IDEA-5** RRF fused a validated ELN entry and a transferred analogy identically.
+- gap queries answer "what don't we know", the question that steers experimental design;
+- note types come from a registry, so a typo cannot mint a type that retrieval filters then miss;
+- an experiment can be marked failed, since distillation is biased toward what recurs;
+- fusion can weigh sources differently, rather than treating a validated ELN entry and a
+  transferred analogy identically.
 """
 
 from collections import Counter
@@ -40,11 +36,9 @@ def _write(directory: Path, note: Note) -> None:
 
 @pytest.fixture
 def corpus(tmp_path: Path) -> Path:
-    """A small graph: two linked reactions, one orphan, one *tag* with no distillation.
+    """A small graph: two linked reactions, one orphan, one tag with no distillation.
 
-    The tags are topic tags (`amide-coupling`, `suzuki`) because that is what the corpus actually
-    holds — `Note` has no project field — and a fixture that says `proj-x` invites the reader to
-    believe the gap query knows about projects.
+    The tags are topic tags (`amide-coupling`, `suzuki`), since `Note` has no project field.
     """
     _write(
         tmp_path,
@@ -79,20 +73,12 @@ def test_a_tag_with_evidence_but_no_distillation_is_surfaced(corpus: Path) -> No
 
 
 def test_a_playbook_that_records_a_recurrence_and_states_no_rule_is_named(corpus: Path) -> None:
-    """The other half of "where is synthesis owed", and the two do not subsume each other.
+    """A playbook that records a recurrence and states no rule is named.
 
-    `tags_without_distillation` asks which *topics* have evidence and no playbook.
-    This asks which *playbooks* record a recurrence nobody has generalised — the cross-project
-    miner's own output, which before
-    `D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` said so by ending its
-    body with "Distil the transferable rule…", an instruction to a reader inside a note retrieval
-    cites to a chemist.
-
-    The fixture makes the independence visible: `suzuki` carries a playbook, so it is *not* in
-    `tags_without_distillation`, and that playbook is nonetheless waiting for a rule. A report with
-    only the first field would say this corpus has no synthesis owed on `suzuki` at all.
-
-    Asserted with the distilled playbook present too, so it cannot pass by naming every playbook.
+    `tags_without_distillation` asks which topics have evidence and no playbook; this asks which
+    playbooks record a recurrence nobody has generalised. Independent: `suzuki` has a playbook, so
+    it is not in the first list, yet that playbook still awaits a rule. Asserted with a distilled
+    playbook present too, so naming every playbook does not pass.
     """
     _write(
         corpus,
@@ -116,14 +102,11 @@ def test_a_playbook_that_records_a_recurrence_and_states_no_rule_is_named(corpus
 
 
 def test_the_gap_query_never_calls_a_tag_a_project(corpus: Path) -> None:
-    """The field named these free-text tags "projects" and the model believed the field.
+    """The gap query never calls a tag a project.
 
-    A live run turned this list into a confident portfolio status — "27 projects tagged" — from a
-    computation that is a set difference over `note.tags` and has no project concept anywhere near
-    it (`Note` carries no project field). The computation was never wrong; the name asserted
-    something false, and a field name is all the model has to go on. Asserted over the serialized
-    payload because that, not the Python attribute, is what reaches the agent via
-    `find_knowledge_gaps`.
+    The computation is a set difference over `note.tags`, with no project concept; a field named
+    "projects" would make the model report project status. Asserted over the serialized payload,
+    which is what `find_knowledge_gaps` hands the agent.
     """
     payload = analyze(build_graph(corpus), load_notes(corpus)).model_dump()
     assert not [key for key in payload if "project" in key]
@@ -160,13 +143,10 @@ def test_a_typo_in_a_note_type_fails_the_gate(tmp_path: Path) -> None:
 
 
 def test_every_type_the_code_mints_is_registered() -> None:
-    """The registry must cover what the system actually writes, or the gate cries wolf.
+    """Every type the code mints is registered.
 
-    Against the *effective* vocabulary, because one of these is minted by a bundle rather than by
-    core: `bo-candidate` by `bo`, declared in its own `connector.yaml`. That is the point of the
-    union — what this deployment can write is core's set plus its enabled bundles' — and checking
-    core's frozenset alone would assert that a bundle's note type is registered in a file that
-    deliberately does not name it.
+    Checked against the effective vocabulary: core's set plus enabled bundles' declared types (e.g.
+    `bo-candidate` from `bo`'s `connector.yaml`).
     """
     minted = {
         "reaction",
@@ -204,16 +184,10 @@ def _reaction(**overrides: object) -> OrdReaction:
 
 
 def test_silence_is_not_a_successful_run() -> None:
-    """A source that said nothing about how a run turned out has not said it worked.
+    """Silence is not a successful run.
 
-    This asserted the opposite until `D-2026-08-26-silence-is-not-a-successful-run`, on the
-    compatibility argument that silence had always meant an ordinary run. That argument covered a
-    status column that happened to be null; it did not cover a source with no status column at all,
-    where the default made every record in the corpus assert a success nobody claimed — silently,
-    on the one field whose purpose is that a failure must not read as an ordinary run.
-
-    `None` and not `INCONCLUSIVE`: that value means the run carries no evidence about the chemistry,
-    which is a statement somebody made. "Nobody has read the prose yet" is a different fact.
+    A source that said nothing about the outcome has not said it worked. `None` rather than
+    `INCONCLUSIVE`, which is a statement somebody made about the chemistry.
     """
     assert _reaction().outcome_class is None
     assert _reaction(outcome_class=OutcomeClass.SUCCESS).outcome_class is OutcomeClass.SUCCESS
@@ -290,24 +264,12 @@ def test_an_unlisted_retriever_keeps_neutral_weight() -> None:
 
 
 def test_a_weighted_source_cannot_starve_another_source_out_of_the_cap() -> None:
-    """The documented example weight starved a whole retrieval leg to zero surviving chunks.
+    """A weighted source cannot starve another source out of the cap.
 
-    RRF's rank term is nearly flat at `k=60` — rank 1 scores 0.01639 and rank 30 scores 0.01111, a
-    ratio of 1.48 across thirty positions — so a *multiplicative* weight does not nudge a tier, it
-    replaces rank with source: at `w = 1.5` a graph hit outranks every other source's best hit for
-    all its own ranks below 31 (`graph rank30 * 1.5 = 0.01667` vs `lexical rank1 = 0.01639`).
-
-    Measured on a 40-chunk sweep of four sources, with the weights the ENV comment in
-    `core/config/retrieval.py` gives as its example:
-
-        weights=None                            -> graph 15 / lexical 8 / share 10 / vector 7
-        weights={'graph': 1.5, 'vector': 0.8}   -> graph 34 / lexical  3 / share  3 / vector 0
-
-    That is literally the "one retrieval leg contributed *zero* chunks" outcome
-    `D-2026-08-01-a-cap-that-starves-a-source` records as the merge design's reason to exist, and
-    nothing reports it: the per-source counters show the vector branch returning its seven chunks,
-    and they all die in the fusion. The invariant pinned here is the general one, not the example —
-    for any weights, every source's rank-1 hit survives a cap of 40 over four sources.
+    RRF's rank term is nearly flat at `k=60` (rank 1 is 0.01639, rank 30 is 0.01111), so a
+    multiplicative weight of 1.5 lets a source's rank-30 hit outrank every other source's best. The
+    invariant pinned is general: for any weights, every source's rank-1 hit survives a cap of 40
+    over four sources.
     """
     depths = {"graph": 45, "lexical": 8, "vector": 7, "share": 10}
     lists = [
@@ -335,11 +297,10 @@ _THE_LEGS_THE_ROW_MEASURED = {"graph": 45, "lexical": 8, "share": 10, "vector": 
 
 
 def _the_sweep_the_row_measured() -> list[list[EvidenceChunk]]:
-    """One ranked list per leg, every note unique to its leg — the worst case for a floor.
+    """One ranked list per leg, every note unique to its leg: the worst case for a floor.
 
-    Unique on purpose: overlap is what *rescues* a leg, because a note several legs offer collects
-    several votes and rises. A sweep where nothing overlaps is the one where a weight can put one
-    leg's whole list above every other leg's best hit.
+    Overlap rescues a leg by collecting votes; with none, a weight can put one leg's whole list
+    above every other leg's best hit.
     """
     return [
         [_chunk(f"{leg}-{rank}", leg) for rank in range(depth)]
@@ -348,13 +309,10 @@ def _the_sweep_the_row_measured() -> list[list[EvidenceChunk]]:
 
 
 def _kept_per_leg(kept: list[EvidenceChunk], legs: list[list[EvidenceChunk]]) -> dict[str, int]:
-    """Count survivors by what each leg **offered**, never by `chunk.retriever`.
+    """Count survivors by what each leg offered, never by `chunk.retriever`.
 
-    The fusion keeps the first chunk it sees for a note, so a note three legs found carries the
-    name of whichever ran first; counting by that field credits earlier legs and pins later ones
-    at zero — the error `fanout.record_kept_chunks` records having measured as `graph 16,
-    lexical 0, vector 0`. A test that counted that way would report a starvation the floor is not
-    able to fix and miss one it is.
+    The fusion keeps the first chunk it sees for a note, so `retriever` names whichever leg ran
+    first and would under-count later legs.
     """
     survivors = {chunk.source_note_id for chunk in kept}
     return {
@@ -365,14 +323,11 @@ def _kept_per_leg(kept: list[EvidenceChunk], legs: list[list[EvidenceChunk]]) ->
 
 
 def test_a_weight_can_take_the_whole_window_and_the_floor_gives_every_leg_one_back() -> None:
-    """The `BACKLOG.md` row's own reproduction, both halves, at the shipped `retrieval_fusion_k`.
+    """A weight can take the whole window, and the floor gives every leg one slot back.
 
-    The weight is not exotic: `retrieval_source_weights` refuses zero, negative and non-finite and
-    nothing else, and its validator argues — correctly — that there is no upper bound to clamp a
-    weight toward. So `{"graph": 10}` is a value the config accepts and means, and at a cut of
-    eight it keeps `graph 8` and nothing else. That is the starvation
-    `D-2026-08-01-a-cap-that-starves-a-source` exists to prevent, reached through a knob rather
-    than through the flat cut that ADR removed.
+    `retrieval_source_weights` refuses only non-positive and non-finite values, so `{"graph": 10}`
+    is valid, and at a cut of eight it keeps only graph chunks. Both halves at the shipped
+    `retrieval_fusion_k`.
     """
     legs = _the_sweep_the_row_measured()
     fused = reciprocal_rank_fusion(legs, k=60, weights={"graph": 10.0})
@@ -396,12 +351,11 @@ def test_a_weight_can_take_the_whole_window_and_the_floor_gives_every_leg_one_ba
 
 
 def test_the_floor_is_the_identity_wherever_no_leg_was_at_zero() -> None:
-    """A guard that moves a ranking nobody complained about is a second retrieval policy.
+    """The floor is the identity wherever no leg was at zero.
 
-    Swept over the shipped uniform case and the weight that starves, at the cut the sweep ships
-    with (`gather_evidence_max_chunks`, 40) and two smaller ones. Identity is asserted on the
-    chunk list rather than on a per-leg count, because a count can match while the order moved —
-    and the order is what the fusion is for.
+    Swept over the uniform case and the starving weight at the shipped cut
+    (`gather_evidence_max_chunks`) and two smaller ones. Identity is asserted on the chunk list,
+    since a per-leg count can match while the order moved.
     """
     legs = _the_sweep_the_row_measured()
     moved = []
@@ -425,12 +379,9 @@ def test_the_floor_is_the_identity_wherever_no_leg_was_at_zero() -> None:
 def _a_floor_that_reads_the_retriever_field(
     fused: list[EvidenceChunk], legs: list[list[EvidenceChunk]], limit: int
 ) -> list[EvidenceChunk]:
-    """The floor this repository did **not** build, written out so a test can separate the two.
+    """The floor this repository did not build, coded so a test can separate the two.
 
-    Identical to `with_no_leg_cut_out` except for where it gets a leg's identity: this one asks
-    `chunk.retriever`, which after the fusion's `representative.setdefault` names only the leg
-    that found a note *first*. Described in a comment rather than coded, the difference is a claim;
-    coded, it is a fixture.
+    Identical to `with_no_leg_cut_out` except that it reads `chunk.retriever`.
     """
     reserved = set()
     for leg in legs:
@@ -448,22 +399,12 @@ def _a_floor_that_reads_the_retriever_field(
 
 
 def test_the_floor_reads_what_a_leg_offered_not_who_found_the_note_first() -> None:
-    """Reading `chunk.retriever` would evict well-ranked chunks to fix a starvation that is not one.
+    """The floor reads what a leg offered, not who found the note first.
 
-    Three legs whose notes overlap heavily. Every one of them offered every note in the window, so
-    **nothing is starved and the correct answer is the identity** — and it is the case a
-    `retriever`-reading floor gets worst, because the representatives all carry whichever leg ran
-    first, so it sees two legs at zero and reserves a slot for each from the only chunks that *do*
-    carry their labels: the two lowest-ranked notes in the fusion.
-
-    Both directions of that error are here. The naive reading **under**-reserves for a leg whose
-    notes were all found first by another, and then **over**-promotes on the strength of a label
-    that means nothing — evicting `n3` and `n1` from a three-slot window and substituting `n9` and
-    `n6`. That is not a smaller improvement than this floor; it is a worse answer than no floor.
-
-    An earlier version of this test asserted only that this floor is inert here, which every floor
-    that does nothing also satisfies — including the identity. It named the design choice in its
-    title and did not separate it.
+    Three legs with heavily overlapping notes: every leg offered every note in the window, so
+    nothing is starved and the correct answer is the identity. A `retriever`-reading floor sees two
+    legs at zero and promotes the lowest-ranked notes carrying their labels, evicting well-ranked
+    ones.
     """
     legs = [
         [_chunk(note, leg) for note in notes]
@@ -488,11 +429,9 @@ def test_the_floor_reads_what_a_leg_offered_not_who_found_the_note_first() -> No
 
 
 def test_a_window_smaller_than_the_leg_count_is_decided_by_the_fusion() -> None:
-    """Fewer slots than legs cannot satisfy every leg, so the ranking decides which go without.
+    """A window smaller than the leg count is decided by the fusion.
 
-    Asserted because the alternative is worse and is what a naive loop does: reserve in
-    `ranked_lists` order and the window is filled by whichever legs the *config* happens to list
-    first, which is a retrieval decision taken by a file's line order.
+    Reserving in `ranked_lists` order would let the config's line order decide retrieval.
     """
     legs = _the_sweep_the_row_measured()
     fused = reciprocal_rank_fusion(legs, k=60, weights={"graph": 10.0})
@@ -506,12 +445,10 @@ def test_a_window_smaller_than_the_leg_count_is_decided_by_the_fusion() -> None:
 
 
 def test_the_floor_holds_under_the_two_stage_corpus_fusion() -> None:
-    """`corpora` relabels a representative's `retriever` to its corpus name; the floor is unmoved.
+    """The floor holds under the two-stage corpus fusion.
 
-    The two-stage path fuses within each corpus, relabels on a `model_copy` and fuses across — so
-    a floor that read `retriever` would be reading corpus names by the time it ran. This one reads
-    `source_note_id`, which the relabelling does not touch, so the same guarantee holds on both
-    paths rather than on the one it was written against.
+    `corpora` relabels a representative's `retriever` to its corpus name; the floor reads
+    `source_note_id`, which the relabelling does not touch.
     """
     legs = _the_sweep_the_row_measured()
     corpora = ["knowledge-notes", "knowledge-notes", "sharedrive", "knowledge-notes", "warehouse"]
@@ -525,27 +462,20 @@ def test_the_floor_holds_under_the_two_stage_corpus_fusion() -> None:
 
 
 def test_the_distilled_types_are_all_real_note_types() -> None:
-    """A typo in `_DISTILLED_TYPES` disables the gap query silently, in the direction of "clean".
+    """The distilled types are all real note types.
 
-    `_undistilled_tags` is a set difference: a misspelt distilling type moves its notes to the
-    *evidence* side, so a tag that has a playbook starts being reported as needing one. Nothing
-    else would notice — the query still runs, still returns a list, and is simply wrong. Same
-    class of defect as an unregistered note type (KNW-6), one level in.
+    `_undistilled_tags` is a set difference, so a misspelt distilling type would report tags that
+    have a playbook as needing one, with no error.
     """
     assert analytics._DISTILLED_TYPES <= KNOWN_NOTE_TYPES
 
 
 def test_hubs_never_name_a_note_that_does_not_exist(tmp_path: Path) -> None:
-    """A dangling link target is reported as dangling, never as the graph's top hub.
+    """Hubs never name a note that does not exist.
 
-    `build_graph` deliberately keeps a link to an unknown id as a node with no `note` attribute so
-    `kg-validate` can report it, and `_hubs` ranked those nodes by the very citations that make
-    them dangling. Measured before the fix: four notes citing a `compound-pending` that does not
-    exist put it back as *the most-cited note in the graph*.
-
-    This is the state D-018 calls normal, not a corruption — a fingerprint-indexed reaction is
-    citable before its note clears the PR-gate — so the tool was telling a chemist to check the
-    hub that matters most and `expand_note` on it then raised.
+    `build_graph` keeps a link to an unknown id as a node without a `note` attribute so
+    `kg-validate` can report it; ranking hubs by citations would surface such a node, and
+    `expand_note` on it would raise. A cited-but-unstored note is a normal state, not corruption.
     """
     for index in range(4):
         _write(
@@ -565,11 +495,9 @@ def test_hubs_never_name_a_note_that_does_not_exist(tmp_path: Path) -> None:
 
 
 def test_a_non_positive_source_weight_is_refused_by_the_config() -> None:
-    """A weight divides the rank, so zero is a division by zero and a negative one inverts a source.
+    """A non-positive source weight is refused by the config.
 
-    Both were meaningless under the multiplier this replaced too — `0` deleted a source from every
-    sweep silently, which is the starvation the knob exists to prevent — so refusing them is the
-    config stating what the arithmetic always required.
+    A weight divides the rank: zero divides by zero and a negative one inverts a source.
     """
     from chemclaw.core.config.retrieval import RetrievalSettings
 
@@ -579,20 +507,11 @@ def test_a_non_positive_source_weight_is_refused_by_the_config() -> None:
 
 
 def test_a_non_finite_source_weight_is_refused_by_the_config() -> None:
-    """The three the positivity check cannot see, because ordering is what it rests on.
+    """A non-finite source weight is refused by the config.
 
-    `nan <= 0` is False, so NaN walked straight through the guard that refuses `-1` — and a NaN
-    weight makes `1.0 / (k + rank / weight)` NaN for every hit the weighted source contributed,
-    which propagates into the fused score of every note it touched. `sorted` then compares those
-    keys, every comparison is False, and the ranking degenerates to the order the dicts happened to
-    be built in: the fusion still returns a list, of the right length, in an order that is not a
-    ranking. The same defect `find_matches` closed for a NaN Tanimoto threshold — refused there
-    too, and for the same reason: a value with no nearest bound cannot be clamped toward one.
-
-    `+inf` is refused on the guard's own stated grounds rather than by association. It survives
-    `weight <= 0`, and `rank / inf` is `0.0` for *every* rank, so every hit in that source fuses at
-    `1/k` — its best and its worst hit score identically. That is precisely "names no ordering at
-    all", which is what the refusal message says a rejected weight is.
+    `nan <= 0` is False, and a NaN weight makes every fused score it touches NaN, so `sorted`
+    returns an order that is not a ranking. `+inf` makes `rank / inf` zero for every rank, so a
+    source's best and worst hits score identically: no ordering at all.
     """
     from chemclaw.core.config.retrieval import RetrievalSettings
 
@@ -601,12 +520,10 @@ def test_a_non_finite_source_weight_is_refused_by_the_config() -> None:
             RetrievalSettings(retrieval_source_weights={"graph": weight})
 
 
-# --- STO-8, second half: relation direction and note-shape hardening -------------------------
+# --- Relation direction and note-shape hardening ---
 #
-# The shipped corpus once held twelve edges written backwards against the vocabulary's declared
-# directions, all green under a gate that checked relation *names* only, with a seed-corpus test
-# pinning the inversion as correct (`docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md`
-# §1). These tests are the checks that would have refused it.
+# The gate checks each edge's direction against the vocabulary's declared directions, not only the
+# relation names.
 
 
 def test_an_inverted_edge_fails_the_gate(tmp_path: Path) -> None:
@@ -689,11 +606,10 @@ def test_a_corpus_note_in_the_external_namespace_is_not_reported_missing(tmp_pat
 
 
 def test_a_surrogate_in_a_nested_conditions_field_is_refused_at_the_note() -> None:
-    """`_text_is_writable` once walked only top-level strings.
+    """A surrogate in a nested conditions field is refused at the note.
 
-    A surrogate in `conditions.major_impurity` therefore built a Note that raised
-    `UnicodeEncodeError` in the PR-gate's commit — the exact late failure the validator exists
-    to prevent.
+    `_text_is_writable` walks nested strings, so `conditions.major_impurity` cannot fail later at
+    commit with `UnicodeEncodeError`.
     """
     from chemclaw.kg.note import ProcessConditions
 
@@ -706,12 +622,10 @@ def test_a_surrogate_in_a_nested_conditions_field_is_refused_at_the_note() -> No
 
 
 def test_a_calc_ref_the_store_never_produced_is_reported() -> None:
-    """The calc half of the citation-existence gate (2026-08-27 review §5).
+    """A `calc_ref` the store never produced is reported.
 
-    `_calc_ref_shape` validates a key's *form* and its own comment concedes that existence "is a
-    question only a database can answer" — and nothing asked it, so a transposed digit merged
-    silently and `calc_ref_index` indexed a key no calculation ever produced. The store is a
-    parameter (`CalculationExistence`), so this needs no patching, exactly like the reaction check.
+    `_calc_ref_shape` checks only a key's form; existence needs the store, which is a parameter
+    (`CalculationExistence`), so no patching is needed.
     """
     import asyncio
 
@@ -746,20 +660,11 @@ def test_a_calc_ref_the_store_never_produced_is_reported() -> None:
 
 
 def test_every_relation_this_graph_declares_has_a_note_type_that_can_be_its_target() -> None:
-    """A relation nothing can legally point at is a question the corpus cannot answer.
+    """Every relation whose wording names a kind of thing has a note type that can be its target.
 
-    `measured-by` — "this claim rests on that experimental method or instrument" — was declared in
-    `kg/relations.py` with no note type an instrument or a method could be. Not a theoretical gap:
-    the one `measured-by` edge in the shipped corpus points at `playbook-recrystallisation-purity`,
-    a *transferable rule* about quoting a yield with the purification that produced it, because
-    that was the nearest thing available. A corpus author hit this and worked around it
-    (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
-
-    **Asserted as a mapping rather than over the whole relation set**, because most relations are
-    note-to-note and need no special type — `contradicts`, `supersedes` and `part-of` point at
-    whatever they are about. The ones worth pinning are those whose *wording* names a kind of thing,
-    since that is the pair that can come apart: the relation says "an experimental method", and
-    nothing in the vocabulary is one.
+    `measured-by` says "an experimental method or instrument", so a note type for one must exist, or
+    authors point it at the nearest wrong thing. Asserted as a mapping, since most relations are
+    note-to-note and need no special type.
     """
     from chemclaw.kg.relations import KNOWN_RELATIONS
 

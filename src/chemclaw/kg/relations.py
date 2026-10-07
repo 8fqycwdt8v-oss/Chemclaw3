@@ -1,21 +1,9 @@
-"""What an edge in the knowledge graph is allowed to mean (STO-8).
+"""What an edge in the knowledge graph is allowed to mean.
 
-Every edge used to be `graph.add_edge(note.id, target)` — no attributes at all. A graph in which
-nothing can be said *about* a connection is a citation network, and the retrieval layer treated it
-as one: no query could ask for a compound's precursors, for the note that contradicts this one, or
-for the calculation a claim was computed from. The links were there; the relations were not.
-
-The vocabulary below is **adopted, not invented**. RXNO (reaction ontology), CHMO (chemical
-methods), CHEMINF (chemical information) and OntoRXN already name these relations for chemical
-knowledge graphs, and a bespoke set would be one more thing to map to a standard later.
-
-Enforced by `chemclaw.kg.validate`, not by the `Note` schema — exactly as `KNOWN_NOTE_TYPES` is,
-and for the same reason: a hard schema rejection would fail the agent's write at the tool, so
-`kg-validate` names an unknown relation over the whole corpus instead, once, while an intended one
-costs one line here. (This paragraph used to say the agent *proposes* a relation and that "the
-PR-gate is where a human decides whether it joins the vocabulary". There is no gate
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so what buys the placement is what it
-costs a *write*, not what a reviewer sees.)
+Typed edges let queries ask for a compound's precursors, a contradicting note or the calculation
+behind a claim. The vocabulary is adopted from RXNO, CHMO, CHEMINF and OntoRXN rather than invented.
+Enforced by `kg.validate` over the corpus rather than by the `Note` schema, so a deployment
+extending the vocabulary does not fail the agent's write at the tool.
 """
 
 # The default relation. A bare `[[wikilink]]` is a citation and nothing stronger — which is what
@@ -37,11 +25,8 @@ KNOWN_RELATIONS: frozenset[str] = frozenset(
         "computed-from",  # this claim was derived from that calculation or note
         "evidence-for",  # this note supports that claim
         # --- disagreement and time ---
-        # This experiment was run in response to that one — the edge that turns a pile of runs
-        # into a line of enquiry (D-162). Deliberately stronger than "was performed later": it is
-        # minted by whoever can read the intent (the agent proposing the next run, a chemist
-        # confirming a series), never derived from two dates, because a date proves sequence and
-        # not response.
+        # This experiment was run in response to that one. Minted by whoever can read
+        # the intent, never derived from two dates: a date proves sequence, not response.
         "follows",
         "contradicts",  # this note asserts something incompatible with that one
         "supersedes",  # this note replaces that one as the current answer
@@ -52,18 +37,10 @@ KNOWN_RELATIONS: frozenset[str] = frozenset(
 )
 
 
-# The direction each typed relation runs in, as the note types allowed at each end. `None` leaves
-# an end unconstrained. Only the relations whose comments above state a direction are listed —
-# `analogue-of`, `contradicts` or `cites` legitimately connect anything to anything, and inventing
-# a constraint the vocabulary never stated would refuse notes the vocabulary allows.
-#
-# Why this exists: the vocabulary's directions lived only in comments, and the shipped corpus wrote
-# twelve edges backwards against them — `product-of` pointing both ways in one graph, campaigns
-# `part-of` their own member reactions — all of it green under a validator that checked relation
-# *names* only. A direction nothing enforces is a direction half the corpus will eventually invert
-# (`docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md` §1). Enforced by
-# `chemclaw.kg.validate` against notes whose endpoints both resolve in the corpus; dangling and
-# external targets are other checks' business.
+# The direction each typed relation runs in, as the note types allowed at each end; `None` leaves an
+# end unconstrained. Only relations with a stated direction are listed (`analogue-of`,
+# `contradicts`, `cites` connect anything). Enforced by `kg.validate` where both endpoints resolve
+# in the corpus.
 RELATION_SIGNATURES: dict[str, tuple[frozenset[str] | None, frozenset[str] | None]] = {
     "precursor-of": (frozenset({"compound"}), frozenset({"compound"})),
     "product-of": (frozenset({"compound"}), frozenset({"reaction"})),
@@ -71,18 +48,8 @@ RELATION_SIGNATURES: dict[str, tuple[frozenset[str] | None, frozenset[str] | Non
     "catalyzes": (frozenset({"compound"}), frozenset({"reaction"})),
     "solvent-for": (frozenset({"compound"}), frozenset({"reaction"})),
     "part-of": (None, frozenset({"campaign", "optimization-campaign", "report"})),
-    # Anything may rest on a measurement, so the source end is open; the target end is not, because
-    # this relation's own comment above names what it points at — "that experimental method or
-    # instrument". Unconstrained, it had no legal target at all until `analytical-method` existed,
-    # and the shipped corpus shows what that costs: its one `measured-by` edge pointed at
-    # `playbook-recrystallisation-purity`, a *transferable rule*, because that was the nearest
-    # thing in the vocabulary
-    # (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
-    #
-    # A signature is what keeps that from recurring. The type existing makes the right edge
-    # *possible*; only this makes the wrong one refuse — which is the same argument the paragraph
-    # above makes about twelve backwards edges that merged green under a validator checking names
-    # only.
+    # The target of `measured-by` is an experimental method or instrument, so only an
+    # `analytical-method` note is a legal target.
     "measured-by": (None, frozenset({"analytical-method"})),
 }
 
@@ -90,9 +57,7 @@ RELATION_SIGNATURES: dict[str, tuple[frozenset[str] | None, frozenset[str] | Non
 def known_relations() -> frozenset[str]:
     """The adopted vocabulary plus the relations the enabled connector bundles declare.
 
-    The relation-side twin of `chemclaw.kg.note.known_note_types` — same argument, same closed set,
-    same lazy import of the connector registry, and the same reason the import is lazy. See that
-    function; duplicating the reasoning here would be two copies of one decision.
+    The relation-side twin of `chemclaw.kg.note.known_note_types`; see that function.
     """
     from chemclaw.connectors.registry import declared_relations
 

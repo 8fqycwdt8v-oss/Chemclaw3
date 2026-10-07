@@ -1,47 +1,20 @@
 """Publish an archived probe run to Phoenix, so two runs can be diffed instead of described.
 
-**What was missing, precisely.** `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment`
-shipped the *trace* half of AG-13 — a span per model call, carrying its token counts — and said in
-as many words that it did not close the row: what remained was "datasets, run-over-run diffing and
-annotation … a *deployment* someone runs against the probe transcripts". This module is that, and
-nothing more: it reads transcripts that already exist on disk and writes them into a Phoenix that
-already exists on the network.
+Reads transcripts already on disk (`evals/live.py` writes `{probe, outcome}` per probe, the judge
+writes `grades.json`) and writes them into an existing Phoenix. Runs no model.
 
-**It runs no model, and that is the point.** Every probe run this repo has ever taken is already
-persisted — `evals/live.py` writes `{probe, outcome}` per probe as each lands, and the judge's
-verdicts sit beside them in `grades.json`. So the experiment surface AG-13 asks for does not need a
-credential, a benchmark or a re-run to exist; it needs the record loaded somewhere that can compare
-two of them. `tasks/live-test/` alone holds three arms of the same corpus (190 probes, a 92-probe
-sonnet arm, a 6-probe after-fix set), which is a run-over-run comparison nobody could see.
+The mapping:
 
-**The mapping, and why each half is where it is.**
+- A **dataset example** is a *probe*, read from the committed corpus in `data/evals/probes/`, not
+  from the run: it is the axis runs are compared along. Phoenix versions the dataset when
+  examples change, and an experiment names the version it ran against. Building examples from a
+  run would make an incomplete run look like a shrunken corpus.
+- An **experiment run** is a `ProbeOutcome`; one experiment per archived directory.
+- An **evaluation** is a judgement about an outcome: the judge's verdict is
+  `annotator_kind="LLM"`, signals derived from the outcome itself are `annotator_kind="CODE"`,
+  and the two are never flattened into one column.
 
-- A **dataset example** is a *probe*, read from the committed corpus in `data/evals/probes/` — not
-  from the run being published. It is the part that does not change between runs, which is what
-  makes it the axis two runs are compared along. Phoenix versions a dataset when its examples
-  change, so re-publishing an unchanged corpus adds no version and an edited one adds exactly
-  one — and an experiment names the version it ran against, so a corpus edit can never silently
-  re-label an older run's results.
-
-  **The dataset is the corpus and not the run, and that distinction was measured rather than
-  assumed.** Building the examples from a run's own transcripts looks equivalent and is not:
-  publishing the archived 92-probe sonnet arm that way cut the dataset's newest version from 190
-  examples to 92, so a run that merely *covered less* was recorded as a corpus that had *lost* 98
-  questions. Reading the corpus instead makes an incomplete run show up as an experiment with
-  fewer runs, which is what an incomplete run is.
-- An **experiment run** is a *`ProbeOutcome`*: what the system did with that question on one
-  occasion. One experiment per archived directory.
-- An **evaluation** is a *judgement about that outcome*, and there are two kinds. The judge's
-  verdict is `annotator_kind="LLM"` because a stronger model produced it; the signals derived from
-  the outcome itself — did it call the tools the probe expected, did it cite what it named, did it
-  fail loudly — are `annotator_kind="CODE"`. Phoenix carries that distinction natively and this
-  module refuses to flatten it: "a model said this answer was served" and "the transport recorded
-  no error" are not the same class of claim, and a surface that showed them as one column would
-  invite exactly the conflation the judge exists to avoid.
-
-**Nothing here re-derives a verdict.** `live_judge.judgement_from_transcript` already rehydrates a
-stored transcript into `(Probe, ProbeOutcome)`, and it exists for the same reason this module reuses
-it: re-asking 190 live questions to correct a downstream bug would change the thing being measured.
+No verdict is re-derived: `live_judge.judgement_from_transcript` rehydrates each transcript.
 """
 
 from __future__ import annotations
@@ -58,11 +31,8 @@ from chemclaw.evals.live import ProbeOutcome, load_probes
 from chemclaw.evals.live_judge import judgement_from_transcript
 from chemclaw.evals.probe import Probe
 
-# The files a transcript directory holds that are not transcripts. `evals/live.py` writes one
-# `<probe-id>.json` per probe and `cli/live_probes.py` writes its outputs into the same directory
-# "so outputs live with the transcripts that produced them" — so the directory is a mixed bag and
-# the reader has to know which is which. Named rather than pattern-matched: a probe id is
-# arbitrary, and a rule like "skip anything without a dash" would silently drop a real probe.
+# Files in a transcript directory that are not transcripts. Named rather than pattern-matched, since
+# a probe id is arbitrary.
 _NOT_TRANSCRIPTS = frozenset({"grades.json", "evidence.json", "summary.md"})
 
 
@@ -70,9 +40,8 @@ _NOT_TRANSCRIPTS = frozenset({"grades.json", "evidence.json", "summary.md"})
 class PublishedRun:
     """What one publish produced, in Phoenix's own identifiers.
 
-    Returned rather than logged because the caller is a CLI that has to print a URL somebody can
-    open, and because the counts are the check: an experiment with fewer runs than the dataset has
-    examples is a partial publish, which is a thing to notice rather than a thing to infer.
+    Returned so the CLI can print a URL, and so the counts show a partial publish (fewer runs than
+    examples).
     """
 
     dataset_id: str
@@ -86,8 +55,7 @@ class PublishedRun:
 def load_transcripts(directory: Path) -> list[tuple[Probe, ProbeOutcome]]:
     """Every archived probe in `directory`, rehydrated, in probe-id order.
 
-    Sorted so two publishes of the same directory produce the same example order, which is what
-    lets Phoenix recognise a re-publish as the same version rather than a new one.
+    Sorted so re-publishing a directory yields the same example order.
 
     Args:
         directory: A transcript directory written by `cli/live_probes.py`.
@@ -96,8 +64,7 @@ def load_transcripts(directory: Path) -> list[tuple[Probe, ProbeOutcome]]:
         The `(probe, outcome)` pairs it holds.
 
     Raises:
-        FileNotFoundError: The directory does not exist — a typo'd path is worth a hard stop
-            rather than an empty publish that reads as "the run had no probes".
+        FileNotFoundError: The directory does not exist, rather than an empty publish.
     """
     if not directory.is_dir():
         raise FileNotFoundError(f"no transcript directory at {directory}")
@@ -111,14 +78,12 @@ def load_transcripts(directory: Path) -> list[tuple[Probe, ProbeOutcome]]:
 def load_grades(directory: Path) -> dict[str, Mapping[str, Any]]:
     """The judge's verdicts for `directory`, keyed by probe id; empty when it was never graded.
 
-    Absent rather than required: a run whose judge pass never happened is still worth publishing —
-    the objective signals do not need a grader — and demanding `grades.json` would make the most
-    common state of a fresh run unpublishable.
+    Optional: an ungraded run is still worth publishing for its objective signals.
 
     Args:
         directory: The transcript directory, or the run directory beside it. Both are searched,
             because `cli/live_probes.py` writes `grades.json` next to the transcripts for a probe
-            run and one level up for the archived sets in `tasks/live-test/`.
+            run and one level up for an archived set.
 
     Returns:
         `{probe_id: judgement}` for whichever file was found first.
@@ -134,24 +99,10 @@ def load_grades(directory: Path) -> dict[str, Mapping[str, Any]]:
 def _example(probe: Probe) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """One probe as Phoenix's `(input, output, metadata)` triple.
 
-    `output` is the *reference* — what the probe declared it wanted — rather than anything the
-    system produced. That is Phoenix's convention for a dataset example and it is also the honest
-    one here: `expects_tools` and `forbids_claims` are the corpus's claim about a right answer, and
-    they belong on the axis, not in the run.
-
-    `asserts_absent` travels with them for the same reason, and it is the one of the three that
-    says what the *system* was assumed to be: a reader comparing two experiments over a bucket-C
-    question needs to see which capability the question was scored as lacking, because that is the
-    premise a corpus edit most often changes underneath a stored verdict.
-
-    **`needs_bundle` goes with it, and that argument applies to it harder.** It is the other half
-    of the same premise — which deployment the probe was scored against — and unlike the three
-    above it changes with **no corpus edit at all**: mounting `CHEMCLAW_CONNECTORS_DIR` differently
-    is enough. Without it, two runs of one `needs_bundle` probe in two lanes are indistinguishable
-    in the published dataset, and the expectation `evals/live._tool_expectation_applies` silently
-    dropped in one of them is invisible to whoever compares them. On `metadata` rather than
-    `output`, because it is a fact about the run's configuration rather than a claim about the
-    right answer.
+    `output` is the reference — what the probe declared it wanted (`expects_tools`,
+    `forbids_claims`, `asserts_absent`) — not anything the system produced. `needs_bundle` goes on
+    `metadata`: it records which deployment the probe was scored against, which changes with
+    configuration alone, so two lanes' runs stay distinguishable.
     """
     return (
         {"question": probe.question, "persona": probe.persona, "direction": probe.direction},
@@ -172,10 +123,8 @@ def _example(probe: Probe) -> tuple[dict[str, Any], dict[str, Any], dict[str, An
 def _run_output(outcome: ProbeOutcome) -> dict[str, Any]:
     """What the system did with one probe, as the experiment run's output.
 
-    The answer plus the surface it used. Deliberately not the whole `ProbeOutcome`: the fields that
-    are *judgements* about the outcome become evaluations below, where they can carry a score and
-    an annotator kind, and duplicating them here would put the same claim on the page twice with
-    nothing saying which one to believe.
+    The answer plus the surface it used; judgements about the outcome are published as evaluations,
+    not duplicated here.
     """
     return {
         "answer": outcome.answer,
@@ -192,25 +141,10 @@ def _evaluations(
 ) -> Iterator[dict[str, Any]]:
     """Every judgement about one outcome, each with the kind of thing that made it.
 
-    Scores are 1.0/0.0 rather than a bare label wherever the question is a yes/no, because Phoenix
-    aggregates a score across an experiment and a label only groups: "expected tools met" is the
-    number a second run should be compared on, and a label would make that comparison a manual
-    read of two lists.
-
-    **An unmeasurable signal is omitted, not scored zero**, and that follows from the same
-    sentence: a zero is a claim about the run, so a probe nobody could measure must not make one.
-    Two of these were making it. `1.0 if outcome.expected_tools_met else 0.0` scored `None` —
-    "this probe declares no expected tool", true of 57 of the 258 committed probes, 53 of them
-    bucket C where calling no tool is the *correct* behaviour — the same as `False`, "the tool
-    existed and was not called"; so the published aggregate was capped at 0.78 by the corpus's
-    composition and a release adding bucket-C probes read as a regression. `1.0 if verdict ==
-    "served" else 0.0` scored `ungraded` — the judge's own reply hit the token ceiling — the same
-    as `unserved`. `evals.live_judge` keeps `ungraded` a separate verdict precisely because
-    collapsing it "mislabelled 65 of 190 probes and inflated the headline unserved rate from at
-    most 22 to 87", and `evals.live.degradation_findings` already guards on `probe.expects_tools`.
-    The distinction survived in the labels and died in the numbers everything is compared on.
-    A third was found later, on `failed_loudly`, where the guard and the value disagreed in both
-    directions at once — the comment beside that row says what it published and what it now does.
+    Yes/no questions are scored 1.0/0.0 so Phoenix can aggregate them across an experiment. An
+    unmeasurable signal is omitted, never scored zero: `expected_tools_met is None` (the probe
+    expects no tool) and an `ungraded` verdict (the judge failed) publish nothing, since a zero
+    would be a claim about the run.
     """
     if outcome.expected_tools_met is not None:
         yield {
@@ -234,21 +168,9 @@ def _evaluations(
         "label": "clean" if not outcome.uncited_note_ids else "uncited",
         "explanation": ", ".join(outcome.uncited_note_ids) or None,
     }
-    # A failure the chemist can see is a different outcome from a failure they cannot, which is why
-    # `failed_loudly` is recorded rather than folded into `answered`.
-    #
-    # **The guard and the value disagreed on both edges, and each edge published a number nobody
-    # measured.** `failed_loudly` is `tools_failed or error_code`, and the row was gated on
-    # `error_code or transport_error`: a turn whose tools fell over with no `error` event was
-    # `True` and published *nothing*, so the aggregate excluded exactly the runs it counts; and a
-    # turn that died in transport was `False` and published **0.0** — "this run did not fail
-    # loudly" — under the label `transport_error`. Every observed turn publishes the flag now, so
-    # the aggregate is the run's loud-failure *rate* rather than a constant 1.0 over the turns that
-    # happened to carry an error code.
-    #
-    # A transport death publishes no row at all, by the rule this function's docstring already
-    # states: the stream broke, so whether the system announced its own failure is a thing this run
-    # did not observe. It is not lost — `publish_run` stamps the run itself with `error=`.
+    # `failed_loudly` (a failure the chemist could see) is published for every observed turn, so its
+    # aggregate is the run's loud-failure rate. A transport death publishes no row: whether the
+    # system announced its failure was not observed. `publish_run` marks such a run with `error=`.
     if outcome.transport_error is None:
         yield {
             "name": "failed_loudly",
@@ -259,9 +181,7 @@ def _evaluations(
         }
     if judgement is not None:
         verdict = str(judgement.get("verdict", "ungraded"))
-        # `ungraded` means the judge did not answer, which is a fact about the grading pass and not
-        # about the system under test. Publishing it as 0.0 put "the judge timed out" in the same
-        # column as "the chemist was not served".
+        # `ungraded` is a fact about the grading pass, not the system, so it publishes no score.
         if verdict != "ungraded":
             yield {
                 "name": "judge_verdict",
@@ -275,14 +195,8 @@ def _evaluations(
 def _window(outcome: ProbeOutcome, at: datetime) -> tuple[datetime, datetime]:
     """The interval Phoenix records a run over, from the latency the transcript kept.
 
-    The transcripts hold a duration and no wall-clock, so the caller supplies the anchor. That is
-    stated rather than hidden: an archived run's runs are stamped at publish time, and the number
-    that carries meaning is the *span*, not the instant.
-
-    There is no "unknown duration" arm, and the one that stood here protected nothing:
-    `ProbeOutcome.latency_seconds` is a required `float` defaulting to `0.0`, which pydantic
-    refuses to make `None`, so the guard was always true and the zero-width window it fell back to
-    is the one a turn with no latency already produces.
+    Transcripts hold a duration but no wall clock, so the caller supplies the anchor; the span is
+    what carries meaning, not the instant.
     """
     return at, at + timedelta(seconds=outcome.latency_seconds)
 
@@ -292,9 +206,8 @@ def publish_corpus(
 ) -> Any:
     """Publish the committed probe corpus as the dataset every run is an experiment over.
 
-    Idempotent by construction rather than by a check: Phoenix compares the examples it is given
-    against the current version and only cuts a new one when they differ, so calling this before
-    every publish costs a request and keeps the dataset equal to what is in `data/evals/probes/`.
+    Idempotent: Phoenix cuts a new version only when the examples differ, so calling this before
+    every publish keeps the dataset equal to `data/evals/probes/`.
 
     Args:
         client: A `phoenix.client.Client`.
@@ -325,15 +238,14 @@ def publish_run(
 ) -> PublishedRun:
     """Publish one archived transcript directory as a Phoenix experiment over the probe dataset.
 
-    The corpus is published first, so the dataset is always the questions this repo currently
-    commits and the experiment names the version it was measured against. A run covering fewer
-    probes than the corpus holds is an experiment with fewer runs — it does not shrink the dataset.
+    The corpus is published first, so the experiment names the dataset version it was measured
+    against; a run covering fewer probes is an experiment with fewer runs.
 
     Args:
         directory: A transcript directory written by `cli/live_probes.py`.
         experiment_name: What this run is called in Phoenix — the arm, the model, the date.
-        client: A `phoenix.client.Client`. Injected rather than constructed here so the CLI owns
-            the endpoint and the tests can drive this against a recorder.
+        client: A `phoenix.client.Client`, injected so the CLI owns the endpoint and tests can
+            record calls.
         dataset_name: The dataset to publish into; defaults to the configured one.
         probe_dir: The corpus to publish as the dataset; defaults to the configured one.
         now: The anchor the run windows are measured from; defaults to publish time.
@@ -343,9 +255,7 @@ def publish_run(
 
     Raises:
         FileNotFoundError: No such transcript directory.
-        ValueError: The directory holds no transcripts — an empty publish would create an
-            experiment that says a run happened and found nothing, which is not what happened —
-            or it holds a probe the corpus does not.
+        ValueError: The directory holds no transcripts, or holds a probe the corpus does not.
     """
     transcripts = load_transcripts(directory)
     if not transcripts:
@@ -392,10 +302,8 @@ def publish_run(
 def _example_ids(dataset: Any, transcripts: Sequence[tuple[Probe, ProbeOutcome]]) -> dict[str, str]:
     """`{probe_id: dataset_example_id}`, matched on the metadata the examples were written with.
 
-    Matched on `probe_id` rather than on position. Position would work today and would break the
-    first time a corpus gains a probe: a run publishing 190 outcomes against a 191-example version
-    would attach every result after the insertion to the wrong question, and nothing about the
-    resulting numbers would look wrong.
+    Matched on `probe_id`, not position, so a corpus that gains a probe cannot shift results onto
+    the wrong questions.
     """
     by_probe = {
         str((example.get("metadata") or {}).get("probe_id")): str(example["id"])

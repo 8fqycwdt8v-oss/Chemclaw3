@@ -1,18 +1,8 @@
 """One sink may not hold the drain, and a driver that hangs may not starve the ones after it.
 
-`durable/publish_results.py` iterates the enabled sinks **sequentially**, and its module docstring
-gives that shape a reason: *"two enabled destinations are two failure domains: one being
-unreachable must not hold up the other."* That is true of the rows — one row per (sink, calc_ref) —
-and it was false of the pass. The only ceiling over the loop was the activity's
-`result_publish_timeout_seconds x len(sinks)`, one budget the first sink could drink entirely,
-while the setting's own declaration calls it a per-`deliver` bound.
-
-Measured on the unfixed seam with `alpha` hanging and `beta` healthy over eight passes: `beta` was
-claimed **zero** times and its row sat at `attempts=0` with an empty `last_error`, so nothing even
-distinguished "starved" from "nothing to send".
-
-Driven through the real `registry.build`, because that is where the bound now lives: a sink is
-bounded because the registry built it, not because a particular caller remembered to wrap it.
+`durable/publish_results.py` iterates enabled sinks sequentially, treating each as its own failure
+domain, so each `deliver` and `aclose` is bounded by `result_publish_timeout_seconds`. Driven
+through the real `registry.build`, where the bound lives, so every caller gets it.
 """
 
 import asyncio
@@ -74,11 +64,9 @@ def bounded_sink(monkeypatch: pytest.MonkeyPatch) -> ResultSink:
 
 
 def test_a_hanging_sink_gives_up_at_the_per_sink_ceiling(bounded_sink: ResultSink) -> None:
-    """`deliver` must return control at `result_publish_timeout_seconds`, not hold the pass.
+    """A hanging sink gives up at the per-sink ceiling.
 
-    Retryable, because the destination did not answer — which is also what puts the reason into
-    `result_publications.last_error`, where an operator reads it. The unfixed seam returned control
-    only when the whole activity timed out, having claimed the rows and marked none of them.
+    The timeout is retryable, which also records the reason in `result_publications.last_error`.
     """
     started = time.perf_counter()
     with pytest.raises(SinkUnavailableError) as outage:
@@ -96,9 +84,8 @@ def test_a_sink_that_will_not_close_does_not_cost_the_next_one_its_pass(
 ) -> None:
     """`aclose` is bounded too, and swallows its timeout.
 
-    The drain calls it from a `finally` that has nothing to do with delivery, so a driver refusing
-    to release a connection must not become the same starvation by another route — and must not
-    turn a successful pass into a raised one either.
+    It runs from the drain's `finally`, so a driver that will not release a connection must neither
+    starve the next sink nor turn a successful pass into a raised one.
     """
     started = time.perf_counter()
     asyncio.run(bounded_sink.aclose())
@@ -108,9 +95,8 @@ def test_a_sink_that_will_not_close_does_not_cost_the_next_one_its_pass(
 def test_the_bound_is_the_seam_s_rather_than_a_caller_s(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every sink `build` returns is bounded, so no caller can forget to wrap one.
 
-    Stated as a property of the returned object rather than of the drain loop: the backfill CLI and
-    any later caller get the guarantee for free, and the activity's `x len(sinks)` budget becomes
-    the honest sum of N per-sink budgets rather than a pool.
+    The backfill CLI and later callers get the guarantee, and the activity's `x len(sinks)` budget
+    is a sum of per-sink budgets rather than a pool.
     """
     monkeypatch.setattr(settings, "manifest_driver_packages", "tests")
     built = registry.build(_manifest())
@@ -140,28 +126,13 @@ def test_a_driver_that_is_not_a_sink_is_still_named_before_it_is_wrapped(
 
 
 def test_a_sinks_held_connection_is_counted_where_the_budget_applies() -> None:
-    """A bare connection occupies a backend, and the process's own reading could only see pools.
+    """A sink's held connection is counted where the connection budget applies.
 
-    `D-2026-09-13-a-connection-counted-where-the-budget-applies`. `PostgresWarehouse` opens an
-    un-pooled `AsyncConnection` and keeps it for the driver's life — in neither `db._POOLS` nor
-    `db._FOREIGN_POOLS` — so `chemclaw_pg_pool_max_size` reported a ceiling one lower than the
-    process could reach, for every enabled sink, while being the gauge an alert compares against
-    `pg_fleet_max_connections`.
-
-    **Registering it as a pool, which is what the `BACKLOG.md` row proposed, raises.**
-    `_process_max_connections` sums `pool.max_size`; measured,
-    `AttributeError: 'AsyncConnection' object has no attribute 'max_size'`. So the count is of
-    *connections*, each worth one backend.
-
-    **Both directions are asserted, because a blanket count is the same error in the other
-    direction.** A result sink points by design at a database this system does not own
-    (`D-2026-08-25-a-cache-is-not-a-record`), whose ceiling no deployment here declares — so a sink
-    on its own server must count zero against the primary's budget, and only a sink that *is* on
-    `postgres_dsn`'s server may raise it. A test asserting only the rise would pass a gauge that
-    charged every warehouse in the world to this one ceiling.
-
-    Read through `_process_max_connections` rather than off `_HELD_CONNECTIONS`: the registry is the
-    mechanism, and what the alert reads is the sum.
+    `D-2026-09-13-a-connection-counted-where-the-budget-applies`. `PostgresWarehouse` holds an
+    un-pooled connection, which `chemclaw_pg_pool_max_size` must count as one backend (connections
+    have no `max_size`). Both directions: a sink on another server counts zero against the primary's
+    budget, and only one on `postgres_dsn`'s server raises it. Read through
+    `_process_max_connections`, the sum the alert reads.
     """
     from chemclaw.core import db
     from chemclaw.publish.drivers.postgres import PostgresWarehouse
@@ -181,21 +152,17 @@ def test_a_sinks_held_connection_is_counted_where_the_budget_applies() -> None:
             await here.aclose()
         after_close = db._process_max_connections()
 
-        # The same driver, dialled at a host string `pg_endpoint` reads as a different server. It
-        # never connects — `_connection` is what registers, and nothing asks it to — which is the
-        # honest arm: a sink whose warehouse is elsewhere contributes nothing here whether it is
-        # reachable or not, and a reachable foreign server is not something this suite can assume.
+        # The same driver at a host `pg_endpoint` reads as a different server. It never connects; a
+        # warehouse elsewhere contributes nothing whether reachable or not.
         elsewhere = PostgresWarehouse(
             host="a-warehouse-of-its-own.invalid", port=5432, database="results", schema="public"
         )
         db.register_connection(_StillOpen(), elsewhere._conninfo())
         off_primary = db._process_max_connections()
 
-        # **The drain builds a new driver every pass**, deliberately, so a rotated credential takes
-        # effect on the next run (`PostgresWarehouse.aclose`'s own docstring). Without the release
-        # in `aclose` the registry grows by one dead entry per pass, and the read-time prune is no
-        # answer to that on its own: it only runs when somebody reads the gauge. Counted with no
-        # read in between, which is what makes the release observable rather than believed.
+        # The drain builds a new driver every pass so rotated credentials apply, so `aclose` must
+        # release its registry entry. Counted with no gauge read in between, since the read-time
+        # prune would hide a leak.
         registered_before = len(db._HELD_CONNECTIONS)
         for _ in range(4):
             driver = PostgresWarehouse(dsn=settings.postgres_dsn, schema="public")
@@ -229,10 +196,8 @@ def test_a_sinks_held_connection_is_counted_where_the_budget_applies() -> None:
 class _StillOpen:
     """A stand-in for a connection held open on a server this suite cannot dial.
 
-    The registry reads exactly one thing off a connection — `closed` — and the endpoint it compares
-    comes from the conninfo passed beside it. A double is right here for the reason a double is
-    usually wrong: the subject is the *arithmetic over the endpoint*, and the alternative is asking
-    this suite to reach a second Postgres it has no way to start.
+    The registry reads only `closed`, and the endpoint comes from the conninfo beside it; the
+    subject is the arithmetic over the endpoint.
     """
 
     closed = False

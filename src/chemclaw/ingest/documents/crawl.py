@@ -1,17 +1,12 @@
 """Walk the mounted share and decide what is worth opening — without opening anything.
 
-The whole cost model of a TB share lives in this module. A crawl of 500k files that reads nothing
-is a `scandir` pass measured in minutes; a crawl that reads each file to find out what it is would
-be measured in days and would parse a decade of scanned archives to discover they say nothing. So
-every filter here — extension, exclusion, size — runs on the directory entry and its `stat`, and a
-file's bytes are read only after the sync has confirmed its fingerprint moved.
+Every filter (extension, exclusion, size) runs on the directory entry and its `stat`; a file's bytes
+are read only after the sync confirms its fingerprint moved. That is what keeps crawling a large
+share cheap.
 
-The walk is **deterministic and totally ordered**: roots in sorted order, entries sorted within
-each directory. That is what lets a bounded chunk resume from `after` while keeping no state at
-all — the same "the cursor is a position in a total order" trick the ELN sync plays on timestamps.
-
-**Nothing here writes.** The share is mounted read-only and treated as read-only anyway: there is
-no code path in this package that opens a file for writing, creates one, or removes one.
+The walk is deterministic and totally ordered (roots sorted, entries sorted within each directory),
+so a bounded chunk resumes from `after` with no other state. Nothing here writes: no code path opens
+a file for writing, creates or removes one.
 """
 
 import logging
@@ -42,10 +37,8 @@ class FileRef:
     def fingerprint(self) -> str:
         """The stat signature that decides whether this file must be read again.
 
-        `mtime_ns:size` — the same shape `note_index` stores (D-2026-08-02-embed-only-what-changed).
-        It is not a content hash and does not pretend to be: it costs no read, and the one thing it
-        can miss (a rewrite that preserves both mtime and size) does not happen to documents a
-        human edited.
+        `mtime_ns:size`, the same shape `note_index` stores. Not a content hash: it costs no read,
+        and a rewrite preserving both mtime and size does not happen to human-edited documents.
         """
         return f"{self.mtime_ns}:{self.size}"
 
@@ -57,79 +50,38 @@ class CrawlResult:
     files: list[FileRef] = field(default_factory=list)
     # More entries remain past `cursor` — the sync comes back with `after=cursor`.
     has_more: bool = False
-    # The last entry this pass *examined*, accepted or not. The resume point, and deliberately not
-    # "the last accepted file": everything between the last accepted file and where the chunk
-    # stopped would then be re-examined next time and counted twice in the skip tallies. A counter
-    # that inflates during a drain is worse than no counter, because it is read as a measurement.
+    # The last entry this pass examined, accepted or not — the resume point. Not "the last accepted
+    # file", which would re-examine and double-count skipped entries on the next chunk.
     cursor: str = ""
-    # Roots that could not be walked to completion. **Prune safety depends on this being honest**:
-    # a share that failed to mount presents as an empty directory, and pruning on that would delete
-    # the whole corpus. Anything in here means "delete nothing this run".
+    # Roots that could not be walked to completion. Prune safety depends on this: an unmounted share
+    # looks empty, so anything here means "delete nothing this run".
     failed_roots: list[str] = field(default_factory=list)
-    # Entries the walk *saw* but could not stat. They are on the share — `scandir` listed them —
-    # so the sync restamps them as seen rather than letting the sweep read their absence from this
-    # pass as deletion. A transient `EACCES` on a subtree must not empty that subtree from the
-    # index; the mark means "observed to exist", never "successfully processed".
+    # Entries `scandir` listed but that could not be stat'ed. The sync restamps them as seen so a
+    # transient `EACCES` does not read as deletion; the mark means "observed to exist", never
+    # "processed".
     unreadable: list[str] = field(default_factory=list)
     skipped_oversized: int = 0
-    # Per-extension counts of everything the allowlist turned away. Reported rather than dropped:
-    # an operator has to be able to see that 40% of the share is `.doc` before concluding the
-    # corpus is complete.
+    # Per-extension counts of everything the allowlist turned away, reported so an operator can see
+    # what share of the corpus is unsupported.
     skipped_unsupported: Counter[str] = field(default_factory=Counter)
 
 
 def _is_excluded(relative: str, spec: pathspec.GitIgnoreSpec, *, directory: bool = False) -> bool:
-    """Whether a mount-relative path is excluded — asked of a *directory* as well as of a file.
+    """Whether a mount-relative path is excluded — asked of a directory as well as of a file.
 
-    Gitignore semantics (`binding.exclude_spec`), because that is what the patterns a deployment
-    writes already assume: the shipped manifest's `~$*`, `**/Archive/**` and `*.tmp` are gitignore
-    lines. What stood here before was three `fnmatch` calls per pattern — the bare path, the path
-    with a leading `/`, and the basename — each compensating for something `fnmatch` does not do.
-    Gitignore does all three natively: a pattern with no separator matches at every depth (that is
-    the basename arm), and one with a separator is anchored at the mount (that is the `/`-prefixed
-    arm, added because `fnmatch` translates `**/Archive/**` to `.*?/Archive/`, which demands a
-    separator *before* `Archive` and so left a **top-level** `Archive/`'s files indexed and cited).
+    Gitignore semantics (`binding.exclude_spec`): a pattern without a separator matches at every
+    depth, one with a separator is anchored at the mount, and a directory offered as `Archive/`
+    matches `**/Archive/**` so its subtree is never listed. Everything under an excluded directory
+    is excluded.
 
-    **The half the three-way try could not reach is the directory, and that is the cost.** Measured:
-    `fnmatch(p, "**/Archive/**")` is False for `Projects/Archive`, `/Projects/Archive` and `Archive`
-    — all three arms — so no directory ever matched, and `descend` listed the whole archive subtree
-    to reject it one file at a time, in the module whose own docstring says the cost model of a TB
-    share lives here. Gitignore matches a directory when it is presented as one, which is all
-    `directory=True` does: `Archive/` matches `**/Archive/**` and the subtree is never opened.
-
-    **This is not a change to what a deployment indexes**, which was checked rather than assumed
-    before the swap — but the claim has to be stated at the width that is true, because the obvious
-    wider one is false. Over the three shipped patterns and a path set holding the cases that
-    separate the two policies, old and new agree on every path in that set
-    (`tests/test_document_share.py::test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics`
-    is that measurement, kept runnable). They do **not** agree as predicates in general: gitignore
-    excludes everything under a matched directory, and the three fnmatch arms did not, so
-    `_is_excluded("scratch.tmp/report.pdf", ["*.tmp"])` was False before and is True now. The probed
-    set holds no file under a `*.tmp` directory, which is why nothing in it diverges.
-
-    **The corpus is unchanged anyway, by a different route, and that is the part worth knowing.**
-    The old `descend` asked `_is_excluded` of *every* entry including directories, and the basename
-    arm matched `scratch.tmp` there — so the directory was skipped and its files were never offered
-    to the predicate at all. Same corpus, different mechanism: the old walk pruned that subtree and
-    could not prune `Archive/`, the new one prunes both. A path-level comparison therefore under-
-    describes the swap in both directions, and neither half is visible without the walk.
-
-    The one semantic the swap does drop is basename-matching a pattern that *contains* a separator:
-    `Foo/Bar` used to exclude a file named `Bar` anywhere and now excludes only `Foo/Bar`. No
-    shipped pattern is of that shape, and the fnmatch behaviour was an artefact of the fallback
-    rather than anything a manifest could have meant.
-
-    Still case-sensitive, which is a real mismatch with CIFS (`Archive`, `ARCHIVE` and `archive`
-    are one folder to the file server and three strings here) — recorded in
-    `docs/archive/findings-2026-08.md` rather than silently changed, because case-folding every
-    pattern would quietly widen exclusions a deployment already relies on. (That citation said
-    `docs/planning/BACKLOG.md` and the row has never been there.)
+    Case-sensitive, which mismatches CIFS; case-folding patterns would silently widen exclusions
+    deployments rely on, so it is left as is.
 
     Args:
         relative: The mount-relative POSIX path of the entry.
         spec: The binding's compiled exclusions.
         directory: True when the entry is a directory, so it is offered in the form gitignore
-            recognises as one.
+        recognises as one.
     """
     return spec.match_file(f"{relative}/" if directory else relative)
 
@@ -143,8 +95,7 @@ def _extension_of(name: str) -> str:
 def _within_mount(mount: Path, path: Path) -> bool:
     """Whether a path still lands inside the mount once every link in it is resolved.
 
-    Module-level because both the per-entry guard and the per-root one need it: `descend` asks it
-    of a symlink it is about to follow, and `crawl_share` asks it of the root directory itself,
+    Used by `descend` for a symlink it is about to follow and by `crawl_share` for the root itself,
     which `descend` never sees.
     """
     try:
@@ -165,35 +116,21 @@ class _Walk:
         # The identity — `(st_dev, st_ino)` — of every directory this pass has already walked, so
         # a link back into the mount is followed once instead of forever. See `enter`.
         self.visited: set[tuple[int, int]] = set()
-        # Entries whose type could not be read while sorting. Not `CrawlResult.unreadable`, which
-        # has a specific meaning the sync acts on ("observed to exist, restamp it"): this is a
-        # weaker fact — the sort key for this entry is a guess — and conflating them would restamp
-        # paths on evidence that does not support it. See `_order`.
+        # Entries whose type could not be read while sorting. Kept apart from
+        # `CrawlResult.unreadable`, which the sync acts on by restamping; this is only "the sort key
+        # was a guess". See `_order`.
         self.unstattable: list[str] = []
 
     def enter(self, directory: Path, relative: str) -> bool:
         """Claim `directory` for this walk; False when it is one already walked.
 
-        **`_within_mount` checks escape, and a cycle is the case it cannot see.** A link whose
-        target resolves *inside* the mount is exactly what a convenience link is —
-        `Projects/sub/current -> ..`, `Data/Archive/all -> /mnt/share/Data`, both ordinary on a
-        decade-old drive — so with `follow_symlinks: true` the walk recursed through it, emitting
-        the same file under an unbounded family of mount-relative paths until `scandir` failed on
-        path length. That `OSError` is caught and records the root as *failed*, which is right for
-        its own purpose and fatal here: `prune_share` refuses to sweep on any failed root, so from
-        the first cycle onward the share's index was never pruned again and deleted documents
-        stayed searchable and citable. Before that, the cycle ate the bounded chunk's `limit`.
+        `_within_mount` catches escape but not a cycle: a link resolving inside the mount (`current
+        -> ..`) would otherwise recurse until `scandir` fails on path length, mark the root failed,
+        and block pruning for good. Keyed on directory identity rather than path, which also stops
+        two roots linked to one tree from indexing it twice; first walked wins, deterministically.
 
-        Keyed on the directory's identity rather than on its path, which also covers the acyclic
-        version of the same fault — two roots reaching one tree through a link, indexing every file
-        twice under two paths and two tag sets. The binding already refuses roots that overlap
-        *lexically*; this is the same rule where the overlap is in the filesystem instead of in the
-        string, and first walked wins, deterministically, because the roots are walked in order.
-
-        A directory that cannot be `stat`ed is **entered anyway**: `scandir` is about to fail on it
-        too, and that failure is what marks the root failed and stops the sweep. Swallowing it here
-        would turn a half-mounted share back into "these files are not there", which is the one
-        wrong answer this module is built around avoiding.
+        A directory that cannot be `stat`ed is entered anyway, so the `scandir` failure that follows
+        marks the root failed and stops the sweep rather than reading as "these files are gone".
         """
         try:
             stat = directory.stat()
@@ -223,11 +160,9 @@ class _Walk:
         try:
             stat = entry.stat(follow_symlinks=self.binding.follow_symlinks)
         except OSError:
-            # DEBUG, and the path is carried out in `result.unreadable` instead: this fires once
-            # per entry the walk cannot stat, and that population is a function of the share rather
-            # than of the request — one changed ACL on a folder is one WARNING per file inside it.
-            # `sync` reports the whole population in one line (`_summarise_skips`), which is what
-            # an operator can act on.
+            # DEBUG, with the path carried in `result.unreadable`: one changed ACL would otherwise
+            # be one WARNING per file, and `sync._summarise_skips` reports the population in one
+            # line.
             logger.debug("could not stat %s; skipping", relative)
             self.result.unreadable.append(relative)
             return True
@@ -254,24 +189,16 @@ class _Walk:
     def _order(self, entry: os.DirEntry[str]) -> str:
         """The sort key that makes sibling order agree with joined-path order.
 
-        A directory is keyed as `name + "/"` because every path it yields begins that way, and the
-        cursor is compared against the *joined* path. Sorting on the bare name instead puts a
-        directory before a sibling file whose name extends it — `Report` before `Report.txt` — while
-        the paths sort the other way round, since `"."` (0x2E) is below `"/"` (0x2F):
-        `Docs/Report.txt` < `Docs/Report/a.txt`. The stream is then non-monotonic, and a resumed
-        pass skips `Report.txt` for good. Sibling roots do it too: `Data-Archive` loses to `Data`
-        on the bare name and wins on the joined path, so a resume drops the whole root.
+        A directory is keyed as `name + "/"` because the cursor is compared against joined paths,
+        and `"."` sorts below `"/"`: on the bare name `Report` precedes `Report.txt` while
+        `Docs/Report.txt` < `Docs/Report/a.txt`, so a resume would skip `Report.txt` for good.
         """
         try:
             is_dir = entry.is_dir(follow_symlinks=self.binding.follow_symlinks)
         except OSError:
-            # **An entry that cannot be stat'ed is sorted as a file, and that is a guess with a
-            # cost.** If it is really a directory it sorts under the wrong key, the stream stops
-            # being monotonic, and the resume cursor then skips whatever sorts between the two
-            # positions — permanently, since the next pass starts past it. Nothing else in this
-            # module can see that happen, so it is recorded here and summarised once per pass by
-            # `crawl_share`: a subtree whose permissions changed produces one line rather than one
-            # per entry, which is the rule `_summarise_skips` states one module over.
+            # An entry that cannot be stat'ed is sorted as a file. If it is really a directory the
+            # stream stops being monotonic and the resume cursor may skip entries permanently, so it
+            # is recorded and summarised once per pass by `crawl_share`.
             self.unstattable.append(entry.path)
             is_dir = False
         return entry.name + "/" if is_dir else entry.name
@@ -279,12 +206,11 @@ class _Walk:
     def descend(self, directory: Path, root: RootBinding) -> bool:
         """Walk one directory in sorted order; return False when the chunk filled up.
 
-        Sorted rather than in filesystem order because the walk's position *is* the resume cursor:
-        an unordered walk would have to remember every path it had already seen to make progress.
+        Sorted because the walk's position is the resume cursor.
 
         Raises:
             OSError: The directory could not be listed — the caller records the root as failed so
-                nothing is pruned from a share that may simply be half-mounted.
+            nothing is pruned from a share that may be half-mounted.
         """
         with os.scandir(directory) as entries:
             listing = sorted(entries, key=self._order)
@@ -299,14 +225,10 @@ class _Walk:
                 logger.warning("%s links outside the mount; skipping", relative)
                 continue
             if entry.is_dir(follow_symlinks=self.binding.follow_symlinks):
-                # **The prune, and the reason the exclusion check is asked twice.** The check above
-                # is the file form; a directory only matches a pattern like `**/Archive/**` when it
-                # is offered as `Archive/`. Without this the walk descended into every excluded
-                # folder and rejected it one file at a time — the exclusion was correct and the
-                # saving it exists for was not taken. Asked here rather than by giving the first
-                # check an `is_dir` argument, so `entry.is_dir` keeps raising `OSError` out of
-                # `descend` exactly as it did: that escape is what marks the root failed and stops
-                # the sweep, and swallowing it would let a half-readable share prune the index.
+                # Prune an excluded directory without listing it: a directory matches a pattern like
+                # `**/Archive/**` only when offered as `Archive/`. A separate check so
+                # `entry.is_dir` still raises `OSError` out of `descend`, which marks the root
+                # failed and stops the sweep.
                 if _is_excluded(relative, spec, directory=True):
                     continue
                 if not self.enter(Path(entry.path), relative):
@@ -345,26 +267,19 @@ def crawl_share(
         raise DocumentShareError(
             f"share mount {binding.mount!r} is not a directory — the volume is not mounted"
         )
-    # Sorted, not in declaration order: the resume cursor is a position in one lexical order over
-    # the whole share, and every path under a root begins with that root's own name. Walking roots
-    # out of order would make the concatenated stream non-monotonic, and `after` would then skip
-    # every file in a later-walked root that happens to sort earlier. Keyed with the separator
-    # appended, for the reason `_Walk._order` spells out — on the bare name, roots `Data` and
-    # `Data-Archive` sort the opposite way from the paths they yield.
+    # Sorted (keyed with a trailing separator, see `_Walk._order`), not in declaration order: the
+    # resume cursor is a position in one lexical order over the whole share, so roots must be walked
+    # in that order.
     for root in sorted(binding.roots, key=lambda item: item.path + "/"):
         directory = walk.mount if root.path == "." else walk.mount / root.path
         if not directory.is_dir():
             logger.error("root %r of share mount %s is missing", root.path, binding.mount)
             walk.result.failed_roots.append(root.path)
             continue
-        # The root itself is resolved, not just the entries under it. `descend`'s symlink guard
-        # runs per *entry*, so it never sees the root directory it was handed — and a root that is
-        # a link is followed by `is_dir()`, walked by `scandir`, and yields ordinary files whose
-        # `is_symlink()` is False, so nothing fires. `Projects -> /` would index the container
-        # filesystem, the knowledge repo included, under paths that still look mount-relative in
-        # the cursor and the citation. `follow_symlinks: false` does not help: it only skips
-        # symlink entries. A lexical `..` check in the binding cannot see this either — the escape
-        # is in the filesystem, not in the string.
+        # The root itself is resolved, since `descend`'s per-entry symlink guard never sees it: a
+        # root that is a link (`Projects -> /`) would otherwise index the container filesystem under
+        # mount-relative paths. Neither `follow_symlinks: false` nor a lexical `..` check catches
+        # this.
         if not _within_mount(walk.mount, directory):
             logger.error(
                 "root %r of share mount %s resolves outside the mount; refusing to walk it",
@@ -373,9 +288,8 @@ def crawl_share(
             )
             walk.result.failed_roots.append(root.path)
             continue
-        # The root itself is claimed too, for the same reason it is resolved above: `descend` never
-        # sees the directory it was handed, so two roots that reach one tree — declared distinct,
-        # linked together on the share — would otherwise each walk it in full.
+        # The root is claimed too, so two roots linked to one tree on the share are not each walked
+        # in full.
         if not walk.enter(directory, root.path):
             continue
         try:
@@ -392,9 +306,8 @@ def crawl_share(
 def _report_unstattable(paths: list[str]) -> None:
     """One line per pass for entries whose type the sort could not read; nothing when none were.
 
-    The count is what makes this actionable: one such entry is a file being written while the walk
-    passed it, and a thousand is a subtree whose permissions changed — and in the second case the
-    resume cursor may be stepping over files that will never be indexed.
+    The count distinguishes a file mid-write from a subtree whose permissions changed, where the
+    resume cursor may be skipping files.
     """
     if not paths:
         return

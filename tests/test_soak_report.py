@@ -1,10 +1,7 @@
 """The soak's verdict must refuse the number it cannot resolve.
 
-Every test here is about one failure mode: reporting a trend that the data does not support. The
-soak's previous attempt reported `api RSS 643,304 → 650,756 KB` and let the reader infer a leak
-from two endpoints — and the series it drew that from is used below, as the case that must come
-back *unresolved*. A test suite that only checked the arithmetic of a slope would have passed on
-that record too.
+Every test is about not reporting a trend the data does not support; a two-endpoint series is
+used as a case that must come back unresolved.
 """
 
 from __future__ import annotations
@@ -49,13 +46,9 @@ def test_three_points_are_refused_rather_than_fitted() -> None:
 
 
 def test_the_scratch_soaks_rss_series_resolves_a_slope_but_cannot_say_it_continues() -> None:
-    """What five rounds of the scratch soak do and do not support — measured, not assumed.
+    """Five rounds resolve a slope but cannot say whether it continues.
 
-    The plan called these five points "a lead, not a leak" on the grounds that five is few. That
-    was wrong, and the fit says so: the residuals are small enough that +1,825 KB/round clears four
-    times its own standard error. What n=5 cannot do is fit the *tail*, which is the only thing
-    that separates a warm-up from a leak — so the honest verdict names the slope and says the tail
-    is too short, rather than either crying leak or calling it flat.
+    The fit clears its standard error, but n=5 cannot fit the tail that separates warm-up from leak.
     """
     trend = fit(_SCRATCH_RSS)
     assert trend.resolved
@@ -72,13 +65,9 @@ def test_a_warm_up_curve_is_separated_from_a_leak() -> None:
 
 
 def test_a_real_leak_is_named_by_its_two_halves_rather_than_by_the_whole() -> None:
-    """Both halves resolved: the verdict compares them to each other, never the tail to the whole.
+    """A real leak is named by comparing its two halves, never the tail to the whole.
 
-    The whole *contains* the tail, so on a series that rises in steps the whole-run slope is dragged
-    down by an early flat stretch and a tail below it reads as deceleration when nothing
-    decelerated. This repository's own soak did exactly that: `whole +2,317 / tail +1,345` was
-    reported as "decelerating" at 104 rounds, and at 138 the two halves were +3,166 and +3,177 —
-    identical — with the last quarter steeper still.
+    The whole contains the tail, so an early flat stretch makes a steady tail read as deceleration.
     """
     leak = [100.0 + 20.0 * i for i in range(12)]
     said = describe(leak, "KB")

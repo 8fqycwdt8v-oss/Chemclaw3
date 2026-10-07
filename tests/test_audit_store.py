@@ -1,14 +1,7 @@
 """The durable Postgres audit sink persists a tool-audit row (INV-3).
 
-`PostgresAuditSink` is the "who ran what" record; it had no direct test. This proves an append-only
-round trip against a real database (CI provides one; the offline sandbox skips): a recorded
-`AuditEvent` lands in `audit_events` with every field intact, and concurrent appenders lose nothing.
-
-The concurrency test came from the deleted concurrency-chain suite, which drove twenty-four
-writers at the sink to prove the hash chain could not fork under a lost advisory lock.
-The chain is gone and so is the lock, but the other half of what that test measured is not about
-the chain at all: an insert that races another insert must still arrive. Rows are independent now,
-so there is no ordering to get wrong — only the arrival, which is what is asserted here.
+An append-only round trip against a real database (skipped offline): a recorded `AuditEvent`
+lands in `audit_events` with every field intact, and concurrent appenders lose nothing.
 """
 
 import asyncio
@@ -41,11 +34,8 @@ async def test_postgres_audit_sink_persists_an_event() -> None:
         detail="job qm-1 started",
         latency_ms=12.5,
         revision="orchestrator-abc123",
-        # The two provenance fields are read back together, because the mistake they guard
-        # against is one being written into the other's column: the `_INSERT` column list and
-        # the value tuple are positional, so a field appended to `AuditEvent` and forgotten in
-        # one of the two lands every later value one column to the left — silently, since both
-        # are `TEXT NOT NULL DEFAULT ''`.
+        # The two provenance fields are read back together: the `_INSERT` column list and value
+        # tuple are positional, so a field forgotten in one shifts every later value silently.
         tool_revision="calc@server-9f3c1d",
     )
     sink = PostgresAuditSink()
@@ -95,9 +85,7 @@ def _race_event(index: int) -> AuditEvent:
 async def test_concurrent_appends_all_arrive() -> None:
     """Twenty-four sinks append at once and every event is in the trail afterwards.
 
-    Counted by `correlation_id` rather than over the whole table, so this needs no `TRUNCATE` and
-    cannot be perturbed by another test's rows — which is also why it is safe to run beside the
-    round-trip test above against one shared schema.
+    Counted by `correlation_id`, so it needs no `TRUNCATE` and ignores other tests' rows.
     """
     await migrated_db_or_skip()
 
@@ -119,14 +107,9 @@ async def test_the_write_buffer_sheds_the_oldest_rather_than_growing_without_bou
 ) -> None:
     """A slow database must not be able to grow this buffer until the pod dies.
 
-    `_flush_all` already refuses to re-queue a failed batch, which bounds the buffer against a
-    database that is **down**. Nothing bounded it against one that is merely **slow** — `record`
-    appends and returns, so at the ~90 rows a turn this module measures, a drain taking seconds
-    loses the race on the producer side inside a 1 GiB pod.
-
-    Driven without a database on purpose: no flusher can make progress here, which is exactly the
-    shape being bounded. The assertions are that the buffer stops at the bound and that the events
-    it kept are the *newest* — an operator reading this trail is asking what just happened.
+    A failed batch is never re-queued (bounding a down database), and the buffer is capped (bounding
+    a slow one), shedding the oldest. Driven without a database so no flusher progresses; the kept
+    events must be the newest.
     """
     monkeypatch.setattr(settings, "agent_audit_buffer_max_events", 10)
 

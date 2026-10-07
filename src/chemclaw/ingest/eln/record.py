@@ -1,27 +1,13 @@
-"""Map a canonical ORD reaction to an ELN transcription record (D-2026-08-25).
+"""Map a canonical ORD reaction to an ELN transcription record.
 
-The pure mapping from an `OrdReaction` to the `ReactionRecord` the transcription tier stores. It
-records the reaction SMILES, headline conditions (scale first), the charge sheet behind that scale,
-the impurity profile, and the full **step-by-step procedure** in prose, so a detailed development
-recipe survives ingestion intact and a chemist who reaches this record from a structure search gets
-the recipe rather than an id.
+The pure mapping from an `OrdReaction` to the stored `ReactionRecord`: reaction SMILES, headline
+conditions (scale first), the charge sheet, the impurity profile and the full procedure, so a
+chemist reaching the record from a structure search gets the recipe.
 
-**Nothing here infers anything**, which is why the result is data rather than a knowledge claim
-(`chemclaw.ingest.eln.records`): every field is read from the entry or rendered from fields that
-were, so there is nothing here for anyone to decide. What a human *asserts* about these runs is a
-playbook or a campaign in `knowledge/`, written as knowledge and corrected rather than
-pre-approved, citing this record as `reaction-<id>`.
-
-That was true of this module and false of what it was handed, which is a distinction the argument
-does not survive: `eln-json` recovered `temperature_c` and `time_h` from procedure prose by taking
-the first regex match, and those landed in `conditions` as recorded fact. **The premise is a
-constraint on the whole path, not a property of this file**, and it is now enforced where it was
-broken — `D-2026-08-26-a-transcription-may-not-infer-a-setpoint`. Anything that would put a derived
-number into a field an entry did not state belongs on the other side of that line, in a note.
-
-The record carries no `[[wikilink]]`, and that is enforced by `_without_wikilinks` rather than
-merely asserted — the source's free text reaches this body verbatim, and a record that could spell
-a relation would let an ELN write an edge into the graph that cites it.
+Nothing here infers anything (D-2026-08-25-an-eln-transcription-is-data-not-a-claim): every field is
+read from the entry or rendered from fields that were, so the result is data, not a knowledge claim.
+That holds only if adapters also infer nothing (see `json_adapter._number`). The body carries no
+`[[wikilink]]`, enforced by `_without_wikilinks`, since the source's free text reaches it verbatim.
 """
 
 import re
@@ -40,42 +26,21 @@ from chemclaw.ingest.eln.ord import (
 from chemclaw.ingest.eln.records import ReactionRecord
 from chemclaw.kg.note import ProcessConditions
 
-# Each `[` that another `[` follows. A lookahead so the match consumes one character and the next
-# is re-examined, which is what makes the substitution unable to manufacture the delimiter it is
-# removing — see `_without_wikilinks`.
+# Each `[` that another `[` follows; a lookahead, so the substitution cannot manufacture the
+# delimiter it removes (see `_without_wikilinks`).
 _OPENING_BRACKET_PAIR = re.compile(r"\[(?=\[)")
 
 
 def _without_wikilinks(body: str) -> str:
     """Neutralize any `[[rel:id]]` span the source's own free text spelled.
 
-    This module's docstring promises the note "carries no `[[wikilink]]`", and that promise was
-    false: `kg.note` parses the rendered body for links, so a chemist typing
-    `[[contradicts:reaction-1234]]` into a hypothesis, a failure reason, a procedure step or an
-    unmapped attribute forged a real relation into the note. No review could have caught it — a
-    forged link is indistinguishable from an authored one, `contradicts` and `supersedes` are in
-    the allowed vocabulary, and `kg.validate` only objects when the target does not exist, so
-    naming a *real* note yields a well-formed note. Which it is. There is no review now
-    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), which makes this function the
-    control rather than a second line of one.
+    `kg.note` parses rendered bodies for links, so source text like `[[contradicts:reaction-1234]]`
+    would forge a real relation; with no review step, this function is the control. Applied once to
+    the assembled body so every field, present and future, is covered.
 
-    Applied once to the assembled body rather than at each of the five free-text sites, so the next
-    field added to this mapping cannot forget it — and so that the values which are not obviously
-    free text (`reaction_id`, an attribute *key*) are covered by the same line as the ones that are.
-    A cross-block spelling was considered and is not the reason: the blocks are joined by newlines
-    and label prefixes, so two `[` from adjacent fields never actually meet.
-
-    The substitution is visible and lossless rather than a strip. The record is prose a chemist
-    reads, so they must see what the source actually wrote — and deleting a chemist's characters to
-    make them safe is the same mistake as trusting them.
-
-    **A lookahead, not `str.replace("[[", "[ [")`, and that distinction is the whole control.**
-    `str.replace` scans left to right and never re-reads what it has just emitted, so it consumes
-    the *first* two brackets of `[[[` and appends the third untouched: `[[[x]]` becomes `[ [[x]]`,
-    which contains a brand-new valid delimiter and forges the edge anyway. Substituting each `[`
-    that is *followed* by a `[` cannot be outrun that way, because the decision is made per
-    character against the original text. Measured over 200,000 random bracket-dense bodies: the
-    replace form leaks 5, this form leaks 0.
+    The substitution is visible and lossless, so a reader sees what the source wrote. A
+    per-character lookahead rather than `str.replace("[[", "[ [")`, which turns `[[[x]]` into `[
+    [[x]]` and leaves a valid delimiter.
     """
     return _OPENING_BRACKET_PAIR.sub("[ ", body)
 
@@ -98,36 +63,23 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
         reaction_id=reaction.reaction_id,
         source=reaction.provenance,
         compound_smiles=_principal_product(reaction),
-        # The project is the one grouping key the entry already carries, and the whole of what a
-        # `tag=` filter narrows on here. Exactly the project and nothing else — a derived
-        # vocabulary (a scale band, an outcome word) would be a taxonomy this mapping invented,
-        # filterable against a scheme no chemist agreed to and no other note class uses.
+        # The project is the one grouping key the entry carries and what `tag=` filters on. Nothing
+        # derived (scale band, outcome word), which would be a taxonomy no chemist agreed to.
         project=reaction.project or None,
-        # The experiment's own date is what makes the record time-scopable (gap KNW-1): "what have
-        # I tried on this step in the last two weeks" is a `since`/`until` window over this column.
-        # A run is evidence from the day it was run, and it has no expiry — a result does not
-        # lapse on its own, it is superseded, which is a claim a human makes in a note.
+        # The experiment's own date makes the record time-scopable (`since`/`until`). A result has
+        # no expiry; it is superseded by a human claim in a note.
         performed_at=reaction.performed_at,
-        # The numbers a chemist compares, kept as numbers. The body renders them as prose for a
-        # human; this is the same facts in the form anything comparing runs can read without
-        # re-deriving them from the sentences it just wrote (`ProcessConditions` says why).
-        #
-        # `ProcessConditions` argues for frontmatter over "a second table", and that argument
-        # survives the move rather than being overridden by it: the reaction row already exists
-        # (D-2026-08-25), so these ride on it and there is still exactly one place a run's numbers
-        # live. What it rejected was a store *just* for conditions, which this is not.
+        # The numbers a chemist compares, kept as numbers on the existing reaction row
+        # (`ProcessConditions`), so comparisons need not re-parse the body's prose.
         conditions=_conditions(reaction),
-        # Each compared role's structures, so the turn-time comparison diffs the same sets the
-        # mined campaign note does (`memory.progression.changes_between`) instead of only what a
-        # model can read back out of `body`. A projection, not the charge sheet: `RoleSpecies`
-        # says why amounts and order stay in the body alone. None on a citation-only record: its
-        # named-only species have no structure to project, so a projection would drop them and
-        # the comparison would report them removed — "no projection" is skipped instead.
+        # Each compared role's structures, so turn-time comparison diffs the same sets as the
+        # campaign note (`memory.progression.changes_between`); amounts and order stay in the body
+        # (`RoleSpecies`). None on a citation-only record, whose named species would otherwise read
+        # as removed.
         species=reaction.role_species() if reaction.tier is RecordTier.STRUCTURED else None,
         tier=reaction.tier,
-        # Last, and it matters to one reader: pydantic truncates a long `input_value` repr in the
-        # middle, and an unstorable byte in the body is reported from its tail
-        # (`tests/test_ingest_rejections.py` pins that the refusal quotes it).
+        # Last: pydantic truncates a long `input_value` repr in the middle, and an unstorable byte
+        # in the body is reported from its tail.
         body=body,
     )
 
@@ -135,11 +87,8 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
 def _lead(reaction: OrdReaction) -> str:
     """The body's first line: the reaction SMILES, or why a citation-only record has none.
 
-    **The tier is stated in the body, not only in a column**, because the body is what every
-    reader gets — `expand_note`, a protocol comparison, a chemist reading the row — and a record
-    that silently omitted its reaction SMILES would read as a transcription that lost it. The
-    sentence says what the source did (named species without giving their structure) and what that
-    costs (no structure search), and nothing about what the missing structure might be.
+    Stated in the body because every reader gets the body; it says the source named species without
+    structures and that structure search does not apply, never what the structure might be.
     """
     if reaction.tier is RecordTier.STRUCTURED:
         return f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
@@ -157,20 +106,9 @@ def _stated_outcome(
 ) -> Literal["success", "failure", "inconclusive"] | None:
     """The frontmatter spelling of an outcome a source stated, or `None` when it stated none.
 
-    **A `match` rather than a dict lookup, so the exhaustiveness claim is one mypy actually makes.**
-    The frontmatter type is a `Literal` and this mapping is where a new `OutcomeClass` member has to
-    be given a spelling. Written as a `dict[OutcomeClass, Literal[...]]` that intent was a comment
-    and nothing more: mypy does not exhaustiveness-check a dict literal's keys, so a fourth member
-    would have type-checked clean and raised `KeyError` here at runtime — inside
-    `record_from_ord_reaction`, outside the `ElnMappingError` path that rejects one entry and
-    continues, so it would have aborted the whole sync rather than one row. `assert_never` moves
-    that back to where the comment always claimed it was.
-
-    **`SUCCESS` is spelled here now**, where it used to be omitted so a record would not assert a
-    success the ELN never claimed. That was necessary while the field defaulted to SUCCESS, and it
-    cost the distinction between a run the chemist recorded as successful and one nobody assessed.
-    With `outcome_class` optional (`D-2026-08-26-silence-is-not-a-successful-run`) silence is
-    carried by `None`, and a stated success can be written as what it is.
+    A `match` with `assert_never` so mypy enforces that every `OutcomeClass` member gets a spelling;
+    a dict would fail with `KeyError` at runtime and abort the whole sync. A stated success is
+    spelled; silence is `None`.
     """
     match outcome:
         case None:
@@ -188,14 +126,8 @@ def _stated_outcome(
 def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
     """The run's setpoints and outcomes as frontmatter, or `None` when it recorded none of them.
 
-    `None` rather than an all-empty block: a note carrying `conditions: {}` would claim the
-    question was asked and answered emptily, where the honest reading is that this note is not
-    about a run with recorded conditions at all. Same rule as `_quality_columns` dropping a column
-    nothing filled.
-
-    `outcome` is written when the source stated one and left `None` when it did not — the same
-    "absent means nobody wrote it down" rule as every other field here, now that `outcome_class`
-    can say that (`D-2026-08-26-silence-is-not-a-successful-run`).
+    `None` rather than an empty block, which would claim the question was asked and answered
+    emptily. `outcome` is `None` when the source stated none.
     """
     impurity = reaction.major_impurity()
     conditions = ProcessConditions(
@@ -207,31 +139,17 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
         major_impurity=(impurity.name or impurity.smiles) if impurity else None,
         impurity_area_percent=impurity.area_percent if impurity else None,
     )
-    # An explicit field check rather than a `model_dump(exclude_none=True)`: serializing the whole
-    # model to ask whether any of it is set is work for an answer the fields already give.
-    #
-    # **`is not None`, never truthiness.** Every field here is an optional number or an optional
-    # string, so a bare `any(...)` over the values asks whether any of them is *non-zero* — and
-    # `ProcessConditions` is explicit that "absent means 'not recorded', never 'zero'". A 0 °C ice
-    # bath, a 0% yield (a complete failure, the case `OutcomeClass` exists to preserve) and a 0 h
-    # hold each recorded a setpoint; under the old predicate all three stored a NULL column while
-    # the body below still rendered the bullet, so the prose and the number disagreed.
+    # `is not None`, never truthiness: a 0 °C bath, a 0% yield or a 0 h hold is a recorded value,
+    # and absent means "not recorded", never zero.
     return conditions if any(value is not None for value in dict(conditions).values()) else None
 
 
 def _principal_product(reaction: OrdReaction) -> str | None:
     """The molecule this record is *about*, when the entry names exactly one product.
 
-    The column every by-compound question starts from: "what else have we made this way", and the
-    join a playbook uses when it groups runs by what they produced. The structure is in the entry
-    either way — it goes into the body as part of the reaction SMILES — this is what puts it
-    somewhere a query can reach without parsing prose.
-
-    **Only when there is one outcome.** "The molecule this record is about" has no honest answer
-    for a reaction reporting a product and two by-products, and picking the first (or the largest
-    by amount, which an ELN often omits) would file the run under a compound the chemist did not
-    mean. A wrong `compound_smiles` is worse than none: it is what a by-compound search would
-    return, and it would look right.
+    The column by-compound questions and playbook grouping join on. Only with one product: picking
+    among several would file the run under a compound the chemist did not mean, and a wrong
+    `compound_smiles` is worse than none.
     """
     if reaction.product_count() != 1 or not reaction.outcomes:
         return None
@@ -239,11 +157,10 @@ def _principal_product(reaction: OrdReaction) -> str | None:
 
 
 def _hypothesis_block(reaction: OrdReaction) -> str:
-    """Lead with what the run was testing, when the source recorded it (D-162).
+    """Lead with what the run was testing, when the source recorded it.
 
-    First in the body rather than buried among the conditions, because it is what makes the run
-    legible: every condition below is an answer, and this is the question. Empty when unrecorded —
-    the note never says "no hypothesis", which would assert something the record does not.
+    First because it is the question the conditions answer. Empty when unrecorded; the body never
+    says "no hypothesis".
     """
     if not reaction.hypothesis:
         return ""
@@ -253,23 +170,10 @@ def _hypothesis_block(reaction: OrdReaction) -> str:
 def _measured(value: float) -> str:
     """Render a number this system *computed*, without the binary tail of its own arithmetic.
 
-    **The boundary is who produced the digits.** A yield or a purity is echoed verbatim below,
-    because those are read straight out of the entry and their digits are the chemist's own — there
-    is nothing there to clean, and `str(float)` is already the shortest form that round-trips what
-    the source said. A temperature, a duration and a mass are *converted* (K→°C, minutes→hours,
-    g→mg), so their last digits are an artefact this system introduced: the dry-ice bath every
-    chemist writes as −78 °C reached the note — and retrieval, and a human reader — as
-    `-77.99999999999997 °C`, from `195.15 - 273.15`, which is exact in decimal and not in binary.
-
-    **Twelve significant figures, not `:g`'s six.** Six is where the neighbouring amount lines
-    started, and it is a real loss rather than a tidier one: a kilo-scale charge rendered as
-    `1.23457e+06 mg`, throwing away digits a five-place balance actually measured, on the very
-    lines whose reason for existing is that the per-species amounts are legible rather than taken
-    on trust. Twelve is past any instrument in this domain and short of the ~16 digits where the
-    noise lives.
-
-    Nothing here touches what is *stored*: `conditions` keeps the full double, which is what every
-    comparison and every future `WHERE` clause reads. This is the body, and the body is prose.
+    Yield and purity are echoed verbatim (the source's own digits); converted values (K->°C,
+    minutes->hours, g->mg) carry float artefacts, so `195.15 - 273.15` renders as -78 rather than
+    -77.99999999999997. Twelve significant figures: enough for any balance at kilo scale, short of
+    float noise. Stored `conditions` keep the full double; this is only the body.
     """
     return f"{value:.12g}"
 
@@ -290,11 +194,9 @@ def _conditions_block(reaction: OrdReaction) -> str:
     if reaction.performed_at is not None:
         conditions.append(f"performed: {reaction.performed_at.isoformat()}")
     if reaction.outcome_class in (OutcomeClass.FAILURE, OutcomeClass.INCONCLUSIVE):
-        # Stated first-class in the body, not implied by a missing yield: a reader (and retrieval)
-        # must be able to tell "this did not work" from "nobody recorded the number" (gap KNW-3).
-        # A stated success is deliberately not written here — the body lists what a chemist would
-        # read as notable, and the frontmatter carries the value for anything comparing runs. An
-        # *unstated* outcome writes nothing at all, exactly like an unrecorded temperature.
+        # A failure or inconclusive outcome is stated in the body so "did not work" is distinct from
+        # "no number recorded". A stated success is not written here (the frontmatter carries it),
+        # and an unstated outcome writes nothing.
         outcome = f"outcome: {reaction.outcome_class.value}"
         if reaction.failure_reason:
             outcome += f" — {reaction.failure_reason}"
@@ -305,47 +207,23 @@ def _conditions_block(reaction: OrdReaction) -> str:
 def _scale(reaction: OrdReaction) -> str | None:
     """The run's scale, as one bullet at the *top* of the conditions.
 
-    Charged amounts were on the record and reached the note only if the chemist happened to write
-    them into the procedure prose, so nothing — not retrieval, not the agent, not a reader skimming
-    a hit — could tell a 5 g proof-of-concept from a 2 kg pilot batch without reading the whole
-    body. Scale is the context every other condition is read against: 100 °C for 4 h means one
-    thing on a bench run and another in a reactor.
+    Scale is the context every condition is read against. Reactants only: solvent tracks the vessel
+    and reagents (excess base) would inflate the figure.
 
-    **Reactants only**, because that is what a chemist means by "a 5 g run". Solvent mass is the
-    bulk of any flask and tracks the vessel, not the amount of material being made; folding it in
-    would report the same number for a dilute 5 g run and a concentrated 50 g one. Reagents are
-    excluded for the same reason in reverse — three equivalents of an inorganic base can outweigh
-    the substrate and would inflate the figure well past what anyone would call the scale.
+    Mass, then `amount_mmol`, then stated volume, each unit-labelled; chosen per reactant, so a
+    record mixing forms reports every form rather than under-reporting (which makes a pilot read as
+    a bench run). `None` when nothing is charged.
 
-    Mass preferred, `amount_mmol` next, a stated volume last, and every form unit-labelled so they
-    are never confused. `None` when the record charges none of them — the note stays silent rather
-    than asserting a scale it does not know.
-
-    **The two forms are chosen per record, not per reactant, and a record carrying both reports
-    both.** `Component` allows `mass_mg` and `amount_mmol` independently, so "an ELN records one or
-    the other" is true of most records and not of the schema. Preferring mass whenever *any*
-    reactant had one silently dropped every reactant that had only moles: a run charging 4.6 g of
-    one substrate and 120 mmol (≈7.2 g) of another reported "4.6 g", a 2.5x under-report of the one
-    number this bullet exists to make legible. Under-reporting scale is the specific direction that
-    matters — it makes a pilot batch read as a bench run.
-
-    **First in the block, and in the block rather than in a tag.** A retrieval excerpt is a blind
-    character prefix of the body (`retrieval.retrievers._excerpt`, `note_excerpt_chars`), so
-    anything appended at the end is invisible to exactly the notes with the most prose — the
-    detailed ones. A tag would be worse still: tags are matched by equality, so a usable scale
-    tag means inventing bands ("bench", "kilo") that no chemist agreed to and no other note class
-    uses; the per-input detail below is what a machine reads, this line is what a skim reads.
+    First in the block because retrieval excerpts are a character prefix of the body; not a tag,
+    which would need invented bands.
     """
     # A named-only reactant was charged too, and its amount counts toward the scale the same way.
     reactants = [c for c in (*reaction.inputs, *reaction.unstructured) if c.role is Role.REACTANT]
     masses = [c.mass_mg for c in reactants if c.mass_mg is not None]
     # Only those with no mass, so a reactant carrying both is counted once, on the preferred form.
     amounts = [c.amount_mmol for c in reactants if c.mass_mg is None and c.amount_mmol is not None]
-    # And only those the source stated neither of the other two for. A volume is not convertible to
-    # either without a density this record does not carry, so it is a *third* labelled term rather
-    # than a conversion: a 49.3 g charge made of 40 g plus 10 mL now reads "40 g + 10 mL of
-    # reactants charged", where it read "40 g" — the under-report this docstring argues is the
-    # direction that matters, arriving by the kind `ord_adapter._amount` could not read.
+    # Volumes only for reactants with neither mass nor moles: without a density a volume is a third
+    # labelled term ("40 g + 10 mL"), not a conversion.
     volumes = [
         c.volume_ml
         for c in reactants
@@ -363,36 +241,16 @@ def _scale(reaction: OrdReaction) -> str | None:
 def _charge_block(reaction: OrdReaction) -> str:
     """Render what was actually charged, per input — the detail behind the one-line scale.
 
-    The `scale:` bullet is one number for a skim; this is the charge sheet behind it, so a
-    **reader** can see which species carried the mass rather than taking a derived figure on trust.
-    Empty when no input carries an amount, so a record that never reported one gets no section
-    rather than a table of blanks.
-
-    **It is prose, and calling it machine-legible was a claim about a consumer that does not
-    exist.** This docstring used to say "(or a downstream consumer) … recompute stoichiometry", and
-    `grep` finds no parser of `## Charge` anywhere in this repository — while the numbers had
-    already been through `:g`, six significant figures, which no stoichiometry survives at kilo
-    scale. `_measured` fixes the second half; the first is fixed by not claiming it.
-
-    **A column was considered and declined.** `reaction_records` holds no per-species amount, so a
-    consumer that wanted these numbers would need one — and adding a column is a design decision
-    (what shape, whose unit, keyed how, migrated when) taken on behalf of a reader nobody has yet.
-    The transcription tier stores what a query is known to ask for; the day something asks for
-    amounts, the honest answer is a column and its migration, not a parser for this text.
-
-    Every input is listed once the section exists, including those with no recorded amount: that a
-    species was charged is itself information, and omitting its row would read as "not charged".
-
-    Empty for a citation-only record, whose `## Species` block lists every species with whatever
-    amount was recorded — a second list of the structured half here would read as the whole charge.
+    Prose for a reader, so the species carrying the mass is visible rather than taken on trust;
+    nothing parses it, and a per-species amount column would be a schema decision for a consumer
+    that does not exist yet. Empty when no input carries an amount or attribute. Once present, every
+    input is listed, since omission would read as "not charged". Empty for a citation-only record,
+    whose `## Species` block lists everything.
     """
     if reaction.tier is RecordTier.CITATION_ONLY:
         return ""
-    # **Or an attribute**, because the gate decided whether a per-species fact reaches the note at
-    # all and read only the three quantities: a record whose ELN charged by `unmeasured` (an ORD
-    # statement, carried as `amount_unmeasured`) or logged a lot number without a mass lost every
-    # one of those rows here, silently. The "table of blanks" this gate avoids is a record that
-    # carries *nothing* per species, which is still what it refuses.
+    # Attributes count too, so a species with only an `amount_unmeasured` or lot number still gets
+    # its row; only a record with nothing per species gets no section.
     if not any(
         c.mass_mg is not None
         or c.amount_mmol is not None
@@ -410,9 +268,8 @@ def _charge_line(component: Component) -> str:
     amounts = _amounts(component)
     detail = ", ".join(amounts) if amounts else "amount not recorded"
     line = f"`{component.smiles}` ({component.role.value}): {detail}"
-    # Whatever else the source recorded about this species, on the row it belongs to rather than in
-    # the reaction-level block: a lot number is a fact about *this* charge, and hoisting it would
-    # lose which species it described the moment a record charges two lots of the same reagent.
+    # Per-species attributes stay on their row: a lot number describes this charge, and two lots of
+    # one reagent must stay distinguishable.
     if component.attributes:
         line += " — " + _attribute_text(component.attributes)
     return line
@@ -421,10 +278,8 @@ def _charge_line(component: Component) -> str:
 def _species_block(reaction: OrdReaction) -> str:
     """Every species of a citation-only record, drawn or named — what its missing SMILES would say.
 
-    Empty for a structured record, whose reaction SMILES and charge sheet already say it. For a
-    citation-only one this is the only place its species appear at all, so it lists every one,
-    inputs before products: a structure as its SMILES, a named-only species as the source's name
-    followed by "structure not given by the source", which is the tier made visible per species.
+    Empty for a structured record. Inputs before products; a named-only species is followed by
+    "structure not given by the source".
     """
     if reaction.tier is RecordTier.STRUCTURED:
         return ""
@@ -460,9 +315,8 @@ def _amounts(component: Component | UnstructuredComponent) -> list[str]:
         amounts.append(f"{_measured(component.mass_mg)} mg")
     if component.amount_mmol is not None:
         amounts.append(f"{_measured(component.amount_mmol)} mmol")
-    # Volume is a recorded amount like the other two, and saying "amount not recorded" for a
-    # species the source charged by volume is the false half of the same defect: it tells a reader
-    # the ELN was silent where the ELN was not (`Component.volume_ml`).
+    # Volume is a recorded amount; "amount not recorded" would be false for a volumetric charge
+    # (`Component.volume_ml`).
     if component.volume_ml is not None:
         amounts.append(f"{_measured(component.volume_ml)} mL")
     return amounts
@@ -476,9 +330,7 @@ def _attribute_text(attributes: dict[str, str]) -> str:
 def _impurity_block(reaction: OrdReaction) -> str:
     """Render the impurity profile, the half of the outcome yield alone never captures.
 
-    Rendered into the note body (not only frontmatter) because retrieval reads bodies: an
-    impurity-driven question — "what did we see besides product on that route?" — has to be able
-    to match here.
+    In the body, not only frontmatter, because retrieval reads bodies.
     """
     if not reaction.impurities:
         return ""
@@ -500,30 +352,10 @@ def _impurity_line(impurity: Impurity) -> str:
 def _procedure_block(reaction: OrdReaction) -> str:
     """Render the recipe: the ordered steps, the prose the source recorded, or both.
 
-    **The prose branch exists because without it a whole class of source lost its protocol
-    silently.** This function used to return `""` whenever `steps` was empty, and
-    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from what a binding may map, on the
-    stated grounds that "a warehouse records a protocol as prose, which lands in
-    `procedure_text` verbatim". Both
-    statements were true and nothing rendered that prose: measured, a warehouse-shaped reaction
-    carrying 251 characters of procedure produced a 63-character note body containing none of it,
-    and `procedure_text` had three writers and exactly one reader in the tree — a 240-character
-    excerpt in `memory/optimization`. For the warehouse ELN — the first live connector —
-    `expand_note` answered with a reaction that had no recipe.
-
-    **Why both are sometimes rendered, decided by containment rather than by a threshold.** The two
-    file-drop adapters populate `steps` *and* `procedure_text`, and they do it differently.
-    `json_adapter` segments the prose, so its steps are that prose recut — measured, 0.992 string
-    similarity, and every step's text appears verbatim inside it. `ord_adapter` derives steps from
-    structured ORD fields while `procedure_text` is the chemist's own `notes.procedure_details` —
-    measured, 0.555 similarity, with the steps reading `Add CCO` where the prose reads "a catalytic
-    amount of sulfuric acid over 30 min". Rendering steps alone would have dropped that sentence,
-    which is the same defect one source over; rendering both always would duplicate the whole
-    recipe on every `json_adapter` note.
-
-    So the question asked is the exact one that matters — *are these steps a cut of this prose?* —
-    and it is answered by containment, which needs no tuned number and cannot drift: if every step's
-    text is inside the prose, the steps are the better presentation of it and stand alone.
+    Warehouse sources record the protocol only as `procedure_text`, so prose is rendered when there
+    are no steps. When both exist, they are compared by containment: `json_adapter` steps are cuts
+    of the prose and stand alone, while `ord_adapter` steps come from structured fields and may omit
+    what the chemist's prose says, so both are rendered. Containment needs no tuned threshold.
     """
     prose = " ".join((reaction.procedure_text or "").split())
     if not reaction.steps:
@@ -538,9 +370,7 @@ def _procedure_block(reaction: OrdReaction) -> str:
 def _steps_segment(reaction: OrdReaction, prose: str) -> bool:
     """Whether these steps are a segmentation of `prose` rather than an independent account.
 
-    True when every step's text appears verbatim in the whitespace-normalized prose — which is what
-    a segmenter produces and what a mapper reading structured fields cannot. `_procedure_block`
-    says why this is the question and why containment is how it is asked.
+    True when every step's text appears verbatim in the whitespace-normalized prose.
     """
     return all(" ".join(step.text.split()) in prose for step in reaction.steps)
 
@@ -558,14 +388,8 @@ def _step_line(step: ReactionStep) -> str:
 def _attribute_block(reaction: OrdReaction) -> str:
     """Render whatever the source recorded that this schema has no field for.
 
-    **Last in the body, deliberately.** A retrieval excerpt is a blind character prefix
-    (`retrieval.retrievers._excerpt`, `note_excerpt_chars`), so every block competes for the same
-    budget. These are the fields nobody has yet decided are worth a question — putting them ahead of
-    the procedure would push the actual recipe out of the excerpt to make room for a vessel id.
-
-    Rendered as a definition list rather than prose so the labels stay the source's own. This
-    section is the record saying "the ELN also carried these"; inventing readable names for them
-    here would assert a mapping nobody wrote.
+    Last in the body so unmodelled fields never push the recipe out of the character-prefix
+    retrieval excerpt. A definition list keeps the source's own labels rather than inventing names.
     """
     if not reaction.attributes:
         return ""

@@ -1,5 +1,7 @@
 # D-106 — Heavy review of the xTB layer: five defects the tests did not catch
 
+**Superseded-by:** [D-2026-08-01-a-key-names-what-ran](D-2026-08-01-a-key-names-what-ran.md) (in part)
+
 A full read of the branch's 12k lines against `main`. The green suite was not evidence:
 every defect below sits in a path the tests exercised from the wrong side, and three of
 them were **contradicted by their own docstring**, which turned out to be the most

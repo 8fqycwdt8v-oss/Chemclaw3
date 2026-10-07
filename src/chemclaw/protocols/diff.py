@@ -1,15 +1,9 @@
 """What changed between two revisions of a design.
 
-**This is the product, not a debugging aid.** The first shot at a protocol is almost always
-altered by the chemist who runs it, and that alteration is the single most informative thing this
-system can observe about its own suggestions — it is a labelled correction, made by the person with
-the most context, at the moment they had it. Storing revisions without being able to say what moved
-would keep the data and throw away the signal.
-
-Flattened to dotted paths rather than compared as a tree, because that is the form both consumers
-want: a UI puts a marker next to one field, and a later miner asks "how often does the chemist
-change `base.setpoints.temperature_c`, and in which direction". A structural tree diff answers
-neither without being flattened first.
+The product, not a debugging aid: a chemist's alteration of the first-shot protocol is a
+labelled correction, the most informative signal this system observes about its suggestions.
+Flattened to dotted paths because both consumers want that form: a UI marks one field, and a
+miner asks how often a given path changes and in which direction.
 """
 
 from __future__ import annotations
@@ -75,18 +69,10 @@ def _render(value: Any) -> str:
 def flatten(document: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     """A design document as `{dotted.path: scalar}`.
 
-    A list named in `_KEYED_LISTS` is keyed by its member's own identifier (`arms.A1.control`)
-    rather than by position, so reordering a plate is not read as rewriting it. Every other list is
-    keyed by index, which is right where position *is* the identity — `base.steps.0.text` is the
-    first instruction and stays the first instruction.
-
-    **`None` is an absent path, not a leaf holding `None`, and the difference inverted a word on
-    the product surface.** An optional sub-model stored as a scalar leaf meant `layout: None`
-    produced the path `layout`, while a populated one produced `layout.rows`, `layout.wells.A1.…`
-    and no `layout` at all — so the set difference reported *adding* a plate as `layout removed`
-    and removing one as `layout added`. It also filled a diff with rows carrying no information:
-    87% of the paths for a per-arm setpoint were `'' -> ''`, which a miner asking "how often does a
-    chemist change this field" counts as changes that never happened.
+    A list named in `_KEYED_LISTS` is keyed by its member's identifier (`arms.A1.control`), so
+    reordering a plate is not read as rewriting it; other lists are keyed by index, where position
+    is the identity. `None` is an absent path rather than a leaf, so adding an optional sub-model
+    reads as an addition and unset fields produce no rows.
     """
     flat: dict[str, Any] = {}
     for key, value in document.items():
@@ -109,25 +95,11 @@ def flatten(document: dict[str, Any], prefix: str = "") -> dict[str, Any]:
 def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]:
     """Each member with the key it is flattened under, disambiguating a repeated key.
 
-    **The disambiguation is the whole of this function, and it is a data-loss fix rather than a
-    tidy-up.** Keying by a member's own identifier is what makes a reordered plate diff as no
-    change, but nothing guarantees the identifier is unique: `base.charge` is keyed by `component`,
-    and a solvent charged in two portions — an addition and a rinse — is entirely ordinary.
-    Measured, the second line silently overwrote the first, so a chemist editing the *first* toluene
-    charge from 5 mL to 9 mL was recorded as the *second* moving 2 mL to 9 mL: not a lost row but a
-    misattributed edit, in the one table this system keeps precisely to learn from those edits.
-
-    **The ordinal counts within the key, not within the list, and that is the correction to the
-    first fix.** `<label>#<position>` replaced the overwrite with a different misattribution:
-    positions shift, so deleting an *unrelated* line renumbered both toluenes and the diff reported
-    "toluene volume 5.0 → 2.0", an edit nobody made — 33 paths for a one-line deletion. Counting
-    within the key makes the two lines `toluene#0` and `toluene#1` whatever else is added or
-    removed around them, so an unrelated edit is not attributed to them at all.
-
-    A key that is still not unique after that — a component literally named `toluene#1` beside two
-    called `toluene` — makes the whole list positional. That loses reorder-freeness for that one
-    list and is the only answer that cannot silently merge two members, which is the property worth
-    keeping.
+    Identifiers are not guaranteed unique (a solvent charged in two portions), and a repeated key
+    would overwrite or misattribute an edit. Repeats get `<label>#<n>` counted within the key, so
+    an unrelated insertion or deletion does not renumber them. If a key is still not unique after
+    that, the whole list falls back to positional keys, losing reorder-freeness but never merging
+    two members.
     """
     if identifier is None:
         return [(str(index), item) for index, item in enumerate(items)]
@@ -135,19 +107,8 @@ def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]
         str(item.get(identifier, index)) if isinstance(item, dict) else str(index)
         for index, item in enumerate(items)
     ]
-    # `Counter`, not `labels.count(label)` in a comprehension, which is O(n²) over a list whose
-    # length a browser chooses through `POST /protocols/{id}/revisions`. That scan measured **46 s
-    # of blocked event loop** for one authenticated request — but on a payload that predated the
-    # `max_length` ceilings and can no longer be posted, so **the ceilings are what closed that,
-    # not this line.** At the largest list those ceilings now admit (1536, a full plate) the scan
-    # costs 22.4 ms against this `Counter`'s 0.107 ms, and a design at every count ceiling diffs in
-    # **0.18 s** — the third figure this clause has carried and the first taken on a document with
-    # every count actually at its ceiling. The ~0.3 s it said before was a shape a third of that
-    # size; at the real ceilings the diff cost 1.67 s until `diff_designs` stopped ordering paths
-    # nobody asked for (see `models.py`'s note on the three-row sweep, and `diff_designs` itself).
-    # The right claim for `Counter` here is that it keeps a bounded cost flat
-    # rather than quadratic in the bound; the earlier comment credited it with the 46 s, which was
-    # false.
+    # `Counter` keeps the cost linear in a list whose length the browser chooses (bounded by the
+    # model's `max_length` ceilings).
     repeated = {label for label, n in Counter(labels).items() if n > 1}
     seen: Counter[str] = Counter()
     resolved: list[str] = []
@@ -170,24 +131,10 @@ _SECTION_ORDER: tuple[str, ...] = ("request", "base", "factors", "arms", "layout
 def _reading_order(path: str) -> tuple[int, list[tuple[int, int, str]], str]:
     r"""Sort key putting a path where a reader expects it.
 
-    Plain `sorted` is lexicographic, which `paths`'s docstring called "reading order" and is not:
-    it interleaves the sections alphabetically (`arms` before `base` before `request`) and orders
-    twelve arms `A1, A10, A11, A12, A2, …`, so a reviewer scanning a 96-arm diff meets arm 10
-    between arm 1 and arm 2. Sections take the document's order and each segment sorts its digit
-    runs numerically, which is what makes `A2` precede `A10`.
-
-    **Which run is a number is the regex's answer and not `str.isdigit`'s**, because the two
-    disagree and a path segment is chemist-supplied text. `'²'.isdigit()` is `True` and `int('²')`
-    raises, while `\D` matches `'²'` — so a factor named `²` reached `int()` through the
-    non-digit branch and raised `ValueError` out of `diff_designs`, which is a 500 on the diff
-    route from a name somebody typed. Reading the group the match came from cannot disagree with
-    the pattern that produced it: whatever `\d+` matched, `int` accepts.
-
-    **The raw path is the last term, because the key before it is not a total order.** `A1` and
-    `A01` produce identical keys (`int('01') == int('1')`, and the residual text is empty in both),
-    so two distinct paths compared equal and their order fell to `sorted`'s stability over a
-    **set**, whose iteration order varies with the interpreter's hash seed. The same diff of the
-    same two revisions listed its rows in a different order from one process to the next.
+    Sections take the document's order and digit runs sort numerically, so `A2` precedes `A10`.
+    Digit runs are read from the regex match, not `str.isdigit` (which accepts `'²'`, which
+    `int` rejects), since segments are chemist-supplied text. The raw path is the final term so the
+    key is a total order (`A1` vs `A01`) and the result is stable across hash seeds.
     """
     head, _, _ = path.partition(".")
     section = _SECTION_ORDER.index(head) if head in _SECTION_ORDER else len(_SECTION_ORDER)
@@ -214,30 +161,15 @@ def diff_designs(
     left = flatten(before.model_dump(mode="json"))
     right = flatten(after.model_dump(mode="json"))
     changes: list[FieldChange] = []
-    # **Ordered after the comparison, not before it, because the sort is the whole cost and almost
-    # none of it is on paths the caller will ever see.** `sorted(set(left) | set(right))` built a
-    # `_reading_order` key for every path in the *document* and then discarded all but the handful
-    # that moved: measured at every count ceiling (50 factors x 96 levels x 1536 arms x 500 charge
-    # lines, a legal 1.66 MB body inside `service_max_request_bytes`), a chemist's one-field edit
-    # cost **1.67 s** of `sorted` over 105,869 paths to report a diff of one. Both HTTP routes and
-    # `draft_experiment_protocol` call this inline on a loop `service_uvicorn_workers` refuses to
-    # run more than one of, so that was every other chemist's SSE stream and both kubelet probes
-    # stalled for the whole of it. Sorting only what differs is the same list — the key is a total
-    # order over distinct paths, and a subset of a totally ordered set keeps its relative order —
-    # and the same edit now costs **0.18 s** — 1.5x-1.7x what flattening the two documents costs on
-    # its own, which is the work no diff can avoid and what `tests/test_protocol_diff.py` bounds it
-    # against.
+    # Ordered after the comparison, not before: sorting every path in a ceiling-sized document
+    # dominates the cost, and a subset of a totally ordered set keeps its order.
+    # `tests/test_protocol_diff.py` bounds the diff against the cost of flattening.
     for path in set(left) | set(right):
         old, new = left.get(path), right.get(path)
         if path not in right:
-            # **An appearing or vanishing path whose value is empty is not a change.** `flatten`
-            # skips `None` for exactly this reason and empty-string leaves were never skipped, so
-            # the same rows survived on the same field family: replacing an arm's `setpoints: None`
-            # with an all-default `Setpoints()` changes nothing a chemist can see — `setpoints_for`
-            # returns the identical resolved conditions — and produced
-            # `added arms.A1.setpoints.solvent : '' -> ''`. A miner asking how often a chemist
-            # changes a field counts those as changes that never happened. A path whose value
-            # *changes* to empty is a real deletion and is kept, below.
+            # An appearing or vanishing path whose value is empty is not a change (an all-default
+            # sub-model replacing `None` changes nothing a chemist can see). A value changing *to*
+            # empty is a real deletion and is kept below.
             if _render(old):
                 changes.append(FieldChange(path=path, kind="removed", before=_render(old)))
         elif path not in left:

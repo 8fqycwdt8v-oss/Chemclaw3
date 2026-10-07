@@ -1,30 +1,11 @@
 """The organisation's skills over HTTP: open to read, closed to change.
 
-`agent/org_skills.py` holds the tier and says why it exists; this is the surface that makes it
-usable, and the split down the middle of this module is the whole design.
-
-**The three reads take any authenticated caller, and that is a requirement rather than laxity.**
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` §3 grants a skills tier its exemption from
-per-use review *on the condition* that the people it acts on can see what is acting on them — "a
-behaviour change nobody can inspect is the property that makes the shared tier need a gate". The
-personal tier owes that to one person. This one is in the prompt of every turn every chemist takes,
-so it owes it to all of them, and a version list nobody but an admin could read would make the
-rollback story something the organisation has to take on trust.
-
-**The three writes take the privileged role**, through `deps._is_reviewer` — the same role set that
-guards every write tool rather than a new one. That function's own docstring predicted this subject:
-*"The role is also what an admin will hold when a skill is proposed."* A refusal here is a 403 plus
-`record_refusal`, the shape `api/routes/protocols.py` uses, because the record and the response are
-different decisions and it was the record that used to go unwritten.
-
-**What is deliberately absent is a route that decides somebody else's proposal.** An admin promotes
-by posting a *document*, not by reaching into a queue: `api/routes/proposals.py` stays owner-scoped
-by construction, with no parameter naming whose queue to touch, and no admin ever writes into a
-person's namespace. `agent/org_skills.py` carries the argument and the cost.
-
-**Availability rides the memory store**, exactly as `api/routes/skills.py` does and for its reason:
-a second flag would be a second switch for one resource, and a 503 that says the tier is
-*unavailable* is the honest answer where an empty list would say the deployment simply has none.
+The tier itself is `agent/org_skills.py`. Reads take any authenticated caller: the tier acts on
+every chemist's turn, so everyone may inspect it and its versions. Writes take the privileged role
+(`deps._is_reviewer`); a refusal is a 403 plus `record_refusal`. No route decides somebody else's
+proposal: an admin promotes by posting a document, never by reaching into a person's queue.
+Availability follows the memory store, as in `api/routes/skills.py`: without one, 503 rather than
+an empty list.
 """
 
 from fastapi import FastAPI, HTTPException
@@ -104,12 +85,8 @@ class OrgSkillVersionsOut(BaseModel):
 def _reviewer_or_refuse(principal: CurrentUser, target: str, act: str) -> None:
     """Refuse unless this caller holds the privileged role, and record it either way it goes.
 
-    403 rather than this module's neighbours' 404: the tier's reads are open, so a skill name's
-    existence is not a secret and only the right to change it is withheld (`deps.ORG_SKILL`).
-
-    `record_refusal` rather than a bare `raise`, because the response and the server-side record are
-    different decisions and `api/routes/protocols.py` exists as the precedent for the case where
-    only one of them was being made.
+    403 rather than 404: the tier's reads are open, so a name's existence is no secret
+    (`deps.ORG_SKILL`).
     """
     if _is_reviewer(principal):
         return
@@ -125,9 +102,7 @@ def _reviewer_or_refuse(principal: CurrentUser, target: str, act: str) -> None:
 async def _store_or_refuse() -> object:
     """This deployment's store, or a 503 saying the tier is unavailable rather than empty.
 
-    `api/routes/skills.py`'s reason exactly: with no store a listing would answer `[]` and a publish
-    would appear to succeed and vanish, so the surface would read "this organisation keeps no
-    skills" when the truth is "this deployment cannot keep any".
+    Without a store a listing would answer `[]` and a publish would vanish.
     """
     return store_or_503(
         await turn_store(),
@@ -170,10 +145,8 @@ async def read_versions(name: str, principal: CurrentUser) -> OrgSkillVersionsOu
 async def publish_skill(body: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut:
     """Publish one skill to everyone, holding the body it replaces as a revert target.
 
-    Validated before the role is checked would leak whether a name is taken to a caller with no
-    role, so the gate comes first — `_reviewer_or_refuse` is the first statement, and the name it
-    records is the one the *frontmatter* will declare only after validation, so the target recorded
-    is `<publish>` until there is a document to name.
+    The role check comes first, so validation cannot leak whether a name is taken; the recorded
+    target is `<publish>` since there is no validated name yet.
     """
     _reviewer_or_refuse(principal, "<publish>", "publishing an organisation skill")
     store = await _store_or_refuse()
@@ -181,9 +154,7 @@ async def publish_skill(body: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut
         name = validated_skill(body.body)
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
-    # The row cap rides on the writer, not on this route: it has to be counted and spent under one
-    # lock, and a check here would be the second copy the personal tier's acceptance door already
-    # proved goes stale.
+    # The row cap is enforced by the writer, under the same lock that spends it.
     try:
         await save_org_skill(store, name, body.body, activated_by=principal.oid)
     except SkillRefused as refusal:
@@ -194,8 +165,7 @@ async def publish_skill(body: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut
 async def revert_skill(name: str, body: OrgSkillRevertIn, principal: CurrentUser) -> OrgSkillOut:
     """Make a body this tier already holds the active one again.
 
-    404 on a hash the version namespace does not hold, which is the property that makes this a
-    rollback rather than a write: the pointer can only point at history.
+    404 on a hash the tier does not hold: the pointer can only point at history.
     """
     _reviewer_or_refuse(principal, name, "reverting an organisation skill")
     store = await _store_or_refuse()
@@ -211,9 +181,7 @@ async def revert_skill(name: str, body: OrgSkillRevertIn, principal: CurrentUser
             f"this organisation holds no version of {name!r} with that content hash — read "
             f"GET /skills/org/{name}/versions for the bodies it can be reverted to",
         )
-    # Read back rather than echoed from the version record, so what the caller is told is what the
-    # tier now serves — the two can only differ if something raced this call, and that is precisely
-    # the case where echoing would be a confident lie.
+    # Read back, so the caller is told what the tier now serves even if something raced this call.
     active = await read_org_skill(store, name)
     return OrgSkillOut(name=name, body=active or "")
 
@@ -221,8 +189,7 @@ async def revert_skill(name: str, body: OrgSkillRevertIn, principal: CurrentUser
 async def forget_skill(name: str, principal: CurrentUser) -> OrgSkillsOut:
     """Stop one organisation skill acting, and answer with what is left.
 
-    The history survives, so this is reversible through the revert route: retiring a skill and
-    rolling one back are different acts and only one of them is this.
+    History survives, so the revert route can restore it.
     """
     _reviewer_or_refuse(principal, name, "retiring an organisation skill")
     store = await _store_or_refuse()
@@ -234,8 +201,7 @@ async def forget_skill(name: str, principal: CurrentUser) -> OrgSkillsOut:
 def register(app: FastAPI) -> None:
     """Attach this module's routes to `app` — called once, by `create_app` only.
 
-    Registered with the app's own decorators rather than an `APIRouter` + `include_router`, for the
-    reason every `register` in this package gives.
+    App decorators, not an `APIRouter`; see `chemclaw/api/routes/jobs.py`'s `register`.
     """
     app.get("/skills/org", response_model=OrgSkillsOut)(list_skills)
     app.post("/skills/org", response_model=OrgSkillOut)(publish_skill)

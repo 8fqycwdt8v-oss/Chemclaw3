@@ -1,10 +1,7 @@
 """What one step hands the next, on every path the agent can drive.
 
-`D-2026-08-21-a-geometry-is-an-address-not-a-payload`. The review behind it found that every
-agent-drivable path between two calculation steps routed its data through the model's token stream
-and required it to re-type the next call's arguments. These are the properties that stop that being
-true, one per path: the durable envelope, the deterministic template, the DFT launch, and the
-context reduction that used to leave a turn with no way back to a result it had lost.
+Each path passes an address rather than routing data through the model's token stream: the
+durable envelope, the deterministic template, and recovery after compaction clears a result.
 """
 
 from __future__ import annotations
@@ -63,11 +60,10 @@ def _ensemble() -> ConformerEnsemble:
 
 
 def test_the_job_envelope_carries_addresses_and_not_coordinates() -> None:
-    """The projection `CalcJobWorkflow` applies, exercised as the pure function it has to be.
+    """The job envelope carries addresses, not coordinates.
 
-    Asserted here rather than through a live workflow because the property is that it is *pure*:
-    the workflow applies it in workflow code, where a replay must produce byte-identical output
-    from an activity result already in history.
+    Tested as a pure function, since `CalcJobWorkflow` applies it in workflow code that must replay
+    byte-identically.
     """
     envelope = job_envelope(
         XtbJobResult(kind="ensemble", summary="conformers of CCO", ensemble=_ensemble())
@@ -87,11 +83,9 @@ def test_the_job_envelope_carries_addresses_and_not_coordinates() -> None:
 
 
 def test_the_envelope_carries_the_calculations_a_note_would_cite() -> None:
-    """`record_knowledge_note` has said "get them from a job's result envelope" since D-133.
+    """The envelope carries `calc_refs`, so a note drafted from a run can cite its calculations.
 
-    No envelope carried any, so a note drafted from a calculation the agent had just run could not
-    cite it. `calc_refs` rides on the envelope's own field rather than inside `data`, because it is
-    a cross-cutting fact about the run and not this bundle's domain result.
+    It rides on the envelope's own field, as a fact about the run rather than the bundle's result.
     """
     envelope = ConnectorJobResult(summary="done", calc_refs=["xtb.opt@v1:aaaa:bbbb"])
     assert envelope.calc_refs == ["xtb.opt@v1:aaaa:bbbb"]
@@ -102,13 +96,10 @@ def test_the_envelope_carries_the_calculations_a_note_would_cite() -> None:
 def test_a_real_job_run_collects_the_calculations_it_rested_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Driven through the activity, because the shape of the field proves nothing.
+    """A real job run collects the calculations it rested on.
 
-    Written after the first end-to-end run of the chain reported `calc_refs: []` on a job that had
-    plainly reached a cached calculation: the collector was wired, the field existed, the model
-    validated — and the one line that records a key had failed to land. A test asserting the
-    envelope's shape passed throughout. The property is that a *run* produces refs, so the test has
-    to be a run.
+    Driven through the activity, since a correct envelope shape says nothing about whether a run
+    records keys.
     """
     from temporalio import activity
 
@@ -146,11 +137,9 @@ def test_the_mid_turn_resume_hands_the_model_json() -> None:
 
 
 def test_a_template_can_chain_a_field_out_of_a_job_result() -> None:
-    """A dotted reference selects a field out of the result a step already produced.
+    """A template can chain a field out of a job result with a dotted reference.
 
-    Without it a `job` step's result could only be passed on whole — an envelope no next step's
-    schema accepts — so every template carrying a computed value had to launder it through an
-    `agent` step that re-typed it, putting a model inside the one mode that exists to exclude one.
+    Otherwise a computed value would have to pass through an `agent` step and the model.
     """
     envelope = ConnectorJobResult(
         summary="conformers of CCO",
@@ -179,12 +168,7 @@ def test_a_field_a_step_result_does_not_have_is_refused() -> None:
 
 
 def test_a_dotted_reference_is_validated_against_the_step_that_produced_it() -> None:
-    """A dotted reference still has to name an earlier step.
-
-    Validation checks the *step*, which is what a manifest can know; whether the field exists is a
-    run-time fact about what a tool returned, and a check that pretended otherwise would be
-    guessing.
-    """
+    """A dotted reference must name an earlier step; whether the field exists is a run-time fact."""
     Template.model_validate(
         {
             "name": "chained",
@@ -245,9 +229,7 @@ def test_a_half_specified_complex_pair_is_refused() -> None:
 def _reduced_request(cleared: str, args: dict[str, Any]) -> Any:
     """A request whose reduction cleared exactly one tool's result, as the middleware leaves it.
 
-    Real messages carrying upstream's own `context_editing.cleared` stamp, because that is what
-    `_cleared_calls` reads. A stub with an empty message list would say a reduction happened and
-    name nothing it cleared, which is the one thing that cannot occur in production.
+    Real messages with upstream's `context_editing.cleared` stamp, which `_cleared_calls` reads.
     """
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -273,12 +255,10 @@ def _reduced_request(cleared: str, args: dict[str, Any]) -> Any:
 
 
 def test_a_compacted_turn_may_read_a_cleared_result_again() -> None:
-    """The dead end both modules documented and neither closed.
+    """A compacted turn may read a cleared result again.
 
-    The guard refuses a third identical call because the model "already has" the first answer.
-    Compaction is what makes that false: it replaces older tool results with a placeholder, and
-    `compaction.py` removed a "re-run the tool if you still need it" line from that placeholder
-    *because* the guard would then deny it. After a reduction an identical call is a re-read.
+    Compaction replaces old results with a placeholder, so an identical call after a reduction is a
+    re-read, not a repeat.
     """
     token = begin_call_watch()
     try:
@@ -294,12 +274,10 @@ def test_a_compacted_turn_may_read_a_cleared_result_again() -> None:
 
 
 def test_a_reduction_forgives_only_the_calls_whose_results_it_cleared() -> None:
-    """Clearing keeps the newest results, so the model still holds some of its answers.
+    """A reduction forgives only the calls whose results it cleared.
 
-    A blanket reset forgave those too, once per reduction — which made the guard's strength a
-    function of `agent_tool_result_clear_trigger`, a token threshold with no bearing on whether a
-    repeat is useful. Asserted at the handoff rather than only in `test_repeat_guard.py`, because
-    the defect lived in the seam between the two modules and not in either one.
+    Clearing keeps the newest results. Asserted at the handoff, since the seam between the repeat
+    guard and compaction is what is under test.
     """
     token = begin_call_watch()
     try:
@@ -340,14 +318,7 @@ def test_the_resume_message_stays_framed_as_data() -> None:
 
 
 def test_the_shipped_refinement_template_carries_an_address_between_its_steps() -> None:
-    """The chain end to end, on the deterministic path, with no model in the middle.
-
-    This is the template that could not be written before D-2026-08-21: the only thing a `job`
-    step could hand on was its whole envelope, which satisfies no next step's schema, and no
-    calculation accepted a geometry anyway — so the sequence had to be laundered through an
-    `agent` step. Driving the resolver over a real search envelope is what makes the file a
-    worked example rather than a hopeful one.
-    """
+    """The shipped refinement template passes an address between steps, with no model."""
     from pathlib import Path
 
     import yaml

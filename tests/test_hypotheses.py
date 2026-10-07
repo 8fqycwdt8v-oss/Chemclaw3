@@ -1,8 +1,7 @@
 """The pure layer behind the hypothesis tournament: rating, screening, pairing and rendering.
 
-Every number asserted here was measured against the implementation and then pinned, rather than
-copied out of the design — the standard-error behaviour in particular went through two wrong
-designs before this one, and both of them passed a test written from the intent.
+Numbers asserted here were measured against the implementation and then pinned, rather than
+copied from the design.
 """
 
 import math
@@ -91,16 +90,11 @@ def test_a_draw_leaves_two_hypotheses_level() -> None:
 
 
 def test_the_two_reported_errors_are_coherent_with_each_other() -> None:
-    """Both reported errors describe the same fit, and in a two-hypothesis field that is checkable.
+    """The two reported errors are coherent with each other.
 
     With two candidates, `r_i − mean(r)` is exactly half of `r_i − r_j`, so the within-field error
-    must be exactly half the pairwise one. This pins the pair together: an implementation that went
-    back to reporting a *marginal* error — the first one did — breaks this immediately, because a
-    marginal is dominated by the unknowable overall level of the field and carries no such relation.
-
-    The magnitude matters as much as the ratio. Twenty drawn comparisons know the gap to well under
-    a hundred points; the marginals for this same fit are ±285 each, and combining those in
-    quadrature gave ±403, which is what made a clean five-nil sweep read as undecided.
+    must be half the pairwise one. A marginal error, dominated by the field's unknowable overall
+    level, breaks that relation and makes a clean sweep read as undecided.
     """
     table = rate(["a", "b"], [Judgement("a", "b", outcome=0.5) for _ in range(20)])
     separation = table.difference("a", "b")
@@ -176,11 +170,10 @@ def test_duplicates_merge_and_the_first_survives() -> None:
 
 
 def test_two_claims_sharing_one_test_are_not_merged() -> None:
-    """The sharpest case, and the one a prose-similarity screen gets wrong.
+    """Two claims sharing one test are not merged.
 
-    Two different explanations discriminated by the same experiment are two hypotheses — that is
-    the interesting shape, and collapsing it would delete a real alternative silently, which is the
-    failure `D-162` names when it refuses to mint findings out of phrasing.
+    Different explanations discriminated by the same experiment are two hypotheses; merging them
+    would delete a real alternative silently.
     """
     shared = "the impurity persists when the base is changed to DIPEA"
     result = screen(
@@ -398,12 +391,10 @@ def test_a_field_note_states_what_the_rating_is_not() -> None:
 
 
 def test_model_text_in_a_field_note_cannot_mint_a_citation_or_a_section() -> None:
-    """`field_body` embeds `summarise`, so every model span there is a cell too.
+    """Model text in a field note cannot mint a citation or a section.
 
-    Before, the summary interpolated statement, refuted-if, mechanism, objections and the check
-    raw, so a `[[id]]` in any of them became a real edge on the committed `hypothesis-field` note
-    and a newline could forge a `##` section. The only links the note may carry are the proposals
-    this run wrote.
+    `field_body` embeds `summarise`, so every model span is escaped: a `[[id]]` would become an edge
+    and a newline could forge a `##` section. The only links are the proposals this run wrote.
     """
     hostile = RankedHypothesis(
         hypothesis=Hypothesis(
@@ -533,23 +524,12 @@ def _null_judge_spread(field: int, runs: int, *, permute: bool, seed: int = 4) -
 
 
 def test_a_fixed_bracket_favours_whoever_enters_first_and_a_permuted_one_does_not() -> None:
-    """Where the fairness of the ranking actually comes from, measured in both directions.
+    """A fixed bracket favours whoever enters first, and a permuted one does not.
 
-    A Swiss bracket seeded the same way every time advantages the positions it seeds first, and
-    because the fit is opponent-strength aware that turns *identical records* into different
-    ratings. Under a coin-flip judge — no hypothesis better than any other, so every point of
-    spread is an artefact — a fixed entry order produces well over a hundred Elo of monotone
-    spread. That is wider than the standard errors printed beside the ratings.
-
-    This used to be keyed on the **id**, so the bracket favoured lexically-early hypotheses and,
-    since production ids are hashes of the statement, rephrasing one moved it up the chemist's
-    table. The fix is not to make `pair_round` clever: a pairing that consulted a random source
-    could not replay, and Swiss must seed *somehow*. It is to make the seeding the caller's
-    choice — `durable/hypothesis_tournament.py` permutes the field by a hash of the question, so
-    the order is fixed for a given tournament and fair across them.
-
-    Both halves are asserted, because a test that only pinned the good case would pass just as
-    happily if someone made the tiebreak alphabetical again.
+    Swiss pairing must seed somehow, and with an opponent-aware fit a fixed entry order turns
+    identical records into over a hundred Elo of spread under a coin-flip judge. `pair_round` stays
+    deterministic; the caller (`durable/hypothesis_tournament.py`) permutes the field by a hash of
+    the question, fixed within a tournament and fair across them. Both directions are asserted.
     """
     fixed = _null_judge_spread(10, 400, permute=False)
     permuted = _null_judge_spread(10, 400, permute=True)
@@ -570,23 +550,19 @@ def test_input_order_is_what_breaks_a_score_tie() -> None:
 
 
 def test_pricing_a_run_includes_the_double_judged_round() -> None:
-    """The number exists to be right before the money is spent, and it under-priced every run.
+    """Pricing a run includes the double-judged first round.
 
-    Omitting the double-judged first round reported 20 comparisons for a field of ten that actually
-    makes 25 model calls — a quarter of the bill, on the one figure a deployment reads to decide
-    whether it can afford the feature.
+    The figure is read before the money is spent, so it must count every model call.
     """
     assert comparisons_for(10) == 20
     assert comparisons_for(10, double_judge_first_round=True) == 25
 
 
 def test_two_opposite_claims_are_not_merged_as_duplicates() -> None:
-    """The screen's most dangerous failure, and it needed word order to see it.
+    """Two opposite claims are not merged as duplicates.
 
-    "The aldehyde reacts faster than the ketone" and "the ketone reacts faster than the aldehyde"
-    are the same words in a different order, so a bag-of-words comparison scores them 1.0 on both
-    fields and the merge rule deleted one. Two mutually exclusive explanations of one observation
-    are the single most valuable thing a tournament can hold.
+    "A reacts faster than B" and "B reacts faster than A" share every word, so the screen needs word
+    order; mutually exclusive explanations are the most valuable thing a tournament holds.
     """
     result = screen(
         [
@@ -607,11 +583,10 @@ def test_two_opposite_claims_are_not_merged_as_duplicates() -> None:
 
 
 def test_a_short_concrete_refutation_survives_the_screen() -> None:
-    """Rejection is the only destructive rule here, so it must not select against concreteness.
+    """A short concrete refutation survives the screen.
 
-    A character floor rejected exactly the best conditions — `"yield > 90%"` normalises to eight
-    characters — while vaguer, longer text passed. Counting words catches the placeholders without
-    that inversion.
+    A character floor would reject `"yield > 90%"` while passing vaguer text; counting words catches
+    placeholders without that inversion.
     """
     for condition in ("yield > 90%", "pH drops", "no exotherm", "Rf unchanged"):
         kept = screen([Hypothesis(id="h", statement="a claim", refuted_if=condition)]).kept
@@ -622,11 +597,9 @@ def test_a_short_concrete_refutation_survives_the_screen() -> None:
 
 
 def test_a_double_judged_pair_counts_once_toward_the_evidence_shown() -> None:
-    """The displayed count must agree with the weight the fit used.
+    """A double-judged pair counts once toward the evidence shown.
 
-    A pair judged in both presentation orders enters as two half-weight judgements. Counting rows
-    told a chemist "over 2 comparisons" for evidence the fit weighted as one, beside an interval
-    computed from the weight.
+    It enters the fit as two half-weight judgements, and the displayed count must match that weight.
     """
     table = rate(
         ["a", "b"],

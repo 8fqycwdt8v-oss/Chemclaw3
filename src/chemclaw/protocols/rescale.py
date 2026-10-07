@@ -1,23 +1,13 @@
 """Scaling a protocol's charges to a new basis, and naming everything that did not scale.
 
-**The arithmetic is the easy half and is not why this module exists.** Multiplying every charge by
-a factor is four lines; what a chemist taking a 1 g procedure to 2 kg actually needs is the list of
-quantities that are *not* multiplied by that factor, because those are where the batch goes wrong
-and they are invisible in the scaled protocol. An addition made over ten minutes on the bench is
-not made over ten minutes in a 250 L reactor; a filtration that took twenty minutes takes a shift;
-cooling that was instant is now a time constant. Each of those changes the time-temperature history
-the material sees, which is the thing the original procedure was actually evidence about.
+The arithmetic is trivial; the deliverable is the list of quantities that are *not* multiplied by
+the factor (addition times, filtrations, cooling), because they change the time-temperature
+history and are invisible in a scaled protocol. `rescale` returns the scaled charges and a
+`Caveat` per refused quantity together.
 
-So `rescale` returns both halves and the caller cannot take one without the other: the scaled
-charges, and a `Caveat` per quantity this module refuses to scale. The refusals are the deliverable.
-
-**What this module does not do.** It computes no new setpoint, proposes no dose rate and sizes no
-equipment — `connectors/unitops` and `connectors/thermalsafety` do that from measurements, and
-inventing a dose time here would be exactly the fabricated-input failure
-`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate` refuses one layer over. It also writes
-nothing: it returns a revised `ExperimentDesign`, and storing it is `draft_experiment_protocol`'s
-job under the ordinary `parent_revision` check, so a rescale is a revision a human can diff and
-reject like any other.
+It computes no new setpoint, dose rate or equipment size (that is `connectors/unitops` and
+`connectors/thermalsafety`, from measurements), and it writes nothing: the revised design is
+stored through `draft_experiment_protocol` like any other revision.
 """
 
 from dataclasses import dataclass
@@ -26,12 +16,8 @@ from chemclaw.core.units import Measurement, UnitError, has_ambiguous_comma, par
 from chemclaw.protocols.models import ChargeLine, ExperimentDesign, ProtocolStep, RequestField
 
 #: Step kinds whose *duration* does not follow the charge, with the reason each one does not.
-#:
-#: Keyed by kind rather than by a per-protocol judgement because the reason is a property of the
-#: operation: a filtration is limited by cake resistance and filter area, a drying by heat and
-#: mass transfer through a deeper bed, an addition by the jacket's ability to remove the heat it
-#: releases. None of those is linear in the charge, and two of them are the reason a scaled batch
-#: has a different impurity profile than the procedure it was scaled from.
+#: Keyed by kind because the limit is a property of the operation (cake resistance, heat and mass
+#: transfer, jacket heat removal), none of which is linear in the charge.
 _DURATION_DOES_NOT_SCALE: dict[str, str] = {
     "addition": (
         "an addition time is set by heat removal and by how much unreacted reagent may accumulate, "
@@ -64,8 +50,7 @@ _DURATION_DOES_NOT_SCALE: dict[str, str] = {
 class Caveat:
     """One quantity the rescale refused to touch, and why.
 
-    `where` names it the way the protocol does (`step 4`, `setpoints.time_h`) so a reader can find
-    it, rather than describing it.
+    `where` names it as the protocol does (`step 4`, `setpoints.time_h`) so a reader can find it.
     """
 
     where: str
@@ -86,18 +71,15 @@ class Rescaled:
 class RescaleError(ValueError):
     """The rescale cannot be computed, naming which half is missing.
 
-    A `ValueError` for the reason `ConnectorError` is: these are all "this input is not usable"
-    failures that one `except ValueError` at an entry point catches.
+    A `ValueError`, so one `except ValueError` at an entry point catches every unusable input.
     """
 
 
 def _limiting_line(design: ExperimentDesign) -> ChargeLine:
     """The charge line the factor is computed against.
 
-    The limiting reagent and not the total mass, because that is what a chemist means by "we ran it
-    at 1 g" and what `stoichiometry_table` already scales against. `charge_is_consistent` and
-    `limiting_is_limiting` are what keep the marked line honest; this module trusts them rather
-    than re-deriving the answer, which is the DRY rule and also keeps one definition of limiting.
+    The limiting reagent, not the total mass: that is what "we ran it at 1 g" means. The checks keep
+    the marked line honest; this trusts them.
     """
     limiting = [line for line in design.base.charge if line.limiting]
     if len(limiting) != 1:
@@ -131,11 +113,8 @@ def _stated_bases(line: ChargeLine) -> list[Measurement]:
 def _factor(design: ExperimentDesign, target: str) -> tuple[float, str]:
     """How much bigger the new basis is, and the basis as it will be recorded.
 
-    The basis is whichever of the limiting line's stated amounts the target converts to, so a line
-    carrying both a mass and an amount scales by either. Refuses only a target in a dimension the
-    line states none of, rather than assuming a density or a molar mass. Assuming either is how a
-    scaled protocol acquires a number nobody measured, and the caller can restate the target in a
-    dimension the protocol already uses.
+    The basis is whichever of the limiting line's stated amounts the target converts to. A target in
+    a dimension the line does not state is refused rather than assuming a density or molar mass.
     """
     wanted = parse_quantity(target)
     if wanted is None and has_ambiguous_comma(target):
@@ -165,9 +144,8 @@ def _factor(design: ExperimentDesign, target: str) -> tuple[float, str]:
     )
 
 
-#: The dimensions `checks._plausibility_bands` can size a band from. A scale in any other dimension
-#: (an amount, with no molar mass to spend it against) silently falls back to the bench ceilings,
-#: so a rescale must never record one while a readable alternative exists.
+#: The dimensions `checks._plausibility_bands` can size a band from; any other falls back to bench
+#: ceilings, so a rescale never records one while a readable alternative exists.
 _BAND_DIMENSIONS = frozenset({"mass", "volume"})
 
 #: The units a derived scale is written in, largest first, so it reads "6 kg" and not "6e+06 mg".
@@ -185,13 +163,11 @@ def _readable(quantity: Measurement) -> str:
 
 
 def _recorded_scale(design: ExperimentDesign, target: str, factor: float) -> str:
-    """The request scale a rescaled design declares — always one the plausibility band can read.
+    """The request scale a rescaled design declares: always one the plausibility band can read.
 
-    The target text when it is a mass or a volume. Otherwise (a molar target) the chemist's own
-    declared scale moved by the factor, which keeps their unit; then the limiting line's scaled
-    mass or volume; and the target text only when none of those is readable. Recording "6000 mmol"
-    as the scale of a kilo batch would size the band at bench ceilings and warn a unit slip on
-    every charge the rescale itself produced.
+    The target when it is a mass or volume; otherwise the chemist's declared scale moved by the
+    factor (keeping their unit); then the limiting line's scaled mass or volume; the target text
+    only as a last resort.
     """
     wanted = parse_quantity(target)
     if wanted is not None and wanted.unit.dimension in _BAND_DIMENSIONS:
@@ -209,9 +185,7 @@ def _recorded_scale(design: ExperimentDesign, target: str, factor: float) -> str
 def _scaled_line(line: ChargeLine, factor: float) -> ChargeLine:
     """One charge line at the new basis.
 
-    Equivalents are **not** scaled and that is the whole point of the field: a ratio is what
-    survives a change of scale, and multiplying it would silently change the chemistry rather than
-    the batch size.
+    Equivalents are not scaled: a ratio is what survives a change of scale.
     """
     return line.model_copy(
         update={
@@ -240,13 +214,12 @@ def rescale(design: ExperimentDesign, *, target: str) -> Rescaled:
 
     Args:
         design: the protocol to scale. Its limiting charge line is the basis.
-        target: the new basis as a quantity a person would write — "2 kg", "500 mL".
+        target: the new basis as a quantity a person would write: "2 kg", "500 mL".
 
     Returns:
         The revised design, the factor, the basis as recorded, and one `Caveat` per quantity this
-        refuses to scale. **The caveats are not advisory decoration**: a caller that reports the
-        charges without them has produced the document that makes a scaled batch fail, which is the
-        failure this module was written for.
+        refuses to scale. The caveats are part of the answer: reporting charges without them is the
+        failure this module exists to prevent.
 
     Raises:
         RescaleError: no single limiting line, a limiting line with no amount, a target that is not
@@ -280,11 +253,8 @@ def rescale(design: ExperimentDesign, *, target: str) -> Rescaled:
                 ),
             )
         )
-    # The request's scale moves with the charges: `checks._plausibility_bands` sizes the mass and
-    # volume ceilings off it, so a kilo-scale revision still declaring the bench scale is judged
-    # as a unit slip — and so the recorded scale must be one it can read (`_recorded_scale`).
-    # `inferred`, not `stated` — the chemist's text never said this value, and
-    # `require_quotes_are_verbatim` would be asked to find it there.
+    # The request's scale moves with the charges so the plausibility bands judge the new batch, not
+    # the bench. `inferred`, not `stated`: the chemist's text never said this value.
     scaled = design.model_copy(
         update={
             "request": design.request.model_copy(

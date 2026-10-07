@@ -1,23 +1,11 @@
 """Artefacts over HTTP — the pane beside the chat reads, edits, pins and exports them here.
 
-**A chemist's edit is a REST write, not a tool call composed by a click**, the line
-`api/routes/protocols.py` draws for a design: everything the *agent* does reaches it as a chat turn,
-and a person authoring a revision is recorded as a person (`author_kind="human"`) without the agent
-being involved. The agent learns of the edit on its next turn (`agent/exhibit_notes`).
-
-**Session-scoped through `resolve_session`** — the owner or a member the owner let in; anybody else
-gets the same 404 an unknown session id gets, so these routes are no oracle for which ids exist.
-Members may revise as well as read (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`
-decision 5), and each revision records who wrote it.
-
-**A stale edit is a 409 bound to a revision**, `{"code": "stale_revision", "head_revision": N}`:
-the client names the revision it edited, and a write derived from anything but the head is refused
-rather than allowed to discard the revision it did not see.
-
-**Audited the way a person's decision is audited here**: the revision row names its author, kind,
-time and correlation id, and every write also emits one structured `exhibit.*` log event. No route
-writes an `AuditEvent` — that trail is the tool-call middleware's, shaped around a tool, an outcome
-and a latency (`api/routes/workflows.py` states the convention).
+A person's edit is a REST write recorded with `author_kind="human"`; the agent learns of it on its
+next turn (`agent/exhibit_notes`). Session-scoped through `resolve_session`: the owner or a member,
+anybody else the same 404 as an unknown id. Members may revise, and each revision records its
+author. A write based on anything but the head revision is a 409 `{"code": "stale_revision",
+"head_revision": N}`. Each write records author, kind, time and correlation id on the revision row
+and emits one `exhibit.*` log event; no route writes an `AuditEvent`.
 """
 
 from __future__ import annotations
@@ -113,12 +101,8 @@ class ExhibitIndexOut(BaseModel):
 async def list_exhibits(session_id: str, live: CurrentSession) -> ExhibitListOut:
     """The session's artefacts, most recently updated first, and whether the feature is on.
 
-    `enabled` is `agent_exhibits_enabled`: off, the agent holds no artefact tools and a surface
-    shows the pane read-only, offering no new artefact. What a session already holds is still
-    listed, because switching the agent's
-    tools off is not a reason to hide what a chemist pinned. `html_enabled` is
-    `agent_html_artefacts_enabled`, under the same rule: off refuses a new html artefact and still
-    lists the ones the session holds.
+    `enabled` (`agent_exhibits_enabled`) and `html_enabled` (`agent_html_artefacts_enabled`) control
+    whether new artefacts may be created; existing ones are always listed.
     """
     return ExhibitListOut(
         enabled=settings.agent_exhibits_enabled,
@@ -132,9 +116,7 @@ async def create_exhibit_route(
 ) -> ExhibitView:
     """Create an artefact as a person — revision 1, `author_kind` human.
 
-    A `result` artefact pins a stored tool result: its `result_ref` must be one this session can
-    fetch, so a person cannot pin bytes another conversation produced — the rule a binding is held
-    to as well (`exhibits.bindings`).
+    A `result` artefact's `result_ref` must be one this session can fetch, as for a binding.
     """
     spec = await _parsed(session_id, body.spec, title=body.title, change_note="", creating=True)
     if spec.kind != body.kind:
@@ -192,8 +174,8 @@ async def get_exhibit_diff(
 ) -> ExhibitDiff:
     """What changed between two revisions; `to=0` is the head, `from=0` its parent.
 
-    Between the *stored* specs, bindings and all (`exhibits.diff`): the store's views are not
-    resolved, so a binding whose result has since been swept reads as unchanged here.
+    Compares the stored specs, bindings unresolved, so a binding whose result was swept reads as
+    unchanged.
     """
     store = default_exhibit_store()
     after = await store.view(session_id, exhibit_id, to_revision)
@@ -276,11 +258,9 @@ async def export_exhibit(
 ) -> Response:
     """The artefact as a file; a format its kind does not offer is a 404, not a wrong file.
 
-    So is a geometry whose cited calculation artifact has been evicted since it was written: the
-    artefact still reads, and the file it pointed at is not there to give. A bound value is
-    exported as what it resolves to; one whose result is gone is an empty cell. An html page is
-    exported as `text/plain` (`exhibits.export.MEDIA_TYPES`): this server never answers
-    `text/html` for an artefact.
+    Also 404 for a geometry whose cited calculation artifact was evicted. Bound values export as
+    what they resolve to (empty when the result is gone). An html page exports as `text/plain`: this
+    server never answers `text/html` for an artefact.
     """
     view = await default_exhibit_store().view(session_id, exhibit_id, revision)
     if view is None:
@@ -303,8 +283,7 @@ async def list_my_exhibits(
 ) -> ExhibitIndexOut:
     """Artefacts across every session the caller owns or is a member of, newest first.
 
-    Empty under the in-memory session store, for `GET /sessions`' reason: there is no durable
-    registry of who owns or joined a session to enumerate.
+    Empty under the in-memory session store, which has no durable ownership registry.
     """
     bounded = min(limit, settings.exhibit_max_listing)
     return ExhibitIndexOut(
@@ -323,11 +302,9 @@ async def _parsed(
 ) -> Spec:
     """The spec to store, write-checked with its bindings resolved, or the 422 naming the fault.
 
-    A person's spec may keep any binding whose result this session holds — one copied from
-    `raw_spec` — or replace it with a literal; a ref outside the session's results is refused, so
-    nobody can bind bytes the conversation never produced (`exhibits.bindings`). A binding carried
-    unchanged from `parent`, the revision being revised, is kept even when retention has swept its
-    result, so an expired cell does not block every other edit.
+    A binding must resolve to a result this session holds, or be replaced by a literal. A binding
+    carried unchanged from `parent` is kept even if retention swept its result, so it does not block
+    other edits.
     """
     try:
         spec = parse_spec(raw)
@@ -362,11 +339,9 @@ async def _require_session_result(session_id: str, spec: Spec) -> None:
 async def _announce(view: ExhibitView, op: Literal["created", "revised"]) -> None:
     """Log the person's write, and push it to the session's other open tabs — best effort.
 
-    The push goes through the same mailbox a finished job does (`session_events`), claimed by
-    `GET /sessions/{id}/events`. Best effort in both senses: the claim is at-most-once across
-    every tab of the session, and a surface refetches the list on focus anyway, so a lost push costs
-    a refresh. A mailbox that cannot be written is counted and does not fail the write that already
-    committed. The in-memory session store has no mailbox, so nothing is pushed there.
+    Uses the `session_events` mailbox claimed by `GET /sessions/{id}/events`: at most once across
+    tabs, and surfaces refetch on focus anyway. A failed mailbox write is counted and does not fail
+    the committed write. No mailbox under the in-memory store.
     """
     record_write(view, op)
     if settings.session_store != "postgres":
@@ -401,9 +376,8 @@ def _missing(exhibit_id: str, revision: int) -> str:
 def register(app: FastAPI) -> None:
     """Attach this module's routes to `app` — called once, by `create_app` only.
 
-    With the app's own decorators rather than an `APIRouter`, for the reason
-    `chemclaw/api/routes/sessions.py`'s `register` gives. `GET /exhibits` has no `{session_id}`
-    segment and authorizes by listing only the caller's own sessions.
+    App decorators, not an `APIRouter`; see `chemclaw/api/routes/jobs.py`'s `register`.
+    `GET /exhibits` authorizes by listing only the caller's own sessions.
     """
     app.get("/exhibits")(list_my_exhibits)
     app.get("/sessions/{session_id}/exhibits")(list_exhibits)

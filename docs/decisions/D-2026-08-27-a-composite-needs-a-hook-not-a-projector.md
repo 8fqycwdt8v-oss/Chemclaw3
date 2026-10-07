@@ -2,6 +2,8 @@
 
 ## Status
 
+**Superseded-by:** [D-2026-08-29-a-composite-s-identity-is-its-result-not-its-request](D-2026-08-29-a-composite-s-identity-is-its-result-not-its-request.md) (in part)
+
 Accepted. Extends `D-2026-08-25-a-cache-is-not-a-record` (the seam) and
 `D-2026-08-26-a-route-is-not-a-shape` (what routes a composite). Both stand.
 

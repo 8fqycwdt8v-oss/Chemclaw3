@@ -1,33 +1,15 @@
-"""The revision history of every design — append-only, because an edit is the evidence.
+"""The revision history of every design: append-only, because an edit is the evidence.
 
-Three tables and one rule. The header row is a mutable projection — its status, head revision and
-counts move with the head, and the grant gives UPDATE on it alone. **The two beneath it are
-append-only:** a change is a new row naming the row it came from, and a sign-off is a new row
-naming the revision it was made on. That is what makes an expert's alteration of the first shot
-observable at all, and it is what makes a concurrent edit a refusal instead of a silent overwrite —
-`parent_revision` is compared against the head, so two people editing one protocol produce a
-`RevisionConflict` rather than one of them losing their work without being told.
+The header row is a mutable projection (status, head revision, counts) and is the only table
+granted UPDATE. Revisions and status events are append-only: a change is a new row naming its
+parent, so an expert's alteration is observable, and `parent_revision` is compared against the
+head so a concurrent edit is a `RevisionConflict`, never a silent overwrite.
+`experiment_protocol_status_events` records which revision each deliberate status move was made
+against, since the header's status describes only the head.
 
-The third table is `experiment_protocol_status_events`, and it exists because the header's `status`
-describes the **head**: `advanced()` retires an `approved` or `executed` status the moment a new
-revision lands, correctly, and that leaves nowhere on the header row to say *which document* a
-chemist signed off on. Only a deliberate move is recorded — an automatic demotion has no actor and
-no reason, and the revision that caused it is already in the history.
-
-Shaped as `ingest.eln.records` is, and for the same reason: a Protocol with an in-memory and a
-Postgres implementation, so the drafting path is testable with no database while the store that
-actually serves the front door is exercised against a real one.
-
-**A design is data, not a knowledge claim, so it is a row rather than a note.** `knowledge/`
-answers "what do we know"; a draft is a proposal to act and nothing about it is true yet. That is
-`D-2026-08-25-an-eln-transcription-is-data-not-a-claim` arriving from the opposite side — the
-transcription is a row because there is nothing to decide, and a draft is a row because the
-decision it carries is *running it*, which happens in a laboratory. A chemist who wants a rule out
-of an approved design still writes a `playbook` or an `experiment-proposal` note citing it, on the
-one write path every agent note takes (`kg/record.py`). This paragraph used to end "through the
-gate that has always been there", which
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified; the row/note line it was drawn
-beside is unchanged.
+A Protocol with in-memory and Postgres implementations that must answer identically. A design is
+data, not a knowledge claim, so it is a row rather than a note; a rule drawn from an approved
+design is written as a note citing it through `kg/record.py`.
 """
 
 from __future__ import annotations
@@ -101,28 +83,15 @@ VALUES
      %(change_note)s, %(document)s, %(checks)s, now())
 """
 
-# **`FOR UPDATE`, and it is the difference between holding a chemist's decision and losing it.**
-# `append` reads the status here, recomputes it through `advanced()` and writes it back through
-# `_UPSERT_DESIGN`. `core/db.py` is READ COMMITTED, so without the row lock a `set_status` that
-# commits between the two is overwritten by this transaction's stale value. Measured before the
-# lock: a chemist abandoning a design while an agent appended a revision lost the abandonment
-# **20 times out of 20**, leaving a header reading `draft` — against `advanced()`'s own promise
-# that `abandoned` is held because "a design somebody decided not to run does not come back
-# because an agent wrote to it".
-#
-# The lock is taken on the design's own header row, which every writer of that design already
-# contends for, so it serialises exactly the writers that must not interleave and nothing else.
+# `FOR UPDATE`: `append` reads the status, recomputes it via `advanced()` and writes it back, and
+# under READ COMMITTED a concurrent `set_status` would otherwise be overwritten with a stale value.
+# The lock is on the design's own header row, so it serialises exactly the writers that must not
+# interleave.
 _SELECT_HEAD = (
     "SELECT head_revision, status FROM experiment_protocols WHERE design_id = %s FOR UPDATE"
 )
 
-# **The window this used to claim was closed by a `RETURNING` clause is closed by `_SELECT_HEAD`'s
-# `FOR UPDATE`.** The comment here read "`RETURNING head_revision` rather than a second SELECT …
-# reading it separately leaves a window in which an append moves the head between the two
-# statements", and `RETURNING` appeared nowhere in this file: `set_status` does exactly the separate
-# read the comment said it avoided. The guarantee is real and the mechanism named was not, which is
-# the worse of the two failures — a reader auditing the sign-off path went looking for something
-# that was not there.
+# The head moving between the read and this update is prevented by `_SELECT_HEAD`'s `FOR UPDATE`.
 _SET_STATUS = """
 UPDATE experiment_protocols SET status = %(status)s, updated_at = now()
 WHERE design_id = %(design_id)s
@@ -155,9 +124,8 @@ FROM experiment_protocols
 """
 
 
-#: The most summaries one `listing` call will serve, whatever a caller asks for. Both backends
-#: clamped to this already; what is new is that they *report* it, because a caller asking for
-#: 10,000 and getting 500 could not tell that from a site with 500 designs.
+#: The most summaries one `listing` call serves; both backends report the clamp so a caller can
+#: tell it from a site with exactly that many designs.
 _MAX_LISTING = 500
 
 
@@ -218,21 +186,11 @@ class RevisionConflict(ChemclawError):
 
 
 class StatusConflict(ChemclawError):
-    """A lifecycle move from a status the design no longer holds — somebody else moved it first.
+    """A lifecycle move from a status the design no longer holds: somebody else moved it first.
 
-    **A sibling of `RevisionConflict`, not a subclass of it, because the two name different
-    losses.** `expected_revision` is a compare-and-set on the *document*: it refuses a sign-off
-    attributed to a revision nobody read. It says nothing about the *status*, so two people looking
-    at revision 1 could approve and abandon it and both were told 204 — measured 100 of 100 over
-    `asyncio.gather`, and it needs no race at all to happen sequentially. What that costs is
-    `advanced()`'s stated guarantee that an `abandoned` design is held until a *person* moves it:
-    a second person's `set_status` un-abandoned it silently and a design retired because the
-    starting material decomposes was back in the `draft` listing.
-
-    Separate types because the caller's *message* differs even though the remedy does not: one says
-    the document moved under you, the other says the decision did. `api/routes/protocols.py` maps
-    them onto two `code`s in one 409 for exactly that, and a subclass would have made which code a
-    caller gets depend on the order of two `except` clauses.
+    A sibling of `RevisionConflict`, not a subclass: that one says the document moved under you,
+    this one says the decision did. The routes map them to two codes in one 409, and a subclass
+    would make the code depend on `except` order.
     """
 
 
@@ -241,25 +199,14 @@ class UnknownDesign(ChemclawError):
 
 
 class UnstorableDocument(ChemclawError):
-    """A write this store will not take, that the caller can fix — the 422 of this module.
+    """A write this store will not take, that the caller can fix: the 422 of this module.
 
-    Two families, and the docstring named only the first for as long as the second existed:
+    Two families:
 
-    **Bytes no text column can hold** — a NUL, or a C0 control character, or an unpaired UTF-16
-    surrogate. Postgres `text` and `jsonb` reject `\u0000` outright, and psycopg raises it as an
-    untyped `DataError`/`UntranslatableCharacter` from inside the driver. Measured before this
-    existed: a NUL anywhere in a browser-supplied design — the notes field, the title, the change
-    note — was a **500** with a correlation id and nothing a caller could act on, while the
-    in-memory backend accepted it, so the two backends disagreed about whether the write was
-    possible. Refused rather than sanitised, because a chemist did not type a NUL: silently
-    stripping it would store a document that is not the one that was sent. `ingest.eln.sync` strips
-    control characters on the *ingest* path for the opposite reason — there the bytes come from
-    somebody else's database and there is no author to refuse.
-
-    **A status the design cannot support** — `require_movable`, which refuses `approved` or
-    `executed` on a design holding only the structured ask. Same exception because it is the same
-    answer to the caller: the request as sent cannot be stored, the reason is in the message, and
-    the fix is theirs. Both reach the routes as a 422.
+    - **Bytes no text column can hold**: a NUL, a C0 control character, or an unpaired UTF-16
+      surrogate. Refused rather than stripped (the author did not type them, and stripping would
+      store a different document), and checked in-process so both backends agree.
+    - **A status the design cannot support**: see `require_movable`.
     """
 
 
@@ -319,19 +266,9 @@ class DesignStore(Protocol):
     ) -> None:
         """Move a design's lifecycle status, recording who moved it, why, and from which revision.
 
-        **Two compare-and-sets, because a design has two things somebody else can move.**
-
-        `expected_revision` is the revision the person was *looking at*, and a move against anything
-        else is refused. Required and keyword-only for the reason `RevisionIn.parent_revision` is
-        both: a sign-off that did not say what it signed off on is exactly the one that ends up
-        attributed to a document nobody read, and defaulting it to the head "for convenience" would
-        remove the control rather than provide one.
-
-        `expected_status` is the status they saw beside it, and it is required and keyword-only for
-        the same reason **one step further**: an optional field a caller may omit is a control that
-        exists only in this docstring. The revision compare-and-set is on the *document* and says
-        nothing about the decision, so two people at revision 1 could approve and abandon it and
-        both were told 204 — which is what `StatusConflict` now refuses.
+        Two compare-and-sets, because a design has two things somebody else can move:
+        `expected_revision` (the document they were looking at) and `expected_status` (the decision
+        they saw). Both are required keyword-only: a defaulted control is no control.
 
         Raises:
             UnknownDesign: nothing in the store answers to `design_id`.
@@ -407,14 +344,9 @@ class InMemoryDesignStore:
                 "correlation_id": correlation_id,
             },
         )
-        # `session_id`, `correlation_id` and `opened_by` are set once, by the write that created
-        # the design, and are deliberately absent from this update — which is what `_UPSERT_DESIGN`
-        # does on the Postgres side by omitting them from its `DO UPDATE SET`. They disagreed
-        # before: this store overwrote `session_id` on every append while Postgres kept the
-        # creator's, so `listing(session_id=…)` returned different designs on the two backends.
-        # That is not a difference a store is allowed to have — this one is "a real backend, not a
-        # test double", so an answer that depends on which is configured is a wrong answer on one
-        # of them.
+        # `session_id`, `correlation_id` and `opened_by` belong to the creating write and are not
+        # updated, matching `_UPSERT_DESIGN`'s `DO UPDATE SET`, so `listing(session_id=...)` agrees
+        # across backends.
         meta.update(
             {
                 "title": design.request.title,
@@ -469,10 +401,7 @@ class InMemoryDesignStore:
         limit: int = 50,
     ) -> DesignIndex:
         """One page of designs, newest first, with how many matched the same filters."""
-        # Clamped exactly as Postgres clamps it. `[:limit]` and `max(1, min(limit, 500))` disagree
-        # on `limit=0` (memory returns nothing, Postgres one row) and on a negative (memory returns
-        # all but the last, Postgres one row) — a divergence in a `Protocol` method whose two
-        # implementations are documented as interchangeable.
+        # Clamped exactly as Postgres clamps it, including `limit <= 0`.
         bounded = max(1, min(limit, _MAX_LISTING))
         summaries = [
             DesignSummary(
@@ -573,32 +502,10 @@ class PostgresDesignStore:
     ) -> DesignRevision:
         """Store the next revision, refusing when `parent_revision` is not the head.
 
-        **Two writers *can* both read the same head, and the primary key is what actually decides
-        between them.** The first version of this docstring claimed the transaction prevented it;
-        `core.db`'s connections are READ COMMITTED, so both readers see `head=1` and both build
-        revision 2 — measured against a real database, with no artificial barrier. What stopped the
-        second was `(design_id, revision)`, and it surfaced as a raw
-        `psycopg.errors.UniqueViolation` that nothing translated: the second chemist in "two
-        chemists editing one plate is the ordinary case" got a **500 with no `revision_conflict`
-        code**, which is precisely the case the 409 was built for.
-
-        So the violation is caught and re-raised as the same `RevisionConflict` a stale
-        `parent_revision` raises. The two are the same fact reaching the writer by different routes
-        — the revision you built on is not the head any more — and a caller that had to tell them
-        apart would be a caller with two ways to do one thing.
-
-        **That is history, and the paragraph above is kept because it explains the handler rather
-        than because it still describes the race.** `_SELECT_HEAD` took `FOR UPDATE` afterwards, for
-        a different defect (a `set_status` losing to a concurrent append), and the lock serialises
-        these two writers as a side effect: the loser now waits, reads the moved head, and is
-        refused by the `parent_revision` comparison before it ever reaches the INSERT. Measured over
-        5x100 concurrent pairs, the primary key decided **none** of them, and replacing this handler
-        with a raised `AssertionError` leaves the whole suite green — no test reaches it.
-
-        It stays anyway, as a backstop rather than a control anybody relies on: it is one `except`
-        clause on a live statement, it costs nothing, and it is what keeps a future writer that
-        skips the lock from serving a 500 where a 409 belongs. What is *not* claimed is that
-        anything proves it works.
+        `_SELECT_HEAD`'s `FOR UPDATE` serialises concurrent appends, so the loser reads the moved
+        head and is refused by the `parent_revision` comparison. The `(design_id, revision)`
+        primary-key violation is still translated to the same `RevisionConflict` as a backstop, so a
+        future writer that skips the lock yields a 409, not a 500; no test currently reaches it.
         """
         require_storable(
             design,
@@ -614,12 +521,8 @@ class PostgresDesignStore:
                 await cur.execute(_SELECT_HEAD, (design_id,))
                 row = await cur.fetchone()
                 head = int(row[0]) if row else 0
-                # `advanced()` on the create too, which is what the in-memory backend has always
-                # done. The two disagreed on a design's *first* revision — memory applied the
-                # transition, Postgres did not — and they agreed by accident only because the one
-                # creator in `src/` passes `kind="request", status="requested"`, for which the
-                # transition is the identity. A second creator would have made the header's status
-                # depend on which backend a deployment configured.
+                # `advanced()` on the create too, as the in-memory backend does, so a design's first
+                # status does not depend on the backend.
                 current_status: DesignStatus = advanced(row[1] if row else status, kind)
                 _require_head(design_id, head, parent_revision)
                 revision = DesignRevision(
@@ -696,23 +599,10 @@ class PostgresDesignStore:
         return _summary(row) if row else None
 
     async def history(self, design_id: str) -> list[DesignRevision]:
-        """Every revision, oldest first — documents included, as the Protocol says.
+        """Every revision, oldest first, documents included, as the Protocol says.
 
-        **A `document`-free variant was tried here and reverted, and the reason is worth keeping.**
-        The route renders seven scalars and `len(blockers)` and never touches `item.design`, so
-        selecting the document looked like pure waste: it measured 4x on a 24-arm plate and 39x on
-        a 384-arm one, and the property worth having is better than either ratio — the header-only
-        read is *flat* in document size, O(revisions) rather than O(bytes).
-
-        It was reverted because of what it did to the value it returned. Filling `design` with a
-        placeholder made this method answer differently on the two backends — the one thing
-        `InMemoryDesignStore`'s docstring forbids — and the placeholder is an ordinary
-        `ExperimentDesign` that nothing refuses, so a caller that read it and appended it wrote
-        `title="(not read)"` into the header row `GET /protocols` renders. Measured, both.
-
-        The optimisation is sound and belongs behind its own name, returning a type with no
-        `design` field at all, so a caller that wants a document cannot silently get a fiction.
-        That is a `docs/planning/BACKLOG.md` row rather than a second method with one caller.
+        A header-only variant must return a type with no `design` field rather than a placeholder
+        document, which callers could mistake for real and append.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -734,9 +624,7 @@ class PostgresDesignStore:
     ) -> DesignIndex:
         """One page of designs, newest first, with how many matched the same filters.
 
-        The count runs in the same transaction as the page for the reason `DesignPage` gives about
-        its four halves: two connections would let a concurrent `append` make "20 of 60" describe
-        two different tables.
+        The count runs in the same transaction as the page so "20 of 60" describes one table state.
         """
         clauses: list[str] = []
         bounded = max(1, min(limit, _MAX_LISTING))
@@ -780,46 +668,12 @@ class PostgresDesignStore:
     ) -> None:
         """Move a design's lifecycle status, recording the move against the revision it names.
 
-        The event row is the whole reason this is several statements in one transaction.
-        `advanced()` demotes an approved or executed design back to `draft` when a revision lands on
-        it, so the header cannot say which document a person signed off on — and until this table
-        existed nothing could, while `advanced()`'s own docstring said `set_status` recorded it.
-
-        **The head is read under `FOR UPDATE` and compared, which is what makes the recorded
-        revision the one the approver saw.** Without it this stamped whatever `head_revision` had
-        become by the time the UPDATE ran, so a chemist who opened revision 1, thought about it and
-        clicked Approve after a colleague saved revision 2 signed a document they had never read —
-        and the status-event table, whose whole purpose is to say *which* document was signed, said
-        revision 2 with their name beside it.
-
-        **And this one needs no race at all**, which is why it is worth more than the concurrency
-        bugs beside it: the sign-off is wrong on plain latency, from reading a design, thinking
-        about it, and clicking. Measured that way it is **100 of 100** across five runs of twenty,
-        and 0 of 100 with the comparison — where the same scenario driven as a true `gather` race
-        reproduced 0 of 100, because the two statements serialise on the pool. A defect that needs
-        no interleaving is not a rare one.
-
-        It is the identical control `append(parent_revision=…)` already is one statement below, and
-        the `FOR UPDATE` is doing a second job besides: it serialises a status move against a
-        concurrent `append`, which is the interleaving the deterministic case does not need.
-
-        **`_SELECT_HEAD` reads the status under that same lock, and for a long time discarded it.**
-        `head_row[1]` was never touched: the compare-and-set was on the document alone, so an
-        `approved` and an `abandoned` move from revision 1 both committed and one of the two people
-        was never told. Sequentially that needs no race at all, which is how
-        `test_two_people_at_one_revision_cannot_both_decide` drives it; as a race it is
-        `test_two_deciders_racing_from_one_status_take_exactly_one_write`, which picks two moves
-        the transition table permits in *both* directions so this comparison is the only thing that
-        can refuse either of them. Every round takes exactly one write and answers the other with
-        `StatusConflict`, and with the comparison neutered every round takes both.
-
-        **No split is quoted, because there is not one to quote.** Which of the two lands is the
-        lock queue's answer rather than a property of this code: driving approve against abandon on
-        this database, the surviving header came back 44/56, 51/49 and 47/53 over three runs of a
-        hundred, and a second reviewer measured 43/57 and 58/42. The 16/84 this docstring used to
-        publish was a property of one afternoon, which is why the test asserts a count and never a
-        ratio. The status the comparison reads is the one the lock already holds, not a second
-        read.
+        The header, the head check and the status-event row are written in one transaction. The head
+        is read under `FOR UPDATE` and compared with `expected_revision`, so the recorded revision
+        is the one the approver saw (a colleague saving a new revision while they read is caught
+        without any race). The status read under the same lock is compared with `expected_status`,
+        so of two people deciding from one status exactly one write lands and the other gets
+        `StatusConflict`. Which one wins is the lock queue's choice, not this code's.
         """
         require_storable(None, design_id=design_id, actor=actor, reason=reason)
         async with self._connection() as conn:
@@ -835,15 +689,12 @@ class PostgresDesignStore:
                         "re-read the design before signing off on it"
                     )
                 require_unmoved(expected_status, head_row[1])
-                # The kind of the revision this move is stamped against, and the reason that is
-                # not a race: `_SELECT_HEAD` locks the *header* row, and every `append` takes that
-                # same lock before writing, so no revision can land between the two reads. The
-                # revisions table is append-only, so the row this finds cannot change either.
+                # Not a race: `_SELECT_HEAD` locks the header row, which every `append` also takes,
+                # and the revisions table is append-only.
                 await cur.execute(_SELECT_HEAD_KIND, (design_id, head))
                 kind_row = await cur.fetchone()
-                # Anything that is not provably `protocol` is treated as `request`, so a header
-                # naming a head revision whose row this read does not find fails *closed* rather
-                # than waving an `executed` through on a document nobody can see.
+                # Anything not provably `protocol` is treated as `request`, so a missing head row
+                # fails closed.
                 require_movable(
                     head_row[1],
                     status,
@@ -880,19 +731,9 @@ class PostgresDesignStore:
     async def page(self, design_id: str, revision: int | None = None) -> DesignPage | None:
         """All four reads in one transaction, at an isolation level that makes that mean something.
 
-        **One transaction is not on its own enough, and that is the whole subtlety here.**
-        `core/db.py` is READ COMMITTED, which takes a *new snapshot per statement*, so four
-        statements inside one transaction tear exactly as four transactions do. `REPEATABLE READ`
-        gives the whole block one snapshot, which is what "the history comes back in the same call"
-        was always supposed to mean. Nothing here writes, and a read-only transaction cannot take a
-        serialization failure, so there is no retry to write.
-
-        **The revision clause is `read`'s, spelled the same way, because `or 0` is not `is None`.**
-        This selected on `(%s = 0 OR revision = %s)` over `revision or 0`, so `page(design_id, 0)`
-        answered with the **head** here and `None` on the in-memory store — a backend divergence in
-        the one method written to remove one, and reachable from a client that sends `revision=0`.
-        There is no revision 0: `DesignRevision.revision` is `ge=1` and `parent_revision=0` is the
-        word for "nothing", so `None` is the honest answer on both.
+        READ COMMITTED takes a new snapshot per statement, so the block runs at `REPEATABLE READ`
+        for one snapshot; it is read-only, so no serialization retry is needed. The revision clause
+        matches `read`'s: `revision=0` is not "the head" and returns `None` on both backends.
         """
         clause = "AND revision = %(revision)s " if revision is not None else ""
         async with self._connection() as conn:
@@ -944,24 +785,10 @@ _RETIRED_BY_A_REVISION: frozenset[DesignStatus] = frozenset({"approved", "execut
 def advanced(current: DesignStatus, kind: RevisionKind) -> DesignStatus:
     """The status a design has after a revision of `kind` lands on it.
 
-    A design that held only a structured ask becomes a `draft` the moment a protocol revision
-    arrives — that transition was always here.
-
-    **An `approved` or `executed` design becomes a `draft` again when a new revision lands**,
-    because both are statements about a *document* and the document has changed. The first version
-    held `approved`, reasoning that a re-draft must not silently un-approve — true of the word and
-    false of the thing: measured, a chemist approving revision 1 at 80 °C and an agent then drafting
-    revision 2 at 200 °C left a header reading `approved` over a protocol nobody had read, and every
-    default read serves the head. `executed` was left behind in that fix and is the same sentence
-    one word along: a header saying a design was run, over a document that was not.
-
-    **What makes the demotion affordable is `experiment_protocol_status_events`**, and it is worth
-    saying plainly that this docstring used to claim a record that did not exist — "`set_status`
-    records it" was written above a `set_status` that wrote one column on the header row and logged
-    a line without the revision in it. It records it now: which revision, by whom, and why.
-
-    `abandoned` is deliberately not in that set and is held: a design somebody decided not to run
-    does not come back because an agent wrote to it, and the way back is a person's `set_status`.
+    A `requested` design becomes `draft` when a protocol revision arrives. An `approved` or
+    `executed` design is demoted to `draft` because both describe a document that has now changed;
+    `experiment_protocol_status_events` keeps which revision was signed. `abandoned` is held: a
+    design somebody decided not to run comes back only through a person's `set_status`.
     """
     if current == "requested" and kind == "protocol":
         return "draft"
@@ -971,20 +798,8 @@ def advanced(current: DesignStatus, kind: RevisionKind) -> DesignStatus:
 def revision_kind(design: ExperimentDesign) -> RevisionKind:
     """The word for what this revision *is*, read off the document rather than taken on trust.
 
-    It used to be an argument, and the three callers derived it separately — which is the shape
-    `has_protocol` exists to prevent and which failed exactly where a duplicated predicate always
-    does, on the path where the two inputs come apart. `structure_experiment_request` deliberately
-    carries a drafted procedure forward when a chemist corrects the ask, and it stamped
-    `kind="request"` regardless. `require_movable` reads this column to decide whether a design has
-    a procedure to approve, so a corrected ask made a fully drafted plate **permanently
-    un-approvable and un-executable**: every arm, step and charge line present, and the store
-    refusing the sign-off with "this design holds only the structured ask". The document was right
-    and only the word for it was wrong, so nothing on the page hinted at the contradiction.
-
-    Deriving it here is what makes the column true by construction: `kind` is `has_protocol` as it
-    stood when the revision was written, which is what `advanced` and `require_movable` have always
-    said they were reading. There is no caller that legitimately wants the other word — a document
-    holding a procedure is a protocol whatever the tool that stored it was called.
+    `kind` is `has_protocol` at write time, so the column `advanced` and `require_movable` read is
+    true by construction (a corrected ask that carries a drafted procedure forward is a protocol).
     """
     return "protocol" if design.has_protocol else "request"
 
@@ -996,16 +811,9 @@ _NEEDS_A_PROTOCOL: frozenset[DesignStatus] = frozenset({"approved", "executed"})
 
 #: Which lifecycle move each status permits, as data rather than a chain of `if`s.
 #:
-#: Nothing enforced an order at all: measured on both backends, `abandoned -> executed`,
-#: `draft -> executed` (running without sign-off), `executed -> draft` and `executed -> approved`
-#: were all accepted. `advanced()`'s stated guarantee that only a person moves an `abandoned` design
-#: off `abandoned` was therefore true only by convention.
-#:
-#: Every `X -> X` is permitted on top of this table, and that is deliberate rather than incidental:
-#: `Chemclaw3_ui`'s sign-off panel retries idempotently, so forbidding `approved -> approved` would
-#: turn a harmless retry into a 422. `draft -> executed` is absent because it is running without
-#: sign-off, and `abandoned -> draft` is present because reviving a retired design is a thing a
-#: person does.
+#: Every `X -> X` is permitted on top of this table, so an idempotent retry is not a 422.
+#: `draft -> executed` is absent (running without sign-off); `abandoned -> draft` is present
+#: (reviving a retired design is a person's act).
 _LEGAL_MOVES: dict[DesignStatus, frozenset[DesignStatus]] = {
     "requested": frozenset({"draft", "abandoned"}),
     "draft": frozenset({"approved", "abandoned"}),
@@ -1018,77 +826,17 @@ _LEGAL_MOVES: dict[DesignStatus, frozenset[DesignStatus]] = {
 def require_movable(current: DesignStatus, status: DesignStatus, head_kind: RevisionKind) -> None:
     """Refuse a lifecycle move the design cannot support, naming why.
 
-    Nothing tied a status to the document it is a statement about, so `set_status("executed")` on a
-    design that holds only the structured ask was accepted on both backends: a lab record saying an
-    experiment was *run*, written against a document with no charge table, no procedure and no arms.
-    `executed` and `approved` are the two words that assert something about a procedure, and a
-    `request` revision has none to assert it of. The head's `kind` is what decides it, because that
-    column is `has_protocol` as it stood when the revision was written — so the two backends read
-    one fact rather than each deriving it, and Postgres does not have to load the document to
-    answer.
+    Three rules, the document rules first because their message is more actionable:
 
-    **`requested` is the same rule read backwards, and it was missing.** It is the one status that
-    asserts the *absence* of a procedure — `DesignStatus` defines it as "holds only a structured
-    ask" — so a `protocol` head contradicts it exactly as a `request` head contradicts `executed`.
-    Nothing refused it: measured on both backends, an executed design moved to `requested` and
-    stayed there with a fully drafted protocol as head, so `GET /protocols?status=requested` listed
-    it among the intakes and `?status=executed` did not. Written as an `if` rather than as a second
-    frozenset beside `_NEEDS_A_PROTOCOL` because it has exactly one member and always will: the
-    other four statuses are claims about a document or about a decision, and only this one is a
-    claim that no document exists yet.
+    - `approved` and `executed` assert something about a procedure, so a `request` head refuses
+      them; `requested` asserts there is none, so a `protocol` head refuses it. The head's `kind`
+      decides, so Postgres need not load the document.
+    - The transition order comes from `_LEGAL_MOVES`, indexed unconditionally so a new status
+      without a row fails on its first move.
+    - Every self-transition is exempt from the table (but not from the document rules): a repeat
+      by somebody who has read the design, such as a co-signature, is recorded as a new event.
 
-    **The transition *order* is the third rule and it arrived last**, because it is the one that
-    cannot be derived from the document: it needs the design's *current* status, which this function
-    was not given. Nothing forbade `abandoned → executed` or `draft → executed`, measured accepted
-    on both backends — a design retired because the starting material decomposes, marked run; a
-    protocol nobody had signed off, marked run. `_LEGAL_MOVES` above is the decided table, and
-    each of its edges says there why it exists.
-
-    **Every self-transition is exempt from the *table***, which it does not spell out because it is
-    one rule about a repeat rather than five decisions about the lifecycle. It is not a blanket
-    permission, and this sentence used to say it was: the document rules below outrank the exemption
-    exactly as they outrank an edge, so three of the ten (status, head-kind) repeats are refused —
-    `requested -> requested` on a protocol head, and `approved`/`executed` on a request head. Those
-    states are unreachable in practice, because `advanced()` demotes the status on every revision
-    that changes the kind, which is why an absolute claim survived here. A sixth status would be
-    decided by that precedence and not by this paragraph.
-
-    **What the exemption buys is a repeat by somebody who has read the design as it now stands**,
-    and that is not what this paragraph used to say. The case is a second approver co-signing, or
-    the same chemist recording a second reason — an act, not an accident. **It is deliberately not
-    argued from what any client renders**, which is how this paragraph went wrong the first time:
-    it justified the exemption by `Chemclaw3_ui` offering a *Mark X* button for all five statuses,
-    and that repository's sign-off panel now drives its buttons from this very table, so the
-    argument would have expired on somebody else's merge. A rule this store enforces cannot rest on
-    a sentence about a caller this store cannot see.
-
-    The case named here instead was the lost response — a move reported to the chemist as "The
-    status was not recorded" when it may well have been, pressed again — and
-    a retry only arrives here as `X → X` if the client re-read first. Measured on both backends, a
-    panel that has not re-read still shows the *pre*-move status, so the retry names that as
-    `expected_status` and `require_unmoved` refuses it as a `StatusConflict` before this function
-    is reached at all (`test_a_retry_that_has_not_re_read_is_refused_before_the_repeat`). So the
-    exemption covers the deliberate repeat and the retry that re-reads, where the honest answer is
-    "it already worked"; nothing rescues the retry that does not, and refusing the repeat on top of
-    that would refuse an act the record exists to capture. This tree relies on the exemption
-    too: the test that proves both SQL `CHECK (status IN (...))` constraints accept every member of
-    the Literal drives `draft → draft` and `requested → requested` to do it. The move is not
-    swallowed — the caller still gets its 204 and `experiment_protocol_status_events` still gains a
-    row, because a repeat is somebody acting a second time and that table is the record of who
-    moved a design and why.
-
-    **The document rules run first, deliberately.** Where both refuse — `requested` on a protocol
-    head, say — the more actionable message wins: "there is no procedure to approve" tells a chemist
-    what to do next, and "you cannot go from here to there" does not.
-
-    The table is indexed on `current` unconditionally, so a sixth `DesignStatus` added without a row
-    here fails on the first move rather than being silently movable anywhere.
-
-    The complementary guard — refusing a sign-off that would silently overwrite a *different*
-    person's sign-off at the same revision — is `require_unmoved`, which runs before this
-    one. It is separate because the two answer different questions: this table says whether the move
-    is legal at all, and that one says whether the design is still where the person thought it was.
-    `expected_revision` covers neither, being a compare-and-set on the *document*.
+    `require_unmoved` runs first and checks the design is still where the caller thought it was.
 
     Raises:
         UnstorableDocument: the design cannot hold this status.
@@ -1115,20 +863,9 @@ def require_movable(current: DesignStatus, status: DesignStatus, head_kind: Revi
 def require_unmoved(expected: DesignStatus, actual: DesignStatus) -> None:
     """Refuse a lifecycle move made from a status the design no longer holds.
 
-    The compare-and-set `expected_revision` is *not*: that one is on the document, and a design has
-    a second thing another person can move. Both backends call this rather than each writing the
-    comparison, for `require_movable`'s reason one line up — the two read one rule, so a refusal
-    cannot depend on which store a deployment runs.
-
-    A no-op move is deliberately allowed through (`approved` → `approved` with `expected` equal to
-    it): naming the status the design actually holds is what a caller who has *read* it does, so
-    nothing was lost, and refusing it would turn a deliberate second sign-off into an error a
-    chemist has to interpret. It is not what rescues a double click, which this used to claim:
-    both clicks name the status the panel was showing, so the second names the *pre*-move one and
-    is refused here — measured on both backends, and pinned by
-    `test_a_retry_that_has_not_re_read_is_refused_before_the_repeat`. That refusal is the honest
-    one (the caller is out of date), but it is reported to the chemist as somebody *else* having
-    decided, which is `Chemclaw3_ui`'s to answer for and not this function's.
+    The status counterpart to `expected_revision`'s document compare-and-set, shared by both
+    backends. A no-op move naming the status actually held passes. A retry that has not re-read
+    names the pre-move status and is refused.
 
     Raises:
         StatusConflict: somebody else moved the status between the caller's read and this move.
@@ -1140,38 +877,22 @@ def require_unmoved(expected: DesignStatus, actual: DesignStatus) -> None:
         )
 
 
-#: The characters no Postgres `text` or `jsonb` column can hold. NUL is the one that actually
-#: arrives (it is what a truncated UTF-16 read or a fuzzing client produces); the rest of the C0
-#: range is refused with it because none of them belongs in a laboratory procedure and a document
-#: carrying one is not a document somebody typed.
-#:
-#: **Unpaired UTF-16 surrogates are here for the same reason and were missed.** Starlette parses a
-#: request body with stdlib `json.loads`, which turns `"\ud800"` into a lone surrogate, and pydantic
-#: only refuses one on a `str` field carrying a constraint — so any unconstrained string in a design
-#: (`setpoints.atmosphere`, `solvent`, `waste`, an arm's `note`, a level's value) reached the driver
-#: and blew up there. Measured on the real app: `POST /protocols/{id}/revisions` answered **500** on
-#: Postgres and **200** in memory, which is exactly the backend divergence this guard exists to
-#: prevent. It is not even counted as a database failure — `UnicodeEncodeError` is not a
-#: `psycopg.Error`, so `_failure_kind` returns `None` and the metric never moves.
+#: The characters no Postgres `text` or `jsonb` column can hold: the C0 controls (NUL above all)
+#: and unpaired UTF-16 surrogates, which `json.loads` produces from a `"\ud800"` escape and
+#: pydantic does not refuse on an unconstrained string. Refusing them in-process keeps both
+#: backends agreeing.
 _UNSTORABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff]")
 
 
 def require_storable(design: ExperimentDesign | None, **text: str) -> None:
     """Refuse anything Postgres cannot hold, in this process, naming what is wrong.
 
-    Both backends call it, which is the point: without it the in-memory store accepted a NUL and
-    Postgres answered **500**, so whether a write was possible depended on which backend a
-    deployment had configured — the divergence `InMemoryDesignStore`'s own docstring forbids.
-
-    **Every caller-supplied string, not the document and the change note only.** The first version
-    covered two of eight and left six diverging: `author`, `session_id`, `correlation_id`,
-    `design_id`, `actor` and — browser-supplied, and therefore the one that mattered —
-    `set_status`'s `reason`, which `Chemclaw3_ui` collects from a chemist and which answered a raw
-    **500** one route over from the docstring saying that failure was fixed.
+    Both backends call it so the in-memory store refuses exactly what Postgres would. Covers the
+    document and every caller-supplied string, including `set_status`'s browser-supplied `reason`.
 
     Raises:
         UnstorableDocument: something carries a NUL, a C0 control character, or an unpaired UTF-16
-            surrogate — the three families no `text` or `jsonb` column can hold.
+            surrogate.
     """
     if design is not None:
         for label, value in _strings(design.model_dump(), "the document"):
@@ -1195,9 +916,7 @@ def _strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
         yield path, value
     elif isinstance(value, dict):
         for key, item in value.items():
-            # The key as well as the value: `ProtocolArm.levels` is `dict[str, str]` with no
-            # constraint on its keys, so a NUL in a factor name reached `jsonb` and raised
-            # `UntranslatableCharacter` — the exact exception `UnstorableDocument` names.
+            # Keys as well as values: `ProtocolArm.levels` keys are unconstrained.
             yield f"{path}.<key>", key
             yield from _strings(item, f"{path}.{key}")
     elif isinstance(value, list):
@@ -1208,9 +927,8 @@ def _strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
 def _require_head(design_id: str, head: int, parent_revision: int) -> None:
     """Refuse a write derived from anything but the current head.
 
-    `parent_revision=0` means "I am creating this design" and is refused once it exists — an edit
-    that forgot to name its parent is exactly the write that would silently discard somebody's
-    revision, so it is not treated as a shortcut for "the head, whatever it is".
+    `parent_revision=0` means "create" and is refused once the design exists: it is never a
+    shortcut for "the head, whatever it is".
     """
     if parent_revision != head:
         raise RevisionConflict(
@@ -1256,12 +974,10 @@ _IN_MEMORY = InMemoryDesignStore()
 
 
 def default_design_store() -> DesignStore:
-    """The store this deployment uses — Postgres where sessions are durable, memory otherwise.
+    """The store this deployment uses: Postgres where sessions are durable, memory otherwise.
 
-    The same switch the audit sink, the job record, the checkpointer and the campaign store read.
-    The in-memory instance is module-level rather than per-call: it is a real backend for a
-    deployment without Postgres, and one that forgot every design between two calls would be worse
-    than none at all.
+    The in-memory instance is module-level: it is a real backend, and one that forgot every design
+    between calls would be worse than none.
     """
     if settings.session_store == "postgres":
         return PostgresDesignStore()

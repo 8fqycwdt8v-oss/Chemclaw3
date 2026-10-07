@@ -1,30 +1,16 @@
 """Durable crawl of every mounted document share: crawl → diff → parse → embed → sweep.
 
-The Temporal wrapper over `chemclaw.ingest.documents.sync`, and the sibling of
-`durable/note_index.py`: both keep a *derived* index in step with a source of truth that lives
-somewhere else, on the `background-jobs` queue, driven by a Schedule. Nothing here is knowledge —
-the share's documents are evidence retrieved with a citation, so no note is written at all.
+The Temporal wrapper over `chemclaw.ingest.documents.sync`, on `background-jobs`, driven by a
+Schedule. Documents are evidence retrieved with a citation; no note is written.
 
-Three things this file exists to get right, none of which belong in the sync loop itself:
-
-**Bounding.** A first crawl of a TB share is not one activity. Each attempt considers
-`document_sync_batch_size` candidates and returns a cursor; the workflow loops on it, and
-continues as new every `document_sync_max_iterations` chunks so event history stays bounded no
-matter how large the share is. This is the shape `ElnSyncWorkflow` uses, with a path where it has
-a timestamp.
-
-**The sweep, and when it is allowed.** Deletion runs once per source, after its whole crawl
-drained, and only if no root failed anywhere in that drain. A CIFS mount that dropped mid-run
-presents as an empty directory, and the sweep must not read that as "everything was deleted".
-
-**Whose clock.** The mark is a database `now()`, so the sweep's reference is read from the
-database too — not from this worker. A database a minute behind the worker would otherwise make
-freshly-marked rows look older than the run that marked them.
-
-**Stale vectors go first.** A run drains re-embedding before it crawls, because a chunk embedded
-by a superseded model is *wrong now* — it is being compared against freshly embedded queries and
-the comparison is meaningless — whereas a document not yet crawled is merely absent. The re-embed
-pass reads stored chunk text, so it touches no share and runs even when every mount is down.
+- **Bounding.** Each attempt considers `document_sync_batch_size` candidates and returns a
+  cursor; the workflow loops and continues as new every `document_sync_max_iterations` chunks.
+- **The sweep.** Deletion runs once per source after its whole crawl drained, and only if no
+  root failed: a dropped CIFS mount looks like an empty directory.
+- **Whose clock.** The mark is a database `now()`, so the sweep reference is read from the
+  database too.
+- **Stale vectors first.** Re-embedding vectors from a superseded model runs before the crawl,
+  since those are wrong now; it reads stored chunk text, so it works with every mount down.
 """
 
 from datetime import datetime, timedelta
@@ -59,8 +45,7 @@ _document_index = default_document_index
 def share_sources() -> dict[str, DocumentShareSource]:
     """Every active retrieve source that carries a crawlable share, by name.
 
-    Also what `durable/schedules.py` asks to decide whether this job earns a Schedule at all — a
-    deployment with no share mounted must not fire a crawl of nothing every six hours.
+    Also decides whether this job gets a Schedule at all.
     """
     return {
         source.name: source
@@ -75,16 +60,9 @@ class DocumentSyncPlan(BaseModel):
     sources: list[str]
     # Read from the index backend's own clock, never this worker's — see the module docstring.
     started_at: datetime
-    # How many activities this run may schedule before continuing as new. Captured in the activity
-    # rather than read in the workflow, for the reason `resolve_notes_per_run` states: this bound
-    # decides how many commands the run emits, so reading it live makes the command count a
-    # function of the replaying worker's config instead of of history. A redeploy that lowers it
-    # mid-drain then replays `continue_as_new` earlier than history records — a non-determinism
-    # error, which is a workflow *task* failure, which retries forever and wedges the run (D-093).
-    #
-    # No new activity was needed: `plan_document_sync` already runs exactly once per drain and
-    # already returns a model, so the value is recorded in history once and rides `continue_as_new`
-    # on the state with the cursor.
+    # How many activities this run may schedule before continuing as new. Captured in the planning
+    # activity and carried on the state, because it decides the command count: reading it live would
+    # break replay after a redeploy.
     max_iterations: int
 
 
@@ -97,14 +75,8 @@ class DocumentSyncOutcome(BaseModel):
 
     shares: list[SyncReport] = Field(default_factory=list)
     reembedded: int = 0
-    # **The difference between "there was nothing left to do" and "nothing could be done."**
-    # `reembed_stale` returns `has_more=False` in both cases — the batch is deterministic, so
-    # re-handing the caller the identical failing batch forever is worse — and the loop below used
-    # to read that as completion either way. So a total embedding-provider outage produced a run
-    # that reported COMPLETED while every superseded vector was still in the corpus, which is
-    # verbatim what `ReembedReport.stalled` was added to prevent and could not, because nothing
-    # read it. A field with no reader is a claim that a control exists (`audit_events.agent`,
-    # `map_to_hpc_identity`), and this is that shape.
+    # Distinguishes "nothing left to do" from "nothing could be done": `reembed_stale` returns
+    # `has_more=False` in both cases, and an embedding outage must not report as completion.
     reembed_stalled: bool = False
 
 
@@ -119,16 +91,13 @@ class DocumentSyncState(BaseModel):
     remaining: list[str]
     # The crawl cursor within the source in progress: the last path its previous chunk examined.
     after: str = ""
-    # No `degraded` flag: whether a drain may sweep is read off the drain's own merged report
-    # (`prune_share`), which already carries the failed roots and the unfinished tail. A flag beside
-    # the evidence is a second copy of the rule, and the copy the CLI kept was the wrong one.
+    # No `degraded` flag: whether a drain may sweep is read off its merged report (`prune_share`).
     reports: list[SyncReport] = Field(default_factory=list)
     # Whether the re-embedding drain finished. Carried, because a corpus large enough to need
     # `continue_as_new` mid-re-embed must not restart that drain from the top on the next run.
     reembed_done: bool = False
-    # Set when a whole re-embed batch failed to embed. Distinct from `reembed_done`, and carried on
-    # the state rather than derived at the end, because the drain stops on it: the corpus still
-    # holds superseded vectors, so the next scheduled run must pick the batch up again.
+    # Set when a whole re-embed batch failed to embed. The drain stops on it without marking the
+    # re-embed done, so the next scheduled run retries.
     reembed_stalled: bool = False
     reembedded: int = 0
 
@@ -138,9 +107,7 @@ class DocumentSyncState(BaseModel):
 async def plan_document_sync() -> DocumentSyncPlan:
     """Name the shares to crawl, read the sweep reference off the index's own clock, fix the bound.
 
-    All three are live reads that belong in an activity: the share list and the clock because they
-    are external state, and `max_iterations` because it decides a command count and so must be
-    recorded in history once rather than re-read by whichever worker replays the run.
+    All three are live reads, so they belong in an activity and are recorded in history once.
     """
     index: DocumentIndex = _document_index()
     return DocumentSyncPlan(
@@ -150,25 +117,9 @@ async def plan_document_sync() -> DocumentSyncPlan:
     )
 
 
-# One chunk is hundreds of files read off a network share and parsed — minutes of work with no
-# natural progress point to report — so liveness is time-based: something beats while the work
-# runs, and Temporal detects a dead worker within the heartbeat timeout instead of waiting out the
-# whole start-to-close.
-#
-# `durable.heartbeat.beating` is that something now. The two hand-rolled copies this file carried
-# derived their interval as `timeout / 3` with **no floor**, and the setting they divided was
-# declared as a bare `float` — so an ENV-set fraction of a second beat several times a second
-# against the Temporal server for the whole chunk, and a negative value made `asyncio.sleep` return
-# immediately and turned the sibling task into an unbounded busy loop. `beating()` uses
-# `max(1.0, timeout / 4)`, and that floor is exactly what it was written to prevent.
-#
-# The negative half of that is now impossible at the source: this block's settings carry
-# `gt=0`/`ge=1` constraints, so a degenerate value is refused at load rather than survived. The
-# floor stays, because a *positive* sub-second timeout is still legal and still needs bounding — the
-# schema can refuse a nonsensical number, not a legal one that implies too high a beat rate.
-#
-# The eager pre-beat below is kept and is not redundant: `beating()` waits one interval before its
-# first beat, and a fast chunk may finish before that.
+# One chunk is minutes of share reads and parsing with no natural progress point, so liveness is
+# time-based via `durable.heartbeat.beating`, whose interval has a one-second floor. The eager
+# pre-beat covers a chunk that finishes before the first interval.
 
 
 @durable_activity("background")
@@ -197,10 +148,8 @@ async def sync_document_share(source: str, after: str) -> SyncReport:
 async def reembed_stale_documents() -> ReembedReport:
     """Refresh one bounded batch of vectors whose embedding configuration is superseded.
 
-    Scoped to the chunkings the enabled shares actually use: a chunk cut under a superseded one is
-    about to be re-cut and re-embedded by the crawl, so refreshing it here is work thrown away.
-    Read from the live bindings here, in the activity, because that is where a non-deterministic
-    read belongs.
+    Scoped to the chunkings the enabled shares use; a chunk cut under a superseded chunking will be
+    re-cut by the crawl anyway.
     """
     activity.heartbeat()
     chunkings = {share.share_binding().chunking_key for share in share_sources().values()}
@@ -219,22 +168,15 @@ async def prune_document_share(source: str, before: datetime, report: SyncReport
 
 
 @durable_workflow("background")
-# **Deliberately left able to park** (D-2026-08-27), unlike `ElnSyncWorkflow`, which it is
-# otherwise shaped exactly like. That one has an uncapped starter that awaits its result
-# (`cli.live_data.backfill`); this one is reached only from the `document-sync` Schedule, whose
-# action carries `schedule_run_timeout_seconds`. So a parked run is bounded at a day, nothing
-# reads it, and the crawl keeps no cursor between runs by design — the next fire re-walks from
-# the top, which its own docstring prices at a `scandir`. Declaring would buy a failure state no
-# surface reported when this was decided (`ScheduleHealth` carries `last_outcome` now, which
-# reopens that trade) and cost the run its chance to finish once a same-day redeploy fixes the bug.
+# Deliberately left able to park: reached only from the `document-sync` Schedule (bounded by
+# `schedule_run_timeout_seconds`), nothing reads its result, and the next fire re-walks from the
+# top.
 @workflow.defn
 class DocumentShareSyncWorkflow:
     """Crawl every mounted share into the document index, one bounded chunk at a time.
 
-    Each run starts from the top of each share rather than from a stored cursor: the sweep needs a
-    complete pass to be safe, and the crawl is stat-only, so a re-walk of an unchanged share costs
-    a `scandir` and no reads. There is nothing to cursor between runs, which is why — unlike the
-    ELN sync — this job keeps no row in `sync_cursors`.
+    Each run starts from the top of each share: the sweep needs a complete pass, and the stat-only
+    crawl makes re-walking an unchanged share cheap. So no row is kept in `sync_cursors`.
     """
 
     @workflow.run
@@ -257,9 +199,7 @@ class DocumentShareSyncWorkflow:
                 max_iterations=plan.max_iterations,
             )
         iterations = 0
-        # Before the crawl: a vector made by a superseded model is actively wrong, and it is being
-        # compared against queries embedded by the current one. Nothing here reads a share, so it
-        # also makes progress on a run where every mount is unavailable.
+        # Before the crawl: superseded vectors are actively wrong, and this needs no share.
         while not state.reembed_done:
             refresh: ReembedReport = await workflow.execute_activity(
                 reembed_stale_documents,
@@ -273,10 +213,7 @@ class DocumentShareSyncWorkflow:
             state.reembedded += refresh.embedded
             iterations += 1
             if refresh.stalled:
-                # Stop, but do **not** mark the drain done: every chunk in the batch failed to
-                # embed, so the corpus still holds superseded vectors and the next scheduled run
-                # must try again. Marking it done here is what made an outage indistinguishable
-                # from an up-to-date corpus.
+                # Stop without marking the drain done, so the next run retries the failed batch.
                 state.reembed_stalled = True
                 break
             if not refresh.has_more:
@@ -304,18 +241,15 @@ class DocumentShareSyncWorkflow:
             if chunk.has_more and chunk.cursor > state.after:
                 state.after = chunk.cursor
                 if iterations >= state.max_iterations:
-                    # Compacted first: the carried state is the *input* of the next run, and a
-                    # first crawl of a large share is thousands of chunks. Handing every chunk's
-                    # report forward would grow the payload without bound over exactly the drains
-                    # that need continue-as-new in the first place.
+                    # Compacted first, so the carried state does not grow with every chunk of a
+                    # large first crawl.
                     state.reports = _merge_by_source(state.reports)
                     workflow.continue_as_new(state)
                 continue
             if chunk.has_more:
-                # Unreachable with a well-behaved crawl (a truncated pass always advances the
-                # cursor), but a bug must wedge one source with a warning rather than spin this
-                # loop — and Temporal's event history — forever. `has_more` survives into the
-                # merged report below, which is what stops the sweep.
+                # Unreachable with a well-behaved crawl; a bug stops one source with a warning
+                # rather than looping forever. `has_more` survives into the merged report, which
+                # blocks the sweep.
                 workflow.logger.warning(
                     "document sync for %s reported more entries but no cursor advance; stopping",
                     source,

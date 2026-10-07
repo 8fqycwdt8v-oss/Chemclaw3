@@ -1,24 +1,9 @@
 """The `calc` bundle's durable job activity threads its request through to the composition (D-118).
 
-`run_xtb_calculation` is the only caller of the reaction and solvent-screen composites on the
-durable path, and it dispatches on an `XtbJobSpec` member whose fields it copies across by hand. So
-a field that exists in the composite's signature and not in the spec — or exists in both and is not
-copied — is invisible: the job runs, returns a well-formed result, and quietly answers a smaller
-question than the one that was asked.
-
-That is exactly what happened to `symmetry_numbers`. The composite grew it as the input a free
-energy is not computed without, `ReactionJobSpec`/`SolventScreenJobSpec` did not, and both call
-sites were positional up to `level` — so nothing broke and the durable `compute_reaction_energy` and
-`compare_solvents` jobs simply stopped reporting a free energy at all. A chemist who ran the job
-instead of the inline tool got ΔE, and no indication that the ΔG they asked for had been withheld
-for a reason they could have fixed.
-
-**The physics is a fake and that is now the honest choice**, where before this file ran real GFN2 on
-diatomics. The calculations left this repository
-(`D-2026-08-16-the-physics-leaves-the-cache-stays`); what the activity is responsible for is the
-passthrough, the summary line and the heartbeating, and every one of those is visible against
-`tests/calc_server_fake.py`. What a fake cannot check — that the numbers are chemistry — is checked
-in the repository that computes them.
+`run_xtb_calculation` copies `XtbJobSpec` fields into the composites by hand, so a field missing
+from the spec or not copied silently answers a smaller question — e.g. `symmetry_numbers`, without
+which no free energy is reported. The physics is `tests/calc_server_fake.py`: the activity owns
+the passthrough, the summary and the heartbeating.
 """
 
 import asyncio
@@ -58,10 +43,8 @@ from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FakeCalcServer, install
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
-# H2 + Cl2 -> 2 HCl. Every species is a closed-shell diatomic, and the shape that matters: the two
-# homonuclear reactants are D∞h (sigma=2) and the product is C∞v (sigma=1), so sigma does *not*
-# cancel across the arrow and the map has to reach the calculation to change anything. The three
-# distinct values also pin the map key by key rather than as a whole.
+# H2 + Cl2 -> 2 HCl: the reactants are D∞h (sigma=2) and the product C∞v (sigma=1), so sigma does
+# not cancel and the map must reach the calculation; three distinct values pin it key by key.
 _REACTANTS = ["[H][H]", "ClCl"]
 _PRODUCTS = ["Cl", "Cl"]
 _SIGMAS = {"[H][H]": 2, "ClCl": 2, "Cl": 1}
@@ -77,9 +60,8 @@ def store() -> InMemoryStore:
 def server(monkeypatch: pytest.MonkeyPatch, store: InMemoryStore) -> Iterator[FakeCalcServer]:
     """Run the activity outside Temporal: its own store, a fake server, a heartbeat going nowhere.
 
-    `activity.heartbeat` raises outside an activity context, and it is passed down as the progress
-    callback *and* used by the shared heartbeat timer, so this is what makes the real function
-    callable at all from a test.
+    `activity.heartbeat` raises outside an activity context and is used as the progress callback and
+    by the heartbeat timer.
     """
     yield _outside_temporal(monkeypatch, store, FakeCalcServer())
 
@@ -111,9 +93,7 @@ def test_a_reaction_job_that_states_its_symmetry_numbers_gets_a_free_energy(
 ) -> None:
     """The passthrough, proven by the number that only exists when it works.
 
-    `symmetry_number` per species is asserted alongside ΔG because it pins the map *key by key*: a
-    passthrough that dropped the values and passed an empty map would still yield None, but one that
-    mismatched Cl2's 2 onto HCl would not be visible in ΔG alone.
+    Per-species `symmetry_number` pins the map key by key, which ΔG alone would not.
     """
     spec = ReactionJobSpec(reactants=_REACTANTS, products=_PRODUCTS, symmetry_numbers=_SIGMAS)
     result = _run(spec)
@@ -147,12 +127,7 @@ def test_a_reaction_job_without_symmetry_numbers_withholds_the_free_energy(
 
 
 def test_the_repeated_product_is_computed_once(server: FakeCalcServer) -> None:
-    """HCl appears twice in the equation and is one calculation, which is the cache doing its job.
-
-    Four stoichiometric entries, three distinct species. The reaction is a subtraction over
-    per-species entries that are keyed individually — which is why there is deliberately no
-    reaction-level cache row.
-    """
+    """HCl appears twice in the equation and is one calculation: the cache doing its job."""
     result = _run(
         ReactionJobSpec(reactants=_REACTANTS, products=_PRODUCTS, symmetry_numbers=_SIGMAS)
     )
@@ -187,9 +162,7 @@ def test_a_scan_job_threads_its_coordinate_and_summarizes_the_profile(
 ) -> None:
     """A scan job threads its coordinate through and summarizes the profile it got back.
 
-    Atoms, values and solvent all have to reach the composition, or the profile is a different
-    question answered confidently. The summary names the coordinate the result reports, not the one
-    the request asked for.
+    The summary names the coordinate the result reports.
     """
     result = _run(
         ScanJobSpec(smiles="CCCC", atoms=[0, 1, 2, 3], values=[0.0, 60.0, 120.0], solvent="water")
@@ -235,10 +208,8 @@ def test_a_rotation_job_names_the_bond_it_profiled_and_times_the_barrier(
 ) -> None:
     """The durable path end to end: spec in, envelope out, with the barrier as a lifetime.
 
-    The summary is what a completion push-back and a job listing show, so it has to carry the three
-    things a chemist would otherwise have to open the payload for: which bond, how high, and how
-    long that holds — the last one **as a range**, because a single half-life from a semiempirical
-    barrier reads exactly like a measurement.
+    The summary carries which bond, how high, and how long that holds — as a range, since a single
+    half-life from a semiempirical barrier reads like a measurement.
     """
     torsion = TorsionSpec(
         torsion_id=torsion_handle(Chem.MolFromSmiles("CCCC"), (1, 2)),
@@ -274,10 +245,7 @@ def test_a_rotation_job_refuses_a_handle_that_is_not_this_molecule_s(
 def test_a_pka_job_names_the_proton_it_is_about(server: FakeCalcServer) -> None:
     """Two searches, and a summary that says *which* proton — the half a bare pKa does not carry.
 
-    The site is perceived from the winning geometry on the server side, so this asserts the
-    passthrough rather than the perception: what a chemist reads in the job list has to name the
-    equilibrium that was computed, because "pKa 9.9" for a molecule with three ionisable centres is
-    an answer to a question nobody asked.
+    The site is perceived server-side; this asserts the passthrough.
     """
     result = _run(MicrostatePkaJobSpec(smiles="Oc1ccccc1"))
 
@@ -289,12 +257,7 @@ def test_a_pka_job_names_the_proton_it_is_about(server: FakeCalcServer) -> None:
 
 
 def test_a_survey_that_lost_a_bond_says_so_in_its_summary(server: FakeCalcServer) -> None:
-    """The summary is the line people read, so a survey that lost a bond cannot hide it there.
-
-    "weakest of 2 bonds" over a survey asked for two, one of which the server refused, is the
-    silent drop the per-item outcome exists to prevent — moved from the payload into the sentence
-    a completion push-back carries.
-    """
+    """The summary is the line people read, so a survey that lost a bond cannot hide it there."""
 
     def refusing(arguments: dict[str, object]) -> dict[str, object]:
         if arguments["smiles"] == "[CH3]":
@@ -367,12 +330,7 @@ def test_a_species_screen_that_lost_a_medium_says_so_in_its_summary(
 
 
 def test_a_pka_job_carries_the_branch_into_its_summary(server: FakeCalcServer) -> None:
-    """A base reports `pKaH`, not `pKa`, and the summary is where a reader sees which.
-
-    They are different numbers about different equilibria — pyridine's 5.2 is its conjugate acid's —
-    and a job list that called both "pKa" would invite exactly the confusion the branch field exists
-    to prevent.
-    """
+    """A base reports `pKaH`, not `pKa`, and the summary is where a reader sees which."""
     result = _run(MicrostatePkaJobSpec(smiles="c1ccncc1"))
 
     assert result.pka is not None and result.pka.branch == "base"
@@ -382,14 +340,10 @@ def test_a_pka_job_carries_the_branch_into_its_summary(server: FakeCalcServer) -
 def test_the_remote_call_names_the_person_the_durable_run_is_for(
     monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer
 ) -> None:
-    """Every request to the calculation server used to be anonymous on the durable path.
+    """The remote call names the person the durable run is for.
 
-    The activity's outbound calls carry `connectors.identity.turn_headers()`, which reads the
-    ambient identity — and nothing on this path bound one, so the heaviest server in the fleet
-    (minutes-to-hours CREST runs) logged `actor=- session=-` for every job while the same tool
-    called inline from a chat turn was fully attributed. Recorded at the boundary the real code
-    calls rather than inside it: the header builder is asked, at the moment of the remote call,
-    exactly what it would put on the wire.
+    Outbound calls carry `connectors.identity.turn_headers()`, so the activity binds the run's
+    identity. Recorded at the header builder at the moment of the remote call.
     """
     seen: list[dict[str, str]] = []
     answer = server.call_tool
@@ -416,16 +370,8 @@ def test_the_identity_is_unstamped_when_the_job_ends(
 ) -> None:
     """The stamp is removed when the dispatch ends, on the returning path and the raising one.
 
-    **Read in the same task that set it, which is the whole reason this test can fail.** It used to
-    call `asyncio.run(...)` and then assert over `turn_headers()` in the caller's context —
-    `asyncio.run` wraps the coroutine in a `Task`, a `Task` runs in a *copy* of the context, and a
-    contextvar set inside one can never be visible to that assertion. Measured: replacing
-    `_acting_for`'s `try/finally` with a bare `yield`, or deleting only the `finally`, left every
-    test in this file green.
-    Both assertions below go red on that mutation.
-
-    The raising path is the one that matters more and had no test at all: an activity that fails
-    after binding is exactly where a `finally` earns its place.
+    Read in the same task that set it: `asyncio.run` runs in a copied context, where the assertion
+    could never see the contextvar.
     """
 
     async def _returned() -> dict[str, str]:
@@ -455,14 +401,8 @@ def test_a_direct_call_with_no_identity_stamps_nothing_rather_than_a_placeholder
 ) -> None:
     """Absent identity stays absent: an empty header would let a log claim an anonymous caller.
 
-    The defaults also keep a run started before these arguments existed decodable, which is why
-    they are empty strings rather than a required field.
-
-    **Scoped to a direct caller, and it used to claim more than that.** This test calls the
-    activity, so what it can prove is what the activity's own defaults do. It was named for a *run*
-    with no memo, which is a different thing and is not what happens: `CalcJobWorkflow` defaults the
-    memo read to `settings.service_actor_id`, so the durable path delivers `service-account` rather
-    than nothing. The test below pins that half.
+    The defaults are empty strings so older runs still decode. This covers a direct call; a durable
+    run with no memo is the next test.
     """
     seen: list[dict[str, str]] = []
     answer = server.call_tool
@@ -479,15 +419,11 @@ def test_a_direct_call_with_no_identity_stamps_nothing_rather_than_a_placeholder
 async def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
     server: FakeCalcServer,
 ) -> None:
-    """The other half of the same route: identity has to reach the activity to be stampable.
+    """The workflow hands the activity the actor off the run's memo.
 
-    `ConnectorJobWorkflow` puts `requested_by` and `correlation_id` on the child's **memo** —
-    deliberately not in the payload, which is model-authored and is the cache key — and this
-    bundle's workflow never read them, so the activity had nothing to stamp however carefully it
-    stamped it. Driven on the real server against a stand-in activity registered under the
-    production name, because what is under test is the argument the workflow sends rather than the
-    calculation; the stand-in answers with a result the *real* activity produced against the fake
-    server, so the workflow's own `job_envelope` still runs on a shape it would really see.
+    `ConnectorJobWorkflow` puts `requested_by` and `correlation_id` on the child's memo, not the
+    model-authored payload. Driven on the real server with a stand-in activity under the production
+    name, answering with a result the real activity produced so `job_envelope` sees a real shape.
     """
     seen: list[tuple[str, str]] = []
     # Awaited rather than routed through `_run`, which owns an `asyncio.run` of its own:
@@ -520,20 +456,11 @@ async def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
 async def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
     server: FakeCalcServer,
 ) -> None:
-    """The durable path's own no-identity behaviour, which is not the activity's.
+    """A durable run with no memo is attributed to the service identity.
 
-    `CalcJobWorkflow` reads `requested_by` off the memo with `settings.service_actor_id` as the
-    default — the same read `connectors/bo/workflows.py` makes, which is why it is that value and
-    not `""`. So "a run with no memo stamps nothing" is true of a direct caller and false here: the
-    activity is handed `("service-account", "")` and puts `X-Chemclaw-Actor: service-account` on the
-    wire with no correlation header, because `_acting_for`'s both-empty short circuit is not taken.
-
-    Nothing could reach this state today — `ConnectorJobWorkflow` sets the memo unconditionally and
-    `ConnectorJobInput.requested_by` is `Field(min_length=1)` off `require_actor()` — so this is a
-    characterisation of the fallback rather than a supported route. It is pinned because the
-    fallback is what an operator reading `actor=service-account` on an hours-long CREST run is
-    actually looking at, and because nothing else in this repository states which of the two
-    behaviours the durable path has.
+    `CalcJobWorkflow` defaults the memo read to `settings.service_actor_id`, as `connectors/bo`
+    does, so the wire carries `X-Chemclaw-Actor: service-account`. Unreachable today (the memo is
+    always set); pinned as a characterisation of the fallback an operator would see.
     """
     seen: list[tuple[str, str]] = []
     # Awaited rather than routed through `_run`, which owns an `asyncio.run` of its own:

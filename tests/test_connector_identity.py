@@ -1,21 +1,12 @@
 """What crosses the process boundary with a connector call — and what deliberately does not.
 
-Two mechanisms, tested for the two different reasons they exist:
+- The identity headers reflect the calling turn, so `turn_headers` reads the ambient context at
+  call time; this makes a connector's request log joinable to the core audit trail.
+- The auth flow reads its credential per request, so a rotated secret applies without a restart.
 
-- The **identity headers** must reflect the turn that is calling, so `turn_headers` is tested for
-  reading the *ambient* context rather than anything captured earlier — the property that makes
-  a connector's own request log joinable to the core audit trail.
-- The **auth flow** must read its credential per request, so a rotated secret takes effect without a
-  restart rather than pinning whatever was mounted when the client was built.
-
-Both have a negative half worth pinning: an absent actor must yield an absent header (not an empty
-one, which would let a connector's log claim an anonymous user made the call), and a missing
-credential must raise rather than send an empty `Authorization`.
-
-That the headers actually *arrive* is a transport property, proven against a live server in
-`test_connector_transport.py` — it cannot be shown here, and assuming it is exactly the mistake
-that
-made MAF's own `header_provider` look usable (see `chemclaw.connectors.identity`).
+Negative halves: an absent actor yields no header (not an empty one), and a missing credential
+raises rather than sending an empty `Authorization`. That headers arrive is a transport property,
+proven against a live server in `test_connector_transport.py`.
 """
 
 import asyncio
@@ -66,11 +57,10 @@ def test_no_ambient_identity_sends_no_identity_headers() -> None:
 
 
 def test_headers_are_read_from_the_ambient_turn_at_call_time() -> None:
-    """The property the whole design rests on: the headers describe the turn in flight.
+    """Headers are read from the ambient turn at call time.
 
-    Anything captured earlier — at client construction, at connect — would make every call in
-    the process report whichever user happened to be first, which is precisely the
-    misattribution the per-turn connector lifetime exists to prevent.
+    Anything captured at client construction or connect would attribute every call to whichever user
+    came first.
     """
     identity = set_current_identity("user-1", frozenset({"process-chemist", "admin"}))
     session = set_current_session_id("session-abc")
@@ -89,11 +79,9 @@ def test_headers_are_read_from_the_ambient_turn_at_call_time() -> None:
 
 
 def test_the_headers_carry_only_identity_never_call_content() -> None:
-    """The headers say *who* is calling, never *what* they asked for.
+    """The headers say who is calling, never what they asked for.
 
-    Nothing from the tool call reaches them by construction — `turn_headers` takes no argument
-    at all — which is the point: model-authored text in the transport envelope would be read as
-    our own metadata by a connector's request log and by any intermediary.
+    `turn_headers` takes no argument, so model-authored text cannot enter the transport envelope.
     """
     import inspect
 
@@ -102,19 +90,11 @@ def test_the_headers_carry_only_identity_never_call_content() -> None:
 
 
 def test_the_strip_list_covers_every_header_the_stamp_produces() -> None:
-    """The strip list and the stamp list must not drift, or one header outlives the guard.
+    """The strip list covers every header the stamp produces.
 
-    `STAMPED_HEADERS` names the four `X-Chemclaw-*` headers this module mints, and it used to be
-    what the origin guard walked — while `turn_headers()` ends with
-    `headers.update(trace_headers())`. So with tracing on, six headers were stamped and four were
-    stripped: `traceparent`, `tracestate` and `baggage` were copied through to the redirect's
-    target, carrying this deployment's trace and span ids and whatever `baggage` was carrying.
-    The docstring this replaces argued the standard ones were excluded on purpose, because
-    "pruning it would only orphan a span" — which is true of the connector's own origin and
-    irrelevant on a foreign one, where there is no span of ours to attach to.
-
-    So the assertion is now a *covering* one rather than an equality: whatever the stamp produces,
-    the guard removes.
+    `turn_headers()` adds `trace_headers()` (`traceparent`, `tracestate`, `baggage`) to the
+    `X-Chemclaw-*` headers; on a foreign origin those carry our trace ids and arbitrary baggage. So
+    the assertion covers rather than equals: whatever the stamp produces, the guard removes.
     """
     identity = set_current_identity("user-1", frozenset({"process-chemist"}))
     session = set_current_session_id("session-abc")
@@ -135,17 +115,12 @@ def test_the_strip_list_covers_every_header_the_stamp_produces() -> None:
 
 
 def test_the_hook_strips_the_identity_when_a_request_leaves_the_connector_origin() -> None:
-    """Defence in depth for Sec-2: the hook is bound to one origin and prunes on any other.
+    """The hook strips the identity when a request leaves the connector origin (Sec-2).
 
-    The connector registry's client refuses redirects (`registry.connector_http_client`), so for a
-    bundle this is the second layer. It is the **only** layer for the calc backend, whose client is
-    `core.mcp_session.short_connect_client` with `follow_redirects=True` — the hottest and most
-    privileged connection in the system. It has to *strip* rather than decline to re-add: httpx
-    builds a redirected request from the previous request's headers and drops only `Authorization`,
-    so a hook that merely skipped a foreign origin would let the originals travel untouched.
-    Asserted on a client that *does* follow redirects, because that is the configuration the guard
-    exists for — and with a trace context stamped, because four of the six headers were being
-    removed and two were not.
+    Bundle clients refuse redirects (`registry.connector_http_client`), so this is a second layer
+    there and the only layer for the calc backend, whose `core.mcp_session.short_connect_client`
+    follows redirects. It must strip, because httpx copies the previous request's headers (dropping
+    only `Authorization`). Asserted on a redirect-following client with a trace context stamped.
     """
     seen: dict[str, httpx.Headers] = {}
 
@@ -186,10 +161,8 @@ def test_the_hook_strips_the_identity_when_a_request_leaves_the_connector_origin
     assert seen["connector"][HEADER_ACTOR] == "user-99"
     assert seen["connector"][HEADER_SESSION] == "session-leak"
     assert seen["connector"]["traceparent"] == _TRACEPARENT
-    # Nothing of ours survived the hop, including the flags that are not identity themselves but
-    # would still tell an eavesdropper which of our turns it is looking at — and including the
-    # trace context, which is an internal correlation identifier and, in `baggage`, an arbitrary
-    # key/value carrier.
+    # Nothing of ours survived the hop: not the identity, the flags that identify our turn, nor the
+    # trace context and `baggage`.
     assert [header for header in STAMPED_HEADERS if header in seen["attacker"]] == []
     assert "traceparent" not in seen["attacker"]
     assert "baggage" not in seen["attacker"]
@@ -228,16 +201,10 @@ def test_a_missing_credential_raises_instead_of_sending_an_empty_one(
 
 
 def test_the_correlation_id_crosses_the_connector_boundary() -> None:
-    """The audit trail joins across processes, on the key core already stamps (REV-11).
+    """The correlation id crosses the connector boundary (REV-11).
 
-    `chemclaw.agent.audit` records a correlation id for every in-core tool call, and the connector
-    serving
-    that call logged under an id of its own with nothing tying the two together. "Show me everything
-    that happened in this turn" was therefore answerable in core and unanswerable across the four
-    runtimes a turn actually spans — which is most of what an audit trail is for.
-
-    Advisory like the rest of these headers: a connector may join its records to ours on it and must
-    never make an access decision on it.
+    `chemclaw.agent.audit` records it for every in-core tool call; carrying it lets a connector's
+    records join the turn's audit trail. Advisory only: a connector must never decide access on it.
     """
     token = set_current_correlation_id("turn-7f3a")
     try:
@@ -251,12 +218,10 @@ def test_the_correlation_id_crosses_the_connector_boundary() -> None:
 
 
 def test_a_durable_job_carries_the_turn_it_was_launched_from() -> None:
-    """The other half of the same gap: a durable run must not be an island in the trail.
+    """A durable job carries the turn it was launched from.
 
-    `ConnectorJobInput` reaches a Temporal worker that has no request context, so the id has to
-    travel in the input — the same argument that puts `requested_by` there. It is then set as a
-    workflow *memo* rather than folded into `payload`, because `payload` is exactly the arguments
-    the model filled in, and metadata the LLM can write is not metadata.
+    A Temporal worker has no request context, so the id travels in `ConnectorJobInput` and is set as
+    a workflow memo, not in `payload`, which holds only model-filled arguments.
     """
     from chemclaw.durable.connector_job import ConnectorJobInput
 
@@ -291,21 +256,10 @@ def test_a_durable_job_carries_the_turn_it_was_launched_from() -> None:
 def test_a_bearer_connector_refuses_an_unauthenticated_mcp_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`mode: bearer` was send-only — this file tested the sending half and nothing tested a check.
+    """A bearer connector refuses an unauthenticated MCP request.
 
-    `_EnvBearerAuth` above puts an `Authorization` header on every call, and no connector ever read
-    one: `connector_app` took no manifest, the string "Authorization" did not appear in
-    `connectors/server.py`, and `connector-validate` raised no objection. A deployment following
-    the manifest's own advice ("bearer for everything in-cluster") mounted a secret, recorded the
-    control as enabled, and served every tool to anything that could reach the pod. Proved before
-    the fix by completing an unauthenticated MCP handshake against the real app.
-
-    Enforced as middleware rather than a route dependency, and that is why the gap was easy to
-    miss: `/mcp` is `app.mount`ed, and a mount bypasses the enclosing app's dependencies — anything
-    written as `Depends(...)` would have guarded the two routes that need it least.
-
-    `/healthz` stays open deliberately (a kubelet probe carries no identity), so both halves are
-    asserted here or the fix would be a liveness outage rather than a control.
+    Enforced as middleware, because `/mcp` is `app.mount`ed and a mount bypasses the enclosing app's
+    dependencies. `/healthz` stays open (a kubelet probe has no identity); both halves are asserted.
     """
     from fastapi.testclient import TestClient
 
@@ -339,11 +293,9 @@ def test_a_bearer_connector_refuses_an_unauthenticated_mcp_request(
 def test_a_bearer_connector_with_no_token_configured_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing secret must refuse, not compare against `""` and accept every caller.
+    """A bearer connector with no token configured fails closed.
 
-    The failure mode this rules out is the one that looks like success: an unset variable making
-    `expected` empty, an empty `Authorization` header matching it, and the connector serving
-    everything while the deployment believes the credential is in force.
+    An unset variable must not make `expected` empty and accept an empty `Authorization`.
     """
     from fastapi.testclient import TestClient
 
@@ -360,11 +312,10 @@ def test_a_bearer_connector_with_no_token_configured_fails_closed(
 
 
 def test_a_mode_none_connector_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every shipped bundle declares `auth: mode: none`; the middleware must not appear for them.
+    """A `mode: none` connector gets no middleware.
 
-    The boundary for those is the NetworkPolicy, which is a deployment decision, not a code one —
-    so adding a check where none is declared would break `make connectors` and the transport tests
-    without any manifest asking for it.
+    Its boundary is the NetworkPolicy, a deployment decision; adding a check nobody declared would
+    break `make connectors` and the transport tests.
     """
     from fastapi.testclient import TestClient
 
@@ -378,17 +329,11 @@ def test_a_mode_none_connector_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> 
 def test_an_unreadable_manifest_makes_the_connector_refuse_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real `_declared_bearer_env`, on the path where it decides whether a control exists.
+    """An unreadable manifest makes the connector refuse everything.
 
-    The three tests above monkeypatch that function away, so the function that decides whether the
-    connector is guarded at all was executed by none of them — which is how its first version came
-    to fail *open*. `discovered()` parses every bundle in `connectors_dirs` and raises on one bad
-    YAML, so a typo in an operator's prepended directory (the documented PATH-like override), or a
-    mount briefly unreadable at pod start, took every bearer-mode connector in the process
-    anonymous while logging only that it "could not read manifests to resolve its auth mode".
-
-    A control whose absence is decided by a file being unreadable is not a control. The connector
-    now refuses until an operator fixes the manifest.
+    Exercises the real `_declared_bearer_env`. `discovered()` raises on one bad YAML (e.g. a typo in
+    a prepended override directory), and that must not leave bearer-mode connectors anonymous; the
+    connector refuses until the manifest is fixed.
     """
     from fastapi.testclient import TestClient
 
@@ -413,17 +358,10 @@ def test_an_unreadable_manifest_makes_the_connector_refuse_everything(
 
 
 def test_a_shipped_bundle_resolves_to_the_variable_its_manifest_names() -> None:
-    """The other real-resolution case: a discovered bundle resolves to a *name*, not a sentinel.
+    """A shipped bundle resolves to the variable its manifest names.
 
-    Without this, "fail closed on an unreadable manifest" could be satisfied by failing closed
-    always — which would refuse every MCP call in the dev composite and the transport tests, and
-    look exactly like a working credential gate while gating nothing that could ever open.
-
-    This used to assert `is None` for `molfp`, on the premise that every shipped bundle declared
-    `auth: mode: none`. That premise was the finding rather than the fixture: the four bundles this
-    repository hosts served their whole tool surface to anything that could reach the pod. The
-    assertion is now the positive one, and `test_an_app_no_bundle_backs_is_not_refused` carries the
-    `None` case it used to stand in for.
+    Rules out "fail closed always", which would look like a working gate while refusing every call.
+    The `None` case is `test_an_app_no_bundle_backs_is_not_refused`.
     """
     from chemclaw.connectors.registry import enabled
     from chemclaw.connectors.server import _declared_bearer_env
@@ -437,17 +375,10 @@ def test_a_shipped_bundle_resolves_to_the_variable_its_manifest_names() -> None:
 def test_a_shipped_bundle_that_discovery_missed_is_unresolved_not_unguarded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A bundle that ships a manifest this process did not discover must refuse, not open.
+    """A shipped bundle that discovery missed is unresolved, not unguarded.
 
-    The *likelier* half of what the unreadable-manifest test above closes. A raise failed closed;
-    a `discovered()` that simply comes back without this bundle in it fell through to "no
-    credential required" and served the whole `/mcp` surface anonymously. Nothing has to be corrupt
-    for that — a `connectors_dir` pointing elsewhere, or an operator's prepended override directory
-    shadowing the tree, both parse perfectly well — and the deployment goes on recording the pod as
-    credential-gated, which is what makes the open answer worse than an outage.
-
-    Driven by pointing `connectors_dir` at an empty directory, which is the misconfiguration
-    itself rather than a stand-in for it.
+    A `connectors_dir` pointing elsewhere parses fine and omits the bundle; that must refuse rather
+    than serve `/mcp` anonymously. Driven by pointing `connectors_dir` at an empty directory.
     """
     from chemclaw.connectors.registry import forget_discovered
     from chemclaw.connectors.server import _UNRESOLVED_AUTH, _declared_bearer_env
@@ -461,12 +392,10 @@ def test_a_shipped_bundle_that_discovery_missed_is_unresolved_not_unguarded(
 
 
 def test_an_app_no_bundle_backs_is_not_refused() -> None:
-    """Undiscovered is not undeclared — a synthetic app stays open, and that is the boundary.
+    """An app no bundle backs is not refused.
 
-    `connector_app` serves apps no bundle backs at all: every transport and identity test builds
-    one. Nothing was declared for those names, so there is no promise to betray and no token
-    anybody could present — failing closed there would only mean "fail closed always", which the
-    `mode: none` test above exists to prevent.
+    Synthetic apps (built by transport and identity tests) declare nothing, so there is no token to
+    present; refusing them would be "fail closed always".
     """
     from chemclaw.connectors.server import _declared_bearer_env
 
@@ -476,11 +405,10 @@ def test_an_app_no_bundle_backs_is_not_refused() -> None:
 def test_an_unresolved_connector_recovers_without_a_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_declared` caches a resolved answer, never the fail-closed sentinel.
+    """An unresolved connector recovers without a restart.
 
-    `_declared_bearer_env` promises the connector "answers 401 until an operator fixes the
-    manifest". Latching `_resolved` unconditionally made that "…and restarts the pod", because the
-    middleware never asked again — so the remedy the log line names did not work.
+    `_declared` caches a resolved answer, never the fail-closed sentinel, so fixing the manifest is
+    enough.
     """
     from chemclaw.connectors.server import _UNRESOLVED_AUTH, BearerAuthMiddleware
 
@@ -498,15 +426,11 @@ def test_an_unresolved_connector_recovers_without_a_restart(
 def test_a_non_ascii_authorization_header_is_refused_not_a_server_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`compare_digest` on `str` raises `TypeError` unless both sides are ASCII.
+    """A non-ASCII `Authorization` header is refused, not a server error.
 
-    Starlette decodes header bytes as latin-1, so one non-ASCII byte turned the auth boundary into
-    a 500 with a traceback that any remote party could produce at will — and made "fail closed" a
-    property of an exception handler upstream rather than of the branch written for it.
-
-    Driven through the middleware's own `dispatch` rather than `TestClient`, because httpx encodes
-    outgoing headers as ASCII and refuses to send the bytes a real server accepts. The scope is the
-    shape uvicorn builds: raw bytes, decoded latin-1 by Starlette.
+    `compare_digest` on `str` raises `TypeError` unless both sides are ASCII, and Starlette decodes
+    headers as latin-1. Driven through `dispatch` with a uvicorn-shaped scope, because httpx refuses
+    to send such bytes.
     """
     from starlette.requests import Request
 
@@ -540,24 +464,12 @@ def test_a_non_ascii_authorization_header_is_refused_not_a_server_error(
 
 
 def test_a_tool_reads_the_caller_of_the_call_it_serves_not_of_the_handshake() -> None:
-    """The identity a connector stamps on a durable row must be the one that asked for the row.
+    """A tool reads the caller of the call it serves, not of the handshake.
 
-    `CallerLogMiddleware` binds the caller in `dispatch`, an ASGI task — but a tool body runs in
-    the MCP session-manager task created by `initialize`, so the contextvar it read was whatever
-    the *handshake* set, for the whole life of the MCP session. Measured over the real
-    streamable-HTTP transport, handshaking with alice's headers and then calling the tool with
-    bob's on the same `mcp-session-id`: the tool body read
-    `('alice-oid', 'sess-alice', 'corr-alice')`. The middleware's own log line for that same call
-    printed bob, because it reads the headers directly — so the log and the durable row this
-    feature exists to reconcile disagreed with each other.
-
-    Two docstrings asserted the opposite ("each request runs in its own task context, so a
-    ContextVar set here is already invisible to the next one"; "so one request's identity cannot
-    leak into the next"). Both are corrected, and this is the test that keeps the corrected
-    version true.
-
-    Not a cross-user leak today — two independent MCP sessions showed no bleed — so what this
-    pins is attribution, which is exactly what `caller_provenance` exists to provide.
+    `CallerLogMiddleware` binds in the ASGI task, but tool bodies run in the MCP session-manager
+    task created at `initialize`, so the caller must be re-bound per call. Driven over the real
+    transport: handshake as alice, call as bob on the same session; the tool must read bob. This
+    pins attribution, which `caller_provenance` provides.
     """
     from fastapi.testclient import TestClient
 
@@ -626,20 +538,11 @@ def test_a_tool_reads_the_caller_of_the_call_it_serves_not_of_the_handshake() ->
 
 
 def test_every_bundle_this_repository_hosts_authenticates_its_own_mcp() -> None:
-    """A bundle we serve declares a credential — asserted over the manifests, not remembered.
+    """Every bundle this repository hosts authenticates its own MCP.
 
-    Four of the six endpoint-serving bundles shipped `auth: mode: none` (`bo`, `calc`, `molfp`,
-    `rxnfp`). The NetworkPolicy was the only thing between any pod in the namespace and a tool that
-    starts durable expensive work, and a NetworkPolicy selects peers rather than paths — so a
-    compromised
-    or merely curious neighbour in the same namespace could launch one.
-
-    Written as a sweep over the enabled set rather than a list of four names, because the failure
-    this guards against is the *fifth* bundle: a list would still pass the day someone adds one
-    with `mode: none`, which is exactly how the first four came to be that way.
-
-    `chem` and `safety` are covered by the same sweep and were already correct — their credential
-    belongs to `Chemclaw3-mcp`, which enforces it on its own `/mcp`.
+    A NetworkPolicy selects peers, not paths, so without a credential any pod in the namespace could
+    start durable work. A sweep over the enabled set, so a new bundle is covered. `chem` and
+    `safety` are enforced by `Chemclaw3-mcp` on its own `/mcp`.
     """
     from chemclaw.connectors.registry import enabled
 
@@ -661,12 +564,9 @@ def test_every_bundle_this_repository_hosts_authenticates_its_own_mcp() -> None:
 def test_a_shipped_manifests_declaration_is_what_the_gate_actually_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The declaration reaches the middleware: no token is a 401, the declared value is not.
+    """A shipped manifest's declaration is what the gate actually reads.
 
-    The other bearer tests here patch `_declared_bearer_env`, which proves the *gate* and says
-    nothing about whether a real `connector.yaml` reaches it. This one names a shipped bundle and
-    lets resolution run for real, so a manifest that stopped declaring a credential — or declared
-    one under a variable nothing sets — fails here rather than in a cluster.
+    Resolution runs for real on a shipped bundle: no token is a 401, the declared value is not.
     """
     from starlette.requests import Request
 
@@ -709,19 +609,12 @@ def test_a_shipped_manifests_declaration_is_what_the_gate_actually_reads(
 def test_the_probe_allowlist_survives_being_mounted_under_a_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/healthz` stays open when the app is mounted at `/<name>`, which is how dev serves it.
+    """The probe allowlist survives being mounted under a name.
 
-    Starlette does not strip a mount prefix from `scope["path"]` — it records it in `root_path` and
-    leaves the path whole — so an allowlist written against `/healthz` matches at the root and
-    silently stops matching under a mount. Each connector is its own Deployment in the cluster, so
-    the bug was invisible there; `chemclaw.cli.connectors_dev` mounts every bundle under its name,
-    which is what `make connectors`, the live lane and `tests/test_connector_transport.py` run.
-
-    It was invisible everywhere until the four bundles we host declared a credential, because
-    nothing was refused. With one declared, the readiness probe `connectors.health` makes against
-    `health_url` would have come back 401 and reported the whole fleet unreachable.
-
-    Driven at the scope level, mount prefix and all, because the shape is the whole point.
+    Starlette keeps the mount prefix in `scope["path"]` (recording it in `root_path`), so an
+    allowlist written for `/healthz` must also match `/<name>/healthz`, as
+    `chemclaw.cli.connectors_dev` mounts it. Otherwise the readiness probe gets 401 and reports the
+    fleet unreachable. Driven at scope level.
     """
     from starlette.requests import Request
 
@@ -761,16 +654,8 @@ def test_the_probe_allowlist_survives_being_mounted_under_a_name(
 def test_liveness_is_its_own_route_and_consults_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """`/livez` answers whenever the process serves HTTP, whatever else is wrong with it.
 
-    The chart pointed liveness and readiness at one route, `/healthz`, so a check that route ever
-    gained would have become a reason for the kubelet to kill the container — a restart that
-    repairs no dependency and discards every tool call in flight. `Chemclaw3-mcp` forbids that
-    shape fleet-wide for exactly this reason; this repository's own connector servers and the MCP
-    face now carry the same split.
-
-    Two properties, each driven: it is open without a credential even on a connector whose auth
-    could not be resolved (the fail-closed path refuses everything else), and it answers with the
-    app's lifespan never run — no MCP session manager and no Postgres pool — which is what
-    "consults nothing" means for this app.
+    Liveness on its own route, so a readiness check never becomes a kill. Asserted: open without a
+    credential even when auth could not be resolved, and answering with the lifespan never run.
     """
     from fastapi.testclient import TestClient
 
@@ -792,12 +677,10 @@ def test_liveness_is_its_own_route_and_consults_nothing(monkeypatch: pytest.Monk
 def test_the_dev_runner_mints_a_credential_only_where_both_ends_are_ours(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A token is invented for the bundles we serve, and never for someone else's server.
+    """The dev runner mints a credential only where both ends are ours.
 
-    `chem` and `safety` declare a bearer too, and that credential belongs to `Chemclaw3-mcp`.
-    Minting a random value for one would replace a clear `MissingConnectorCredential` naming the
-    unset variable with a 401 from a server that has never heard of the token — a worse failure,
-    and a slower one to diagnose. A secret is only ours to invent when both ends of the call are.
+    `chem` and `safety` credentials belong to `Chemclaw3-mcp`; minting one would replace a clear
+    `MissingConnectorCredential` with a confusing 401.
     """
     from chemclaw.cli.connectors_dev import bearer_token_envs, ensure_dev_tokens
 
@@ -818,12 +701,10 @@ def test_the_dev_runner_mints_a_credential_only_where_both_ends_are_ours(
 def test_an_operator_supplied_credential_is_kept_and_shell_quoted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An existing value survives untouched, and the printed export cannot break out of its quotes.
+    """An operator-supplied credential is kept and shell-quoted.
 
-    Both halves matter. Keeping the value is what lets a caller decide the secret and have both
-    processes agree on it. Quoting it is what stops a value carrying a `'` from ending the
-    assignment early and turning the rest of a *credential* into shell words — the output of
-    `--export-env` is `eval`ed by `infra/live/processes.sh`.
+    Keeping it lets both processes agree; quoting stops a `'` breaking out of the assignment, since
+    `--export-env` output is `eval`ed by `infra/live/processes.sh`.
     """
     from chemclaw.cli.connectors_dev import _export_lines, bearer_token_envs, ensure_dev_tokens
 
@@ -841,18 +722,11 @@ def test_an_operator_supplied_credential_is_kept_and_shell_quoted(
 
 
 def test_the_callers_entitlements_are_not_sent_to_a_connector() -> None:
-    """`X-Chemclaw-Roles` is gone and must not come back without a reader.
+    """The caller's entitlements are not sent to a connector.
 
-    `D-2026-08-26-an-entitlement-set-is-not-provenance`. An *absence* test, the shape
-    D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution established for a claim
-    with no producer, applied to the mirror case: a value with no consumer. It had one writer here
-    and, measured across this repository and `Chemclaw3-mcp`, no reader anywhere — while being the
-    one identity header with no bound on its size, carrying every AD group a user is in under
-    `entra_group_claims_as_roles` to every connector, including servers this family does not host.
-
-    Re-adding it is a decision, not a line: it needs a connector that reads it and an argument for
-    why an entitlement set is the thing that reader needs, given that a connector may never decide
-    on one.
+    `D-2026-08-26-an-entitlement-set-is-not-provenance`. `X-Chemclaw-Roles` had no reader anywhere,
+    was unbounded in size, and carried AD groups to servers this family does not host. Re-adding it
+    needs a reader and an argument, since a connector may never decide access on it.
     """
     identity = set_current_identity("user-1", frozenset({"process-chemist", "admin"}))
     session = set_current_session_id("session-abc")
@@ -867,14 +741,10 @@ def test_the_callers_entitlements_are_not_sent_to_a_connector() -> None:
 
 
 def test_two_concurrent_calls_on_one_session_each_read_their_own_caller() -> None:
-    """Parallel tool use puts two `tools/call`s in flight on one `mcp-session-id`.
+    """Two concurrent calls on one MCP session each read their own caller.
 
-    The per-call re-binding above was measured strictly sequentially — alice's handshake, then
-    one call as bob. `ToolNode` gathers a whole batch, so two calls can be in flight on the same
-    session at once, and if the SDK served them from one task the bind/reset pairs would
-    interleave: records mis-attributed, and `reset_caller`'s token reuse raising out of a
-    `finally` would fail the call outright. This pins that each in-flight call reads its own
-    headers — the property the fleet's whole identity story rests on under parallel batches.
+    `ToolNode` runs a batch in parallel on one session; if calls shared a task, the bind/reset pairs
+    would interleave and mis-attribute or fail.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -956,14 +826,10 @@ def test_two_concurrent_calls_on_one_session_each_read_their_own_caller() -> Non
 def test_the_dev_banner_does_not_echo_a_credential_the_operator_already_exported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--export-env` prints credentials because a caller `eval`s it. The banner is not that.
+    """The dev banner does not echo a credential the operator already exported.
 
-    `ensure_dev_tokens` did not distinguish a token it minted from one already in the environment,
-    and the *serving* path printed the same lines as a human-readable banner — so a real
-    `CHEMCLAW_*_MCP_TOKEN` an operator had exported for a staging connector was echoed verbatim to
-    stdout, which in any wrapped or CI invocation is a log. A minted dev token is worth printing:
-    it is random, ephemeral, and the point of printing it is that a second process needs it. A
-    credential the operator already holds is one they do not need told back to them.
+    `--export-env` prints credentials because a caller `eval`s it; the serving banner prints only
+    tokens it minted, since stdout is often a log.
     """
     from chemclaw.cli.connectors_dev import _export_lines, bearer_token_envs, ensure_dev_tokens
 
@@ -990,13 +856,10 @@ def test_the_dev_banner_does_not_echo_a_credential_the_operator_already_exported
 def test_a_connector_answers_the_address_it_is_configured_at_and_refuses_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In a cluster a connector is dialled by Service name; FastMCP's default refused that with 421.
+    """A connector answers the address it is configured at and refuses others.
 
-    `FastMCP(name)` turns on DNS-rebinding protection with a loopback-only `Host` allow-list, so a
-    front door calling `http://chemclaw-connector-molfp:8080/mcp` got `421 Misdirected Request` on
-    every call — measured on a kind cluster, every bundle unreachable on every turn while the probes
-    stayed green. The connector now also admits the address `connector_urls` gives it, and still
-    refuses a `Host` it was never configured at (the rebinding case the guard exists for).
+    `FastMCP(name)`'s DNS-rebinding guard admits loopback only, so a Service-name `Host` got 421.
+    The connector also admits its `connector_urls` address and still refuses an unconfigured `Host`.
     """
     from fastapi.testclient import TestClient
 
@@ -1016,19 +879,12 @@ def test_a_connector_answers_the_address_it_is_configured_at_and_refuses_others(
 
 
 def test_a_connector_pod_logs_the_caller_it_is_serving(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every record a connector writes carries the caller's correlation id, session and actor.
+    """A connector pod logs the caller it is serving.
 
-    `connectors/caller.py` bound the `X-Chemclaw-*` headers into its own contextvars and
-    `core.logging.ContextFilter` never read them, so in a `chemclaw-connector-<name>` pod every line
-    — the middleware's own request line and anything a tool body logged — carried
-    `correlation_id=- session_id=- actor=-`, and the request line's text omitted the id outright.
-    Measured before the fix through exactly this drive: all four records below said `-`.
-
-    Driven over the real transport rather than by calling `bind_caller`, because the half that
-    mattered is the tool body, which runs in the MCP session-manager task and not the ASGI one.
-    The handler carries the pair `configure_logging` installs, in its order, so the redaction half
-    is the one production runs: a header value holding a credential this process knows is scrubbed
-    from the identity fields in both the `%`-format and the JSON rendering.
+    Every record carries the caller's correlation id, session and actor via
+    `core.logging.ContextFilter`. Driven over the real transport, because tool bodies run in the MCP
+    session-manager task. The handler pair is the one `configure_logging` installs, so credentials
+    in header values are redacted in both renderings.
     """
     import logging
 
@@ -1052,10 +908,8 @@ def test_a_connector_pod_logs_the_caller_it_is_serving(monkeypatch: pytest.Monke
     capture.addFilter(ContextFilter())
     capture.addFilter(SecretRedactingFilter())
     tool_logger = logging.getLogger("tests.connector_probe_tool")
-    # An earlier test in the same process may have quietened or disabled these loggers, so they are
-    # opened here and restored after. `setLevel` rather than assigning `level`: only the method
-    # clears `logging`'s per-logger `isEnabledFor` cache, and a stale cached "INFO is off" from an
-    # earlier test is exactly what dropped the request line when this ran after the bearer tests.
+    # Earlier tests may have quietened these loggers, so they are opened here and restored after.
+    # `setLevel`, not assigning `level`: only the method clears the `isEnabledFor` cache.
     root = logging.getLogger()
     opened_loggers = [
         logging.getLogger(name)
@@ -1173,13 +1027,11 @@ def test_a_connector_pod_logs_the_caller_it_is_serving(monkeypatch: pytest.Monke
 
 
 def test_a_claimed_caller_is_log_attribution_and_never_an_identity() -> None:
-    """The headers reach the log context and stay out of the identity every gate reads.
+    """A claimed caller is log attribution, never an identity.
 
-    The log fix could have bound the `X-Chemclaw-*` values into `core.identity_context` and
-    `core.session_context` directly — and the read-only MCP face runs core's own tools behind this
-    same transport, where `get_current_actor` is the reader every authorization gate shares. So the
-    claimed caller has its own variable, and an identity this process bound itself still wins the
-    record's fields.
+    The read-only MCP face runs core tools behind this transport, where `get_current_actor` feeds
+    every authorization gate, so the claimed caller has its own variable and an identity this
+    process bound wins the record's fields.
     """
     import logging
 

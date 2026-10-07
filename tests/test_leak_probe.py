@@ -1,22 +1,9 @@
-"""What the in-process leak hunt measures, and what it refuses to conclude — `cli/leak_probe.py`.
+"""Tests for `cli/leak_probe.py`: what the leak hunt measures and what it refuses to conclude.
 
-The probe's own claim is that it drives the *real* front door, so most of it cannot run here: it
-needs `make live-up` (the mock LLM, Postgres, every connector), and faking that stack would produce
-exactly the measurement the module says is worthless — an earlier repro that faked the agent and
-the connectors found zero retention across 900 turns, and the leak was in the three things it had
-replaced. So `main` is deliberately not exercised below.
-
-What is exercised is everything `main` composes, each of which is a real measurement in its own
-right and none of which needs a live lane:
-
-- the two counters — resident set and live objects by type — checked against an independent
-  reading of the same quantity, because a probe whose instruments are wrong reports confidently;
-- `_drive`, against a real HTTP client and a stand-in front door, for the one number a leak hunt
-  cannot afford to have inflated: how many turns were actually *answered*;
-- `_sample`, including what `tracemalloc` is allowed to say and what it must leave out;
-- `report` and `leaks`, whose verdict is read off `soak_report.fit` rather than off two endpoints
-  (`tests/test_soak_report.py` holds the fit itself; what is held here is that this module defers
-  to it instead of growing a second opinion).
+`main` needs the live lane and is not exercised; faking the stack would measure nothing. What is
+tested is everything `main` composes: the RSS and live-object counters against independent
+readings, `_drive` against a stand-in front door (counting only answered turns), `_sample` and
+its `tracemalloc` filtering, and `report`/`leaks` deferring to `soak_report.fit` for the verdict.
 """
 
 import gc
@@ -45,12 +32,10 @@ class _Retained:
 
 @pytest.mark.skipif(not _STATUS.exists(), reason="no /proc; the probe reads Linux counters")
 def test_the_resident_set_agrees_with_the_kernel_s_own_kilobytes() -> None:
-    """`statm` reports pages of an unstated size, and the whole leak verdict is built on this.
+    """The resident set read from `statm` agrees with the kernel's `VmRSS` in kilobytes.
 
-    Read against `VmRSS`, which the kernel prints in kilobytes — an independent expression of the
-    same quantity. A wrong page size or the neighbouring `statm` field (total program size, several
-    times larger) would both pass an "is it a plausible number" check and put every RSS slope in
-    the report off by a constant factor.
+    A wrong page size or the neighbouring `statm` field would pass a plausibility check and skew
+    every RSS slope by a constant factor.
     """
     before = _vm_rss_kb()
     measured = cli._rss_kb()
@@ -92,11 +77,10 @@ def test_a_sample_reads_every_counter_at_one_moment() -> None:
 
 
 def test_a_traced_sample_names_what_grew_and_leaves_out_what_shrank() -> None:
-    """Growth since the baseline is the question; a freed allocation is not an answer to it.
+    """A traced sample lists what grew since the baseline and leaves out what shrank.
 
-    `compare_to` ranks by the *magnitude* of the change, so the 2 MB released below is the largest
-    entry in the comparison and would head the "largest growth" list — reported to a reader hunting
-    a leak as the biggest thing that grew, with a minus sign in front of it.
+    `compare_to` ranks by magnitude, so a large freed allocation would otherwise head the growth
+    list.
     """
     tracemalloc.start(5)
     try:
@@ -138,9 +122,8 @@ def _front_door(
 ) -> FastAPI:
     """A front door with the two routes the probe drives and nothing behind them.
 
-    Real routing over a real client, because what is under test is the driving loop — that a turn
-    is a fresh session plus a message into *that* session, and which of them counts as answered.
-    The app the probe drives in anger is `chemclaw.api.app`; standing that up needs the live lane.
+    Real routing over a real client, because the driving loop is under test: a turn is a fresh
+    session plus a message into that session, and only answered turns count.
     """
     app = FastAPI()
 
@@ -242,12 +225,10 @@ def test_a_single_batch_is_refused_rather_than_fitted() -> None:
 
 
 def test_the_per_turn_column_is_per_turn_and_the_verdict_is_per_batch() -> None:
-    """The two numbers a reader would otherwise conflate, and only one of them is trustworthy.
+    """The per-turn column divides by turns driven; the fit's slope is per batch.
 
-    `describe` fits against the batch index, so its slope is per batch; the column beside it
-    divides by the turns those batches actually drove. On this series they differ by 25×, which is
-    the batch size — printing the fit's slope in the per-turn column would say a turn retains
-    100 KB when it retains 4.
+    On this series they differ by the batch size, so printing the fit's slope as per-turn would
+    overstate retention 25-fold.
     """
     text = cli.report(_samples([1000.0, 1100.0, 1200.0, 1300.0, 1400.0]))
 
@@ -286,13 +267,10 @@ def test_a_type_the_first_batch_had_never_seen_counts_from_zero() -> None:
 
 
 def test_two_batches_at_the_same_turn_count_report_no_rate_rather_than_raising() -> None:
-    """A per-turn rate over zero turns is not a rate, and it is not a crash either.
+    """Two batches at the same turn count report no rate rather than raising `ZeroDivisionError`.
 
-    `report` is public and is the one durable artefact a leak hunt produces, so anything holding
-    `Sample`s can call it — a run whose last batch drove nothing, a caller replaying a truncated
-    JSONL. The series table has always guarded this divisor; the type table one block below it did
-    not, so such a series printed its header, its RSS row and half a type table and then raised
-    `ZeroDivisionError` out of the middle of the deliverable.
+    `report` is public and can be handed any `Sample` series, including one whose last batch drove
+    nothing; every per-turn divisor must be guarded.
     """
     samples = _samples([1000.0, 1400.0], step=100, types=[{"Session": 10}, {"Session": 30}])
     samples[-1].turns = samples[0].turns
@@ -318,11 +296,9 @@ def test_the_report_carries_the_last_allocations_and_drops_the_older_ones() -> N
 
 
 def test_the_verdict_is_the_fit_and_not_the_two_endpoints() -> None:
-    """The rule the soak's own record had to be rewritten twice to learn.
+    """The verdict is the fit, not the two endpoints.
 
-    This series ends 29 KB above where it started, which is what an endpoint comparison reports as
-    a leak, and it is alternating noise around a flat line. `fit` says so; anything reading the
-    first and last samples does not.
+    This series ends above where it started but is alternating noise around a flat line.
     """
     noisy = [100.0, 130.0, 95.0, 135.0, 98.0, 132.0, 101.0, 129.0]
     assert noisy[-1] > noisy[0]
@@ -343,11 +319,9 @@ class _Started(Exception):
 
 @pytest.fixture
 def parse_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace `logging.basicConfig` — `main`'s first statement after `parse_args` — with a marker.
+    """Replace `logging.basicConfig`, `main`'s first statement after `parse_args`, with a marker.
 
-    That one line is the boundary every test below is about: reaching it means argparse accepted
-    the arguments, and not reaching it means argparse refused them. Standing the real run up
-    instead would need the whole live lane, and a `--batch 0` run would never return at all.
+    Reaching it means argparse accepted the arguments; not reaching it means argparse refused them.
     """
     monkeypatch.setattr(logging, "basicConfig", _raise_started)
 
@@ -365,15 +339,11 @@ def test_a_run_that_could_never_end_is_refused_before_anything_starts(
     value: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`--batch 0` was an unbounded loop inside the tool built to account for unbounded growth.
+    """A zero or negative `--batch`/`--turns` is refused before anything starts.
 
-    `batch = min(args.batch, args.turns - done)` is zero, so `done` never advances, `while done <
-    args.turns` never ends, and each iteration appends another full type histogram — every live
-    object in the process, by name, forever. A negative batch walks `done` backwards into the same
-    loop. `--turns` is the bound on that loop, so a zero or negative one drives nothing and leaves
-    a single sample, which `report` can only refuse to fit.
-
-    These two flags only. `--warmup` counts turns as well and is *not* one of them — see below.
+    A zero batch never advances `done` (an unbounded loop appending a type histogram each pass), a
+    negative one walks it backwards, and a non-positive `--turns` leaves a single unfittable sample.
+    `--warmup` is not one of these flags.
     """
     with pytest.raises(SystemExit) as exit_code:
         cli.main([flag, value])
@@ -385,13 +355,7 @@ def test_a_run_that_could_never_end_is_refused_before_anything_starts(
 
 @pytest.mark.usefixtures("parse_only")
 def test_a_cold_start_is_a_run_the_probe_accepts() -> None:
-    """`--warmup 0` measures from a cold process, which is a question worth asking.
-
-    It is what puts the one-time costs the warm-up exists to exclude — the agent pool, each
-    connector's first session, the caches, the allocator's arenas — *inside* the fitted series
-    instead of ahead of it. Nothing about it is unbounded: `_drive(client, 0)` returns immediately,
-    the first sample is taken at turn 0, and `--turns` bounds the loop exactly as always.
-    """
+    """`--warmup 0` is accepted: it measures from a cold process, one-time costs included."""
     assert cli._non_negative("0") == 0
 
     with pytest.raises(_Started):

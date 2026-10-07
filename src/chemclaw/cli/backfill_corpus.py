@@ -1,28 +1,8 @@
-"""Write knowledge notes from a directory of existing documents (gap IDEA-6).
+"""Write knowledge notes from a directory of existing documents.
 
-The only ingestion path was the incremental, cursored ELN sync. A real deployment arrives with a
-decade of existing reports, SOPs and filings, and its first question is "make our existing documents
-answerable" — so the day-one experience of a correctly-installed Chemclaw was an empty graph.
-
-This is the batch driver. It reuses `chemclaw.agent.attachments`' parsers verbatim (one parsing
-implementation, not a second one that could drift) and routes every document through the same write
-path as every other machine-written note.
-
-**What makes it safe to run over a decade of documents changed, and the answer it changed to is the
-better one.** This paragraph used to say "a backfill proposes, humans review — nothing lands in the
-graph unreviewed", which stopped being true when the PR-gate was deleted
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), and would have been an unreviewed dump of
-thousands of notes if the safety had really rested there. It does not, and the reason is one
-paragraph down: this is a **deterministic transcription**, one note per document, verbatim. It
-infers nothing, so there is nothing for a reviewer to decide — the argument
-`D-2026-08-25-an-eln-transcription-is-data-not-a-claim` makes about an ELN entry, applied to a PDF.
-A backfill that summarized would be a different thing entirely and would need a different argument,
-which is exactly why it does not.
-
-**Deliberately one note per document, verbatim.** No summarizing, no fact extraction, no chunking.
-A backfill's job is to make existing documents *reachable*; deciding what they *mean* is the
-retrieval and synthesis layers' job, and an LLM-summarized backfill would put thousands of
-unreviewed paraphrases into the corpus — the fastest way to make a knowledge graph untrustworthy.
+One note per document, verbatim, through `chemclaw.agent.attachments`' parsers and the normal note
+write path. A deterministic transcription infers nothing, so there is nothing to review; summarizing
+would put unreviewed paraphrases into the corpus.
 
 Run: `python -m chemclaw.cli.backfill_corpus <directory> [--dry-run] [--tag PROJECT]`
 """
@@ -47,9 +27,8 @@ logger = logging.getLogger(__name__)
 def note_for_document(path: Path, raw: bytes, tags: list[str]) -> Note:
     """Build the `report` note for one source document (idempotent id, verbatim body).
 
-    The id is derived from the *content*, not the filename: re-running a backfill after a file is
-    renamed or moved must not mint a second note for the same document, and a byte-identical
-    rewrite of an existing note then makes a repeat run genuinely free.
+    The id derives from the content, not the filename, so a renamed or moved file does not mint a
+    second note and a repeat run is free.
     """
     attachment = parse_attachment(path.name, raw)
     return Note(
@@ -65,38 +44,18 @@ def note_for_document(path: Path, raw: bytes, tags: list[str]) -> Note:
 async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[int, int]:
     """Write a note per readable document; return `(written, skipped)`.
 
-    An unreadable or unsupported file is skipped with a WARNING, never fatal: a decade of documents
-    will contain formats this cannot parse, and one PDF must not abort a backfill of ten thousand
-    files (the reject-and-continue discipline the ELN sync uses).
+    An unreadable or unsupported file is skipped with a WARNING, never fatal, so one bad PDF cannot
+    abort a large backfill.
     """
     written = skipped = 0
-    # **A backfill batches and the conversational path does not**, which is the whole of what
-    # `docs/planning/BACKLOG.md` meant by "a backfill and an incremental sync want different write
-    # shapes". Measured: one commit and one push per note is 140.8 ms against a local remote on an
-    # empty corpus and 327.3 ms at a 10,000-note corpus against a real one, against 31.6 ms per note
-    # at ten to a commit and 8.5 at fifty. `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`
-    # declined batching for the *conversational* path on the product — a queued note is one a
-    # chemist cannot read yet — and that argument does not reach an operator command over a
-    # directory of existing documents, where nobody is mid-turn and the wait is for the whole run.
+    # A backfill batches commits; the conversational path does not, because there a queued note is
+    # one a chemist cannot read yet. An operator command over existing documents has nobody waiting
+    # mid-turn, and per-note commits are several times slower.
     submitter = BatchingNoteWriter(default_writer(), settings.backfill_commit_batch_size)
-    # **The trailing flush runs on both exits, and only one of them may swallow it.** Up to
-    # `batch_size - 1` notes are held in memory at every instant, so the flush shipped as a bare
-    # statement after the loop lost them to anything the inner `except` does not catch — a git
-    # failure, a `psycopg` error, a `KeyboardInterrupt` — *after* `written` had counted them and
-    # the log had reported each as written "(pending a batch)".
-    #
-    # **The first repair put it in a `finally` with a blanket `except`, and that was worse.**
-    # Measured through the real CLI with a failing inner writer: the loop completed, the flush
-    # raised, the exception was logged and swallowed, and `main` printed `wrote 4 note(s)` and
-    # returned **0** with nothing in git — the exact "reporting it as written" failure the
-    # paragraph above exists to prevent, now on the *common* path (a push rejection, an auth
-    # failure, a hook). Pre-fix that case at least exited non-zero.
-    #
-    # So the two exits are separated. When the loop finished, the flush is the last thing that can
-    # fail and its failure **is** the run's failure: it propagates. When the loop is already
-    # unwinding, the flush is best-effort — the run is ending badly, the original cause is the one
-    # an operator needs, and a flush that also raises would replace it — but it is still attempted
-    # and still logged, because dropping the batch in silence is what started all of this.
+    # Up to `batch_size - 1` notes are held in memory, so the trailing flush runs on both exits.
+    # When the loop finished, the flush's failure is the run's failure and propagates. When the loop
+    # is already unwinding, the flush is best-effort and logged, so it cannot replace the original
+    # cause.
     try:
         for path in sorted(p for p in directory.rglob("*") if p.is_file()):
             try:
@@ -109,9 +68,8 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
                 logger.info("would write %s from %s (%d chars)", note.id, path.name, len(note.body))
             else:
                 reference = await record_note(note, submitter)
-                # A batched write's reference is empty until its commit lands, so the per-note line
-                # says what it can: the note, its source, and that the commit is still pending. The
-                # batch's own reference is logged when it flushes.
+                # A batched write's reference is empty until its commit lands; the batch's reference
+                # is logged at flush.
                 logger.info(
                     "wrote %s from %s -> %s", note.id, path.name, reference or "(pending a batch)"
                 )
@@ -127,9 +85,8 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
         raise
     if not dry_run:
         outcome = await submitter.flush()
-        # Booked here because this commit lands on a call `record_note` never sees: the final
-        # partial batch is flushed by the driver, so without this the tail of every run would be
-        # missing from `chemclaw_notes_recorded_total`.
+        # Booked here because the final partial batch is flushed by the driver, which `record_note`
+        # never sees.
         count_notes_recorded(outcome)
         if outcome.written:
             logger.info("committed the final batch -> %s", outcome.reference)
@@ -139,12 +96,8 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: walk a directory and write one note per readable document.
 
-    **Not a proposal, and this said it was.** The summary line read "PR-gate one note per readable
-    document" and `--dry-run`'s help promised a run that opened no branch, both left behind by
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`: `record_note` commits onto the notes
-    repository's base branch, so a bare invocation writes one note per document straight into
-    `knowledge/`. That sentence is the one an operator reads while deciding whether the non-dry-run
-    is safe, which is why it is worth more than a wording fix.
+    Without `--dry-run`, `record_note` commits each note straight into `knowledge/` on the notes
+    repository's base branch.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path, help="Directory of documents to backfill.")

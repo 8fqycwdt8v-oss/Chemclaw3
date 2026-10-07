@@ -1,15 +1,7 @@
 """A calculation reaches an external database and can be queried out of it again.
 
-**The only test in this suite that assembles the whole path** — projector, outbox, drain, driver
-and the shipped DDL — and it exists because assembling it is what found the last two defects.
-Everything upstream of here tests one piece against a fixture I chose:
-
-- `test_publish_projection.py` calls `project()` directly, so it was green while nothing called it.
-- `test_publish_outbox.py` uses a stub sink, so it was green while the shipped driver could not
-  satisfy the shipped sink's own runtime check and every real delivery failed at the connect.
-
-Neither is wrong. Both are blind in the same direction, and this is the file that is not: it builds
-`SqlResultSink` over `PostgresWarehouse`, applies `schema/result-store/` to a *second* schema
+The only test assembling the whole path: projector, outbox, drain, driver and the shipped DDL. It
+builds `SqlResultSink` over `PostgresWarehouse`, applies `schema/result-store/` to a second schema
 standing in for a database this system does not own, and asks the questions in SQL.
 """
 
@@ -34,9 +26,7 @@ _STORE = "test_publish_e2e"
 async def _create_store(dsn: str) -> None:
     """Apply the shipped DDL and the generated registry seed to a fresh schema.
 
-    Exactly what a site does: `make sink-schema --all`, then apply. Loading them here rather than
-    hand-writing a fixture is deliberate — a fixture that drifted from the shipped files would test
-    a database nobody deploys.
+    As a site does, so the test cannot drift from what is deployed.
     """
     from chemclaw.cli.sink_schema import ddl, seed
 
@@ -50,12 +40,10 @@ async def _create_store(dsn: str) -> None:
 
 
 def _screen() -> SolventComparisonResult:
-    """A solvent comparison — the composite shape, and the one that decomposes.
+    """A solvent comparison: the composite shape, and the one that decomposes.
 
-    THF is named by its **alias** deliberately. `ALPB_SOLVENTS` accepts `thf` and
-    `tetrahydrofuran` and the name reaches the calculation key verbatim, so a store that kept the
-    given name answers "every reaction in THF" with a confident subset. The query below asks by the
-    canonical id, and it only returns this row because the alias table resolved it.
+    THF is named by its alias; the query asks by canonical id and returns this row only if the alias
+    table resolved it.
     """
     return SolventComparisonResult(
         reactants=["C=C", "C=CC=C"],
@@ -85,12 +73,9 @@ async def test_a_composite_reaches_an_external_database_and_answers_a_question(
 ) -> None:
     """Enqueue a composite the way a finished job does, drain it, then query it back out.
 
-    Three assertions, each about a claim the seam is built on:
-
-    1. **The composite arrives at all.** Its `calc_type` is `<connector>.<job>`, which matches no
-       projector prefix — only the `payload_kind` on the envelope routes it.
-    2. **The parts arrive with it**, edged back to the aggregate, so "what was ΔG in THF" is
-       answerable and not only "which solvent won".
+    1. **The composite arrives**: its `calc_type` matches no projector prefix, so `payload_kind`
+       routes it.
+    2. **The parts arrive with it**, edged back to the aggregate.
     3. **The alias resolves**, so the canonical-id query returns a run submitted under another name.
     """
     from chemclaw.durable import publish_results
@@ -201,18 +186,12 @@ async def _rows(conn: psycopg.AsyncConnection[Any], sql: str) -> list[Any]:
 async def test_a_same_named_table_in_another_schema_does_not_decide_the_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The probe asks `information_schema` by table *name*; the writes go through `search_path`.
+    """A same-named table in another schema does not decide the columns.
 
-    Unqualified, the two do not agree about which table they are talking about the moment the
-    target database holds a same-named relation in another schema the runtime role can see — an
-    archive of last year's shape, a staging copy, a second tenant. `found["calculation"]` becomes
-    the *union*, so the writer keeps a column the site's own table does not have and every
-    `calculation` row is refused by the server. The mirror case is worse: the DDL applied to a
-    schema that is not on `search_path` makes the "the target has no …" guard pass while every
-    write fails.
-
-    Reproduced here as the realistic half — a site one release behind, beside an archive schema
-    that still carries the column it dropped.
+    The column probe must use the schema writes resolve through via `search_path`; otherwise an
+    archive or staging copy elsewhere would union in columns the target lacks, or mask a missing
+    table. Reproduced as a site one release behind beside an archive that still has a dropped
+    column.
     """
     from chemclaw.publish.drivers.sql import SqlResultSink
     from chemclaw.publish.project import project
@@ -263,22 +242,11 @@ async def test_a_same_named_table_in_another_schema_does_not_decide_the_columns(
 
 
 async def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bound() -> None:
-    """The `schema:` a manifest writes reaches libpq's `options`, so it is an identifier or nothing.
+    """A manifest's `schema:` cannot smuggle a second libpq option past the timeout bound.
 
-    `PostgresWarehouse.__init__` range-checks `query_timeout_seconds` three lines before it builds
-    the options string, and its comment says why: `statement_timeout=0` is Postgres' spelling of
-    *no* timeout, so the check exists specifically to keep that value out. libpq splits `options`
-    on whitespace and the **last** `-c` wins, so a `schema` carrying a space set the very value the
-    check refuses — measured against this server before the fix:
-
-        options='-c statement_timeout=60000 -c search_path=public -c statement_timeout=0'
-        SHOW statement_timeout -> '0'
-
-    Both directions are asserted live rather than by reading the options string, because the string
-    is not the control: what the *server* ends up with is. Every other field of a `connection:`
-    block is checked — `_env` names against `check_env_name`, the whole block against the driver's
-    signature, every binding identifier against `check_identifier` — and this was the one that
-    reaches a process argument rather than a statement.
+    libpq splits `options` on whitespace and the last `-c` wins, so a `schema` containing a space
+    could set `statement_timeout=0`. It must be an identifier. Asserted against what the server
+    reports, not the options string.
     """
     from chemclaw.publish.connect import SinkConnectionError
     from chemclaw.publish.drivers.postgres import PostgresWarehouse
@@ -301,15 +269,10 @@ async def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bo
 
 
 async def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() -> None:
-    """The seed must name the id the projector derives, or it seeds a row nothing joins to.
+    """The seeded no-conditions row is the one the writer points at.
 
-    `condition_set` is content-addressed like every other key here: a calculator with no conditions
-    of its own publishes `Conditions()`, whose `condition_id` is a hash. The seed wrote the literal
-    `cond_unspecified` while the DDL comment told consumers that row is "the condition set every
-    calculator with no conditions of its own points at" — so a consumer following that advice
-    joined on a name no calculation has ever carried and got zero rows, forever, with a second
-    all-null row sitting beside it under the derived id. Asserted against a database with the
-    shipped DDL and seed actually applied, which is what the earlier claim would have survived.
+    `condition_set` is content-addressed, so the seed must use the derived id of `Conditions()`, or
+    consumers joining on it get nothing. Asserted with the shipped DDL and seed applied.
     """
     from chemclaw.publish.record import Conditions
 
@@ -330,18 +293,11 @@ async def test_the_seeded_no_conditions_row_is_the_one_the_writer_points_at() ->
 async def test_a_finished_job_publishes_the_note_it_produced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`calculation_publication` recorded four weak links to a run and dropped the structured one.
+    """A finished job publishes the note it produced.
 
-    That table exists to answer "what question was this meant to answer" — it carries the session,
-    the job, the actor, the correlation id and the rationale. `job_records.note_id` holds the note a
-    finished connector job's envelope produced, written by `finished_job_record` from the same
-    `ConnectorJobResult` that `_publish_result` is handed, and both publish paths had it in hand and
-    did not carry it (`D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`).
-
-    Driven through the **real workflow**, on a real broker, because the producer is the thing under
-    test: a test that built a `Publication` itself would assert that a field it filled arrives,
-    which is true of a field nothing fills. The fixture job returns a note with a known id, so what
-    the outbox holds afterwards is either that id or the empty string the seam shipped with.
+    `D-2026-09-13-a-publication-carries-the-link-the-system-already-holds`. Driven through the real
+    workflow on a real broker, because the producer is under test; the fixture job returns a note
+    with a known id.
     """
     from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
@@ -397,24 +353,12 @@ async def test_a_finished_job_publishes_the_note_it_produced(
 
 # --- The drain's round trips -------------------------------------------------------------------
 #
-# `SqlResultSink.deliver` groups a whole batch into one statement per `(table, column set)` and
-# sends each with all of its parameter sets through `execute_many`. That helper only reaches
-# psycopg's pipeline when the driver's cursor offers `executemany` — an *optional* capability,
-# because `D-2026-08-26-the-driver-s-signature-is-the-schema` means a site brings its own driver
-# and this repository cannot require a method of a class it does not ship.
-#
-# `_CountingCursor` and `_BatchingCursor` below exist to *count* round trips, and nothing else:
-# both delegate to the shipped driver's own cursor, which is `_PostgresCursor`. That is the whole
-# of this comment's history and the reason it was rewritten — it used to say the batching cursor
-# was a copy of `_PostgresCursor` kept here "only because nothing in this tree has claimed that
-# file yet", and that file had claimed it since the commit that added it. The copy reached past
-# the wrapper into the raw psycopg cursor, so these tests exercised the test's own code and no
-# production code: driven, `_PostgresCursor.executemany` could be **deleted** and all 286 publish
-# tests still passed, over the method whose own commit message says the batching change was inert
-# in production without it.
-#
-# The three tests below now go through it, so deleting it turns them red — two by the sink
-# reaching a cursor that no longer offers the capability, and one by naming it outright.
+# `SqlResultSink.deliver` groups a batch into one statement per `(table, column set)` and sends each
+# through `execute_many`, which uses psycopg's pipeline only when the driver's cursor offers the
+# optional `executemany` (a site brings its own driver,
+# `D-2026-08-26-the-driver-s-signature-is-the-schema`). `_CountingCursor` and `_BatchingCursor` only
+# count round trips and delegate to the shipped `_PostgresCursor`, so these tests exercise
+# production code.
 
 _ROUND_TRIPS: dict[str, int] = {"execute": 0, "executemany": 0}
 
@@ -438,16 +382,11 @@ class _CountingCursor:
 
 
 class _BatchingCursor(_CountingCursor):
-    """`_CountingCursor` plus the presence of the one method that makes N statements one round trip.
+    """`_CountingCursor` plus the method that makes N statements one round trip.
 
-    It counts and delegates. The JSON adaptation, the pipeline call and the error mapping are all
-    `_PostgresCursor.executemany`'s — which is the point: a wrapper that reimplemented them would
-    make every assertion below a claim about this file, and that is exactly what it was.
-
-    Declaring the method here is still what decides whether the capability is *offered*, since
-    `execute_many` probes a `runtime_checkable` Protocol and so tests member presence on the object
-    the sink holds. That is what lets the `batching=False` arm below be the same driver with the
-    capability withheld, which is the comparison the round-trip counts rest on.
+    It only counts and delegates to `_PostgresCursor.executemany`. Declaring the method decides
+    whether the capability is offered (`execute_many` probes a `runtime_checkable` Protocol), so the
+    `batching=False` arm is the same driver with it withheld.
     """
 
     async def executemany(self, sql: str, params_seq: Any) -> None:
@@ -494,18 +433,10 @@ def _records(count: int) -> list[Any]:
 async def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same batch, through a driver that can batch and one that cannot, lands the same rows.
+    """A batch is one statement per table and column set, not one per row, and lands the same rows.
 
-    **The round-trip counts are the measurement and the assertion.** Twenty records here are 300
-    statements row-at-a-time and 9 batched — nine because `_batches` groups table-major across the
-    *whole* batch rather than per record, which is the difference between 9 and 180. On the full
-    `result_publish_batch_size` of 100 the same shape measured, over three runs each, 1 500 round
-    trips and 5.55-5.68 s row-at-a-time against 9 and 0.34-0.48 s batched on this server; twenty is
-    used here because the point is the ratio and a test is not a benchmark.
-
-    Asserted as a bound rather than as an equality, because the exact count is a function of how
-    many distinct column sets the projector emits and a new optional column would move it without
-    anything being wrong.
+    `_batches` groups table-major across the whole batch. Asserted as a bound on round trips, since
+    a new optional column would change the exact count without anything being wrong.
     """
     await migrated_db_or_skip()
     dsn = settings.postgres_dsn
@@ -563,19 +494,10 @@ async def test_a_batch_is_one_statement_per_table_and_column_set_not_one_per_row
 
 
 async def test_the_shipped_postgres_cursor_is_what_offers_the_batching_capability() -> None:
-    """`_PostgresCursor` is the object `execute_many` probes, and this is what says so.
+    """The shipped `_PostgresCursor` is what offers the batching capability.
 
-    The two tests above count round trips through a wrapper, and a wrapper can be wrong about what
-    it wraps: before this, `_BatchingCursor` reached past `_PostgresCursor` into the raw psycopg
-    cursor, so the batching *tests* were green over a production method that could be deleted
-    outright — 286 publish tests still passed with it gone, over the method whose own commit says
-    the batching change was inert in production without it.
-
-    So this one names the class, takes its real cursor, and drives `execute_many` over it: the
-    `isinstance` is the same `runtime_checkable` probe `execute_many` performs, and the rows are
-    what say the pipeline call actually ran rather than merely being offered. Deleting
-    `_PostgresCursor.executemany` fails the probe here and the `execute_many` call in the two tests
-    above, which is the point of writing it three times over.
+    Names the class, runs the same `isinstance` probe `execute_many` does, and checks the rows
+    landed, so deleting `_PostgresCursor.executemany` fails here and in the two tests above.
     """
     await migrated_db_or_skip()
     dsn = settings.postgres_dsn
@@ -615,17 +537,11 @@ async def test_the_shipped_postgres_cursor_is_what_offers_the_batching_capabilit
 
 
 async def test_a_refused_row_inside_a_batch_is_still_named_with_its_table_and_calc_ref() -> None:
-    """A batch shares a failure; the error must not. Driven with one poisoned row in a group.
+    """A refused row inside a batch is still named with its table and `calc_ref`.
 
-    `SinkRejectedError` naming the table and the `calc_ref` is what an operator acts on, and it is
-    also a retry contract: `durable/publish.py` marks it non-retryable **by class name**, and
-    `_drain_one` reads anything that is not a `SinkUnavailableError` as one record's fault and
-    replays the batch a record at a time. A group-level message would have kept both behaviours
-    and lost the only part of them that identifies the row.
-
-    The poison is a CHECK constraint the test adds, because that is the shape of the real fault
-    this arm exists for — a site whose store refuses a value this release writes — and it fails one
-    row of a group whose other rows are perfectly good.
+    `SinkRejectedError` is non-retryable by class name, and `_drain_one` replays a batch one record
+    at a time on it, so the error must identify the row. The poison is a test-added CHECK
+    constraint, the shape of a site's store refusing a value this release writes.
     """
     await migrated_db_or_skip()
     dsn = settings.postgres_dsn

@@ -1,9 +1,7 @@
 """The Postgres sink cursor adapts and maps errors identically on its single and batched paths.
 
-`executemany` used to carry its own copy of `execute`'s `Jsonb` comprehension and its own copy of
-the error mapping, so an adaptation added to one would make the batched drain fail and fall back
-to row-by-row replay. Both now go through `_adapted` and `_mapped_errors`; these tests drive both
-paths over a fake psycopg cursor and assert the same answers, so a divergence is red.
+Both go through `_adapted` and `_mapped_errors`; driven over a fake psycopg cursor so a divergence,
+which would push the drain into row-by-row replay, is red.
 """
 
 import asyncio

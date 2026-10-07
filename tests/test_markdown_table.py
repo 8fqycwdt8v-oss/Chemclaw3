@@ -1,24 +1,11 @@
-r"""The one Markdown table renderer, and the two things it is for.
+r"""The one Markdown table renderer (`core.markdown`), and the two properties it guarantees.
 
-`core.markdown` exists because ~21 places in this tree built a table out of f-strings and agreed
-only on the pipe character. Most of what it consolidated was style — a delimiter row spelled
-`|---|` against `| --- |`, a header cased one way here and another there — and none of that is
-worth a test. Two things are, because they are the reason the consolidation was not a library:
+* A cell can fill a cell and never add one: a `|` from an ELN field, a quoted tool result or an
+  exception message must not shift later values under the wrong heading.
+* A cell says what the record said: the backslash is escaped before the pipe, or a GFM reader
+  consumes a backslash the source wrote.
 
-* **A cell can fill a cell and never add one.** Three of the twenty-one sites escaped their cells
-  and the rest did not, so a `|` arriving from an ELN field, a tool result quoted into a probe
-  report or an exception's message rendered as *more table* — silently shifting every value after
-  it under the wrong heading. `tests/test_optimization.py` holds that for the campaign note, where
-  the rule was first written; this file holds it for the renderer and for the report writers that
-  had no rule at all.
-* **A cell says the same thing the record said.** Escaping the pipe without escaping the backslash
-  first does not break the column count — a GFM splitter treats any `|` behind a backslash as
-  escaped whatever precedes it — but it eats a backslash the source wrote. That is the half the
-  campaign note's own escaping got wrong and the run sheet's got right, so it is asserted rather
-  than left to whichever call site is read next.
-
-Cells are split the way `tests/test_optimization.py` splits them: on *unescaped* pipes only, since
-counting an escaped one as a boundary is the misreading the escaping exists to prevent.
+Cells are split on unescaped pipes only, as in `tests/test_optimization.py`.
 """
 
 from __future__ import annotations
@@ -61,11 +48,9 @@ def test_the_delimiter_row_carries_the_declared_alignment() -> None:
 
 
 def test_a_header_with_no_rows_still_renders_its_header() -> None:
-    """A header with no rows says the question was asked.
+    """A header with no rows still renders its header, saying the question was asked.
 
-    "Asked and nothing came back" is a different claim from "not asked", and only the caller knows
-    which is true — so the renderer does not decide it, and `protocols.render._table` and
-    `cli.live_data.report` each say their own version in their own words.
+    Whether "nothing came back" needs saying is the caller's decision, not the renderer's.
     """
     assert render_table(["a"], []) == "| a |\n| --- |"
 
@@ -90,11 +75,10 @@ def test_a_row_that_does_not_match_the_headers_raises() -> None:
 
 
 def test_an_empty_cell_is_the_one_spelling_of_absence() -> None:
-    """A blank cell reads as a measured nothing; `MISSING` reads as a record that is silent.
+    """An empty cell is the one spelling of absence.
 
-    One spelling, because `memory.comparison.drop_empty_columns` decides a column is empty by
-    comparing rendered cells against it — a second spelling would make a column of blanks survive
-    the check that exists to remove it.
+    `memory.comparison.drop_empty_columns` compares rendered cells against it, so a second spelling
+    would let a column of blanks survive.
     """
     assert cells(render_table(["a", "b"], [["", "  "]]).splitlines()[2]) == [MISSING, MISSING]
 
@@ -121,12 +105,10 @@ def test_a_newline_in_a_cell_cannot_add_a_row() -> None:
 
 
 def test_a_backslash_survives_the_pipe_escaping() -> None:
-    r"""`x\|y` must come back as `x\|y`, not as `x|y`.
+    r"""`x\|y` comes back as `x\|y`, not `x|y`: the backslash survives the pipe escaping.
 
-    Escaping the pipe alone leaves the source's own backslash adjacent to the escape this adds, and
-    a GFM reader spends it on the escape: measured through markdown-it-py's GFM tables, pipe-only
-    escaping rendered `x\|y` as `x|y` and `\\` as `\`. The column count was never the casualty —
-    the text was, which is the property the escaping was written to protect.
+    Pipe-only escaping leaves the source backslash adjacent to the added escape, and a GFM reader
+    spends it; the text, not the column count, is the casualty.
     """
     assert placeable(r"x\|y") == r"x\\\|y"
     assert placeable("\\") == "\\\\"
@@ -144,11 +126,10 @@ def test_whitespace_in_a_cell_collapses_to_one_line() -> None:
 
 
 def test_a_tool_result_quoted_into_a_job_report_cannot_shift_its_columns() -> None:
-    """A connector's own output reaches a report cell, and it is not this system's text.
+    """A tool result quoted into a job report cannot shift its columns.
 
-    `cli/live_storm.py` puts the first 70 characters of a tool's own result into an `observed`
-    field, and `cli/live_jobs.py` renders that field in a three-column table. Measured before this
-    consolidation: ``result[0]='a | b'`` produced a row of **4** cells under a header declaring 3.
+    `cli/live_storm.py` puts a tool's own output into `observed`, which `cli/live_jobs.py` renders
+    in a table; a `|` in it must stay inside its cell.
     """
     run = SmokeRun(workflow_id="wf-1", seconds=1.0)
     run.checks = [JobCheck(name="tool result", passed=True, observed="result[0]='a | b'")]
@@ -168,11 +149,10 @@ def test_a_corpus_check_cannot_shift_the_columns_of_the_fidelity_report() -> Non
 
 
 def test_provenance_pipes_stay_inside_their_cell_in_the_eval_report() -> None:
-    """The one report that always escaped: `precision`'s provenance carries set-cardinality bars.
+    """Provenance pipes stay inside their cell in the eval report.
 
-    Kept as a test of the shared renderer rather than of the deleted private `_cell`, and extended
-    with the change this consolidation made deliberately — a metric with no unit renders `MISSING`
-    rather than a blank, because a blank is a second spelling of absence.
+    `precision`'s provenance carries set-cardinality bars. A metric with no unit renders `MISSING`,
+    since a blank would be a second spelling of absence.
     """
     report = EvalReport(
         case_set_version="v1",

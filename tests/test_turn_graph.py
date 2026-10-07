@@ -1,12 +1,8 @@
 """The turn graph: peers, the handoff that moves between them, and the bounds on both.
 
-**What this file is for, above any individual assertion.** Peer handoff is the one arrangement in
-this tree where an agent's surface is decided by something other than its immediate caller, so the
-assertions that matter are the ones about *arithmetic*: that a peer's surface is a subset of the
-root's, whatever the roster says, and that a chain of any length is still bounded by the root. A
-number would rot; the inequalities cannot.
-
-The multi-hop test is the centre of it. Everything else here is a bound on a way that could fail.
+A peer's surface is decided by the root rather than its immediate caller, so the key assertions
+are inequalities: a peer's surface is a subset of the root's whatever the roster says, and a
+chain of any length stays bounded by the root.
 """
 
 import asyncio
@@ -53,11 +49,10 @@ def _profile(name: str, tools: set[str] | None) -> AgentProfile:
 
 
 def test_a_peer_cannot_reach_a_tool_the_root_does_not_hold() -> None:
-    """The invariant that replaces `D-2026-08-10`'s "attenuation of its caller", as arithmetic.
+    """A peer cannot reach a tool the root does not hold.
 
-    A profile naming a tool the root lacks does not get it. This is the whole safety argument for
-    peer handoff and it is one line of set algebra, which is the point: there is no code path that
-    *adds* a name, so no review has to check that nobody added one.
+    A profile naming a tool the root lacks does not get it; the surface is set intersection, so no
+    code path adds a name.
     """
     root = frozenset({"find_notes", "screen_hazards"})
     greedy = _profile("greedy", {"find_notes", "start_optimization_campaign", "record_answer"})
@@ -71,9 +66,7 @@ def test_a_peer_cannot_reach_a_tool_the_root_does_not_hold() -> None:
 def test_a_profile_that_narrows_nothing_narrows_to_nothing_as_a_peer() -> None:
     """`tool_names is None` means "does not narrow" for a session profile and nothing for a peer.
 
-    The alternative reading hands a peer the root's entire surface under a name that promises
-    something specific, which is `D-2026-08-12`'s identical-menu defect with worse consequences:
-    the menu would differ while the surfaces did not.
+    Otherwise a peer would get the root's whole surface under a name promising something specific.
     """
     assert _peer_surface(frozenset({"a", "b"}), _profile("vague", None)) == frozenset()
 
@@ -149,9 +142,8 @@ def test_two_peers_of_one_name_are_refused_at_build_time() -> None:
         handoff_tools(peers, current="other", menu_tools=12, max_handoffs=3)
 
 
-# --------------------------------------------------------------------------------------------
-# The cap
-# --------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------- The
+# cap --------------------------------------------------------------------------------------------
 
 
 def test_the_cap_refuses_rather_than_ending_the_turn() -> None:
@@ -219,11 +211,10 @@ def test_a_roster_that_survives_to_one_peer_builds_no_mesh(monkeypatch: Any) -> 
 
 
 def test_a_helper_holds_no_handoff_tool() -> None:
-    """A `task` helper cannot hand the conversation anywhere, by construction.
+    """A `task` helper holds no handoff tool, by construction.
 
-    `_subagents` passes no `handoffs=`, so there is no set to subtract from and no name anybody can
-    forget — which is the difference between this and the `SPEAKS_TO_THE_CHEMIST` shape. Driven on
-    a compiled graph rather than asserted about the source, because what is bound is the question.
+    `_subagents` passes no `handoffs=`. Driven on a compiled graph, since what is bound is the
+    question.
     """
     helper = build_langgraph_agent(
         ScriptedChatModel(["done"]),
@@ -242,14 +233,8 @@ def test_a_helper_holds_no_handoff_tool() -> None:
 # --------------------------------------------------------------------------------------------
 
 
-#: A connector tool no rostered peer's profile names, so the mesh every test here compiles is one
-#: where the connector half of the bound is *load-bearing*.
-#:
-#: **`connectors=[]` is why the root-bound invariant test was green over a live leak.** With no open
-#: connector tools, `_peer_connectors` has nothing to filter and `connectors=connectors` — dropping
-#: the narrowing entirely — is indistinguishable from the shipped line. Driven with the shipped
-#: `safety` profile and one open tool, the unfiltered form binds `similar_reactions` onto a peer
-#: whose profile names it nowhere.
+#: A connector tool no rostered peer's profile names, so the connector half of the peer bound is
+#: exercised; with `connectors=[]` dropping the narrowing would be undetectable.
 MESH_CONNECTOR = "similar_reactions"
 
 
@@ -265,13 +250,9 @@ def _connector_tool(name: str) -> Any:
 def _mesh(monkeypatch: Any, scripts: dict[str, Any], checkpointer: Any | None = None) -> Any:
     """A compiled turn graph whose peers replay the given scripts, keyed by peer name.
 
-    **The peers carry harness fields and the mesh is built with an open connector tool**, because
-    both halves of `_peer_profile`'s bound are invisible without them: a peer profile that sets
-    neither harness field cannot show the gate moving, and an empty `connectors=` cannot show a
-    connector reaching a peer that does not name it.
-    `checkpointer` is optional because only one assertion needs one: that a dry-run turn does not
-    *durably* move `active_agent`, which is a claim about what the saver holds afterwards rather
-    than about the state the invocation returns.
+    Peers carry harness fields and the mesh has an open connector tool, so both halves of
+    `_peer_profile`'s bound are observable. `checkpointer` is optional; one test needs it to check
+    what the saver holds for `active_agent` afterwards.
     """
     from chemclaw.agent import profiles as profiles_module
 
@@ -326,17 +307,12 @@ def _mesh(monkeypatch: Any, scripts: dict[str, Any], checkpointer: Any | None = 
 def test_a_turn_hands_twice_and_the_thread_stays_well_formed(monkeypatch: Any) -> None:
     """**The multi-hop scenario.** default → evidence-peer → safety-peer, in one turn.
 
-    Three things are asserted together because they fail together:
-
-    1. **Control actually moves twice.** Each peer runs, in order, and the last one answers.
-    2. **Every tool call has its answer.** A `Command(graph=PARENT)` terminates the inner agent
-       without merging its state, so a handoff that returned only its `ToolMessage` would leave the
-       parent holding an orphan whose `tool_call_id` matches nothing — and an OpenAI-compatible
-       endpoint rejects that thread on the *next* request, which surfaces as a bug in whichever
-       agent happens to be holding the conversation by then. Measured both ways before the fix
-       existed; `agent/handoff.py` has the two message lists.
-    3. **The turn's answer is the last peer's**, not a relayed report. That is the difference
-       between a handoff and `task`, and `answer_text` is what a caller reads.
+    1. **Control moves twice.** Each peer runs in order and the last one answers.
+    2. **Every tool call has its answer.** `Command(graph=PARENT)` does not merge the inner agent's
+       state, so the handoff carries its message list up; an orphaned `tool_call_id` would make an
+       OpenAI-compatible endpoint reject the thread on the next request.
+    3. **The turn's answer is the last peer's**, not a relayed report, which distinguishes a handoff
+       from `task`.
     """
     graph = _mesh(
         monkeypatch,
@@ -365,11 +341,10 @@ def test_a_turn_hands_twice_and_the_thread_stays_well_formed(monkeypatch: Any) -
 
 
 def _structural_tools() -> frozenset[str]:
-    """What a compiled agent binds regardless of what its profile names — the middleware floor.
+    """What a compiled agent binds regardless of its profile: the middleware floor.
 
-    Compiled rather than written down, so `SubAgentMiddleware`, `TodoListMiddleware` and the
-    scratchpad verbs stay out of every surface comparison in this file without any of them being
-    named here. A profile naming *nothing* is the derivation: anything still bound is structural.
+    Derived by compiling an agent whose profile names nothing, so middleware tools stay out of every
+    surface comparison without being listed.
     """
     floor = build_langgraph_agent(
         ScriptedChatModel(["unused"]),
@@ -383,26 +358,12 @@ def _structural_tools() -> frozenset[str]:
 def test_a_dry_run_turn_is_refused_the_handoff_and_leaves_the_conversation_where_it_was(
     monkeypatch: Any,
 ) -> None:
-    """A turn the chemist marked "do nothing" may not decide who answers every later turn.
+    """A dry-run turn is refused the handoff and leaves the conversation where it was.
 
-    `agent/handoff.py` opens by stating that a handoff "lands in the audit trail as a row, passes
-    the authorization gate, **is refused under dry-run**, and is counted by `repeat_guard`". Three
-    of those four were true. Measured with `set_dry_run(True)`: `dry_run_refusal` returned `None`
-    for every `transfer_to_<peer>`, because it gates on `authz.side_effecting_call` and a handoff
-    was in
-    neither of that predicate's halves — not in `side_effecting_tools()`, which cannot name a tool
-    minted per peer at build time, and not in the argument-driven half, which reads a `file_path`.
-
-    **And the consequence is durable, which is why this test drives a whole turn against a
-    checkpointer rather than asserting the predicate.** `active_agent` is a checkpointed channel
-    precisely so a later turn resumes with whoever holds it. Measured before the fix: turn 1 under
-    `dry_run=True` came back `handoffs=1`, and the checkpoint carried `active_agent='p-right'` — so
-    the conversation was reassigned by the one kind of turn that promises, in the refusal text on
-    that same turn, that "Nothing was started".
-
-    The other direction is asserted too: the turn still *answers*. A dry-run refusal is an ordinary
-    tool result the model reads, so the agent that was already holding the conversation says what it
-    would have done, which is what `dry_run_refusal`'s own `sanctioned_path` tells it to do.
+    `active_agent` is checkpointed so later turns resume with whoever holds it, so a dry-run handoff
+    would durably reassign the conversation. A handoff is minted per peer and reads no `file_path`,
+    so it needs its own dry-run predicate. Driven over a whole turn against a checkpointer; the turn
+    still answers, since the refusal is an ordinary tool result.
     """
     from langgraph.checkpoint.memory import InMemorySaver
 
@@ -459,13 +420,10 @@ def test_a_dry_run_turn_is_refused_the_handoff_and_leaves_the_conversation_where
 
 
 def test_a_handoff_is_counted_by_the_repeat_guard() -> None:
-    """The fourth claim in that sentence, which nothing had instrumented either.
+    """A handoff is counted by the repeat guard.
 
-    `agent/handoff.py` claims a handoff "is counted by `repeat_guard`". It is — the guard keys on
-    `(name, arguments)` with no exemption list, so a peer bounced at with one unchanged `reason`
-    earns the same refusal any repeated tool call does. Asserted rather than assumed because the
-    three claims beside it were checked and one of them was false: a sentence whose neighbours were
-    wrong is not evidence about itself.
+    The guard keys on `(name, arguments)` with no exemption list, so a repeated handoff with one
+    unchanged `reason` is refused like any repeated call.
     """
     from chemclaw.agent.repeat_guard import begin_call_watch, count_call, end_call_watch
     from chemclaw.core.config import settings
@@ -486,11 +444,10 @@ def test_a_handoff_is_counted_by_the_repeat_guard() -> None:
 
 
 def test_the_second_hop_is_bounded_by_the_root_not_by_the_first(monkeypatch: Any) -> None:
-    """A chain re-widening after a narrowing is the shape a mesh reaches and a tree cannot.
+    """The second hop is bounded by the root, not by the first.
 
-    `C ⊆ B ⊆ A` is what a pairwise rule promises and it says nothing about a fourth hop. This
-    asserts the stronger thing directly: every compiled peer's bound surface is a subset of the
-    root's, so the chain is bounded by its first frame however long it gets.
+    A pairwise rule says nothing about a chain re-widening; every compiled peer's surface must be a
+    subset of the root's.
     """
     graph = _mesh(
         monkeypatch,
@@ -516,20 +473,14 @@ def test_the_second_hop_is_bounded_by_the_root_not_by_the_first(monkeypatch: Any
             f"peer {name!r} binds {sorted(capability - root)}, which the root does not hold — "
             "the root-bound invariant is broken and a handoff has become a widening"
         )
-        # **`⊆ root` alone cannot see a connector leak, and that is why one shipped.** The root
-        # binds every open connector tool by definition, so a peer that took the whole
-        # `connectors=` list untouched is still a subset of the root and still holds a tool its own
-        # profile names nowhere. The named bound is the one `_peer_surface` promises, and it is the
-        # one a *chemist* reads the roster entry as: `root ∩ what this profile names`.
+        # `⊆ root` alone cannot see a connector leak, since the root binds every open connector
+        # tool. The named bound is `root ∩ what this profile names`, which is what a chemist reads
+        # the roster as.
         if name == "default":
             continue
         named = profiles_module.get_profile(name).tool_names or frozenset()
-        # The middleware floor is subtracted rather than listed: `write_todos`, `task` and the
-        # scratchpad verbs are attached by middleware whatever a profile names, so they are not part
-        # of the surface `tool_names` decides and cannot be evidence of a leak. Derived by compiling
-        # an agent whose profile names nothing and which holds no connectors — everything it binds
-        # is structural by construction, so a middleware added next year carries the set instead of
-        # reding this.
+        # The middleware floor is subtracted rather than listed: those tools are attached whatever a
+        # profile names, so they are not evidence of a leak.
         capability -= _structural_tools()
         assert capability <= (root & named), (
             f"peer {name!r} binds {sorted(capability - (root & named))}, which its own profile "
@@ -560,17 +511,11 @@ def _bound_handoffs(graph: Any) -> set[str]:
 
 
 def test_every_handoff_a_mesh_binds_is_a_name_the_agent_advertises(monkeypatch: Any) -> None:
-    """`available_tool_names()` carries every handoff a compiled mesh binds — read off the graph.
+    """`available_tool_names()` carries every handoff a compiled mesh binds, read off the graph.
 
-    **The subject is the names the mesh really bound, not the names a function says it mints.**
-    `handoff_tool_names` is compared against the tool node of every peer `build_turn_graph`
-    compiled, so the root's hand-back tool (minted by the *other* peers, for a profile the roster
-    never names) is inside the set being checked. A version that unioned only the roster would
-    pass a roster-only fixture and miss exactly that name.
-
-    Why it matters: `cli/mock_llm._validate` refused any scripted call outside this union, so the
-    delegation suite's peer arm could not record the one act it exists to observe. The second half
-    drives that validator with every bound name.
+    Compared against every compiled peer's tool node, so the root's hand-back tool (minted by the
+    other peers) is included. `cli/mock_llm._validate` refuses scripted calls outside this union, so
+    the second half drives it with every bound name.
     """
     from chemclaw.agent.chemclaw_agent import available_tool_names
     from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall
@@ -604,13 +549,10 @@ def test_every_handoff_a_mesh_binds_is_a_name_the_agent_advertises(monkeypatch: 
 def test_the_handoff_names_do_not_depend_on_whether_profiles_were_discovered(
     monkeypatch: Any,
 ) -> None:
-    """A process that never ran discovery advertises the same hand-backs a real mesh binds.
+    """The handoff names do not depend on whether profiles were discovered.
 
-    `handoff_tool_names` unions every registered profile because any of them can be a turn's root,
-    and profile files register lazily. Reading the registry alone answered `{default, <roster>}`
-    in a process that had not globbed `data/profiles/` yet — the mock LLM, a validator — and so
-    refused a hand-back to a file-profile root such as `computation` that the mesh does bind.
-    Driven from a registry holding only the default, as a fresh process starts.
+    Any registered profile can be a turn's root and profile files register lazily, so a fresh
+    process such as the mock LLM must still advertise hand-backs to file-profile roots.
     """
     from chemclaw.agent import profiles
     from chemclaw.agent.chemclaw_agent import handoff_tool_names
@@ -622,12 +564,7 @@ def test_the_handoff_names_do_not_depend_on_whether_profiles_were_discovered(
 
 
 def test_no_roster_advertises_no_handoff_and_the_mock_refuses_one() -> None:
-    """The shipped default adds nothing: with no roster there is no mesh and no handoff name.
-
-    The other direction of the test above, and the one that says the widening is inert by default
-    — a skill or a scripted call naming `transfer_to_…` on a deployment that never turned handoff
-    on is still refused, because no turn it serves could bind one.
-    """
+    """With no roster there is no mesh and no handoff name, and the mock refuses one."""
     from chemclaw.agent.chemclaw_agent import available_tool_names, handoff_tool_names
     from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall
 
@@ -644,17 +581,11 @@ def test_no_roster_advertises_no_handoff_and_the_mock_refuses_one() -> None:
 
 
 def test_a_peers_answer_reaches_the_chemist_unattributed(monkeypatch: Any) -> None:
-    """The regression a wrapper graph creates, which nothing else in this file covers.
+    """A peer's answer reaches the chemist unattributed.
 
-    `api/graph_stream` attributes by namespace, and every event a peer produces arrives one frame
-    below the stream's root because a peer *is* a node of the turn graph. Under the predicate this
-    module shipped with — `bool(namespace)` — a peer's tokens arrive marked `"subagent"`, and
-    `api/runner` builds the turn's answer by concatenating the **unattributed** ones. So the mesh
-    would have answered every turn with the empty string and the runner would have classified it
-    `empty_answer`: a total failure that no assertion about surfaces, handoffs or caps can see.
-
-    Asserted on tokens rather than on `root_depth` directly, because the number is a mechanism and
-    the answer reaching the chemist is the property.
+    A peer is a node of the turn graph, so its events arrive one namespace frame below the root, and
+    `api/runner` builds the answer from unattributed tokens only; marking peers as subagents would
+    answer every turn empty. Asserted on tokens, the property, rather than on `root_depth`.
     """
     from chemclaw.api.events import TokenEvent
     from chemclaw.api.graph_stream import graph_events, root_depth
@@ -698,12 +629,10 @@ def test_a_peers_answer_reaches_the_chemist_unattributed(monkeypatch: Any) -> No
 
 
 def test_a_single_agent_is_not_mistaken_for_a_mesh() -> None:
-    """The failure the derived marker actually had, pinned so it cannot return.
+    """A single agent is not mistaken for a mesh.
 
-    The first version of `root_depth` asked whether the graph declared an `active_agent` channel.
-    Every compiled agent in this tree declares it — `ChemclawState` does — so a plain single agent
-    measured 1, which marks every token of every shipped turn as a subagent's and answers every
-    turn empty. This is the assertion that says the marker is about what the builder built.
+    Every compiled agent declares an `active_agent` channel, so `root_depth` must reflect what the
+    builder built, not the channel's presence.
     """
     from chemclaw.api.graph_stream import root_depth
 
@@ -716,19 +645,11 @@ def test_a_single_agent_is_not_mistaken_for_a_mesh() -> None:
 
 
 def test_a_bouncing_turn_hits_the_cap_and_still_answers(monkeypatch: Any) -> None:
-    """The chain bound, driven on a mesh rather than on the function that computes it.
+    """A bouncing turn hits the handoff cap and still answers.
 
-    `refuse_a_handoff_past_the_cap` is unit-tested above, which proves the arithmetic and nothing
-    about whether the tool consults it — and the counter feeding it was wrong in exactly that gap:
-    it wrote a constant `1` into a `TurnTotal`, which folds absolute totals, so a two-hop turn
-    counted 1 and the cap could never be reached however far a turn bounced. A test that called the
-    helper directly passed throughout.
-
-    So this drives a turn that tries to hand over more times than it may, and asserts the two
-    things that matter together: the count is the real chain length, and the turn **still answers**.
-    Refusing the tool rather than ending the run is `agent/loop_cap.py`'s position — a chemist is
-    entitled to the work the turn managed — and a cap that stopped the turn would be a worse
-    failure than the bouncing it prevents.
+    Driven on a mesh because the counter feeding the cap must count the real chain length (a
+    `TurnTotal` folds totals). The tool is refused rather than the run ended, so the chemist keeps
+    the work the turn managed.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.agent_max_handoffs", 1)
     graph = _mesh(
@@ -759,17 +680,11 @@ def test_a_bouncing_turn_hits_the_cap_and_still_answers(monkeypatch: Any) -> Non
 
 
 def test_a_two_hop_turn_announces_each_handoff_exactly_once(monkeypatch: Any) -> None:
-    """One event per hop, not one per hop still visible in the thread.
+    """A two-hop turn announces each handoff exactly once.
 
-    **This is the hazard the fix for the orphan `ToolMessage` creates**, and the two have to be
-    held together. A handoff carries its agent's *whole* message list up, because a
-    `Command(graph=PARENT)` otherwise drops the `AIMessage` holding the call — so on the second hop
-    the update the stream sees contains the **first** hop's tool call as well. A producer that
-    scans an update's messages for transfer calls therefore sees hop one twice, and a reader gets a
-    trace claiming the conversation went somewhere it had already been.
-
-    Asserted as a multiset over `(from, to)` rather than a count, so a duplicate is named in the
-    failure rather than reported as an arithmetic mismatch.
+    A handoff carries its agent's whole message list up, so the second hop's update also contains
+    the first hop's call; a producer scanning messages would announce it twice. Asserted as a
+    multiset over `(from, to)` so a duplicate is named.
     """
     from chemclaw.api.events import HandoffEvent
     from chemclaw.api.graph_stream import graph_events
@@ -814,14 +729,11 @@ def test_a_two_hop_turn_announces_each_handoff_exactly_once(monkeypatch: Any) ->
 
 
 def test_two_handoffs_in_one_message_hand_over_once(monkeypatch: Any) -> None:
-    """Two `transfer_to_…` calls in one assistant message: one hop, announced once, to the first.
+    """Two `transfer_to_…` calls in one message hand over once, to the first.
 
-    ToolNode runs every call in the message and applies only the first `Command(graph=PARENT)` —
-    so before `handoff.refuse_a_later_handoff`, both tool bodies ran and both announced
-    themselves: driven, `record_handoff` saw `default→evidence-peer` **and** `default→safety-peer`
-    while only the first happened, and the chemist's stream carried a handoff that never did. The
-    cap could not catch it, because both calls read the same pre-batch `handoffs`. This also pins
-    the upstream arbitration `state.LastPeer`'s docstring now names instead of the one it claimed.
+    ToolNode runs every call but applies only the first `Command(graph=PARENT)`, so
+    `handoff.refuse_a_later_handoff` keeps the second from running and announcing a hop that never
+    happened.
     """
     from langchain_core.messages import AIMessage
 
@@ -868,11 +780,10 @@ def test_two_handoffs_in_one_message_hand_over_once(monkeypatch: Any) -> None:
 
 
 def test_an_unbound_handoff_name_does_not_win_the_arbitration(monkeypatch: Any) -> None:
-    """An earlier call of the minted shape that this node does not bind cannot refuse a real one.
+    """An unbound name of the minted shape does not win the arbitration.
 
-    `transfer_to_default` is the handing agent's own name, which `handoff_tools` never binds. When
-    the arbitration asked only the *shape*, it won: it got ToolNode's unknown-tool error, the valid
-    `transfer_to_evidence_peer` after it was refused as "not the first", and no hop happened.
+    `transfer_to_default` is the handing agent's own name and is never bound; it must not cause the
+    real handoff after it to be refused as "not the first".
     """
     from langchain_core.messages import AIMessage
 
@@ -902,14 +813,10 @@ def test_an_unbound_handoff_name_does_not_win_the_arbitration(monkeypatch: Any) 
 
 
 def test_a_handoff_is_not_held_behind_the_plan_gate(monkeypatch: Any) -> None:
-    """A handoff under the shipped harness defaults, with a session bound, hands over.
+    """A handoff is not held behind the plan gate.
 
-    Folding handoffs into `authz.side_effecting_call` to make dry-run refuse them also put every
-    handoff behind `enforce_plan_approval`, which reads the same predicate: with a session id bound
-    — the API path — an enabled mesh could not hand over without an approved plan naming the
-    handoff, and the refusal told the chemist it "changes stored data or starts work". A handoff
-    cannot extend the turn's authority, so the gate protected nothing; dry-run keeps refusing it
-    (the test above) through `authz.changes_the_conversation`, which the plan gate does not read.
+    A handoff cannot extend the turn's authority, so the plan gate protects nothing there. Dry-run
+    refuses it through `authz.changes_the_conversation`, which the plan gate does not read.
     """
     from chemclaw.agent.plan_gate import gate_applies
     from chemclaw.agent.profiles import get_profile
@@ -943,12 +850,11 @@ def test_a_handoff_is_not_held_behind_the_plan_gate(monkeypatch: Any) -> None:
 
 
 def test_the_root_surface_is_what_the_root_node_binds(monkeypatch: Any) -> None:
-    """The prediction every peer's `transfer_to_<root>` description publishes, against the graph.
+    """`root_surface` is what the root node binds.
 
-    `root_surface` feeds `describe_peer`'s "It holds: …". It skipped the personal-tier filter
-    `build_langgraph_agent` applies, so with that tier unavailable every peer was told the root
-    holds `propose_skill`, which the root never bound. Compared with the compiled root node minus
-    what the graph adds beyond its capability tools (handoffs and the structural floor).
+    It feeds `describe_peer`'s "It holds: …", so it must apply the same personal-tier filter as
+    `build_langgraph_agent`. Compared with the compiled root minus handoffs and the structural
+    floor.
     """
     monkeypatch.setattr("chemclaw.agent.langgraph_agent.personal_skills_available", lambda: False)
     graph = _mesh(monkeypatch, {"default": ["done"]})
@@ -969,22 +875,11 @@ def test_the_root_surface_is_what_the_root_node_binds(monkeypatch: Any) -> None:
 
 
 def test_the_root_peer_binds_what_it_would_have_bound_alone(monkeypatch: Any) -> None:
-    """Turning the mesh on does not change what the agent the chemist already had can do.
+    """Turning the mesh on does not change what the root agent can do.
 
-    The root is a peer like any other, and it is compiled through the same builder with its
-    `tool_names` set to the surface it was measured to hold — which is a *narrowing* operation
-    applied to a profile that may not have been narrowing at all. `AgentProfile.tool_names is None`
-    means "does not narrow"; replacing it with an explicit set equal to the current surface is
-    identical for this turn and would not be if the set were computed even slightly wrong.
-
-    So this compares the two compiled surfaces directly rather than trusting that argument. The
-    handoff tools are the only permitted difference, and they are subtracted by name: they are what
-    the mesh *adds*, and everything else must be untouched.
-
-    **Both sides are handed the same open connector tools**, which is the only comparison that means
-    anything: `_mesh` now compiles with one, and a solo agent built with none would differ by that
-    tool whatever the root peer's narrowing did — turning this assertion into a statement about the
-    fixture rather than about the mesh.
+    The root peer is compiled with `tool_names` set to its measured surface, which is identical only
+    if that set is exactly right. The two compiled surfaces are compared directly, minus the handoff
+    tools, with the same open connector tools on both sides.
     """
     graph = _mesh(
         monkeypatch,
@@ -1015,23 +910,15 @@ def test_the_root_peer_binds_what_it_would_have_bound_alone(monkeypatch: Any) ->
 
 
 def test_every_profile_field_a_peer_does_not_own_comes_from_the_root() -> None:
-    """The set's two directions, over the model's own field list rather than a copy of it.
+    """Every profile field a peer does not own comes from the root.
 
-    `turn_graph.py` claimed *"`tests/test_turn_graph.py` holds this set against the model's fields
-    in both directions"* while `PEER_OWNED_FIELDS` appeared in no test in the tree — `grep -rl
-    PEER_OWNED tests/` answered nothing. This is that claim.
+    - **Forwards**: every name in `PEER_OWNED_FIELDS` is a real `AgentProfile` field, since a typo
+      would silently leave the intended field root-derived.
+    - **Backwards**: every other field is the root's on the built profile, taken outright or, for
+      the
+      three allow-lists, narrowed to the root's. The peer differs from the root in every field.
 
-    - **Forwards**: every name in the set is a real `AgentProfile` field. A typo is a no-op that
-      reads as an exemption, so the field it was meant to name is silently root-derived and the line
-      documents a decision nobody took.
-    - **Backwards**: every field *not* in the set is the root's on the built profile — either taken
-      outright, or narrowed to no more than the root holds for the three allow-lists. Driven with a
-      peer whose every field differs from the root's and whose allow-lists are strictly wider, which
-      is the only fixture that can tell a root-derived field from a peer-derived one.
-
-    A field added to `AgentProfile` next year lands in the backwards half with nothing to change
-    here, which is the "derived-by-exclusion fails safe" claim the set is built on — asserted rather
-    than argued.
+    A new `AgentProfile` field lands in the backwards half automatically.
     """
     from chemclaw.agent.turn_graph import PEER_OWNED_FIELDS, _peer_profile
 
@@ -1093,24 +980,16 @@ def test_every_profile_field_a_peer_does_not_own_comes_from_the_root() -> None:
 
 
 def test_a_peer_can_neither_turn_the_plan_gate_off_nor_on() -> None:
-    """The consequence, because membership alone is satisfied by adding an authority-bearing name.
+    """A peer can neither turn the plan gate off nor on.
 
-    **This is the half the membership test above cannot hold.** Adding `harness_enabled` and
-    `harness_autonomy` to `PEER_OWNED_FIELDS` makes the built profile carry the peer's values, which
-    is exactly what the forwards direction then asserts — so the set's own test goes green over the
-    defect. Driven: with the two names added, `gate_applies` for an ungated peer under a gated root
-    goes `True → False`, and the plan gate is not attached to that peer at all.
+    Membership alone would pass if the harness fields were added to `PEER_OWNED_FIELDS`. Both
+    directions matter:
 
-    Both directions are the same defect mirrored and both are reachable with shipped files
-    (`data/profiles/computation.yaml` pins `harness_enabled: true`):
+    - an **ungated peer under a gated root** would keep the root's acting tools with no plan gate;
+    - a **gated peer under an ungated root** would demand an approval the runner never spends, since
+      `plan_gated` is computed from the root.
 
-    - an **ungated peer under a gated root** keeps the root's acting tools with no plan gate;
-    - a **gated peer under an ungated root** makes a chemist approve a plan `api/runner` then never
-      spends, because the runner computes `plan_gated` from the root — and that approval stands for
-      every later turn on the session.
-
-    The combinations are taken off the two fields' declared types rather than written out, so a
-    third autonomy mode is covered the day it is declared.
+    Combinations come from the two fields' declared types, so a new autonomy mode is covered.
     """
     from typing import Literal, get_args, get_type_hints
 
@@ -1169,19 +1048,11 @@ def test_a_peer_can_neither_turn_the_plan_gate_off_nor_on() -> None:
     ],
 )
 def test_a_minted_handoff_tool_name_carries_only_what_a_tool_name_may_carry(stem: str) -> None:
-    """A profile name reaches a provider inside a tool name, so the charset is the constraint.
+    """A minted handoff tool name carries only what a tool name may carry.
 
-    `handoff_tool_name` folded `-` and nothing else, argued from the one separator this repository's
-    own profile files happen to use. A profile is a **file stem** and `agent/profile_discovery.py`
-    validates no charset on it, so every spelling here is a legal deployment file: `data/profiles/
-    property lookup.yaml` minted `transfer_to_property lookup` and `property.lookup` minted
-    `transfer_to_property.lookup`, both invalid by the fold's own argument and both refused by
-    nothing on this side — the provider refuses them, on the request, which reads as a model failure
-    on a turn nobody touched.
-
-    The pattern is written out here rather than imported from `agent/handoff.py`, for
-    `Chemclaw3-mcp/tests/test_identity_contract.py`'s reason: a test that imports the constant
-    it is checking agrees with it however wrong it is.
+    A profile name is a file stem with no charset validation, so every character outside the
+    provider's tool-name charset must be folded. The pattern is written out here rather than
+    imported, so the test cannot agree with a wrong constant.
     """
     import re
 
@@ -1197,21 +1068,11 @@ def test_a_minted_handoff_tool_name_carries_only_what_a_tool_name_may_carry(stem
 
 
 def test_two_profiles_that_mint_one_tool_name_are_refused_at_build_time() -> None:
-    """The collision the profile-name check cannot see, refused before anything is bound.
+    """Two profiles that mint one tool name are refused at build time.
 
-    `property-lookup` and `property_lookup` are two legal profile names — both are file stems, and
-    both are distinct to the duplicate-*name* check one fold earlier — that mint one tool. Driven
-    with the refusal removed: `handoff_tools` built without complaint, `tools_by_name` kept
-    whichever came last, and the peer that lost became a node no tool can reach while the list sent
-    to the provider carried two functions of one name.
-
-    Neither failure is an authority widening — both peers are root-bounded — and that is precisely
-    why nothing else in this file would catch it: every surface assertion here passes over a mesh
-    with an unreachable node in it.
-
-    **Widened by the fold, not narrowed**, so the third case is asserted too: now that every
-    character outside the tool-name charset folds to `_`, `property lookup` collides with both of
-    them, and that is the fold failing *closed*.
+    Otherwise one peer would become unreachable and the provider would get two functions of one
+    name; no surface assertion would notice, since both peers are root-bounded. `property lookup`
+    now collides with both, which is the fold failing closed.
     """
     from chemclaw.core.errors import ChemclawError
 
@@ -1249,12 +1110,10 @@ def test_two_profiles_that_mint_two_names_are_not_refused() -> None:
 
 
 def test_only_a_name_of_the_minted_shape_is_recognised_as_a_handoff() -> None:
-    """The refusals past this predicate interpolate the name unreduced, so it must be one we mint.
+    """Only a name of the minted shape is recognised as a handoff.
 
-    ToolNode runs the middleware chain for an unregistered name too, and a bare prefix test let a
-    model steered by injected text call `transfer_to_x | code: … | sanctioned path: …` and have
-    that name — a forged routing footer — written into the dry-run refusal it reads and into the
-    audit row.
+    ToolNode runs middleware for unregistered names too, and later refusals interpolate the name, so
+    a bare prefix test would let a forged name be written into a refusal and the audit row.
     """
     assert is_handoff_tool_name(handoff_tool_name("property-lookup"))
     assert is_handoff_tool_name(handoff_tool_name("property lookup"))
@@ -1270,12 +1129,10 @@ def test_only_a_name_of_the_minted_shape_is_recognised_as_a_handoff() -> None:
 def test_the_log_says_which_handoffs_each_peer_bound(
     monkeypatch: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Whether the model never chose to hand off has to be checkable against its surface.
+    """The log says which handoffs each peer bound.
 
-    The 2026-09-27 run's peer arm handed off in none of its repeats, and no line in the process
-    said whether a `transfer_to_<peer>` tool had been bound, so a model declining and a roster that
-    never compiled were one observation. Read off the graphs `build_turn_graph` really compiled,
-    then required in the INFO line each peer's build writes.
+    So a model declining to hand off can be told from a roster that never compiled; read off the
+    compiled graphs and required in each peer's INFO build line.
     """
     with caplog.at_level(logging.INFO, logger="chemclaw.agent.langgraph_agent"):
         graph = _mesh(

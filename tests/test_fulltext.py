@@ -1,22 +1,9 @@
-"""The offline lexical proxy, pinned against the exact regression its own comment names.
+"""The offline lexical proxy agrees with Postgres full-text search.
 
-`core/fulltext.py`'s module comment records that `_WORD` used to be spelled `[a-z0-9]+` twice, in
-the two backends this module now unifies, and that the ASCII-only spelling silently dropped every
-non-ASCII letter Postgres indexes. It is also, independently, wrong on plain ASCII: `[a-z0-9]+` is
-case-sensitive, so `Suzuki` tokenises as `uzuki` rather than `suzuki` — the capital `S` is not in
-the class and breaks the run. `test_case_is_folded_after_tokenising_not_by_the_character_class`
-below is that exact bug, written as an assertion rather than as a comment: it fails the moment
-`_WORD` reverts to `[a-z0-9]+`, which nothing else in this suite reaches (`reference_tokens` and
-`reference_terms` appear in no other test file).
-
-**This file was written twice, on two branches, and the merge kept both halves** — which is worth
-recording because they are different *kinds* of test and each is blind to the other's defect. The
-offline cases below pin the tokeniser against mutation. They cannot see whether the offline proxy
-and the server agree, and the numeric divergence they could not see was real: `to_tsvector` glues a
-sign onto a lexeme and emits a decimal whole, so a cryogenic temperature was reachable by no query
-at all while every assertion here passed. The Postgres-backed differential test at the end is that
-half — it drives both backends over one chemistry corpus and asserts the same hit sets, which is the
-only shape that could have caught any of the three divergences the module's docstring records.
+Two kinds of test: offline cases pin the tokeniser against mutation (e.g. an ASCII-only `_WORD`
+that splits `Suzuki` into `uzuki`), and a Postgres-backed differential test drives both backends
+over one chemistry corpus and asserts the same hit sets, which is the only shape that catches a
+divergence such as signed or decimal numbers.
 """
 
 import asyncio
@@ -42,11 +29,10 @@ def _run(awaitable: Any) -> Any:
 
 
 def test_case_is_folded_after_tokenising_not_by_the_character_class() -> None:
-    r"""`Suzuki` must tokenise whole and lowercased — not as `uzuki` with the `S` dropped.
+    r"""`Suzuki` tokenises whole and lowercased, not as `uzuki`.
 
-    This is the mutant the backlog row names: mutate `_WORD` from `[^\W_]+` to the ASCII-only
-    `[a-z0-9]+` and this reproduces the bug the module's own comment describes, because a capital
-    letter is outside `[a-z0-9]` and breaks the run instead of being folded into it.
+    Fails if `_WORD` is mutated from `[^\W_]+` to `[a-z0-9]+`, since a capital letter would break
+    the run instead of being folded.
     """
     assert reference_tokens("Suzuki coupling") == {"suzuki", "coupling"}
 
@@ -169,35 +155,29 @@ CHEMISTRY_QUERIES: list[str] = [
 
 
 def test_a_decimal_is_one_token_because_postgres_emits_a_float_whole() -> None:
-    """`98.5` does not become `98` and `5`.
+    """`98.5` is one token, because Postgres emits a float whole.
 
-    Splitting it made the offline reference report a hit for the query `98` that the durable backend
-    does not return — the over-matching direction, where the backend the tests stand on answers a
-    question production cannot.
+    Splitting it would make the offline reference match `98`, which the durable backend does not.
     """
     assert reference_tokens("gave 98.5% ee") == {"gave", "98.5", "ee"}
     assert "98" not in reference_tokens("98.5")
 
 
 def test_a_sign_is_detached_from_the_number_it_precedes() -> None:
-    """`-78 C` is indexed by its magnitude, so a chemist can find a cryogenic temperature.
+    """A sign is detached from the number it precedes, so `-78 C` is indexed by its magnitude.
 
-    Postgres keeps the sign on the lexeme (`'-78'`), and `websearch_to_tsquery` reads a leading `-`
-    as an *exclusion* — so before this normalisation no query reached the row at all: `78` missed it
-    and `-78` asked to exclude it.
+    Postgres keeps the sign on the lexeme and `websearch_to_tsquery` reads a leading `-` as
+    exclusion, so otherwise no query reaches the row.
     """
     assert reference_tokens("charged at -78 C") == {"charged", "at", "78", "c"}
     assert normalize_search_text("held at -78 C") == "held at  78 C"
 
 
 def test_both_backends_return_the_same_hits_over_a_chemistry_corpus() -> None:
-    """The invariant the module exists for, asserted the only way it can be: by asking both.
+    """Both backends return the same hits over a chemistry corpus.
 
-    `InMemoryNoteIndex` is the reference every other lexical test stands on and `PostgresNoteIndex`
-    is what production runs. The module is explicitly allowed to differ on *scores* and on stop
-    words; it is not allowed to differ on **which rows are hits**. Every historical occurrence of
-    that divergence was invisible for the same reason — no test ever asked the two the same
-    question — and the numeric one was found by writing this.
+    `InMemoryNoteIndex` is the reference other lexical tests rely on and `PostgresNoteIndex` is
+    production. They may differ on scores and stop words, never on which rows are hits.
     """
     _run(migrated_db_or_skip())
     records = [
@@ -224,12 +204,10 @@ def test_both_backends_return_the_same_hits_over_a_chemistry_corpus() -> None:
 
 
 def test_a_cryogenic_temperature_is_findable_by_its_magnitude() -> None:
-    """The end-to-end form of the defect, against the durable backend rather than the reference.
+    """A cryogenic temperature is findable by its magnitude in the durable backend.
 
-    Worth its own case beside the differential test above, because the two backends *agreeing* is
-    not the same property as either of them being right: before this change both could have been
-    made to agree by breaking the reference instead, and a chemist still could not have found the
-    run held at -78 °C.
+    The backends agreeing is not the same as either being right, so the outcome is asserted
+    directly.
     """
     _run(migrated_db_or_skip())
     records = [

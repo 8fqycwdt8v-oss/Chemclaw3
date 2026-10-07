@@ -1,22 +1,11 @@
 """The connector-side runtime: wrap a FastMCP capability as the FastAPI app a connector serves.
 
-Every connector we own is the same shape — a FastAPI application exposing `/healthz` for the startup
-probe, `/metrics` for the scrape, and `/mcp` for the MCP streamable-HTTP transport, over a `FastMCP`
-instance holding the capability's tools. That shape is written once here so a new connector's
-`connectors/<name>/server/app.py` is three lines, and so the two cross-cutting behaviors it needs
-cannot be forgotten per connector:
-
-- **Running the MCP session manager.** `FastMCP.streamable_http_app()` returns a Starlette app whose
-  *own* lifespan starts the session manager; mounting that app inside FastAPI does not run a
-  sub-app's lifespan, so the parent must drive it explicitly. Getting this wrong produces a server
-  that accepts connections and then hangs on the first request — the failure this helper exists to
-  make impossible.
-- **Logging the calling identity.** The `X-Chemclaw-*` headers arrive on every request
-  (`chemclaw.connectors.identity`); logging the actor and session here is what lets a connector's
-  own records
-  be reconciled with the core audit trail, which is the whole point of sending them. It is logged,
-  never trusted: authorization happened in core before the call was made, and a header on a request
-  is not evidence of anything a connector should act on.
+Every connector is the same shape: `/healthz`, `/livez`, `/metrics` and the MCP streamable-HTTP
+transport at `/mcp`, over a `FastMCP` holding the tools. Written once so a bundle's `app.py` is
+three lines and the cross-cutting behaviours cannot be forgotten: running the MCP session manager
+(mounting does not run a sub-app's lifespan, and without it the server hangs on the first request),
+bearer auth, error sanitising, result publishing, and logging the `X-Chemclaw-*` caller identity.
+That identity is logged and bound for attribution, never trusted: authorization happened in core.
 """
 
 import asyncio
@@ -57,54 +46,21 @@ from chemclaw.core.tracing import continue_trace
 logger = logging.getLogger(__name__)
 
 
-# The sentinel `_declared_bearer_env` returns when it cannot find out what this bundle requires.
-# No environment variable has this name, so `os.environ.get` yields `""` and the middleware refuses
-# every request — a connector that cannot read its own manifest serves nothing rather than
-# everything.
+# Sentinel `_declared_bearer_env` returns when it cannot learn what this bundle requires. No
+# variable has this name, so every request is refused: a connector that cannot read its manifest
+# serves nothing.
 _UNRESOLVED_AUTH = "CHEMCLAW_CONNECTOR_AUTH_UNRESOLVED"
 
 
 def _declared_bearer_env(name: str) -> str | None:
     """The env var holding this bundle's bearer token, `None` for `mode: none`, or fail closed.
 
-    Imported lazily because `connector_app` is called at import time by seven bundle modules.
-
-    **A read failure returns the sentinel, not `None`.** The first version returned `None` — no
-    middleware, whole `/mcp` surface anonymous — and justified it with "`connector-validate` checks
-    the declaration separately". That justification was false: the validator has no auth check of
-    any kind, and it validates the *repository's* manifest directory, not the one mounted in the
-    pod. `discovered()` parses every bundle in `connectors_dirs` and raises `ConnectorError` on one
-    bad YAML, so a single typo in an operator's prepended directory — the documented PATH-like
-    override — would have taken every bearer-mode connector in the process unauthenticated, logging
-    only that it "could not read manifests to resolve its auth mode".
-
-    A control whose absence is decided by a file being unreadable is not a control. Failing closed
-    makes the same event loud: the connector answers 401 until an operator fixes the manifest.
-
-    **A manifest that ships and is not discovered fails closed too, and that half was missing.**
-    Only `discovered()` *raising* failed closed. `discovered()` succeeding without this bundle in
-    its result fell through to `return None` — "no credential required", whole surface anonymous —
-    which is the identical outcome the paragraph above refuses, reached by the likelier route: a
-    `connectors_dir` pointing somewhere else, or an operator's prepended override directory
-    shadowing the tree. Neither raises, because a directory with no bundles parses perfectly well,
-    and the deployment goes on recording the pod as credential-gated.
-
-    **Undiscovered is not the same as undeclared, and the packaged tree is what separates them.**
-    `connector_app` also serves apps no bundle backs at all — every transport and identity test
-    builds one, and that is a supported construction, not a misconfiguration: nothing was declared,
-    so there is no promise to betray and no token anyone could present. What distinguishes the two
-    is whether a `connector.yaml` for this name ships *beside this module* — `_ships_a_manifest`.
-    If one does and discovery did not find it, this process is looking at the wrong tree and must
-    refuse; if none does, the app is synthetic and stays open. That check resolves against
-    `__file__` rather than through the registry or `settings`, because the configured roots are
-    exactly what the first case has wrong.
-
-    **What that does not cover, stated rather than implied:** a bundle an operator ships *outside*
-    this package — the documented PATH-like override — has no manifest beside this module, so a
-    misconfigured registry makes it indistinguishable from a synthetic app and it stays open. There
-    is no second source of truth to consult for one: its manifest lives in the same configured roots
-    that are under suspicion. The shipped bundles are the ones this can speak for, and it speaks for
-    them; a private bundle that wants the same guarantee has to assert its own credential.
+    Imported lazily because `connector_app` runs at import time in bundle modules. Fails closed (the
+    sentinel) when discovery raises, and when a manifest ships beside this module
+    (`_ships_a_manifest`) but discovery did not find it, meaning the process is looking at the wrong
+    tree. An app with no shipped manifest is synthetic (tests build them) and stays open. A private
+    bundle outside this package cannot be told apart from a synthetic app when the registry is
+    misconfigured, so it must assert its own credential (`token_env`).
     """
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
     from chemclaw.connectors.registry import discovered
@@ -137,31 +93,24 @@ def _declared_bearer_env(name: str) -> str | None:
 def _ships_a_manifest(name: str) -> bool:
     """Whether a `connector.yaml` for `name` ships inside this package.
 
-    The one question that separates "this deployment is pointed at the wrong tree" from "this app
-    was built without a bundle behind it" — see `_declared_bearer_env`. Resolved against `__file__`
-    (this module lives in the bundle root, one level above every bundle) rather than through
-    `settings.connectors_dirs`, because those roots are exactly what the first case has wrong.
+    Resolved against `__file__`, not `settings.connectors_dirs`, because the configured roots are
+    what a misconfiguration gets wrong. See `_declared_bearer_env`.
     """
     from chemclaw.connectors.registry import MANIFEST_FILENAME
 
     return (Path(__file__).parent / name / MANIFEST_FILENAME).is_file()
 
 
-#: How much of a caller-authored path may reach a log record. Long enough for every route this
-#: transport serves (`/mcp`, `/healthz`, `/livez`, `/metrics`, and a dev-composite `/<bundle>`
-#: prefix), short enough that a caller cannot spend the logging lock on a redaction scan. The front
-#: door bounds its own echoed strings at the same order of magnitude and for the same measured
-#: reason (`api.middleware._MAX_LOGGED_CHARS`); the two are separate constants because a connector
-#: may not import `api`, and neither is a deployment's choice to make.
+#: How much of a caller-authored path may reach a log record: enough for every route served, short
+#: enough that a caller cannot spend the logging lock on a redaction scan. Separate from the front
+#: door's constant because a connector may not import `api`.
 _MAX_LOGGED_PATH_CHARS = 128
 
 
 def _clipped(value: str) -> str:
     """`value` bounded for a log record, marked when it was actually cut.
 
-    The marker is part of it: a truncation that said nothing would leave an operator unable to tell
-    a clipped path from a short one, which is `api.middleware.clip_for_log`'s argument for the same
-    contract at the front door.
+    The marker lets an operator tell a clipped path from a short one.
     """
     if len(value) <= _MAX_LOGGED_PATH_CHARS:
         return value
@@ -169,21 +118,11 @@ def _clipped(value: str) -> str:
 
 
 def _app_relative_path(request: Request) -> str:
-    """This request's path *within this app*, with any mount prefix removed.
+    """This request's path within this app, with any mount prefix removed.
 
-    **Not `request.url.path`, and the difference is a security boundary rather than a nicety.**
-    Starlette leaves `scope["path"]` whole when it dispatches into a mounted sub-app and records
-    the prefix in `root_path` — measured: a `GET /molfp/healthz` reaches a middleware inside the
-    mounted app as `url.path == scope["path"] == "/molfp/healthz"`, `root_path == "/molfp"`. So a
-    probe allowlist written against `/healthz` matches at the root and silently *stops* matching
-    the moment the same app is mounted under a name.
-
-    In the cluster each connector is its own Deployment serving at the root, so the allowlist held
-    there. `chemclaw.cli.connectors_dev` — `make connectors`, the live lane, and the transport
-    tests — mounts every bundle under `/<name>`, and there it did not: with a credential declared,
-    the readiness probe `connectors.health` makes against `health_url` would have come back 401 and
-    reported the whole fleet unreachable. That was invisible while every bundle we host declared
-    `auth: mode: none`, because nothing was ever refused.
+    Not `request.url.path`: inside a mounted sub-app Starlette keeps the full path and records the
+    prefix in `root_path`, so a probe allowlist on `/healthz` would stop matching under the dev
+    composite's `/<name>` mounts and the readiness probe would get 401.
     """
     root = request.scope.get("root_path", "")
     path = request.url.path
@@ -193,62 +132,31 @@ def _app_relative_path(request: Request) -> str:
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Verify the bearer token a `mode: bearer` manifest says this connector requires.
 
-    `BearerAuth` existed only on the *sending* side: `connectors/identity.py` set an
-    `Authorization` header and no connector ever read one, while `connector-validate` raised no
-    objection. A deployment that followed the manifest's own advice ("bearer for everything
-    in-cluster") therefore mounted a secret, believed the pod was credential-gated, and served
-    every tool to anything that could reach it — a control the deployment records as enabled and
-    that does not exist. Proved by completing an unauthenticated MCP handshake against the real app.
-
-    **Middleware, not a route dependency, and that is the whole reason this was missable**: `/mcp`
-    is `app.mount`ed, and a mount bypasses the enclosing app's dependencies entirely. Anything
-    written as `Depends(...)` would have guarded the two routes that need it least and none of the
-    surface that matters.
-
-    `/healthz`, `/livez` and `/metrics` stay open, matching the front door's probe allowlist: a
-    kubelet probe and a Prometheus scrape happen independently of any identity, and the exposition
-    carries counts only. The MCP surface is what the credential is for.
-
-    Comparison is `compare_digest`, and a missing/short token is refused rather than compared, so a
-    misconfigured deployment fails closed instead of accepting the empty string.
+    Middleware, not a route dependency: `/mcp` is mounted, and a mount bypasses the enclosing app's
+    dependencies. `/healthz`, `/livez` and `/metrics` stay open for the kubelet and Prometheus (the
+    exposition carries counts only). Compared with `compare_digest`; a missing expected token
+    refuses rather than matching the empty string.
     """
 
     def __init__(self, app: Any, *, connector: str, token_env: str | None = None) -> None:
         """Bind the connector name; the declared auth mode is resolved on first request.
 
-        `token_env` is for a surface that has no `connector.yaml` to be resolved *from* — core's own
-        read-only MCP face (`api/mcp_face.py`) is the one such caller. Supplied here, it is used
-        directly and the manifest lookup never runs, which matters because the lookup's
-        "undiscovered and ships no manifest" branch treats an app as synthetic and leaves it
-        **open**. That is the right default for the transport tests that build a bare app, and it
-        is the wrong one for a surface exposing the corpus, so such a surface states its credential
-        rather than inheriting an absence.
+        `token_env` is for a surface with no `connector.yaml` (core's read-only MCP face,
+        `api/mcp_face.py`); supplied, the manifest lookup never runs, so such a surface cannot fall
+        into the "synthetic app stays open" branch.
         """
         super().__init__(app)
         self._connector = connector
         self._token_env: str | None = token_env
-        # An explicitly supplied name needs no resolution; an explicitly supplied *empty* one is a
-        # deployment that meant to require a token and has not named the variable, which fails
-        # closed on the `not expected` branch below rather than opening the surface.
+        # A supplied name needs no resolution; a supplied empty name fails closed below.
         self._resolved = token_env is not None
 
     def _declared(self) -> str | None:
         """The env var this bundle's manifest names, resolved once, on first use.
 
-        **Lazily, and that is not an optimisation.** Resolving it in `connector_app` called the
-        `lru_cache`d `discovered()` at app-build time, which warmed that cache against whatever
-        `connectors_dir` happened to be set to *then* — so a caller that builds an app and only
-        afterwards points the registry at its own bundle (which is exactly what
-        `tests/test_connector_safety_rubric.py`'s fixture does, and what any late configuration
-        would do) found the registry serving stale contents. Building an app is not a moment that
-        should have side effects on shared state; the first request is.
-
-        **The fail-closed answer is not cached, and that is what makes the other promise true.**
-        `_declared_bearer_env`'s docstring says the connector "answers 401 until an operator fixes
-        the manifest"; latching `_resolved` on the sentinel made that "until an operator fixes the
-        manifest *and* restarts the pod", because nothing would ever ask again. `discovered()` is
-        cached but does not cache exceptions, so re-asking after a fix is cheap and can succeed.
-        Only a *resolved* answer is worth keeping — a real env var name, or `None` for `mode: none`.
+        Lazy, so building an app does not warm the registry cache against whatever `connectors_dir`
+        is set at that moment. The fail-closed sentinel is not cached, so a fixed manifest takes
+        effect without a restart; only a resolved answer is kept.
         """
         if not self._resolved:
             self._token_env = _declared_bearer_env(self._connector)
@@ -266,11 +174,8 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         expected = os.environ.get(token_env, "")
         presented = request.headers.get("authorization", "")
         scheme, _, offered = presented.partition(" ")
-        # Compared as *bytes*. `compare_digest` on `str` requires both operands to be ASCII-only and
-        # raises `TypeError` otherwise, and Starlette decodes headers as latin-1 — so a single
-        # non-ASCII byte in the header turned this security boundary into a 500 with a traceback,
-        # which any remote party could produce at will. The refusal must come from the branch
-        # written for it, not from an exception handler upstream.
+        # Compared as bytes: `compare_digest` on a non-ASCII `str` raises `TypeError`, which would
+        # let any caller turn this refusal into a 500.
         if (
             not expected
             or scheme.lower() != "bearer"
@@ -279,14 +184,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 expected.encode("utf-8", "surrogateescape"),
             )
         ):
-            # **Clipped, because this branch runs before any credential is checked**, so the
-            # path is an unauthenticated caller's own string. The front door fixed the identical
-            # line and measured what it cost: 6,054 characters straight into
-            # `SecretRedactingFilter`, whose scan is linear in the record's length, with the
-            # logging lock held — and this transport serves every bundle *and* the read-only MCP
-            # face. `api.middleware.route_template` is the front door's answer and is out of
-            # reach here (a connector may not import `api`, and `/mcp` is a mount rather than a
-            # route table), so what is bounded is the length.
+            # Clipped: this runs before any credential check, so the path is an unauthenticated
+            # caller's string and an unbounded one would hold the logging lock through the redaction
+            # scan.
             logger.warning(
                 "connector %s refused an unauthenticated MCP request to %s",
                 self._connector,
@@ -299,16 +199,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 class CallerLogMiddleware(BaseHTTPMiddleware):
     """Log the `X-Chemclaw-*` caller identity of every request, and bind it for the tools.
 
-    Advisory only, in both roles. The headers say who core says is asking; they are recorded so a
-    connector's own records and logs can be joined to the core audit trail by actor and session,
-    and they are never an input to an access decision — a connector that gated on one would be
-    trusting an unauthenticated string.
-
-    Binding is what makes the second half of that sentence reachable. Logging alone let a connector
-    correlate its *log lines*; a connector that writes a durable row — a persisted BO suggestion —
-    had no way to stamp it with the conversation that asked for it, so the row could not be traced
-    back to a chemist or a turn. `chemclaw.connectors.caller` holds the contextvars and the trust
-    rule; this is where they are set and, importantly, reset.
+    Advisory only: recorded so a connector's logs and durable rows can be joined to core's audit
+    trail by actor and session, never used for an access decision. `chemclaw.connectors.caller`
+    holds the contextvars and the trust rule; this sets and resets them.
     """
 
     def __init__(self, app: ASGIApp, connector: str) -> None:
@@ -334,54 +227,28 @@ class CallerLogMiddleware(BaseHTTPMiddleware):
                 correlation or "-",
                 request.headers.get(HEADER_DRY_RUN, "-"),
             )
-            # Adopt the caller's trace, so this connector's spans are children of the turn that
-            # called it rather than the root of an unrelated one. Note the asymmetry with the two
-            # lines above: the `X-Chemclaw-*` identity headers are advisory and must never reach an
-            # access decision, while trace context is safe to take from outside precisely because
-            # it grants nothing — the worst a forged `traceparent` achieves is attaching spans to
-            # someone else's trace.
+            # Adopt the caller's trace so this connector's spans are children of the calling turn.
+            # Safe to take from outside, unlike identity, because a trace grants nothing.
             with continue_trace(request.headers):
                 return await call_next(request)
         finally:
-            # This used to say "each request runs in its own task context, so a `ContextVar` set
-            # here is already invisible to the next one", and measurement disproved it in the
-            # direction that mattered: a *tool body* does not run in this task at all, so what it
-            # read was the handshake's identity rather than the call's, for the whole life of the
-            # MCP session. `_bind_caller_per_tool_call` is what makes a tool see its own caller.
-            # This binding stays for everything else on the request path, and the reset with it.
+            # Tool bodies run in the MCP session-manager task, not this one;
+            # `_bind_caller_per_tool_call` gives them their caller. This binding serves the rest of
+            # the request path.
             reset_caller(tokens)
 
 
 def _bind_caller_per_tool_call(server: FastMCP) -> None:
-    """Re-bind the caller from the request the tool call is *serving*, not the one that connected.
+    """Re-bind the caller from the request the tool call is serving, not the one that connected.
 
-    `CallerLogMiddleware` binds the contextvars in `dispatch`, which is an ASGI task. An MCP tool
-    body does not run there: it runs in the session-manager task created by `initialize`, so the
-    contextvar it reads is whatever the *handshake* set. Measured over the real streamable-HTTP
-    transport — handshake carrying alice's headers, then `tools/call` carrying bob's on the same
-    `mcp-session-id` — the tool body read `('alice-oid', 'sess-alice', '')`. The middleware log
-    line for that call says bob, because it reads the headers directly; a durable row stamped by
-    the same call said alice. The two artifacts this feature exists to reconcile disagreed.
+    A tool body runs in the session-manager task created at `initialize`, so without this it reads
+    the handshake's identity for the whole MCP session. `request_ctx` carries the ASGI request per
+    JSON-RPC message; with no request context (stdio, a direct test call) the middleware's binding
+    stands.
 
-    Not a cross-user *leak*: a second, independent MCP session showed no bleed, so the scope is
-    "frozen at the handshake within one session". It is a mis-attribution, and it becomes a live
-    one the moment a connection is pooled or reused across turns.
-
-    The serving request is reachable — `request_ctx` is set per JSON-RPC message and carries the
-    ASGI request — so the fix is to read it here rather than to weaken the docstrings. When there
-    is no request context (a stdio transport, a tool called directly in a test) this falls through
-    to whatever the middleware bound, which is today's behaviour and the right one.
-
-    Wrapped around `_sanitize_tool_errors`'s interception of the same method rather than merged
-    into it: two concerns, two functions, one patch point each.
-
-    **Idempotent, marked on the manager rather than on the wrapper.** Both patches here used to
-    reassign unconditionally, so a process building two apps over one `FastMCP` stacked a second
-    pair — measured, one `connector_app` left `call_tool` two deep and two left it four, and the
-    growth is unbounded in the number of apps. The marker cannot live on the wrapper the way
-    `_publish_tool_results`'s does, because this one is installed *outside* the other and a
-    second build would read the wrong layer's attribute; the manager is the object whose method is
-    being replaced, so it is the object that knows whether it has been.
+    Wrapped around `_sanitize_tool_errors`'s patch of the same method. Idempotent, marked on the
+    manager whose method is replaced, so building several apps over one `FastMCP` does not stack
+    wrappers.
     """
     manager = server._tool_manager
     if getattr(manager, "_chemclaw_binds_caller", False):
@@ -406,13 +273,8 @@ def _bind_caller_per_tool_call(server: FastMCP) -> None:
             headers.get(HEADER_CORRELATION, ""),
         )
         try:
-            # **The caller's trace, adopted for the same reason the caller's identity is.**
-            # `CallerLogMiddleware.dispatch` also attaches `continue_trace`, and that attachment is
-            # in the ASGI task — the same task a tool body does *not* run in. So a span opened
-            # inside a tool would have been rooted at nothing rather than parented to the turn that
-            # asked for it, which is the exact defect measured one function up for the contextvars.
-            # Latent today (no tool body in this repository opens a span) and pre-emptied here,
-            # because the first one to do so would produce an orphan and nothing would say why.
+            # The caller's trace, adopted in the tool's own task for the same reason as its
+            # identity, so a span opened in a tool body is parented to the calling turn.
             with continue_trace(headers):
                 return await wrapped_call_tool(
                     tool_name, arguments, context=context, convert_result=convert_result
@@ -427,29 +289,11 @@ def _bind_caller_per_tool_call(server: FastMCP) -> None:
 def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
     """Replace an unexpected tool exception's text with a generic notice before it reaches a caller.
 
-    Measured, not assumed (a probe against this exact `mcp` version, over the real streamable-HTTP
-    transport): `Tool.run` already turns any exception a tool raises into a JSON-RPC tool-error
-    result rather than an HTTP fault, but it folds the exception's `str()` in verbatim —
-    `f"Error executing tool {name}: {e}"` — so an unhandled `psycopg.OperationalError` or a stray
-    path reaches the model with a DSN or an internal identifier attached. This is not about
-    *whether* a caller sees an error, only about *what it is allowed to say*.
-
-    `ValueError` is the one exception family this codebase already treats as "a deliberately-worded,
-    caller-safe message" (`chemclaw.core.errors.ChemclawError` and `ConnectorError` both derive from
-    it, and so does pydantic's own `ValidationError`) — every connector tool that raises to explain
-    a bad SMILES or a bad argument already raises one of these, so only this family is let through
-    unchanged. Anything else is a bug or an infrastructure fault, not a message written for the
-    model to read, and is replaced here — with the real exception logged so an operator can still
-    find it.
-
-    There is no supported hook for this in `FastMCP` (no tool-call middleware in this version), so
-    the interception point is the tool manager's own `call_tool` — the one place every tool call
-    passes through before `Tool.run` composes the leaking message. Patched once here, the one
-    shared choke point every connector's app is built through, rather than once per bundle.
-
-    Idempotent on the same terms as `_bind_caller_per_tool_call`, and for a reason of its own
-    besides the wrapper count: re-entering this sanitiser at every layer re-walks `exc.__cause__`
-    once per app the process has built.
+    `Tool.run` folds `str(exc)` into the error result, which can leak a DSN or internal path.
+    `ValueError` (including `ChemclawError` and pydantic's `ValidationError`) is this codebase's
+    caller-safe family and passes through; anything else is replaced and logged for the operator.
+    FastMCP has no tool-call middleware, so this patches the tool manager's `call_tool`, once for
+    every connector. Idempotent like `_bind_caller_per_tool_call`.
     """
     manager = server._tool_manager
     if getattr(manager, "_chemclaw_sanitizes_errors", False):
@@ -468,11 +312,9 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
             )
         except ToolError as exc:
             if isinstance(exc.__cause__, AtCapacityError):
-                # A full backend is not a fault, and replacing its sentence with "an internal
-                # error occurred" is what made it one: the caller could not tell "ask again in a
-                # moment" from "broken". The marker goes first, where the fleet's matcher reads
-                # it (`core/mcp_session.at_capacity`); the sentence is the chemist-facing one the
-                # error was written with, which carries no hostname by that class's contract.
+                # A full backend is not a fault: keep its marker first (read by
+                # `core/mcp_session.at_capacity`) and its chemist-facing sentence, so callers can
+                # tell "ask again" from "broken".
                 busy = exc.__cause__
                 raise ToolError(f"Error executing tool {tool_name}: {busy.marker} {busy}") from busy
             if isinstance(exc.__cause__, ValueError):
@@ -491,35 +333,16 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
 def _publish_tool_results(server: FastMCP, *, name: str) -> None:
     """Offer every tool's own result to the external results store, for every bundle at once.
 
-    **The third publish hook** (`D-2026-08-27-a-composite-needs-a-hook-not-a-projector`). Two
-    already exist and neither can see a *tool* composite: the cache hook fires on a cache miss and
-    a composite has no cache row by design (its key would name its own output), and the job hook
-    fires off a Temporal envelope and a tool is not a job. `compute_thermochemistry` and
-    `predict_logd` both had a projector and no caller for as long as the seam has shipped, which is
-    the `audit_events.agent` shape — a record that reads as kept and is not.
-
-    Installed here rather than called by each tool, and that is the whole design: a tool author has
-    nothing to remember, because a tool is registered with `@server.tool()` and is therefore already
-    inside `_tool_manager`. `chemclaw.publish.hooks` decides what is actually published, and the
-    suite derives that set rather than trusting it.
-
-    **Wrapped on the tool's function, not on `call_tool`.** The two patches above intercept
-    `ToolManager.call_tool`, which is right for an error and for an identity because neither needs
-    the result. This one does: by the time a call returns from the manager, `convert_result` has
-    turned the model into content blocks and a structured dict — a tool result is not a model on
-    the wire (`D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire`) — and the hook routes on the
-    model's own name. `Tool.fn` is the last point at which it still is one.
-
-    The wrapper returns the tool's result unchanged and swallows nothing the tool raises: a failed
-    tool publishes nothing, and a failed publish is invisible to the caller. Idempotent, so a
-    process that builds two apps over one server does not wrap twice.
+    The publish hook for tool composites, which have no cache row and are not jobs, so the cache and
+    job hooks never see them. Installed here so tool authors have nothing to remember;
+    `chemclaw.publish.hooks` decides what is published. Wraps `Tool.fn` rather than `call_tool`
+    because the hook routes on the result model, which `call_tool` has already converted to content
+    blocks. Returns the result unchanged; a failed publish is invisible to the caller. Idempotent.
     """
     for tool in server._tool_manager.list_tools():
         if not tool.is_async or getattr(tool.fn, "_chemclaw_publishes", False):
-            # A synchronous tool is left alone rather than wrapped in a coroutine: `Tool.is_async`
-            # was decided at registration and `call_fn_with_arg_validation` dispatches on it, so an
-            # async wrapper over a sync function would be awaited by nobody. No tool in this tree
-            # is synchronous; a future one that is would need `is_async` moved with it.
+            # Sync tools are left alone: `Tool.is_async` was fixed at registration, so an async
+            # wrapper over a sync function would never be awaited.
             continue
         tool.fn = _publishing(tool.fn, connector=name, tool_name=tool.name)
 
@@ -532,10 +355,8 @@ def _publishing(
     @functools.wraps(fn)
     async def _run(**kwargs: Any) -> Any:
         result = await fn(**kwargs)
-        # Imported here rather than at module scope for the reason `publish_stored_result` gives
-        # for the same import: `connector_app` runs at import time in seven bundle modules, and a
-        # deployment with no sink configured should never load the projection machinery — or
-        # RDKit's canonicalization behind it — at all.
+        # Imported lazily so a deployment with no sink never loads the projection machinery or
+        # RDKit.
         from chemclaw.publish.hooks import publish_tool_result
 
         await publish_tool_result(
@@ -555,19 +376,9 @@ _LOOPBACK_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 def _transport_security(name: str) -> TransportSecuritySettings:
     """The Host/Origin allow-list for this connector's `/mcp`: loopback, plus its own address.
 
-    **Without this every in-cluster call is refused with 421.** `FastMCP(name)` enables MCP's
-    DNS-rebinding protection with a loopback-only allow-list, and the bundles build their server
-    that way, so the transport answered `421 Misdirected Request` to any request whose `Host` was
-    not `127.0.0.1`/`localhost` — i.e. to every caller that dials it by Service name. Measured on
-    a kind cluster running the chart: the front door logged `connector molfp is unreachable
-    (421 Misdirected Request)` for every bundle on every turn, while `/healthz` (a plain route,
-    outside the transport) kept every probe green. The live lanes never saw it because they dial
-    `127.0.0.1`.
-
-    The guard stays on, narrowed rather than dropped: it admits loopback — the dev lanes, unchanged
-    — and the one address this connector is configured to be reached at, `connector_urls[name]`,
-    which the chart renders into every pod's ConfigMap including this one's. A deployment that
-    names no URL gets exactly FastMCP's default.
+    `FastMCP(name)` enables DNS-rebinding protection for loopback only, which answers 421 to every
+    caller dialling a Service name while `/healthz` stays green. The guard stays on, admitting
+    loopback and `connector_urls[name]`; with no URL configured it is FastMCP's default.
     """
     hosts = list(_LOOPBACK_HOSTS)
     origins = [f"http://{host}" for host in _LOOPBACK_HOSTS]
@@ -589,26 +400,12 @@ def connector_app(
 ) -> FastAPI:
     """Build the FastAPI app that serves one connector's MCP capability.
 
-    Args:
-        server: The `FastMCP` instance holding the capability's tools. Which of them the *agent*
-            may call is decided by the manifest's `tools` allow-list in core, not here — but every
-            tool served is reachable by anything that can open a socket to this pod, so the served
-            set is not a free surface. This docstring used to say the server "can also expose
-            index/write tools for the ingestion path"; it did, nothing in the tree called them, and
-            an anonymous MCP handshake wrote a row into the fingerprint corpus. `connector-validate`
-            now refuses a served tool the manifest does not declare.
-        name: The connector's name (must match its bundle folder and manifest `name`), used in the
-            health payload and the request log.
-        token_env: The environment variable holding this surface's bearer token, for a surface
-            with no `connector.yaml` to resolve one from — core's read-only MCP face is the one
-            such caller. Omitted, the bundle's manifest decides, which is what every connector
-            does. See `BearerAuthMiddleware.__init__` for why an app with neither is left open.
-        on_start: Optional coroutine started once at startup — the hook a bundle uses to report
-            the state of what it serves (`molfp`/`rxnfp` log how many fingerprints their index
-            actually holds, so an operator learns of an unbuilt index before a chemist does).
-            Diagnostics only, and treated as such: it is *started*, not awaited (see the lifespan),
-            and a bundle's hook owns swallowing its own failures — a connector that refuses to
-            start because it could not describe itself is strictly worse than one that starts.
+    Every tool `server` serves is reachable by anything that can reach the pod, so
+    `connector-validate` refuses one the manifest does not declare. `name` must match the bundle
+    folder and manifest `name`. `token_env` names the bearer-token variable for a surface with no
+    `connector.yaml` (core's read-only MCP face); omitted, the manifest decides. `on_start` is an
+    optional diagnostic coroutine started, not awaited, at startup; it must swallow its own
+    failures.
 
     Returns:
         A FastAPI app exposing `GET /healthz`, `GET /livez`, `GET /metrics`, and the MCP endpoint
@@ -627,19 +424,10 @@ def connector_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         """Run the MCP session manager, and pool Postgres, for the app's lifetime.
 
-        The session manager is the sub-app's own lifespan, which mounting does not run.
-        `db.pooling` is here for the same reason it is in the front door's lifespan: a
-        connector that touches a store (`calc` reads and writes the calculation cache) otherwise
-        opens a connection per tool call, and the handshake lands on the same event loop that
-        serves every other request on this process.
-
-        `on_start` is launched inside the pool (so a bundle's report borrows a pooled connection
-        rather than paying its own handshake) but deliberately **not awaited**: it touches the
-        database, and an unreachable one would hold readiness for the whole pool timeout — a
-        diagnostic that can delay a connector becoming ready is worse than the blindness it cures.
-        Measured, not assumed: awaiting it kept the connector composite from starting inside the
-        transport test's window with no Postgres running. The task is kept referenced so it is not
-        garbage-collected mid-flight, and cancelled if shutdown beats it.
+        The session manager is the sub-app's own lifespan, which mounting does not run. The pool
+        avoids a connection per tool call for connectors that touch a store. `on_start` runs inside
+        the pool but is not awaited, so an unreachable database cannot delay readiness; the task is
+        kept referenced and cancelled on shutdown.
         """
         async with db.pooling(), server.session_manager.run():
             report: asyncio.Task[None] | None = (
@@ -653,15 +441,11 @@ def connector_app(
 
     app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)
     app.add_middleware(CallerLogMiddleware, connector=name)
-    # Always installed; it resolves what this bundle's own manifest requires on the first request
-    # and passes straight through for `mode: none`. Read from the registry rather than taken as an
-    # argument, so the seven `app.py` modules stay one line each and no bundle can forget to wire
-    # it — the declaration is in the manifest and the enforcement follows it.
+    # Always installed; resolves the manifest's auth on first request and passes through for
+    # `mode: none`, so no bundle can forget to wire it.
     app.add_middleware(BearerAuthMiddleware, connector=name, token_env=token_env)
-    # Added *after* `CallerLogMiddleware`: Starlette wraps in add-order with the most recently
-    # added outermost, so this one now sits outside it and refuses an oversized body before any
-    # handler — including the logging middleware's own `dispatch` — ever reads it (Sec-5: `/mcp`
-    # had no cap at all, unlike the front door's `_add_body_size_limit`).
+    # Added after `CallerLogMiddleware`, so it is outermost and refuses an oversized body before any
+    # handler reads it.
     if settings.connector_max_request_bytes:
         app.add_middleware(BodySizeLimit, max_bytes=settings.connector_max_request_bytes)
 
@@ -669,11 +453,8 @@ def connector_app(
     async def healthz() -> dict[str, str]:
         """Readiness, for the kubelet and for core's startup sweep (`chemclaw.connectors.health`).
 
-        Startup and readiness share it, honestly so rather than by omission: uvicorn accepts
-        connections only after the lifespan above has completed, so this route answering *is* the
-        evidence that the MCP session manager is running and the Postgres pool is open. A separate
-        `/readyz` here could only assert the same fact a second time. Liveness is `/livez` below,
-        which is a different question rather than the same fact.
+        uvicorn accepts connections only after the lifespan completes, so answering proves the
+        session manager and pool are up.
         """
         return {"status": "ok", "connector": name}
 
@@ -681,14 +462,9 @@ def connector_app(
     async def livez() -> dict[str, str]:
         """Liveness, and nothing else: answering proves the process still serves HTTP.
 
-        A route of its own although `/healthz` answers the same today, because the two answers
-        differ in what acting on them costs. A readiness failure takes the pod out of its Service
-        and is undone by the next passing probe; a liveness failure kills the container. So the
-        probe the kubelet restarts on must consult nothing a restart cannot fix — the rule
-        `Chemclaw3-mcp` holds every fleet server to, after a liveness probe pointed at a readiness
-        route killed a pod that was only missing an optional dependency. With one route serving
-        both, the first check anyone adds to `/healthz` would become a restart trigger without a
-        line of the chart changing.
+        Separate from `/healthz` because a liveness failure kills the container, so it must consult
+        nothing a restart cannot fix; a check later added to `/healthz` must not become a restart
+        trigger.
         """
         return {"status": "alive", "connector": name}
 
@@ -696,11 +472,9 @@ def connector_app(
     async def metrics() -> Response:
         """Prometheus exposition for this connector process.
 
-        A connector records through `chemclaw.core.metrics_bridge` like everything else, and the
-        registry that bridge finds is per-process — so these counters are this pod's, and until
-        this route existed nothing could read them. Unauthenticated for the same reason the front
-        door's copy is: a scrape happens independently of user identity, the NetworkPolicy keeps
-        the port inside the cluster, and the exposition carries counts only.
+        Exposes this pod's `chemclaw.core.metrics_bridge` registry. Unauthenticated like the front
+        door's: a scrape has no user identity, the NetworkPolicy keeps it in-cluster, and it carries
+        counts only.
         """
         return Response(content=METRICS.render(), media_type=CONTENT_TYPE)
 

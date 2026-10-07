@@ -1,9 +1,7 @@
-"""The front-door run service (plan Phase F2/F3): binding, limits, sessions, budgets.
+"""Settings for the front-door run service: binding, limits, sessions, budgets.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from typing import Literal
@@ -22,470 +20,191 @@ class ServiceSettings(BaseSettings):
     sessions + job push-back reach the browser.
     """
 
-    # The ASGI service that actually *runs* the agent for a chemist: it builds the agent, opens
-    # the MCP tool lifecycle for the turn, streams the response, and serves the browser chat
-    # surface. `service_host`/`service_port` bind the server (the OpenShift Route front-ends it,
-    # F6). `service_cors_origins` is a comma-separated allow-list for browser origins that may
-    # call the API (empty = none, the safe default; a same-origin embedded UI needs none). These
-    # are the only front-door knobs; identity/OIDC is layered on in F4. Binds all interfaces
-    # inside the container; the OpenShift Route + NetworkPolicy gate ingress.
+    # The ASGI service that runs the agent for a chemist: builds the agent, opens the turn's MCP
+    # sessions, streams the response and serves the browser chat. Binds all interfaces inside the
+    # container; the OpenShift Route and NetworkPolicy gate ingress.
     service_host: str = "0.0.0.0"
     service_port: int = Field(default=8080, gt=0)
-    # Explicit opt-in to boot *unauthenticated on a non-loopback bind* (SEC-2). With
-    # `entra_required` False every request runs as the shared dev principal with all
-    # authorization gates open — safe only behind loopback. The front door refuses to start in
-    # that mode on an exposed interface unless this is set, so an exposed unauthenticated
-    # deployment is a conscious decision (one loud env var), never a default. Loopback dev and
-    # Entra-enforced deployments never need it.
+    # Explicit opt-in to boot unauthenticated on a non-loopback bind. With `entra_required` False
+    # every request runs as the shared dev principal with gates open, so the front door refuses an
+    # exposed interface without this.
     service_allow_insecure: bool = False
-    # A comma-separated allow-list of browser origins. Empty (the default) is *no* cross-origin
-    # access; `*` is refused below, because it is the one value that turns an allow-list into no
-    # list at all and there is no deployment that needs it — a same-origin embedded UI needs none,
-    # and a browser client that does need access has an origin to name.
+    # Comma-separated browser-origin allow-list; empty allows no cross-origin access. `*` is refused
+    # (`_no_wildcard_origin`).
     service_cors_origins: str = ""
-    # **A field with one legal value, whose whole job is to refuse the other ones.** Every value
-    # above 1 is rejected unconditionally by `_guards_that_the_comments_already_demand`, and
-    # `deploy/entrypoint.sh` passes no `--workers` flag at all — so this starts no second process
-    # and cannot be made to. It exists so that an operator who sets it is told *why* at startup,
-    # by name, instead of finding out from behaviour.
-    #
-    # The reason is unchanged and is worth keeping. One asyncio event loop saturates one CPU, and
-    # a load test measured throughput flat at ~1.18 turns/s from 10 to 50 concurrent users on a
-    # 4-CPU box, so a second process is the obvious lever — and pulling it silently breaks
-    # per-process guarantees: the rate limiter, the budget tracker, the live-session LRU and the
-    # metrics registry all live in one process's memory and are invisible to a sibling worker, and
-    # so does a running turn's event pump, which only its own process can stop or re-attach to.
-    # No ingress can pin below the pod. The supported way to use more CPU is `replicas` with
-    # session affinity at the Route.
-    #
-    # The attachment store used to head that list — a chemist who uploaded a file and then asked
-    # about it needed both requests on one process. Under `session_store="postgres"` uploads are
-    # in `session_attachments` and every process reads them
-    # (D-2026-10-04-an-upload-is-session-state-not-pod-state); only the in-memory store, which
-    # `session_store="memory"` runs and which is single-process anyway, still lives in one.
-    #
-    # The sixth guarantee is the one that *was* fixed and is therefore no longer a reason: under
-    # `session_store="postgres"` a turn takes a leased row in `session_turns`, so two turns on one
-    # session cannot be admitted by two processes (D-121). That fix is why this comment used to end
-    # by advising the reader to "raise this only for a deployment that does not use attachments or
-    # the harness" — advice for a configuration the refusal has never permitted. Nor is the refusal
-    # store-specific: measured, `session_store="memory"` and `session_store="postgres"` are both
-    # refused identically at 2 and at 4, because the guard reads this field alone.
-    #
-    # Still read rather than inert: it is the middle factor in the fleet turn-ceiling product
-    # (`replicas × workers × cap`) that the same validator checks a few statements later. Pinned
-    # at 1 it contributes nothing there, so no configuration can reach that guard through this
-    # field — which is the shape a knob takes on its way out, not a second meaning.
+    # Exists only to refuse values above 1 at startup (`_guards_that_the_comments_already_demand`);
+    # `deploy/entrypoint.sh` passes no `--workers`. The rate limiter, budget tracker, live-session
+    # LRU, metrics and a running turn's event pump are per process, so scale out with `replicas` and
+    # session affinity instead. Still the middle factor of the fleet product `replicas × workers ×
+    # cap`.
     service_uvicorn_workers: int = Field(default=1, gt=0)
-    # How long a turn's claim on its session (`session_turns`, D-121) stays valid before another
-    # process may take it. A lease rather than a lock because a lock would have to be held on a
-    # pooled connection for the turn's whole duration; the cost of a lease is that exclusion holds
-    # only while the holder is scheduled often enough to refresh it, which the front door does
-    # every third of this interval. Sized well above the worst measured event-loop scheduling
-    # delay (~10 s under 50 concurrent users) and well below the wall-clock turn timeout, so a
-    # crashed worker frees its session in about a minute rather than at the next restart.
+    # Validity of a turn's claim on its session (`session_turns`) before another process may take
+    # it. A lease, refreshed every third of this interval, so no connection is held for the turn;
+    # above worst event-loop delays and below the turn timeout, so a crashed worker frees its
+    # session in about a minute.
     service_turn_claim_lease_seconds: float = Field(default=60.0, gt=0)
-    # How many messages may wait in one session for its running turn to end
-    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A message sent while another
-    # turn runs joins the session's line instead of being refused, and runs as its own sender's
-    # turn when it reaches the head; past this many the next one is refused 409, as every second
-    # message used to be. Each sender may hold one place per session whatever this is, so the
-    # number bounds the *people* waiting rather than one person's retries. A waiter holds an open
-    # stream for as long as it waits, so this is also a socket bound: a process holds at most
-    # `service_max_concurrent_turns` × this many waiters, wherever the turns ahead of them run (past
-    # it the next is refused 429), and the connection backstop in `core/config/__init__.py` charges
-    # exactly that product.
+    # Messages that may wait in one session behind its running turn; each runs as its own sender's
+    # turn, and past this the next is refused 409. One place per sender per session. A waiter holds
+    # a stream, so a process holds at most `service_max_concurrent_turns` × this (past it 429),
+    # which the connection backstop in `core/config/__init__.py` charges.
     service_turn_queue_max: int = Field(default=4, ge=1)
-    # How often a waiting message asks whether it is next. The ask also refreshes its lease (the
-    # turn-claim lease above), so it must be shorter than that lease — startup refuses one that is
-    # not, because every ticket would lapse between asks and its message read as withdrawn. In-
-    # process a finishing turn wakes its waiters at once; this interval is what a waiter on
-    # *another* replica pays, and what a shift in its position takes to reach the sender's screen.
+    # How often a waiting message asks whether it is next; the ask refreshes its lease, so it must
+    # be shorter than the turn-claim lease (checked at startup). In-process waiters are woken at
+    # once.
     service_turn_queue_poll_seconds: float = Field(default=1.0, gt=0)
-    # How many participants besides the sender may follow one running turn's live stream at once
-    # (`GET /sessions/{id}/turn/stream`). Each has its own bounded buffer, so a stalled one is cut
-    # off without holding the others; this bounds the memory and the sockets one turn can gather.
-    # A watch also takes one of its watcher's `service_max_event_streams_per_user` slots.
+    # Participants besides the sender who may follow one running turn (`GET
+    # /sessions/{id}/turn/stream`), each with its own bounded buffer. A watch also takes a
+    # `service_max_event_streams_per_user` slot.
     service_turn_max_watchers: int = Field(default=4, ge=0)
-    # How long a watcher's membership is trusted before it is read again, on the next event of the
-    # turn they follow. Membership is read per request and a watch is one request lasting a turn, so
-    # this bounds how long a member removed mid-turn keeps seeing it. One lookup per watcher per
-    # interval at most, and none while the turn is quiet.
+    # How long a watcher's membership is trusted before re-reading it on the next event, bounding
+    # how long a removed member keeps watching.
     service_turn_watch_recheck_seconds: float = Field(default=5.0, gt=0)
-    # **A running turn is reached from any replica**
-    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`). A reattach or a
-    # Stop that lands on a replica not holding the turn becomes a row the holder polls for
-    # (`agent/turn_remotes.py`), and a followed turn's frames come back through rows the asker polls
-    # for. This is both polls' interval: how long a Stop sent to another replica takes to reach the
-    # turn, and how coarsely a turn followed from another replica arrives. Each poll is one short
-    # statement, taken only while there is something to poll for — a turn held here, or a view of
-    # one held elsewhere.
+    # Poll interval for cross-replica turn relay (`agent/turn_remotes.py`): a reattach or Stop
+    # landing on another replica becomes a row the holder polls for, and relayed frames come back
+    # the same way. Polls run only while there is something to relay.
     service_turn_relay_poll_seconds: float = Field(default=0.25, gt=0)
-    # How long such a request lives without its asker refreshing it — the bound on how long a holder
-    # keeps relaying to a replica that died — and how long the asker waits for the holder's first
-    # answer before answering 503. Startup refuses a poll at or above it.
+    # Lifetime of a relay request without refresh, and how long the asker waits for the holder's
+    # first answer before 503. Must exceed the poll interval (checked at startup).
     service_turn_relay_lease_seconds: float = Field(default=10.0, gt=0)
-    # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request
-    # body at the trust boundary so an oversized POST is a clean 422, not an unbounded
-    # allocation. Generous for a real message (~25k tokens); raise it for a workflow that posts
-    # more.
+    # Max characters in one chat message; larger is a clean 422.
     service_max_message_chars: int = Field(default=100_000, gt=0)
-    # Response security headers on the browser surface (SEC-5). When on (the safe default),
-    # every response carries a Content-Security-Policy scoped to the self-served chat UI (self +
-    # one inline <style> block + data: images), X-Content-Type-Options: nosniff,
-    # X-Frame-Options: DENY, and Strict-Transport-Security. Off is only for a deployment
-    # fronting its own header policy at the ingress/Route. HSTS is inert over plain-HTTP dev, so
-    # leaving this on locally is harmless.
+    # Security headers on every response: a CSP scoped to the self-served chat UI, nosniff,
+    # `X-Frame-Options: DENY` and HSTS. Turn off only where the ingress sets its own policy.
     service_security_headers: bool = True
 
-    # Durable session store (plan Phase F3). The agent's conversation history must survive a pod
-    # restart, so a session is resumable. `memory` keeps the classic in-process provider
-    # (dev/test); `postgres` persists each turn's messages to `session_messages` keyed by
-    # session id, so a fresh process over the same DSN resumes the thread. **Session state is
-    # not Temporal job state** — it is the conversation layer (D-002), and the table is a read
-    # model rather than the turn's state. `session_store_dsn` lets it point at a database other
-    # than the
-    # calculation/fingerprint DSN; empty falls back to `postgres_dsn` (one database in the
-    # simple deployment).
+    # Durable session store. `memory` is in-process (dev/test); `postgres` persists each turn's
+    # messages to `session_messages` so a fresh process resumes the thread. Session state is the
+    # conversation layer, not Temporal job state. `session_store_dsn` may name another database;
+    # empty uses `postgres_dsn`.
     session_store: Literal["memory", "postgres"] = "memory"
     session_store_dsn: DatabaseDsn = ""
-    # Cap on the front door's in-process live-session cache (COR-3). The service holds the live
-    # AgentSession object per session id; without a bound this map grows for the pod's whole
-    # lifetime. When the cap is exceeded the least-recently-used session is evicted — its
-    # durable history survives in the session store, only the in-process handle is dropped.
-    # Sized generously for concurrent chemists; raise it for a busier front door.
+    # Cap on the in-process live-session cache; least-recently-used handles are evicted, durable
+    # history survives.
     service_max_live_sessions: int = Field(default=1000, gt=0)
-    # Cap on how many of a caller's sessions `GET /sessions` returns, newest first. A chemist
-    # who has used the system for a year owns thousands of session rows, and the route exists to
-    # populate a sidebar — an unbounded list would be a slow query rendering a list nobody
-    # scrolls.
+    # Most sessions `GET /sessions` returns, newest first (it fills a sidebar).
     service_max_listed_sessions: int = Field(default=100, gt=0)
-    # Cap on how many of those sessions `GET /plans/pending` reads a plan for. Bounded separately
-    # from the listing because the cost is a different kind: each read is a checkpointer statement,
-    # and `AsyncPostgresSaver` serializes every statement behind one `asyncio.Lock`
-    # (`agent/checkpointer.py`), so an inbox that scanned a full listing would hold the checkpointer
-    # against every concurrent turn on the pod for the length of the scan. Sessions that cannot
-    # hold a plan — a profile with the harness off — are skipped before the read and do not spend
-    # the budget. What the scan did not reach comes back as `unread` rather than being silently
-    # dropped, because a partial inbox that looks complete is the failure this route exists to
-    # avoid.
+    # Most sessions `GET /plans/pending` reads a plan for. Each read is a checkpointer statement
+    # serialized behind one lock (`agent/checkpointer.py`), so a long scan would stall every turn.
+    # Sessions that cannot hold a plan are skipped free; unreached ones come back as `unread`.
     service_max_plan_scans: int = Field(default=25, gt=0)
-    # Admission control on concurrent agent turns (AG-15). Each turn holds one permit for its
-    # whole streamed run, so at most this many turns hit the shared internal LLM endpoint at
-    # once; a turn that cannot get a permit within the admission timeout is shed rather than
-    # piling onto a saturated endpoint. Tune to the endpoint's real throughput budget. Health and
-    # push-back streams are not gated (they are not LLM-bound).
-    #
-    # **A shed is not a 503, and this comment said it was for as long as the guard has existed.**
-    # `POST /sessions/{id}/messages` streams, so the status line is written before a permit is
-    # asked for: measured at 400 and 800 offered turns, the wire shape is `HTTP 200` followed by an
-    # SSE frame `{"type":"error","code":"at_capacity","retryable":true}` — 743 of them, with the
-    # response still counted as a success by every 5xx-based alarm. (The 503s at
-    # `api/middleware.py` are a pool checkout and an unreachable Temporal, which is why grepping
-    # for one found it.) `chemclaw_turns_shed_total` is the only signal there is, which is why the
-    # chart alerts on its *share of offered turns* and not merely on its being non-zero: a
-    # deployment refusing two thirds of its chemists reports 100% availability.
-    #
-    # **The default is 12 because that is what the machinery measured.** A turn is 8.32 s wall and
-    # 0.581 s CPU — 7% machinery, 93% waiting on the model — so one core carries
-    # 1 ÷ 0.581 × 8.32 ≈ 14 permits before CPU binds, and the front door's own event loop wants the
-    # rest. 12 leaves that margin. The number that decides whether 200 chemists are served is
-    # this × replicas, and the fleet ceiling below is where an operator states what the endpoint
-    # will actually take.
+    # Admission control: permits for concurrent turns, held for the whole streamed run; a turn not
+    # admitted within the admission timeout is shed. The response has already started, so a shed is
+    # an SSE `{"type":"error","code":"at_capacity"}` frame under HTTP 200, not a 503;
+    # `chemclaw_turns_shed_total` is the signal. 12 is about what one core carries (turns are mostly
+    # waiting on the model). The fleet ceiling below is where the endpoint's real capacity is
+    # stated.
     service_max_concurrent_turns: int = Field(default=12, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
-    # **The cap above is actor-blind, and this is its missing half.** One principal opening
-    # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
-    # chemist is shed `at_capacity` — the measurement is in `chemclaw.api.detach`, one hang-up per
-    # permit. The per-actor *rate* limit below does not reach it, and not because it is set too
-    # high — it meters a *rate* while this counts *simultaneous* turns, so a principal holds the
-    # whole replica on twelve requests. (It is also 0.0 here; 120/min is the chart's value.)
-    # `src/chemclaw/api/routes/streams.py` already bounds its own resource twice, per user and per
-    # process, on the argument that one bound does not imply the other;
-    # turns had only the second. Counted across an actor's *other* sessions, since one turn per
-    # session is already a 409.
-    #
-    # **0 disables, and off is right as a code default** (D-142/REV-16), here for a reason that is
-    # measured rather than doctrinal: `chemclaw.cli.live_storm`'s family A sweeps the *admission*
-    # cap end to end, driving 48 concurrent turns from one credential at each value — an
-    # on-by-default per-actor cap turns those sheds into 429s and breaks the one instrument that
-    # validates admission control. The chart carries the posture.
-    #
-    # Per process, like `service_max_concurrent_turns`, and with the same caveat: `maxReplicas`
-    # multiplies the real ceiling, so an actor spread over the fleet holds that multiple, and a
-    # fleet-wide per-actor limit belongs at the ingress (SCALE-1). A value at or above
-    # `service_max_concurrent_turns` enforces nothing while reading as protection, which the
-    # cross-field validator in `core/config/__init__.py` now refuses outright.
+    # Per-actor cap on simultaneous turns across their sessions, so one principal cannot hold every
+    # permit (the rate limit meters rate, not concurrency). 0 disables, the code default, so
+    # `chemclaw.cli.live_storm` can drive admission from one credential; the chart sets it. Per
+    # process; a fleet-wide per-actor limit belongs at the ingress. A value at or above
+    # `service_max_concurrent_turns` is refused.
     service_max_concurrent_turns_per_actor: int = Field(default=0, ge=0)
-    # Threads kept *above* whatever this process's own admission caps can occupy, in the one
-    # `asyncio.to_thread` pool they all share (`core/executor.py`). They exist for the calls that
-    # are microseconds long and must never wait behind a corpus parse or an embedding: bearer-token
-    # validation on every request, a readiness probe, an SSE reconnect. Without a sized pool the
-    # loop's stock default is `min(32, cpu_count + 4)` — 8 on a 4-CPU pod, which is *below*
-    # `service_max_concurrent_turns`, so the admission cap could fill the pool on its own and
-    # authentication latency became a function of corpus size (measured: a queued short call waited
-    # 0.2 ms at 1 concurrent `load_notes`, 565.5 ms at 8, 813.4 ms at 16). The *reserved* half is
-    # derived from the caps that already exist, so raising a cap widens the pool with it; this is
-    # the only part an operator tunes, and only if short calls are seen queuing.
+    # Threads kept above what the admission caps can occupy in the shared `asyncio.to_thread` pool
+    # (`core/executor.py`), so short calls (token validation, probes, reconnects) never queue behind
+    # a parse or embedding. The reserved part derives from the caps; tune this only if short calls
+    # queue.
     service_thread_pool_headroom: int = Field(default=8, gt=0)
-    # The two numbers that turn the *per-process* cap above into the load the shared LLM endpoint
-    # actually sees, because a process cannot discover either of them.
+    # Front-door pods this deployment may reach, which turns the per-process cap into what the LLM
+    # endpoint sees (`replicas × workers × cap`). The chart derives it from
+    # `autoscaling.maxReplicas` (or `service.replicas`); 1 suits a CLI or dev run.
     #
-    # The guard is per-process by design and stays that way: SCALE-1 rejected a fleet-wide admission
-    # counter because bounding a *resource* is not worth a durable write and a heartbeat on every
-    # turn. But that decision left the real ceiling — `replicas × uvicorn workers × the cap above` —
-    # written down nowhere and checked by nothing. With `maxReplicas: 6` the shipped chart admits 48
-    # concurrent turns against an endpoint sized by whoever set `8`, and an operator raising the cap
-    # to "use the box better" multiplies the fleet's demand sixfold without touching anything named
-    # fleet. That is the gap: not that the guard is per-process, but that nobody states the product.
-    #
-    # `fleet_replicas` is how many front-door pods this deployment may reach — the chart derives it
-    # from `autoscaling.maxReplicas` (or `service.replicas` when the HPA is off), so it is the same
-    # number the HPA obeys and cannot drift from it. 1 is the honest default for a CLI, a test or a
-    # single-pod dev run.
-    #
-    # `fleet_max_concurrent_turns` is the ceiling the LLM endpoint's throughput budget permits,
-    # declared by the operator who knows it. When it is set, the validator refuses a configuration
-    # whose product exceeds it, at startup, in every pod — so the multiplication fails loudly at
-    # deploy time instead of silently at 3am. 0 = undeclared, which is the code default for the same
-    # reason `budget_enabled` and the rate limiter are off in code: a dev run has no fleet.
+    # `fleet_max_concurrent_turns` is the endpoint's permitted ceiling, declared by the operator;
+    # when set, startup refuses a product above it. 0 = undeclared.
     service_fleet_replicas: int = Field(default=1, gt=0)
-    # The same count during a rolling update, when both generations are up: the chart's
-    # `chemclaw.frontDoorProcessesAtRolloutPeak`. It exists because the connection budget's
-    # readiness term is one pool *per front-door pod*, so a peak charged with the steady replica
-    # count mixes two bases in one formula. 0 = undeclared, and the budget then falls back to the
-    # steady figures — which is what a CLI, a test and any hand-rolled deployment get.
+    # Front-door pods during a rolling update (chart's `chemclaw.frontDoorProcessesAtRolloutPeak`),
+    # for the connection budget's per-pod readiness term. 0 falls back to the steady figures.
     service_fleet_replicas_at_rollout_peak: int = Field(default=0, ge=0)
     service_fleet_max_concurrent_turns: int = Field(default=0, ge=0)
-    # Per-principal request budget (`api/rate_limit.py`), spent inside `require_principal` so it
-    # covers every authenticated route and none of the probes. The two guards above are scoped to
-    # *turns*, so a caller holding them at zero could still drive `/proposals`, `/jobs`,
-    # `/schedules` and `/sessions` as fast as the network allowed — every one of which does real
-    # work against Temporal or Postgres. A loop with no LLM call in it was free.
-    #
-    # A token bucket: `per_minute` is the sustained refill and `burst` the ceiling a caller may
-    # spend at once. A fixed window would let someone spend a whole allowance at its last
-    # millisecond and the next at its first, so the observed peak is twice the configured rate at
-    # the moment the system can least absorb it.
-    #
-    # 0 disables, and that is the code default for the same reason `budget_enabled` is off in code
-    # and on in the chart (REV-16): a CLI, a test and a single-user dev run have no reason to be
-    # throttled, and a limiter that fires there is one people switch off everywhere.
-    #
-    # Per process, like `service_max_concurrent_turns`, and with the same caveat: `maxReplicas`
-    # multiplies the real ceiling, and a fleet-wide limit belongs at the ingress.
+    # Per-principal request budget (`api/rate_limit.py`), spent in `require_principal` so it covers
+    # every authenticated route and no probes. A token bucket: `per_minute` refills, `burst` caps a
+    # spend, so no window edge doubles the peak. 0 disables, the code default; the chart sets it.
+    # Per process; fleet-wide limits belong at the ingress.
     service_rate_limit_per_minute: float = Field(default=0.0, ge=0)
     service_rate_limit_burst: float = Field(default=30.0, gt=0)
-    # How many principals the limiter remembers before evicting the least recently seen. A map
-    # keyed by caller identity is the classic unbounded-growth bug (fixed three times in this
-    # codebase, most recently for metric label series, D-152), and here the key is
-    # attacker-influenced — minting tokens for many `oid`s is exactly the way around a per-principal
-    # limit. Eviction costs that caller one free burst and costs the process nothing.
+    # Principals the limiter remembers before evicting the least recent; the key is
+    # attacker-influenced, so the map must be bounded. Eviction gives that caller one free burst.
     service_rate_limit_max_principals: int = Field(default=10_000, gt=0)
-    # Hard ceiling on a request body, refused with 413 *before* anything reads it
-    # (`core.asgi.BodySizeLimit`). `attachment_max_bytes` was the only size check and it runs inside
-    # `parse_attachment` — by then Starlette's multipart parser has already written the whole body
-    # to a spooled temp file (RAM to 1 MB, then the pod's ephemeral disk), so a 5 GB upload was
-    # ingested in full and then refused. Above `attachment_max_bytes` because a multipart envelope
-    # carries boundaries and headers around the file; 0 disables.
+    # Hard ceiling on a request body, refused with 413 before anything reads it
+    # (`core.asgi.BodySizeLimit`); otherwise multipart parsing spools the whole body first. Above
+    # `attachment_max_bytes` to fit the multipart envelope. 0 disables.
     service_max_request_bytes: int = Field(default=4_000_000, ge=0)
-    # The three uvicorn transport bounds, read by `deploy/entrypoint.sh`. Settings rather than
-    # literals in the script for the usual reason — every threshold is one config value — and here
-    # for a second one: they are the only knobs in the system an operator must tune *against the
-    # connection count*, and burying them in a shell script is where they would never be found.
-    #
-    # None of these can be imposed by the application: by the time a request reaches an ASGI app,
-    # uvicorn has accepted the socket and parsed the headers. `max_connections` bounds sockets, not
-    # turns — deliberately far above `service_max_concurrent_turns`, since a connection waiting for
-    # an admission permit or holding an SSE stream is doing nothing expensive; it is the backstop,
-    # not the policy. `keepalive_seconds` reclaims an idle connection's slot. `max_header_bytes`
-    # bounds the request line plus headers, without which a client can dribble an unbounded header
-    # block for as long as it likes.
-    #
-    # **`--limit-concurrency` answers 503 above the ASGI app, so this bound is also the liveness
-    # probe's.** uvicorn counts open sockets — idle keep-alives included — and rejects at the
-    # protocol layer, before routing: proven with 20 idle keep-alive sockets against a limit of
-    # 20, where a *fresh* `GET /healthz` got 503, and again with 255 SSE streams held at 256,
-    # where `/healthz`, `/readyz`, `GET /sessions` and a turn POST all returned 503 together. The
-    # cascade that makes it an outage rather than a queue: one pod lost, the survivor takes every
-    # stream, `/readyz` drains it at ~30 s and `/healthz` has the kubelet SIGKILL it at ~60 s —
-    # killing every in-flight turn on the one pod still serving. The liveness probe's premise
-    # ("`/healthz` does no work, so its budget is about a wedged event loop") is false at the
-    # limit, and a restart there is strictly worse than doing nothing.
-    #
-    # Which is why the number is now derived from what this process's own caps can occupy rather
-    # than picked: 256 was 28% above `service_max_event_streams_total` alone, so the app's
-    # documented, supported state — a full complement of push-back streams — reached a transport
-    # bound that answers 503 to the kubelet. The composed validator refuses a configuration where
-    # `max_connections` is not at least streams + turns (each with its watchers) + the messages
-    # this process may hold waiting + the headroom below, which is the cross-check that was missing
-    # beside the three (fleet turns, fleet Postgres connections, fleet calc requests) that already
-    # exist.
+    # The three uvicorn transport bounds, read by `deploy/entrypoint.sh`; none can be imposed from
+    # inside the ASGI app. `keepalive_seconds` reclaims idle connections; `max_header_bytes` bounds
+    # the request line plus headers. `max_connections` (`--limit-concurrency`) counts every open
+    # socket and answers 503 before routing, including to `/healthz`, so hitting it gets the pod
+    # killed. Startup therefore requires it to cover streams + turns (with watchers) + waiting
+    # messages + `service_connection_headroom`.
     service_max_connections: int = Field(default=512, gt=0)
-    # Sockets kept *above* what this process's own caps can occupy, in the same spirit as
-    # `service_thread_pool_headroom`: the two kubelet probes, the Prometheus scrape, and the
-    # ordinary non-streaming requests a browser makes (transcript reads, `/plans/pending`,
-    # attachment uploads) while its streams are open. Without it the backstop would sit exactly on
-    # the caps and the first probe past them would be the one refused.
+    # Sockets kept above what the caps can occupy: kubelet probes, the scrape, and a browser's
+    # ordinary requests while its streams are open.
     service_connection_headroom: int = Field(default=64, gt=0)
     service_keepalive_seconds: int = Field(default=15, gt=0)
     service_max_header_bytes: int = Field(default=32_768, gt=0)
-    # Wall-clock bound on one streamed turn — how long a turn may hold its admission permit. The
-    # admission timeout only bounds the *wait* for a permit; without this, a hung model stream
-    # or a deliberately slow-reading SSE client pins a permit indefinitely, and a handful of
-    # such streams collapses the whole front door's capacity (every other turn is shed 503). On
-    # expiry the client gets one user-safe error event and the permit is released. Generous for
-    # a real turn (an async QM job is submitted, not awaited, within the turn), finite against a
-    # stall.
+    # Wall-clock bound on one streamed turn, i.e. how long it holds its admission permit; without it
+    # a hung model or slow-reading client pins a permit. On expiry the client gets one user-safe
+    # error event.
     service_turn_timeout_seconds: float = Field(default=600.0, gt=0)
-    # Wall-clock bound on one *send* to an SSE client, which is a different stall from the one
-    # above and cannot be caught by it. `service_turn_timeout_seconds` is an `asyncio.timeout`
-    # entered inside the turn's generator, so it converts to an error event only while that
-    # generator is executing; a client that has stopped reading parks the generator at a `yield`
-    # and blocks the *transport* instead, where the same cancellation tears the stream down with
-    # no teardown of the turn at all (it is left to the async-generator garbage collector, in a
-    # context the turn's contextvar tokens do not belong to). sse-starlette answers this bound by
-    # closing the body iterator in the task serving the stream, which runs the turn's own
-    # teardown. Deliberately far below the turn timeout — a bound that is not reached first
-    # catches nothing — and far above `service_sse_ping_seconds`, so an idle-but-healthy stream
-    # is never cut.
+    # Wall-clock bound on one send to an SSE client. A client that stops reading blocks the
+    # transport, where the turn timeout cannot convert to a clean teardown; sse-starlette closes the
+    # body iterator in the serving task, running the turn's own teardown. Far below the turn timeout
+    # and far above `service_sse_ping_seconds`.
     service_sse_send_timeout_seconds: float = Field(default=60.0, gt=0)
-    # Whether a client disconnect detaches from a running turn (the turn completes; its answer
-    # lands in the transcript; Stop is the explicit `POST /sessions/{id}/turn/stop`) or cancels it
-    # as every disconnect used to (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`). On by
-    # default because losing a 10-minute multi-tool turn to a Wi-Fi handoff is the worse failure;
-    # the cost — an abandoned turn runs to completion and is billed whole — is bounded by the loop
-    # cap and `service_turn_timeout_seconds`, and a deployment that prefers cost over completion
-    # turns this off and gets the old posture exactly.
+    # Whether a client disconnect detaches from a running turn (it completes into the transcript;
+    # Stop is `POST /sessions/{id}/turn/stop`) rather than cancelling it. The cost, an abandoned
+    # turn billed whole, is bounded by the loop cap and turn timeout.
     service_turn_survives_disconnect: bool = True
-    # How long a stop sent *by a page that is unloading*
-    # (`POST /sessions/{id}/turn/stop?reason=unload`) waits before it cancels the turn, so a
-    # reload — which the browser cannot tell from a close at unload time — can reattach
-    # (`GET /sessions/{id}/turn/stream`) and keep the turn
-    # (`D-2026-10-03-an-unload-stop-waits-for-a-reload`). Long enough for a reload to finish booting
-    # and reattach on a slow network; short enough that a chemist who really left frees the turn's
-    # capacity soon after. One window per stop: a second unload stop while one is pending does not
-    # move its deadline. 0 turns the deferral off, and every unload stop is immediate, as before.
+    # How long a stop from an unloading page (`?reason=unload`) waits before cancelling, so a reload
+    # can reattach (`GET /sessions/{id}/turn/stream`). A second unload stop does not move the
+    # deadline. 0 makes unload stops immediate.
     service_turn_unload_grace_seconds: float = Field(default=20.0, ge=0, le=300)
-    # How many unload stops one turn may defer. Each reattach cancels the pending stop, so without
-    # a bound a reload loop would restart the window indefinitely; past this, an unload stop is
-    # immediate. (The turn's own `service_turn_timeout_seconds` still bounds it either way.)
+    # Unload stops one turn may defer; beyond this they are immediate, so a reload loop cannot keep
+    # a turn alive.
     service_turn_unload_grace_max_deferrals: int = Field(default=3, ge=1)
-    # Turn/token budgets — the runaway-cost guard (service.budget). A single turn is already
-    # iteration-capped (`harness_max_loop_iterations`), but nothing caps the *number*
-    # of turns, so a client or an automated push-back loop could accumulate unbounded LLM spend.
-    # When `budget_enabled`, the front door meters each turn's reported token usage and counts
-    # turns per session and per user, refusing (HTTP 429) a turn that would exceed a cap. Caps
-    # are per running process and best-effort — they reset on restart, bounding a live process's
-    # runaway (the missing ceiling above the per-turn loop cap), not a durable rolling-window
-    # quota (deferred). A cap of 0 means unlimited on that dimension, so a deployment can enable
-    # just the guard it wants; the defaults are generous for a real chemist but finite against a
-    # loop. Token metering reads each streamed chunk's `usage_metadata`, so a provider reporting
-    # no usage meters 0 and the turn caps bind. Off by default.
+    # Turn and token budgets against runaway cost. When enabled, the front door meters each turn's
+    # reported usage and counts turns per session and per user, refusing (429) a turn over a cap. A
+    # cap of 0 is unlimited on that dimension. Token metering reads `usage_metadata`, so a provider
+    # reporting none meters 0. Off by default.
     budget_enabled: bool = False
     budget_max_turns_per_session: int = Field(default=100, ge=0)
     budget_max_tokens_per_session: int = Field(default=2_000_000, ge=0)
     budget_max_turns_per_user: int = Field(default=1000, ge=0)
     budget_max_tokens_per_user: int = Field(default=20_000_000, ge=0)
-    # The largest conversation a turn may be admitted onto, in bytes of the stored `messages` blob
-    # (`agent/checkpointer.stored_thread_bytes`). **A memory bound, not a cost one**, so it binds
-    # whether or not `budget_enabled` is on: every turn loads its whole thread — compaction trims
-    # only what is sent — so the front door's working set per admitted turn grows with this number
-    # times the pod's bytes per stored byte, and twelve permits on long threads OOM-killed a 1Gi
-    # front door at turn 76 with nothing else in flight
-    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The turn caps above cannot stand in for
-    # it: they count in process, so a restart or a second replica hands a thread a fresh 100.
-    #
-    # Derived downwards from the pod rather than chosen: `tests/test_deploy_chart.py` holds
-    # `resources.service`'s limit against `service_max_concurrent_turns` permits each loading a
-    # thread of this size, and raising it fails there. 0 disables it.
+    # Largest conversation a turn may be admitted onto, in bytes of the stored `messages` blob
+    # (`agent/checkpointer.stored_thread_bytes`). A memory bound, independent of `budget_enabled`:
+    # every turn loads its whole thread. `tests/test_deploy_chart.py` holds the pod limit against
+    # `service_max_concurrent_turns` threads of this size. 0 disables.
     session_max_thread_bytes: int = Field(default=1536 * 1024, ge=0)
-    # Cap on distinct users the in-process budget tracker keeps counters for. The tracker lives
-    # for the pod's lifetime, so without a bound its per-user map grows with every principal
-    # ever seen (a slow leak); past the cap the least-recently-active user's counters are
-    # evicted (reset) — acceptable for a best-effort guard whose durable rolling-window quota is
-    # a conscious deferral. The per-session map is bounded by `service_max_live_sessions` (the
-    # session lifecycle bound).
+    # Distinct users the in-process budget tracker keeps counters for; the least recently active is
+    # evicted. Per-session counters are bounded by `service_max_live_sessions`.
     budget_max_tracked_users: int = Field(default=10_000, gt=0)
-    # The rolling window the *durable* per-user counters reset on
-    # (`D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`, `api/budget_store.py`). The
-    # in-process counters above have no window at all — they run until the process restarts or the
-    # LRU evicts the scope, which is a reset on an operational event rather than on a policy, and
-    # is what made `budget_max_tokens_per_user` mean "per pod, between restarts". A window makes
-    # the cap mean what a deployment reads it as.
-    #
-    # There is deliberately **no** `budget_durable` flag: the durable half engages exactly where
-    # `session_store == "postgres"`, the same switch the audit sink and the turn-cost ledger read
-    # (`agent/turn_cost.default_turn_cost_sink`). A second flag could only restate that or
-    # contradict it, which is the argument `durable/schedules.py` makes three times over for asking
-    # the manifests rather than adding an enable switch beside them.
-    #
-    # Rolling rather than calendar-aligned, anchored at a principal's first turn in the window —
-    # `api/budget_store.py` carries that argument and what it costs.
+    # Rolling window for the durable per-user counters (`api/budget_store.py`), anchored at a
+    # principal's first turn in the window. Durable counting engages exactly when `session_store ==
+    # "postgres"`; there is no separate flag.
     budget_window_hours: float = Field(default=24.0, gt=0)
-    # Warn a deployment *before* the cap refuses a turn, rather than only at the refusal. A budget
-    # whose first observable signal is a 429 gives an operator no lead time and a chemist no
-    # explanation: the turn that reports the problem is the turn that was lost to it. At this
-    # fraction of any cap, `chemclaw_budget_warnings_total` increments and a WARNING names the
-    # scope — once per turn, from `record`, because `check` runs twice per turn (a fast path before
-    # the admission permit and the binding one after it) and would double every count.
-    #
-    # **It reaches a metric and a log, not the chemist.** Putting it on the wire means a new member
-    # of the SSE `Event` union in `api/events.py`, which is a coordinated change across
-    # `Chemclaw3_ui` and `Chemclaw3_mock` — the same reason `AnswerEvent.challenged` is still
-    # declared. Stated here rather than left to be discovered, because "the user is warned at 80%"
-    # is what this setting's name suggests and is not what it does.
-    #
-    # 0 disables the warning, on the convention `agent.py` states for numeric ceilings. The upper
-    # bound is exclusive because 1.0 is the one value whose plain reading ("warn only at the cap")
-    # is not what it does: `_near` is `used >= cap * fraction and used < cap`, so at 1.0 it is
-    # `used >= cap and used < cap` — never true, the warning silently off. This line used to say
-    # 1.0 "fires only on the turn that also refuses, which is legal and pointless"; it fires never,
-    # and a bound that rejects it says so where a comment nobody reads did not.
+    # Fraction of any cap at which `chemclaw_budget_warnings_total` increments and a WARNING names
+    # the scope, once per turn (from `record`). Reaches metrics and logs, not the chemist. 0
+    # disables; 1.0 is excluded because `_near` (`used >= cap * f and used < cap`) would never fire.
     budget_warn_fraction: float = Field(default=0.8, ge=0, lt=1)
-    # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events`
-    # row; the front door tails the table and wakes the owning session (appending the result,
-    # flipping the `awaiting` todo) instead of the user polling. This is the tailer's poll
-    # interval — a LISTEN/NOTIFY-free fallback that is simple and correct; lower it for snappier
-    # wake-ups.
+    # Job push-back: a finished Temporal job writes a `session_events` row and the front door tails
+    # the table to wake the owning session. This is the tailer's poll interval.
     session_event_poll_seconds: float = Field(default=2.0, gt=0)
-    # Cap on concurrent push-back event streams (`GET /sessions/{id}/events`) per user, **per
-    # process**. The turn semaphore only guards POSTed turns; each event stream polls the database
-    # for its whole lifetime, so without a bound one user (or a pile of abandoned tabs) can
-    # accumulate hundreds of forever-polling streams and exhaust Postgres connections for
-    # everyone. A real client needs one stream per open session view; past the cap the request is
-    # refused with 429. Per process, not per deployment: a user spread over `replicas ×
-    # service_uvicorn_workers` processes can hold that multiple. Deliberately left that way —
-    # this bounds a *resource*, and paying a durable write plus a heartbeat per stream to make an
-    # approximate ceiling exact would cost more than the thing it protects.
+    # Concurrent push-back event streams (`GET /sessions/{id}/events`) per user, per process; each
+    # polls the database for its lifetime. Past the cap, 429. Exact fleet-wide counting is not worth
+    # a durable write per stream.
     service_max_event_streams_per_user: int = Field(default=5, gt=0)
-    # How often an idle SSE stream sends a keepalive comment frame (D-159). Neither stream set
-    # one, so a long tool wait had no signal of any kind on the wire: the turn stream can be
-    # silent for the length of an inline calc job or an MCP `request_timeout`, and the push-back
-    # stream is silent by nature until a job lands. Anything between the browser and the pod that
-    # reaps idle connections — a proxy, a load balancer, a phone's radio — was free to drop it,
-    # and the client could not tell that from a slow answer. Comfortably under the 60s such
-    # intermediaries typically use.
+    # Keepalive interval for idle SSE streams, under the ~60 s idle timeout of typical proxies and
+    # load balancers.
     service_sse_ping_seconds: int = Field(default=15, gt=0)
-    # The same cap across *all* users on this process. The per-user cap alone bounds one client;
-    # it does not bound the pod, so 50 concurrent chemists at the per-user cap is 250 forever-
-    # polling streams on one event loop — each a task and a periodic pooled query. This is the
-    # pod-level ceiling, refused with the same 429. Sized as a generous multiple of the per-user
-    # cap so it only binds in the aggregate case the per-user cap cannot see.
+    # Event streams across all users on this process, refused with 429; binds only in aggregate.
     service_max_event_streams_total: int = Field(default=200, gt=0)
-    # How long `/readyz` may reuse its connector sweep. The route is unauthenticated by necessity
-    # (a kubelet cannot present a token) and the kubelet probes every 10 s per pod, so an uncached
-    # sweep is an N-connector HTTP fan-out that any caller can trigger at will. The connector
-    # states are *reported*, never gating, so the only cost of caching is that a reported state
-    # can be up to this stale. 0 probes on every request (the pre-cache behavior).
+    # How long `/readyz` reuses its connector sweep; the route is unauthenticated, so uncached it is
+    # a fan-out anyone can trigger. Connector states are reported, not gating. 0 probes every
+    # request.
     service_readiness_cache_seconds: float = Field(default=5.0, ge=0)
-    # The database probe's own statement budget, deliberately not `pg_statement_timeout_seconds`.
-    # A `SELECT 1` that has not answered in two seconds has answered: the store is not serving.
-    # Keeping this separate from the store timeout is what makes probing safe at all — the argument
-    # against holding readiness on the database (`connectors/server.py`) is an argument against an
-    # *unbounded* wait, and a readiness route exists to say "not ready" quickly. Well under the
-    # kubelet's own probe timeout, so the answer arrives rather than being cut off as a timeout
-    # whose cause the pod never logs.
+    # Statement budget for the readiness `SELECT 1`, separate from `pg_statement_timeout_seconds` so
+    # "not ready" is answered quickly; well under the kubelet's probe timeout.
     service_readiness_db_timeout_seconds: float = Field(default=2.0, gt=0)
 
     @field_validator("service_cors_origins")
@@ -493,15 +212,8 @@ class ServiceSettings(BaseSettings):
     def _no_wildcard_origin(cls, value: str) -> str:
         """Refuse `*`, the one entry that makes this allow-list allow everything.
 
-        `api/middleware._add_cors` splits on commas and passes the result to `CORSMiddleware`
-        verbatim, so `*` reached `allow_origins=["*"]` with nothing between. The harm is bounded
-        today — `allow_credentials` is left False and this API authenticates with a bearer rather
-        than a cookie, so a hostile origin cannot ride a user's session — but that bound rests on
-        two properties of *other* modules, and neither is pinned anywhere. A guard rail on the knob
-        itself does not.
-
-        Checked on every entry rather than on the whole string, because the dangerous value is just
-        as dangerous in a list beside real origins.
+        `api/middleware._add_cors` passes entries to `CORSMiddleware` verbatim. Checked per entry,
+        because `*` is as dangerous inside a list.
         """
         for origin in (part.strip() for part in value.split(",")):
             if origin == "*":
@@ -513,8 +225,5 @@ class ServiceSettings(BaseSettings):
                 )
         return value
 
-    # The read-only MCP face's bearer token variable (F7). A name rather than the value, like
-    # every other credential seam here — and required rather than defaulted to empty *at the
-    # middleware*, which fails closed when the variable is unset: a face serving the corpus
-    # anonymously is the one outcome this surface must not have.
+    # Env var holding the read-only MCP face's bearer; the middleware fails closed when it is unset.
     mcp_face_token_env: str = "CHEMCLAW_MCP_FACE_TOKEN"

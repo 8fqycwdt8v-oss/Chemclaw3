@@ -1,15 +1,9 @@
 """A profile may not spell `harness_autonomy` wrong and quietly lose the plan gate.
 
-`AgentSettings.harness_autonomy` has always been a `Literal`, so the environment variable is
-refused at startup when misspelled. `AgentProfile.harness_autonomy` was a bare `str`, so the file
-was not — and the failure is not symmetrical with "the gate is not added". `autonomy_for` falls
-back to the deployment default only when the profile's value is `None`, so an explicit typo
-*removes* the gate the profile would otherwise have inherited from the shipped `plan_only` default,
-while `TodoListMiddleware` keeps running. The harness then looks plan-gated and is not:
-`GET /plan` answers `approved=false` while state-changing tools execute.
-
-These tests assert the property (a bad value is refused, a good one is kept, an absent one
-inherits) rather than the annotation, so a future refactor that widens the field fails here.
+An explicit value overrides the deployment default, so a typo would remove the inherited
+`plan_only` gate while `TodoListMiddleware` keeps running, and the harness would look plan-gated
+while state-changing tools execute. The tests assert the property (bad refused, good kept, absent
+inherits), not the annotation.
 """
 
 import pytest
@@ -20,10 +14,8 @@ from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import AgentSettings, HarnessAutonomy
 
-# What pydantic says when a `Literal` arm is missed, up to the value it was handed. Spelled once
-# because it is one sentence pydantic owns, and quoted rather than derived from the annotation:
-# a regex built from `get_args(HarnessAutonomy)` would agree with whatever the field currently
-# says, which is the assertion this table exists to *not* make.
+# Pydantic's message for a missed `Literal` arm, up to the value it was handed. Quoted rather than
+# derived from `get_args(HarnessAutonomy)`, which would agree with whatever the field says.
 _LITERAL_ERROR = (
     r"harness_autonomy\n  Input should be 'plan_only' or 'execute' \[type=literal_error"
 )
@@ -44,15 +36,10 @@ _LITERAL_ERROR = (
     ],
 )
 def test_a_misspelled_autonomy_value_is_refused(value: str, fires: str) -> None:
-    """A bad value is refused *by the autonomy field*, naming the value it was handed.
+    """A bad value is refused by the autonomy field, naming the value it was handed.
 
-    `match=` is what makes this table an assertion about which field refused, and the difference
-    is measured rather than argued. Driven: widening `AgentProfile.harness_autonomy` to a bare
-    `str | None` — the exact regression this file was written against — while narrowing `name` to
-    `min_length=5` so the `"typo"` every row passes in is refused instead. Under a bare
-    `pytest.raises(ValidationError)` all
-    **7** rows stayed green with the guard gone, because a construction that raises for *any*
-    reason satisfies it. Under `match=` all **7** go red, each naming the field that did not fire.
+    `match=` pins which field refused; a bare `pytest.raises(ValidationError)` would pass on any
+    validation failure, including one from an unrelated field.
     """
     with pytest.raises(ValidationError, match=fires):
         # Deliberately outside the Literal — mypy is right to object, and that it objects is half
@@ -88,11 +75,9 @@ def test_an_explicit_plan_only_profile_is_gated(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_the_settings_field_and_the_profile_field_accept_the_same_set() -> None:
-    """The two are one alias now; this fails if someone re-spells either one.
+    """The settings field and the profile field accept the same set.
 
-    The defect was not that the profile lacked validation in principle — it was that the constraint
-    existed in one of the two places that needed it, so the two could disagree. Comparing the
-    resolved annotations is what keeps them from drifting apart again.
+    They share one alias; comparing resolved annotations keeps them from drifting apart.
     """
     from typing import get_args, get_type_hints
 

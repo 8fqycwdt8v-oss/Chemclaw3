@@ -1,16 +1,11 @@
-"""The generic data-source seam: contract, discovery, and re-host (plan F7-T1/T2/T3/T4, D-120).
+"""The generic data-source seam: contract, discovery, and re-host (D-120).
 
-Proves a source may provide either half or both (and neither is rejected), that discovery plus the
-`data_sources` enable token select the active ingest/retrieve halves, that `gather_evidence` fans
-out over discovered retrievers, and that the re-hosted ELN source rides the seam with its
-provenance intact — all offline, no DB or Temporal.
+A source may provide either half or both (neither is rejected); discovery plus the
+`data_sources` token select the active halves; `gather_evidence` fans out over discovered
+retrievers; and the re-hosted ELN source keeps its provenance. All offline.
 
-The fan-out test is the seam's **acceptance test**: it attaches a new source the way an operator
-would — writing a `datasource.yaml` into a directory and naming it in `data_sources` — and touches
-no core Python at all. Before D-120 the same test had to `monkeypatch.setitem` a dict inside
-`chemclaw.ingest.sources.registry`, which is precisely the core edit the seam is supposed to
-remove; a test that
-has to reach into core to add a source is evidence the seam does not work.
+The fan-out test is the acceptance test: it attaches a source the way an operator would (a
+`datasource.yaml` in a directory, its name in `data_sources`) and touches no core Python.
 """
 
 import asyncio
@@ -35,12 +30,9 @@ from chemclaw.retrieval.evidence import EvidenceChunk
 def _allow_test_package_drivers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let this suite's manifests name halves that live in this file.
 
-    `D-2026-09-06-a-manifest-is-data-in-every-field-that-executes` holds `retrieve:`/`ingest:` to
-    `chemclaw` plus whatever an operator named, because that reference is imported and called in
-    the process reading it. These fixtures are precisely the *third-party* case the setting exists
-    for, so the suite does what such a deployment does — one env var — rather than the seam being
-    loosened so its own tests keep passing. That the escape hatch carries a real out-of-tree
-    driver here is the strongest evidence the D-118/D-120 "zero core edits" property survived.
+    `retrieve:`/`ingest:` references are imported and called, so they are restricted to `chemclaw`
+    plus operator-named packages (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`).
+    These fixtures are the third-party case, so the suite sets the one env var a deployment would.
     """
     monkeypatch.setattr(settings, "manifest_driver_packages", "tests")
 
@@ -55,10 +47,8 @@ def _write_source(directory: Path, name: str, body: str) -> None:
 class _FakeRetriever:
     """A minimal retrieve half returning one fixed chunk, to prove registry fan-out.
 
-    Takes `name` because every retrieve half does: the registry passes the manifest's name to
-    `_build_retrieve_half` so a source's identity comes from its folder and not from a default
-    the half chose (see that function). A half that does not accept it fails at build time — which
-    is what this class did until the contract landed.
+    Takes `name` because every retrieve half does: the registry passes the manifest's name, so a
+    source's identity comes from its folder, not the half's default.
     """
 
     def __init__(self, name: str = "fake") -> None:
@@ -136,14 +126,9 @@ def test_default_preserves_single_graph_retriever(monkeypatch: pytest.MonkeyPatc
 def test_the_three_note_legs_declare_one_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     """`graph`, `lexical` and `vector` read one note tree, and the manifests have to say so.
 
-    Without the declaration they are three independent votes in `reciprocal_rank_fusion`, which is
-    the correlated-ranker defect: measured on the shipped corpus their pairwise agreement is 47/55,
-    44/55 and 41/53, because the shipped `embedding_provider` is `hash` and all three are therefore
-    term-overlap rankers.
-
-    Asserted here rather than left to the fusion's own unit tests, because those construct their
-    corpus list by hand — deleting `corpus: knowledge-notes` from all three manifests left every
-    one of them green while restoring the defect in every deployment.
+    Without `corpus: knowledge-notes` they are three correlated votes in `reciprocal_rank_fusion`
+    (with the `hash` embedder all three are term-overlap rankers). Asserted on the manifests,
+    because the fusion's unit tests build their corpus list by hand.
     """
     monkeypatch.setattr(settings, "data_sources", "graph,lexical,vector")
     corpora = registry.active_retrieve_corpora()
@@ -171,9 +156,8 @@ def test_a_new_source_is_a_folder_and_a_config_token(
 ) -> None:
     """Attaching a source touches zero core Python: one `datasource.yaml`, one name in config.
 
-    The seam's acceptance test. Everything here is what an operator does — write a manifest, point
-    discovery at the directory holding it, enable the name — and `gather_evidence` picks it up with
-    no edit to the registry, the config models, or the retrieval code.
+    The acceptance test: write a manifest, point discovery at its directory, enable the name, and
+    `gather_evidence` picks it up.
     """
     _write_source(
         tmp_path,
@@ -196,9 +180,8 @@ def test_a_retrieve_half_is_named_by_its_manifest_not_by_its_own_default(
 ) -> None:
     """The source's name wins over whatever default the half's constructor carries.
 
-    `_FakeRetriever` defaults to `"fake"`; mounted under a folder called `borrowed`, it must answer
-    `borrowed`. This is the property the whole partition rests on — see the sibling test below for
-    what it cost when it did not hold.
+    `_FakeRetriever` defaults to `"fake"`; mounted under `borrowed`, it must answer `borrowed`. The
+    partition rests on this (see the sibling test below).
     """
     _write_source(
         tmp_path,
@@ -220,17 +203,10 @@ def test_two_instances_of_one_engine_get_distinct_names(
 ) -> None:
     """Two sources sharing one retrieve engine are two corpora, not one.
 
-    **The regression this file exists to hold.** Every parameterised half used to default its own
-    name — `ShareDocumentRetriever` to `"sharedrive"`, `WarehouseVectorRetriever` to `"warehouse"` —
-    because the registry passed no name at all. Two mounted shares therefore both answered
-    `sharedrive`: `chemclaw.durable.document_sync.share_sources()` is keyed on that name, so the two
-    collapsed to one entry, only the last-discovered share was ever crawled, and its sweep deleted
-    the other's rows — the `document_files` primary key is `(source, path)`, and both handed it
-    the same `source`. The key was right; the value fed to it was not.
-
-    Asserted on names rather than on the deletion because the name *is* the mechanism: distinct
-    names make the partition partition, and every consumer keyed on it (citations, source weights,
-    the sweep) follows.
+    If a half named itself, two mounted shares would both answer `sharedrive`: `share_sources()`
+    would collapse them, only one would be crawled, and its sweep would delete the other's rows
+    (`document_files` is keyed `(source, path)`). Asserted on names, since distinct names are what
+    make every keyed consumer (citations, weights, the sweep) partition.
     """
     for name in ("alpha", "beta"):
         _write_source(
@@ -254,9 +230,7 @@ def test_a_retrieve_half_that_refuses_a_name_fails_naming_the_source(
 ) -> None:
     """Taking the source name is the contract, and breaking it fails loudly at build time.
 
-    The alternative — stamping the name on after construction — would accept such a half silently,
-    which is how the defect above survived: nothing anywhere objected to a retriever that named
-    itself.
+    Stamping the name on after construction would accept such a half silently.
     """
     _write_source(
         tmp_path,
@@ -419,12 +393,8 @@ def test_a_config_that_shadows_the_source_name_is_refused(
 ) -> None:
     """A `name` in `config:` cannot be built, so the manifest refuses it.
 
-    The registry passes `name=<manifest name>` on top of `**config`, so a second `name` is a
-    duplicate keyword and the source dies at startup. `make datasource-validate` built the kwargs as
-    a *dict*, where the second silently overwrote the first — so the manifest validated green and
-    the process then failed with `got multiple values for keyword argument 'name'`. A validator that
-    passes what startup refuses is worse than no validator, because it is what an operator trusts
-    before deploying.
+    The registry passes `name=` on top of `**config`, so a second `name` is a duplicate keyword at
+    startup; the validator must refuse what startup refuses, not merge it silently as a dict would.
     """
     _write_source(
         tmp_path,
@@ -445,16 +415,10 @@ def test_a_config_that_shadows_the_source_name_is_refused(
 def test_the_seam_dates_a_record_the_adapter_left_undated() -> None:
     """`performed_at` falls back to the entry timestamp every entry is required to carry.
 
-    A timeline is the whole of "where did development start and what changed next":
-    `memory.progression` orders on `performed_at`, and `Progression.is_timeline()` will not
-    narrate a trajectory without it. A source with no experiment date therefore produces a
-    corpus that answers that question with "this is a stable id listing, not a timeline" — honestly,
-    and completely — while `RawEntry.created_at` sits in every one of those rows, required, because
-    the sync watermark cannot advance without it (D-2026-08-26-silence-is-not-a-successful-run).
-
-    Asserted in both directions, because a floor that overwrote what an adapter knew would be worse
-    than the gap: an entry timestamp is when the record was *written*, and a chemist-entered
-    experiment date is the better fact wherever a source has one.
+    `memory.progression` orders on `performed_at`, so without it a source produces no timeline.
+    `RawEntry.created_at` is always present (the sync watermark needs it). Both directions: a
+    chemist-entered experiment date, where a source has one, is the better fact and is never
+    overwritten.
     """
     from chemclaw.ingest.eln.adapter import DatedIngest
     from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
@@ -490,11 +454,8 @@ def test_both_ingest_readers_get_the_same_normalisation(
 ) -> None:
     """The sync and the corpus miner build through one construction point, so a rule reaches both.
 
-    `map_to_ord` has six call sites and no shared downstream — the durable sync validates, and
-    `durable.memory_jobs.read_corpus`, which builds the optimization-campaign note this whole
-    question asks for, does not. A normalisation put in either caller silently misses the other,
-    which is the shape of the defect it exists to fix, so it goes at the registry and both entry
-    points are asserted to carry it.
+    `map_to_ord` has many call sites and no shared downstream, so a normalisation in either caller
+    would miss the other; it lives in the registry and both entry points are asserted to carry it.
     """
     from chemclaw.ingest.eln.adapter import DatedIngest
 
@@ -520,15 +481,12 @@ def test_both_ingest_readers_get_the_same_normalisation(
 
 
 def test_an_entry_dated_series_does_not_claim_it_was_ordered_by_experiment() -> None:
-    """A filled-in date must say where it came from, or the note overclaims with it.
+    """An entry-dated series does not claim it was ordered by experiment.
 
-    `DatedIngest` uses the entry's *creation* timestamp, which is when the record was written. That
-    is the best ordering available and usually right — and a batch of three weeks' bench work
-    transcribed in one afternoon carries no sequence at all. Unstamped, it turns
-    `Progression.is_timeline()` true and the campaign note asserts "Runs in the order they were
-    performed" over an afternoon of typing: a value the source could not supply reading as one it
-    did, which is the exact defect `D-2026-08-26-silence-is-not-a-successful-run` is about,
-    reintroduced by the fix for it.
+    `DatedIngest` uses when the record was *written*, which for a batch transcribed in one afternoon
+    carries no sequence. Unstamped, the campaign note would claim "Runs in the order they were
+    performed"; the fallback must say where the date came from
+    (`D-2026-08-26-silence-is-not-a-successful-run`).
     """
     from chemclaw.ingest.eln.adapter import DatedIngest
     from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
@@ -596,16 +554,10 @@ def test_the_gate_binds_every_half_as_the_registry_actually_calls_it(
 ) -> None:
     """`make datasource-validate` and worker startup must agree, in both directions.
 
-    The seam's whole trade is that the callable's signature *is* the config schema, so the gate
-    binds the manifest's kwargs against the real signature offline. It bound `name` for the
-    `retrieve` half only, while `registry._build_ingest_half` and `_build_commitments_half` pass it
-    to every half — so a site's own adapter, written to exactly the documented contract, passed the
-    gate cleanly in CI and then failed at worker startup with `TypeError: unexpected keyword
-    argument 'name'`. A gate that passes what the runtime refuses is worse than no gate: it is the
-    reason the adapter was shipped.
-
-    Asserted as an agreement rather than as a message, so it stays true whichever way a future
-    change moves the contract.
+    The callable's signature is the config schema, so the gate binds the manifest's kwargs against
+    it offline, including the `name` the registry passes to every half. A gate that passes what the
+    runtime refuses is worse than none. Asserted as agreement, so it holds whichever way the
+    contract moves.
     """
     for half, reference in (
         ("ingest", "tests.test_datasource_seam:_DocumentedIngest"),
@@ -644,27 +596,12 @@ def test_the_gate_binds_every_half_as_the_registry_actually_calls_it(
 def test_a_quoted_flag_in_a_manifest_is_refused_rather_than_read_as_true(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The half of "the callable's signature is the schema" that checked names and not values.
+    """A quoted flag in a manifest is refused rather than read as true.
 
-    `snapshot` on `commitments-json` licenses a **destructive** sweep: it tells the store that every
-    pass reads a complete export, so anything absent from the export may be deleted. Measured
-    before this check, over `yaml.safe_load` and the real factory:
-
-        snapshot: true      -> True   sweep armed
-        snapshot: false     -> False  sweep off
-        snapshot: "false"   -> 'false' sweep ARMED
-        snapshot: "no"      -> 'no'    sweep ARMED
-
-    A manifest value reaches the callable exactly as YAML parsed it, and every non-empty string is
-    truthy — so the quoted spelling of the word that turns the sweep off is the spelling that turns
-    it on. Neither `make datasource-validate` nor `_build_half` could see it: both asked what the
-    callable *accepts*, and `signature_mismatch`'s own docstring says "values are irrelevant here",
-    which is right for a `connection:` block of addresses and wrong for a `config:` block of
-    behaviour.
-
-    Driven through a real manifest rather than through `option_type_mismatch` directly, because the
-    property is that the gate **and** the build agree — a check in one of them is a check an
-    operator can walk past.
+    `snapshot` on `commitments-json` licenses a destructive sweep, and YAML parses `"false"` as a
+    non-empty, truthy string, so the quoted spelling of "off" would arm it. Values in a `config:`
+    block are behaviour, not addresses, so their types are checked. Driven through a real manifest,
+    because the gate **and** the build must agree.
     """
     folder = tmp_path / "quoted"
     folder.mkdir()

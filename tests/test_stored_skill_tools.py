@@ -1,14 +1,8 @@
 """The two stored skills tiers are narrowed by the questions that apply to them, and by no others.
 
-Every assertion here was driven failing first against the state this replaced, where the four
-narrowings landed on the stored tiers almost exactly backwards: the three whose basis is a list of
-*filed* names all applied — and `EnabledSkills` emptied both tiers outright, which both tiers' own
-module docstrings said it would, as their reason for believing it did not — while
-`ToolScopedSkills`, the one that asks a question a stored body can answer, ran and could not narrow,
-because the declaration map it reads is built by globbing a directory.
-
-`docs/decisions/D-2026-09-21-a-stored-tier-and-a-filed-tree-are-not-asked-the-same-question.md`
-carries the argument. This file carries the measurements.
+`ToolScopedSkills` must read stored bodies' declarations, since it can answer for them;
+`EnabledSkills` names shipped skills and must not empty a stored tier. The argument is in
+`docs/decisions/D-2026-09-21-a-stored-tier-and-a-filed-tree-are-not-asked-the-same-question.md`.
 """
 
 import asyncio
@@ -55,10 +49,8 @@ _DECLARING = (
     "tools: [compute_thermochemistry, sample_conformers]\n---\n\nQuench cold.\n"
 )
 
-#: A personal skill declaring nothing, which the conservative rule leaves visible to everyone —
-#: `ToolScopedSkills` hides on "every declared tool absent", and an empty declaration has no tools
-#: to be absent. Kept in every arm below so a fix that hid the whole tier could not pass as a
-#: narrowing.
+#: A personal skill declaring nothing, which the conservative rule leaves visible. Kept in every
+#: arm so a fix that hid the whole tier could not pass as a narrowing.
 _BARE = "---\nname: my-notes\ndescription: what I always forget\n---\n\nLabel the flask.\n"
 
 #: The organisation's tier gets the same treatment, which is why the row was one row and not two.
@@ -93,13 +85,8 @@ def _mounted(
 ) -> Any:
     """The backend a turn would be given, with the narrowing a turn really computes.
 
-    **Not `permits=lambda _: True`, which is what makes this file different from the other two.**
-    `tests/test_local_skills.py` and `tests/test_org_skills.py` mount with a permissive narrowing
-    because their subject is the read/write split; the subject here *is* the narrowing, so this
-    walks the real trees and reads the real declarations.
-
-    `stored=False` is the defect arm: it builds the same turn with the stored declarations withheld,
-    which is the state before `agent/stored_skill_tools.py` existed.
+    Walks the real trees and declarations, since the narrowing is the subject here. `stored=False`
+    withholds the stored declarations, the defect arm.
     """
     prof = profile or AgentProfile(name="default")
     tokens = set_current_identity(actor, frozenset())
@@ -117,12 +104,9 @@ def _mounted(
 
 
 def _read(store: Any | None, actor: str) -> StoredSkillTools:
-    """The reader, under the identity a turn takes — it reads the ambient rather than an argument.
+    """The reader, under the identity a turn takes — it reads the ambient actor, not an argument.
 
-    Stamped rather than passed, because that is the fix for the defect a review found here: the
-    reader resolving the personal namespace from a *different* spelling of one actor than the mount
-    does. A test that could still pass an actor would be a test of a parameter that no longer
-    exists.
+    The reader and the mount must resolve one spelling of the actor.
     """
     tokens = set_current_identity(actor, frozenset())
     try:
@@ -144,12 +128,9 @@ def _listed(backend: Any, root: str) -> list[str]:
 def test_a_stored_skill_about_tools_this_turn_cannot_reach_is_not_offered(
     stocked: InMemoryStore,
 ) -> None:
-    """The row, on both tiers, with the arm that proves it is a narrowing and not a deletion.
+    """A stored skill about tools this turn cannot reach is not offered, on both tiers.
 
-    Driven before the fix: the declaring skill was **served and listed** in a turn binding zero
-    tools, while `declared_tools` reports 34 of 39 filed skills hidden by that same predicate in
-    that same turn. A narrowing that runs and cannot narrow is worse than an absent one, because the
-    prose says it is applied.
+    A skill declaring nothing stays visible, so this is a narrowing and not a deletion.
     """
     at_zero = _mounted(stocked, available=set())
 
@@ -197,14 +178,10 @@ def test_a_filed_skill_is_still_hidden_by_the_same_predicate(stocked: InMemorySt
 
 
 def test_an_enable_list_does_not_empty_a_stored_tier(stocked: InMemoryStore) -> None:
-    """`EnabledSkills` names *shipped* skills, so applying it to a stored tier only empties it.
+    """An enable-list does not empty a stored tier.
 
-    Both stored tiers' module docstrings stated this as a fact about the code. Driven before the fix
-    with `CHEMCLAW_SKILLS_ENABLED=development-report`: `ls('/mine/')` and `ls('/org/')` were both
-    empty — on a tier that acts on everybody's turns, in a deployment that had asked for nothing of
-    the kind. `make skill-validate` checks every name in that setting against the *discovered*
-    trees, so no stored name can legally appear in it and there is no configuration that works
-    around this.
+    `EnabledSkills` names shipped skills, and `skill-validate` forbids stored names in it, so
+    applying it to a stored tier could only empty it.
     """
     every_tool = {"compute_thermochemistry", "sample_conformers"}
     original = settings.skills_enabled
@@ -225,13 +202,10 @@ def test_an_enable_list_does_not_empty_a_stored_tier(stocked: InMemoryStore) -> 
 def test_the_control_arm_that_removes_every_skill_still_removes_both_stored_tiers(
     stocked: InMemoryStore,
 ) -> None:
-    """`ProfileScopedSkills` stays in the stored narrowing, and that is decided rather than left.
+    """The control arm that removes every skill still removes both stored tiers.
 
-    `skill_names: frozenset()` is a profile author writing down that this agent reaches no skill at
-    all — the `skills-removed.yaml` control arm — and a tier escaping it would make every A/B result
-    measured against that arm a comparison with a system that still had skills. It is the one of the
-    three filed-basis narrowings that is kept, so it gets its own test rather than riding on
-    `tests/test_org_skills.py`, which cannot see this partition.
+    `skill_names: frozenset()` means no skill at all; `ProfileScopedSkills` is the filed-basis
+    narrowing that the stored tiers keep.
     """
     arm = AgentProfile(name="default", skill_names=frozenset())
     backend = _mounted(
@@ -244,27 +218,12 @@ def test_the_control_arm_that_removes_every_skill_still_removes_both_stored_tier
 
 
 def test_a_stored_skill_under_a_shipped_name_is_never_served(store: InMemoryStore) -> None:
-    """The read side agrees with the write side's *discovered* basis — the row's own invariant.
+    """A stored skill under a shipped name is never served.
 
-    **The scenario is an enable-list, and that matters: the role gate the row named does not reach
-    this.** Driven all four ways, with `UnreservedNames` on and off:
-
-    - a `skill_role_gates` entry hides the stored copy **either way**, because `RoleScopedSkills` is
-      in the stored narrowing too — so the row's own measurement was already closed, silently, when
-      the stored mounts gained a backend predicate;
-    - an enable-list that omits the name gives `/mine/deep-research/SKILL.md` with the rule off and
-      nothing with it on. `EnabledSkills` is the one narrowing this change makes `filed`-only, so
-      the stored tiers now survive an enable-list — which is exactly what re-opens the collision,
-      and why these two fixes belong in one commit.
-
-    An earlier version of this test used the role gate and therefore stayed green with
-    `UnreservedNames` removed from the composition *and* with `reserved=` emptied at the production
-    call site. A mutation review found both; this asserts the mechanism that actually binds.
-
-    The body is written through the tier's own writer rather than `save_local_skill`, because that
-    is the case: `validated_skill` refuses this name *now*, and what is left is a row stored before
-    it did, or a name a later commit moved into `skills/`. Those are exactly the two the write door
-    cannot reach.
+    The binding scenario is an enable-list omitting the name: `EnabledSkills` is filed-only, so only
+    `UnreservedNames` hides the stored copy. A role gate would hide it either way and cannot tell
+    the arms apart. The body is written through the tier's writer, standing in for a row stored
+    before `validated_skill` refused the name.
     """
     contested = "deep-research"
     assert contested in shipped_skill_names(), (
@@ -303,12 +262,9 @@ def test_a_stored_skill_under_a_shipped_name_is_never_served(store: InMemoryStor
 
 
 def test_a_role_gate_alone_does_not_reach_the_reserved_name_case(store: InMemoryStore) -> None:
-    """The row's stated measurement, driven and recorded as *not* the mechanism.
+    """A role gate alone cannot distinguish the `UnreservedNames` arms.
 
-    Kept as its own test rather than deleted, because the next reader of `UnreservedNames` will
-    reach for the scenario the backlog row named, and a green test saying "this one does not
-    distinguish the arms" is what stops it being written as the guard a third time.
-    `RoleScopedSkills` is in the stored narrowing, so the gate removes the personal copy on its own.
+    It hides the stored copy on its own; kept so this scenario is not written as the guard.
     """
     contested = "deep-research"
     body = f"---\nname: {contested}\ndescription: my own digging\n---\n\nMine.\n"
@@ -328,13 +284,9 @@ def test_a_role_gate_alone_does_not_reach_the_reserved_name_case(store: InMemory
 
 
 def test_a_stored_requires_narrows_the_stored_tier(store: InMemoryStore) -> None:
-    """`requires:` on a stored body behaves as it does on a filed one — the other half of R6.
+    """`requires:` on a stored body narrows the stored tier as it does a filed one.
 
-    Separate from the `tools:` case because the two quantifiers differ and only one of them was
-    driven: `tools:` hides when *every* declared tool is absent, `requires:` hides when *any*
-    required one is. A mutation review found that dropping `stored.required` from the merge entirely
-    left the whole file green, because the existing assertions read the reader's map rather than the
-    visibility it buys.
+    Separate from `tools:`, since the quantifiers differ; asserted on visibility, not on the map.
     """
     body = (
         "---\nname: my-scan\ndescription: how I scan\n"
@@ -360,14 +312,10 @@ def test_a_stored_requires_narrows_the_stored_tier(store: InMemoryStore) -> None
 def test_a_stored_declaration_cannot_hide_the_reviewed_skill_of_that_name(
     store: InMemoryStore,
 ) -> None:
-    """The filed entry wins a name held by both tiers, because one map feeds both predicates.
+    """A stored declaration cannot hide the reviewed skill of the same name.
 
-    The merge was written the other way first, with a comment claiming the collision could not
-    happen because `UnreservedNames` removes it — true of the *stored* predicate, and silent about
-    the filed one. Driven at that revision: a grandfathered `/mine/deep-research` declaring one tool
-    nothing binds made the **reviewed** `deep-research` invisible in a turn that bound all twelve
-    tools it declares. A stored declaration for a shipped name describes a body no turn can read, so
-    it must not describe the body a turn does read.
+    One map feeds both predicates, so the filed entry wins a name both hold; a stored declaration
+    for a shipped name describes a body no turn reads.
     """
     contested = "deep-research"
     filed = declared_tools([d for _label, d in _labelled(_skill_dirs())])
@@ -383,12 +331,7 @@ def test_a_stored_declaration_cannot_hide_the_reviewed_skill_of_that_name(
 
 
 def test_the_reserved_rule_does_not_reach_a_name_no_tree_ships(stocked: InMemoryStore) -> None:
-    """A chemist's own vocabulary is theirs, and `UnreservedNames` must only close a collision.
-
-    The defect arm of the test above would be a fix that hid the personal tier whenever a gate was
-    configured, or whenever any name was reserved — so this pins the other side: the reserved set is
-    every shipped name on every turn, and the personal skills here survive it.
-    """
+    """`UnreservedNames` closes only a collision: personal names no tree ships survive it."""
     assert shipped_skill_names(), "no shipped skills, so the reserved set narrows nothing here"
     backend = _mounted(stocked, available={"compute_thermochemistry", "sample_conformers"})
 
@@ -429,12 +372,9 @@ def test_the_reserved_rule_is_asked_of_stored_tiers_only() -> None:
 def test_a_narrowing_that_applies_to_both_tiers_answers_both_the_same(
     kwargs: dict[str, Any], name: str
 ) -> None:
-    """The three shared narrowings are the *same objects* in both halves, so they cannot drift.
+    """The shared narrowings are the same objects in both halves, so they cannot drift.
 
-    A derived guard rather than three hand-written cases: `SkillNarrowing` builds `filed` and
-    `stored` from one tuple precisely so there is no second composition to keep in step, and this is
-    what turns a future edit that rebuilt one of them into a red test rather than a divergence
-    nobody measures.
+    `SkillNarrowing` builds `filed` and `stored` from one tuple; this fails if one is rebuilt.
     """
     base: dict[str, Any] = {"enabled": None, "declared": {}, "available": [], "gates": None}
     narrowing = skill_permits(**{**base, **kwargs})
@@ -443,13 +383,10 @@ def test_a_narrowing_that_applies_to_both_tiers_answers_both_the_same(
 
 
 def test_an_unreadable_stored_body_is_scoped_to_nothing(store: InMemoryStore) -> None:
-    """Fail closed, because a declaration may only ever cost a skill its visibility.
+    """An unreadable stored body is scoped to nothing (fail closed).
 
-    `ToolScopedSkills` reads a *missing* entry as "declares nothing" and leaves the skill visible to
-    everyone, so dropping an unparseable body would make it a **widening** — the defect
-    `skill_manifest._declared_pair`'s own `except` arm exists to refuse, arriving through the stored
-    door. Both write doors run `validated_skill`, so what makes this reachable is a body stored
-    before a rule tightened; the writer is used directly to produce exactly that row.
+    A missing entry reads as "declares nothing", so dropping it would widen visibility. The writer
+    stands in for a body stored before a validation rule tightened.
     """
     asyncio.run(_writer(store).awrite(skill_key("broken"), "---\ntools: {not: a list}\n---\nx"))
     asyncio.run(_writer(store).awrite(skill_key("nameless"), "no frontmatter at all"))
@@ -467,10 +404,7 @@ def test_an_unreadable_stored_body_is_scoped_to_nothing(store: InMemoryStore) ->
 def test_a_stored_body_and_a_filed_one_are_read_by_one_function(tmp_path: Any) -> None:
     """`declared_triple` is the single parse, so a `tools:` key means one thing in both tiers.
 
-    Two readers would be two opinions about a declaration, in a filter whose whole contract is that
-    a declaration can only ever cost a skill its visibility — so this drives the same five shapes
-    through both doors and requires the same answer. The list comes from `_declared_pair`'s own
-    docstring, which names what it was driven over.
+    The same failure shapes are driven through both doors and must give the same answer.
     """
     import frontmatter
 
@@ -499,12 +433,7 @@ def test_a_stored_body_and_a_filed_one_are_read_by_one_function(tmp_path: Any) -
 
 
 def test_a_tier_is_read_exactly_where_it_is_mounted(store: InMemoryStore) -> None:
-    """The reader's two conditions mirror the mount's, or a gate narrows by an unreachable body.
-
-    Asking about a tier a turn has no mount for would hide a skill for no reason the model could
-    ever see; not asking about one it *does* mount is the gap this closes. So both directions are
-    pinned.
-    """
+    """A tier is read exactly where it is mounted, in both directions."""
     asyncio.run(save_local_skill(store, _ACTOR, "my-workup", _DECLARING))
     asyncio.run(save_org_skill(store, "house-workup", _ORG, activated_by="admin-oid"))
 
@@ -519,18 +448,11 @@ def test_a_tier_is_read_exactly_where_it_is_mounted(store: InMemoryStore) -> Non
 
 
 def test_the_reader_and_the_mount_resolve_one_actor_to_one_namespace(store: InMemoryStore) -> None:
-    """A padded actor spelling must not give the gate a different namespace from the mount.
+    """A padded actor spelling resolves the reader and the mount to one namespace.
 
-    `core/identity_context.get_current_actor` returns the value **stripped**, "because the reader
-    every gate and every namespace shares normalizes rather than leaving each of them to", and
-    `scratchpad_backend` resolves the personal mount through it. The reader took an `actor` argument
-    and `api/runner.py` passed the request's raw value, so `' alice-oid '` resolved two namespaces:
-    the reader found nothing, the mount found the skill, and a *missing* declaration reads as
-    "declares nothing" — the whole `/mine` tier unscoped, silently, which is the pre-change state.
-
-    Driven through the mount rather than on the namespaces, because the namespaces agreeing is the
-    mechanism and the tier being scoped is the property. The reader takes no actor now, so the two
-    spellings cannot diverge; this is what turns re-introducing the parameter into a red test.
+    `get_current_actor` strips the value; a raw spelling would leave the reader finding nothing and
+    the `/mine` tier unscoped. Driven through the mount, since the tier being scoped is the
+    property.
     """
     asyncio.run(save_local_skill(store, _ACTOR, "my-workup", _DECLARING))
 
@@ -545,22 +467,10 @@ def test_the_reader_and_the_mount_resolve_one_actor_to_one_namespace(store: InMe
 
 
 def test_a_name_both_tiers_hold_is_scoped_by_the_body_the_turn_reads(store: InMemoryStore) -> None:
-    """The **organisation's** body wins; this test asserted the opposite until a review drove it.
+    """A name both stored tiers hold is scoped by the organisation's body, the one a turn reads.
 
-    Upstream resolves a collision *last-source-wins* and `_skills_middleware` orders its sources by
-    ascending review depth — `/mine`, `/org`, then the reviewed trees — so the organisation's body
-    is what a turn reads. `local_skills.save_local_skill` says so in the course of refusing the
-    other direction: a personal skill under an org name "would never act, since `_skills_middleware`
-    puts `/org` after `/mine`".
-
-    Keyed the other way, one person's private document decided the visibility of a skill acting on
-    everybody's turns. The collision is reachable in one direction and by design: `save_local_skill`
-    refuses an existing org name, while `POST /skills/org` may publish over a name somebody already
-    keeps privately, because the alternative is a deployment-wide publication blocked by one
-    person's private vocabulary.
-
-    **The served path is asserted beside the declaration**, which is the part whose absence let this
-    pass: a test that reads only the map cannot notice that the map disagrees with the listing.
+    Upstream resolves collisions last-source-wins and `/org` comes after `/mine`. The served path is
+    asserted beside the declaration, so the map and the listing must agree.
     """
     shared = "house-workup"
     asyncio.run(save_org_skill(store, shared, _ORG, activated_by="admin-oid"))
@@ -583,12 +493,10 @@ def test_a_name_both_tiers_hold_is_scoped_by_the_body_the_turn_reads(store: InMe
 
 
 def test_the_reader_pages_like_the_listing_it_shares_a_walk_with(store: InMemoryStore) -> None:
-    """More rows than one page, because an un-paged read answers ten and reads as the whole tier.
+    """The reader pages like the listing, over more rows than one page.
 
-    `BaseStore.asearch` defaults to `limit=10`; the personal tier was measured listing ten of a
-    chemist's twelve skills, with the two beyond the page undeletable through the route that exists
-    to remove them. Three callers now share `skill_store.paged_items`, and a narrowing that saw one
-    page would silently leave every skill past it unscoped — which is the fail-*open* direction.
+    `BaseStore.asearch` defaults to `limit=10`; skills past the first page would otherwise be
+    unscoped, the fail-open direction.
     """
     rows = LISTING_PAGE + 7
     writer = _writer(store)
@@ -605,12 +513,9 @@ def test_the_reader_pages_like_the_listing_it_shares_a_walk_with(store: InMemory
 def test_no_stored_skill_name_reaches_the_narrowing_log(
     stocked: InMemoryStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A personal skill's name is a person's own words, and this line is written on every turn.
+    """No stored skill name reaches the per-turn narrowing log.
 
-    `local_skills._count_a_local_load` refuses to put one in a metric label for exactly this reason
-    — "a label would mint a series per private project name in a shared exposition that no erasure
-    reaches" — and `_log_narrowing`'s `skills=` field is the same hazard at DEBUG. The narrowing now
-    reads both maps; the log keeps counting the filed one, which is also what "discovered" means.
+    A personal skill's name is a person's own words; the log counts the filed map only.
     """
     caplog.set_level(logging.DEBUG, logger="chemclaw.agent.langgraph_agent")
 
@@ -624,9 +529,7 @@ def test_no_stored_skill_name_reaches_the_narrowing_log(
 def _paths_offered(backend: Any) -> dict[str, str]:
     """`{skill name: the path the model is told to read}` — the listing the prompt actually carries.
 
-    Through `_skills_middleware` rather than off a mount's `ls`, because the collision this file's
-    R7 case is about is resolved by upstream's *listing*: two mounts holding one name produce one
-    entry, and which one is the whole question.
+    Through `_skills_middleware`, since upstream's listing resolves which mount wins a name.
     """
     labelled = _labelled(_skill_dirs())
     loaded = _skills_middleware(backend, labelled, AgentProfile(name="default")).before_agent(

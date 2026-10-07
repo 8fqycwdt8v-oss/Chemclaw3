@@ -1,24 +1,11 @@
-"""A turn cancelled *during* connector teardown must stay cancelled.
+"""A turn cancelled during connector teardown must stay cancelled.
 
-`HeldConnectorSession._shut_down` awaits the holder task, and that `await` is the suspension point
-at which a cancellation of the **calling** task is delivered — a chemist closing the tab, or
-`asyncio.timeout(service_turn_timeout_seconds)` in `api/routes/turns.py` expiring while a wedged
-connector pod is slow to close its streamable-HTTP session. The clause around it suppressed
-`asyncio.CancelledError` along with `Exception`, so the caller's own cancellation was swallowed and
-the turn ran on: `run_turn`'s `except (GeneratorExit, asyncio.CancelledError)` clause — the one that
-rolls back the half-written exchange — was never entered, and `asyncio.timeout.__aexit__` never saw
-the `CancelledError` it converts into `TimeoutError`, so the front door's wall-clock deadline did
-nothing at all. A `Task.cancel()` delivers its exception once; swallowing it does not re-arm it.
-
-The suppression itself is right for what it was written for, and the second test pins that half:
-the *holder* task's unwind raises `CancelledError` out of the MCP client's own `anyio` cancel
-scope, and that must still be absorbed or every clean teardown would fail the turn. The module
-already owns the discriminator between the two — `_is_really_cancelled()`, which reads
-`Task.cancelling()` — and `absorb_connect_failure` four lines up already uses it.
-
-Driven at the object rather than through a live server, because the property under test is which
-task the exception belongs to, and that is decided by `_shut_down` alone; a real connector adds a
-socket to the picture and nothing to the question.
+`HeldConnectorSession._shut_down` awaits the holder task, where a cancellation of the calling task
+(a closed tab, or `asyncio.timeout(service_turn_timeout_seconds)`) is delivered. Swallowing it would
+skip `run_turn`'s rollback and defeat the turn deadline, since `Task.cancel()` delivers once. The
+holder's own `anyio` scope unwind must still be absorbed; `_is_really_cancelled()` (reading
+`Task.cancelling()`) tells the two apart. Driven at the object, because only `_shut_down` decides
+which task owns the exception.
 """
 
 import asyncio
@@ -82,12 +69,10 @@ def test_a_caller_cancelled_inside_connector_teardown_stays_cancelled() -> None:
 
 
 def test_the_holders_own_scope_unwind_is_still_absorbed() -> None:
-    """The half the suppression was written for, kept: an inner scope's unwind is not the turn's.
+    """The holder's own scope unwind is still absorbed.
 
-    The MCP session is an `anyio` cancel scope and unwinding it raises `CancelledError` on the
-    holder task without anyone having cancelled *this* one. Re-raising that blanket would turn
-    every clean connector close into a cancelled turn — which is why the fix reuses
-    `_is_really_cancelled()` rather than simply dropping `CancelledError` from the clause.
+    Unwinding the MCP session's `anyio` cancel scope raises `CancelledError` on the holder without
+    anyone cancelling the turn; re-raising it would fail every clean close.
     """
 
     async def scenario() -> bool:

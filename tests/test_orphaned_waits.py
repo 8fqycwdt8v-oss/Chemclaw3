@@ -1,9 +1,7 @@
 """A durable wait whose run ended without settling it is settled by the sweep, and nothing else is.
 
-Against a real broker and a real `pending_requests` table, because the whole decision is the
-broker's answer: `durable/orphaned_waits.py` settles a row only when Temporal says the run that owns
-it is not running, and a sweep that settled on anything weaker would cancel live questions
-(`D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
+Against a real broker and `pending_requests` table: `durable/orphaned_waits.py` settles a row only
+when Temporal says the owning run is not running, so live questions are never cancelled.
 """
 
 import asyncio
@@ -72,14 +70,13 @@ def test_a_terminated_wait_is_settled_and_a_live_one_is_left_alone(
 ) -> None:
     """Terminated, gone, running, reopened, and reset — five answers.
 
-    - **terminated**: the case a `ParentClosePolicy.TERMINATE` parent leaves, which never reaches
-      workflow code — settled `cancelled`, with the reason;
-    - **unknown to the broker**: a history retention already removed — settled;
-    - **running**: a question somebody may still answer — untouched, whatever its age;
-    - **reopened**: the row now names a *live* run, while the sweep's evidence is about a dead
-      one — untouched, because the settle is guarded on the run it examined;
-    - **reset**: the row names a terminated run while a newer run of the same id carries the wait
-      on — untouched, because whichever run of the id is running owns the question.
+    - **terminated** (e.g. by a parent's `ParentClosePolicy.TERMINATE`): settled `cancelled`, with
+      the
+      reason;
+    - **unknown to the broker** (history retention removed it): settled;
+    - **running**: untouched, whatever its age;
+    - **reopened** to name a live run: untouched, because the settle is guarded on the run examined;
+    - **reset**, with a newer run of the same id carrying the wait: untouched.
     """
     monkeypatch.setattr(settings, "awaiting_orphan_grace_seconds", 3600.0)
 
@@ -208,9 +205,8 @@ def test_a_pass_that_spends_its_budget_resumes_where_it_stopped_rather_than_at_t
 ) -> None:
     """A pass out of budget hands its position to the next, and the walk wraps at the end.
 
-    Before the cursor survived a pass, every pass restarted at the oldest row, so an orphan behind
-    more live waits than one pass could describe was never reached — the starvation the in-pass
-    cursor fixed, moved to a longer table. A zero budget makes every pass exactly one page.
+    Otherwise an orphan behind more live waits than one pass can describe is never reached. A zero
+    budget makes every pass exactly one page.
     """
     monkeypatch.setattr(settings, "awaiting_orphan_grace_seconds", 3600.0)
     monkeypatch.setattr(settings, "awaiting_orphan_batch", 2)
@@ -266,12 +262,7 @@ def test_a_pass_that_spends_its_budget_resumes_where_it_stopped_rather_than_at_t
 def test_a_cursor_left_past_the_last_row_wraps_within_the_same_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pass handed a cursor with nothing after it sweeps from the start rather than nothing.
-
-    A pass that runs out of budget exactly on the table's last full page leaves `resume_after` on
-    that page's last row. Without the in-pass wrap the next Schedule fire read an empty page and
-    returned `examined=0`, so a whole interval swept nothing before the walk wrapped.
-    """
+    """A cursor past the last row wraps within the same pass rather than sweeping nothing."""
     monkeypatch.setattr(settings, "awaiting_orphan_grace_seconds", 3600.0)
 
     async def _run() -> tuple[str, OrphanSweep]:
@@ -314,12 +305,11 @@ async def _recording_sweep(after: pending_store.WaitingRow | None = None) -> Orp
 
 
 def test_each_scheduled_run_starts_from_the_previous_run_s_resume_after() -> None:
-    """The workflow half of the cursor: a run reads the last completion result and passes it on.
+    """Each scheduled run starts from the previous run's `resume_after`.
 
-    Every other test here calls the activity directly, so a `run` that dropped the argument — or a
-    `WaitingRow` whose `datetime` did not survive the data converter — would pass all of them. A
-    cron workflow is what gives a run a last completion result, and the sandboxed runner is what
-    the real worker uses.
+    The other tests call the activity directly; this drives a cron workflow on the sandboxed runner
+    so the argument passing and the `WaitingRow` datetime round trip through the data converter are
+    covered.
     """
     _SEEN.clear()
 

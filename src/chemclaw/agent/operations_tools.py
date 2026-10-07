@@ -1,15 +1,8 @@
 """The agent tool over the operational read model — one tool, four readings.
 
-**One tool with an `aspect` rather than four tools**, which is a deliberate departure from the
-one-question-one-tool shape most of this surface has. Every advertised tool's schema ships on every
-turn, the static prefix is already the subject of a measured ceiling
-(`tests/test_context_floor.py`), and these four readings share a window argument, a coverage field
-and a single sentence of guidance. Four names would have bought nothing the enum does not and cost
-four schemas.
-
-**It reads and it does not remember.** Nothing here records a note, records an observation or
-writes a preference: an operational reading is a projection of rows this system already wrote, so
-it is `read_only` in the sense the manifest gate means and needs no gate of its own.
+One tool with an `aspect` enum rather than four tools, because every tool schema ships in every
+turn's prefix and the four readings share their arguments and guidance. It is `read_only`: a reading
+is a projection of rows this system already wrote.
 """
 
 from typing import Literal

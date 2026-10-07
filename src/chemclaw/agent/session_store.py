@@ -1,59 +1,24 @@
-"""Durable, Postgres-backed conversation history (plan Phase F3).
+"""Durable, Postgres-backed conversation history.
 
-`PostgresHistoryProvider` appends each turn's exchange to the `session_messages` table keyed by
-session id and loads it back in insertion order, so a fresh process over the same database can show
-a conversation that outlived its pod — the "session survives a restart" requirement (F3-T1).
+`PostgresHistoryProvider` appends each turn's exchange to `session_messages` and reads it back in
+insertion order, so a conversation outlives its pod. It is a read-model projection, not the
+conversation's state: turn state lives in the LangGraph checkpointer. `chemclaw.api.runner` writes
+the chemist's message ahead of the turn (`turn_status='running'`) and the rest of the exchange once
+the answer exists, settling that status. Readers are the transcript route, the audit join, and the
+bounded `recent_user_texts`.
 
-**It is a read-model projection, not the conversation's state.** That is the change D-2026-08-10 §2
-made and it is what everything below follows from. Under MAF this table *was* the thread: the
-framework wrote it as the turn went and read it back before each model call, which made it
-load-bearing, made it grow without bound, made a half-written turn a poison pill, and made three
-mechanisms necessary that are now gone (a disconnect rollback, a read-time orphan repair, and a
-compaction pass over the stored rows). Turn state lives in the LangGraph checkpointer now. What is
-written here is written by `chemclaw.api.runner` in two steps: the chemist's message **ahead** of
-the turn, carrying `turn_status='running'`, and the rest of the exchange once the answer exists,
-which settles that status (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`);
-what reads it is `GET /sessions/{id}/messages` and the audit trail's join, both for a person — and,
-since the `basis="stated"` window was widened to the thread, `recent_user_texts`, which is not for a
-person and is bounded accordingly.
+Messages are stored as LangChain's `message_to_dict()`; this module interprets only which
+serialization a row holds (`message_from_row`), because older rows hold a previous framework's
+shape.
 
-This is the conversation layer, deliberately separate from Temporal job state (D-002) and the
-calculation cache. A message is stored as LangChain's own `message_to_dict()`, so the column is a
-serialization the library owns; what this module interprets is only *which* serialization a row
-holds (`message_from_row`), because the table still contains rows the previous framework wrote.
+Three stores share one database because they are one session's durable state: the history,
+`SessionOwnerStore` (who owns a session; also the keyset-paged listing and `delete_session`), and
+`SessionTurnClaims` (which process is running a turn right now).
 
-Three stores live here because they are one session's durable state and must share a database:
-the message history above, `SessionOwnerStore` (who owns a session id — the fact the in-process
-LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
-the fact the in-process 409 guard loses at the pod boundary, D-121).
-
-The owner store also answers the two questions a conversation list has beyond "which are mine":
-**where does the page stop** (`page_for_owner` + `encode_session_cursor`, a keyset cursor, because
-this list reorders itself as it is read) and **how does one go away**
-(`SessionOwnerStore.delete_session`, the session-scoped counterpart to `leaver.erase_actor`'s
-actor-scoped sweep, over the table set that module already enumerates). See
-`D-2026-08-27-a-session-list-is-a-cursor-and-a-session-is-deletable`.
-
-**`get_messages` has no `LIMIT` and must not grow one.** That used to be a data-safety rule, because
-the read repaired tool-call pairings and wrote the repair back. It is now a rendering rule: the
-reader is a person reloading a conversation, and a transcript that silently omits its own beginning
-does not look truncated — it looks like the conversation started later than it did.
-
-**It is a rule about that read, not about this table**, and `recent_user_texts` is what makes the
-distinction load-bearing rather than pedantic. That one answers "what has this chemist written" for
-`core/turn_text`'s ambient, runs once per turn on the answer path, and is bounded in SQL by the
-chemist's own rows and by a configured window — because its reader is a check rather than a person,
-and a check reading a whole conversation to grade one quote is a cost every turn pays. Two reads,
-two bounds, one table; putting a `LIMIT` on the first to serve the second is what this pair exists
-to prevent.
-
-**The table is bounded by `durable/retention.py`, by age, and by nothing else.** A compaction pass
-used to shrink it too, applying the model's context-window policy (`keep_last_conversation_groups`)
-to the stored rows. That was right while the rows were the model's context and wrong the moment they
-stopped being: it deleted a chemist's older messages not because any policy said to keep less, but
-because the model no longer needed them — a context heuristic quietly editing a durable record. Age-
-based retention is the policy statement a deployment actually makes, and it deletes only whole
-pairing components (`droppable_rows`, D-145).
+`get_messages` has no `LIMIT` and must not grow one: its reader is a person, and a transcript
+silently missing its beginning looks like a shorter conversation. `recent_user_texts` is a separate,
+bounded read for a check. The table is bounded only by age, by `durable/retention.py`, which deletes
+whole pairing components (`droppable_rows`).
 """
 
 import base64
@@ -90,76 +55,57 @@ from chemclaw.core.metrics_bridge import degraded
 
 log = logging.getLogger(__name__)
 
-# Stamped into `additional_kwargs` of a message this module *recovered* rather than decoded, so a
-# reader can tell the two apart. Without it the degraded path is a forgery: it returns an ordinary
-# message of a guessed class carrying the row's prose, and nothing downstream — no reader, no test
-# — can distinguish "this row was decoded" from "this row was not, and these are its words". That
-# is not hypothetical. Deleting the `LANGCHAIN_SHAPE` branch outright sends *every* row this system
-# writes through the legacy converter, which refuses it, and every transcript comes back as flat
-# prose with its tool calls gone (an `AIMessage` loses `tool_calls`, a `ToolMessage` becomes an
-# `AIMessage` with no `tool_call_id`) — the M6 defect this module's docstring was written about,
-# reached from the inside. The counter says a degradation happened; this says *which row*, which is
-# what a reader rendering that row needs.
-#
-# `additional_kwargs` rather than a new field or a wrapper type: it is LangChain's own extension
-# point on `BaseMessage`, so the marker rides along on the ordinary object every caller already
-# handles and costs nothing to ignore.
+# Stamped into `additional_kwargs` of a message this module recovered rather than decoded, so a
+# reader can tell a guessed speaker and prose from a decoded row. The degradation counter says that
+# a degradation happened; this marks which row. `additional_kwargs` is LangChain's own extension
+# point, so the marker costs callers nothing to ignore.
 DEGRADED_RENDER = "chemclaw_degraded_render"
 
 
 def is_degraded_render(message: BaseMessage) -> bool:
     """Whether this message is a recovered row rather than a decoded one.
 
-    Public for `chemclaw.cli.explain`, which reconstructs a conversation for the audit join and
-    must not present a guess as the record: a row whose prose was recovered has an *unknown*
-    speaker, whatever label it happens to carry.
+    Public for `chemclaw.cli.explain`, which must not attribute a recovered row to a speaker it does
+    not actually know.
     """
     return DEGRADED_RENDER in message.additional_kwargs
 
 
-#: Where a stored message carries the correlation id of the turn that stored it: stamped on read
-#: by the durable provider, from the column `026_audit_provenance.sql` added, and on save by the
-#: in-memory one. On the message rather than beside it, so both providers keep answering one call.
+#: Where a stored message carries the correlation id of the turn that stored it, stamped on read by
+#: the durable provider and on save by the in-memory one, so both answer one call.
 STORED_CORRELATION_ID = "chemclaw_correlation_id"
 
 
 def stored_correlation_id(message: BaseMessage) -> str | None:
     """The correlation id of the turn that stored `message`, or `None` when none was recorded.
 
-    Public for the transcript route: a client whose stream detached recovers that turn's answer by
-    this id rather than by guessing from text. `None` rather than `""` for a row written off the
-    request path (the CLI, tests) or before the column existed, which is "unknown", not a turn.
+    Public for the transcript route, where a detached client recovers its turn's answer by this id.
+    `None` (not `""`) for rows written off the request path or before the column existed.
     """
     value = message.additional_kwargs.get(STORED_CORRELATION_ID)
     return str(value) if value else None
 
 
-#: Where a stored message carries who wrote it (`core/authorship.py`): the `actor`/`agent` pair
-#: `109_session_message_authorship.sql` added, stamped on read by the durable provider and on save
-#: by the in-memory one — the same arrangement as the correlation id above, for the same reason.
+#: Where a stored message carries who wrote it (`core/authorship.py`), stamped the same way as the
+#: correlation id.
 STORED_AUTHORSHIP = "chemclaw_authorship"
 
 
 def stored_authorship(message: BaseMessage) -> Authorship | None:
     """Who wrote `message` — the person it was written for and the agent that wrote it.
 
-    `None` when the row records neither half: written off the request path by a writer that knew
-    nobody, or a legacy row whose speaker the backfill could not read. Public for the transcript
-    route, which is this column pair's reader.
+    `None` when the row records neither half. Public for the transcript route.
     """
     value = message.additional_kwargs.get(STORED_AUTHORSHIP)
     return Authorship.model_validate(value) if isinstance(value, dict) else None
 
 
-#: How the turn a stored *question* opened has ended so far (`session_messages.turn_status`, 118).
+#: How the turn a stored question opened has ended so far (`session_messages.turn_status`).
 #:
-#: Only a chemist's message written ahead of its turn carries one; every other row — an answer, a
-#: tool exchange, a row written before the column existed — is `None`, which a reader takes as "this
-#: turn's answer is in the transcript, or nobody recorded otherwise". `running` is the write-ahead
-#: state; `done`, `failed` and `stopped` are what the turn's own process settles it to; and
-#: `interrupted` is the one value a *different* process writes, when the turn's claim lapsed with no
-#: live owner (`PostgresHistoryProvider.mark_interrupted`). See
-#: `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`.
+#: Only a chemist's message written ahead of its turn carries one; every other row is `None`.
+#: `running` is the write-ahead state; `done`, `failed` and `stopped` are settled by the turn's own
+#: process; `interrupted` is written by a different process when the turn's claim lapsed with no
+#: live owner (`PostgresHistoryProvider.mark_interrupted`).
 TurnStatus = Literal["running", "done", "failed", "stopped", "interrupted"]
 
 
@@ -182,29 +128,22 @@ _TURN_STATUSES: dict[str, TurnStatus] = {status: status for status in get_args(T
 def turn_status_of(value: object) -> TurnStatus | None:
     """`value` as a member of the vocabulary, or `None` for anything else.
 
-    The column carries no constraint, and a contract field that can say anything says nothing — so
-    an unknown spelling reads as "nobody recorded", never passes through.
+    The column has no constraint, so an unknown spelling reads as "nobody recorded".
     """
     return _TURN_STATUSES.get(value) if isinstance(value, str) else None
 
 
 def stored_turn_status(message: BaseMessage) -> TurnStatus | None:
-    """The status of the turn this stored question opened, or `None` for every other row.
-
-    Public for the transcript route, which is this column's reader.
-    """
+    """The status of the turn this stored question opened, or `None` for every other row."""
     return turn_status_of(message.additional_kwargs.get(STORED_TURN_STATUS))
 
 
 def message_authorship(message: BaseMessage, actor: str | None) -> Authorship:
     """Who wrote a message this system is about to store, on behalf of `actor`.
 
-    **The speaker decides the agent half, and nothing else does.** A `HumanMessage` is the chemist's
-    own words — a human wrote it directly, so there is no agent. Everything else the transcript
-    stores is the agent's: its answer, the tool calls it made and the results those returned.
-    Which agent is `UNNAMED_AGENT`, not a guess: the graph that wrote a message is known to the
-    audit middleware as a build-time argument and reaches nothing that saves a transcript, and the
-    audit trail's own convention is that the agent the chemist talks to goes unnamed.
+    A `HumanMessage` is the chemist's own words, with no agent. Everything else is the agent's,
+    recorded as `UNNAMED_AGENT`: the graph's identity does not reach the transcript writer, and the
+    audit convention leaves the chemist-facing agent unnamed.
     """
     return Authorship(actor=actor, agent=None if message.type == "human" else UNNAMED_AGENT)
 
@@ -228,23 +167,10 @@ def _stamped(
 def chemist_words(messages: Iterable[BaseMessage]) -> list[str]:
     """Only the messages a *person* typed, as plain text, in the order they were said.
 
-    The filter behind `core/turn_text`'s ambient, and the reason widening a `basis="stated"` quote
-    to the thread costs the anti-spoofing property nothing: what makes a quote evidence is that the
-    model cannot have written it, so an assistant turn, a tool result and a recovered row are all
-    excluded here rather than at the two call sites.
-
-    Three exclusions, each for its own reason:
-
-    - **not a `HumanMessage`** — the model's own prose quoted back as the chemist's words is
-      exactly the fabrication the check exists to refuse;
-    - **a recovered row** (`is_degraded_render`) — its speaker is a *guess* made by
-      `_degraded_class` from a label on a row that would not decode, and a guess cannot be
-      evidence about a person;
-    - **non-string content** — a block list is the assistant's wire shape; nothing writes a
-      chemist's message as one, so a row carrying it is not the thing this returns.
-
-    Two callers, which is why it is a function rather than a comprehension in each: the durable
-    provider filters rows it has just decoded, and the in-memory one filters the messages it kept.
+    The filter behind `core/turn_text`'s ambient: a quote is evidence only if the model cannot have
+    written it. Excluded are non-`HumanMessage` rows, recovered rows (`is_degraded_render`, whose
+    speaker is a guess), and non-string content (an assistant wire shape). Shared by both history
+    providers.
     """
     return [
         message.content
@@ -258,48 +184,18 @@ def chemist_words(messages: Iterable[BaseMessage]) -> list[str]:
 def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
     """One stored row as a LangChain message, whichever shape it holds.
 
-    Public because it has a second reader outside this module: `chemclaw.cli.explain` reconstructs
-    the same conversation for the audit join, and a CLI that parsed the stored payload itself is
-    exactly how a table holding two shapes acquires a reader that knows one. (It did: the CLI read
-    the legacy shape only, so every row written after the M6 conversion rendered blank.) One
-    function knows the shapes; everything else asks it.
+    The one function that knows the stored shapes; `chemclaw.cli.explain` calls it too, rather than
+    parsing payloads itself. An unstamped row is the legacy (MAF) shape, since the conversion pass
+    is resumable and rows written before the `message_shape` stamp carry none.
 
-    Both shapes read, and that is what the `message_shape` stamp is for (D-2026-08-10 §"why a shape
-    version"): a rollout is not atomic, and `make db-migrate`'s conversion pass is resumable, so
-    during it some rows are MAF and some are LangChain. An unstamped row is MAF, because every row
-    written before the stamp existed has no stamp and rewriting them all to add one is exactly the
-    rewrite the version exists to avoid.
-
-    A row that will not convert degrades to its own text rather than raising. `to_langchain` is
-    deliberately strict — a migration must stop on a shape nobody anticipated rather than guess —
-    but this is the *read* path, and the reader is a chemist reloading a conversation. Failing the
-    whole transcript because one historical row holds a content type this system no longer writes
-    would lose the conversation to protect it.
-
-    **Both branches are guarded, and the unguarded one was the common one.** Only the MAF
-    conversion used to sit inside the `try`, so a `langchain` row the library refuses raised
-    `ValueError: Got unexpected message type` straight through — and since M6 every row this
-    system writes is a `langchain` row. The one caller of `get_messages` is
-    `GET /sessions/{id}/messages`, which has no handler of its own, so a single bad row answered
-    the whole transcript with a 500. `UnconvertibleMessage` is likewise not the only way a stored
-    payload fails to convert: a `contents` list holding a non-dict raises `AttributeError` from
-    inside the converter, past a handler that named one exception type. Which is why the catch is
-    `Exception` and not a tuple — the whole promise of this branch is that *no* stored payload can
-    cost a chemist their conversation, and a tuple is a list of the ways that have been seen so
-    far.
-
-    **A recovered row says so** (`DEGRADED_RENDER`, read back by `is_degraded_render`). A catch that
-    wide swallows a converter *bug* as readily as one unreadable legacy row, and what it returns
-    then is an ordinary message of a guessed class carrying plausible prose — indistinguishable, to
-    every reader downstream, from a row that decoded. The counter says a degradation happened
-    somewhere; the stamp says which message is the guess, so the audit reconstruction can decline
-    to attribute it to a speaker it does not actually know.
+    On the read path a row that will not convert degrades to its own text rather than raising, so
+    one bad historical row cannot fail a whole transcript. The catch is `Exception` on purpose,
+    covering both shapes; because that also swallows converter bugs, the result is stamped
+    `DEGRADED_RENDER` and counted.
     """
     if not isinstance(payload, dict):
-        # `message` is a bare `jsonb` column — only `message_shape` is constrained — so a scalar or
-        # an array is storable, and every branch below assumes a mapping. Nothing writes such a row
-        # today; without this, three payload shapes still raised `AttributeError` past both callers
-        # and answered the whole transcript with a 500, which is the promise this function makes.
+        # `message` is a bare `jsonb` column, so a scalar or array is storable; every branch below
+        # assumes a mapping.
         degraded(log, "session_transcript", "a stored message was not an object; rendering nothing")
         return AIMessage(content="", additional_kwargs={DEGRADED_RENDER: str(shape or "")})
     try:
@@ -307,29 +203,19 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
             return messages_from_dict([payload])[0]
         return to_langchain(payload)
     except Exception:
-        # `degraded` rather than a bare warning, because the catch is deliberately wide: it also
-        # swallows the shape of a *converter bug* — an `AttributeError` from a typo degrades every
-        # row in every transcript into plausible prose, and a log line nobody alerts on makes "one
-        # legacy row" and "the converter is broken for everyone" observationally identical. The
-        # counter is what separates them.
+        # `degraded` rather than a bare warning: the wide catch also swallows converter bugs, and
+        # the counter distinguishes one legacy row from a converter broken for everyone.
         degraded(log, "session_transcript", "could not render a stored message; showing its prose")
-        # The prose out of `contents`, not `payload["text"]` — the stored shape has no top-level
-        # `text` key and never did, so the fallback rendered **every** refused row as an empty
-        # bubble. That is the failure this branch exists to avoid, reached by the branch itself: a
-        # reader who cannot convert a row should still see what was said in it, and a blank message
-        # says the turn was silent. Refusals became commonplace when the converter started stopping
-        # on parallel results and unknown content types instead of quietly dropping them.
-        # Stamped as recovered, not decoded. The prose below is a best effort at what was said;
-        # the structure of the row — which tool answered, under which call id — is gone, and a
-        # reader that cannot see the difference will present the guess as the record.
+        # The prose comes from `contents` (the stored shape has no top-level `text`), so a reader
+        # still sees what was said. Stamped as recovered: the row's structure (which tool answered,
+        # under which call id) is gone.
         return _degraded_class(payload)(
             content=_stored_prose(payload), additional_kwargs={DEGRADED_RENDER: str(shape or "")}
         )
 
 
-# Which speaker each stored shape's label names. MAF stamps `role`, LangChain's `message_to_dict`
-# stamps `type`; the two vocabularies are disjoint, so one mapping reads both without having to
-# know which shape a refused row holds — which is exactly what is in doubt when this is consulted.
+# Which speaker each stored shape's label names. MAF stamps `role`, LangChain stamps `type`; the
+# vocabularies are disjoint, so one mapping reads both without knowing the shape.
 _DEGRADED_CLASSES: dict[str, type[BaseMessage]] = {
     "user": HumanMessage,
     "human": HumanMessage,
@@ -340,15 +226,9 @@ _DEGRADED_CLASSES: dict[str, type[BaseMessage]] = {
 def _degraded_class(payload: dict[str, Any]) -> type[BaseMessage]:
     """The message class a refused row should render as, taken from the speaker it names.
 
-    **The fallback returned `AIMessage` unconditionally, which put words in the agent's mouth.** A
-    chemist's own question rendered as agent speech — attributed, in the transcript, to the system
-    that answered it — which is a worse failure than a blank bubble because nothing about it looks
-    wrong. The row says who spoke even when it cannot say what a `ToolMessage` answers, so the
-    label is read rather than assumed.
-
-    `AIMessage` stays the default for everything else — the assistant's own `role`, a `tool` row
-    (a `ToolMessage` needs a `tool_call_id` this row may not carry), and a payload with no label
-    at all — because the model's voice is the one attribution that claims nothing about a person.
+    The label is read rather than assumed, so a chemist's question is never rendered as agent
+    speech. `AIMessage` is the default for everything else (assistant, tool, unlabelled), since the
+    model's voice claims nothing about a person and a `ToolMessage` would need a `tool_call_id`.
 
     Args:
         payload: The stored `message` column of the row that would not convert.
@@ -363,9 +243,8 @@ def _degraded_class(payload: dict[str, Any]) -> type[BaseMessage]:
 def _stored_prose(payload: dict[str, Any]) -> str:
     """Whatever text a stored row carries, for a reader that could not convert it properly.
 
-    Deliberately forgiving where `to_langchain` is strict: this runs *after* a refusal, and its job
-    is that a chemist reloading a conversation still reads the words. Both stored shapes are tried
-    because a row that fails conversion is exactly the row whose shape is in doubt.
+    Deliberately forgiving and tries both stored shapes, because a refused row is exactly one whose
+    shape is in doubt.
     """
     contents = payload.get("contents")
     if isinstance(contents, list):
@@ -373,9 +252,7 @@ def _stored_prose(payload: dict[str, Any]) -> str:
         prose = "".join(str(p.get("text", "")) for p in parts if p.get("type") == "text")
         if prose:
             return prose
-        # A refused *tool* row carries no text part at all — its words are the results. Joining
-        # them is what makes the commonest refusal (a row answering parallel calls) render as the
-        # answers it holds rather than as an empty bubble.
+        # A refused tool row has no text part; its words are the results, so join them.
         results = [str(p.get("result", "")) for p in parts if p.get("type") == "function_result"]
         if any(results):
             return "\n".join(r for r in results if r)
@@ -383,95 +260,65 @@ def _stored_prose(payload: dict[str, Any]) -> str:
     if isinstance(data, dict):
         content = data.get("content", "")
         if isinstance(content, list):
-            # A LangChain assistant message carries block content, so `str()` of it is a Python
-            # repr of the wire format — including a tool call's `input` arguments — presented in
-            # the transcript as the agent's own words. This branch was unreachable while the
-            # `langchain` shape returned before the `try`; widening the guard made it live, so it
-            # has to flatten the way `api/schemas.message_text` already does.
+            # LangChain block content: flatten the text blocks (as `api/schemas.message_text` does)
+            # rather than `str()` it, which would show the wire format, tool arguments included, as
+            # the agent's words.
             blocks = [str(b.get("text", "")) for b in content if isinstance(b, dict)]
             return "".join(block for block in blocks if block)
         return str(content)
     return str(payload.get("text", ""))
 
 
-# The correlation id makes a stored message joinable to the audit rows of the turn that wrote it
-# (D-2026-07-31-the-audit-chain-is-versioned).
-# Without it the two halves of "what happened in this conversation" — the words and the
-# tool calls — sat in tables with no key between them, so the trail could show *that* a tool ran
-# and never *why*.
-#
-# `actor`/`agent` are who wrote the row (`core/authorship.py`,
-# `D-2026-09-27-an-author-is-a-person-and-an-agent`) — the same two names `audit_events` spells the
-# same pair in, so a shared transcript can say whose words each message is.
+# The correlation id joins a stored message to the audit rows of the turn that wrote it.
+# `actor`/`agent` record who wrote the row (`core/authorship.py`), named as `audit_events` names the
+# pair.
 _INSERT = (
     "INSERT INTO session_messages "
     "(session_id, message, message_shape, correlation_id, actor, agent) "
     "VALUES (%s, %s, %s, %s, %s, %s)"
 )
-# Row ids come back too. The repair that used to write a fixed message back to its own row is gone
-# (D-2026-08-10 §2), so what the id serves now is the caller that needs to name a row — the
-# conversion pass stamping it, and an operator reading a refusal's row number out of a log.
+# Row ids come back so a caller can name a row (the conversion pass, an operator reading a log).
 #
-# **Public, and shared with the retention sweep.** `message_shape` is in the projection because the
-# pairing rule reads it, and the sweep and the transcript reader must decide "which serialization
-# is this" the same way — `message_from_row` is already the one function allowed to decide that
-# (`D-2026-08-11-what-the-removal-found`), so the SELECT that feeds it is single too. It used to be
-# written twice, byte-identically, and the destructive copy was the one living furthest from this
-# rule.
-#
-# The authorship pair rides at the end, so a reader that indexes the first four columns — the
-# retention sweep does — reads exactly what it did.
-#
-# `turn_status` (118) rides after them for the same reason.
+# Public and shared with the retention sweep, so both feed `message_from_row` the same projection.
+# The authorship pair and `turn_status` ride at the end, so readers indexing the first four columns
+# are unaffected.
 SELECT_SESSION_ROWS = (
     "SELECT id, message, message_shape, correlation_id, actor, agent, turn_status "
     "FROM session_messages WHERE session_id = %s ORDER BY id"
 )
 
-# **The chemist's message, written ahead of the turn it opens**
-# (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). The row `_INSERT` writes,
-# plus `turn_status = 'running'`, and its id back so the turn can settle *this* row when it ends.
-# The checkpointer holds the message from the graph's first step, so a process that died mid-turn
-# used to leave the model's record holding a question the chemist's transcript did not.
+# The chemist's message, written ahead of the turn it opens: `_INSERT` plus `turn_status =
+# 'running'`, returning its id so the turn can settle this row. The checkpointer holds the message
+# from the graph's first step, so the transcript must too.
 _INSERT_TURN = (
     "INSERT INTO session_messages "
     "(session_id, message, message_shape, correlation_id, actor, agent, turn_status) "
     "VALUES (%s, %s, %s, %s, %s, %s, 'running') RETURNING id"
 )
-# Settling a turn's question. Two forms, because the two outcomes carry different authority. An
-# **answer** that exists overrides whatever the row says — including `interrupted`, which another
-# process can write when this one's claim lapsed while it was in fact still alive (the lease
-# property `SessionTurnClaims` states); the transcript then shows the answer the chemist received.
-# A turn that ended **without** one settles only a row still `running`, so a teardown racing its own
-# successful write, or arriving after another process's mark, can never demote a settled turn.
+# Settling a turn's question, in two forms. An answer overrides whatever the row says, including an
+# `interrupted` written by another process while this one was still alive. A turn that ended without
+# an answer settles only a row still `running`, so a racing teardown can never demote a settled
+# turn.
 _SETTLE_ANSWERED = "UPDATE session_messages SET turn_status = %s WHERE id = %s AND session_id = %s"
 _SETTLE_UNANSWERED = (
     "UPDATE session_messages SET turn_status = %s "
     "WHERE id = %s AND session_id = %s AND turn_status = 'running'"
 )
-# **A turn whose owner is gone, noticed by whoever touches the session next.** A question is still
-# `running` and no live claim covers it: the session's `session_turns` row is absent, expired, or
-# was taken *after* the question was written — by a successor, which happens only once this turn's
-# own lease lapsed. `claimed_at <= created_at` is that last test: a turn's claim is always taken
-# before its question is written (both clocks are this database's `now()`), and a refresh moves
-# `expires_at` and never `claimed_at`, so a live owner's claim always passes it and a successor's
-# never does.
+# A turn whose owner is gone: a question still `running` with no live claim covering it — the claim
+# is absent, expired, or taken after the question was written (`claimed_at <= created_at` fails only
+# for a successor, since a turn claims before writing its question and refreshes never move
+# `claimed_at`).
 #
-# One statement, so it is exactly-once across every process that might notice at the same moment:
-# the `UPDATE` takes the row lock, a concurrent one re-evaluates `turn_status = 'running'` after it
-# and matches nothing, and only the statement that flipped the row gets it back from `RETURNING` —
-# which is what the caller books the turn's `interrupted` outcome from. Served by the partial index
-# 118 adds, so a session with no running question costs one empty index probe.
+# One statement, so exactly one process flips the row and gets it back from `RETURNING`, which is
+# what the caller books the `interrupted` outcome from. Served by a partial index.
 _MARK_INTERRUPTED = (
     "UPDATE session_messages m SET turn_status = 'interrupted' "
     "WHERE m.session_id = %s AND m.turn_status = 'running' "
     "AND NOT EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = m.session_id "
     "AND t.expires_at > now() AND t.claimed_at <= m.created_at) "
     "RETURNING m.correlation_id, m.actor, "
-    # Whether the turn already has an outcome of its own on the ledger — a turn whose process was
-    # alive to book one, and whose settle then failed (the store refused it, or the process died
-    # between the two writes). Its question is still marked, because the transcript should say the
-    # turn is over; its outcome is not booked a second time.
+    # Whether the turn already booked its own outcome (its process was alive but the settle failed):
+    # the question is still marked, but the outcome is not booked twice.
     "EXISTS (SELECT 1 FROM turn_costs c "
     "WHERE c.correlation_id = m.correlation_id AND m.correlation_id <> '') AS booked"
 )
@@ -482,43 +329,17 @@ _LATEST_TURN_STATUS = (
 )
 
 # The chemist's own words in one thread, newest first — the bounded read behind `core/turn_text`'s
-# ambient, and deliberately *not* `SELECT_SESSION_ROWS` with a `LIMIT` bolted on. That read's
-# no-`LIMIT` rule is a rendering rule (a person reloading a conversation must not be shown a
-# transcript that silently omits its own beginning); this one has a different reader and a
-# different bound, and conflating them would put a cap on the transcript to serve a check.
+# ambient, deliberately separate from `SELECT_SESSION_ROWS` and its no-`LIMIT` rendering rule.
 #
-# **Filtered in SQL rather than in Python, because a `LIMIT n` over all rows is a bound in the
-# wrong currency.** A turn writes one human row and two more per tool call, each carrying a whole
-# tool result, so taking the last n rows and sieving them here would ship megabytes of JSONB to
-# find a handful of typed sentences — and could return no human row at all for a tool-heavy turn.
-# `(session_id, id)` (migration 008) serves the scan; the JSONB predicate is a filter on top of it.
+# Filtered in SQL, because a `LIMIT` over all rows would ship whole tool results and might return no
+# human row at all. `(session_id, id)` serves the scan; the JSONB predicate (which detoasts this
+# session's rows) filters on top, while other sessions' rows are discarded by the cheap `session_id`
+# qual.
 #
-# **What that filter saves is other sessions, not this one, because `message->>'type'` detoasts.**
-# Reading a field out of a `jsonb` datum decompresses the whole datum first, so every row of *this*
-# session the scan passes is detoasted whether or not it turns out to be a human row; how much that
-# costs is a property of the payload rather than of the predicate, since an incompressible tool
-# result is fetched back out of the TOAST table while a pglz-compressible one of the same size is
-# not. The saving is on the other side of the `session_id` equality: that is the cheap qual,
-# evaluated first, so the rows of every *other* session are discarded on the heap page and their
-# payloads are never fetched at all.
-#
-# **Two predicates, one rule: a row this system recorded from a person.** `message_shape` pins the
-# LangChain shape and `message_original IS NULL` excludes the rows the M6 conversion pass rewrote —
-# `message_migration._MARK_CONVERTED` copies the pre-conversion payload into that column in the
-# same statement that stamps the row, so it marks every converted row and nothing else. The shape
-# alone was this rule for a while and it is not one that holds: `make db-migrate` and the chart's
-# post-upgrade Job both run that pass, which turns a MAF `role: user` row into
-# `message_to_dict(HumanMessage(...))` and stamps it `langchain`, so a row that was excluded before
-# an operator migrated was quotable afterwards with nothing about its provenance changed. Provenance
-# is the whole point here, because this is the evidence set `core/turn_text`'s ambient hands
-# `require_quotes_are_verbatim`: MAF's provider was called on every run rather than once after the
-# answer, so what carried the `user` role there is not the set this system can say a person typed,
-# and a converted one can carry text nobody typed.
-#
-# The exclusion therefore rides on the rollback column, and that is its one limit: an operator who
-# reclaims it (`UPDATE session_messages SET message_original = NULL` — 067's deliberate act of
-# giving up the rollback) gives up this exclusion with it, because nothing else on the row records
-# that it was converted.
+# Two predicates define "a row this system recorded from a person": `message_shape` pins the
+# LangChain shape, and `message_original IS NULL` excludes rows the conversion pass rewrote from the
+# legacy shape, whose user role is not proof a person typed them. That exclusion rests on the
+# rollback column; reclaiming it gives the exclusion up.
 _SELECT_RECENT_USER_ROWS = (
     "SELECT message, message_shape FROM session_messages "
     "WHERE session_id = %s AND message_shape = %s AND message_original IS NULL "
@@ -526,14 +347,12 @@ _SELECT_RECENT_USER_ROWS = (
     "ORDER BY id DESC LIMIT %s"
 )
 
-# The per-session turn claim (D-121). One statement, so the check and the take cannot be
-# interleaved by another process: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock, and the
-# update only fires when the incumbent claim has expired. `RETURNING` is empty exactly when a live
-# claim was left alone, which is the caller's "someone else is running a turn" answer.
+# The per-session turn claim. One statement: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock
+# and fires only when the incumbent claim has expired, so an empty `RETURNING` means someone else is
+# running a turn.
 #
-# `actor` is the turn's sender, so a replica that does not hold the turn can apply the stop route's
-# rule — a member stops only their own turn — before asking the holder to stop it
-# (`agent/turn_remotes.py`, `infra/sql/121_session_turn_remotes.sql`).
+# `actor` is the turn's sender, so a replica not holding the turn can apply the stop route's rule (a
+# member stops only their own turn) before asking the holder (`agent/turn_remotes.py`).
 _TURN_CLAIM = (
     "INSERT INTO session_turns (session_id, holder, expires_at, actor) "
     "VALUES (%s, %s, now() + make_interval(secs => %s), %s) "
@@ -551,27 +370,14 @@ _TURN_REFRESH = (
 )
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
 
-# The same three operations over a *set* of sessions, in one statement each.
+# The same three operations over a set of sessions, one statement each.
 #
-# **A fleet-wide sweep cannot take a lease one round trip at a time.** `agent/leaver.py` claims
-# every session a departing person owns before it deletes any of them, and one statement per
-# session runs at ~56 sessions/s — so at 6,000 sessions the loop alone took 104 s against a 60 s
-# lease and the claims it took first had already lapsed before it took its last. Measured at 600
-# sessions with a 10 s lease: 37 claims expired before the loop finished, 113 by the time the
-# erase transaction would have run, and a second pod took the first session at t+10.3 s while the
-# sweep was still running. The array form makes that loop one statement per thousand
-# (`leaver.CLAIM_BATCH`), which is the half of the fix that keeps the lease from being outrun; the
-# other half is that the sweep now refreshes what it holds.
+# `agent/leaver.py` claims every session a departing person owns before deleting any; one round trip
+# per session would outrun the lease on large fleets. `unnest(%s::text[])` keeps the statement
+# constant for any batch size (the cast is needed for psycopg's untyped array).
 #
-# `unnest(%s::text[])` rather than a `VALUES` list built in Python: one parameter for any batch
-# size, so the statement is a constant and cannot be built from a caller's strings. The cast is not
-# decoration — psycopg sends an untyped array and Postgres cannot infer its element type on its own
-# in the `SELECT` position.
-#
-# **The caller must not repeat a session id inside one batch.** `ON CONFLICT … DO UPDATE` refuses
-# to touch a row twice in one statement (`CardinalityViolation: ON CONFLICT DO UPDATE command
-# cannot affect row a second time`), so the batch is de-duplicated where it is assembled rather
-# than being made tolerant here, which would hide a caller passing the same session twice.
+# The caller must not repeat a session id in one batch: `ON CONFLICT DO UPDATE` cannot touch a row
+# twice in one statement, and de-duplicating here would hide that caller bug.
 _TURN_CLAIM_MANY = (
     "INSERT INTO session_turns (session_id, holder, expires_at) "
     "SELECT s, %s, now() + make_interval(secs => %s) FROM unnest(%s::text[]) AS s "
@@ -580,20 +386,10 @@ _TURN_CLAIM_MANY = (
     "WHERE session_turns.expires_at <= now() "
     "RETURNING session_id"
 )
-# **`FOR UPDATE SKIP LOCKED`, and it is what keeps this heartbeat from deadlocking the sweep it is
-# keeping alive.** The erasure's own transaction deletes `session_turns` rows for the same
-# sessions, so a plain `UPDATE … WHERE session_id = ANY(...)` and that `DELETE` lock the same rows
-# in whatever order each plan chooses: two statements taking the same set of row locks in
-# different orders is a deadlock, and Postgres resolves one by aborting a transaction — which here
-# is the erasure. Skipping a locked row instead costs nothing that matters: a row the erase
-# transaction has locked is a row no other pod can claim either, so the lease it carries is not
-# what is protecting that session at that instant.
-#
-# `ORDER BY session_id` gives every batch one lock order for the same reason.
-#
-# The holder guard sits in the locking sub-select rather than in the outer `UPDATE`: the rows are
-# locked by the time the update runs, so their holder cannot change underneath it, and a second
-# copy of the predicate is a second thing to keep in step.
+# `FOR UPDATE SKIP LOCKED` with `ORDER BY session_id` keeps this heartbeat from deadlocking the
+# erasure transaction that deletes the same `session_turns` rows. Skipping a locked row is harmless:
+# a row the erasure holds cannot be claimed by another pod either. The holder guard sits in the
+# locking sub-select, where the holder can no longer change.
 _TURN_REFRESH_MANY = (
     "UPDATE session_turns SET expires_at = now() + make_interval(secs => %s) "
     "WHERE session_id IN ("
@@ -603,38 +399,25 @@ _TURN_REFRESH_MANY = (
     "RETURNING session_id"
 )
 _TURN_RELEASE_MANY = "DELETE FROM session_turns WHERE holder = %s AND session_id = ANY(%s::text[])"
-# Which of these sessions somebody *else* is holding right now. Only asked when a refresh did not
-# come back with everything it was given, and it is what makes that warning true rather than
-# alarming: a claim this sweep failed to refresh is either a takeover — the hazard — or a row its
-# own erase transaction has locked or already deleted, which is the ordinary end of every applied
-# run. Warning on both would fire on every healthy erasure, and a warning that fires on every
-# healthy run is one nobody reads.
+# Which of these sessions somebody else holds now, asked only when a refresh came back short, so the
+# caller warns on a real takeover and not on rows its own erase transaction locked or deleted.
 _TURN_OTHER_HOLDERS = (
     "SELECT session_id FROM session_turns WHERE session_id = ANY(%s::text[]) AND holder <> %s"
 )
 
-# The one definition of the session list's sort key, substituted into both statements that
-# maintain it (092). `updated_at` *is* `max(session_messages.created_at)` for the session — the
-# expression `_OWNER_LIST`'s lateral used to compute per page — so the mirror cannot mean something
-# slightly different from what it replaced, which is the drift `043_session_listing.sql` refused
-# this column for. Correlated on the owning row's id, so it costs one backwards probe of
-# `session_messages_session_recent_idx`.
+# The one definition of the session list's sort key, used by both writers: `updated_at` is
+# `max(session_messages.created_at)` for the session, correlated on the owning row so it costs one
+# backwards index probe.
 _NEWEST_MESSAGE = (
     "(SELECT max(m.created_at) FROM session_messages m WHERE m.session_id = o.session_id)"
 )
 
-# **`updated_at` is derived here rather than left NULL, and that is what covers the fork.**
-# `agent/session_fork.py` imports this statement and runs it *after* copying the parent's
-# transcript onto the child id, so by the time this row is written the messages it summarises are
-# already there — an ownership row inserted with a NULL sort key would be a fork that never appears
-# in `GET /sessions`, which is failure 2 in that module's own list. For an ordinary new session
-# there are no messages yet and the subquery is NULL, which is the honest value: nothing has been
-# said in it.
+# `updated_at` is derived rather than left NULL because `agent/session_fork.py` runs this after
+# copying the transcript, and a NULL sort key would hide the fork from `GET /sessions`. For a new
+# session it is NULL: nothing has been said yet.
 #
-# Written as `SELECT … FROM (VALUES …)` rather than `VALUES (…)` so the correlated subquery can
-# name the session id without the caller passing it twice — the parameter list stays the three
-# every caller already sends. The casts are psycopg's requirement, not decoration: a `VALUES` row
-# of bare placeholders has no type for Postgres to infer.
+# `SELECT … FROM (VALUES …)` lets the subquery name the session id without a second parameter; the
+# casts give bare placeholders a type.
 _OWNER_INSERT = (
     "INSERT INTO session_owners (session_id, owner, profile, updated_at) "
     "SELECT o.session_id, o.owner, o.profile, "
@@ -642,100 +425,34 @@ _OWNER_INSERT = (
     "FROM (VALUES (%s::text, %s::text, %s::text)) AS o (session_id, owner, profile) "
     "ON CONFLICT (session_id) DO NOTHING"
 )
-# The other writer: the turn that has just appended to `session_messages`, in the same transaction
-# as the append (see `PostgresHistoryProvider.save_messages`). Recomputed from the table rather
-# than stamped `now()`, so a writer that supplies its own `created_at` — the fork shifts every
-# copied row's — is summarised by the same rule as one that does not.
+# The other writer: the turn that just appended to `session_messages`, in the same transaction.
+# Recomputed rather than stamped `now()`, so a writer supplying its own `created_at` (the fork) is
+# summarised by the same rule.
 _OWNER_TOUCH = f"UPDATE session_owners o SET updated_at = {_NEWEST_MESSAGE} WHERE o.session_id = %s"
-# The profile comes back with the owner because both are facts the in-process LRU loses, and a
-# rehydration that restored one without the other silently widened the session's tool surface
-# (REV-14 — a profile can only attenuate, so losing it is never the safe direction).
+# The profile comes back with the owner: a rehydration that lost it would widen the session's tool
+# surface, since a profile only attenuates.
 _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s"
-# Newest first: a session list is read as "what was I just working on", and the caller pages from
-# the top. The owner match is NULL-safe rather than a bare `=`, so the shared dev principal (a real
-# NULL owner) matches itself instead of dropping every row to SQL's three-valued logic — spelled out
-# as two arms rather than with `IS NOT DISTINCT FROM`, for the indexability reason `_OWNER_LIST`
-# gives below.
+# A page of the owner's sessions, newest activity first.
 #
-# "Newest" is the last message now, not the row's `created_at`, which is when the session was
-# *started*. The two diverge exactly where it matters: a session opened last Tuesday and abandoned
-# sorted above one used an hour ago, so the top of the list was the least likely thing to be wanted.
-# `created_at` still comes back, because when a conversation began is worth showing; it just no
-# longer decides the order.
+# The sort key is the mirrored `updated_at` column (last message), not `created_at`, served by
+# `session_owners_owner_updated_idx` as a bounded index walk; a lateral `max(created_at)` would be
+# evaluated for every session the owner ever created. `created_at` is still returned for display.
 #
-# **The sort key is a column on this row and no longer a lateral, and that is a trade with a
-# number on both sides (092).** `043_session_listing.sql` derived it — `LATERAL (SELECT
-# max(created_at) … WHERE session_id = o.session_id)` — and argued that a mirrored column "would be
-# a second write per turn that can silently fall out of step with the first". The argument was
-# right and the price was never measured: because the sort key came *out* of the lateral, the
-# planner evaluated it for every session the owner had ever created before it could discard any.
-# Measured on this schema, one message per session, warm cache: 2 sessions 0.4 ms · 600 5.3 ms ·
-# 6,000 **47.6 ms** (18,051 buffers) · 20,000 **155.0 ms** (60,154 buffers). Linear, and the keyset
-# cursor below did not help — page 2 measured 49.4 ms against page 1's 47.6 ms at 6,000, because
-# its predicate was on the lateral's output too and could not prune the loop. Nothing bounds the
-# row count: `retention_session_messages_days` ships at 0 and the companion UI mints an ownership
-# row on the first keystroke. The same page over the column and
-# `session_owners_owner_updated_idx` is a bounded index walk — measured below the millisecond at
-# every size above.
+# The `EXISTS` arm keeps the mirror out of the membership decision: `o.updated_at IS NOT NULL` is
+# the index condition, and `EXISTS` drops sessions with no messages (abandoned drafts, or
+# transcripts pruned by retention) at the moment their rows go. The mirror can only mis-order a
+# page, never invent or hide a row.
 #
-# What the mirror costs is one `_OWNER_TOUCH` per turn, in the same transaction as the message
-# insert, and one definition of what the column means (`_NEWEST_MESSAGE`) used by both writers.
+# The `after` arm is a keyset cursor, not an `OFFSET`: this list reorders as it is read, so the
+# row-wise `(updated_at, session_id) <` comparison names a position in a strict total order. It
+# self-disables through `%s::timestamptz IS NULL`, so the first and later pages are one statement.
 #
-# **The `EXISTS` arm is what keeps the mirror out of the membership decision.** 043's `ON
-# m.updated_at IS NOT NULL` dropped precisely the sessions that have never had a turn, and those
-# exist in bulk — every abandoned draft leaves an ownership row behind, and listing them handed a
-# caller a column of empty conversations it could not tell apart from ones whose transcript had
-# failed to load. That is now two arms rather than one, deliberately: `o.updated_at IS NOT NULL` is
-# the *index* condition, and the `EXISTS` asks the table the question the old join asked, so a
-# session whose messages `durable/retention.py` has pruned since drops out of the listing at the
-# moment they go rather than when something remembers to rewrite a column. The mirror can therefore
-# only ever mis-*order* a page, never invent or hide a row.
+# `profile` is returned so `GET /plans/pending` can skip sessions that cannot hold a plan without a
+# checkpointer read.
 #
-# **The `after` arm is the cursor, and it is a keyset rather than an offset.** The ceiling
-# (`service_max_listed_sessions`) used to be the end of the list: a chemist with more sessions than
-# it could never reach the older ones, from any client, because nothing said where the page
-# stopped. `OFFSET` is the obvious fix and is wrong here — this list *reorders itself as it is
-# read*, since a session moves to the top the moment its owner speaks in it, so an offset page
-# boundary skips the rows that moved down and repeats the ones that moved up. Comparing against the
-# sort key instead cannot: `(m.updated_at, o.session_id) < (%s, %s)` names a position in the
-# ordering rather than a count of rows before it. The pair is compared row-wise, so the session id
-# breaks the tie two sessions whose last message shares a timestamp would otherwise be ordered by
-# arbitrarily — a strict total order is what makes "everything after this row" unambiguous.
-#
-# The arm is self-disabling through `%s::timestamptz IS NULL`, the shape
-# `kg/proposal_store._SELECT_MANY` established, so the first page and a resumed one are the same
-# statement rather than two that can drift. The casts are not decoration: psycopg sends an untyped
-# NULL, and Postgres cannot infer the type of a parameter that only ever appears beside another
-# parameter.
-#
-# `profile` rides along because it is the one thing about a session that says whether it can be
-# holding an undecided plan at all: the todo list only exists under a harness-enabled profile
-# (`agent/langgraph_agent`), so `GET /plans/pending` skips a session on this column instead of
-# paying a serialized checkpointer read to find nothing. It is already on the row, and one listing
-# both surfaces read is one listing they cannot disagree about — a second query filtered on
-# `profile` would be a second answer to "which sessions does this person have".
-#
-# **The owner predicate is spelled out rather than written `IS NOT DISTINCT FROM`, and the reason is
-# that the index exists.** `IS NOT DISTINCT FROM` is not a btree-searchable operator, so
-# `session_owners_owner_idx` — added by `046_review_hardening_indexes.sql` for *this* statement,
-# quoting it verbatim — could not serve it, and every `GET /sessions` stayed the sequential scan the
-# migration was written to remove while paying the index's write cost on every session created.
-# Measured at 200,000 ownership rows: `Seq Scan … Rows Removed by Filter: 196000`, 21 ms, 1,274
-# buffers, and unchanged under `enable_seqscan = off` because there was no alternative plan to fall
-# back to; the form below plans as a `Bitmap Index Scan` with 5 index buffers, and the whole
-# statement goes from 47 ms to 25 ms. `039_note_index_embedding_key.sql` had already recorded the
-# same fact about `IS DISTINCT FROM` seven files earlier.
-#
-# The NULL-safety is not given up, which is what the operator was there for: `owner` is nullable
-# (013 — the shared dev principal has no Entra oid), and a bare `=` would list none of its sessions.
-# The second arm restores exactly that match, and it is indexable too — a btree stores NULLs, so
-# `owner IS NULL` is an index condition. Both arms were checked against the same data (2 rows for
-# the NULL principal, 4,000 for a named one, identical to the old predicate) and both plan as index
-# scans, including under `plan_cache_mode = force_generic_plan`, where the planner cannot see which
-# arm is dead and takes a `BitmapOr` of the two.
-#
-# The owner is therefore bound twice, which is the shape this statement already uses for the
-# self-disabling cursor arm below it rather than a new one.
+# The owner match is NULL-safe (the shared dev principal is a real NULL owner) but spelled as two
+# arms rather than `IS NOT DISTINCT FROM`, which is not btree-searchable and would defeat
+# `session_owners_owner_idx`. Hence the owner is bound twice.
 _OWNER_LIST = (
     "SELECT o.session_id, o.created_at, o.updated_at, o.title, o.profile FROM session_owners o "
     "WHERE (o.owner = %s OR (o.owner IS NULL AND %s::text IS NULL)) "
@@ -745,43 +462,20 @@ _OWNER_LIST = (
     "  AND EXISTS (SELECT 1 FROM session_messages m WHERE m.session_id = o.session_id) "
     "ORDER BY o.updated_at DESC, o.session_id DESC LIMIT %s"
 )
-# First writer wins, in one statement and without a read first. A title is derived from a session's
-# opening question, so every later turn would otherwise overwrite it; `title IS NULL` is what lets
-# the turn route call this unconditionally and stay correct. Naming a conversation after how it
-# started rather than where it drifted to is what makes a sidebar scannable.
+# First writer wins, in one statement: a title names a session after its opening question, and
+# `title IS NULL` lets the turn route call this unconditionally.
 _OWNER_TITLE = "UPDATE session_owners SET title = %s WHERE session_id = %s AND title IS NULL"
 
-# What one session's rows are, table by table, when the session itself is what is being deleted.
+# The per-table predicate for deleting one session's rows.
 #
-# **The table *set* is not declared here — it is `chemclaw.agent.leaver._ERASE`'s** (see
-# `_session_delete_statements`). Only the predicate is: erasure reaches a session through its
-# owner, this reaches one session by name, and the two questions have different answers for four
-# of the twelve tables (`_ACTOR_SCOPED_ONLY`). Writing the set out a second time is how the two
-# drift, and this repository has the receipt for that failure mode — `tool_result_links` was
-# invisible to the erasure check for months because a *derived* completeness test could not see a
-# table whose columns name no person.
+# The table set is `chemclaw.agent.leaver._ERASE`'s (see `_session_delete_statements`), not declared
+# here; only the predicate is, since some erasure tables are actor-scoped (`_ACTOR_SCOPED_ONLY`).
 #
-# `tool_result_blobs` is the one statement that is not a bare `session_id = ...`, and both halves
-# of it are load-bearing. The blob is content-addressed, so two sessions that ran the same tool
-# over the same arguments share one row; the `NOT EXISTS` arm is what keeps deleting *this*
-# conversation from unlinking *another* one's stored result (a cascade takes the link rows with the
-# blob, so an unconditional delete would remove a row belonging to a session nobody asked to
-# delete). The consequence is stated rather than hidden: this session's own link row survives when
-# its bytes are shared, because `infra/sql/grants/app_privileges.sql` withholds DELETE on
-# `tool_result_links` on purpose — a link may only disappear behind its blob. What is left is a row
-# naming a session id that no longer resolves to anything, and `durable/retention.py`'s age sweep
-# collects it with the blob.
-#
-# **The `NOT EXISTS` arm counts only links whose session still exists**, and without that clause
-# those surviving orphan rows blocked the blob for ever. Two sessions sharing bytes, both deleted:
-# the first delete spares the blob (the second session still links it) and leaves an orphan link;
-# the second delete then finds *that* row and spares the blob again. Nothing owns it, nothing can
-# reach it, and the only collector left is `retention_tool_results_days`, which ships at 0.
-#
-# Coincidental sharing made this rare — two sessions had to run one tool over identical arguments
-# and get byte-identical output. `agent/session_fork.py` made it certain: a fork copies the
-# parent's links by design, so *every* forked conversation left its parent's results unreclaimable.
-# That is what surfaced it; the defect is older than the fork and the fix is not fork-specific.
+# `tool_result_blobs` is content-addressed and may be shared across sessions, so it is deleted only
+# when no link from a still-existing session references it. This session's own link row survives a
+# shared blob (the runtime role has no DELETE on `tool_result_links`), and the retention sweep later
+# collects it with the blob. Counting only links of existing sessions keeps such orphan links from
+# pinning a blob for ever, which matters because forks share their parent's links.
 _SESSION_DELETE: dict[str, str] = {
     "tool_result_blobs": (
         "DELETE FROM tool_result_blobs b WHERE EXISTS ("
@@ -793,9 +487,8 @@ _SESSION_DELETE: dict[str, str] = {
         "     AND EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = l.session_id))"
     ),
     "session_messages": "DELETE FROM session_messages WHERE session_id = %(session_id)s",
-    # An artefact is part of the conversation (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-
-    # an-effect`); its revisions go with the header by cascade, so the one statement is the whole of
-    # it and the runtime role needs no DELETE on the append-only revision table.
+    # An artefact is part of the conversation; its revisions go by cascade, so the runtime role
+    # needs no DELETE on the append-only revision table.
     "session_exhibits": "DELETE FROM session_exhibits WHERE session_id = %(session_id)s",
     # The conversation's uploaded working files (`120_session_attachments.sql`), whoever uploaded
     # them: deleting a conversation deletes what was handed to it.
@@ -813,9 +506,8 @@ _SESSION_DELETE: dict[str, str] = {
     "session_owners": "DELETE FROM session_owners WHERE session_id = %(session_id)s",
 }
 
-# The tables in the erasure set that a *session* delete must leave alone, and why. Each one is
-# keyed by the person rather than by the conversation, so deleting one conversation would take data
-# from every other one the same chemist has.
+# Tables in the erasure set a session delete must leave alone: each is keyed by the person, so
+# deleting one conversation would take data from all of theirs.
 _ACTOR_SCOPED_ONLY: dict[str, str] = {
     "store": "an agent memory outlives the session it was written in — that is what it is for",
     "store_vectors": "the embedding half of the same memory",
@@ -826,11 +518,8 @@ _ACTOR_SCOPED_ONLY: dict[str, str] = {
         "the next session is meant to run"
     ),
     "user_preferences": "a preference is the person's, and survives every session they close",
-    # **And a session delete must not be a way to buy allowance.** A spend window is keyed by the
-    # principal for the reason the whole guard exists — it bounds what one *person* may spend, not
-    # what one conversation may. Deleting a session is an ordinary thing a chemist may do to their
-    # own session at will, so a `session_id` predicate here would turn "delete the conversation"
-    # into "reset my quota", available to exactly the runaway the budget is there to stop.
+    # A spend window bounds what one person may spend; a `session_id` predicate here would let
+    # deleting a conversation reset the quota.
     "budget_usage": (
         "a spend window bounds a person, not a conversation — and a session delete that reset it "
         "would be a free allowance reset available to anyone who is over budget"
@@ -842,20 +531,11 @@ _ACTOR_SCOPED_ONLY: dict[str, str] = {
 def _session_delete_statements() -> tuple[tuple[str, str], ...]:
     """The per-table DELETEs for one session, in the order an actor's erasure uses.
 
-    **Derived from `leaver._ERASE` rather than listed again**, because the question "which tables
-    hold a session's data" already has one answer in this codebase and a second copy of it is a
-    copy that goes stale in silence. Every table there is either session-scoped (a predicate in
-    `_SESSION_DELETE`, or the checkpointer's `thread_id`, which *is* the session id) or deliberately
-    actor-scoped (`_ACTOR_SCOPED_ONLY`); a table that is neither raises here, so the next writer to
-    add one to the erasure sweep is told that this delete has no opinion about it yet, rather than
-    finding out from a session whose rows outlived it.
-
-    The order is `_ERASE`'s too, for `_ERASE`'s reason: everything keyed by the session goes before
-    the ownership row that is the only way to find the session again.
-
-    Both imports are deferred, and have to be: `leaver` and `checkpointer` each import this module
-    at import time, so naming either of them at module scope here is an import cycle that fails on
-    whichever one is loaded first.
+    Derived from `leaver._ERASE` so "which tables hold a session's data" has one answer. Every table
+    there is either session-scoped (`_SESSION_DELETE`, or the checkpointer's `thread_id`) or
+    actor-scoped (`_ACTOR_SCOPED_ONLY`); an unclassified table raises. The order puts the ownership
+    row last, since it is the only way to find the session again. The imports are deferred because
+    `leaver` and `checkpointer` import this module.
 
     Returns:
         `(table, statement)` pairs, each statement taking one `session_id` parameter.
@@ -867,11 +547,8 @@ def _session_delete_statements() -> tuple[tuple[str, str], ...]:
     from chemclaw.agent.leaver import _ERASE
 
     scoped = dict(_SESSION_DELETE)
-    # The checkpointer keys graph state by `thread_id`, and a thread id is a session id. The three
-    # statements come from the checkpointer rather than being written here, because their *order*
-    # and the re-ask inside it are what stop a turn landing mid-delete from keeping a checkpoint
-    # whose payload has gone — a rule that belongs to those tables, not to this deleter, and that
-    # this deleter had wrong for as long as the retention sweep did.
+    # A thread id is a session id. The checkpointer supplies these statements because their order is
+    # what stops a concurrent turn keeping a checkpoint whose payload has gone.
     scoped.update(dict(checkpoint_thread_delete_statements("thread_id = %(session_id)s")))
     unclassified = [
         table for table, _ in _ERASE if table not in scoped and table not in _ACTOR_SCOPED_ONLY
@@ -888,18 +565,10 @@ def _session_delete_statements() -> tuple[tuple[str, str], ...]:
 def encode_session_cursor(updated_at: datetime, session_id: str) -> str:
     """This row's position in the session listing, as one opaque token.
 
-    The cursor is the *sort key* — the row's last activity and its session id — and nothing else,
-    which is what makes it stable: it names a place in the ordering rather than a page number, so
-    it keeps meaning the same thing when rows are added, removed, or reordered by a chemist
-    speaking in an old conversation, and it survives a change to the page size. The row it was
-    minted from need not still exist.
-
-    Base64url of the two fields, because a caller must not be able to *read* it and conclude
-    anything: an id-plus-timestamp pair spelled in the clear invites a client to construct one, and
-    a constructed cursor is a client that breaks the day the ordering gains a third component.
-    It is deliberately **not** signed. A cursor is not a capability — every page is re-scoped to
-    the caller's own sessions by the NULL-safe owner match in `_OWNER_LIST`, so the worst a forged
-    one can do is move the forger around their own list.
+    The cursor is the sort key (last activity, session id), so it names a place in the ordering and
+    stays valid as rows move or the page size changes. Base64url so clients do not construct one;
+    not signed, because every page is re-scoped to the caller's own sessions and a forged cursor
+    only moves the forger within their own list.
 
     Args:
         updated_at: The row's last-activity timestamp, exactly as the listing ordered by it.
@@ -916,10 +585,8 @@ def decode_session_cursor(cursor: str) -> tuple[datetime, str]:
     """The `(updated_at, session_id)` position a cursor names.
 
     Raises:
-        ValueError: the token is not one this service minted — bad base64, bad UTF-8, a missing
-            separator, or a timestamp `datetime.fromisoformat` refuses. One error type for all of
-            them, because the caller's answer is the same in every case and the difference is not
-            something a client should be told.
+        ValueError: the token is not one this service minted. One error type for every malformation,
+        since the caller's answer is the same.
     """
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
@@ -938,14 +605,8 @@ def decode_session_cursor(cursor: str) -> tuple[datetime, str]:
 def _session_dsn() -> str:
     """Resolve the session layer's DSN: `session_store_dsn`, else the shared `postgres_dsn`.
 
-    One resolver for all three stores in this module, so they can never end up pointing at
-    different databases — the ownership row, the turn claim and the message history are one
-    session's state and must live together (D-002).
-
-    It took a `dsn` override until the 2026-08-05 review counted the call sites: all twenty, in
-    `src/` and in `tests/`, construct these classes with no arguments, so the first branch of
-    `dsn or …` was unreachable in the whole tree. A parameter nothing passes is a parameter that
-    documents a capability the deployment does not have.
+    One resolver for all three stores, so one session's ownership, turn claim and history always
+    share a database.
     """
     return settings.session_store_dsn or settings.postgres_dsn
 
@@ -954,26 +615,16 @@ def _session_dsn() -> str:
 async def _session_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
     """Borrow a session-layer connection with the configured per-statement timeout.
 
-    Pooled per process when the process opened a pool (`chemclaw.core.db.pooling`), so a request
-    path
-    pays no TCP+auth handshake; a dedicated connect otherwise. Either way a down or misconfigured
-    database reports "Postgres unreachable at <host>" rather than a raw psycopg traceback, and a
-    hung query is cancelled rather than pinning the enclosing activity for its whole budget.
-
-    Extracted once the third store in this module needed the identical four lines.
+    Pooled when the process opened a pool (`chemclaw.core.db.pooling`), a dedicated connect
+    otherwise. A down database reports "Postgres unreachable at <host>", and a hung query is
+    cancelled.
     """
     async with db.connection(dsn) as conn:
         yield conn
 
 
 class PostgresHistoryProvider:
-    """Persists a session's transcript to Postgres, and reads it back for a person.
-
-    A plain class since M13. It subclassed MAF's `HistoryProvider` while the framework asked a
-    provider for the thread it was about to send a model; nothing asks now — the graph reads its
-    checkpointer — so the base class contributed a `source_id` and a set of hooks with no callers.
-    What is left is the two storage primitives it always overrode.
-    """
+    """Persists a session's transcript to Postgres, and reads it back for a person."""
 
     def __init__(self) -> None:
         """Configure the provider against the session-store database."""
@@ -988,14 +639,8 @@ class PostgresHistoryProvider:
     ) -> list[BaseMessage]:
         """Load a session's messages in insertion order (empty for an unknown/None session).
 
-        A plain read, and the absence of the repair that used to sit here is the point. That repair
-        dropped a function call no result answered, and wrote the correction back, because the
-        thread it returned was fed straight to the model and an unmatched `tool_use` makes every
-        later turn on the session fail outright — a `SIGKILL` between the call and its result
-        leaves one behind and runs no cleanup handler. Both halves of that are gone: the graph
-        builds its thread from the checkpointer, never from here, and the only caller left is the
-        transcript route, which renders for a person. New rows cannot even acquire an orphan, since
-        the projection writes the user's message and the answer as plain text (D-2026-08-10 §2).
+        A plain read with no repair: the graph builds its thread from the checkpointer, and the only
+        caller is the transcript route, which renders for a person.
         """
         if not session_id:
             return []
@@ -1022,22 +667,18 @@ class PostgresHistoryProvider:
     ) -> list[str]:
         """The chemist's own last `limit` messages in this thread, oldest first.
 
-        **A different read from `get_messages`, on purpose.** That one renders a whole conversation
-        for a person and must never grow a `LIMIT`; this one answers "what has this chemist
-        written", for `core/turn_text`'s ambient, and is bounded because it runs on the turn's hot
-        path once per turn. Both facts are in the module docstring above; the rule there is about
-        the transcript, not about the table.
+        Unlike `get_messages`, bounded: it serves `core/turn_text`'s ambient once per turn on the
+        hot path.
 
         Args:
-            session_id: The thread. Unknown or `None` returns nothing, which every reader treats
-                as "no chemist spoke" rather than as a waiver.
+            session_id: The thread. Unknown or `None` returns nothing, which every reader treats as
+            "no chemist spoke" rather than as a waiver.
             limit: How many of the chemist's messages to return, newest kept.
-            state: Ignored — this provider deliberately keeps nothing in the session's state, and
-                the parameter is here so both providers answer the same call.
+            state: Ignored; present so both providers answer the same call.
 
         Returns:
-            Their messages oldest first, so the caller can append the turn in flight and have the
-            conversation in the order it was said.
+            Their messages oldest first, so the caller can append the turn in flight in the order it
+            was said.
         """
         if not session_id or limit <= 0:
             return []
@@ -1059,22 +700,9 @@ class PostgresHistoryProvider:
     ) -> None:
         """Append this turn's messages to the session's durable history (no-op if none to store).
 
-        **One transaction, and the second statement in it is the session list's sort key** (092).
-        The turn's exchange lands whole or not at all, which is what lets `chemclaw.api.runner`
-        carry no rollback: there is no window in which half of it is committed, and that now covers
-        `session_owners.updated_at` as well — a mirror written in a *later* transaction is the
-        "silently falls out of step" `043_session_listing.sql` refused this column for, and one
-        written in this one cannot be missing while the rows it summarises are there.
-
-        It is `_OWNER_TOUCH`'s recomputation rather than an assignment of the timestamp this call
-        happens to know, so the column means `max(created_at)` at every writer (`_NEWEST_MESSAGE`)
-        instead of meaning "whatever the last writer thought". The cost is one indexed `UPDATE` and
-        one backwards probe of `session_messages_session_recent_idx` per turn — measured over a
-        2,000-message session, **0.068 ms and 6 buffers**, against a turn that has just spent
-        seconds in a model.
-
-        Bounding the table is `durable/retention.py`'s job, on its own schedule, and deliberately
-        not this call's — an append on the answer path must not also be deciding what to delete.
+        One transaction, which also updates the session list's sort key (`_OWNER_TOUCH`), so the
+        exchange and the mirror commit together and `chemclaw.api.runner` needs no rollback.
+        Bounding the table is `durable/retention.py`'s job, not this append's.
         """
         if not session_id or not messages:
             return
@@ -1093,15 +721,10 @@ class PostgresHistoryProvider:
     ) -> int | None:
         """Write the chemist's message ahead of its turn, `running`; return the row to settle.
 
-        **Why ahead** (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`): the
-        checkpointer holds this message from the graph's first step, and the rest of the exchange
-        lands only once an answer exists, so a process killed in between left the model's record of
-        the conversation holding a question the chemist's transcript did not. Written here, the
-        question is in both from the start, and how its turn ended is a column on it rather than an
-        absence. The session list's sort key moves with it, in the same transaction, for
-        `save_messages`' reason.
-
-        `None` for no session, which the caller reads as "settle nothing, write the exchange whole".
+        The checkpointer holds the message from the graph's first step, so writing it here keeps the
+        transcript in step, and how the turn ended becomes a column rather than an absence. The sort
+        key moves in the same transaction. `None` for no session, which the caller reads as "settle
+        nothing, write the exchange whole".
         """
         if not session_id:
             return None
@@ -1124,10 +747,9 @@ class PostgresHistoryProvider:
     ) -> None:
         """Append the rest of a turn's exchange and settle its question's status, in one commit.
 
-        `messages` is everything after the question — the tool exchanges and the answer — and is
-        empty for a turn that ended without one. `done` overrides whatever the question's row says,
-        and anything else settles only a row still `running` (see `_SETTLE_ANSWERED`): an answer the
-        chemist received is the record, and a teardown never demotes a settled turn.
+        `messages` is everything after the question and is empty for a turn that ended without an
+        answer. `done` overrides the row's status; anything else settles only a row still `running`
+        (see `_SETTLE_ANSWERED`).
         """
         if not session_id:
             return
@@ -1146,11 +768,9 @@ class PostgresHistoryProvider:
     ) -> list[InterruptedTurn]:
         """Mark this session's turns whose owner is gone `interrupted`; return the ones marked now.
 
-        A turn is returned by **exactly one** call across every process (`_MARK_INTERRUPTED`), so
-        the caller can book its outcome without a second writer ever booking it again — and
-        `booked` says whether the turn's own process already did, in which case nobody books it.
-        Asked by whoever touches the session next — its next turn, a reattach, a transcript read —
-        because the process that would have settled it is the one that died.
+        Each turn is returned by exactly one call across every process (`_MARK_INTERRUPTED`), so its
+        outcome is booked once; `booked` says whether the turn's own process already booked it.
+        Called by whoever touches the session next.
         """
         if not session_id:
             return []
@@ -1177,9 +797,7 @@ class PostgresHistoryProvider:
 def _rows(session_id: str, messages: Sequence[BaseMessage]) -> list[tuple[Any, ...]]:
     """The `_INSERT` parameters for these messages, stamped with their turn's id and authorship.
 
-    Read once for the whole batch: these messages are one turn's work, so they share its
-    correlation id — empty off the request path (the CLI, tests), where there is no turn — and the
-    person the turn runs for.
+    One turn's messages share its correlation id (empty off the request path) and its person.
     """
     correlation_id = get_current_correlation_id() or ""
     actor = get_current_actor()
@@ -1202,27 +820,13 @@ def _rows(session_id: str, messages: Sequence[BaseMessage]) -> list[tuple[Any, .
 def owner_permits(owner: str | None, actor: str | None) -> bool:
     """Whether a stored owner lets `actor` reach the row — the one ownership rule.
 
-    **One definition, because there are now three callers and they must not drift.** The HTTP layer
-    resolves ownership for `/sessions/{id}/…` (`api/deps._owner_authorizes`, which delegates here
-    and which `chemclaw/api/routes/protocols.py` reaches for a design as well); the agent resolves
-    it for a tool handed an explicit session id
-    (`agent/evidence_tools.assemble_evidence_pack`); and it resolves it again for a tool handed an
-    explicit `design_id` (`agent/protocol_design_tools._require_writable`). A second copy of this
-    predicate is how one surface ends up stricter than the other, and the loose one is the one that
-    matters.
+    Shared by every caller that resolves ownership (the HTTP session gate, evidence packs, protocol
+    designs) so no surface is looser than another. `owner` is whichever column records who opened
+    the row.
 
-    The subject is no longer only a session, and the docstring said "two" and named the session pair
-    for a release after the third caller landed. `owner` is whatever column records who opened the
-    row — `session_owners.owner` or `experiment_protocols.opened_by` — and the rule below reads
-    neither table, which is what lets it be one rule.
-
-    The dev/enforced split is deliberate and is `_is_reviewer`'s, applied to ownership: with
-    `entra_required` off there is no real actor, so an owner-less row degrades open exactly as
-    every other route does. Once identity is enforced a *recorded* absence of an owner is no longer
-    "everyone's" — enforcement never mints an owner-less row, so one surviving into it is a
-    leftover from a dev-mode write, and treating it as anyone's would hand it to every
-    authenticated principal instead of to nobody. `owner` is falsy for both `None` and `""`, so a
-    row written without one and one holding the empty-string sentinel are refused alike.
+    With `entra_required` off there is no real actor, so an owner-less row degrades open. Once
+    identity is enforced, an owner-less row (a dev-mode leftover) belongs to nobody. `None` and `""`
+    are treated alike.
 
     Args:
         owner: The session's recorded owner, or `None`/`""` when it has none.
@@ -1237,18 +841,11 @@ def owner_permits(owner: str | None, actor: str | None) -> bool:
 
 
 class SessionOwnerStore:
-    """Durable session-ownership registry, so a restarted front door can reattach a client (F3).
+    """Durable session-ownership registry, so a restarted front door can reattach a client.
 
-    The front door holds live `AgentSession` handles in an in-process LRU that a pod restart wipes;
-    without a durable record of *who owns which session id*, a returning client's id is unknown
-    after a restart and it is forced onto a brand-new session — orphaning its durable history
-    (`session_messages`) and any unconsumed job push-back (`session_events`). This is that record:
-    `create_session` writes `(session_id, owner)` once, and on a cache miss the front door looks
-    the owner up to authorize a reattach before rebuilding the live handle over its durable history.
-
-    One identity row per session, deliberately separate from the append-only message history — it
-    carries the single security-relevant fact (the owner) the in-memory LRU lost. The DSN resolves
-    exactly as the history provider's, so both durable-session tables live in one database (D-002).
+    The front door's live-session LRU dies with the pod; this row records who owns each session id,
+    so on a cache miss the owner is looked up to authorize a reattach over the durable history. One
+    identity row per session, separate from the append-only history.
     """
 
     def __init__(self) -> None:
@@ -1269,8 +866,8 @@ class SessionOwnerStore:
     async def lookup(self, session_id: str) -> tuple[bool, str | None, str | None]:
         """Return `(found, owner, profile)` — `(False, None, None)` when there is no such session.
 
-        The `found` flag distinguishes an unknown session from a known one owned by the shared
-        principal (a real `NULL` owner), which a bare `str | None` return could not.
+        `found` distinguishes an unknown session from one owned by the shared principal (a real
+        `NULL` owner).
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -1283,11 +880,8 @@ class SessionOwnerStore:
     async def set_title_if_absent(self, session_id: str, title: str) -> None:
         """Name a session after its opening question, once (see `_OWNER_TITLE`).
 
-        Called on every turn and expected to match nothing after the first, which is why it is one
-        conditional `UPDATE` on the primary key rather than a read followed by a write: the second
-        shape costs two round-trips to discover it has nothing to do, and can lose a race between
-        them. Against a turn that is about to spend seconds in a model, one indexed no-op write does
-        not register.
+        Called every turn; one conditional `UPDATE` rather than a read-then-write, which would cost
+        two round trips and could race.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -1299,12 +893,9 @@ class SessionOwnerStore:
     ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
         """The owner's newest page of sessions — `page_for_owner` from the top.
 
-        `(session_id, created_at, updated_at, title, profile)` per row.
-
-        Kept as its own name because it is the shape the front door's `SessionOwners` protocol
-        declares and the only one a registry that cannot resume a listing has to implement. It
-        holds no query of its own: a first page that was assembled by a second statement is a first
-        page that can order its rows differently from every page after it.
+        `(session_id, created_at, updated_at, title, profile)` per row. The shape the front door's
+        `SessionOwners` protocol declares; it delegates so the first page and later pages share one
+        statement.
         """
         return await self.page_for_owner(owner)
 
@@ -1314,29 +905,13 @@ class SessionOwnerStore:
         """One page as `(session_id, created_at, updated_at, title, profile)`.
 
         Newest first, at most `service_max_listed_sessions` rows, resuming strictly after the row
-        `after` names — see `_OWNER_LIST` for why the order is `updated_at` rather than
-        `created_at`, why a session with no messages is not listed at all, and why the resume is a
-        keyset comparison rather than an `OFFSET`.
-
-        This table is already the durable answer to "which sessions exist and who owns them", so
-        listing reads it directly rather than adding a second registry that could disagree with the
-        one `_resolve_session` authorizes against. `updated_at` is a column on it since 092, having
-        been derived from `session_messages` before that — see `_OWNER_LIST` for what deriving it
-        cost per page, and for the two arms that keep the mirror out of the decision about which
-        sessions appear at all.
-
-        `profile` is the fifth field rather than a second query — see `_OWNER_LIST` for what reads
-        it. `None` is a real value there and means the session runs the default profile, which is
-        exactly what `agent.profiles.get_profile(None)` resolves.
-
-        A tuple rather than a record type, matching `lookup` above: this module is below the API
-        layer that consumes it, so a shared shape would have to live somewhere neither of them owns.
-        The cursor for each row is derivable from that tuple (`encode_session_cursor`), so the page
-        carries no field the caller has to be told how to combine.
+        `after` names; `_OWNER_LIST` explains the order, which sessions appear, and the keyset
+        resume. `profile` `None` means the default profile. A tuple, matching `lookup`; each row's
+        cursor is derivable with `encode_session_cursor`.
 
         Args:
             owner: The principal whose sessions to list; `None` is the shared dev principal's real
-                SQL NULL and matches itself.
+            SQL NULL and matches itself.
             after: A cursor from `encode_session_cursor`, or None for the newest page.
 
         Returns:
@@ -1358,32 +933,18 @@ class SessionOwnerStore:
     async def delete_session(self, session_id: str) -> dict[str, int]:
         """Delete one conversation and everything keyed by it, in one transaction.
 
-        The counterpart to `chemclaw.agent.leaver.erase_actor`, at the other scope: erasure answers
-        "someone left", this answers "I do not want this conversation any more". It runs the same
-        table set for the same reason — an ownership row deleted without the rows it keys leaves
-        messages, events and graph state that *nothing can reach and nothing can find again*, since
-        every session-scoped sweep in this system starts from `session_owners`.
-
-        **The transaction is what makes that true rather than intended.** Twelve statements that
-        commit one at a time can be interrupted after any of them, and the interruption that
-        matters is the one that has already deleted the ownership row.
-
-        A method on this store, not a free function: the ownership row is the key every other table
-        here is reached by, and this store is the thing that owns it. It deletes only what this
-        session's id names — an actor-scoped row (a memory, a preference, a subscription) belongs
-        to the person and outlives their conversations (`_ACTOR_SCOPED_ONLY`).
-
-        Missing tables are skipped rather than raising, exactly as the erasure sweep skips them:
-        the checkpointer's three are created by `AsyncPostgresSaver.setup()` and not by a
-        migration, so a deployment that has never run the graph does not have them, and deleting a
-        conversation must not be the one operation such a deployment cannot perform.
+        The session-scoped counterpart to `chemclaw.agent.leaver.erase_actor`, over the same table
+        set. One transaction, because an ownership row deleted without the rows it keys would leave
+        data nothing can find again. Actor-scoped rows outlive the conversation
+        (`_ACTOR_SCOPED_ONLY`). Missing tables (e.g. the checkpointer's, before the graph ever ran)
+        are skipped, as the erasure sweep skips them.
 
         Args:
             session_id: The conversation to delete.
 
         Returns:
-            `{table: rows deleted}`, one key per table in the sweep — zero where a table held
-            nothing or does not exist here, so an operator comparing two runs sees the same keys.
+            `{table: rows deleted}`, one key per table in the sweep, zero where a table held nothing
+            or does not exist.
         """
         statements = _session_delete_statements()
         removed: dict[str, int] = {}
@@ -1412,9 +973,7 @@ class SessionOwnerStore:
     ) -> dict[str, int]:
         """One attempt at the delete transaction — the body `delete_session` retries.
 
-        Extracted so the retry wraps a whole transaction rather than a statement: a deadlock abort
-        rolls the transaction back, so resuming inside it is not available and the unit that can be
-        tried again is this one.
+        A deadlock abort rolls the whole transaction back, so the retry unit is the transaction.
         """
         removed: dict[str, int] = {}
         async with self._connection() as conn:
@@ -1431,29 +990,14 @@ class SessionOwnerStore:
 
 
 class SessionTurnClaims:
-    """One turn at a time per session, across every process, as a leased row (D-121).
+    """One turn at a time per session, across every process, as a leased row.
 
-    The front door refuses a second concurrent turn on a session with a 409, because two turns
-    driving `agent.run` against the same conversation thread interleave their messages into one
-    history. That guard was a `set` in one process's memory, and the shipped chart runs the front
-    door at two replicas — so two turns on one session landing on different pods were both
-    admitted, and raising `service_uvicorn_workers` would add the same hazard inside a pod. This
-    is the same guard at the width the deployment actually has.
-
-    A **lease**, not a lock, and that is the whole design. A Postgres advisory lock (or
-    `SELECT … FOR UPDATE`) lives on a connection or a transaction, so holding one for a turn means
-    pinning a pooled connection for minutes — re-creating the connection starvation that made a
-    bounded pool start raising in the first place. Each of the three operations here is one short
-    statement that borrows a connection and gives it straight back.
-
-    The claim is taken under `expires_at`, refreshed while the turn runs, and deleted when it
-    ends. A worker that is SIGKILLed mid-turn therefore stops blocking its session after one
-    lease, where a lock held by a dead connection waits for the server to notice and an in-memory
-    set needed a process restart. The cost is the standard lease property, stated in
-    `core/config/service.py` beside the lease setting itself: exclusion holds as long as the holder
-    is scheduled often enough to refresh. (This sentence used to cite `chemclaw.api.app`, which
-    never said it — the 2026-08-05 review grepped for the claim and found it in the config and in
-    D-121, not there.)
+    Two concurrent turns on one session would interleave their messages, and the front door runs
+    several replicas, so the guard must be shared. A lease, not a lock: an advisory or row lock
+    would pin a pooled connection for the whole turn, while each operation here is one short
+    statement. The claim is refreshed while the turn runs and deleted when it ends, so a killed
+    worker stops blocking after one lease. Exclusion holds as long as the holder refreshes in time
+    (see the lease setting in `core/config/service.py`).
     """
 
     def __init__(self) -> None:
@@ -1469,10 +1013,8 @@ class SessionTurnClaims:
     ) -> bool:
         """Take the session's turn slot for `lease_seconds`; False if someone else holds it.
 
-        One statement, so no other process can observe the gap between the check and the take —
-        the same atomicity the in-process `set` got for free from having no `await` between its
-        membership test and its `add`. `actor` is who sent the turn, recorded for the replicas
-        that do not hold it (`agent/turn_remotes.py`).
+        One statement, so no process observes a gap between check and take. `actor` records who sent
+        the turn for replicas that do not hold it (`agent/turn_remotes.py`).
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -1484,16 +1026,9 @@ class SessionTurnClaims:
     async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
         """Push this holder's claim out by another lease; False if it is no longer ours.
 
-        A no-op when the claim is gone or now belongs to someone else: that means this worker was
-        already declared dead, and re-taking the slot behind the live holder's back is exactly
-        the interleaving the guard exists to prevent.
-
-        **It returns whether the claim survived, and that return value is the point.** The no-op
-        was correct and silent: `rowcount` was discarded, so a holder whose lease had been taken
-        over could not tell, and `api/state.py::_hold_turn_claim` reacts only to *exceptions* — of
-        which a silent takeover raises none. Its own warning ("another worker may start a turn on
-        this session") was therefore unreachable in exactly the scenario it describes. Found by
-        the 2026-08-05 review.
+        A no-op when the claim is gone or taken over (this worker was declared dead), since
+        re-taking it would cause the interleaving the guard prevents. The return value lets the
+        holder notice a silent takeover.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -1514,10 +1049,8 @@ class SessionTurnClaims:
     ) -> set[str]:
         """Take the turn slot of every one of these sessions at once; return the ones taken.
 
-        The set-shaped `claim`, for the one caller that needs a whole fleet held at the same
-        instant (`agent/leaver.py`'s erasure). The sessions **not** in the returned set are the
-        ones somebody else is running a turn on, which is the same answer `claim` gives one session
-        at a time — this does not wait for them and does not give up the ones it did take.
+        The set-shaped `claim`, for `agent/leaver.py`'s erasure. Sessions not returned are held by
+        someone else; this neither waits for them nor releases the ones it took.
 
         Args:
             session_ids: The sessions to claim. Must not repeat one (see `_TURN_CLAIM_MANY`).
@@ -1541,10 +1074,8 @@ class SessionTurnClaims:
     ) -> set[str]:
         """Push this holder's claims out by another lease; return the ones still ours.
 
-        The set-shaped `refresh`, and the return value carries the same meaning: a session absent
-        from it is one this holder no longer has — taken over, deleted, or (uniquely to the batch
-        form) locked by a concurrent transaction and skipped rather than waited on
-        (`_TURN_REFRESH_MANY` has the whole argument for that).
+        A session absent from the result was taken over, deleted, or locked by a concurrent
+        transaction and skipped (see `_TURN_REFRESH_MANY`).
         """
         if not session_ids:
             return set()
@@ -1575,16 +1106,10 @@ class SessionTurnClaims:
 
 
 class InMemoryHistoryProvider:
-    """The dev/test transcript store: the same two primitives, over the session's own state.
+    """The dev/test transcript store: the same primitives, over the session's own state.
 
-    Keeps the thread in `session.state` — the dict `TurnSession` carries — which is why both
-    primitives take `state`. That is not incidental: it is the whole difference from the Postgres
-    provider, which deliberately keeps nothing there, and it is why a memory-backed session's
-    transcript dies with the pod.
-
-    First-party since M13, replacing MAF's provider of the same name. Twelve lines rather than an
-    import because the framework's version carried a thread the model was sent, a compaction seam
-    and a set of run hooks — none of which has a caller now that the graph reads its checkpointer.
+    Keeps the thread in `session.state`, which is why the primitives take `state` and why a
+    memory-backed transcript dies with the pod.
     """
 
     _KEY = "chemclaw_transcript"
@@ -1607,9 +1132,8 @@ class InMemoryHistoryProvider:
     ) -> list[str]:
         """The chemist's own last `limit` messages in this session's state, oldest first.
 
-        The durable provider's counterpart, over the thread this one keeps in `state` — same
-        filter, same order, same bound, so a deployment on the memory store and one on Postgres
-        answer a `basis="stated"` quote the same way.
+        Same filter, order and bound as the durable provider, so both stores answer a
+        `basis="stated"` quote alike.
         """
         if state is None or limit <= 0:
             return []
@@ -1626,9 +1150,8 @@ class InMemoryHistoryProvider:
         """Append this turn's exchange to the session's state (no-op without one)."""
         if state is None or not messages:
             return
-        # Copies, stamped as the durable provider stamps them on read, so the transcript route
-        # reports a turn's correlation id under either store. Copies because these are the turn's
-        # own message objects, and the stamp belongs to the stored transcript, not to them.
+        # Stamped copies, as the durable provider stamps rows on read; the stamp belongs to the
+        # stored transcript, not to the turn's own message objects.
         state.setdefault(self._KEY, []).extend(_copies(messages))
 
     async def begin_turn(
@@ -1656,10 +1179,8 @@ class InMemoryHistoryProvider:
     ) -> None:
         """Settle the question at `turn` and append the rest, by the durable provider's rule.
 
-        The question is looked for where `begin_turn` put it and settled only while it is still a
-        written-ahead one: a turn rolled back across a teardown restores `state` to before the
-        question was written (`api/runner._roll_back_unfinished`), and the index may then name
-        nothing, or a message that opened no turn.
+        Settled only while it is still a written-ahead question: a teardown rollback
+        (`api/runner._roll_back_unfinished`) may have restored `state` to before it was written.
         """
         if state is None:
             return
@@ -1688,11 +1209,7 @@ class InMemoryHistoryProvider:
 
 
 def _copies(messages: Sequence[BaseMessage], turn_status: str | None = None) -> list[BaseMessage]:
-    """Stamped copies of `messages`, as the durable provider stamps its rows on read.
-
-    Copies because these are the turn's own message objects, and the stamp belongs to the stored
-    transcript, not to them.
-    """
+    """Stamped copies of `messages`, as the durable provider stamps its rows on read."""
     correlation_id = get_current_correlation_id() or ""
     actor = get_current_actor()
     return [

@@ -1,28 +1,12 @@
-"""The ASGI front door (plan step F2-T1/F2-T2): a browser chat surface over the Chemclaw agent.
+"""The ASGI front door: a chat service over the Chemclaw agent.
 
-`create_app` builds a FastAPI app that lets a non-developer chemist open a page, start a
-session, and converse with the agent — watching its plan, tool calls, and cited answer stream
-in. It owns one agent instance per profile for the process and a per-session `AgentSession`
-(durable under `session_store="postgres"`, with job→session push-back). The agent factory is
-injectable so tests drive the whole app with a fake streaming agent and no live model or
-credentials.
-
-**This module is the composition root and nothing else** (R3.2): it seeds `app.state`, installs
-the middleware, binds the gauges, and includes the routers. The routes live in
-`chemclaw/api/routes/` (one module per resource), the request/response shapes in
-`api/schemas.py`, the state types and turn-lease bookkeeping in `api/state.py`, the
-authorization dependencies in `api/deps.py`, and the cross-cutting HTTP armor in
-`api/middleware.py`. The seam that makes the split behavior-preserving is `app.state`: every
-route reads the process's live structures through `request.app.state`, never through lexical
-capture, so `create_app` keeps its signature and its injection points while holding no route
-code.
-
-Routes: `GET /healthz` (liveness), `GET /readyz` (readiness), `POST /sessions` (start a session),
-`GET /sessions` (the caller's conversation list), `POST /sessions/{id}/messages` (send a turn,
-Server-Sent-Events stream of `chemclaw.api.events`), `GET /sessions/{id}/messages` (read the
-transcript
-back), and — in dev only — the bundled chat UI at `/`. Identity (Entra OIDC on every non-health
-route) is layered on in F4.
+`create_app` is the composition root and nothing else: it seeds `app.state`, installs the
+middleware, binds the gauges and registers the routes. Routes live in `chemclaw/api/routes/`,
+shapes in `api/schemas.py`, state types and turn leases in `api/state.py`, authorization in
+`api/deps.py` and HTTP armour in `api/middleware.py`. Every route reads the process's live
+structures through `request.app.state`, never by lexical capture. The graph factory is injectable,
+so tests drive the whole app without a model or credentials. The bundled chat UI at `/` is served
+only when identity is not enforced.
 """
 
 import asyncio
@@ -108,13 +92,9 @@ from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
 
-# The module's surface, and — for everything besides `create_app` — its *test seam*. The suite
-# patches the routes' external collaborators on this module by name
-# (`monkeypatch.setattr("chemclaw.api.app.job_status", …)`), and the route modules read them back
-# through this module at call time (`from chemclaw.api import app as front_door`), so a patch
-# lands wherever the route lives. The re-exported types and transcript helpers are here for the
-# same reason: `tests/test_service.py` and `tests/test_jobs_api.py` import them from this module,
-# which remains the package's front page even though the definitions moved (R3.2).
+# The module's surface and its test seam: tests patch route collaborators on this module by name,
+# and route modules read them back through it at call time (`from chemclaw.api import app as
+# front_door`), so a patch lands wherever the route lives.
 __all__ = [
     "create_app",
     # Types and pure helpers the suite imports from here.
@@ -126,8 +106,7 @@ __all__ = [
     "cancel_job",
     "expand_note",
     "fetchable_refs",
-    # Patched to observe the width the lifespan sizes this process's shared `to_thread` pool to —
-    # the argument, not a re-derivation of it, is what a test of that arithmetic has to read.
+    # Patched so tests read the width the lifespan sizes the `to_thread` pool to.
     "install_default_executor",
     "job_status",
     "load_tool_result",
@@ -144,23 +123,10 @@ logger = logging.getLogger(__name__)
 def startup_inventory() -> list[str]:
     """What this process is configured to hold, one `subsystem=state` term per subsystem.
 
-    **The gap this closes is that nothing told an operator what was unconfigured.** A cold front
-    door logged exactly one line about its own emptiness — `connectors: none enabled`, from the
-    health sweep — and nothing at all about a log-only audit trail, an unwritten session store, no
-    skills, no ingest source and no result sink. `make ci` is collectively the honest inventory and
-    it is a pre-push gate: it cannot be pointed at a running pod, and `make connector-validate`
-    *fails* on a condition this process happily serves under.
-
-    **Configuration only, and deliberately no counts.** "What it holds" — how many notes, how many
-    indexed structures — is a query per subsystem, and this runs before `db.pooling()` opens the
-    pool: a startup line that queries five subsystems is a startup line that can hang or fail a
-    boot, over facts that change every hour anyway. What is here instead is the set of facts that
-    are *static for the life of the pod* and that each turn silently degrades around. The two
-    filesystem walks are the exception and they are the ones a turn already makes per turn.
-
-    Connectors are not a term here: `check_connectors_at_startup` logs them with their
-    *reachability*, which is strictly more than this could say, and a second line naming the same
-    bundles differently is how two inventories come to disagree.
+    Tells an operator at boot what is unconfigured (log-only audit, memory session store, no skills,
+    sources or sinks), since each turn silently degrades around it. Configuration only, no counts:
+    this runs before the pool opens and must not query. Connectors are omitted because
+    `check_connectors_at_startup` logs them with their reachability.
     """
     skills = sum(
         1
@@ -180,30 +146,12 @@ def startup_inventory() -> list[str]:
 
 
 def _report_inventory() -> None:
-    """Log the inventory, and warn separately where the trail is not the one the prompt described.
+    """Log the inventory, and warn separately where no durable trail is written.
 
-    **The warning is the finding; the inventory is the context for it.** `default_audit_sink()`
-    resolves to `NullAuditSink` whenever `session_store != "postgres"`, and D-122 decided that
-    gate with a *stated* condition — "log-only is the fallback where no database is configured" —
-    that the implementation does not test. `.env.example` ships `CHEMCLAW_SESSION_STORE=memory`
-    beside a `postgres_dsn` default pointing at the `make up` database, which is the configuration
-    `CLAUDE.md` tells a developer to stand up: a database is configured, migrated and reachable,
-    `audit_events` exists, and every row a turn would write is discarded. Measured on that
-    deployment, one completed turn that called a tool left `audit_events` at 0, `session_messages`
-    at 0, `chemclaw_audit_sink_failures_total` at 0, and `explain` printing "no messages, tool
-    calls or jobs recorded".
-
-    **The DSN is deliberately not part of the condition.** "Warn when a Postgres DSN is configured"
-    reads as the narrower check and is not one: `postgres_dsn` has a default value, so it is always
-    configured and the qualifier would be a warning that always fires, dressed as a warning that
-    sometimes does. What is actually being reported is the resolution — this deployment writes no
-    durable trail — and that is worth one line at every front-door boot whether or not a DSN
-    happens to point somewhere.
-
-    The front door only, which is the process a chemist talks to and the one whose prompt makes the
-    claim. A worker's trail is the same sink by the same rule; putting the warning in `Settings`
-    would fire it in every CLI invocation and every test collection, which is how a warning stops
-    being read.
+    `default_audit_sink()` is `NullAuditSink` whenever `session_store != "postgres"`, even when a
+    database is configured and migrated, so every audit row is discarded. The DSN is not part of the
+    condition because it always has a default. Front door only: in `Settings` it would fire on every
+    CLI invocation and test collection.
     """
     logger.info("inventory: %s", " ".join(startup_inventory()))
     if isinstance(default_audit_sink(), NullAuditSink):
@@ -222,102 +170,44 @@ def _report_inventory() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Open this process's Postgres pool, then probe the connectors once before serving.
+    """Open this process's Postgres pool, probe the connectors, and drain turns before closing.
 
-    The pool belongs here because it belongs to one process and one event loop, and because
-    everything below `chemclaw.core.db.connection` inherits it with no plumbing: the session store,
-    the ownership registry and the push-back tailer all stop paying a TCP+auth handshake per call.
-    That churn — measured at ~2.7 connects per turn — was what made a connect fail to be scheduled
-    inside its timeout under load, and under load a non-fatal guard that cannot get a connection
-    disarms itself in silence, which is the failure this pool exists to prevent (D-107). **The
-    example that argument was originally written from is gone**: the rollback watermark over
-    `session_messages` left with the MAF turn loop
-    (`D-2026-08-10-langgraph-rebuild-of-the-conversation-layer`), and neither it nor
-    `chemclaw_rollback_watermark_unavailable_total` — named in D-119 §42 and D-143 §16 in the
-    present tense — exists anywhere in `src/`. Naming a dead consumer among the live ones is what
-    made this docstring read as evidence that a control was still running.
+    The pool belongs to one process and loop; everything under `chemclaw.core.db.connection`
+    inherits it, so callers do not pay a connect per call — under load a non-fatal guard that cannot
+    get a connection disarms silently.
 
-    The connector probe's *result* only informs (readiness reports it, a gauge counts it) — a
-    missing connector costs capability, not correctness, so the default is to serve anyway.
-    `connectors_required` is the opt-in inversion: it raises here, which fails startup, for a
-    deployment where answering with a silently reduced tool surface is worse than not answering.
-    That check belongs at startup rather than in the readiness route because refusing to *start*
-    is the only way to keep a pod with degraded capability out of a rollout.
+    The connector probe only informs readiness and a gauge, unless `connectors_required`, which
+    fails startup: refusing to start is the only way to keep a degraded pod out of a rollout.
 
-    **Closes the checkpointer's pool on the way out, which nothing did before.** The LangGraph turn
-    state lives on its own pool (`agent/checkpointer.py`), built lazily the first time a turn needs
-    it, and `close_checkpointer`/`close_memory_store` existed with no caller outside tests — this
-    process built the pool and then let it die with the process instead of closing it, which is
-    exactly the sockets-left-for-the-database-to-reap outcome `db.pooling()` already avoids for the
-    *other* pool. The memory store closes first because it holds no connections of its own, only a
-    reference into the checkpointer's pool (`agent/scratchpad.py`); closing the pool first would
-    leave it pointing at dead connections for whatever ran between the two calls.
-
-    **That ordering is `close_checkpointer`'s to keep, and this lifespan no longer repeats it.** It
-    called `close_memory_store()` and then `close_checkpointer()`, which closes the store itself
-    first — so the store was dropped twice and the invariant was written down in two places, only
-    one of which explained it. Two copies of an ordering rule is how the copies come to disagree:
-    whoever reorders the pair here would not be reading the argument for it, which lives beside the
-    pool that argument is about. One call now; the sequence is `agent/checkpointer.py`'s.
-
-    **And drains the running turns before any of that**, which is the half that made the closes a
-    hazard rather than a courtesy. Since `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` a turn
-    outlives the request that started it, on a pump task nothing outside `RunningTurns` knows
-    about — so uvicorn finishes its own drain with those turns still mid-flight and this `finally`
-    then closed both pools underneath them. Measured: shutdown returned in 0.001 s and the turn's
-    next checkpoint write raised `PoolClosed`, booking itself `abandoned`, on exactly the turns
-    detaching exists to preserve. Bounded by `service_turn_timeout_seconds`, which is the number
-    the chart already derives `terminationGracePeriodSeconds` from
-    (`deploy/helm/chemclaw/templates/deployment-service.yaml`: that timeout plus
-    `service.drainSeconds`), so the grace the pod is given covers the wait it now performs.
+    On shutdown, running turns are drained first (they outlive their requests on pump tasks nobody
+    else tracks), bounded by `service_turn_timeout_seconds`, which the chart's
+    `terminationGracePeriodSeconds` is derived from. Then pending budget bookings, then the pools;
+    `close_checkpointer` owns the order of closing the memory store and checkpointer pool.
     """
-    # First, so everything below is logged the way the operator asked. The front door never
-    # configured either of these, so it ran on Python's default root logger (WARNING, no format)
-    # while every worker honoured `CHEMCLAW_LOG_LEVEL`/`LOG_FORMAT`, and `CHEMCLAW_OTEL_ENABLED`
-    # was simply inert here — the one process a chemist actually talks to was the one with no
-    # observability wiring. Here rather than in `create_app` because this is the "about to serve"
-    # moment, matching each worker's `main()`.
+    # First, so everything below honours `CHEMCLAW_LOG_LEVEL`/`LOG_FORMAT` and OTel; here rather
+    # than in `create_app` because this is the "about to serve" moment, as in each worker's
+    # `main()`.
     configure_logging()
     configure_telemetry()
-    # Register the file-authored profiles before any agent is built, so a session can name one
-    # on its first request. Failing here is the right outcome for a malformed profile: it is a
-    # deployment configuration error, and a front door that started anyway would 400 every
-    # request naming that profile with no hint as to why.
+    # Register file-authored profiles before any agent is built. A malformed profile is a deployment
+    # error and fails startup.
     load_profiles()
-    # And the `task` roster names profiles, so it is checked here for the same reason the load
-    # above fails here: a misspelled entry is a deployment configuration error, and the only thing
-    # it does at run time is make a helper quietly absent from the menu. `_subagents` skips an
-    # unknown name with a WARNING because a turn must not die for one; that fail-soft is what makes
-    # this loud check necessary rather than redundant, since a capability nobody is told is missing
-    # is one nobody restores.
+    # A misspelled `task` roster entry fails startup: at run time `_subagents` only skips it with a
+    # warning, and the helper would be silently missing.
     refuse_an_unknown_roster(registered_profile_names(), lambda name: get_profile(name).description)
-    # The **peer** roster is the same class of configuration error one topology over, and it is
-    # worth failing on for a sharper reason than the helper roster's: a misspelled peer does not
-    # make a menu entry absent, it makes the mesh one agent smaller, and a two-name roster with one
-    # typo silently becomes a single agent that behaves exactly like the shipped default. That is
-    # indistinguishable, from the outside, from the feature being off.
+    # Likewise the peer roster: one typo can make the mesh indistinguishable from the feature being
+    # off.
     refuse_an_unknown_peer_roster(registered_profile_names())
-    # After `configure_logging()` so the line is formatted the way the operator asked, and after
-    # the profiles load so a malformed one fails before anything claims the deployment is sound.
+    # After logging is configured and profiles load, so a malformed profile fails first.
     _report_inventory()
-    # Before anything can offload. Every `asyncio.to_thread` in this process — token validation on
-    # every request, the retrieval and knowledge-graph legs, embeddings, attachment parses — shares
-    # one pool, and the loop's stock default is `min(32, cpu_count + 4)`: 8 on a 4-CPU pod, the
-    # same number as `service_max_concurrent_turns`, so the admission cap could fill it on its own
-    # and authentication queued behind chemistry. See `core/executor.py` for the measurement.
-    #
-    # The width is `front_door_reserved()` rather than the sum written here before, because the sum
-    # was not the ceiling: an admitted turn may fan out to `agent_max_parallel_tool_calls`
-    # concurrent tool calls and each may hold a thread, so the caps permit 98 simultaneous offloads
-    # where this asked for 14. Measured, one short call behind 96 offloads waited 762.7 ms at the
-    # old width and 123.2 ms at this one.
+    # Before anything offloads. Every `asyncio.to_thread` here (token validation, retrieval,
+    # embeddings, parses) shares one pool, and the stock default is small enough for admitted turns
+    # to starve authentication. `front_door_reserved()` sizes it for every admitted turn's parallel
+    # tool calls; see `core/executor.py`.
     install_default_executor(component="front-door", reserved=front_door_reserved())
 
-    # Before serving, for the reason `connectors_required` raises here: a judge endpoint that
-    # cannot enforce structured output degrades *every* verified answer silently, and refusing to
-    # start is the only way to keep that pod out of a rollout. A no-op unless `verifier_enabled`
-    # — there is one endpoint now, so the probe either runs or the judge is off; see
-    # `require_verifier_capability`.
+    # Before serving: a judge endpoint that cannot enforce structured output would silently degrade
+    # every verified answer. A no-op unless `verifier_enabled`.
     await require_verifier_capability()
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
@@ -327,8 +217,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            # Inside `db.pooling()` and before either close, because a draining turn still writes
-            # its checkpoint, its transcript and its cost row through all three.
+            # Inside `db.pooling()` and before the closes: a draining turn still writes through
+            # them.
             running_turns: RunningTurns = app.state.running_turns
             await running_turns.drain(settings.service_turn_timeout_seconds)
             # After the drain, so a Stop sent from another replica still reaches a draining turn.
@@ -336,14 +226,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 serving.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await serving
-            # After the turns, because a draining turn books its own spend on the way out, and
-            # before the pool closes, because the booking needs it. A budget booking is scheduled
-            # off the hot path (`api/budget._schedule`, which is synchronous by D-130), so without
-            # this wait an ordinary rollout cancels the last booking of every in-flight principal
-            # and hands each of them that much allowance back.
+            # After the turns (which book spend as they finish) and before the pool closes (the
+            # booking needs it); otherwise a rollout drops each in-flight principal's last booking.
             await drain_pending()
-            # One call, not two. `close_checkpointer` drops the memory store itself, in the order
-            # the store's dependency on its pool requires — see the paragraph above.
+            # `close_checkpointer` also closes the memory store, in the order their pools require.
             await close_checkpointer()
 
 
@@ -355,38 +241,21 @@ def create_app(
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
-    **All four arguments are a test seam and none is a deployment knob.** Every production entry
-    calls `create_app()` bare — it is the uvicorn factory — and no setting, manifest or chart value
-    can supply any of them, so a branch reached only by a non-default argument is reached only from
-    `tests/`. Saying so here is not pedantry: `GET /sessions` and the plan inbox each carry a branch
-    for a registry that is not `SessionOwnerStore`, and both used to describe it as *a deployment's*
-    registry — an operational caveat about a deployment that cannot exist, which sends an operator
-    looking for a knob (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`). The seam itself
-    stays: `graph_factory` is what lets the whole HTTP surface be driven without a model credential,
-    which is the reason the front door is testable at all.
+    Every argument is a test seam, not a deployment knob: production calls `create_app()` bare as
+    the uvicorn factory, so a branch reached only by a non-default argument is reached only from
+    tests.
 
     Args:
-        owner_store: The durable session-ownership registry used to reattach a client to its session
-            after a pod restart. Defaults to the config-gated store (present only under
-            `session_store="postgres"`), which is what every shipped configuration gets; tests
-            inject an in-memory fake to exercise rehydration without a database.
-        connector_factory: Builds *this turn's* connector specs for one profile name
-            (`chemclaw.agent.chemclaw_agent.connector_specs`). A factory rather than a list because
-            a connector's connection must belong to a single turn, so the app calls it per turn; and
-            per-profile because the profile narrows the connector surface as well as the
-            in-process one. Injectable for the same reason `graph_factory` is: a test drives the
-            whole HTTP surface without a connector server running.
-        turn_claims: The durable "one turn at a time per session" claim, which is what makes that
-            guard hold across processes rather than only within one (D-121). Defaults to the
-            config-gated store (present only under `session_store="postgres"`), which is what every
-            shipped configuration gets; tests inject an in-memory fake to exercise the
-            cross-process conflict without a database.
-        graph_factory: Builds *this turn's* compiled graph, given the profile, the turn's identity
-            and its already-open connectors. It is the seam a test injects a credential-free turn
-            through, and the only one: without it the front door's own surface would need a live
-            model to exercise at all. A factory rather than an instance because a graph binds its
-            tools at construction and therefore belongs to one turn
-            (`chemclaw.agent.langgraph_agent`) — nothing here is cached per process.
+        owner_store: The durable session-ownership registry used to reattach a client after a pod
+            restart. Defaults to the config-gated store (present only under
+            `session_store="postgres"`).
+        connector_factory: Builds this turn's connector specs for one profile name. Called per turn,
+            because a connector session belongs to one turn and the profile narrows it.
+        turn_claims: The durable "one turn at a time per session" claim that holds across processes.
+            Defaults to the config-gated store (present only under `session_store="postgres"`).
+        graph_factory: Builds this turn's compiled graph from the profile, identity and open
+            connectors. Per turn, because a graph binds its tools at construction. The seam a test
+            uses to run a turn without a model credential.
 
     Returns:
         A configured `FastAPI` application.
@@ -394,160 +263,86 @@ def create_app(
     _refuse_unauthenticated_exposure()
     refuse_unconfigured_llm_gateway()
     refuse_unusable_entra_ca_bundle()
-    # `openapi_url=None` keeps FastAPI from registering the schema on a plain `Route`, which is not
-    # an `APIRoute` and therefore carries no dependency tree `require_principal` could sit in — the
-    # defect D-2026-08-06 §4 closed, where the full route/parameter/model surface was readable by
-    # anyone who could reach the pod. The document itself is served again, from a real `APIRoute`
-    # registered below (`D-2026-09-07-a-contract-check-that-cannot-reach-the-contract`): what that
-    # ADR rejected was the *route shape*, and its second reason — no consumer — stopped being true
-    # when `Chemclaw3_ui` grew a contract check that fetches it. `docs_url`/`redoc_url` stay off:
-    # they are pages for a human, and nothing consumes those.
+    # `openapi_url=None`: FastAPI would serve the schema on a plain `Route` outside
+    # `require_principal`. The document is served from a gated `APIRoute` below instead.
+    # `docs_url`/`redoc_url` stay off.
     app = FastAPI(
         title="Chemclaw", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan
     )
-    # **First, which is what makes it innermost.** `add_middleware` inserts at position 0 and the
-    # stack is built outermost-first, so the earliest call is the middleware closest to the router:
-    # inside `_SecurityHeaders` (so the 500 it answers carries them, which Starlette's own
-    # `ServerErrorMiddleware` above every user middleware could not), and outside FastAPI's
-    # `ExceptionMiddleware` (so the 401s, 404s, 422s and 429s the handlers produce are recorded as
-    # the responses they are). See `_RequestObservability`.
+    # First, which makes it innermost (`add_middleware` prepends): inside `_SecurityHeaders`, so its
+    # 500 carries them, and outside FastAPI's `ExceptionMiddleware`, so handler 4xx responses are
+    # recorded.
     _add_request_observability(app)
-    # **The body cap goes on before the header stamper, so it ends up inside it.** Installed the
-    # other way round, `BodySizeLimit` sat *above* `_SecurityHeaders` and answers its 413 without
-    # ever calling down — so that client-facing JSON error carried no CSP, no `nosniff`, no
-    # `X-Frame-Options` and no HSTS, while `_add_security_headers` claims them "on every response
-    # (including static files and errors)". Those four are what the swap fixed, and they are all
-    # it fixed; the two things this comment used to claim beside them were measured and are false:
-    #
-    # - **The 413 still carries no correlation id**, because `_RequestObservability` mints it and
-    #   is installed *first*, i.e. innermost, so the cap still answers above it. That is the
-    #   decision rather than a residue — the refusal is counted by
-    #   `chemclaw_requests_too_large_total` and logged where it is refused, and giving it an id
-    #   means routing every oversized body through the access log and its route/status series.
-    #   `test_the_413_carries_the_browser_security_headers_like_every_other_response` asserts the
-    #   absence so a later reading of "every response gets one" cannot turn it into a bug.
-    # - **A CORS preflight still passes through none of them.** `CORSMiddleware` is outermost and
-    #   answers an `OPTIONS` before anything below it runs, so it reaches neither the stamper nor
-    #   the observability layer. `_add_security_headers` argues that in full: nothing is rendered
-    #   from a preflight, so it is harmless.
-    #
-    # What the old order bought is unchanged: the cap still answers *above* the access log, which
-    # is why `test_an_oversized_body_leaves_a_log_line_as_well_as_a_count` asserts on
-    # `chemclaw.core.asgi`'s own WARNING rather than on an `http.request` record.
+    # Installed before the header stamper so it sits inside it and its 413 carries the security
+    # headers. It still sits above the observability layer, so the 413 has no correlation id and no
+    # access-log line (it is counted by `chemclaw_requests_too_large_total` and logged where
+    # refused); tests assert both. A CORS preflight is answered by the outermost `CORSMiddleware`
+    # before any of these run.
     _add_body_size_limit(app)
     _add_security_headers(app)
-    # Outermost, and correctly so: a 500 raised anywhere below has to come back out through CORS
-    # or a browser cannot read it. A preflight is therefore answered here, above everything.
+    # Outermost, so even a 500 passes through CORS and a browser can read it.
     _add_cors(app)
-    # One handler rather than a try/except per route: every route that touches durable session
-    # state can hit the pool, and `chemclaw.db` already funnels both "no database" and "no free
-    # connection in time" into `ConnectionError` precisely because a caller cannot act on the
-    # difference. See `_database_unavailable`.
+    # One handler instead of per-route try/except: `chemclaw.db` maps both "no database" and "pool
+    # timeout" to `ConnectionError`. See `_database_unavailable`.
     app.add_exception_handler(ConnectionError, _database_unavailable)
     app.add_exception_handler(SubsystemUnavailableError, _subsystem_unavailable)
-    # Both called once per *turn*, not once per process. A connector's session belongs to a single
-    # turn, and a graph binds its tools at construction — so the graph's lifetime is pinned to its
-    # connectors' (`chemclaw.agent.langgraph_agent`). There used to be an `agents` dict beside
-    # these, holding one process-lived agent per profile; nothing outlives a turn now.
+    # Both are called per turn: a connector session and a graph's tools belong to one turn.
     app.state.connector_factory = connector_factory
     app.state.graph_factory = graph_factory
 
     def _turn_in_flight(session_id: str) -> bool:
         """Whether `session_id` holds an unexpired in-process turn lease — the eviction pin.
 
-        Reads `app.state.active_turns` (seeded below) at call time, so the pin appears when a
-        turn claims the slot and vanishes when the turn releases it *or* when the lease expires —
-        a leaked entry (see `chemclaw.api.state._claim_turn_slot`) can therefore delay an
-        eviction by at most one lease, never wedge it.
+        Reads `app.state.active_turns` at call time, so a leaked lease delays eviction by at most
+        one lease period.
         """
         lease = app.state.active_turns.get(session_id)
         return lease is not None and lease.deadline > time.monotonic()
 
-    # Bounded LRU of live sessions, each carrying its owner Entra oid so a session can only be
-    # posted to / streamed by its creator and the members they admitted (defense-in-depth beyond
-    # the unguessable uuid4 id; membership itself is read per request, never cached here).
-    # The bound keeps the map from growing for the pod's lifetime (COR-3). Sessions with a turn
-    # in flight are pinned against eviction: dropping the handle mid-turn lets the next request
-    # rehydrate a second one over the same durable history, and the two diverge (A5).
+    # Bounded LRU of live sessions, each carrying its owner's oid (membership is read per request,
+    # never cached here). Sessions with a turn in flight are pinned: evicting one mid-turn would let
+    # the next request rehydrate a second handle over the same history.
     app.state.live_sessions = _LiveSessions(
         settings.service_max_live_sessions, pinned=_turn_in_flight
     )
-    # Durable session-ownership registry (F3): the record a restarted front door rehydrates from
-    # so a returning client reattaches to its session instead of being forced onto a new one.
-    # None with the in-memory session store (nothing durable to reattach to — a cache miss stays
-    # a 404).
+    # Durable session ownership, for rehydrating after a restart; `None` under the in-memory store.
     app.state.session_owners = owner_store if owner_store is not None else _default_owner_store()
-    # Through the factory, not by construction, so the plan routes and the enforcement gate
-    # (`chemclaw.agent.plan_gate`) hold the *same* store: a decision recorded here has to be a
-    # decision the gate can see, which under the in-memory backend means the same object (D-167).
+    # Through the factory so the plan routes and `chemclaw.agent.plan_gate` share one store.
     app.state.plan_approvals = plan_approval_store()
-    # The same history provider the agent writes turns through, used read-only to serve a
-    # transcript back. Shared rather than re-derived per request: the Postgres provider holds
-    # only a DSN and the in-memory one holds nothing at all (its messages live in
-    # `session.state`), so one instance is correct for both and neither carries per-session
-    # state.
+    # The agent's history provider, read-only here to serve transcripts; one instance serves all.
     app.state.history = history_provider()
-    # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns
-    # hit the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a
-    # turn that cannot get one within the admission timeout is shed with 503. Built here so it
-    # binds to the app's event loop on first await.
+    # Admission control on concurrent turns: a permit is held for a turn's whole run, and a turn
+    # that cannot get one within the admission timeout is shed with 503. Built here to bind to the
+    # app's loop.
     app.state.turn_semaphore = asyncio.Semaphore(settings.service_max_concurrent_turns)
-    # Per-session turn serialization: session id → the lease held by the turn in flight
-    # (`chemclaw.api.state.TurnLease`). Two concurrent turns on one session would drive
-    # `agent.run` against the same AgentSession state at once, interleaving two turns' messages
-    # in one thread — so a second turn is rejected with 409 while one runs, matching the
-    # admission semaphore's shed-don't-queue semantics (a queued turn would silently pin a
-    # second permit and still interleave from the user's point of view; a 409 tells the client —
-    # a double-submit or a second tab — to wait for the running turn). A lease map rather than a
-    # bare set because an entry can leak (see `chemclaw.api.state._claim_turn_slot`, which owns
-    # the claim's atomicity, its identity and its expiry); this is also the pin set
-    # `_turn_in_flight` above reads for the live cache's eviction.
+    # Per-session turn serialization: session id → the lease of the turn in flight
+    # (`chemclaw.api.state.TurnLease`). Concurrent turns on one session would interleave messages in
+    # one thread, so a second turn gets 409. A lease rather than a set because an entry can leak
+    # (`_claim_turn_slot` owns atomicity and expiry); also the eviction pin `_turn_in_flight` reads.
     app.state.active_turns = {}
-    # The live turns themselves, beside the leases above: the lease answers "is a turn running"
-    # for admission, this answers "hand me the running turn" for the explicit stop route — a
-    # disconnect only detaches now, so stopping needs a handle rather than a closed socket
-    # (`chemclaw.api.detach`).
+    # The live turns, so the stop route can find one (a disconnect only detaches).
     app.state.running_turns = RunningTurns()
-    # The same gate at the width the deployment actually has (D-121). The map above is one
-    # process's view, and the chart runs the front door at two replicas, so the second POST can
-    # land on a process that has never heard of the first. A leased row in `session_turns` is what
-    # both processes can see; None under the in-memory session store, where two processes share no
-    # history to corrupt.
+    # The same gate across replicas (`session_turns` leases); `None` under the in-memory store.
     app.state.turn_claims = turn_claims if turn_claims is not None else _default_turn_claims()
-    # And what lets a turn held here be followed and stopped from every other replica — and a turn
-    # held elsewhere be followed and stopped from here
-    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`). Only where the
-    # claim above is durable: that is when another replica can be holding a session's turn at all.
+    # Follows and stops turns across replicas; only where the claim above is durable.
     app.state.turn_relay = (
         TurnRelay(TurnRemotes(), app.state.running_turns, app.state.active_turns)
         if app.state.turn_claims is not None and settings.session_store == "postgres"
         else None
     )
-    # Each session's line of messages waiting for its running turn to end
-    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), and what wakes this process's
-    # waiters when a turn here ends. The line is durable exactly where the claim above is.
+    # Per-session queue of messages waiting for the running turn; durable where the claim is.
     app.state.turn_queue = _default_turn_queue()
     app.state.queue_signal = QueueSignal()
-    # This process's waiting messages per `(sender, session)`: what bounds the sockets they hold
-    # (`service_max_concurrent_turns` × `service_turn_queue_max`, wherever their turns run) and what
-    # the per-actor cap counts beside running turns. The queue above is the order; this is the load.
+    # This process's waiting messages per `(sender, session)`: the load, where the queue is the
+    # order.
     app.state.queue_waiters = {}
-    # Per-user count of open push-back event streams. The turn semaphore only guards POSTed
-    # turns; each event stream polls the database for its whole lifetime, so without a cap one
-    # user's scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are
-    # removed when a user's last stream closes, so the map stays small.
+    # Per-user count of open push-back event streams, each of which polls the database.
     app.state.event_streams = {}
-    # Runaway-cost guard (service.budget): meters each turn's token usage and counts turns per
-    # session and per user, refusing a turn (429) that would exceed a configured cap. In-process
-    # and off unless `budget_enabled`; the missing ceiling above the per-turn loop cap.
+    # Runaway-cost guard (429 over a session or user cap); off unless `budget_enabled`.
     app.state.budget = BudgetTracker()
-    # Gauges read the live structures rather than a mirrored counter, so there is nothing to
-    # keep in sync (gap DEP-4). In-flight turns against the cap is the saturation signal the HPA
-    # should scale on — CPU is close to noise for a stream-bound, model-latency-dominated
-    # service.
-    # Counts unexpired leases only: a leaked entry waiting out its deadline is not a turn in
-    # flight, and the sweep in `chemclaw.api.state._claim_turn_slot` only runs when a POST
-    # arrives, so `len` alone would report a phantom turn until then.
+    # Gauges read the live structures, so nothing has to be kept in sync. Turns in flight against
+    # the cap is the saturation signal to scale on. Counts unexpired leases only, since the sweep
+    # runs only when a POST arrives.
     METRICS.bind_gauge(
         "chemclaw_turns_in_flight",
         lambda: float(
@@ -561,22 +356,15 @@ def create_app(
         "chemclaw_turn_actor_capacity",
         lambda: float(settings.service_max_concurrent_turns_per_actor),
     )
-    # Per-pod capacity summed across pods is what the fleet admits; this is what it was declared
-    # allowed to admit. Config validation refuses the product at startup, but only for the shape the
-    # chart rendered — a hand-scaled Deployment or an in-cluster HPA edit never re-reads it, and
-    # only this pair can see that.
+    # Declared fleet capacity. Config validation checks the chart's product at startup, but a
+    # hand-scaled Deployment never re-reads it; only this pair can show that.
     METRICS.bind_gauge(
         "chemclaw_fleet_turn_ceiling",
         lambda: float(settings.service_fleet_max_concurrent_turns),
     )
     METRICS.bind_gauge("chemclaw_live_sessions", lambda: float(len(app.state.live_sessions)))
-    # The push-back streams' saturation pair, the same shape `chemclaw_turns_in_flight` and
-    # `chemclaw_turn_capacity` make for turns — and absent for as long as the stream cap has
-    # existed. Only *rejections* were counted (`chemclaw_event_streams_rejected_total`), so "are we
-    # near the per-pod cap" was unanswerable until the cap was already being hit, which is the one
-    # moment the answer is no longer useful. Summed over the per-user ledger rather than kept as a
-    # second counter, for the reason the gauges above read live structures: there is nothing to
-    # keep in sync.
+    # The push-back streams' saturation pair, like the turn gauges, so nearing the cap is visible
+    # before rejections start. Summed over the per-user ledger.
     METRICS.bind_gauge(
         "chemclaw_event_streams_open", lambda: float(sum(app.state.event_streams.values()))
     )
@@ -584,55 +372,28 @@ def create_app(
         "chemclaw_event_stream_capacity",
         lambda: float(settings.service_max_event_streams_total),
     )
-    # Out-of-process capability is a new failure mode, so it gets a signal an operator can alert
-    # on. Refreshed by the readiness probe (and at startup), read from the snapshot here — a
-    # gauge must not perform network I/O when Prometheus scrapes it.
+    # Connector health snapshot, refreshed by readiness; gauges read it without network I/O.
     app.state.connector_health = []
-    # When that snapshot was taken (`time.monotonic`), so the readiness route can reuse it instead
-    # of fanning out to the whole connector fleet on every unauthenticated probe. Negative
-    # infinity, not 0: an empty snapshot must always be treated as stale, and 0 would be "fresh"
-    # for the first `service_readiness_cache_seconds` of process uptime.
+    # When the snapshot was taken (monotonic); negative infinity so an empty one is stale.
     app.state.connector_health_at = float("-inf")
-    # The database probe's cached verdict and when it was taken. `True` before any probe has run,
-    # because readiness must not report a store unreachable on the strength of never having asked —
-    # the kubelet's first probe answers within one interval, and refusing traffic until then would
-    # turn every rollout into a needless gap.
+    # Cached database verdict; `True` until probed, so a new pod is not refused traffic.
     app.state.database_reachable = True
-    # Whether the schema carries the newest migration this image ships, taken in the same round
-    # trip. `True` before any probe has run for the same reason `database_reachable` is, and
-    # `True` again whenever the question cannot be answered: this verdict gates only on positive
-    # evidence of a mismatch, never on the absence of evidence.
+    # Whether the schema has this image's newest migration; `True` unless a mismatch is proven.
     app.state.schema_current = True
     app.state.database_probed_at = float("-inf")
-    # The probe tasks currently in flight, keyed by probe name. Both readiness probes are
-    # single-flight (`chemclaw.api.routes.ops._shared_probe`): the cache window suppresses
-    # sequential repeats, and this is what makes a *burst* of unauthenticated probes cost one
-    # connector fan-out and one pooled checkout instead of one per caller.
+    # In-flight readiness probe tasks by name, for single-flight (`routes.ops._shared_probe`).
     app.state.readiness_probes = {}
-    # The pool gauges are deliberately *not* bound here any more (D-119's saturation signal, plus
-    # the connection-budget pair). `chemclaw.core.db.pooling` binds them, so every process that
-    # opens a pool reports on it rather than only the one process that happened to have the
-    # binding — the workers and connector servers pool too and were reporting nothing
-    # (D-2026-08-05-the-connection-budget-is-a-fleet-number).
-    # `unhealthy`, not `state == "unreachable"`: a jobs-only bundle whose task queue has no poller
-    # is `unpolled`, which is down in the way that matters (D-2026-08-27). The predicate lives on
-    # the model so this gauge and the `connectors_required` gate cannot drift into two definitions
-    # of the same word; `unknown` — the probe itself could not run — is neither, by the same ADR.
+    # Pool gauges are bound by `chemclaw.core.db.pooling`, so every process with a pool reports.
+    # `unhealthy` includes `unpolled` (a jobs-only bundle with no poller); the predicate lives on
+    # the model so this gauge and the `connectors_required` gate share one definition. `unknown` is
+    # neither.
     METRICS.bind_gauge(
         "chemclaw_connectors_unhealthy",
         lambda: float(sum(1 for item in app.state.connector_health if item.unhealthy)),
     )
-    # The same probe result, by connector — the half `chemclaw_connector_unhealthy`'s own
-    # declaration says `open_reachable` "had in hand and discarded", and which nothing had ever
-    # bound. A declared-but-unbound gauge family renders no series at all, so the "Connector
-    # reachability" panel on the data dashboard was a graph that could never draw: empty for a
-    # healthy fleet and empty for a broken one, which is the exact failure the unlabelled gauge
-    # beside it exists to end. The count says *how many* are down and this says *which*, which is
-    # the only one of the two an operator can act on.
-    #
-    # `unprobed` reads 0 rather than being omitted, matching the count above: a connector with no
-    # health route is deliberately not counted as unhealthy (`connectors/health.py`), and dropping
-    # it from the family instead would make "no series" mean both "reachable" and "never asked".
+    # The same probe result, by connector: the count says how many are down, this says which.
+    # `unprobed` reads 0 rather than being omitted, so "no series" never means both "reachable" and
+    # "never asked".
     METRICS.bind_gauge_family(
         "chemclaw_connector_unhealthy",
         lambda: {
@@ -641,12 +402,9 @@ def create_app(
         },
     )
 
-    # The routes, one module per resource (`chemclaw/api/routes/`). Order mirrors the audience:
-    # probes first, then the chemist surfaces, then the review/operator surfaces — it changes
-    # nothing about matching (every APIRoute path here is distinct) and keeps the OpenAPI listing
-    # stable relative to the pre-split file. Each module registers its handlers on the app
-    # directly rather than contributing an `APIRouter` — see any `register` docstring for why
-    # `include_router` cannot be used here since FastAPI 0.139.
+    # The routes, one module per resource. Order is by audience (probes, chemist, operator) and only
+    # affects the OpenAPI listing. Each module registers on the app directly; see any `register`
+    # docstring for why `include_router` is not used.
     for module in (
         ops,
         sessions,
@@ -668,17 +426,10 @@ def create_app(
     ):
         module.register(app)
 
-    # **The turn-event union, merged into the document the client actually reads.**
-    # `D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`: the SSE
-    # body is `text/event-stream`, which FastAPI cannot infer, so measured on 2026-09-14 the
-    # published document declared 2 of the union's 17 members and 0 of its 10 error codes — while
-    # `Chemclaw3_ui/shared/events.ts` mirrors all of it by hand and has been wrong nine times.
-    # The two streaming routes declare `TURN_EVENT_REF` in their 200 response; this is what makes
-    # that `$ref` resolve.
-    #
-    # Wrapped around `app.openapi` rather than done in the handler because FastAPI caches the
-    # generated document on `app.openapi_schema` — a handler-side merge would run per request
-    # against an already-frozen dict, and the first caller to mutate it would be racing the rest.
+    # Merge the turn-event union into the published document: the SSE body is `text/event-stream`,
+    # which FastAPI cannot infer, and `Chemclaw3_ui` mirrors these types. The streaming routes
+    # reference `TURN_EVENT_REF`; this makes it resolve. Wrapped around `app.openapi` because
+    # FastAPI caches the generated document.
     _generate = app.openapi
 
     def _openapi_with_events() -> dict[str, Any]:
@@ -691,45 +442,23 @@ def create_app(
 
     app.openapi = _openapi_with_events  # type: ignore[method-assign]
 
-    # The schema, gated like everything else — and registered here rather than in a `routes/`
-    # module because it is not a resource of any domain: it is this app describing itself, and it
-    # has to be declared after the loop above so its own path lands last in the listing.
-    #
-    # **Why it is served at all.** `Chemclaw3_ui/scripts/check-openapi.mjs` diffs that repo's BFF
-    # whitelist against the routes this service publishes, and it exists because the same class of
-    # miss reached production three times. Against a real backend it fetched a 404 and exited 1, so
-    # the check had never once run, and its own failure text says "The FastAPI service serves this"
-    # — so the one honest signal it had ("this check did not run") read as a mistyped base URL.
-    # `D-2026-09-07-a-contract-check-that-cannot-reach-the-contract` weighs that against publishing
-    # a generated artifact instead, and takes this arm.
-    #
-    # **Why it is a handler and not `openapi_url`.** `CurrentUser` is what makes it an `APIRoute`
-    # with `require_principal` in its dependency tree, which is both the gate and the reason
-    # `tests/test_route_auth_coverage.py` can see it. `principal` is deliberately unused: the
-    # document is the same for every caller — being *someone* is the whole check.
+    # The schema, gated like everything else, registered after the route loop so it lists last.
+    # Served because `Chemclaw3_ui/scripts/check-openapi.mjs` diffs its BFF whitelist against it. A
+    # handler taking `CurrentUser` puts it under `require_principal` and in
+    # `tests/test_route_auth_coverage.py`'s view; `principal` is unused because the document is the
+    # same for every caller.
     @app.get("/openapi.json")
     async def openapi_schema(principal: CurrentUser) -> dict[str, Any]:
         """The OpenAPI document, for an authenticated caller only.
 
-        `app.openapi()` caches into `app.openapi_schema` on the first call, so this is one
-        generation per process rather than per request — which is also why the turn-event union is
-        merged inside `app.openapi` below rather than here: doing it here would rebuild it per
-        request against a document FastAPI has already frozen.
+        `app.openapi()` caches on first call, so this generates once per process.
         """
         return app.openapi()
 
-    # **Only when identity is not enforced**, and that is a property of this UI rather than a
-    # policy choice. `api/static/app.js` sends no `Authorization` header at all — measured: the
-    # string does not occur in it — and subscribes to job push-back with a native `EventSource`,
-    # which cannot carry one. So under `entra_required` every call it makes is a 401 on the first
-    # click: serving it there publishes a permanently broken chat client on the same public host
-    # as the API, competing for `/` with `Chemclaw3_ui`, which does authenticate.
-    #
-    # A setting was considered and rejected: there is no configuration under which this UI works
-    # with identity on, so a knob would only offer a way to be wrong. `Chemclaw3_ui` is the
-    # authenticated front end; this one is the dev affordance it grew out of, and the condition
-    # says exactly that. `tests/test_route_auth_coverage.py` now asserts that an enforced app has
-    # *no* ungatable surface at all, which is the property this buys.
+    # Only when identity is not enforced: `api/static/app.js` sends no `Authorization` header and
+    # uses a native `EventSource`, so under `entra_required` it could not work. `Chemclaw3_ui` is
+    # the authenticated front end; `tests/test_route_auth_coverage.py` asserts an enforced app has
+    # no ungated surface.
     if _STATIC_DIR.is_dir() and not settings.entra_required:
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
 

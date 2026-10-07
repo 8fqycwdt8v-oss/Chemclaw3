@@ -1,13 +1,8 @@
 """Crawl a mounted document share from the terminal — and, first, cost it.
 
-The scheduled job (`chemclaw.durable.document_sync`) is the production path. This exists for the
-step before it: a TB share with 500k files is an embedding bill, and nobody should discover its
-size by watching it arrive. `--dry-run` walks the share exactly as the real crawl does — the same
-binding, the same filters, the same total order — reads nothing, and reports what *would* be
-indexed, what would be turned away, and per extension.
-
-Run it against the real mount before enabling the source. The `.doc` count alone usually changes
-which roots a deployment starts with.
+The scheduled job (`chemclaw.durable.document_sync`) is the production path. `--dry-run` walks the
+share exactly as the real crawl does (same binding, filters and order), reads nothing, and reports
+what would be indexed or turned away, per extension — run it before enabling a large share.
 
     python -m chemclaw.cli.sync_share sharedrive --dry-run
     python -m chemclaw.cli.sync_share sharedrive
@@ -65,10 +60,9 @@ def _resolve(name: str) -> DocumentShareSource:
 
 
 def _estimate(binding: DocumentShareBinding, report: SyncReport) -> str:
-    """Report what a real run would cost, in the unit that is actually billed: chunks.
+    """Estimate what a real run would cost in chunks, the billed unit.
 
-    An estimate, and labelled as one — the true chunk count depends on how much text each document
-    holds, which cannot be known without reading them, which is the thing a dry run refuses to do.
+    Labelled an estimate: the true count depends on document text, which a dry run does not read.
     """
     lines = [
         f"candidates:        {report.scanned}",
@@ -96,11 +90,8 @@ def _estimate(binding: DocumentShareBinding, report: SyncReport) -> str:
 async def _drain(name: str, share: DocumentShareSource, *, limit: int) -> SyncReport:
     """Run the real sync to completion, then sweep — the CLI mirror of the durable workflow."""
     index = default_document_index()
-    # Same order as the durable workflow: a vector made by a superseded model is wrong *now*, and
-    # this pass reads stored text rather than the share, so it is also the part that still works
-    # when the mount is unavailable. Scoped to *this* share's chunking — the command is "sync this
-    # share", and a chunk cut under any other one is either another share's business or about to be
-    # re-cut by the crawl below, in which case refreshing it is paid for and then discarded.
+    # Re-embed stale vectors first, as the durable workflow does: it reads stored text, so it works
+    # even when the mount is unavailable. Scoped to this share's chunking only.
     chunkings = {share.share_binding().chunking_key}
     while True:
         refresh = await reembed_stale(index, chunkings, settings.document_reembed_batch_size)
@@ -119,9 +110,8 @@ async def _drain(name: str, share: DocumentShareSource, *, limit: int) -> SyncRe
             break
         after = report.cursor
     merged = merge_reports(reports, name)
-    # The merged report *is* the evidence, and `prune_share` reads it. This used to hand over
-    # `not merged.failed_roots`, which said nothing about a drain that stopped early — so
-    # `--limit 0` scanned nothing, reported `has_more`, and swept the whole source.
+    # `prune_share` reads the merged report as evidence, so a drain that stopped early (e.g.
+    # `--limit 0`) does not sweep the whole source.
     merged.pruned = await prune_share(name, index, started_at, merged)
     return merged
 

@@ -1,23 +1,15 @@
 """The two rows of the reaction-label index, and what each phase of writing them may set.
 
-**The two-phase split is the design, not an implementation detail.** A reaction reaches this index
-twice:
+A reaction reaches this index twice:
 
-* The **record phase** is written by whoever ingested the reaction, from the canonical record in
-  hand. It has to be. `OrdReaction.transformation_smiles()` — the string `reaction_fingerprints`
-  stores — deliberately drops solvent and catalyst, because leaving them in let a solvent swap
-  dominate DRFP similarity (measured: 0.82 for one coupling in THF vs 2-MeTHF, 1.00 once excluded).
-  That is right for a fingerprint and fatal for a label index, whose whole job is to answer *which
-  solvent, which ligand, which base*. And there is no second chance to ask: `ElnAdapter` offers
-  `fetch_new_entries(since)` and nothing that reads one entry back by id.
-* The **derived phase** is written later by the background labeller, from the record phase's own
+* The **record phase** is written by the ingester from the canonical record in hand. It must be: the
+  fingerprint's transformation string drops solvent and catalyst, which a label index exists to
+  answer about, and `ElnAdapter` cannot read one entry back by id.
+* The **derived phase** is written later by the background labeller from the record phase's
   `record_smiles`.
 
-`labeller_version` is what separates them, and it is the reason "which entries are missing labels"
-is a `WHERE` clause instead of a flag somebody has to remember to set. NULL means never derived; a
-value below the current one means derived by a superseded labeller. Both are stale, and both are
-found by one indexed scan. This is `note_index.fingerprint` (`infra/sql/035`) and
-`document_chunks.embedding_key` (`038`) applied to a third kind of derived data.
+`labeller_version` separates them: NULL means never derived, a value below the current one means
+derived by a superseded labeller, and both are found by one indexed `WHERE` scan.
 """
 
 import math
@@ -148,8 +140,7 @@ class CorpusCoverage(BaseModel):
     labelled: int = Field(ge=0, description="Rows in scope carrying the current labeller version.")
     total: int = Field(ge=0, description="Rows in scope at all, labelled or not.")
     sources: list[str] = Field(default_factory=list, description="Which sources the scope spans.")
-    # The ELN records the label index cannot hold, because the tier keeps citation-only records out
-    # of it (`CitationOnlyRecords`). `None` = not asked, which only a hand-built result is.
+    # ELN records the label index cannot hold (citation-only). `None` means not asked.
     unsearched: CitationOnlyRecords | None = None
 
     @computed_field  # type: ignore[prop-decorator]
@@ -157,9 +148,8 @@ class CorpusCoverage(BaseModel):
     def verdict(self) -> str:
         """What the reader must know about this answer's denominator before quoting it.
 
-        `_labelled_verdict` is about the label index; the clause after it is about what that index
-        is not, because "COMPLETE: all 4282" read as the whole ELN while thousands of
-        citation-only records sat outside the count.
+        `_labelled_verdict` covers the label index; the clause after it names the citation-only
+        records outside it, so a COMPLETE count is not read as the whole ELN.
         """
         labelled = self._labelled_verdict()
         outside = self.unsearched.verdict if self.unsearched is not None else ""
@@ -182,12 +172,8 @@ class CorpusCoverage(BaseModel):
                 "reached these rows. Do not present this as a finding about the chemistry."
             )
         if self.labelled < self.total:
-            # **Rounded away from the two readings this branch exists to refuse.** `:.0f` printed
-            # "PARTIAL … (100%)" for 4,999 of 5,000 and "(0%)" for 1 of 100,000: a reader takes 100%
-            # as complete and 0% as nothing, in the one branch whose whole job is to say the answer
-            # is neither. Truncating toward the nearest tenth keeps 99.98 → "99.9" and 0.001 →
-            # "0.1", so the printed share can never read 100 while a row is unlabelled, nor 0 while
-            # one is labelled.
+            # Truncate to a tenth and clamp to [0.1, 99.9], so a PARTIAL share never prints as 100%
+            # or 0%.
             share = min(99.9, max(0.1, math.floor(1000 * self.labelled / self.total) / 10))
             return (
                 f"PARTIAL: this answer is drawn from {self.labelled} of {self.total} matching "

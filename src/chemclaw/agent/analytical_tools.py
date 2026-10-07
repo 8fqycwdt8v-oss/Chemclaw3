@@ -1,18 +1,8 @@
-"""The agent's way to ask whether results meet a specification, now and over time.
+"""Agent tools that check results against a specification, now and over time.
 
-Two tools. `analytical/specification.py` carries the whole argument — why the verdict is not a
-boolean, why a criterion nothing measured is reported rather than dropped, why a result the limit
-cannot be compared with is `indeterminate` rather than a pass, and why a `within` result whose
-uncertainty crosses a limit says so without changing its verdict.
-
-**Nothing in this file decides anything about a batch.** Whether to release, whether to open an
-out-of-specification investigation, whether a method's precision is fit for the limit it is being
-held to — all judgment, all a chemist's. What is here is the arithmetic and the four answers it can
-give.
-
-The docstring below is deliberately short and the rationale a reader wants is in this header
-instead: `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`, plus
-`tests/test_context_floor.py`'s ratchet, which a long tool description moves.
+The arithmetic lives in `analytical/specification.py`. Nothing here decides about a batch —
+release and out-of-specification investigations are a chemist's judgment. Tool docstrings stay
+short because they are prompts charged on every model call.
 """
 
 from __future__ import annotations
@@ -29,16 +19,14 @@ from chemclaw.core.units import Measurement, UnitError
 
 
 def _limit(text: str, *, criterion: str, which: str) -> Measurement | None:
-    """`"98.0 % w/w"` as a `Measurement`, or `None` for an empty (one-sided) bound.
+    """Parse `"98.0 % w/w"` into a `Measurement`, or `None` for an empty (one-sided) bound.
 
-    Split on the first space so a unit containing one (`% w/w`) survives, which is exactly the
-    spelling that carries a basis — and the basis is what stops an area percent being scored
-    against a weight-percent limit.
+    Splits on the first space so a unit containing one (`% w/w`) keeps its basis, which stops an
+    area percent being scored against a weight-percent limit.
 
     Raises:
-        ChemclawError: The text is not `<number> <unit>`, or names a unit this system does not
-            know. Worded for the model, naming the criterion and which bound, because "invalid
-            limit" over twelve rows is not something a caller can act on.
+        ChemclawError: The text is not `<number> <unit>` or names an unknown unit; the message
+            names the criterion and bound so the model can act on it.
     """
     if not text.strip():
         return None
@@ -104,12 +92,11 @@ def check_against_specification(criteria: list[dict[str, str]], results: dict[st
 
 
 def _measurement(name: str, value: str, unit: str, spread: str) -> Measurement:
-    """One result, refusing anything that is not a number and a unit this system knows.
+    """Parse one result, refusing anything that is not a number and a known unit.
 
     Raises:
-        ChemclawError: Worded for the model and naming the criterion, because a result that cannot
-            be parsed must not silently become a criterion nobody measured — which is the one way
-            this tool could turn a bad input into something that reads like a clean specification.
+        ChemclawError: Naming the criterion, so an unparseable result never silently becomes an
+            unmeasured criterion.
     """
     try:
         return Measurement.of(

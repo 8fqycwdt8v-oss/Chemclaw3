@@ -1,20 +1,14 @@
 """Several people in one session: the sender governs, a plan's author decides, the owner admits.
 
-`D-2026-09-27-in-a-shared-session-the-sender-governs`. Every test here drives the production entry
-point — `create_app` over `TestClient`, the real plan gate middleware, the real erasure — because
-each property is a claim about who a request or a turn *is*, and a unit that takes the identity as
-an argument proves only that it uses the argument it was given.
+Every test drives the production entry point, since each property is about who a request is:
 
-The security floor, one test (or more) each:
-
-- a stranger is answered 404 on every session route, before and after somebody else is admitted;
-- a member's turn runs as the member — their oid, their roles, their memories — never the owner's;
-- a member cannot approve the owner's plan, the owner can, and the owner cannot approve a member's;
-- an approval authorizes only its approver's turns, so nobody acts under another person's yes;
-- the owner's acts (delete, fork, admit, remove another, stop another's turn) refuse a member;
-- membership is revocable, and revocation takes effect on the next request;
-- and over a real database: the membership rows cascade, and an erasure takes a member's words and
-  standing out of a session somebody else owns while claiming that session for its duration.
+- a stranger gets 404 on every session route, before and after somebody else is admitted;
+- a member's turn runs as the member — their oid, roles and memories;
+- only a plan's author may approve it, and an approval authorizes only its approver's turns;
+- the owner's acts (delete, fork, admit, remove, stop another's turn) refuse a member;
+- membership is revocable, effective on the next request;
+- over a real database, membership rows cascade and an erasure removes a member's rows from a
+  session somebody else owns while claiming that session.
 """
 
 import asyncio
@@ -224,11 +218,9 @@ def test_a_member_stops_only_their_own_turn_and_the_owner_any() -> None:
 
 
 def test_a_members_turn_runs_as_the_member_with_their_roles_and_memories() -> None:
-    """The sender governs: identity, roles and `/memories/` and `recall_*` are the member's.
+    """A member's turn runs with the member's identity, roles, `/memories/` and `recall_*`.
 
-    Ana has a preference on file and Ben has none, so a turn that loaded the owner's memories would
-    read Ana's solvent back inside Ben's turn — the isolation this asserts on the value, not on a
-    namespace string alone.
+    Only the owner has a stored preference, so loading the owner's memories would show here.
     """
     asyncio.run(PREFERENCES.remember(_ANA.oid, "solvent", "2-MeTHF"))
     turn = _Recorder()
@@ -461,14 +453,11 @@ async def _say(session_id: str, actor: str, text: str) -> None:
 async def test_an_erasure_takes_a_members_words_and_standing_and_claims_the_shared_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leaver's rows in a session somebody else owns go; the owner's stay; the session is held.
+    """An erasure removes a member's rows from a session somebody else owns and claims it meanwhile.
 
-    Three halves, each a way the sweep was blind to a shared session before membership existed: the
-    member's messages (by author), their membership and their plan authorship (by person), and the
-    turn claim — a member mid-turn in the owner's session is writing exactly the rows being erased,
-    so the claim that stops that race on the leaver's own sessions has to span this one too. And
-    the owner's session is *not* reported as residue: its ownership row stays, and so do the
-    owner's own words.
+    The member's messages, membership and plan authorship go; the turn claim stops a concurrent
+    turn writing the rows being erased; the owner's rows stay and the session is not reported as
+    residue.
     """
     import uuid
     from contextlib import asynccontextmanager

@@ -1,16 +1,8 @@
-"""Run one bundle's own Temporal worker — the durable half of a connector-owned capability.
+"""Run one bundle's own Temporal worker: the durable half of a connector-owned capability.
 
-Written once now that there is a second caller, which is the condition `connectors/bo/worker.py`
-named as the trigger for looking again: *"there is one connector worker today … the second
-connector worker is when to look at it again."* `calc` is that second one, and
-`connectors/bo/worker.py` and `connectors/calc/worker.py` had already become near-copies.
-
-What made a shared version pointless before was that the *body* of each worker was its two
-hand-maintained lists — `_WORKFLOWS` and `_ACTIVITIES` — so there was nothing to share but the
-`Worker(...)` call. With the bundle's modules registering themselves through
-`chemclaw.durable.registry` and the queue derived from the bundle name, there is no body left to
-differ,
-and no list that can silently disagree with what the module actually defines (D-118).
+A bundle's modules register their workflows and activities through `chemclaw.durable.registry`
+and the queue is derived from the bundle name, so every bundle worker is this one function and no
+hand-maintained list can disagree with what the modules define (D-118).
 """
 
 import asyncio
@@ -36,10 +28,9 @@ logger = logging.getLogger(__name__)
 async def run_bundle_worker(connector: str) -> None:
     """Poll `connector`'s own queue, serving exactly what importing its modules registered.
 
-    The caller imports the bundle's `workflows` and `activities` modules for their registration
-    side effect and then calls this. That import is the isolation boundary the whole seam rests
-    on: core's workers never import these modules, so the bundle's heavy dependencies are loaded
-    in this process and nowhere else.
+    The caller imports the bundle's `workflows` and `activities` for their registration side effect.
+    That import is the isolation boundary: core's workers never make it, so the bundle's heavy
+    dependencies load only here.
     """
     configure_logging()
     configure_telemetry()
@@ -53,37 +44,20 @@ async def run_bundle_worker(connector: str) -> None:
         task_queue=queue,
         workflows=registered_workflows(queue),
         activities=registered_activities(queue),
-        # The same drain budget core's worker gets, and the one that matters more: a bundle's
-        # activity is the expensive science, so re-running it because the pod was killed rather
-        # than drained is the costliest version of this failure.
+        # A bundle's activity is the expensive science, so draining rather than killing matters most
+        # here.
         graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
-        # How many of that expensive science may run at once. Unset, temporalio admits 100 — which
-        # for `calc` means 100 concurrent xTB runs on a two-CPU pod, and for every bundle means
-        # more activities than the Postgres pool can serve connections to
-        # (D-2026-08-05-a-worker-may-not-outrun-its-pool). A bundle whose activities are long waits
-        # rather than database work — `calc`, whose CREST searches hold a slot for their whole
-        # runtime — raises it in the chart, where the memory that bounds it is also declared.
+        # Unset, temporalio admits 100 concurrent activities, more than the CPU or the Postgres pool
+        # can serve. A bundle whose activities are long waits (e.g. `calc`) raises it in the chart,
+        # beside the memory that bounds it.
         max_concurrent_activities=settings.worker_max_concurrent_activities,
-        # **And this is the worker the cache ceiling is actually about.** A child workflow is not
-        # an activity, so the line above never reached the children core starts — and those
-        # children run *here*, on the bundle's own derived queue: `durable/connector_job.py` starts
-        # one with `task_queue=job.task_queue`, and `hypothesis_tournament.py` and
-        # `template_activities.py` with `bundle_queue(connector)`. The workflow that holds a CREST
-        # search's state between its tasks is therefore cached in this process, never in core's.
-        #
-        # A first draft of `D-2026-09-22-the-ceiling-that-holds-memory-is-the-cache-not-the-task-
-        # slot` armed the background worker alone — the one population the row behind it was not
-        # about. Nothing observable differed, because that draft's value *was* the SDK's default;
-        # the omission became invisible for exactly as long as the number was unexamined.
+        # The workflow cache ceiling matters most here: child workflows that core starts
+        # (`durable/connector_job.py`, `hypothesis_tournament.py`, `template_activities.py`) run on
+        # the bundle's queue, so their state is cached in this process.
         max_cached_workflows=settings.worker_max_cached_workflows,
-        # Every activity this worker serves, bound to the turn that asked for it and recorded on
-        # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
-        # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,
-        # and a reader looking for "why does this activity log anything" looks at the constructor.
-        #
-        # The SDK's OpenTelemetry interceptor rides beside it when span export is on, which is the
-        # half that makes a durable job a child of the launching turn — `core/temporal_client.py`
-        # writes the context on the client, this reads it here.
+        # Binds every activity to the turn that asked for it and records it in and out
+        # (`durable/interceptor.py`). When span export is on the SDK's OpenTelemetry interceptor
+        # makes a durable job a child span of the launching turn.
         interceptors=worker_interceptors(),
     )
     logger.info("%s connector worker connected: queue=%s %s", connector, queue, describe(queue))

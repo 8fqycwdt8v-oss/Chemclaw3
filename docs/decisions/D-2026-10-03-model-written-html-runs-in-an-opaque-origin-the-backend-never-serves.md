@@ -5,6 +5,8 @@
 the frontend builds to. Reverses that ADR's decline of "artefacts that run code"; that ADR is merged
 and stands as the record of why it declined them then.
 
+**Superseded-by:** [D-2026-10-03-model-written-html-runs-its-scripts-by-default](D-2026-10-03-model-written-html-runs-its-scripts-by-default.md) (in part)
+
 ## Context
 
 The earlier record declined model-authored HTML for one reason, and it is still true: **a tool

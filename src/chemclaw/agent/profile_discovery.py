@@ -1,30 +1,9 @@
-"""Profiles as files: the authoring path for a per-use-case agent (`AgentProfile` Stage 3).
+"""Profiles as files: the authoring path for a per-use-case agent.
 
-`chemclaw.agent.profiles` holds the *contract* — the override bundle and the `{name: profile}`
-registry —
-and until now the only way to add one was a Python call, which meant a use case could not be
-configured without a code change. That was the right amount of machinery while exactly one
-profile existed. It stopped being the right amount when the capabilities a profile selects from
-moved to connectors: a "property-lookup agent" is now a name, three tool names and a sentence of
-instructions, and nothing about it should require touching `agent/`.
-
-So a profile is a YAML file, discovered exactly the way a skill is:
-
-- `profiles/<name>.yaml` — the configured tree, for a profile that spans connectors. Most do: a
-  profile's whole job is to select *across* capabilities, so a shared home is the common case
-  (`reaction-search`'s skill made the same argument for spanning content).
-- `connectors/<name>/profiles/<p>.yaml` — a bundle's own, declared in its manifest, for a profile
-  that is genuinely about that one capability and should be reviewed and shipped with it.
-
-The file's stem is the profile name; a `name:` key inside it would be a second source of truth
-that can disagree with the filename, so the model does not accept one. Everything else is
-`AgentProfile`'s own validated schema, `extra="forbid"` included, so a misspelled override fails at
-startup rather than silently doing nothing.
-
-Discovery is not enablement of *capability*: a profile can only ever narrow
-(`chemclaw.agent.profiles`),
-and the audit + authz middleware and the skill role gates run after any narrowing. A file
-dropped here cannot widen what its caller may do.
+A profile is a YAML file discovered like a skill: `profiles/<name>.yaml` in the configured tree, or
+`connectors/<name>/profiles/<p>.yaml` declared by a bundle's manifest. The stem is the name; the
+body is `AgentProfile`'s validated schema (`extra="forbid"`), so a typo fails at startup. A profile
+can only narrow (`chemclaw.agent.profiles`), so a dropped file cannot widen what its caller may do.
 """
 
 import logging
@@ -44,23 +23,16 @@ logger = logging.getLogger(__name__)
 class ProfileError(ChemclawError):
     """A profile file is malformed, or two of them claim the same name.
 
-    A `ChemclawError` (so a `ValueError`) for the same reason `ConnectorError` is one: this is a
-    "this deployment is misconfigured" failure surfaced at startup, so one `except ValueError` at
-    an entry point catches all of them. Also registered in
-    `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class name, since Temporal matches
-    non-retryable types by exact name, not isinstance.
+    A `ChemclawError` (a `ValueError`) so entry points catch misconfiguration uniformly; also listed
+    by name in `chemclaw.durable.publish._BAD_DATA_TYPES`, since Temporal matches by exact name.
     """
 
 
 def _load(path: Path) -> AgentProfile:
     """Parse and validate one profile file, whose stem is its name.
 
-    Read through `core/manifest_io.read_manifest` rather than `yaml.safe_load`, because this is the
-    sixth manifest loader and it was the one wave 5 left out: it carried a bare `safe_load`, so an
-    alias bomb, a 2000-deep nesting (a bare `RecursionError`, past every `except ValueError` at the
-    entry points) and a duplicate key all reached it. That matters more here than at the other five
-    seams, not less — `instructions` **is** the system prompt
-    (`D-2026-09-06-a-manifest-is-data-in-every-field-that-executes`).
+    Read through `core/manifest_io.read_manifest` (alias, depth and duplicate-key guards), since
+    `instructions` becomes a system prompt.
     """
     raw = read_manifest(path, ProfileError)
     if "name" in raw:
@@ -77,8 +49,7 @@ def _load(path: Path) -> AgentProfile:
 def profile_files() -> list[Path]:
     """Every discovered profile file: the configured tree(s), then each enabled bundle's own.
 
-    Sorted within each directory so the discovery order is identical on every machine — the same
-    reproducibility reason connector discovery is sorted.
+    Sorted within each directory so discovery order is reproducible.
     """
     roots = [Path(d) for d in settings.profiles_dirs] + [Path(d) for d in connector_profiles_dirs()]
     return [path for root in roots if root.is_dir() for path in sorted(root.glob("*.yaml"))]
@@ -87,10 +58,8 @@ def profile_files() -> list[Path]:
 def load_profiles() -> list[AgentProfile]:
     """Discover, validate and register every profile file; return what was registered.
 
-    Idempotent across repeated calls (the front door builds agents lazily, and tests build
-    many), so a profile already registered under the same name is skipped rather than raising
-    the registry's duplicate-name error. Two *different* files claiming one name is still an
-    error: it is a genuine ambiguity about which agent a caller would get.
+    Idempotent: a profile already registered under the same name is skipped. Two different files
+    claiming one name is still an error.
 
     Raises:
         ProfileError: When a file is malformed, or two files claim the same profile name.

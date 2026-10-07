@@ -1,28 +1,19 @@
-"""An unparseable tool call, driven through a **compiled graph** rather than through the hook.
+"""An unparseable tool call, driven through a compiled graph rather than through the hook.
 
-`agent/model_calls.py` is the mechanism and
-`D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure` is the decision:
-`PromoteInvalidToolCalls` moves the call from `AIMessage.invalid_tool_calls` onto `tool_calls`
-behind a sentinel, and `refuse_unparsed_arguments` — below every gate that decides — refuses it
-before the body runs. `tests/test_agent_observability_model.py` proves what each half *decides* by
-calling the hooks directly. That is the right shape for a decision and it cannot establish that the
-decision is connected to anything, which is the property `tests/test_state_channels.py` exists for
-after three defects in one week where a hook returned the right value into a graph that dropped it.
+`PromoteInvalidToolCalls` (`agent/model_calls.py`) moves a call from
+`AIMessage.invalid_tool_calls` onto `tool_calls` behind a sentinel, and `refuse_unparsed_arguments`,
+below every deciding gate, refuses it before the body runs.
+`tests/test_agent_observability_model.py` tests each hook's decision; what the mechanism is worth is
+only observable in the graph, because a promoted call becomes an ordinary failing tool call:
 
-**Everything this mechanism is worth is only observable in the graph**, because the entire design
-is that a promoted call becomes an *ordinary* failing tool call:
+- the audit row, the `tool_failed` carrying the model's call id, and the `ToolMessage` come from
+  middleware this module never touches;
+- the tool body is not entered (tools with no required argument would accept `{}`);
+- a valid call beside a broken one still runs;
+- the model's correction is an ordinary graph iteration, counted by the loop cap.
 
-- the audit row, the `tool_failed` carrying the model's own call id, and the `ToolMessage` the
-  model reads are produced by middleware this module never touches;
-- the tool body must not be entered — and the eleven in-process tools with no required argument
-  would satisfy their own schema if the promotion dropped the malformed document, so this is a
-  property of the composed chain rather than of either half;
-- a valid call issued beside a broken one must still run, which no hook-level assertion can show;
-- the model's correction is an ordinary graph iteration, so the loop cap counts it.
-
-The defect itself is asserted the same way, as a **behavioural diff**: the identical script through
-a graph *without* the promotion ends with prose and no tool call, which is
-`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` reproduced rather than described.
+The defect is shown as a behavioural diff: the same script without the promotion ends in prose
+with no tool call.
 """
 
 import asyncio
@@ -84,11 +75,9 @@ def list_watches() -> str:
 class _StreamingModel(GenericFakeChatModel):
     """A model that streams a scripted reply per call, tool-call fragments and all.
 
-    Not `tests/fakes_langgraph.ScriptedChatModel`: that fake emits only *valid* tool-call
-    arguments, and the whole subject here is what LangChain does with arguments that do not parse.
-    Streaming rather than returning whole messages is the point — `stream_mode="messages"` is what
-    a chemist receives, and the streamed path is the one that reaches production, where the
-    provider reports `error=None` and the malformed document is the only field that survives.
+    Not `ScriptedChatModel`, which emits only valid arguments. Streaming matters because it is the
+    production path, where the provider reports `error=None` and the malformed document is the only
+    field that survives.
     """
 
     script: list[dict[str, Any]] = []
@@ -108,15 +97,11 @@ class _StreamingModel(GenericFakeChatModel):
     def _generate(
         self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
     ) -> ChatResult:
-        """The non-streaming path, as the sum of the same chunks — one script, two entry points.
+        """The non-streaming path, as the sum of the same chunks: one script, two entry points.
 
-        `create_agent` calls `ainvoke` rather than `astream` on any turn nothing is streaming
-        (`graph.ainvoke`, and the model node's own choice), and a double that only overrode
-        `_stream` fell through to `GenericFakeChatModel`'s exhausted iterator — a `StopIteration`
-        the executor converts into a bare `RuntimeError`, which reads as a graph defect. Summing
-        the chunks keeps the *shape* the streamed path produces, which is the whole subject here:
-        `AIMessageChunk.__add__` is what runs the argument fragments through `parse_partial_json`
-        and decides which field the call lands on.
+        `create_agent` calls `ainvoke` on turns nothing streams. Summing the chunks keeps the
+        streamed shape, since `AIMessageChunk.__add__` is what parses the argument fragments and
+        decides which field a call lands on.
         """
         chunks = list(self._stream(messages, stop, run_manager, **kwargs))
         merged = chunks[0].message
@@ -127,9 +112,7 @@ class _StreamingModel(GenericFakeChatModel):
     def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any):  # type: ignore[no-untyped-def]
         """Record the thread, then stream the next scripted reply: prose, then one call each.
 
-        `calls` is a list of `(tool name, argument document)` because a reply carrying a broken
-        call *beside* a valid one is a case with its own outcome, and it cannot be scripted at all
-        if a reply may hold only one call.
+        `calls` is a list so a reply can carry a broken call beside a valid one.
         """
         self.seen.append(list(messages))
         step = object.__getattribute__(self, "_step")
@@ -151,9 +134,8 @@ class _StreamingModel(GenericFakeChatModel):
                     ],
                 )
             )
-        # How the provider says it stopped, on the last chunk the way a streamed reply carries it:
-        # `length` is the output budget running out mid-emission.
-        # A list is a gateway that repeats the value on a trailing chunk, which the chunk merge
+        # How the provider says it stopped, on the last chunk: `length` is the output budget running
+        # out. A list models a gateway repeating the value on a trailing chunk, which the merge
         # concatenates.
         finishes = reply.get("finish", [])
         for finish in [finishes] if isinstance(finishes, str) else finishes:
@@ -174,15 +156,11 @@ class _Recording(AuditSink):
 
 
 def _governed_graph(model: Any, sink: AuditSink, *, extra: list[Any] | None = None) -> Any:
-    """A compiled agent carrying the **production** middleware chain over doubles for tools.
+    """A compiled agent carrying the production middleware chain over doubles for tools.
 
-    `tool_call_middleware` is the composed chain a turn really runs — both converters, the
-    framing, the result bound, the announcer, the trail and every gate — and
-    `tests/test_middleware_order.py` is what pins that this list is the one
-    `build_langgraph_agent` hands to `create_agent`. Building through that function instead would
-    bring the whole in-process registry, and none of the eleven no-required-argument tools in it
-    has a body a test can watch: `list_watches` calls `require_actor()` and raises off the request
-    path, which would make the absence assertion unfalsifiable.
+    `tool_call_middleware` is the chain a turn runs, and `tests/test_middleware_order.py` pins it as
+    the list `build_langgraph_agent` uses. The real registry's no-argument tools have no body a test
+    can watch, which would make the absence assertion unfalsifiable.
     """
     audit = make_audit_middleware(correlation_id="test-correlation", actor="tester", sink=sink)
     return create_agent(
@@ -198,12 +176,10 @@ def _governed_graph(model: Any, sink: AuditSink, *, extra: list[Any] | None = No
 
 
 async def _drive(graph: Any) -> tuple[list[ToolMessage], list[ToolFailureSignal], str]:
-    """Run one turn to completion, draining the three channels a chemist's turn actually uses.
+    """Run one turn to completion, draining the three channels a chemist's turn uses.
 
-    The `custom` mode is drained for the reason `core/turn_signals._emit` states: it resolves
-    LangGraph's writer off the ambient config and **drops the signal in silence** where there is
-    none, so a test that called the announcer directly would pass over a chain whose announcements
-    go nowhere. Only a compiled graph publishes on that channel.
+    `core/turn_signals._emit` drops a signal silently where no LangGraph writer is configured, so
+    only a compiled graph shows that the announcements arrive.
     """
     results: list[ToolMessage] = []
     signals: list[ToolFailureSignal] = []
@@ -242,15 +218,11 @@ def _clear_entered() -> Any:
 
 
 def test_langchains_converter_is_where_the_call_goes_missing() -> None:
-    """The upstream fact the whole fix rests on, asserted against upstream's own converter.
+    """LangChain's converter is where the call goes missing.
 
-    A truncated argument document yields `tool_calls: []` and a populated `invalid_tool_calls`. The
-    agent loop iterates `tool_calls`, so the call is gone before any first-party code sees it —
-    which is why the fix moves it back rather than trying to prevent the emission.
-
-    Pinned here for `tests/test_upstream_surface.py`'s reason: if LangChain ever routed a truncated
-    call back onto `tool_calls`, or dropped `error`, this turns red instead of the promotion
-    quietly becoming a middleware with nothing to find.
+    A malformed argument document yields `tool_calls: []` and a populated `invalid_tool_calls`, and
+    the agent loop iterates only `tool_calls`. Pinned so an upstream change turns this red rather
+    than leaving the promotion with nothing to find.
     """
     from langchain_openai.chat_models.base import _convert_dict_to_message
 
@@ -275,18 +247,13 @@ def test_langchains_converter_is_where_the_call_goes_missing() -> None:
 
 
 def test_without_the_promotion_the_turn_proceeds_as_though_no_tool_were_wanted() -> None:
-    """The defect, reproduced in a compiled graph: prose is served and the tool never runs.
+    """Without the promotion the turn proceeds as though no tool were wanted.
 
-    This is the baseline the next test is a diff against, and it is what
-    `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` names — the model announced a
-    lookup, the lookup silently did not happen, and the turn ended looking finished. Without the
-    prose the same turn ends as `empty_answer` instead; with it, nothing anywhere says a call was
-    dropped.
+    The baseline the next test diffs against: the model announced a lookup, it silently did not
+    happen, and the turn ended looking finished.
     """
-    # `'{"smiles": }'` rather than a *truncated* document, because a truncation never reaches the
-    # field under test: `parse_partial_json` completes any prefix of a valid object, so even
-    # `'{oops'` arrives on `tool_calls` with `args={}` and the tool runs — measured, and the
-    # boundary the last test in this file pins.
+    # A malformed rather than truncated document: `parse_partial_json` completes any prefix of a
+    # valid object, so a truncation lands on `tool_calls` (pinned by the last test in this file).
     model = _StreamingModel(
         [{"text": "I will look that up.", "calls": [("predict_pka", '{"smiles": }')]}]
     )
@@ -301,22 +268,16 @@ def test_without_the_promotion_the_turn_proceeds_as_though_no_tool_were_wanted()
 
 
 def test_a_promoted_call_crosses_the_whole_governance_chain() -> None:
-    """The gain over every earlier design, stated as the four records that used to be missing.
+    """A promoted call crosses the whole governance chain.
 
-    Each was previously absent or hand-built, and each is now produced by machinery this mechanism
-    does not touch:
+    Produced by machinery this mechanism does not touch:
 
-    - **an audit row**, under the `error` outcome — three ADRs argued that synthesising one would
-      put a call that never ran into the trail, which was true of a call the tool chain never saw
-      and is not true of one it refuses;
-    - **a `tool_failed` carrying the model's own call id**, so a consumer pairs it with the
-      `tool_call` event rather than with the tool *name*. The design this replaced dropped the id,
-      which is what forced a suppression guard into `api/graph_stream.py`;
-    - **`reason=None`**, because `UnparsedArguments` is deliberately not in `refusal_reason`'s
-      table: a document that will not parse is a fault, not one of the five gates;
-    - **a `ToolMessage` the model can act on**, rather than the call vanishing.
+    - an audit row under the `error` outcome;
+    - a `tool_failed` carrying the model's own call id, so a consumer pairs it with the `tool_call`;
+    - `reason=None`, because a document that will not parse is a fault, not one of the gates;
+    - a `ToolMessage` the model can act on.
 
-    And the tool body is **not entered**, which is the property the sentinel exists for.
+    And the tool body is not entered, which is what the sentinel is for.
     """
     sink = _Recording()
     model = _StreamingModel(
@@ -342,11 +303,9 @@ def test_a_promoted_call_crosses_the_whole_governance_chain() -> None:
 
 
 def test_a_valid_call_beside_a_broken_one_still_runs() -> None:
-    """The sibling survives, which is the case the discard-and-retry design got wrong.
+    """A valid call beside a broken one still runs.
 
-    That design discarded the whole reply to ask again, so a turn asking for two tools and
-    mis-serialising one ran neither — and the successful sibling's result was lost with it. Here
-    the two calls are independent: one executes, one is refused, and the model sees both outcomes.
+    The two calls are independent: one executes, one is refused, and the model sees both outcomes.
     """
     sink = _Recording()
     model = _StreamingModel(
@@ -371,13 +330,10 @@ def test_a_valid_call_beside_a_broken_one_still_runs() -> None:
 
 
 def test_a_promotion_cannot_execute_a_tool_that_needs_no_arguments() -> None:
-    """The trap the sentinel exists for, and the count that makes it worth a sentinel.
+    """A promotion cannot execute a tool that needs no arguments.
 
-    A promotion that dropped the malformed document and passed `{}` would satisfy the schema of
-    every tool with no required argument, and the tool would *execute* on a request the model never
-    successfully expressed. The count is asserted against the live registry rather than quoted from
-    a docstring, so the claim in `agent/model_calls.py` has a producer: a tool added next year that
-    takes no required argument widens this trap, and this number moving is the notice.
+    Passing `{}` would satisfy every such tool's schema. The count of such tools is read from the
+    live registry, so a new one moves the number visibly.
     """
     from chemclaw.agent.chemclaw_agent import _capability_tools
 
@@ -411,14 +367,10 @@ def test_a_promotion_cannot_execute_a_tool_that_needs_no_arguments() -> None:
 
 
 def test_no_tool_in_the_registry_declares_the_sentinel_as_a_parameter() -> None:
-    """The sentinel's one collision risk, checked against the live registry rather than asserted.
+    """No tool in the registry declares the sentinel as a parameter.
 
-    `_UNPARSED_ARGUMENTS` is dunder-flanked so it cannot be a real parameter name, and
-    `agent/model_calls.py` says so — a claim with no producer is exactly what this repository keeps
-    finding. The consequence of a collision is not cosmetic: `refuse_unparsed_arguments` reads the
-    key off `request.tool_call["args"]` and raises before the body, so a tool that legitimately
-    declared it would have **every** call refused, on every turn, with a message about JSON that
-    parsed fine.
+    `refuse_unparsed_arguments` reads the key off the call's args and raises, so a tool declaring it
+    would have every call refused.
     """
     from chemclaw.agent.chemclaw_agent import _capability_tools
     from chemclaw.agent.model_calls import _UNPARSED_ARGUMENTS
@@ -435,15 +387,10 @@ def test_no_tool_in_the_registry_declares_the_sentinel_as_a_parameter() -> None:
 
 
 def test_the_model_corrects_inside_its_own_loop_and_the_correction_runs() -> None:
-    """The property the three hand-built substitutes existed to fake, obtained for free.
+    """The model corrects inside its own loop, and the correction runs.
 
-    The designs this replaces asked the model again from inside `wrap_model_call`, which is outside
-    every bound the graph has — so each needed a hand-rolled "never a loop" ceiling, and neither
-    the loop cap nor the spend cap could see the extra call. Here the correction is an ordinary
-    graph iteration: the model reads the `ToolMessage`, re-issues the call, and it runs. That the
-    iteration is *counted* is the next test — the two are split because a correction that ran and
-    a correction the cap could see are different claims, and the old design satisfied only the
-    first.
+    The correction is an ordinary graph iteration: the model reads the `ToolMessage`, re-issues the
+    call, and it runs. That the iteration is counted is the next test.
     """
     sink = _Recording()
     model = _StreamingModel(
@@ -466,12 +413,10 @@ def test_the_model_corrects_inside_its_own_loop_and_the_correction_runs() -> Non
 
 
 def test_a_corrected_turn_still_hits_the_runaway_cap() -> None:
-    """The other half: the correction spends an iteration, so the cap still bounds the turn.
+    """A corrected turn still hits the runaway cap.
 
-    A cap of 1 rather than the configured default, because the property is that a turn looping on
-    malformed arguments is stopped by the *ordinary* guard. Under the design this replaces the
-    extra provider call was invisible to `enforce_loop_cap` entirely, which is why that design had
-    to carry a ceiling of its own.
+    A cap of 1, because the property is that a turn looping on malformed arguments is stopped by the
+    ordinary `enforce_loop_cap`.
     """
     sink = _Recording()
     original = settings.harness_max_loop_iterations
@@ -493,24 +438,12 @@ def test_a_corrected_turn_still_hits_the_runaway_cap() -> None:
 
 
 def test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate() -> None:
-    """Where the refusal sits, pinned under the profile that falsifies the easy claim.
+    """The guard sits below every gate that decides, including the plan gate.
 
-    The comment on this entry said "innermost of everything" and that was false: a profile with
-    the harness enabled appends `enforce_plan_approval` and `stamp_plan_link` *below* it, so both
-    nest inside. `tests/test_middleware_order.py` and `tests/test_profiles.py` both pin the chain
-    under profiles that attach neither, so the one configuration that could falsify the claim was
-    the one neither of them built.
-
-    The property that actually matters is the one asserted here and it is a *relation*, not an
-    index: every gate that makes a decision about a call must sit **outside** this guard, so a
-    promoted call crosses all of them before being refused. That survives a deliberate reordering,
-    which an index would not.
-
-    **And the consequence, which is deliberate rather than discovered:** the plan gate is *inside*,
-    and this raises before calling its handler, so a promoted call never reaches it. That is right —
-    arguments that did not parse are not a well-formed request for a gate to decide about — and it
-    is asserted so that a future change making the plan gate refuse malformed calls has to change
-    this test on purpose.
+    Asserted as a relation, not an index, under a profile with the harness enabled (which appends
+    `enforce_plan_approval` and `stamp_plan_link`): every deciding gate sits outside this guard, so
+    a promoted call crosses them all before being refused. The plan gate's handler is never reached
+    for a promoted call, deliberately: unparsed arguments are not a request for a gate to decide on.
     """
     from chemclaw.agent.langgraph_agent import tool_governance_middleware
 
@@ -544,25 +477,13 @@ def test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate() 
 
 
 def test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invalid() -> None:
-    """The boundary of the mechanism: streaming never produces an invalid tool call at all.
+    """A streamed truncation is completed by upstream and never becomes invalid.
 
-    `D-2026-08-27-an-unparseable-tool-call-is-a-visible-failure` records the measurement. A tool
-    call arriving as `tool_call_chunks` is merged by `AIMessageChunk.__add__`, which parses the
-    accumulated document with `parse_partial_json` — and that function *completes* any document
-    that is a prefix of a valid object, which is exactly what a cut stream or an exhausted token
-    budget leaves behind. So the truncation the `BACKLOG` row named as the production cause lands
-    on `tool_calls` as a call with half-written arguments, not on `invalid_tool_calls`, and
-    `PromoteInvalidToolCalls` correctly finds nothing to promote.
-
-    Measured against the live lane as well as here: `make live-storm --families F` runs
-    `f-malformed-json` (`'{"text": "unterminated'`) through the real front door and the tool
-    executes with `text="unterminated"`. Only a document that is *not* a prefix — garbage, a bare
-    string, an unbalanced close — reaches the field the promotion reads.
-
-    This is an **absence** assertion, the shape `tests/test_upstream_surface.py` uses for the same
-    reason: if upstream stops completing prefixes, these calls start arriving as invalid, the
-    promotion begins firing on them, and this test turning red is the signal to re-read the ADR
-    rather than to discover the change through behaviour.
+    `AIMessageChunk.__add__` parses with `parse_partial_json`, which completes any prefix of a valid
+    object, so a cut stream lands on `tool_calls` with half-written arguments. Only a document that
+    is not a prefix (garbage, a bare string, an unbalanced close) reaches `invalid_tool_calls`. An
+    absence
+    assertion: if upstream stops completing prefixes, this turns red.
     """
 
     def merged(document: str) -> Any:
@@ -594,17 +515,12 @@ def test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invali
 def test_a_call_cut_off_at_the_output_limit_does_not_run_on_upstreams_guess(
     finish: str | list[str],
 ) -> None:
-    """The truncation the test above pins, refused where the response says it happened.
+    """A call cut off at the output limit does not run on upstream's guess.
 
-    `parse_partial_json` completes `'{"smiles": "CC'` to `{"smiles": "CC"}`, so the call is
-    *valid* and nothing on it says the molecule was cut — but the reply's `finish_reason` does.
-    Demoted and promoted, it crosses the same governance chain a malformed call does: no body,
-    an `error` row, a fault on the stream carrying the model's own id, and a `ToolMessage` telling
-    the model the limit is what cut it rather than that its JSON was invalid
-    (`D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run`).
-
-    The repeated case is a gateway that sends `finish_reason` on a trailing usage chunk too: the
-    merge concatenates it to `"lengthlength"`, and an equality check let that call run.
+    `parse_partial_json` completes `'{"smiles": "CC'` to a valid call, but the reply's
+    `finish_reason` says it was cut. Demoted and promoted, it crosses the same chain as a malformed
+    call, and the `ToolMessage` names the output limit. A gateway repeating `finish_reason` on a
+    trailing chunk concatenates it to `"lengthlength"`, so equality is not enough.
     """
     sink = _Recording()
     model = _StreamingModel(

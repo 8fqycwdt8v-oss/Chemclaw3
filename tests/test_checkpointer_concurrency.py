@@ -1,21 +1,10 @@
 """What the checkpointer does when more than one caller reaches it at once.
 
-Two properties, both measured before they were asserted, and both invisible to every metric and
-every test that existed:
-
-- **The pod serializes on the saver's lock, and nothing could see it.** `AsyncPostgresSaver._cursor`
-  opens `async with self.lock, get_connection(...)`, so every checkpointer statement in the process
-  runs one at a time — *before* the pool is asked for anything. Measured on 8 concurrent turns:
-  max concurrency inside the saver 1, max wait 612 ms, and during a deliberate stall
-  `chemclaw_pg_pool_requests_waiting` read **0** — the exact symptom `core/db.register_pool`'s
-  docstring claimed it had closed. The serialization stays (removing it is a change that wants its
-  own measurement); what is fixed is that it is now visible.
-- **Two pods migrating the checkpoint tables at once: one used to raise.**
-  `CREATE TABLE IF NOT EXISTS` is not race-safe against itself, and the loser's error is a
-  `psycopg.Error` that is not an `OperationalError`, so `_translating` never saw it and a chemist
-  got a non-retryable "internal" about a state another pod had just created correctly. Serialized
-  now by the advisory lock `core/migrate.py` already uses for the same problem — a retry was tried
-  first and measured *still failing*, because the winner is mid-migration when the loser retries.
+- `AsyncPostgresSaver._cursor` serializes every statement on `self.lock` before the pool is asked,
+  so pool metrics cannot see the queue; a dedicated gauge makes it visible.
+- Two pods migrating the checkpoint tables at once: `CREATE TABLE IF NOT EXISTS` races and the
+  loser's error is not an `OperationalError`. Serialized by `core/migrate.py`'s advisory lock; a
+  retry is insufficient because the winner is still mid-migration.
 """
 
 import asyncio
@@ -56,10 +45,7 @@ async def _pool() -> AsyncConnectionPool[Any]:
 async def test_a_queue_on_the_savers_lock_is_visible_where_no_pool_metric_could_show_it() -> None:
     """The gauge moves while a statement is held, and the pool's own gauge does not.
 
-    Driven by holding one checkpointer statement open and asking a second one for a cursor: the
-    second is blocked on `self.lock`, which is a queue the pool has never been told about. Before
-    this instrumentation an operator watching the metric they were pointed at saw a flat zero
-    through a full stall.
+    A second statement blocks on `self.lock`, a queue the pool knows nothing about.
     """
     await migrated_db_or_skip()
     await create_checkpoint_tables()
@@ -113,16 +99,8 @@ async def test_a_queue_on_the_savers_lock_is_visible_where_no_pool_metric_could_
 async def test_two_pods_migrating_the_checkpoint_tables_at_once_do_not_fail_a_turn() -> None:
     """The second migrator waits and finds the work done, instead of failing the chemist.
 
-    Run against a schema that has never seen these tables, which is what a fresh deployment is and
-    what CI's throwaway container is. Measured unguarded: `pod-A` raised `UniqueViolation` on
-    `checkpoint_migrations_pkey` (and, on another run, on `pg_type_typname_nsp_index`) while
-    `pod-B` succeeded and every index ended up present and valid — so the failure was reported
-    about a state that was already correct.
-
-    **A single retry was measured here first and is not sufficient**, which is why this asserts the
-    outcome rather than the mechanism: with the retry in place the loser still failed, because the
-    winner's migration was in flight when it re-read the version ledger and it collided on the same
-    row again.
+    Run against a schema without these tables, as on a fresh deployment. Asserts the outcome rather
+    than the mechanism.
     """
     schema = "chemclaw_setup_race"
 
@@ -181,10 +159,7 @@ async def test_a_real_setup_failure_is_still_reported_rather_than_retried_away(
 ) -> None:
     """The lock serializes migrators; it must not also swallow a failure that is not a race.
 
-    A single retry was the first fix and is measurably not enough — the winner's migration is
-    still in flight when the loser retries, so it collides on the same ledger row again. Having
-    replaced it with the lock, this pins that no retry crept back in beside it: a `setup()` that
-    fails under the lock has nobody to have raced.
+    A `setup()` that fails under the lock had nobody to race, so it is reported, not retried.
     """
 
     class _Saver:
@@ -209,19 +184,10 @@ async def test_a_real_setup_failure_is_still_reported_rather_than_retried_away(
 
 
 async def test_the_checkpointer_pool_agrees_with_every_other_pool_in_the_process() -> None:
-    """The one pool every turn's state write goes through, held to `core/db`'s own settings.
+    """The checkpointer pool agrees with every other `core/db` pool in the process.
 
-    It used to name none of them, so it ran on psycopg_pool's defaults while every `core/db` pool
-    in the same process ran on the configured ones — measured live: `timeout=30.0` against
-    `pg_pool_timeout_seconds=10.0`, `max_idle=600` against `pg_pool_max_idle_seconds=300`, and no
-    `check` at all. A saturated waiter was therefore refused at 30.02 s rather than 10.01 s,
-    holding an admission permit for six times the admission timeout, and a backend killed from
-    outside the pool reached a turn as `AdminShutdown` where `core/db`'s pool would have swapped it.
-
-    **Compared against a `core/db` pool rather than against literals**, which is the whole point: a
-    setting added there must not be silently declined here, and a test naming the numbers would
-    agree with itself while the two pools drifted apart. `min_size` is excluded and only
-    `min_size` — the checkpointer's 0 is deliberate and says why beside itself.
+    Compared against a real `core/db` pool rather than literals, so a setting added there cannot be
+    silently missing here. `min_size` is excluded; the checkpointer's 0 is deliberate.
     """
     await migrated_db_or_skip()
     reference = _pool_for(settings.postgres_dsn, None, settings.pg_pool_max_size)

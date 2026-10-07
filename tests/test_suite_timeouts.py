@@ -1,19 +1,9 @@
-"""What a run says about itself: relaxable wall-clock caps (T11), and the tests that never ran.
+"""What a run says about itself: relaxable wall-clock caps, and the tests that never ran.
 
-Both halves are about a run's headline number being believed without the things that qualify it: a
-timed-out test proves nothing about the assertions it never reached, and a skipped Postgres test
-proves nothing at all. `tests/conftest.py` owns both, and both are exercised here the only way a
-terminal-summary hook can be — through a real session.
-
-`pyproject.toml` caps every test at 180 s and two files tighten that further with
-`@pytest.mark.timeout(...)`. A marker overrides `--timeout` and `PYTEST_TIMEOUT`, so before
-`PYTEST_TIMEOUT_SCALE` existed the tests with the tightest caps were precisely the ones no
-command line could relax — and a contended machine turned them red with their assertions never
-run. Two reviewers read that red as a numerical failure, and a hardening campaign spent hours
-against the baseline it produced.
-
-The scaling is exercised the only way it can be believed: a real pytest session, with a real
-marker, importing the real hook from `tests/conftest.py` rather than a copy of it.
+A timed-out test proves nothing about the assertions it never reached, and a skipped Postgres test
+proves nothing at all; `tests/conftest.py` reports both. A `@pytest.mark.timeout` marker overrides
+`--timeout`, so `PYTEST_TIMEOUT_SCALE` is the only way to relax it on a contended machine. Both are
+exercised through a real pytest session importing the real hook.
 """
 
 from pathlib import Path
@@ -63,15 +53,10 @@ def _write_suite(pytester: pytest.Pytester) -> None:
 def test_a_marker_alone_still_fails_a_test_that_outruns_it(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unscaled, the marker bites — the behaviour the markers exist for, deliberately kept.
+    """Unscaled, the marker still fails a test that outruns it, in its own report section.
 
-    Deleting the timeouts would have been the easy answer and the wrong one: a runaway xTB
-    optimisation hanging CI indefinitely is a real failure they catch.
-
-    The run must also *say* it was a timeout, in its own section. `FAILED … - Failed: Timeout
-    (>180.0s) from pytest-timeout` in the short summary was read as a numerical failure twice, and
-    a timed-out test is not weak evidence about the code — it is none, because the assertions never
-    ran.
+    The timeouts catch real hangs such as a runaway xTB optimisation, and the run must say it was a
+    timeout so it is not read as a numerical failure.
     """
     monkeypatch.delenv("PYTEST_TIMEOUT_SCALE", raising=False)
     _write_suite(pytester)
@@ -85,11 +70,9 @@ def test_a_marker_alone_still_fails_a_test_that_outruns_it(
 def test_the_scale_relaxes_a_marker_no_command_line_flag_can_reach(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The whole point: `--timeout` cannot lift a marker, `PYTEST_TIMEOUT_SCALE` can.
+    """`--timeout` cannot lift a marker; `PYTEST_TIMEOUT_SCALE` can.
 
-    The same suite, the same 1 s marker, the same 1.6 s of work — passing only because the scale
-    was applied to the marker itself. Removing the `_apply_timeout_scale(config, items)` call from
-    `pytest_collection_modifyitems` fails this and leaves the rest of the suite green.
+    The same 1 s marker over 1.6 s of work passes only because the scale reaches the marker itself.
     """
     monkeypatch.setenv("PYTEST_TIMEOUT_SCALE", "4")
     _write_suite(pytester)
@@ -99,17 +82,11 @@ def test_the_scale_relaxes_a_marker_no_command_line_flag_can_reach(
 def test_scaling_a_marker_keeps_the_timeout_method_it_carried(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`method="thread"` must survive the rewrite, or the Temporal hang guard quietly reverts.
+    """`method="thread"` survives the rewrite of a scaled marker.
 
-    `_get_item_settings` reads timeout *and* method off the one closest marker, so a scaled
-    replacement that dropped `**kwargs` would return every Temporal-backed module to the `signal`
-    method — which cannot interrupt a thread blocked in `temporalio`'s Rust core, the exact
-    28-minute silent hang the method was switched for. Nothing would show it locally: those
-    modules skip without a Temporal server.
-
-    Observable because the two methods fail differently. `thread` dumps every stack and calls
-    `os._exit(1)`, so the session ends with no test outcome at all; `signal` reports an ordinary
-    failure. Asserting on the absence of a normal outcome is what distinguishes them.
+    The `signal` method cannot interrupt a thread blocked in `temporalio`'s Rust core. The two
+    methods fail differently: `thread` dumps stacks and calls `os._exit(1)`, leaving no test
+    outcome, so the assertion is on the absence of a normal outcome.
     """
     monkeypatch.setenv("PYTEST_TIMEOUT_SCALE", "2")
     pytester.makeconftest(_CONFTEST)
@@ -152,39 +129,23 @@ def test_the_scale_defaults_to_one_and_refuses_nonsense(monkeypatch: pytest.Monk
 
 
 def test_the_knob_does_not_wear_the_products_config_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`CHEMCLAW_*` is a claim: the key comes from the one `pydantic-settings` config.
+    """The knob does not use the `CHEMCLAW_*` prefix.
 
-    This one does not and must not — how loaded the machine is has nothing to do with a deployment,
-    and `core/config/`'s parity test requires every field to appear in `.env.example`. Under the old
-    name the claim was false and only *invisible*: prose-contract rule 7 fails any `CHEMCLAW_*` key
-    that is not a `Settings` field, and it reads the operator corpus, which `tests/README.md` is
-    outside of. Measured before the rename — one sentence about it in `README.md`, the natural place
-    to tell someone how to run the suite on a loaded machine — `make prose-validate` failed with
-    "names CHEMCLAW_TEST_TIMEOUT_SCALE, which is not a Settings field".
+    That prefix claims a `Settings` field, and machine load has nothing to do with a deployment;
+    prose-contract rule 7 fails any `CHEMCLAW_*` key that is not one.
     """
-    # **The real knob is cleared first, and leaving it out made this test fail for exactly the
-    # person the suite tells to set it.** `PYTEST_TIMEOUT_SCALE` is what the timeout banner
-    # prescribes on a loaded machine ("re-run with PYTEST_TIMEOUT_SCALE=4"), and with it set in the
-    # environment `timeout_scale()` correctly returns 4.0 — so the assertion below failed on a
-    # reading that had nothing to do with the prefix it is about. Found by following that advice.
+    # Cleared first, since the timeout banner tells a user to set it and `timeout_scale()` would
+    # then read it.
     monkeypatch.delenv("PYTEST_TIMEOUT_SCALE", raising=False)
     monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", "8")
     assert timeout_scale() == 1.0, "the product prefix must not name a pytest knob"
 
 
 def test_a_run_says_how_many_postgres_backed_tests_never_ran(pytester: pytest.Pytester) -> None:
-    """The count of what an unreachable database took away is measured, never written down.
+    """A run reports how many Postgres-backed tests never ran, counted by the run itself.
 
-    `CLAUDE.md` warns that a green local run can mean the durable layer never executed, and it
-    stated the size of that as a number — "~157 Postgres tests" — which was stale by ~38% in the
-    direction that understates the risk it exists to warn about (216 measured). A count in prose
-    describes the suite on the day someone counted it; this one is produced by the run that is
-    reporting it, which is what `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` asks
-    for wherever a count is worth having at all.
-
-    Driven through a real session that skips with the real marker `tests/pg.py` writes, because the
-    epilogue matches on that reason string and a hand-called helper would only prove the matcher
-    agrees with itself.
+    Driven through a real session skipping with the real `tests/pg.py` marker, because the epilogue
+    matches on that reason string.
     """
     pytester.makeconftest(_CONFTEST)
     pytester.makepyfile(

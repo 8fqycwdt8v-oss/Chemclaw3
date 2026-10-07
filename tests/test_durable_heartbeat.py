@@ -1,9 +1,7 @@
-"""`chemclaw.durable.heartbeat.beating` — the shared heartbeat-while-waiting idiom (Conn-F2).
+"""`chemclaw.durable.heartbeat.beating` — the shared heartbeat-while-waiting idiom.
 
-Extracted once it had three independent copies: `connectors.calc`'s two CREST jobs (REV-3,
-D-136), and `connectors.bo`'s BoFire fit/acquisition step. This is the generic timer behavior;
-each caller's own wiring (that it passes *its* configured heartbeat timeout through) is pinned
-where that caller lives (`tests/test_calc_heartbeat.py`, `tests/test_bo_heartbeat.py`).
+The generic timer behaviour; each caller's wiring (passing its own configured heartbeat timeout)
+is pinned where the caller lives (`tests/test_calc_heartbeat.py`, `tests/test_bo_heartbeat.py`).
 """
 
 import ast
@@ -66,11 +64,8 @@ def test_beating_propagates_the_failure_it_wraps(monkeypatch: pytest.MonkeyPatch
 def test_the_beat_interval_tracks_the_timeout_argument(monkeypatch: pytest.MonkeyPatch) -> None:
     """The beat cadence scales with the caller's *own* `heartbeat_timeout_seconds` argument.
 
-    Each caller passes its own configured setting (`xtb_job_heartbeat_timeout_seconds`,
-    `bo_activity_heartbeat_timeout_seconds`, ...) rather than a fixed constant, so a deployment
-    that shortens one caller's timeout must shorten only that caller's beat interval. Proven by
-    running the same 1.3 s wait against two different timeouts: a short one (interval ~1 s) beats
-    at least once, a long one (interval well past 1.3 s) never does.
+    So shortening one caller's timeout shortens only its interval. The same 1.3 s wait against two
+    timeouts: the short one beats at least once, the long one never.
     """
 
     async def _slow() -> str:
@@ -90,20 +85,12 @@ def test_the_beat_interval_tracks_the_timeout_argument(monkeypatch: pytest.Monke
 def test_a_sub_second_timeout_still_beats_no_faster_than_once_a_second(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The floor, asserted as a rate rather than as an expression.
+    """A sub-second timeout still beats no faster than once a second.
 
-    `max(1.0, timeout / 4)` is the whole reason the hand-rolled copies had to go: three modules
-    derived the interval as `timeout / 3` with no floor, so a deployment that set the timeout to a
-    fraction of a second turned a sibling task into several `activity.heartbeat()` calls per second
-    against the Temporal server for the whole chunk. A 0.4 s timeout would give a 0.13 s interval
-    without the floor — about ten beats across the wait below; with it, at most one.
-
-    The floor and the schema constraint are not the same guard, which is why both exist.
-    `document_sync_heartbeat_timeout_seconds` now carries `Field(gt=0)` — it was declared bare —
-    so a zero or negative timeout is refused at load rather than surviving into an unbounded busy
-    loop. A *positive* sub-second timeout is still a legal setting, and this floor is what keeps it
-    from flooding the server; the constraint cannot express that, because the right value depends
-    on the beat rate rather than on the number.
+    `max(1.0, timeout / 4)`: without the floor a sub-second timeout would heartbeat the Temporal
+    server several times a second. `Field(gt=0)` on the setting refuses zero or negative at load; a
+    positive sub-second timeout is legal, and only the floor keeps it from flooding the server.
+    Asserted as a rate.
     """
     beats: list[str] = []
     monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a[0])))
@@ -119,13 +106,11 @@ def test_a_sub_second_timeout_still_beats_no_faster_than_once_a_second(
 async def test_cancelling_the_wrapper_cancels_the_work_it_wraps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`beating(x)` must behave like `await x` under cancellation, or adopting it is a regression.
+    """Cancelling the wrapper cancels the work it wraps.
 
-    The awaitable has to run as a task so the timer can run beside it, and `asyncio.wait` does not
-    cancel what it was waiting on when the waiter is cancelled. The two sync activities that
-    adopted this helper previously awaited their work directly, so a cancelled activity interrupted
-    a half-written chunk; without this, the chunk would have kept running — and kept committing —
-    after the activity returned.
+    The work runs as a task beside the timer, and `asyncio.wait` does not cancel what it waits on;
+    `beating(x)` must behave like `await x`, or a cancelled activity keeps committing chunks after
+    it returns.
     """
     monkeypatch.setattr(activity, "heartbeat", lambda *a: None)
     # Asked of the *wrapped coroutine*, not of a wall-clock guess: a first version of this test
@@ -147,14 +132,9 @@ async def test_cancelling_the_wrapper_cancels_the_work_it_wraps(
     wrapped.cancel()
     with pytest.raises(asyncio.CancelledError):
         await wrapped
-    # No sleep here, deliberately. A third version of this test had one — "let the inner task
-    # act on its cancellation" — and that sleep was doing the waiting the helper should do:
-    # `task.cancel()` only *requests* cancellation, so the wrapper was unwinding while the
-    # work was still in its `except`/`finally`. The helper now awaits the cancelled task, so
-    # by the time `await wrapped` returns the work has already finished unwinding.
-    # Asserted *inside* the loop, deliberately: `asyncio.run` cancels every pending task on
-    # its way out, so a check placed after it sees the work cancelled either way. That was the
-    # second version of this test, and it also passed against the unfixed helper.
+    # No sleep here: the helper itself awaits the cancelled task, so the work has finished unwinding
+    # when `await wrapped` returns. Asserted inside the loop, because `asyncio.run` cancels pending
+    # tasks on exit and a later check would pass either way.
     assert reached_cancel, "the wrapped work was left running after the wrapper was cancelled"
 
 
@@ -163,16 +143,13 @@ async def test_cancellation_waits_for_the_work_to_finish_unwinding(
 ) -> None:
     """The order, not just the fact: the work's cleanup completes *before* the caller unwinds.
 
-    `task.cancel()` alone only files a request. Measured on the same loop, with the work holding a
-    50 ms cleanup in its `except` block:
+    `task.cancel()` only files a request:
 
         cancel + raise    -> ['wrapper-returned', 'cleanup-start', 'cleanup-done']
         plain `await x`   -> ['cleanup-start', 'cleanup-done', 'wrapper-returned']
 
-    That difference is the whole reason `eln_sync` and `document_sync` adopting this helper had to
-    be checked: both previously awaited their work directly, where a cancelled activity does not
-    return until the chunk's `finally` — the DB commit — is done. Anything less makes the window
-    "the length of the work's cleanup" instead of closing it.
+    The sync activities rely on the second order, so a cancelled activity returns only after the
+    chunk's `finally` (the DB commit) is done.
     """
     monkeypatch.setattr(activity, "heartbeat", lambda *a: None)
     events: list[str] = []
@@ -199,13 +176,11 @@ async def test_cancellation_waits_for_the_work_to_finish_unwinding(
 async def test_a_failing_heartbeat_does_not_leave_the_work_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation is not the only way out of the loop, and the other way leaked the same work.
+    """A failing heartbeat does not leave the work running.
 
-    `activity.heartbeat` raises outside an activity context, and can raise inside one if the
-    details payload fails to serialise. With the handler keyed on `CancelledError`, that exception
-    left the wrapper while the wrapped task ran on detached — measured, the work printed
-    "completed" a second *after* the wrapper had already raised, which is the exact defect the
-    cancellation fix was written to close, reached through a different door. `finally` covers both.
+    `activity.heartbeat` can raise (outside an activity context, or on an unserialisable payload);
+    that exit must cancel the work too, so the cleanup is in a `finally` rather than a
+    `CancelledError` handler.
     """
 
     def _boom(*_: object) -> None:
@@ -223,10 +198,9 @@ async def test_a_failing_heartbeat_does_not_leave_the_work_running(
         outcome.append("ran to completion after the wrapper raised")
         return "done"
 
-    # 4 s timeout -> a 1 s beat interval, so the first beat lands while the work is still
-    # waiting and takes the wrapper out through the non-cancellation path. The work then
-    # outlives the wrapper by 0.4 s, which is what makes "still running" observable rather
-    # than a wall-clock guess — the trap the two earlier versions of the sibling test fell in.
+    # A 4 s timeout gives a 1 s beat, so the first beat lands while the work waits and exits through
+    # the non-cancellation path; the work outlives the wrapper by 0.4 s, making "still running"
+    # observable.
     with pytest.raises(RuntimeError, match="Not in activity context"):
         await beating(_slow(), "interrupted", 4.0)
     await asyncio.sleep(0.8)
@@ -234,12 +208,10 @@ async def test_a_failing_heartbeat_does_not_leave_the_work_running(
 
 
 def test_the_beat_interval_has_exactly_one_derivation_in_the_tree() -> None:
-    """No module may divide a heartbeat timeout by hand again — that is what diverged.
+    """The beat interval has exactly one derivation in the tree.
 
-    `durable/heartbeat.py` was extracted at the Rule of Three and then three further copies were
-    written beside it (`durable/document_sync.py` twice, `durable/eln_sync.py` once), each dividing
-    by 3 where the helper divides by 4 and none carrying its floor. The helper existing is not what
-    prevents the next copy; this is.
+    Hand-rolled copies diverged from the helper (a different divisor, no floor); the helper existing
+    does not prevent the next copy, this does.
     """
     offenders: list[str] = []
     for f in sorted(_SRC_ROOT.rglob("*.py")):
@@ -261,18 +233,12 @@ def test_the_beat_interval_has_exactly_one_derivation_in_the_tree() -> None:
 def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one multi-hour activity in the tree that neither beat nor had a budget of its own.
+    """The republish walk beats and is bounded below the job ceiling.
 
-    `RepublishResultsWorkflow` runs a full scan of two never-pruned tables and gave its single
-    activity **the parent's whole `connector_job_timeout_seconds`** — the same number
-    `ConnectorJobWorkflow` uses as the child's execution timeout, so the two expired within
-    milliseconds of each other and the activity's `BAD_DATA_RETRY` could never be spent. It also
-    carried no `heartbeat_timeout` and never heartbeated, unlike every other long activity here
-    (`calc`, `bo`, ELN, label, corpus, document, template steps), so a worker killed ten minutes
-    into the walk went unnoticed for the whole five hours.
-
-    Both halves are asserted here: the arguments the workflow hands the activity, and that the walk
-    actually beats while it runs.
+    A full scan of two never-pruned tables must not take the parent's whole
+    `connector_job_timeout_seconds` (it would expire with the child and its retry could never be
+    spent), and without a heartbeat a killed worker goes unnoticed for hours. Asserts both the
+    arguments the workflow passes and that the walk beats.
     """
     from chemclaw.connectors.results import workflows as republish
     from chemclaw.connectors.results.specs import RepublishSpec
@@ -291,9 +257,8 @@ def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
     async def _capture(*args: Any, **kwargs: Any) -> dict[str, int]:
         """Stand in for the activity, and answer with the report `_walk` itself produces.
 
-        Not a dict literal: this test is about timeouts, and a hand-written key set is a second
-        definition of the activity's report that goes stale silently the next time the walk counts
-        something new — which is exactly what happened when the walk gained its fourth bucket.
+        Not a dict literal, which would be a second definition of the report that goes stale when
+        the walk counts something new.
         """
         captured.update(kwargs)
         monkeypatch.setattr(republish, "backfill_cached", _empty_walk)
@@ -340,22 +305,12 @@ def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
 def test_the_eviction_sweep_beats_inside_the_budget_it_reports_within(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one background sweep on this queue that had no heartbeat at all.
+    """The eviction sweep beats inside the budget it reports within.
 
-    `prune_expired_rows`, `reindex_notes_activity` and `drain_result_publications` are its three
-    siblings and every one of them beats; `evict_cold_artifacts` ran two unbounded `DELETE`
-    statements over the whole `artifact_blobs`x`calculation_artifacts` join under a ten-minute
-    `retention_timeout_seconds` and reported nothing in between. So a worker killed thirty seconds
-    into a pass was invisible for the remaining nine and a half minutes, on a job whose entire
-    purpose is to run unattended on a Schedule.
-
-    No new setting: the activity is already budgeted by `retention_timeout_seconds`, and
-    `Settings._the_heartbeat_fits_inside_the_budget_it_reports_within` already keeps
-    `background_activity_heartbeat_timeout_seconds` strictly below it — so the beat this asserts is
-    covered by the guard that already exists rather than by one more number to keep in step.
-
-    Both halves, exactly as the republish walk above: the arguments the workflow hands the
-    activity, and that the sweep actually beats while it runs.
+    `evict_cold_artifacts` runs unbounded `DELETE`s under `retention_timeout_seconds`; without a
+    beat a killed worker is invisible for the whole budget. No new setting:
+    `Settings._the_heartbeat_fits_inside_the_budget_it_reports_within` already keeps the heartbeat
+    timeout below that budget. Asserts the dispatch arguments and that the sweep beats.
     """
     from chemclaw.core.config import settings
     from chemclaw.durable import artifact_eviction
@@ -402,19 +357,13 @@ def test_the_eviction_sweep_beats_inside_the_budget_it_reports_within(
 
 
 def test_every_beating_activity_in_durable_is_dispatched_with_a_heartbeat_timeout() -> None:
-    """A beat nobody is listening for is not liveness, and this was true of one activity.
+    """Every beating activity in `durable` is dispatched with a heartbeat timeout, and vice versa.
 
-    `mirror_commitments_activity` reached an external portfolio system and then wrote every row it
-    got back under a 300 s start-to-close with **no** `heartbeat_timeout` — the only gap in an
-    otherwise complete sweep of eleven heartbeat/budget pairs. Temporal only checks the interval a
-    dispatch declares, so an activity that beats without one is invisible for its whole budget, and
-    a dispatch that declares one over an activity that never beats kills healthy work at it. Both
-    are the same missing pairing, so both are asserted here.
-
-    Derived from the tree rather than listed: the beating activities are the ones whose own body
-    calls `activity.heartbeat()` or `durable.heartbeat.beating(...)`, and the dispatches are the
-    `execute_activity(<name>, ...)` sites that name them. A new long activity is covered by being
-    written, which is the property a list of eleven pairs does not have.
+    Temporal checks only the interval a dispatch declares, so a beating activity without one is
+    invisible for its whole budget, and one declared over an activity that never beats kills healthy
+    work. Derived from the tree: activities whose body calls `activity.heartbeat()` or
+    `beating(...)`, and the `execute_activity(<name>, ...)` sites naming them, so a new activity is
+    covered when written.
     """
     beats: set[str] = set()
     dispatched: dict[str, set[str]] = {}

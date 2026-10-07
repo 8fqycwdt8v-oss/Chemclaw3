@@ -1,14 +1,9 @@
 """The four routes that are the whole of a chemist's control over their own skills.
 
-**This file is the control, the way `tests/test_api_workflows.py` is for an approval.**
-`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved` grants the personal tier its
-exemption from review on conditions it states as requirements: a person can see what is acting on
-their turns, remove it, and nobody else's turn can reach it. Three of those four conditions are
-route behaviour, so if what is here does not hold, the exemption is a claim rather than a bargain.
-
-`tests/test_local_skills.py` drives the tier itself — the mount, the refusal, the namespace. This
-drives the surface: who is scoped to what, which refusals are 4xx rather than 500s, and the two
-bounds that keep one person's judgment from becoming every turn's prefix.
+`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved` exempts the personal tier from
+review on conditions that are route behaviour: a person can see and remove what acts on their
+turns, and nobody else's turn can reach it. This drives the surface (scoping, 4xx refusals, the
+two bounds); `tests/test_local_skills.py` drives the tier itself.
 """
 
 import asyncio
@@ -44,10 +39,8 @@ def _no_connectors(profile: str | None = None) -> list[object]:
 def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryStore:
     """A real `BaseStore` in place of the deployment's `AsyncPostgresStore`.
 
-    Patched at `turn_store` rather than by configuring Postgres, because what these tests are about
-    is the routes' own behaviour over a store that answers — and `InMemoryStore` satisfies the same
-    `BaseStore` contract the tier is written against. The 503 case patches it back to `None`, which
-    is the only reason this is a fixture rather than a module-level patch.
+    Patched at `turn_store`; `InMemoryStore` satisfies the same contract. A fixture so the 503 case
+    can patch it back to `None`.
     """
     backing = InMemoryStore()
 
@@ -127,9 +120,7 @@ def test_a_document_that_is_not_a_skill_is_refused_by_name(
 ) -> None:
     """422 rather than a stored file the listing then skips, or a 500 from the driver.
 
-    The failure mode a tier with no validator has is worse than a refusal: the person is told it
-    was saved and no turn ever sees it. The NUL case is the one that was a 500 — the store rejects
-    it at the driver, far from the field that carried it, so the person learns nothing.
+    A NUL byte would otherwise fail at the driver, far from the field that carried it.
     """
     response = client.post("/skills/mine", json={"body": body})
 
@@ -140,10 +131,8 @@ def test_a_document_that_is_not_a_skill_is_refused_by_name(
 def test_a_personal_skill_may_not_take_a_shipped_skills_name(client: TestClient) -> None:
     """409, because a collision silently decides which of two documents a model is given.
 
-    Refused here because here there is a person to tell. The collision that arrives the other way
-    round — a name entering `skills/` after somebody saved theirs — has no route to refuse at, and
-    `tests/test_local_skills.py::test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims` is
-    where that half is decided.
+    The reverse collision — a shipped skill arriving after a personal one — is decided in
+    `tests/test_local_skills.py::test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims`.
     """
     contested = sorted(shipped_skill_names())[0]
 
@@ -159,14 +148,9 @@ def test_the_tier_is_bounded_in_both_currencies(
 ) -> None:
     """A row cap and a size cap, because either alone is unbounded in the other.
 
-    **The row cap is a bound on prefix spend, not on storage**, and nothing enforced it: the memory
-    tier's cap lives in `scratchpad.BoundedStoreBackend`, which mounts `/memories/` and not this
-    root. Every personal skill's name and description sit in the system message of every turn its
-    owner takes, so an unbounded row count is an unbounded prefix.
-
-    Refused rather than evicted — a memory a turn wrote may be dropped silently, and judgment a
-    person authored may not — and a *replacement* is allowed at the cap, or a chemist who filled it
-    could not correct any of them.
+    The row cap bounds prefix spend: every personal skill's name and description sit in each of its
+    owner's turns. Refused rather than evicted (authored judgment is never dropped silently), and a
+    replacement is allowed at the cap.
     """
     monkeypatch.setattr(settings, "agent_local_skills_max", 3)
     monkeypatch.setattr(settings, "agent_local_skill_max_chars", 200)
@@ -195,11 +179,8 @@ def test_a_deployment_that_keeps_no_store_says_so_rather_than_answering_empty(
 ) -> None:
     """503 on every route rather than a confident empty answer.
 
-    An empty list about a mechanism that is not running reads as "you have no skills" when the
-    truth is "this deployment cannot keep any".
-
-    All four, not one: a list that 503s beside a save that appears to succeed is the worse shape,
-    since the person is told their judgment was kept and it was not.
+    "You have no skills" and "this deployment cannot keep any" differ; all four routes, so a save
+    never appears to succeed beside a 503 listing.
     """
 
     async def _none() -> Any:
@@ -219,11 +200,10 @@ def test_a_deployment_that_keeps_no_store_says_so_rather_than_answering_empty(
 def test_the_listing_route_answers_for_a_tier_larger_than_one_page(
     client: TestClient, store: InMemoryStore
 ) -> None:
-    """`BaseStore.asearch`'s default limit is 10, and the route inherited it.
+    """The listing route answers for a tier larger than one page.
 
-    Driven through the route rather than the function because this is the surface the licence
-    condition names: a chemist with twelve skills was shown ten, and the two beyond the page could
-    not be deleted through the only route that deletes.
+    `BaseStore.asearch` defaults to 10 results; skills beyond the page would be invisible and
+    undeletable.
     """
     names = [f"skill-{index:02d}" for index in range(12)]
     for name in names:

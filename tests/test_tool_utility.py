@@ -1,15 +1,10 @@
-"""The tool-utility A/B: what the control arm actually is, and what a paired score may not absorb.
+"""The tool-utility A/B: what the control arm is, and what a paired score may not absorb.
 
-Three separate claims, because each fails differently:
-
-- The **scale** orders the judge's verdicts the way the comparison needs, `fabricated` below
-  `unserved`. A scale that scored them level would report the failure mode this measurement exists
-  to find (tools give a model something to invent with) as a tie.
-- The **pairing** drops a grader failure and refuses a missing arm. Those are opposite decisions
-  about superficially similar inputs, and getting the second one wrong silently compares different
-  question sets.
-- The **control arm** is a real narrowing rather than a name: the profile that stands for "no
-  tools" must actually build an agent with none, and it must not be in the shipped profile set.
+- The **scale** orders `fabricated` below `unserved`, so inventing an answer cannot tie with
+  declining.
+- The **pairing** drops a grader failure and refuses a missing arm, so different question sets are
+  never compared.
+- The **control arm** really builds an agent with no tools, and is not in the shipped profile set.
 """
 
 import subprocess
@@ -57,12 +52,9 @@ def _verdict(probe_id: str, verdict: str) -> Judgement:
 
 
 def test_a_fabricated_answer_scores_below_a_refusal() -> None:
-    """The one ordering the comparison is *for*, not a general preference about verdicts.
+    """A fabricated answer scores below a refusal.
 
-    ChemToolAgent's finding is that tool augmentation introduces its own error class. If
-    `fabricated` and `unserved` were both 0 the arm that invented a citation and the arm that
-    declined would produce an identical delta, and the A/B would be unable to report the harm it
-    was built to look for.
+    Tool augmentation introduces its own error class; scoring both at 0 would hide it in the delta.
     """
     assert VERDICT_SCORES["fabricated"] < VERDICT_SCORES["unserved"]
     assert VERDICT_SCORES["unserved"] < VERDICT_SCORES["partial"] < VERDICT_SCORES["served"]
@@ -112,9 +104,7 @@ def test_buckets_are_summarised_apart_because_they_ask_opposite_questions() -> N
 def test_the_control_arm_builds_an_agent_with_no_capability_tools() -> None:
     """`tool_names: []` is structural: the compiled graph never holds the tools.
 
-    Asserted through `_capability_tools`, the function `build_langgraph_agent` passes to
-    `create_agent`, rather than through the YAML — the file saying `[]` is a claim, and this is the
-    thing the claim is about.
+    Asserted through `_capability_tools`, which `build_langgraph_agent` passes to `create_agent`.
     """
     profile = _load(_CONTROL_PROFILE)
 
@@ -127,11 +117,9 @@ def test_the_control_arm_builds_an_agent_with_no_capability_tools() -> None:
 
 
 def test_the_control_arm_is_not_in_the_shipped_profile_set() -> None:
-    """It is a measurement instrument, so no deployment advertises it without asking.
+    """The control arm is a measurement instrument, so no deployment offers it by default.
 
-    `data/profiles` is what `CHEMCLAW_PROFILES_DIR` defaults to and what every front door offers;
-    a toolless agent reachable by name from a session request is not a capability anybody should
-    get by picking it off a list.
+    `data/profiles` is what every front door offers.
     """
     shipped = {path.stem for path in (_REPO_ROOT / "data/profiles").glob("*.yaml")}
 
@@ -141,13 +129,10 @@ def test_the_control_arm_is_not_in_the_shipped_profile_set() -> None:
 
 
 def test_the_control_arm_asks_the_front_door_for_its_profile_by_name() -> None:
-    """The wiring the whole comparison rests on: `run_probe(profile=…)` must reach `POST /sessions`.
+    """`run_probe(profile=…)` reaches `POST /sessions` with the profile name.
 
-    Driven through a mock front door that records the body, because everything else here is
-    arithmetic over verdicts — if this one call sent `{}` the two arms would be the same agent and
-    every number in the report would be a comparison of the default profile with itself. The
-    control arm being *structurally* toolless (asserted above) is worth nothing if the request
-    never names it.
+    If the request omitted it, both arms would be the default agent. Driven through a mock front
+    door that records the body.
     """
     import asyncio
     import json
@@ -185,15 +170,10 @@ def test_the_control_arm_asks_the_front_door_for_its_profile_by_name() -> None:
 
 
 def test_a_sample_is_spread_across_the_corpus_rather_than_its_first_n() -> None:
-    r"""`--sample N` must draw across every section, at every N — including N above half.
+    r"""`--sample N` draws across every section, at every N, including N above half.
 
-    The claim is the point of the flag: the corpus loads in file order, which is section order, so
-    a draw that is really `probes[:N]` asks one or two user stories' questions and reports them as
-    a reading of the corpus. The first implementation was `probes[::len(probes) // n][:n]`, which
-    is that exact anti-pattern for every `n > len/2` — an integer stride of 1 makes the slice a
-    no-op — and dropped the tail sections below it, because truncating a strided list cuts from the
-    end. Both ends and the degenerate middle are asserted here rather than the value that motivated
-    the fix, per this repository's own lesson about testing a bound at one end only.
+    The corpus loads in section order, so a draw that is effectively `probes[:N]` would report a few
+    user stories as the corpus. Both ends and the middle are asserted.
     """
     from chemclaw.cli.live_probes import _systematic_sample
 
@@ -204,12 +184,8 @@ def test_a_sample_is_spread_across_the_corpus_rather_than_its_first_n() -> None:
         assert len(drawn) == n, f"n={n} drew {len(drawn)}"
         assert len(set(drawn)) == n, f"n={n} drew a duplicate"
         assert drawn == sorted(drawn), f"n={n} lost corpus order"
-        # **Every stratum is represented, which is the property rather than a proxy for it.** Cut
-        # the corpus into `n` equal-width bands and each must contribute exactly one probe — that
-        # is what "spread across every section" means, and it is what the strided version broke at
-        # both ends (stride 1 put every draw in the first bands; truncation emptied the last).
-        # A first attempt asserted "the last draw is in the final tenth" instead and was simply
-        # wrong at n=2, where the correct stratified draw is the first probe of each half.
+        # Cut the corpus into `n` equal-width bands: each must contribute exactly one probe, which
+        # is what "spread across every section" means.
         bands = [int(i * len(corpus) / n) for i in range(n + 1)]
         for low, high, picked in zip(bands[:-1], bands[1:], drawn, strict=True):
             assert low <= picked < high, f"n={n}: {picked} is outside its band [{low}, {high})"
@@ -234,15 +210,10 @@ def test_a_sample_is_reproducible_and_larger_than_the_corpus_is_the_corpus() -> 
 
 
 # ---------------------------------------------------------------------------------------------
-# The control arm is a *prompt* contrast, and that has to be checked against the documents.
+# The control arm is a prompt contrast, checked against the documents.
 #
-# `D-2026-09-14-tools-were-never-the-variable` decided two things: `no-tools.yaml` stays and is
-# labelled as a prompt contrast, and every site that quoted the pair as a tools result is restated.
-# Neither was carried out in the commit that decided them, and nothing could have caught that —
-# `test_the_prompt_swapping_arm_cannot_be_read_as_a_tools_contrast` asserts properties of the
-# *fixture*, and `prose-validate` only checks that a citation resolves. So the claim "no document
-# reads this arm as a tools contrast" was held by nobody, and a relabelling is a one-line edit away
-# from being undone. This is the half that reads the documents.
+# `no-tools.yaml` swaps the system prompt as well as the tools, so no document may read it as a
+# tools-only contrast. The fixture tests cannot see the documents; these do.
 
 _AB_ANCHORS = ("no-tools", "_AB_BASELINE_PROFILE", "live-ab", "--suite")
 """A line that names the A/B or its control arm. The baseline *is* `no-tools`, so a sentence about
@@ -302,16 +273,11 @@ def _document_lines() -> list[tuple[str, int, str]]:
 
 
 def test_no_live_document_reads_the_control_arm_as_a_tools_contrast() -> None:
-    """The decision that was taken and not carried out, now held by the tree rather than by prose.
+    """No live document reads the control arm as a tools contrast.
 
-    A site may describe the A/B as a comparison about tools only if the same paragraph says the
-    prompt moved as well. Five did not when the ADR was merged — the module that *computes* the
-    comparison among them — and the sixth was the control arm's own header, which opened "The
-    control arm of the tool-utility A/B" and enumerated what it still carried without naming the
-    13,895 characters of system prompt it does not.
-
-    Its reach is deliberately the whole tracked tree minus the records that may not change, so a
-    new document inherits the rule without anybody adding a path here.
+    A site may describe the A/B as about tools only if the same paragraph says the prompt moved as
+    well. The scan covers the whole tracked tree minus the immutable records, so new documents
+    inherit the rule.
     """
     lines = _document_lines()
     assert len(lines) > 10_000, "the corpus is too small to have been the repository"
@@ -338,12 +304,10 @@ def test_no_live_document_reads_the_control_arm_as_a_tools_contrast() -> None:
 
 
 def test_the_control_arm_labels_itself_as_a_prompt_contrast() -> None:
-    """The profile's own header, because that is the document every other site cites.
+    """The control arm's profile labels itself as a prompt contrast.
 
-    Checked by the two things a reader needs and a scan cannot infer from a keyword: that the file
-    says what it is *not*, and that the paragraph enumerating what it still carries names the prose
-    it replaces. The second is where the original header failed — it listed `task` and six file
-    verbs, which are the smallest thing this arm changes, and omitted the largest.
+    It must say what it is not, and its list of what it still carries must name the system prompt it
+    replaces, the largest thing the arm changes.
     """
     header = "\n".join(
         line
@@ -367,15 +331,11 @@ _SKILLS_CONTROL_PROFILE = _REPO_ROOT / "data/evals/profiles/skills-removed.yaml"
 
 
 def test_the_skills_arm_keeps_every_tool_and_reaches_no_skill() -> None:
-    """The arm that isolates the skills, driven on both halves of the claim it makes.
+    """The skills arm keeps every tool and reaches no skill.
 
-    Both assertions matter and neither implies the other. *Reaches no skill* is the treatment, and
-    *keeps every tool* is what makes the delta attributable — it is the property `no-tools.yaml` and
-    `tools-removed.yaml` cannot have, because `ToolScopedSkills` drops a skill whose every declared
-    tool went with the tools, so neither of those arms can move skills without moving tools.
-
-    Asserted against the permit predicate `skills_backend` composes rather than against the YAML:
-    the file saying `skill_names: []` is the claim, and this is the thing the claim is about.
+    Keeping every tool is what makes the delta attributable to skills; the toolless arms cannot
+    isolate skills, since `ToolScopedSkills` drops a skill whose tools are gone. Asserted against
+    the permit predicate `skills_backend` composes, not the YAML.
     """
     profile = _load(_SKILLS_CONTROL_PROFILE)
     permits = skill_permits(
@@ -387,10 +347,8 @@ def test_the_skills_arm_keeps_every_tool_and_reaches_no_skill() -> None:
 
     assert profile.name == "skills-removed"
     assert profile.skill_names == frozenset()
-    # Every discovered skill is refused, whatever it is called — and on **both** tiers, which is the
-    # half `skill_access.SkillNarrowing` made assertable. `ProfileScopedSkills` is deliberately in
-    # the stored narrowing too, because a tier acting on every turn escaping this arm would mean the
-    # arm measured a system that still had skills.
+    # Every discovered skill is refused on both tiers; `ProfileScopedSkills` is in the stored
+    # narrowing too, so no tier leaks a skill into this arm.
     assert [name for name in _SHIPPED_SKILL_NAMES if permits.filed(name)] == []
     assert [name for name in _SHIPPED_SKILL_NAMES if permits.stored(name)] == []
     # And the same predicate with `skill_names` unset refuses none of them — which is what makes

@@ -1,14 +1,9 @@
 """Changing how a campaign id is derived must move the rows, not orphan them.
 
-`D-2026-08-21-a-geometry-is-an-address-not-a-payload` folds case and whitespace into
-`campaign_id_for`, because the caller is a model re-emitting a decision space it just read back and
-`THF` against `thf` was two campaigns with two empty histories. That fix changes every id of a space
-carrying a capital letter — so without a re-key it would *cause* the failure it prevents, telling
-every chemist with a running campaign that their campaign is new.
-
-The re-key is possible at all because migration 031 stores the whole `OptimizationProblem` on the
-row ("so the row reconstructs the space that was searched"), which is what a Python-side derivation
-needs and what SQL alone could never do.
+`campaign_id_for` folds case and whitespace
+(`D-2026-08-21-a-geometry-is-an-address-not-a-payload`), which changes the id of any space with a
+capital letter; the re-key moves existing campaigns to their new ids. It works because each row
+stores the whole `OptimizationProblem`, which a Python-side derivation needs.
 """
 
 from __future__ import annotations
@@ -142,20 +137,11 @@ async def test_a_row_with_no_stored_problem_is_left_alone(caplog: pytest.LogCapt
 def test_the_cli_previews_by_default_and_writes_only_when_told(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one data-touching default in this package that ran the deletes without being asked.
+    """The CLI previews by default and writes only with `--apply`.
 
-    `--dry-run` was opt-in, so a bare `python -m chemclaw.cli.rekey_campaigns` issued `_UPSERT`,
-    `_MOVE_SUGGESTIONS` and `DELETE FROM bo_campaigns` and committed per campaign, with no
-    confirmation and no default preview. Both sibling commands take the opposite default and say
-    why — `erase_actor` ("Dry run by default because this is the one irreversible operation an
-    operator performs on live data") and `backfill_corpus` ("Run this first") — so an operator
-    reaching for this one to *see what it would do*, which is the habit those two teach, committed
-    a merge instead.
-
-    That the operation is idempotent and interrupt-safe, which its docstring argues and which is
-    true, is a different property from being reviewable before it runs: the merge is deliberately
-    lossy at the row level (two rows become one), so a wrong `campaign_id_for` derivation collapses
-    distinct campaigns irreversibly.
+    The merge is lossy at the row level, so a wrong derivation collapses distinct campaigns
+    irreversibly; being idempotent is not the same as being reviewable. This matches the sibling
+    operator commands' dry-run default.
     """
     from chemclaw.cli import rekey_campaigns
 
@@ -175,17 +161,10 @@ def test_the_cli_previews_by_default_and_writes_only_when_told(
 def test_the_cli_reports_what_it_examined_and_what_it_would_move(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The preview's one status line must actually render.
+    """The preview's one status line actually renders.
 
-    `logger.info("%d campaign(s) examined, %d %s", examined, verb, moved)` handed `%d` the verb,
-    so `logging` raised `TypeError` inside `getMessage`, printed "--- Logging error ---" on stderr
-    and dropped the record — while the process exited 0. The command's *only* output therefore
-    never appeared, in dry run or under `--apply`, which is the whole of what the preview-by-
-    default above exists to give an operator before a lossy merge.
-
-    Asserted through `record.getMessage()` rather than through `caplog.records` alone, because
-    that is the call that raises: `caplog` holds the format string and the unformatted args and is
-    green on a record that can never be printed.
+    Asserted through `record.getMessage()`, because a mismatched format string raises there while
+    `caplog.records` stays green.
     """
     from chemclaw.cli import rekey_campaigns
 

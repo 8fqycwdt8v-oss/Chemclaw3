@@ -4,9 +4,8 @@ AI agent for pharmaceutical/chemical process R&D: LangGraph conversation orchest
 Temporal durable jobs, Agent Skills, and a Markdown knowledge graph.
 
 **`ARCHITECTURE.md` is the map** — the four layers and what every directory in this
-repository is for. Read it before going looking for something. The original design and
-build order live in `docs/reference/architektur.md` and `docs/archive/plans/implementation-plan.md`; both are
-historical (see `CLAUDE.md`).
+repository is for. Read it before going looking for something. The decisions in force are
+`docs/decisions/CURRENT.md`; the original design in `docs/reference/architektur.md` is historical.
 
 ## Quickstart
 
@@ -25,8 +24,7 @@ make check              # fast inner loop: lint + mypy --strict + tests
 `make check` is the inner loop, not the gate: it skips the coverage floor, the evals, the
 dependency audit and the validators (`kg-validate`, `eln-validate`, `skill-validate`,
 `connector-validate`, `datasource-validate`, `sink-validate`, `channel-validate`,
-`template-validate`, `prose-validate`, `helm-validate`, `kind-validate`;
-`tests/test_repo_map.py` derives the list from the `ci` target). Run `make ci` before pushing — it
+`template-validate`, `prose-validate`, `helm-validate`, `kind-validate`). Run `make ci` before pushing — it
 is exactly what CI runs and is what `pre-commit` does not cover. `make help` lists every target.
 
 Postgres-backed tests skip when no database is reachable, and the run's closing summary says how

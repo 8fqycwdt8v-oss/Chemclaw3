@@ -1,27 +1,10 @@
 """A command added to a live workflow path is a replay break unless it is patched.
 
-**This file exists because the tree's first two `workflow.patched` calls were added after the
-defect, not before it.** `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` gave four
-workflows an outbound copy, and two of those calls landed *inside* a path that live runs had already
-executed. Temporal replays a workflow by matching the command sequence its code emits against the
-one its history records, so an `await` that was not there before is not a new feature to an open
-run — it is a mismatch:
-
-- `AwaitAnswerWorkflow._push` runs before `_wait_until`, so an open wait has `TimerStarted` where
-  the new code emits `ActivityTaskScheduled`. Measured: `[TMPRL1100] Nondeterminism error: Activity
-  machine does not handle this event`. That workflow is `failure_exception_types=[Exception]`, and
-  a `NondeterminismError` is an `ApplicationError`, so it **fails the wait** rather than parking —
-  leaving a `pending_requests` row `waiting` with no run that will settle it, for up to
-  `awaiting_max_days`.
-- `DigestWorkflow` emitted a *different activity type* at a position its history already held.
-  Measured: `Activity type of scheduled event 'deliver_digest_activity' does not match activity
-  type of activity command 'deliver_message_activity'`. It declares no `failure_exception_types`,
-  so it parks its workflow task forever — and the digest is a Schedule under
-  `ScheduleOverlapPolicy.SKIP`, so one wedged run silently skips every subsequent night.
-
-Neither is checkable in general: no test can know which edit to a workflow body adds a command to a
-path some run has already passed. What *is* checkable is the two ways a correct patch is undone
-afterwards, and both are silent — reusing an id, and deleting the code the off branch still needs.
+Temporal replays by matching the command sequence the code emits against the history, so a new
+`await` on a path open runs already passed is a nondeterminism error: it fails a workflow that
+declares `failure_exception_types` and parks one that does not. Which edit adds such a command is
+not checkable in general; what is checkable is the two silent ways a correct patch is undone
+afterwards — reusing an id, and deleting the code the off branch still needs.
 """
 
 import ast
@@ -44,9 +27,8 @@ def _patch_ids() -> list[tuple[str, str]]:
 def test_no_patch_id_is_ever_reused() -> None:
     """Two sites sharing an id is a replay break that no error names.
 
-    `workflow.patched` records one marker per id. A second site reading the same id sees the first
-    site's marker and takes the *new* branch on a history that never ran it — which is the very
-    mismatch the patch was added to avoid, now with the guard reporting success.
+    `workflow.patched` records one marker per id, so a second site would take the new branch on a
+    history that never ran it.
     """
     ids = [patch_id for _, patch_id in _patch_ids()]
     assert len(ids) == len(set(ids)), f"a patch id is used twice: {sorted(ids)}"
@@ -55,9 +37,8 @@ def test_no_patch_id_is_ever_reused() -> None:
 def test_a_patched_off_branch_still_has_the_code_its_histories_recorded() -> None:
     """The deprecated digest activity is what an open run replays; deleting it is the original bug.
 
-    Asserted by name rather than by behaviour because behaviour is exactly what it must not have:
-    it is scheduled only on the branch no new run takes. The guard is that the symbol survives a
-    tidying pass — "nothing calls this" is true of it and is not a reason to remove it.
+    Asserted by name, because it runs only on the branch no new run takes; "nothing calls this" is
+    not a reason to remove it.
     """
     from chemclaw.durable import digest
 
@@ -92,19 +73,9 @@ def test_the_off_branch_is_reachable_from_the_workflow_that_needs_it() -> None:
 def test_the_off_branch_activity_is_registered_on_the_queue_that_replays_it() -> None:
     """A symbol the worker does not serve is as unreplayable as a symbol that is gone.
 
-    **This is the arm the two tests above could not reach, and the gap was silent.** Both assert
-    the deprecated activity exists and is referenced; neither asserts the worker *serves* it.
-    Driven: removing `@durable_activity("background")` from `deliver_digest_activity` — leaving the
-    symbol, its `@activity.defn` and the `DigestWorkflow` reference all intact — left this file and
-    `tests/test_digest.py` at 20 passed and `tests/test_workflow_registry.py` plus
-    `tests/test_workers.py` at 14 passed. An open run replaying the off branch would then schedule
-    an activity type the `background-jobs` worker does not register, which surfaces as
-    `ApplicationError: NotFoundError: Activity function ... is not registered on this worker` and
-    wedges the run exactly as a deletion would.
-
-    So the assertion is registration on the same queue `DigestWorkflow` is registered on: the
-    decorator is what makes the shim reachable, and "nothing calls this" is as true of the
-    decorator as of the symbol it decorates.
+    Without `@durable_activity("background")` the off-branch activity would exist but be
+    unregistered, and a replaying run would fail with `Activity function ... is not registered on
+    this worker`. So this asserts registration on the queue `DigestWorkflow` is registered on.
     """
     from chemclaw.durable import digest
     from chemclaw.durable.registry import (
@@ -129,19 +100,9 @@ def test_the_off_branch_activity_is_registered_on_the_queue_that_replays_it() ->
 def test_every_durable_activity_is_registered_on_a_queue() -> None:
     """`@activity.defn` alone defines an activity nobody serves, and nothing else notices.
 
-    Found while driving the guard above and aiming the mutation one decorator short: removing
-    `@durable_activity("background")` from `acknowledge_digest` — a **live** activity on the
-    digest's own success path, not a replay shim — left `tests/test_workflow_registry.py`,
-    `tests/test_workers.py`, `tests/test_digest.py` and this file at 35 passed. The wedge is the
-    same either way: the workflow schedules a type the worker does not register, and Temporal
-    answers `NotFoundError: Activity function ... is not registered on this worker` at run time,
-    on a queue whose tests all pass.
-
-    Asserted over the whole package rather than for the one activity that exposed it, because the
-    defect is a decorator being dropped in a tidying pass and there is nothing special about which
-    one. 45 activities carry both today and the pairing is the invariant: `@activity.defn` says
-    what the function is, `@durable_activity` says who serves it, and an activity with only the
-    first is unreachable in exactly the way a deleted one is.
+    `@activity.defn` says what the function is and `@durable_activity` says who serves it; one
+    without the other is unreachable at run time on a queue whose tests all pass. Asserted over the
+    whole package, because any decorator can be dropped in a tidying pass.
     """
     durable = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable"
     unserved: list[str] = []
@@ -152,12 +113,8 @@ def test_every_durable_activity_is_registered_on_a_queue() -> None:
             if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
                 continue
             decorators = [ast.unparse(one) for one in node.decorator_list]
-            # `@activity.defn` and `@activity.defn(name="…")` both declare an activity, and the
-            # second form is what `durable/registry.py` documents as the way to override the
-            # name. Matching only the bare spelling made that form invisible to this scan: driven,
-            # `acknowledge_digest` — the live activity this guard exists for — rewritten as
-            # `@activity.defn(name="acknowledge_digest")` with `@durable_activity` removed left
-            # four files at 34 passed and the activity unregistered.
+            # `@activity.defn(name="…")` also declares an activity (the documented way to override
+            # the name), so both spellings are matched.
             if not any(
                 one == "activity.defn" or one.startswith("activity.defn(") for one in decorators
             ):
@@ -186,21 +143,16 @@ def test_every_patch_is_declared_in_this_file_so_its_removal_date_is_readable() 
         # `DigestWorkflow.run`. Removable the day after it ships: the digest is a nightly Schedule
         # and a run completes in minutes, so no history older than one night can be replayed.
         "digest-outbound-delivery-seam",
-        # `TemplateWorkflow.run`. Gates both of one release's command-sequence changes — the resume
-        # read at the start, and scheduling steps in waves instead of one at a time. Removable once
-        # no run open at that release can still be executing, which is bounded by
-        # `template_run_timeout_seconds`, the execution timeout `templates/registry.py` starts
-        # every run with (12.6 h at the shipped default). One marker and not two because they
-        # landed in one commit: a run either predates both or neither.
+        # `TemplateWorkflow.run`. Gates the resume read at the start and scheduling steps in waves,
+        # which landed together. Removable once no run open at that release can still be executing,
+        # bounded by `template_run_timeout_seconds`.
         "template-waves-and-resume",
         # `CheckInWorkflow.run`. Moves the stale-notice supersede from once per page to once per
         # batch. Removable the day after it ships, for the digest's reason: a nightly Schedule
         # whose run is bounded by its own interval, so no older history is still replayed.
         "check-in-supersede-per-batch",
         # `HypothesisTournamentWorkflow._settle`. Stops dispatching a check that names no target.
-        # Removable once no tournament started before it can still be open. That run is started
-        # with **no** execution timeout (`agent/durable_tools.py`), so the bound is its activities'
-        # own timeouts rather than a setting — check the namespace for open runs before removing.
+        # Started with no execution timeout, so check the namespace for open runs before removing.
         "tournament-empty-calls-refused-before-budget",
     }
     assert {patch_id for _, patch_id in _patch_ids()} == declared

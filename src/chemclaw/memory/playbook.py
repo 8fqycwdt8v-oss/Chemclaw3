@@ -1,17 +1,9 @@
-"""Distil cross-project patterns into `playbook` candidates + notes (plan step 5.4).
+"""Distil cross-project patterns into `playbook` candidates and notes.
 
-The semantic layer. A playbook captures a transformation that *recurs across projects* — the
-signal is reaction-fingerprint similarity (DRFP, Phase 3) grouping reactions that are the same
-kind of chemistry, kept only when the group spans >=2 distinct projects (a single project's
-repetition is episodic, not a transferable rule). `find_playbook_candidates` is deterministic
-(config threshold); `playbook_note` builds the note and **requires evidence references** — a
-playbook with no citations is inadmissible (plan 5.4: Belegverweise verpflichtend). The
-distilled rule's prose is the `playbook-distillation` skill's judgment, layered on this base.
-
-`playbook_note` is also what the observations tier calls when an observation crosses both
-promotion thresholds (`durable.observation_jobs`), so a `playbook` note has two provenances. It
-states which, on the note, derived from the id rather than asserted by the caller — see the
-function's docstring.
+The semantic layer: a transformation that recurs across projects, found by DRFP similarity and kept
+only when it spans >=2 projects (one project's repetition is episodic). `playbook_note` requires
+evidence citations. It is also used when an observation is promoted (`durable.observation_jobs`);
+the note records which provenance it has, derived from its id.
 """
 
 import logging
@@ -28,10 +20,8 @@ from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerpri
 
 logger = logging.getLogger(__name__)
 
-# The two things that mint a `playbook` note, told apart on the note itself. A reader of the file —
-# and every retrieval path that surfaces `source` — deserves to know which one wrote it: a cluster
-# distilled from reactions that recur across projects is a different kind of claim from a reading
-# the observations tier accumulated support for until a threshold promoted it (D-161).
+# The two producers of a `playbook` note, recorded in its `source`: cross-project distillation of
+# recurring reactions, or promotion of an accumulated observation.
 SOURCE_DISTILLATION = "memory:cross-project-distillation"
 SOURCE_PROMOTED_OBSERVATION = "memory:promoted-observation"
 
@@ -44,7 +34,7 @@ class PlaybookCandidate(BaseModel):
 
 
 class PlaybookError(ChemclawError):
-    """A playbook was built without the mandatory evidence references (plan 5.4)."""
+    """A playbook was built without the mandatory evidence references."""
 
 
 def find_playbook_candidates(
@@ -52,35 +42,21 @@ def find_playbook_candidates(
 ) -> list[PlaybookCandidate]:
     """Group structurally similar reactions that recur across >=2 projects.
 
-    Reactions are clustered by DRFP Tanimoto >= `threshold` (default
-    `playbook_similarity_threshold`) via connected components — **single-linkage**, so
-    similarity is transitive (A~B, B~C groups A, B, C even if A and C are not directly
-    similar). A cluster is a candidate only if its members carry at least two distinct
-    projects. Reactions without a project cannot evidence cross-project recurrence and are
-    ignored. Deterministic and order-independent (sorted output).
-
-    Pairwise Tanimoto clustering is O(n²) in fingerprintable reactions — fine at today's
-    scale, noticeable around ~10^4 reactions; the Postgres HNSW index (Phase 3) is the
-    escape hatch when that day comes.
+    Clustered by DRFP Tanimoto >= `threshold` (default `playbook_similarity_threshold`) via
+    connected components, i.e. single-linkage (similarity is transitive). A cluster qualifies only
+    with at least two distinct projects; reactions without a project are ignored. Deterministic and
+    order-independent. Pairwise clustering is O(n^2), fine at current scale.
     """
     floor = threshold if threshold is not None else settings.playbook_similarity_threshold
-    # A playbook is a rule worth *transferring*, so a failed or inconclusive run must not evidence
-    # one (gap KNW-3). Without this filter a recurring failure across two projects would distil
-    # into a recommendation — the exact inversion of what the record says.
-    #
-    # **A run whose outcome nobody stated is excluded by the same test, and that is deliberate.**
-    # Since `outcome_class` became optional (`D-2026-08-26-silence-is-not-a-successful-run`) an
-    # identity test against SUCCESS drops `None` for free. A playbook says "this works"; distilling
-    # one from runs nobody has assessed is a claim built on silence. The visible consequence is that
-    # a source recording no outcome distils nothing — which is the honest answer, and the reason the
-    # ADR names supplying the outcome as the thing such a site has to do.
+    # Only stated successes evidence a playbook: a failed, inconclusive or unassessed (`None`) run
+    # must not distil into a recommendation. A source recording no outcomes therefore yields no
+    # playbooks.
     successes = [r for r in reactions if r.outcome_class is OutcomeClass.SUCCESS]
     # Only *projected*, fingerprintable reactions can evidence cross-project recurrence, so
     # scope to those before clustering (a degenerate reaction is dropped by the fingerprinter).
     projected = [r for r in successes if r.project]
-    # The same one-line silent drop the observation miner had: a binding that maps no
-    # `outcome_class` (or no `project`) means this system never generates a single playbook, and
-    # nothing anywhere said so. Name the field, because the field is the fix.
+    # Name the field when nothing qualifies: a binding without `outcome_class` (or `project`) would
+    # otherwise never produce a playbook, silently.
     if reactions and not successes:
         logger.warning(
             "playbook mining saw %d reaction(s) and none carried a stated success outcome_class "
@@ -115,54 +91,15 @@ def playbook_note(
 ) -> Note:
     """Build an agent `playbook` note citing its evidence; reject one with no citations.
 
-    `note_id` is the full note id (e.g. from `chemclaw.memory.ids.stable_id("playbook", ...)`).
-    `summary` is the rule this playbook states; every playbook must cite the notes that evidence
-    it via `[[wikilinks]]`, so a process chemist meeting the rule as evidence can trace it back to
-    real experiments. Nothing gates the write
-    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), which is what makes the citation the
-    control rather than a courtesy: this line used to say the citations were what let a reviewer
-    check the rule *before approving the merge*, and there is no merge to approve.
+    `note_id` is the full note id (e.g. `chemclaw.memory.ids.stable_id("playbook", ...)`). Citations
+    are the control, letting a chemist trace the rule to real experiments. `evidence_note_ids` are
+    full note ids cited verbatim, so evidence need not be reactions.
 
-    `evidence_note_ids` are **full note ids**, cited verbatim. They used to be bare reaction ids
-    that this function prefixed with `reaction-`, which quietly required every caller's evidence to
-    be a reaction: the observations tier promotes findings whose evidence includes an `interaction`
-    note, and stripping-then-re-adding the prefix turned `interaction-42` into a link to
-    `reaction-interaction-42` — a dangling citation `kg-validate` fails the moment the promotion
-    lands. A function that cites what it is given cannot make that mistake.
-
-    **`source` is derived, not passed.** Both producers already say which one they are, in the id
-    they mint: cluster distillation anchors it on the cluster's smallest member, and promotion
-    anchors it on the observation's scope, so `is_cluster_anchored` tells them apart from the
-    arguments already here. Taking the provenance as a parameter instead would make it a claim the
-    caller asserts — and a claim can disagree with the id, which is exactly why
-    `memory.supersede._is_synthesis_minted` has to reconstruct the id rather than read `source`.
-    Deriving both from one function means the note's stated provenance and the retirement pass's
-    lineage rule cannot come apart.
-
-    **`minted_on` is what makes a distilled rule *reach* anybody, and its absence is why it did
-    not.** A playbook is the one note type that is entirely derived: nobody wrote it down on a day,
-    a miner concluded it. With `valid_from` unset the note means "open-ended, always been true",
-    which is what `Note.is_current` reads `None` as everywhere else — and `durable/digest._is_new`
-    reads it the same way, so a subscriber who had ever been told anything was never told about a
-    promotion. Passing the day it was minted is the honest statement: this became knowledge when
-    the corpus first supported it, which is the day the miner ran.
-
-    A parameter rather than `date.today()` inside, because one caller is a Temporal activity and
-    only activities may read a wall clock — `observation_jobs.workflow_safe_today` exists for
-    exactly this and is the argument it passes. `None` keeps the open-ended note, which is what a
-    test constructing one by hand wants.
-
-    **`distilled=False` is what this docstring used to assert instead of take as an argument.** It
-    said `summary` "is the distilled rule (from the `playbook-distillation` skill)" — true of the
-    promotion caller and false of the cluster miner, which passes a deterministic sentence stating
-    that a transformation recurs. Nothing has ever invoked that skill from a durable path
-    (`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge`), so the sentence was a
-    claim about a producer with no caller — the shape
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted elsewhere.
-
-    So the caller says which it is, and an undistilled one carries `UNDISTILLED_TAG`. That is what
-    makes it findable: `kg.analytics` reports them, so "which recurrences have nobody generalised"
-    is answerable rather than a thing a reader is told to go and do inside the note itself.
+    `source` is derived from the id via `is_cluster_anchored` rather than passed, so the stated
+    provenance cannot disagree with the id. `minted_on` becomes `valid_from`, so the digest reports
+    the playbook; it is a parameter because a Temporal workflow cannot read the wall clock (`None`
+    leaves it open-ended). `distilled=False` marks a deterministic recurrence statement rather than
+    a distilled rule and adds `UNDISTILLED_TAG`, which `kg.analytics` reports.
     """
     if not evidence_note_ids:
         raise PlaybookError(f"playbook {note_id!r} has no evidence references")

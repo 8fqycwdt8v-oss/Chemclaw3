@@ -1,18 +1,9 @@
 """Every SSE stream ends in a terminal event — including when it fails before the first token.
 
-`chemclaw.api.events` states the invariant for a turn ("ending with an `AnswerEvent` on success or
-an `ErrorEvent` on failure") and `run_turn` keeps it faithfully — but only from *inside* itself. The
-2026-08-26 front-door audit drove the real app and found four ways a stream ends with the client
-holding an HTTP 200, an SSE content-type and no explanation at all: a failure between the admission
-permit and `run_turn` (the arguments the route evaluates to call it), a database failure on the job
-push-back tailer, a turn admitted beside another because the in-process lease was stamped before two
-store round trips, and a client that stops reading, whose teardown is left to the async-generator GC
-finalizer in a foreign `Context`.
-
-All four are properties of the *route*, not of the runner, which is why none of them was visible to
-the suite that covers `run_turn`. Each test here drives `create_app()` — over `TestClient` where a
-status code and a body are the whole question, and over raw ASGI where the question is what happens
-to a client that never reads, which no test client can express.
+`run_turn` keeps the invariant inside itself; these tests cover the route around it: a failure
+between the admission permit and `run_turn`, a database failure on the push-back tailer, a turn
+admitted beside another during setup, and a client that stops reading. Each drives
+`create_app()`, over `TestClient` or raw ASGI where the client never reads.
 """
 
 import asyncio
@@ -77,19 +68,10 @@ def _sse_events(client: TestClient, method: str, path: str, **kwargs: Any) -> li
 
 
 def test_a_turn_that_fails_before_run_turn_still_ends_in_an_error_event() -> None:
-    """A stream that dies between the permit and `run_turn` must say so, not fall silent.
+    """A turn that fails before `run_turn` still ends in an error event.
 
-    The concrete production trigger is a session whose profile the deployment no longer ships:
-    `deps._rehydrate_session` restores the stored profile without re-validating it (deliberately),
-    so `front.connector_factory(live.profile)` — an *argument expression* the route evaluates, one
-    frame above every handler `run_turn` owns — raises `ValueError: unknown agent profile`. The
-    audit measured the result over raw ASGI: `status: [200]`, `bodies: []`, and the exception
-    escaping the ASGI app, because `EventSourceResponse` had already written
-    `http.response.start` and Starlette's `ExceptionMiddleware` can no longer run a handler.
-
-    A client cannot tell that from a turn that answered nothing, which is precisely the silent
-    death `empty_answer` was added to eliminate — reproduced one layer above where that guard
-    lives.
+    E.g. a rehydrated session whose stored profile no longer exists raises while the route evaluates
+    `run_turn`'s arguments, after `http.response.start`, where no exception handler can run.
     """
 
     def _broken_registry(_profile: str | None = None) -> list[Any]:
@@ -120,14 +102,10 @@ def test_a_turn_that_fails_before_run_turn_still_ends_in_an_error_event() -> Non
 def test_a_push_back_stream_whose_tailer_dies_ends_in_an_error_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A `ConnectionError` from the tailer must reach the browser as a terminal event and a count.
+    """A tailer raising `ConnectionError` ends the stream in an error event and is counted.
 
-    `create_app` registers a `ConnectionError` handler so every route that touches durable session
-    state sheds retryably. That handler is structurally unreachable here: the response has already
-    started, so Starlette raises `RuntimeError("Caught handled exception, but response already
-    started.")` *instead of* calling it. The client then gets a truncated stream it cannot
-    distinguish from "nothing has happened yet", and `chemclaw_db_unavailable_total` — the counter
-    an operator alerts on — never moves for the population that matters most: the open tabs.
+    The app's `ConnectionError` handler cannot run once the response has started, so the stream must
+    handle it and move `chemclaw_db_unavailable_total` itself.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -162,20 +140,11 @@ def test_a_push_back_stream_whose_tailer_dies_ends_in_an_error_event(
 def test_each_push_back_tailer_polls_on_an_interval_of_its_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """200 idle tabs on one pod must not arrive at the pool as one synchronised burst.
+    """Each push-back tailer polls on an interval of its own.
 
-    `stream_new_events` sleeps a constant `session_event_poll_seconds`, and a pod holds up to
-    `service_max_event_streams_total` (200) tailers whose clients are restarted together by a pod
-    roll, a deploy, or a floor of chemists reconnecting. With no spread, two tailers that once
-    coincided stay coincident for the pod's life. Measured on the shipped numbers against a live
-    database with nothing else running, 200 streams over 10 s and each stream's *first* poll
-    excluded (200 tailers created in one tick synchronise by construction, where 200 separate HTTP
-    requests do not): peak **29** waiters on a pool of 8 and a worst poll of 14 ms, against **0**
-    waiters and 5 ms once each stream has its own interval. The wait is paid by whatever needed
-    the store in that window — a turn's `store_tool_result`, a session claim.
-
-    Asserted at the seam the route chooses the interval on, which names where the fix lives: if
-    the spread ever moves into the tailer itself, this test goes red and should move with it.
+    Tailers restarted together would otherwise stay synchronised and hit the pool as one burst.
+    Asserted at the seam where the route chooses the interval; move this test if the spread moves
+    into the tailer.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -216,9 +185,7 @@ def test_each_push_back_tailer_polls_on_an_interval_of_its_own(
 class _SlowOwnerStore:
     """A session-ownership registry whose title write takes as long as a saturated pool does.
 
-    The round trip is the point: `set_title_if_absent` is awaited *after* the turn slot's deadline
-    has been stamped and *before* the streaming response exists, so a lease stamped at claim time
-    can lapse while the turn that owns it has not started.
+    The write happens after the slot is reserved and before the streaming response exists.
     """
 
     def __init__(self) -> None:
@@ -258,24 +225,11 @@ class _SlowOwnerStore:
 async def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A second POST during the first turn's store round trips waits in line, not beside it.
+    """A second POST during the first turn's setup waits in line, not beside it.
 
-    `_claim_turn_slot` justifies ignoring an expired entry with "the deadline is the widest wall
-    clock a *live* turn can hold the slot ... so an expired entry provably belongs to no running
-    turn". It was stamped before two awaits — the title write and the durable claim — so the real
-    ceiling was `(store latency) + admission + turn timeout`, strictly larger than the deadline.
-    The audit drove it: B was admitted with 200 while A was still live, and B's deadline replaced
-    A's under the same key.
-
-    Both turns then hold the *same* `TurnSession` handle and interleave their messages into one
-    conversation, which is the corruption the guard exists to prevent — and under
-    `session_store="memory"` (the code default and what the dev lanes run) there is no second guard
-    behind it.
-
-    Since `D-2026-10-01-a-queued-message-waits-in-its-senders-request` the second message is not
-    refused: it joins the session's line. The property is unchanged — it must not *run* while the
-    first holds the slot — and the discriminator is that the fake agent answers at once, so a
-    second turn admitted beside the first would be finished long before the first is let go.
+    The lease clock starts only at hand-off, so store latency during setup cannot let a second turn
+    in. The fake agent answers at once, so a turn admitted beside the first would finish long before
+    the first is released.
     """
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.05)
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
@@ -320,13 +274,10 @@ class _BrokenTitleStore(_SlowOwnerStore):
 
 
 def test_a_store_failure_before_the_stream_gives_the_sessions_slot_back() -> None:
-    """A turn that dies during setup must not hold the session — the reservation has no expiry.
+    """A store failure before the stream gives the session's slot back.
 
-    The slot is reserved before the store round trips and its lease clock only starts at the
-    hand-off (`_start_turn_lease`), which is sound exactly because every path in between is inside
-    `post_message`'s `try`/`finally`. `set_title_if_absent` is one of those paths and it is the one
-    that fails in production: a failed pool checkout raises `ConnectionError` and is shed 503. From
-    outside that block the session would answer 409 to its own owner for the pod's lifetime.
+    The reservation has no expiry until hand-off, so every setup path must release it in
+    `post_message`'s `finally`.
     """
     app = _app(owner_store=_BrokenTitleStore())
     with TestClient(app) as client:
@@ -343,12 +294,7 @@ def test_a_store_failure_before_the_stream_gives_the_sessions_slot_back() -> Non
 def test_a_lapsed_turns_teardown_cannot_revoke_its_successors_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The teardown removes the entry *this* turn wrote, or a third turn gets admitted.
-
-    Both teardown paths used to `pop(session_id, None)` — whatever is under the key, not the entry
-    they own. So once one lease had lapsed and a successor had claimed the slot, the first turn's
-    teardown revoked the successor's claim and the guard admitted a third turn beside a live one.
-    """
+    """A lapsed turn's teardown removes only its own entry, never its successor's claim."""
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.01)
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.0)
     active: dict[str, Any] = {}
@@ -426,24 +372,12 @@ class _StallingTurn(ScriptedTurn):
 def test_a_client_that_stops_reading_detaches_the_stream_and_the_turn_still_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stalled *transport* detaches the view; the turn ends deterministically, never via the GC.
+    """A client that stops reading detaches the stream; the turn still cleans up.
 
-    `asyncio.timeout` cancels the task that entered it. When the model stalls that task is
-    executing inside the generator and the conversion to `TimeoutError` works (the suite covers
-    it). When the stall is in the transport — `await send(...)` blocked on a client that has
-    stopped reading — the response task is parked in the send, `sse_starlette`'s `send_timeout`
-    ends the stream in the task serving it, and under
-    `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` that closes the *view only*: the pump task
-    keeps driving the turn, so the permit, the lease and the ambients are released in the pump's
-    own context at the turn's true end — never by asyncio's async-generator GC finalizer, whose
-    different-`Context` `aclose()` is what the audit measured
-    (`ValueError: <Token ...> was created in a different Context` out of `_turn_ambient`).
-
-    So the assertion is in two halves: the ASGI call returns while the turn is still *held* (the
-    detach), and once the pump finishes every guard is back (the deterministic teardown).
-
-    Driven at the raw ASGI level because the property *is* the ASGI contract: no test client can
-    express "the client took the headers and then stopped reading".
+    `send_timeout` ends the view only; the pump keeps driving the turn and releases the permit,
+    lease and ambients in its own context, never via the async-generator GC finalizer. Asserted in
+    two halves: the ASGI call returns while the turn is held, then every guard is back. Raw ASGI,
+    since no test client can stop reading after the headers.
     """
     monkeypatch.setattr(settings, "service_sse_send_timeout_seconds", 1.0)
     # Far above the send deadline, so what ends the stream is unambiguously the transport bound —
@@ -521,14 +455,9 @@ def test_a_client_that_stops_reading_detaches_the_stream_and_the_turn_still_clea
 
 
 async def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambient() -> None:
-    """The GC finalizer's `aclose()` runs in a different `Context`; the teardown must survive it.
+    """A turn torn down in a foreign `Context` still resets every ambient.
 
-    A contextvar `Token` records the `Context` it was created in, so every `reset_*` in
-    `_turn_ambient`'s `finally` raises `ValueError` when the generator is closed from a task other
-    than the one that ran it — and the *first* raise aborted the five resets after it, including
-    `reset_current_identity`. Nothing is lost by tolerating it (the context holding those tokens is
-    being discarded either way); what was lost was the rest of the teardown and any attribution,
-    since the traceback names a `ContextVar` and no session.
+    Each contextvar reset raises `ValueError` there; the teardown tolerates it so later resets run.
     """
     from chemclaw.agent.turn_usage import TurnUsage
     from chemclaw.api.runner import _turn_ambient
@@ -562,17 +491,9 @@ async def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambien
 def test_the_routes_own_error_events_carry_the_correlation_id_the_header_does(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`ErrorEvent.correlation_id` is the join key, and three of four events left it empty.
+    """The route's own error events carry the correlation id the response header does.
 
-    Every `ErrorEvent` built in `api/runner.py` passes `ledger.correlation_id`; the three built in
-    the route module passed none and defaulted to `""`. The id was never unavailable there — the
-    observability middleware minted it, stamped it as an ambient and put it on the response
-    header, and `run_turn` adopted the same id for the `turn_costs` row. So the field the contract
-    nominates as the thing to quote in a bug report was blank on exactly the failure a chemist
-    reports, while the row an operator needs sat under the id the header carried.
-
-    Asserted against the header rather than against "non-empty", because the whole value of the
-    field is that it is *the same* id.
+    Asserted equal to the header, since the field's value is being the same id.
     """
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.05)
 
@@ -603,18 +524,10 @@ def test_the_routes_own_error_events_carry_the_correlation_id_the_header_does(
 def test_a_shed_turn_and_a_spent_budget_do_not_share_one_error_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two populations with opposite remedies must not arrive under one `ErrorCode`.
+    """An admission shed and a spent budget do not share one `ErrorCode`.
 
-    `ErrorCode` is documented as closed and semantic — "each member is a *different thing for the
-    user to do*". The admission shed (*the process had no permit within
-    `service_turn_admission_timeout_seconds`*) emitted `budget_exhausted` with `retryable=True`,
-    and the spent budget emitted the same code with `retryable=False`. A surface switching on the
-    code — the documented way to choose the next step — could not tell "we are busy, retry in a
-    moment" from "your budget is gone, stop retrying", and a retry loop keyed on it either hammers
-    a saturated pod or gives up on a transient one.
-
-    `retryable` is unchanged on both, so a client keyed on that field alone sees exactly what it
-    saw before; what changes is that the code now names the same condition its own message does.
+    Their remedies are opposite (retry soon versus stop), and the code is how a surface chooses.
+    `retryable` is unchanged on both.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
@@ -651,15 +564,11 @@ def test_a_shed_turn_and_a_spent_budget_do_not_share_one_error_code(
 
 
 def test_an_expired_lease_does_not_hold_an_actors_slot() -> None:
-    """The anti-brick guard, and the whole reason the count is derived rather than kept.
+    """An expired lease does not hold an actor's slot.
 
-    A `dict[str, int]` keyed by principal is the obvious shape for a per-actor cap and is what
-    `src/chemclaw/api/routes/streams.py` uses for streams. It is wrong here because a turn has a
-    window neither teardown covers — a client gone after the streaming response was handed off but
-    before its generator was first advanced runs no `finally` at all — so an integer would stay
-    incremented for the pod's lifetime and refuse that human forever. Reading the lease map instead
-    means the same expiry that stops a stale entry answering 409 also stops it answering 429: the
-    cost of a skipped teardown is one lease width, not a restart.
+    The per-actor count is derived from the lease map rather than kept as an integer, since a
+    client gone before its generator first runs executes no `finally`; expiry bounds the cost to one
+    lease width.
     """
     active: dict[str, Any] = {}
     token = _claim_turn_slot(active, "s1", actor="alice")

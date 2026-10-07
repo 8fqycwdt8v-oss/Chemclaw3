@@ -1,17 +1,11 @@
-"""`deploy/kind/` — the local cluster lane — agrees with the chart, the fleet and itself.
+"""`deploy/kind/`, the local cluster lane, agrees with the chart, the fleet and itself.
 
-The lane is a set of files that each name the others: `values-kind.yaml` names Service addresses
-that `manifests/` and the sibling fleet create, `kind-config.yaml` maps host ports onto NodePorts
-that `manifests/` declares, `up.sh` generates the Secret keys the rendered chart references, and
-the release's egress policy has to admit every port the release dials. Each pair is a string in two
-files, and each failure is silent until a cluster is up: a mistyped Service is a connector that
-never answers, a missing Secret key is a pod stuck in `CreateContainerConfigError`, a port the
-egress policy omits drops every packet. `make kind-validate` schema-checks the documents; this file
-checks what no schema can — that they describe one system.
-
-The rendered-chart tests need `helm` and skip without it (`tests/conftest.py` counts the skips); the
-fleet comparisons need the `Chemclaw3-mcp` checkout and skip without it, naming what they did not
-check.
+The files name each other: `values-kind.yaml` names Services `manifests/` and the fleet create,
+`kind-config.yaml` maps host ports onto NodePorts, `up.sh` generates the Secret keys the chart
+references, and the egress policy must admit every port dialled. Each mismatch is silent until a
+cluster is up. `make kind-validate` schema-checks the documents; this checks they describe one
+system. Rendered-chart tests need `helm` and fleet comparisons need the `Chemclaw3-mcp` checkout;
+both skip without them, naming what they did not check.
 """
 
 from __future__ import annotations
@@ -271,12 +265,10 @@ def test_the_host_ports_are_loopback_and_land_on_the_nodeports_manifests_declare
 
 
 def test_the_ui_sandbox_is_its_own_origin_and_the_origins_are_the_mapped_ports() -> None:
-    """The html sandbox is a different hostname from the app, on the host port of its own listener.
+    """The html sandbox is a different hostname from the app, on its own listener's host port.
 
-    So the frame is a different site, and the browser reaches it at the origin the BFF was told.
-
-    The UI's BFF refuses to start a sandbox whose origin equals the app's; it cannot check that the
-    origin it was told is the address the browser actually uses, which is this lane's port mapping.
+    The UI's BFF refuses a sandbox origin equal to the app's but cannot check that the origin it was
+    given is what the browser uses, which is this lane's port mapping.
     """
     from urllib.parse import urlsplit
 
@@ -314,11 +306,9 @@ def test_up_sh_deploys_every_server_the_fleet_ships_a_deployment_for() -> None:
 
 
 def test_the_llm_key_never_becomes_an_argument_or_a_log_line() -> None:
-    """The live-mode key travels sourced variable → pipe → Secret, and nowhere else.
+    """The LLM key travels sourced variable → pipe → Secret, never as an argument or a log line.
 
-    `ps` shows every argument of a running process, so a `--from-literal` would publish the key to
-    every user on the machine for as long as `kubectl` runs; a `log` line would put it in a
-    terminal's scrollback. Neither is a hypothetical shape for a script that builds a Secret.
+    `ps` shows process arguments, so `--from-literal` would expose the key on the machine.
     """
     assert "--from-literal=CHEMCLAW_LLM_API_KEY" not in _UP
     for line in _UP.splitlines():
@@ -329,11 +319,11 @@ def test_the_llm_key_never_becomes_an_argument_or_a_log_line() -> None:
 
 @requires_helm
 def test_oidc_mock_is_the_shipped_identity_posture_against_the_mock_tenant() -> None:
-    """oidc-mock turns sign-in on with no opt-out, and its prerequisites are what core demands.
+    """oidc-mock turns sign-in on, and its prerequisites are what core demands.
 
-    Under `CHEMCLAW_ENTRA_REQUIRED=true` core refuses a plaintext Temporal channel and a Postgres
-    DSN below `sslmode=require` to a non-loopback host, so the mode is only real if both are there:
-    the chart's Temporal mTLS mount on, and `up.sh` writing `sslmode=require` into the DSNs.
+    With `CHEMCLAW_ENTRA_REQUIRED=true` core refuses plaintext Temporal and a non-loopback Postgres
+    DSN below `sslmode=require`, so the chart's Temporal mTLS mount and `up.sh`'s `sslmode=require`
+    must both be present.
     """
     config = _config_map("oidc-mock")
     assert config["CHEMCLAW_ENTRA_REQUIRED"] == "true"

@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-08-15 · Reverses the `FilesystemMiddleware` declination in `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has` and the `BaseStore` rejection in `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives`, on grounds each ADR did not have. Keeps both of their load-bearing objections and answers them.
 
+**Superseded-by:** [D-2026-09-20-a-tier-every-prefix-pays-is-still-not-a-ceiling](D-2026-09-20-a-tier-every-prefix-pays-is-still-not-a-ceiling.md) (in part)
+
 ## Context
 
 Layer 1 could not do a hard research task, and the reason was structural rather than promptable.

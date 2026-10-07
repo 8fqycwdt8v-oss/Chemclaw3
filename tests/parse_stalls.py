@@ -1,18 +1,10 @@
 """Parse children that misbehave, and the driver that measures what the parent does about them.
 
-**A separate process on purpose, and the reason is the only reason.** The single channel into a
-`forkserver` child is the server's *preload list*: the server is `fork`+`exec`'d, so nothing the
-test process patches after it starts is visible to any child, and the server itself is a
-process-wide singleton that `multiprocessing` starts once and never restarts when the preload list
-changes. So a test cannot install these wrappers into the forkserver a sibling test has already
-warmed. Running the whole probe as `python -m tests.parse_stalls` gives it a forkserver of its own
-and leaves the suite's alone.
-
-What is substituted is only the *child's behaviour* — the axis under test. The parent side is the
-shipped `parse_document_isolated`, called exactly as `agent/attachments.py` calls it, on a worker
-thread, because the claim is about a thread ending and therefore about a parse slot coming back.
-
-Each case prints one `label|thread_alive|seconds|outcome` line on stdout.
+Run as `python -m tests.parse_stalls` so it gets a forkserver of its own: the only channel into a
+`forkserver` child is the preload list, fixed when the singleton server starts. Only the child's
+behaviour is substituted; the parent is the shipped `parse_document_isolated`, called on a worker
+thread as `agent/attachments.py` calls it. Each case prints one
+`label|thread_alive|seconds|outcome` line.
 """
 
 import os
@@ -42,9 +34,8 @@ def _parse_into(
 ) -> None:
     """The child entry point, with one name routed to a message that never finishes.
 
-    `Connection.send` frames a message as a four-byte big-endian length followed by the payload.
-    Writing the header and part of the payload is what makes `poll` return True — consuming the
-    parent's only deadline before the fix — while `recv` waits for bytes that never come.
+    `Connection.send` frames a four-byte big-endian length then the payload. Writing the header and
+    part of the payload makes `poll` return True while `recv` waits forever.
     """
     if name == "truncate.txt":
         os.write(connection.fileno(), (64).to_bytes(4, "big") + b"partial")
@@ -56,12 +47,8 @@ def _parse_into(
 def _parse_document(name: str, raw: bytes, declared: str | None = None) -> ParsedDocument:
     """The parser, with two names routed to children that outlive their own answer.
 
-    `linger.txt` answers *correctly* and then does not exit, because a non-daemon thread keeps the
-    interpreter alive past the child's last statement — the shape a parser that leaves a worker
-    behind produces, and the one the unbounded `join()` waited on for ever.
-
-    `grandchild.txt` starts a process of its own and then stalls, so a single-pid kill frees the
-    slot while leaving the CPU spent.
+    `linger.txt` answers correctly and then does not exit (a non-daemon thread keeps it alive).
+    `grandchild.txt` starts its own process and stalls, so a single-pid kill would leave CPU spent.
     """
     if name == "linger.txt":
         threading.Thread(target=time.sleep, args=(_FOREVER,), daemon=False).start()
@@ -108,12 +95,9 @@ def _drive(name: str, timeout: float, patience: float) -> None:
 def main() -> None:
     """Drive every pathological child, then report whether the grandchild outlived the kill.
 
-    **Leads its own process group and leaves by `os._exit`, and both halves are about the failing
-    case.** `multiprocessing`'s exit handler joins every live child without a timeout, so with the
-    regression present this process would hang at shutdown *after* printing — and the caller would
-    see a timeout rather than the `alive` line the assertion is about, which is the failure shape
-    that looks identical to every other. Killing the group takes the forkserver and every stalled
-    child with it, so nothing outlives the probe either way.
+    Leads its own process group and leaves by `os._exit`: `multiprocessing`'s exit handler joins
+    children without a timeout, so a regression would hang after printing. Killing the group takes
+    the forkserver and every stalled child with it.
     """
     os.setsid()
     isolate._PRELOAD = [*isolate._PRELOAD, "tests.parse_stalls"]
@@ -138,14 +122,12 @@ def main() -> None:
 def crawl(mount: str) -> None:
     """Run the shipped `sync_share` over `mount` with one stalling document, and report the pass.
 
-    The share holds `Docs/quick.txt` and `Docs/stall.csv` (the caller writes them). The stall never
-    answers, so its only way out is the kill on `attachment_parse_timeout_seconds`, and the deadline
-    can be generous for the quick document without making the stalled one a race. The pass runs on
-    a worker thread joined with patience far past that deadline, so "the thread ended" separates a
-    killed parse from one nobody kills rather than a fast parse from a slow one.
+    The caller writes `Docs/quick.txt` and `Docs/stall.csv`; the stall exits only by the kill on
+    `attachment_parse_timeout_seconds`. The pass runs on a worker thread joined far past that
+    deadline, so "the thread ended" separates a killed parse from an unkilled one.
 
     Prints one `crawl|<ended>|<skipped_timeout>|<skipped_unreadable>|<indexed>|<kills>|<children>`
-    line, then leaves the way `main` does and for its reason.
+    line, then leaves the way `main` does.
     """
     import asyncio
     import multiprocessing

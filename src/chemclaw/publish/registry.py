@@ -1,13 +1,8 @@
 """Discovering result sinks, and building the ones a deployment enabled.
 
-Mirrors `ingest/sources/registry.py` deliberately, down to the late binding: discovery reads
-manifests and imports nothing, so the one fact needed in order to *skip* a sink — its name — is
-available as data. A process that publishes nothing never imports a database client.
-
-**Discovery is not enablement** (D-018). Every sink this repository ships is discovered; a
-deployment publishes to the subset it names in `CHEMCLAW_RESULT_SINKS`, and that list is **empty by
-default**. A system that began shipping every calculation to a destination on a default nobody
-chose would be the exact failure this seam exists to make deliberate.
+Mirrors `ingest/sources/registry.py`: discovery reads manifests and imports nothing, so a process
+that publishes nothing never imports a database client. Discovery is not enablement (D-018): a
+deployment publishes only to the sinks named in `CHEMCLAW_RESULT_SINKS`, empty by default.
 """
 
 import asyncio
@@ -38,9 +33,8 @@ class ResultSinkError(ChemclawError):
 def _sink_dirs() -> list[Path]:
     """Every directory holding a `sink.yaml`, in discovery-path order.
 
-    Earlier directories win a name collision — the precedence a `PATH` entry has — so a deployment
-    can mount a folder with its own definition of a shipped sink and have it take effect without
-    editing this repository.
+    Earlier directories win a name collision, like `PATH`, so a deployment can override a shipped
+    sink by mounting a folder.
     """
     found: list[Path] = []
     seen: set[str] = set()
@@ -62,9 +56,8 @@ def _sink_dirs() -> list[Path]:
 def _load(directory: Path) -> ResultSinkManifest:
     """Read and validate one manifest, rejecting a name that disagrees with its folder.
 
-    The disagreement matters because the *folder* is what discovery finds while the *name* is what
-    the enable list and every `result_publications.sink` row hold; letting them differ would make a
-    sink enabled under one name and recorded under another.
+    Discovery finds the folder while the enable list and `result_publications.sink` hold the name;
+    they must agree.
     """
     path = directory / _MANIFEST
     raw = read_manifest(path, ResultSinkError)
@@ -89,9 +82,8 @@ def discovered() -> dict[str, ResultSinkManifest]:
 def enabled() -> list[ResultSinkManifest]:
     """The manifests this deployment publishes to, in the order it named them.
 
-    An enabled name with no manifest is a startup error rather than a silent skip: a deployment
-    that believes it is publishing and is not would look identical to one with nothing to publish,
-    and that is the failure mode this whole subsystem is built to end.
+    An enabled name with no manifest is a startup error: silently not publishing would look
+    identical to having nothing to publish.
     """
     available = discovered()
     manifests: list[ResultSinkManifest] = []
@@ -113,9 +105,8 @@ def enabled_names() -> list[str]:
 def publishing_enabled() -> bool:
     """Whether this deployment publishes results anywhere.
 
-    Read by the enqueue path so that, with no sink configured, publishing costs one list lookup
-    and not a database write — and by `planned_schedules`, so a deployment with nowhere to publish
-    does not carry a Temporal Schedule that drains an always-empty queue.
+    Lets the enqueue path skip the database and `planned_schedules` omit the drain schedule when no
+    sink is configured.
     """
     return bool(settings.result_sink_list)
 
@@ -123,9 +114,8 @@ def publishing_enabled() -> bool:
 def unpublishable_reason() -> str | None:
     """Why this deployment cannot republish anything, or `None` when a sink is enabled.
 
-    The `unavailable_reason` the `results` bundle's `republish_calculations` job declares, so the
-    launcher is withheld where it could only fail — and the sentence its own guard raises, so the
-    two cannot say different things about one condition.
+    Both the `republish_calculations` launcher's `unavailable_reason` and its guard's message, so
+    the two cannot disagree.
     """
     if publishing_enabled():
         return None
@@ -136,11 +126,7 @@ def unpublishable_reason() -> str | None:
 
 
 def _resolve(reference: str) -> Callable[..., Any]:
-    """Import `module:callable` and return it, or fail naming both halves of the reference.
-
-    Typed as callable rather than `object` because this function's last act is to check that it is
-    one — a caller that then has to re-narrow would be re-doing the check this already did.
-    """
+    """Import `module:callable` and return it, or fail naming both halves of the reference."""
     resolved: Callable[..., Any] = resolve_driver(reference, ResultSinkError, "result sink driver")
     return resolved
 
@@ -148,27 +134,10 @@ def _resolve(reference: str) -> Callable[..., Any]:
 class _BoundedSink:
     """A sink whose every call is bounded by `result_publish_timeout_seconds`.
 
-    **The setting was documented as a per-`deliver` ceiling and enforced by nobody.** Its own
-    declaration reads *"how long one `deliver` may take before the drain gives up on that batch and
-    leaves its rows pending"*; what actually existed was the *activity's*
-    `result_publish_timeout_seconds x len(sinks)` — one budget for the whole sequential loop. So a
-    single hanging destination consumed the entire pass and every sink later in
-    `CHEMCLAW_RESULT_SINKS` was never reached. Measured with `alpha` hanging and `beta` healthy
-    over eight passes: `beta` was claimed **zero** times, its rows sat at `attempts=0` with no
-    `last_error`, and nothing distinguished "starved" from "nothing to send" — while
-    `durable/publish_results.py`'s module docstring gave two failure domains as the reason for the
-    design. That is true of the *rows* and was false of the *pass*.
-
-    **Here rather than in the drain loop, because the bound belongs to the seam.** Every sink this
-    registry builds is bounded, so the guarantee does not depend on which caller drains — the
-    backfill CLI and any later caller get it for free — and the activity's `x len(sinks)` budget
-    becomes the honest sum of N per-sink budgets rather than one pool the first sink can drink.
-
-    A timeout is a `SinkUnavailableError`: the destination did not answer, which is the retryable
-    half of the contract, and it is what puts the reason into `result_publications.last_error`
-    where an operator reads it. `aclose` is bounded too and *swallows* its timeout — a driver that
-    will not let go of a connection must not also cost the next sink its pass, and the drain calls
-    it from a `finally` that has nothing to do with delivery.
+    Without a per-sink bound, one hanging destination would consume the whole drain pass and starve
+    every later sink. Bounding here, at the seam, gives every caller the guarantee. A timeout is a
+    `SinkUnavailableError` (retryable, recorded in `last_error`). `aclose` is bounded too and
+    swallows its timeout, so a driver that will not let go cannot cost the next sink its pass.
     """
 
     def __init__(self, name: str, sink: ResultSink, timeout_seconds: float) -> None:
@@ -205,12 +174,8 @@ class _BoundedSink:
 def build(manifest: ResultSinkManifest) -> ResultSink:
     """Build the sink a manifest describes, bounded by the per-sink delivery ceiling.
 
-    Deliberately uncached: a sink holds a connection, and a cached one would outlive a credential
-    rotation. The drain builds per run, which is coarse enough that the construction cost does not
-    matter and fine enough that a rotated secret takes effect on the next pass.
-
-    What comes back is a `_BoundedSink` around the driver, never the driver itself — see that
-    class for the starvation that made the wrapper the seam's job rather than a caller's.
+    Uncached: a sink holds a connection, and building per drain run lets a rotated credential take
+    effect on the next pass. Always returns a `_BoundedSink`, never the bare driver.
     """
     factory = _resolve(manifest.driver)
     try:
@@ -220,9 +185,7 @@ def build(manifest: ResultSinkManifest) -> ResultSink:
             **manifest.config,
         )
     except TypeError as exc:
-        # Re-framed so the message names the manifest and the driver rather than surfacing as an
-        # opaque signature error from inside a vendor client — the same courtesy the data-source
-        # seam extends for exactly this mistake.
+        # Re-framed to name the manifest and the driver rather than an opaque signature error.
         raise ResultSinkError(
             f"result sink {manifest.name!r}: driver {manifest.driver!r} does not accept the "
             f"config it was given ({sorted(manifest.config)}): {exc}"

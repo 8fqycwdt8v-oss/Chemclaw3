@@ -4,6 +4,8 @@
 clause; leaves D-080's capability and its advisory invariant standing. Applies
 `D-2026-08-15-capability-moves-judgment-and-declaration-stay`.
 
+**Superseded-by:** [D-2026-08-29-a-sweep-that-corrects-a-claim-must-count-the-claim](D-2026-08-29-a-sweep-that-corrects-a-claim-must-count-the-claim.md) (in part)
+
 ## Context
 
 Scientific capability is moving to [`Chemclaw3-mcp`](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp);

@@ -77,7 +77,7 @@ dependencies = [
     #
     # `httpx` stays above it, and the pair is the recorded cost of taking those two majors: `mcp` 1.x
     # and the `langchain-*` packages require `httpx` regardless of what this repository imports, so
-    # the closure carries both until the `mcp` 2.x migration (`docs/planning/DEFERRED.md`) removes
+    # the closure carries both until the `mcp` 2.x migration (`docs/planning/BACKLOG.md`) removes
     # the last first-party reason for the older one. Rewriting every transport now would buy a
     # smaller image at the moment the thing that would *complete* the migration is deliberately not
     # being taken.
@@ -687,8 +687,7 @@ timeout_multiplier = 4.0
 #
 # The first attempt ran the whole suite and never reached a mutant. This repository's tests read the
 # *source tree itself* as data — `test_repo_map.py` walks every directory against `ARCHITECTURE.md`,
-# `test_docstring_paths.py` resolves every backticked module pointer, `test_deploy_chart.py` renders
-# the chart — and mutmut works by copying a partial tree into `mutants/` and running pytest there.
+# `test_deploy_chart.py` renders the chart — and mutmut works by copying a partial tree into `mutants/` and running pytest there.
 # Those tests fail on the copy for reasons that have nothing to do with any mutant, and none of them
 # could kill one in these seven modules anyway: a mutated branch in `authz.py` is invisible to a
 # test that reads Markdown.

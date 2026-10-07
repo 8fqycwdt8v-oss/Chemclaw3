@@ -1,13 +1,8 @@
 """What an operator sees of artefact writes: one `exhibit.*` event and two counters, for every path.
 
-The REST route logged `exhibit.created`/`exhibit.revised` through `log_event` and the agent's tools
-wrote a bare `logger.info` line — so the writes a model makes, which are most of them, were the ones
-no query could filter — and neither path was countable. One function per fact, called by every
-writer (`api/routes/exhibits.py`, `agent/exhibit_tools.py`, the report activity), so the two
-counters and the event cannot disagree about what was written.
-
-The labels are closed sets fixed here and in the store's `AuthorKind`, never a caller's string: the
-artefact, the session and the author are fields of the log event and labels of nothing.
+One function per fact, called by every writer (`api/routes/exhibits.py`, `agent/exhibit_tools.py`,
+the report activity), so events and counters agree. Labels are closed sets fixed here and in
+`AuthorKind`; artefact, session and author are log fields, never labels.
 """
 
 from __future__ import annotations
@@ -80,8 +75,6 @@ def refusals_counted() -> Iterator[None]:
         record_refusal("not_found")
         raise
     except ChemclawError:
-        # `InvalidExhibit` and the tools' own worded refusals — a pinned result the agent may not
-        # create or revise, `edits` on something not a document, an `old` that does not occur
-        # once: each a write the writer can correct, which is what `invalid` counts.
+        # `InvalidExhibit` and the tools' own refusals — each a write the writer can correct.
         record_refusal("invalid")
         raise

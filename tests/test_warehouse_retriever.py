@@ -1,9 +1,7 @@
 """The retrieve half: ANN pushed into the warehouse, and the rule against double-counting.
 
-The interesting assertions here are not "it returns rows". They are that the search is *ranked and
-truncated by the warehouse* rather than locally, that a reaction which already became a reviewed
-note does not also arrive as a raw row, and that an unreachable warehouse costs this leg of the
-fan-out and nothing else.
+The search is ranked and truncated by the warehouse, a reaction already ingested does not also
+arrive as a raw row, and an unreachable warehouse costs this leg of the fan-out and nothing else.
 """
 
 import asyncio
@@ -30,13 +28,9 @@ _DRIVER = "tests.warehouse_fake:open_fake"
 def _no_real_record_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test here runs against an in-memory transcription store, never Postgres.
 
-    The retriever's suppression check calls `default_record_store()` on every retrieval, so with
-    the database down these tests *failed* rather than skipped — 10 of them, measured — which
-    buried real regressions in a wall of connection errors on any offline run. Nothing in this
-    file is about the durable store: the suppression rule itself is proven against
-    `InMemoryReactionRecordStore` (`_ingested`), and the backends' agreement is
-    `test_reaction_records.py`'s job. `_ingested` overrides this with a seeded store; everything
-    else gets an empty one, which answers "nothing ingested" exactly as a fresh deployment would.
+    The suppression check calls `default_record_store()` on every retrieval, so without this the
+    tests would fail offline. `_ingested` overrides it with a seeded store; otherwise the store is
+    empty, as in a fresh deployment.
     """
     store = InMemoryReactionRecordStore()
     monkeypatch.setattr(
@@ -89,9 +83,8 @@ def _retrieve(
 def _ingested(monkeypatch: pytest.MonkeyPatch, *reaction_ids: str) -> None:
     """Point the retriever's suppression check at a corpus holding exactly `reaction_ids`.
 
-    The check asks the transcription store since D-2026-08-25, not the filesystem, so seeding a
-    `knowledge/reaction/*.md` file — what these tests used to do — now proves nothing at all: that
-    is precisely how `suppress_ingested` became a silent no-op.
+    The check asks the transcription store, not the filesystem, so a `knowledge/reaction/*.md` file
+    would prove nothing.
     """
     store = InMemoryReactionRecordStore()
     asyncio.run(
@@ -145,14 +138,9 @@ def test_the_warehouse_ranks_and_truncates_rather_than_this_process() -> None:
 def test_the_shipped_driver_s_own_spelling_reaches_the_statement() -> None:
     """The dialect and the statement builder meet, with the vendor's real function name.
 
-    Every other assertion in this file goes through `FakeVectorDialect`, deliberately: `sql.py`
-    claims to contribute structure and no vendor's words, and a fake dialect is what can prove that.
-    This one closes the other half — that the *shipped* driver's spelling and its parameter
-    encoding survive the trip — so neither claim rests on the other's fixture.
-
-    Databricks binds the query vector as one JSON scalar, because there is no array parameter type;
-    the assertion on `params[0]` is what would catch a regression to a bound list, which fails only
-    at the server.
+    Other tests use `FakeVectorDialect` to show `sql.py` contributes no vendor words; this one shows
+    the shipped driver's spelling and parameter encoding survive the trip. Databricks binds the
+    query vector as one JSON scalar (no array parameter type), which `params[0]` pins.
     """
     warehouse_fake.prime(**_hits())
     assert warehouse_fake.NEXT is not None
@@ -191,13 +179,9 @@ def test_chunks_cite_the_row_because_there_is_no_note_to_cite() -> None:
 def test_a_reaction_already_ingested_is_not_surfaced_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     """The rule that lets one ELN carry both halves without double-counting.
 
-    A curated reaction reaching the agent once as an ingested record and again as a raw warehouse
-    row would look like two independent sources agreeing.
-
-    This asked the *filesystem* until D-2026-08-25 made a transcription a row: it stat'd
-    `knowledge/reaction/reaction-<key>.md`, which ingestion stopped writing, so the check answered
-    `False` forever and the suppression silently stopped happening. Asserted against the store now,
-    which is where the answer lives.
+    A curated reaction arriving once as an ingested record and again as a raw row would look like
+    two independent sources agreeing. Asserted against the transcription store, where the answer
+    lives.
     """
     _ingested(monkeypatch, "RX-1")
     chunks = _retrieve(_binding(), _hits())
@@ -207,11 +191,8 @@ def test_a_reaction_already_ingested_is_not_surfaced_twice(monkeypatch: pytest.M
 def test_a_traversal_shaped_row_key_suppresses_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """A warehouse-controlled key must never decide a suppression it has no record for.
 
-    The key used to land in a path by string join, so `../../` walked out of the graph and could
-    stat any file that happened to exist — hiding evidence, which is the failure that matters here
-    rather than disclosure. There is no path any more, and the property is asserted against the
-    shape rather than the mechanism so it survives the next storage change too: a key the slug rule
-    rejects cannot be a record id, so it is filtered out before the query and suppresses nothing.
+    Hiding evidence is the failure that matters. A key the slug rule rejects cannot be a record id,
+    so it is filtered out before the query and suppresses nothing.
     """
     _ingested(monkeypatch)
     hits = _hits()
@@ -242,11 +223,8 @@ def test_declared_filters_reach_the_statement_and_undeclared_ones_are_ignored() 
 def test_an_unreachable_warehouse_costs_this_leg_and_no_other() -> None:
     """A failed retriever costs its own leg — and must not answer the question *for* the others.
 
-    This asserted `== []` while `gather_evidence` fanned out with a bare `asyncio.gather`, where a
-    raise lost the whole question. The sweep is per-source branches now, so the empty list is no
-    longer protecting anything and is actively lying: `sources_failed` stayed empty and the model
-    was handed the corpus's own "nothing on file". Both halves are pinned here — the healthy leg
-    keeps its hits, and the dead one is named.
+    The healthy leg keeps its hits, and the dead one is named in `sources_failed` rather than read
+    as "nothing on file".
     """
     warehouse_fake.prime(**_hits())
     _primed().fail_with = ConnectionError("warehouse down")
@@ -294,10 +272,8 @@ def test_a_misconfigured_source_costs_this_leg_and_no_other(
 ) -> None:
     """A driver the image does not carry must not fail every question in the process.
 
-    A driver package the image does not carry fails identically on every query until someone
-    changes the deployment, which is exactly why it may not read as a quiet corpus: an empty answer
-    from a source nobody can reach is a permanent, silent lie rather than a transient one. The
-    sweep's branch is what keeps it out of the chemist's next question while `failed` records it.
+    It fails identically on every query, so it must be reported as failed rather than read as a
+    quiet corpus.
     """
     binding = _binding()
     binding["connection"] = {"driver": "chemclaw.ingest.eln.warehouse.no_such_driver:Nope"}
@@ -321,10 +297,7 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
 ) -> None:
     """The query is embedded *inside* this leg, so the provider's own errors are this leg's too.
 
-    A vendor client's own exception type is in none of the lists this retriever used to enumerate,
-    which is why the enumeration is gone: the sweep's branch catches everything, so the type no
-    longer decides whether a failure is reported. What this pins is that it *is* reported, rather
-    than converted into the empty list a corpus with no matching reaction would return.
+    Whatever the exception type, the failure is reported rather than converted into an empty list.
     """
     monkeypatch.setattr(
         retriever_module, "embed_texts", lambda texts: (_ for _ in ()).throw(_ProviderError("429"))
@@ -379,14 +352,8 @@ def test_a_key_the_store_cannot_hold_costs_its_own_row_and_no_other(
 ) -> None:
     """The filter must not be stricter than the question it answers.
 
-    Under the old path form, `resolve()` raised `ValueError` on an embedded NUL where `is_file()`
-    merely answered `False`, so one unusable row raised into `retrieve()`'s backstop and returned
-    `[]` for the **whole leg** — discarding every other legitimate hit. That is the same "hide
-    evidence" outcome the check exists to prevent, reached from the other side.
-
-    The failure mode survived the move to a store rather than being retired by it: Postgres text
-    cannot hold a NUL, so *asking* about such a key raises out of the driver in exactly the same
-    way. Pre-filtering by the slug rule is what keeps one bad row costing one row.
+    Postgres text cannot hold a NUL, so asking about such a key would raise and discard the whole
+    leg. Pre-filtering by the slug rule keeps one bad row costing one row.
     """
     _ingested(monkeypatch)
     hits = _hits()
@@ -399,14 +366,9 @@ def test_a_key_the_store_cannot_hold_costs_its_own_row_and_no_other(
 def test_a_driver_with_no_similarity_dialect_refuses_the_vector_block() -> None:
     """A `vector:` block against a driver that cannot serve one fails loudly, not as bad SQL.
 
-    How a warehouse spells a similarity search is a dialect fact and lives on the driver — see
-    `VectorDialect` in `chemclaw.ingest.eln.warehouse.driver`. A driver answering `None` has no
-    verified function to call, so the honest outcome is a `BindingError` naming the problem, not a
-    statement built from another vendor's function name for the server to reject on first query.
-
-    Checked at first use rather than at construction on purpose: resolving the driver means
-    importing the vendor client, and a chat pod that builds retrieve halves at startup must not pay
-    that import for a warehouse it may never query.
+    The similarity spelling is a dialect fact on the driver; `None` means a `BindingError`. Checked
+    at first use rather than construction, so a chat pod does not import a vendor client it never
+    uses.
     """
     warehouse_fake.prime(**_hits())
     primed = _primed()
@@ -420,17 +382,11 @@ def test_a_driver_with_no_similarity_dialect_refuses_the_vector_block() -> None:
 def test_a_warehouse_session_is_opened_once_per_process_not_once_per_tool_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The premise the missing `close()` rests on, made true by measurement rather than by comment.
+    """A warehouse session is opened once per process, not once per tool call.
 
-    `Warehouse` deliberately has no `close`, on the written ground that "a connection lives for the
-    process's life by design". `active_retrieve_sources()` has no memoisation, so it builds a fresh
-    retrieve half inside every `gather_evidence` body — measured, 100 constructions for 100 sweeps
-    — and each one opened its own Databricks SQL session that nothing could ever close. Server-side
-    that state survives until an idle timeout measured in tens of minutes, so a busy chat pod
-    exhausts the workspace's sessions in an hour and the symptom is missing evidence.
-
-    Construction stays free (it opens nothing); what may not repeat is the *connection*. This
-    counts driver opens across 50 freshly-built halves sharing one binding.
+    `Warehouse` has no `close`, and `active_retrieve_sources()` builds a fresh retrieve half per
+    sweep; a connection per half would leak server-side sessions until the workspace runs out.
+    Construction opens nothing; this counts driver opens across 50 halves sharing one binding.
     """
     opens: list[dict[str, Any]] = []
     real = warehouse_fake.open_fake
@@ -456,9 +412,8 @@ def test_a_warehouse_session_is_opened_once_per_process_not_once_per_tool_call(
 def test_two_bindings_do_not_share_one_warehouse_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """The control on the cache's key: a second corpus is a second connection, not a collision.
 
-    `pistachio` and `eln-databricks` are two data sources over two catalogues, each with its own
-    credential — the reason a per-corpus token is worth having in the first place. Keying the reuse
-    on anything coarser than the connection block would serve one corpus's rows to the other.
+    Two data sources carry their own credentials; keying reuse on anything coarser than the
+    connection block would serve one corpus's rows to the other.
     """
     opens: list[dict[str, Any]] = []
     real = warehouse_fake.open_fake

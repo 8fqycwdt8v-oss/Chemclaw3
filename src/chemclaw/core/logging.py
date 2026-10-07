@@ -1,33 +1,13 @@
 """Application-wide logging setup — one config-driven switch, plus what a log line has to carry.
 
-Why this exists: before this, the app emitted essentially no logs, so troubleshooting a
-stuck worker or a silent ELN sync meant reading raw tracebacks with no context. This gives a
-single idempotent `configure_logging()` — called at each worker's entrypoint — that wires the
-stdlib root logger to the configured level and format (`CHEMCLAW_LOG_LEVEL`,
-`CHEMCLAW_LOG_FORMAT`), so verbosity is an ENV switch, not a code change. Application modules
-just do `logging.getLogger(__name__)` and log; they never configure logging themselves.
+`configure_logging()` is called once at each entrypoint and wires the root logger to
+`CHEMCLAW_LOG_LEVEL` / `CHEMCLAW_LOG_FORMAT`; application modules only call
+`logging.getLogger(__name__)`. Every line carries the correlation, actor and session ids
+(`ContextFilter`) so it can be joined to the audit trail and traces, can be rendered as JSON, and
+has credentials scrubbed (`SecretRedactingFilter`).
 
-**Two things a readiness review found missing, and they are not the same thing.**
-
-*A log line had nothing to join on.* One `%`-format string, no JSON option, and no filter
-injecting the correlation/actor/session `ContextVar`s — which already existed and were already
-being read by audit, authorization and the connector headers. So an ordinary WARNING sat in a
-stream beside the audit trail and the traces and could not be tied to either: the correlation id
-that keys `audit_events` and the session that `chemclaw explain` walks were present in the
-process and absent from the line. `ContextFilter` puts them on every record, and `log_json` makes
-the whole record a machine-readable object rather than a string a log stack has to guess at.
-
-*Nothing redacted a credential.* `core/db.py::_redact` strips a password from a DSN before it is
-echoed — in exactly one place, which is the tell that the concern is real and unsystematised. A
-DSN, a bearer token or an API key reaches a log through the ordinary routes: an exception message,
-an httpx error, a `repr` of a config object. `SecretRedactingFilter` scrubs them everywhere.
-
-**What is deliberately *not* redacted: the audit trail's arguments.** `SECURITY.md` states plainly
-that the trail records each tool call's arguments, that they are user free text and may contain PII
-or confidential chemistry, and that this is *intentional* — the trail exists to be an attributable
-"who did what to which inputs" record. Redacting that would break the very thing it is for.
-The row asked for redaction and the honest reading of it is credentials, which have no such
-justification and which nothing was protecting.
+The audit trail's tool arguments are deliberately not redacted: that trail is the attributable
+"who did what to which inputs" record (`SECURITY.md`). Redaction here targets credentials.
 """
 
 import json
@@ -48,9 +28,8 @@ from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
 
 if TYPE_CHECKING:
-    # Annotations only. The SDK is imported *inside* `configure_telemetry` at runtime, because this
-    # module is what every entrypoint imports first and telemetry is off by default — and because
-    # "the extras are missing" has to be catchable there rather than at import of the kernel.
+    # Annotations only: the SDK is imported inside `configure_telemetry`, since telemetry is off by
+    # default and a missing extra must be catchable there.
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SpanExporter
 
@@ -58,63 +37,36 @@ if TYPE_CHECKING:
 def configure_logging() -> None:
     """Configure the root logger from config (level + format).
 
-    Safe to call more than once: `force=True` replaces any existing handlers, so a second
-    call (e.g. a test, or both workers in one process) re-applies the configured settings
-    rather than stacking duplicate handlers.
+    Safe to call more than once: `force=True` replaces the root's handlers rather than stacking
+    them.
     """
     logging.basicConfig(
         level=settings.log_level.upper(),
         format=settings.log_format,
         force=True,
     )
-    # The filters go on the *handlers* rather than on a logger, because a filter attached to a
-    # logger is not consulted for records that propagate up from a child — and every module here
-    # logs through `getLogger(__name__)`, so almost every record is a propagated one. On the
-    # handler, nothing reaches an output stream unfiltered.
-    # One filter pair, constructed once and shared. `SecretRedactingFilter.__init__` walks the
-    # connector registry off disk, so a pair per handler would repeat that work — and, when the
-    # registry is broken, would log the ERROR and increment the failure counter once per handler
-    # per call rather than once per startup, which `core/metrics.py` says it means.
+    # Filters go on handlers, not loggers: a logger's filter is not consulted for records propagated
+    # from children. One filter pair is built and shared, because constructing the redactor reads
+    # the connector registry and logs its degradation once per startup.
     handlers = _handlers_that_reach_an_output_stream()
-    # **`ContextFilter` is installed before `SecretRedactingFilter` is *constructed*, not merely
-    # before it is attached.** That constructor logs `degraded[log_redaction]` when the connector
-    # registry raises, and `log_format` demands `%(correlation_id)s`, which only `ContextFilter`
-    # puts on a record — so with the pair built in one statement, `Formatter.format` raised
-    # `ValueError: Formatting field not found in record: 'correlation_id'` and `handleError` dumped
-    # the record to stderr as a "--- Logging error ---" traceback, the raw `'degraded[%s]: …'` and
-    # `Arguments: ('log_redaction',)` on separate lines. The one *security* degradation in this file
-    # is the one line that could not be printed, so the log-stack rule matching the marker this
-    # module calls "the stable marker to alert on" never fired. Two statements, in the order the
-    # alarm needs.
+    # `ContextFilter` is installed before `SecretRedactingFilter` is constructed: that constructor
+    # may log `degraded[log_redaction]`, and the format needs `%(correlation_id)s`, which only
+    # `ContextFilter` supplies. Otherwise the one security degradation line fails to format.
     context = ContextFilter()
     for handler in handlers:
         if not any(isinstance(f, ContextFilter) for f in handler.filters):
             handler.addFilter(context)
     redaction = SecretRedactingFilter()
     for handler in handlers:
-        # `force=True` above resets the *root's* handlers, so a second `configure_logging()` starts
-        # them clean — but a non-propagating logger's handlers are not ours to reset and would
-        # otherwise accumulate a pair per call, running redaction N times per record on the front
-        # door's hot path. Measured 2 -> 4 -> 6 filters over three calls before this guard.
+        # A non-propagating logger's handlers are not reset by `force=True`, so without this guard
+        # each call would stack another filter pair on them.
         installed = next((f for f in handler.filters if isinstance(f, SecretRedactingFilter)), None)
         if installed is None:
             handler.addFilter(redaction)
             installed = redaction
-        # The filter is fail-open by design, so a record it could not redact still reaches
-        # logging's own error path with its original text. That path prints to stderr; this makes
-        # it print a redacted copy. Unconditional because it is idempotent by construction — see
-        # the function.
-        #
-        # `installed`, not `redaction`, and the two differ on every call after the first. The guard
-        # above keeps the *first* filter on the handler while this line used to hand the error path
-        # the newly-constructed one — so a second `configure_logging()` left one handler holding two
-        # different filter objects, which is the exact defect `_install_redacting_handle_error`'s
-        # docstring says it fixed. Measured: the ordinary path's filter was identical across calls,
-        # the error path's was not. Harmless while both resolve the connector registry the same way,
-        # and not harmless in the one case that matters — if the first construction degraded
-        # (`degraded[log_redaction]`) and a later one succeeded, the ordinary path would keep an
-        # empty connector-token inventory for the life of the process while only the error path
-        # held the full one.
+        # The filter is fail-open, so an unredactable record reaches logging's own stderr error
+        # path; this makes that path print a redacted copy. Passed `installed` (the filter actually
+        # on the handler), so both paths share one token inventory across repeated calls.
         _install_redacting_handle_error(handler, installed)
         if settings.log_json:
             handler.setFormatter(JsonFormatter())
@@ -131,20 +83,9 @@ def log_event(
 ) -> None:
     """Emit one record that is both readable prose and a queryable row.
 
-    The gap this closes is not verbosity — it is *shape*. Every log line in this system was a
-    rendered English sentence, so an operator could grep and could never filter or aggregate: a
-    turn's duration, a job's outcome and an activity's attempt number were all present as text
-    inside a message and absent as fields. Measured before this existed: one `extra=` call in the
-    whole tree, and `JsonFormatter` discarded even that one.
-
-    `event` is the discriminator a query starts from — a short dotted name (`turn.finished`,
-    `job.failed`, `http.request`) that is a literal at the call site, so the whole vocabulary is
-    enumerable from the source the way `degraded`'s `subsystem` is. It lands both in `fields.event`
-    and, under the `%`-format, as the message's own prefix, so the two renderings carry it alike.
-
-    `logger` is the **caller's**, for the reason `degraded` takes one: a helper logging under its
-    own name would put `chemclaw.core.logging` on every lifecycle line and throw away the field
-    that says where it happened.
+    `event` is a short dotted literal (`turn.finished`, `job.failed`) that a query starts from; it
+    lands in `fields.event` and, under the `%` format, as the message prefix. `logger` is the
+    caller's so the record says where it happened.
 
     Args:
         logger: the calling module's logger.
@@ -155,12 +96,8 @@ def log_event(
         exc_info: attach the active exception (for a `*.failed` event inside an `except`).
         **fields: the structured payload. Values should be scalars — a log stack indexes those.
     """
-    # G003 is suppressed for the reason `metrics_bridge.degraded` suppresses it, and the reason is
-    # the same one: the rule's fix is to interpolate (`"%s", message % args`), which formats
-    # *eagerly* at the call site — so a caller whose format string and arguments disagree would get
-    # a `TypeError` raised out of the logging call instead of logging's own error path handling it,
-    # which is how every other log call in this codebase behaves. Concatenating the prefix keeps one
-    # lazy format string.
+    # G003 suppressed: interpolating eagerly would raise a format mismatch out of the logging call
+    # instead of through logging's own error path. Concatenating the prefix keeps one lazy format.
     logger.log(
         level,
         "%s: " + message,  # noqa: G003
@@ -174,45 +111,23 @@ def log_event(
 def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
     """Every handler a record can reach — the root's, plus any non-propagating logger's own.
 
-    "Put the filter on the root handler" is only complete while every record propagates to the
-    root, and the front door is the one process where that is false. It is started as
-    `exec uvicorn ... --factory` with no `--log-config`, so uvicorn installs its own dictConfig
-    first and gives `uvicorn` a handler with `propagate: false`. `uvicorn.error` — which logs every
-    unhandled ASGI exception with `exc_info`, i.e. exactly the records that carry a DSN or an auth
-    header — then reaches an output stream that this module had never touched: unredacted,
-    uncorrelated, and in plain text even under `CHEMCLAW_LOG_JSON=true`.
+    The front door runs `exec uvicorn ... --factory`, and uvicorn gives `uvicorn` a handler with
+    `propagate: false`; its `uvicorn.error` logs unhandled exceptions, exactly the records that
+    carry DSNs or auth headers. Sweeping the logger manager covers it without the entrypoint
+    knowing.
 
-    `core/worker_http.py` and `connectors/server_entry.py` avoid this by passing `log_config=None`,
-    but that only helps a process we start ourselves in Python. Sweeping the manager here covers
-    the entrypoint's `exec uvicorn` as well, without it having to know this module exists.
-
-    **The sweep is one-shot, and an earlier version of this docstring claimed more than that.** It
-    said the sweep also covers "any future library that configures its own logger", which is false:
-    it walks `logging.Logger.manager` once, at `configure_logging()` time, so a non-propagating
-    logger created *after* that call is never reached. What makes it work for uvicorn is an
-    ordering fact rather than a general property — `uvicorn.Config.__init__` calls
-    `configure_logging()`, which runs `dictConfig`, before the app factory this module is
-    configured from. Measured on uvicorn 0.51.0: `uvicorn.error` exists with `propagate == False`
-    before the factory runs, and an end-to-end run under `CHEMCLAW_LOG_JSON=true` shows a DSN
-    password redacted in its traceback. A library that configures a logger later needs its own
-    call, or this sweep needs to become a `logging.setLoggerClass` hook.
+    The sweep is one-shot at `configure_logging()` time. It reaches uvicorn's loggers only because
+    uvicorn configures them before the app factory runs; a library that creates a non-propagating
+    logger later is not covered.
     """
     handlers: list[logging.Handler] = list(logging.getLogger().handlers)
-    # `logging.lastResort` is neither a root handler nor any logger's own, and it is what a
-    # non-propagating logger with no handlers of its own falls back to — an ordinary library shape,
-    # and the same shape the rest of this sweep exists for. Measured: such a logger printed
-    # `token=<value>` to stderr through it, unfiltered, on a *successful* emit rather than on any
-    # error path. Swept here so the fallback carries the same redaction as everything else.
+    # `logging.lastResort` is what a non-propagating logger with no handlers falls back to, so it
+    # gets the same redaction.
     if logging.lastResort is not None:
         handlers.append(logging.lastResort)
-    # Snapshot under the logging module's own lock. `loggerDict` is mutated by `getLogger()`, and
-    # this runs in the app factory while worker startup, a lazy connector import or OTel's first use
-    # may be creating loggers on another thread — iterating the live view raised
-    # `RuntimeError: dictionary changed size during iteration` in 64 of 4000 measured attempts, and
-    # the raise would abort `configure_logging()` with filters attached to only some handlers.
-    # `list()` of the values view is a single C-level copy that does not release the GIL, so it
-    # cannot observe a concurrent insertion mid-iteration. A comprehension over the live view can,
-    # and did.
+    # Snapshot with a single C-level `list()` copy: other threads may create loggers concurrently,
+    # and iterating the live view can raise "dictionary changed size during iteration"
+    # mid-configuration.
     known = list(logging.root.manager.loggerDict.values())
     for existing in known:
         # `PlaceHolder` entries are not loggers and carry no handlers.
@@ -224,11 +139,8 @@ def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
 def _redacted_for_diagnostic(value: object, extra_secrets: tuple[str, ...]) -> str:
     """One field of logging's own error diagnostic, rendered and scrubbed, never raising.
 
-    `repr` for a non-string, because that is what `handleError` would have printed anyway, and a
-    bare `***` if even rendering raises: this runs *inside* logging's error path, on a record that
-    has already failed to render once, so a `msg` whose `__str__` raises or an argument with a
-    hostile `__repr__` is the expected input rather than an exotic one. A diagnostic that cannot be
-    produced safely must not become a second exception in the handler that was reporting the first.
+    `repr` for a non-string, as `handleError` would print, and `***` if rendering raises: this runs
+    on a record that already failed to render, so hostile `__str__`/`__repr__` is expected input.
     """
     try:
         return redact_secrets(value if isinstance(value, str) else repr(value), extra_secrets)
@@ -241,54 +153,22 @@ def _install_redacting_handle_error(
 ) -> None:
     r"""Bind a `handleError` on `handler` that scrubs the record before stderr sees it.
 
-    **The leak this closes.** `SecretRedactingFilter.filter` is deliberately fail-open: a record it
-    cannot process is kept and passed on, because a silently dropped log line is worse than a
-    malformed one. That stays exactly as it is — but its own docstring names the consequence, which
-    nothing acted on: the record continues carrying its **original** `msg` and `args`. A record the
-    filter could not render is one `Formatter.format` cannot render either, so `Handler.emit`
-    raises and `Handler.handleError` runs. Read from CPython 3.11.15, `handleError` writes
+    The redacting filter is fail-open, so a record it cannot process keeps its original `msg` and
+    `args`; formatting then fails and `Handler.handleError` writes both verbatim to stderr — where a
+    credential in `args` would leak. Redacting those two fields keeps the diagnostic, unlike setting
+    `logging.raiseExceptions = False`, which would hide every handler failure in the process.
 
-        'Message: %r\nArguments: %s\n' % (record.msg, record.args)
-
-    straight to `sys.stderr` — the pre-redaction message *and* the pre-redaction arguments, which
-    is precisely where a credential lives (`logger.info("dsn=%s", dsn)` keeps the DSN in `args`
-    until format time). `logging.raiseExceptions` defaults to True, so this path is live in every
-    deployment, and it is reached by the ordinary malformations the filter was hardened to survive
-    rather than by anything unusual.
-
-    **Not `logging.raiseExceptions = False`.** That is the tempting one-liner and it is the wrong
-    fix: it closes the leak by silencing *every* handler diagnostic in the process — a failing
-    `emit`, a broken formatter, a closed stream all stop being reported anywhere at all. It trades
-    one credential for a permanent, process-wide blind spot over the logging stack itself, which is
-    the component you most need to be able to see fail. Redacting the two fields the diagnostic
-    prints keeps the diagnostic.
-
-    **Idempotent by construction**, because `configure_logging()` is documented safe to call more
-    than once: the bound function delegates to `type(handler).handleError` — the class
-    implementation — never to whatever this attribute held before. A second call therefore rebinds
-    an equivalent function instead of stacking a wrapper around the first, and a `Handler` subclass
-    with its own `handleError` still gets its own behaviour.
+    Idempotent: the bound function delegates to `type(handler).handleError`, never to the previous
+    attribute, so a second call rebinds rather than stacks, and subclass behaviour is preserved.
     """
 
     def handle_error(record: logging.LogRecord) -> None:
         """Print logging's own diagnostic for `record` with its credentials removed.
 
-        **Nothing here may raise, and the diagnostic must print even if the scrubbing fails.**
-        `Handler.handleError` is the one method in the logging stack that is defensive to the point
-        of re-raising only `RecursionError`, because anything it lets escape surfaces at the
-        application's own `logger.info(...)` line — logging crashing its caller. The first version
-        of this wrapper reintroduced exactly that: `record.args` was treated as a tuple *or*
-        anything-else-with-`.items()`, so a bare string or a `Mapping`-registered object without
-        `items` raised `AttributeError` out through `emit` into the caller, **and** swallowed the
-        diagnostic on the way. That is the property `SecretRedactingFilter.filter` spends a
-        paragraph guaranteeing, given up one level down.
-
-        So: the scrub is attempted, any failure drops the arguments rather than propagating, and
-        the delegation sits outside the `try` where it always runs.
-
-        The token names are read per call rather than captured at install time. Captured, a second
-        `configure_logging()` left one handler with two inventories — the filter kept the first and
-        this closure held the second — with the *stale* one on the ordinary path.
+        Nothing here may raise, since anything escaping surfaces at the caller's log line. The scrub
+        is attempted, any failure drops the arguments, and the delegation sits outside the `try` so
+        it always runs. Token names are read per call so the filter and this path share one
+        inventory.
         """
         msg, args = record.msg, record.args
         try:
@@ -311,10 +191,8 @@ def _install_redacting_handle_error(
         try:
             type(handler).handleError(handler, record)
         finally:
-            # Restored, because the record is not ours. The logger hands the same object to every
-            # handler in turn, so a later handler must format the caller's own values — a `%d`
-            # argument left replaced by its rendered text would spread one handler's failure to
-            # all of them.
+            # Restored: the same record goes to every handler, and each must format the caller's own
+            # values.
             record.msg, record.args = msg, args
 
     handler.handleError = handle_error  # type: ignore[method-assign]
@@ -328,22 +206,9 @@ _NOOP_METERS_INSTALLED = False
 def _install_noop_meter_provider() -> None:
     """Make "telemetry off" mean a no-op provider, not the *absence* of one.
 
-    **This is the fix for the front door's memory leak**, and the distinction it turns on is the
-    whole finding: with no meter provider set, the OpenTelemetry API does not discard instrument
-    calls — it *proxies* them, and it keeps every proxy forever so it can back them if a provider
-    arrives later. `_ProxyMeterProvider._meters` and `_ProxyMeter._instruments` are module-level
-    lists that only ever grow — `_ProxyMeterProvider` in the `opentelemetry.metrics` internals.
-
-    MAF creates one duration histogram per exposed MCP function, and this system rebuilds its
-    connector tool surface every turn — so a turn with telemetry *off* leaked 35 `_ProxyMeter`s,
-    35 `_ProxyHistogram`s, 70 locks and 35 lists, permanently. Measured with the front door's own
-    load (`chemclaw.cli.leak_probe`): **+178 live objects and +20.7 KB of RSS per turn before,
-    +3.3 objects and +2.7 KB after** — and what remains is the session LRU filling toward its cap,
-    which is bounded by construction. Over the 162-round soak that is the 549 MB → 1,066 MB the
-    review recorded and could not name.
-
-    Idempotent by a module flag rather than by asking the API what is installed, because
-    `get_meter_provider()` has the side effect of resolving and caching one.
+    With no meter provider set, the OpenTelemetry API proxies every instrument call and retains each
+    proxy forever, so per-turn instrument creation leaks memory without bound. Idempotent by a
+    module flag, because `get_meter_provider()` itself resolves and caches a provider.
     """
     global _NOOP_METERS_INSTALLED
     if _NOOP_METERS_INSTALLED:
@@ -354,36 +219,21 @@ def _install_noop_meter_provider() -> None:
     _NOOP_METERS_INSTALLED = True
 
 
-# The `service.name` every span is attributed to when the deployment does not say otherwise.
-#
-# Not a `Settings` field, and that is the one place this module does not follow "config, never a
-# literal": OpenTelemetry already owns this value under the standard `OTEL_SERVICE_NAME`, which
-# `_build_tracer_provider` honours, and a `CHEMCLAW_OTEL_SERVICE_NAME` beside it would be a second
-# spelling of one thing — two answers to "which service is this trace from". A deployment
-# that wants the front door and each worker to appear as separate services sets `OTEL_SERVICE_NAME`
-# per Deployment; unset, every Chemclaw process reports as one service, which is what the previous
-# bootstrap did too (it reported them all as `agent_framework`).
+# The `service.name` spans carry when `OTEL_SERVICE_NAME` is unset. Not a `Settings` field because
+# OpenTelemetry already owns that variable; set it per Deployment to separate services.
 _DEFAULT_SERVICE_NAME = "chemclaw"
 
-# Set once per process, for the same reason `_NOOP_METERS_INSTALLED` is: `trace.set_tracer_provider`
-# refuses a second call and warns, and — worse — building a second provider would start a second
-# `BatchSpanProcessor` export thread and a second gRPC channel that the API then silently discards.
-# A flag rather than asking the API what is installed, because `get_tracer_provider()` has the side
-# effect of resolving and caching one.
+# Set once per process: a second provider would start another export thread and channel that the API
+# discards. A flag, because `get_tracer_provider()` resolves and caches one as a side effect.
 _TRACING_INSTALLED = False
 
 
 def _build_tracer_provider(exporter: "SpanExporter") -> "TracerProvider":
     """Assemble the span pipeline: a resource that names the service, batching, then `exporter`.
 
-    Separate from `configure_telemetry` because installing a provider is a once-per-process global
-    act while *building* one is an ordinary object graph — so this half can be driven by a test
-    against a real in-memory exporter, which is the only way to prove that a span emitted through
-    the provider reaches the exporter carrying the resource attributes a collector groups by.
-
-    `BatchSpanProcessor` rather than `SimpleSpanProcessor` for the reason the previous bootstrap
-    also chose it: a synchronous export sits on the caller's thread, and this pipeline is fed from
-    the event loop that serves every SSE stream.
+    Separate from the global install so a test can drive it against an in-memory exporter.
+    `BatchSpanProcessor` because a synchronous export would sit on the event loop serving every
+    stream.
     """
     from opentelemetry.sdk.resources import SERVICE_NAME, SERVICE_VERSION, Resource
     from opentelemetry.sdk.trace import TracerProvider
@@ -391,13 +241,10 @@ def _build_tracer_provider(exporter: "SpanExporter") -> "TracerProvider":
 
     resource = Resource.create(
         {
-            # The standard variable wins when a deployment sets it; passed explicitly rather than
-            # left to `Resource.create`'s own env detection so the two halves of "what names this
-            # service" are in one expression instead of split across a `setdefault` elsewhere.
+            # The standard variable wins when set; resolved explicitly so the service name is
+            # decided in one expression.
             SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME") or _DEFAULT_SERVICE_NAME,
-            # The Git SHA the pod was built from (`CHEMCLAW_DEPLOYMENT_REVISION`), the same value
-            # every audit record is stamped with — so a trace and the audit record of the same turn
-            # name the same build.
+            # The build's Git SHA, the same value stamped on every audit record.
             SERVICE_VERSION: settings.deployment_revision,
         }
     )
@@ -409,60 +256,19 @@ def _build_tracer_provider(exporter: "SpanExporter") -> "TracerProvider":
 def configure_telemetry() -> None:
     """Install the process's OpenTelemetry span pipeline; install no-op meters when it is off.
 
-    Off unless `CHEMCLAW_OTEL_ENABLED=true`. When on, this builds a `TracerProvider` with an OTLP
-    span exporter behind a `BatchSpanProcessor` and installs it as the global provider, so the
-    first-party spans in `core/tracing.py` — the turn, the tool call, and the `traceparent` that
-    joins a connector's work to the turn that asked for it — are actually exported. Called once
-    per process at each worker's entrypoint, after `configure_logging`.
+    Off unless `CHEMCLAW_OTEL_ENABLED=true`. When on, installs a global `TracerProvider` with an
+    OTLP span exporter behind a `BatchSpanProcessor`, so the first-party spans in `core/tracing.py`
+    are exported; span helpers degrade silently to no-ops otherwise, so tests guard this pipeline.
+    Called once per entrypoint, after `configure_logging`; idempotent.
 
-    **This used to be one line into MAF** (`agent_framework.observability.configure_otel_providers`)
-    and that is why it is written out here: the OTel SDK and the OTLP exporter are declared
-    dependencies *of this module*, but the code that turned them into a live pipeline belonged to a
-    package the LangGraph rebuild removes. Nothing in `langchain`, `langgraph` or `langsmith`
-    replaces it, and — the part that makes this the phase's sharpest edge — **no test would have
-    failed** if tracing had simply stopped: every span helper degrades silently to a no-op by
-    design, which is right for a turn and wrong for a deployment. The tests beside this function
-    exist to make the silence audible.
-
-    **What went with MAF, and what answers the same question now.** MAF's chat-client
-    instrumentation recorded `gen_ai.client.token.usage` — an OTel *metric*, a histogram, despite
-    the name reading like a span attribute — labelled by request model, response model, provider and
-    token type. Measured across the installed venv it is emitted by exactly one module, MAF's own
-    `observability`; nothing in `langchain`, `langgraph` or `langsmith` emits it. That metric is not
-    fabricated here. What replaces it is a different signal in the pipeline that *is* here:
-    `_instrument_llm_calls` puts one span per model call, carrying `llm.token_count.*` and
-    `llm.model_name`, behind `CHEMCLAW_OTEL_LLM_SPANS`. `core/metrics.py`'s Prometheus token
-    counters are unchanged and still carry `profile` rather than model, deliberately (D-152).
-    `docs/guides/runbook.md` says the same where an operator would look.
-
-    **Traces only, deliberately, and the other two signals have homes.** Metrics are
-    `core/metrics.py`'s Prometheus text surface, scraped per pod, because a trace is sampled and
-    per-request and cannot answer "what is p95 right now" for an alert; logs go to stderr, as JSON
-    (`JsonFormatter`) when `CHEMCLAW_LOG_JSON` is set, collected by the cluster's log stack.
-    Installing OTLP pipelines for either would be a second, unread copy of a signal that already
-    has a collector.
-
-    **So "on" also installs the no-op meter provider**, not just "off" — see
-    `_install_noop_meter_provider`. With no meter provider set, the OTel *API* proxies every
-    instrument and retains the proxy forever, so a process that exports traces and never installs a
-    meter provider leaks exactly as the disabled path did. One line covers both.
-
-    **Idempotent.** The front door, the workers and the CLI each call this at their entrypoint, and
-    tests call it repeatedly; a second call must not start a second export thread and a second gRPC
-    channel that the API would then discard. The flag makes the second call a no-op.
-
-    `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` **governs again**, and it is the same question it always
-    governed: whether prompts and completions ride on a span. It lost its only consumer with MAF's
-    instrumentation and spent a phase as a warned-about knob; `_instrument_llm_calls` gives it back
-    rather than adding a second flag beside it, because `CHEMCLAW_OTEL_LLM_SPANS` is the only thing
-    that puts content within reach. It still governs nothing when that is off — and the warning
-    below still says so out loud in exactly that case, rather than letting an
-    enabled-but-ineffective privacy switch read as an effective one.
+    Traces only: metrics are `core/metrics.py`'s Prometheus surface and logs go to stderr. The no-op
+    meter provider is installed in both states, since the OTel API leaks proxies without one.
+    `_instrument_llm_calls` adds model-call spans behind `CHEMCLAW_OTEL_LLM_SPANS`, and
+    `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` decides whether those carry prompts and completions.
 
     Raises:
         RuntimeError: `CHEMCLAW_OTEL_ENABLED=true` but the OpenTelemetry SDK / OTLP exporter is not
-            installed — a directive message rather than the import error, for the admin who flips
-            the flag on an install without the extras.
+            installed — a directive message rather than the import error.
     """
     global _TRACING_INSTALLED
     if not settings.otel_enabled:
@@ -470,10 +276,8 @@ def configure_telemetry() -> None:
         return
     if _TRACING_INSTALLED:
         return
-    # Bridge our one config value to the standard OTLP variable the exporter reads (F6-T5), so the
-    # collector endpoint stays a single `CHEMCLAW_OTEL_ENDPOINT` like every other endpoint.
-    # `setdefault`, so a deployment that sets the standard variable directly — or the per-signal
-    # `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — keeps winning, exactly as before.
+    # Bridge `CHEMCLAW_OTEL_ENDPOINT` to the standard OTLP variable; `setdefault` so a directly set
+    # standard or per-signal variable wins.
     if settings.otel_endpoint:
         os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", settings.otel_endpoint)
     try:
@@ -484,9 +288,8 @@ def configure_telemetry() -> None:
             "CHEMCLAW_OTEL_ENABLED=true but the OpenTelemetry SDK/OTLP exporter is not installed"
         ) from exc
 
-    # No endpoint argument: the exporter resolves it from the standard variables itself, which is
-    # what keeps `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, the headers and the protocol settings working
-    # without this module re-implementing OTel's own configuration precedence.
+    # No endpoint argument: the exporter resolves endpoint, headers and protocol from the standard
+    # variables with OTel's own precedence.
     provider = _build_tracer_provider(OTLPSpanExporter())
     trace.set_tracer_provider(provider)
     _instrument_llm_calls(provider)
@@ -499,26 +302,9 @@ def configure_telemetry() -> None:
 def _warn_about_sensitive_data() -> None:
     """Say what `CHEMCLAW_OTEL_INCLUDE_SENSITIVE_DATA` is doing — in *both* directions.
 
-    **The dangerous direction is the one that used to be silent, and that asymmetry was the
-    defect.** The flag spent a phase governing nothing, and this module warned about exactly that:
-    an enabled-but-ineffective privacy switch reads as an effective one. Giving the flag a consumer
-    back inverted which case needs saying. A deployment that set it while it was inert — and the
-    config comment kept it precisely "because a deployment may still have it in its values file" —
-    gets `CHEMCLAW_OTEL_LLM_SPANS` switched on by the shipped chart and starts exporting a chemist's
-    question and the model's answer to the collector, with nobody having decided that in this
-    release. A flag that changes meaning between versions has to announce the meaning it now has.
-
-    Not an error, and not a refusal: a deployment is entitled to make this choice, and failing to
-    start over a telemetry setting would be worse than the setting. What it is not entitled to is
-    making it without noticing, so the line names the endpoint the content is going to.
-
-    **The first branch's claim is true because something now makes it true.** "No first-party span
-    carries turn content" was measured false: the span *exception* channel — `SpanHandle.failed`
-    plus the SDK's automatic `exception` event — exported a tool failure's message and its full
-    stacktrace with this flag off, and a marker credential echoed in a 401 body with it. A span is
-    not a `LogRecord`, so nothing below reached it. `core/tracing.exportable_detail` is the reader
-    that closes it (`D-2026-09-06-a-redaction-that-only-covers-logrecords-covers-one-sink`); this
-    sentence is a claim about that function, and whoever removes it should correct this line.
+    When content export is on, the line names the endpoint the prompts and completions go to, so the
+    choice is never made unnoticed; it is not a refusal. When it is off, first-party spans carry no
+    turn content, which holds because `core/tracing.exportable_detail` scrubs span exception detail.
     """
     logger = logging.getLogger(__name__)
     if not settings.otel_llm_spans:
@@ -543,38 +329,18 @@ def _warn_about_sensitive_data() -> None:
 def _instrument_llm_calls(provider: Any) -> None:
     """Attach OpenInference's LangChain instrumentation, content suppressed unless asked.
 
-    A span per model call, plus the chain and tool spans around it, over the same OTLP exporter the
-    provider was just built with. Off unless `CHEMCLAW_OTEL_LLM_SPANS=true`, and a no-op then — the
-    instrumentation is not imported at all, so a deployment that does not want it pays nothing.
-
-    **Content is `otel_include_sensitive_data`'s decision, which is how that flag stops being
-    dead.** It had exactly one consumer, the agent framework's own instrumentation, and this asks
-    the identical question — so it gets the flag back rather than a second knob beside it. Off (the
-    default) sets every `TraceConfig` hide flag, and `core/tracing.py`'s rule survives intact:
-    identifiers and counts, never a question, an argument or an answer.
-
-    **Suppression costs none of what this was added for**, which is why it is a default rather than
-    a trade-off. Measured against a real compiled graph with a scripted model, scanning *every*
-    exported attribute value for the question and answer text: unsuppressed, five attributes carry
-    content (`input.value`, `output.value` and the three message contents); suppressed, **zero** —
-    while `llm.token_count.prompt`/`.completion`/`.total` and `llm.provider` are byte-identical
-    across the two runs. OpenInference's own `mask()` touches input, output, message, prompt,
-    choice, embedding, tool and invocation-parameter keys and nothing else, which is why.
-
-    **Not guarded against a second call**, deliberately: `configure_telemetry` already returns early
-    on `_TRACING_INSTALLED`, and the instrumentor is a `BaseInstrumentor` singleton that logs
-    "Attempting to instrument while already instrumented" rather than raising. A guard here would be
-    a second answer to a question one flag already answers.
+    A span per model call plus the chain and tool spans around it, over the provider's exporter. Off
+    unless `CHEMCLAW_OTEL_LLM_SPANS=true`, and then not even imported. Whether content rides on the
+    spans is `otel_include_sensitive_data`'s decision; suppressed (the default), token counts, model
+    and provider remain while every input, output and message value is hidden. No second-call guard:
+    `configure_telemetry` already returns early on `_TRACING_INSTALLED`.
 
     Args:
         provider: The tracer provider built for this process, passed explicitly rather than read
-            back from the global — the global is set one line above and reading it back would make
-            this depend on that ordering.
+            back from the global.
 
     Raises:
-        RuntimeError: `CHEMCLAW_OTEL_LLM_SPANS=true` but the instrumentation is not installed — the
-            same directive message the SDK check raises, for the admin who flips the flag on an
-            install without it.
+        RuntimeError: `CHEMCLAW_OTEL_LLM_SPANS=true` but the instrumentation is not installed.
     """
     if not settings.otel_llm_spans:
         return
@@ -592,21 +358,13 @@ def _instrument_llm_calls(provider: Any) -> None:
 def _trace_config(trace_config: Any) -> Any:
     """The OpenInference `TraceConfig` for this deployment — everything hidden, or nothing.
 
-    Two settings rather than eleven. Every hide flag is set together because they answer one
-    question ("may turn content leave this pod?") and a deployment that could answer it differently
-    per attribute would be one that had not answered it: a span carrying the *prompt* but not the
-    completion is still a span carrying a chemist's question.
-
-    The list is written out rather than derived from the dataclass's fields, because deriving it
-    would silently adopt whatever a future version adds — including a field whose default is the
-    permissive one. A new hide flag upstream should require a decision here, not inherit one.
+    Every hide flag is set together because they answer one question: may turn content leave this
+    pod? The list is written out rather than derived from the dataclass, so a new upstream flag
+    requires a decision here; `tests/test_llm_spans.py` compares it against the fields.
 
     Args:
-        trace_config: The `TraceConfig` class. Taken as an argument rather than imported here
-            because the import is lazy in `_instrument_llm_calls` — the caller has already resolved
-            it, and importing again would put a second `ImportError` site in the module for one
-            dependency. It also leaves this a pure function of (settings, class), which is what lets
-            `tests/test_llm_spans.py` check the flag set without building a tracer provider.
+        trace_config: The `TraceConfig` class, already resolved by the caller's lazy import,
+            which keeps this a pure function testable without a tracer provider.
 
     Returns:
         The configuration to hand the instrumentor.
@@ -625,110 +383,62 @@ def _trace_config(trace_config: Any) -> Any:
         hide_choices=True,
         hide_llm_invocation_parameters=True,
         hide_llm_tools=True,
-        # The embedding trio was missing from the first version of this list and
-        # `tests/test_llm_spans.py::test_every_hide_flag_is_set_together` is what found it — which
-        # is the whole reason that test compares against the dataclass's fields rather than against
-        # a list written twice. `hide_embeddings_text` is the one that mattered: the text being
-        # embedded is a chemist's question or a note's body, so leaving it unset would have put
-        # content on a span under the configuration whose entire purpose is that it does not.
-        # `hide_embedding_vectors` and `hide_embeddings_vectors` are upstream's spelling and its
-        # alias; both are set because either might be the one a given release reads.
+        # `hide_embeddings_text` matters most: embedded text is a chemist's question or a note's
+        # body. `hide_embedding_vectors` and `hide_embeddings_vectors` are upstream's spelling and
+        # its alias; both are set because a given release may read either.
         hide_embedding_vectors=True,
         hide_embeddings_vectors=True,
         hide_embeddings_text=True,
     )
 
 
-# The settings whose *values* must never appear in a log line. Redaction works by matching the
-# actual secret this process holds rather than by guessing at token-shaped strings: a pattern like
-# `[A-Za-z0-9]{32,}` both misses a short key and mangles a molecule id, while an exact value match
-# catches the secret no matter which route put it there — an exception message, an httpx error, a
-# `repr` of a settings object — and cannot false-positive on anything else.
-#
-# Listed rather than derived from a name pattern (`*_token`, `*_secret`), because deriving would
-# silently include `calc_server_token_env` and `budget_max_tokens_per_user` — a variable *name* and
-# an integer — and silently *exclude* the next secret whose name does not match. A list is one line
-# per addition and is visible in review, which is what a credential inventory should be.
+# The settings whose values must never appear in a log line. Redaction matches the actual secret
+# values this process holds rather than token-shaped strings, so it catches a secret on any route
+# and cannot false-positive. Listed by hand rather than derived from name patterns, which would
+# include non-secrets and miss the next oddly named secret.
 _SECRET_SETTINGS = (
     "llm_api_key",
-    # The fallback endpoint's own credential, absent from this list until 2026-08-26 — the one
-    # credential in `Settings` that no redaction covered. It is a separate field precisely so a
-    # second endpoint can hold a *different* key, so matching the primary's value would not have
-    # caught it.
+    # The fallback endpoint's own credential, which may differ from the primary's.
     "llm_fallback_api_key",
     "temporal_api_key",
-    # The external vector store's key, and the live lane's bearer. Both were plain `str` outside
-    # this list until 2026-08-27, which made them invisible to the type rule *and* to the value
-    # inventory at once — the shape `tests/test_credentials.py`'s two directions could not see,
-    # because each is a closed loop over one of the two. The third direction added there is a
-    # credential-shaped-name check over `Settings`, so the next one cannot arrive the same way.
+    # The external vector store's key and the live lane's bearer. `tests/test_credentials.py` also
+    # checks credential-shaped `Settings` names against this list.
     "vector_store_api_key",
     "live_probe_token",
     "postgres_dsn",
     "postgres_migration_dsn",
     "session_store_dsn",
-    # Not a credential to an external system, which is why it was missed — but it is the HMAC key
-    # `agent/framing.py` derives `ENVELOPE_TAG` from, and the agent instructions say only an
-    # envelope carrying exactly that tag marks retrieved content as data. Anyone who learns it and
-    # can place text into any retrieval source closes the envelope from inside, and their text is
-    # read as instructions: it defeats the prompt-injection mitigation it exists to make durable.
+    # The HMAC key `agent/framing.py` derives `ENVELOPE_TAG` from. Anyone who learns it can close a
+    # retrieval envelope from inside and have their text read as instructions.
     "framing_envelope_secret",
 )
 
-# The settings that hold a credential's *variable name* rather than its value. The value inventory
-# above cannot reach them and is right not to try: `calc_server_token_env` is a string like
-# `"CHEMCLAW_CALC_TOKEN"`, and redacting *that* would scrub the variable name out of every line
-# that helpfully tells an operator which credential to set. What is secret is what the named
-# variable holds, which is one indirection further out.
-#
-# Nothing covered that indirection, so the three bearers this process actually sends — the
-# calculation backend's, the labelling server's, and the only credential guarding the read-only MCP
-# face — were outside every mechanism at once: absent from `_SECRET_SETTINGS` because they are not
-# values, absent from the connector manifests' `token_env` list because they are not connectors,
-# and never passed to `register_secret_env` because nothing reading them said so. The structural
-# patterns still caught an `Authorization:` header or a `NAME=value` assignment; a bearer quoted on
-# its own in an upstream error message went out verbatim.
-#
-# **Derived from the suffix, and that is the opposite decision to `_SECRET_SETTINGS`' hand-written
-# list — because it is a different question.** Deriving *which settings hold a secret value* by name
-# would sweep in this very suffix and miss the next credential whose name does not match. Deriving
-# *which settings name a variable* is exact: `_token_env` is the suffix a field uses to say so, and
-# there is nothing else it could mean. The field names are read once at import (they are static);
-# only the three attribute reads happen per record, because `_secret_values` runs on every line and
-# a 400-field scan there would be a real cost.
+# Settings holding a credential's variable *name* (for example `calc_server_token_env`), whose named
+# variable holds a bearer this process sends. The name itself must stay readable in log lines that
+# tell an operator what to set; the value it points at is redacted. Derived from the suffix, unlike
+# `_SECRET_SETTINGS`, because `_token_env` exactly means "names a variable". Field names are read
+# once at import; only the environment reads happen per record.
 _TOKEN_ENV_SUFFIX = "_token_env"
 _SECRET_ENV_SETTINGS: tuple[str, ...] = tuple(
     sorted(name for name in type(settings).model_fields if name.endswith(_TOKEN_ENV_SUFFIX))
 )
 
-# The git push credential for the knowledge-sync sidecar (`deploy/knowledge-sync.sh`). It has no
-# `Settings` field — nothing in this process reads it as config, only the sidecar script does —
-# but `_helpers.tpl` ranges over every secret key for every component, so it sits in this process's
-# environment regardless. A `Settings` field would be a config seam for a value nothing here
-# configures; reading the one environment variable a redaction inventory actually needs is simpler
-# than inventing one.
+# The knowledge-sync sidecar's git push credential. No `Settings` field reads it, but the chart puts
+# every secret key into every component's environment, so it is redacted here.
 _KNOWLEDGE_REPO_TOKEN_ENV = "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
 
-# Credential variable names contributed at runtime by something that reads its own configuration
-# rather than this process's settings — today, a data source whose manifest names the environment
-# variables holding its warehouse credentials (`ingest.eln.warehouse.connect`).
-#
-# **Names, never values**, so this stays consistent with everything above it: `_secret_values` reads
-# `os.environ` fresh on every call, and caching a value here would keep redacting a rotated
-# credential's *old* text while the new one flowed through unredacted.
-#
-# A set rather than a `Settings` field because the whole point of the manifest seam is that
-# attaching a source costs no core edit — a source that had to add a config field to be redactable
-# would have given that property back. Registration is idempotent and additive; nothing removes.
+# Credential variable names registered at runtime by code that reads its own configuration, such as
+# a data source whose manifest names its warehouse credentials. Names, never values: values are read
+# fresh from `os.environ` per call so a rotated credential is redacted immediately. A set, not a
+# `Settings` field, so attaching a source needs no core edit. Additive only.
 _RUNTIME_SECRET_ENVS: set[str] = set()
 
 
 def register_secret_env(name: str) -> None:
     """Add an environment variable to the redaction inventory for the life of this process.
 
-    For a credential this process holds but does not configure: a manifest names the variable, the
-    thing that reads it says so here, and every log line from then on has its value scrubbed. Call
-    it where the variable is read, so the registration cannot drift from the use.
+    For a credential this process holds but does not configure. Call it where the variable is read,
+    so the registration cannot drift from the use.
     """
     if name:
         _RUNTIME_SECRET_ENVS.add(name)
@@ -737,15 +447,8 @@ def register_secret_env(name: str) -> None:
 def _named_token_env_vars() -> frozenset[str]:
     """The environment variables the `*_token_env` settings point at, empty values dropped.
 
-    **One derivation with two readers, and it had two the day the second inventory arrived.**
-    `_SECRET_ENV_SETTINGS` was added for the log filter and `secret_env_names()` went on deriving
-    from `_SECRET_SETTINGS` alone — so the calculation backend's bearer, the labelling server's and
-    the read-only MCP face's were scrubbed from every log line and handed, in the clear, to every
-    `git` child `kg/git_writer.py` starts, which is the exact class `_git_child_env` exists to
-    withhold. Two docstrings said the sets "cannot drift"; reading one list from both places is what
-    makes that a property of the code rather than a claim about it.
-
-    A `frozenset` because both callers want membership and neither wants an order.
+    The one derivation shared by the log filter and `secret_env_names()`, so a bearer scrubbed from
+    logs is also withheld from child processes.
     """
     named = (str(getattr(settings, field, "") or "") for field in _SECRET_ENV_SETTINGS)
     return frozenset(variable for variable in named if variable)
@@ -754,19 +457,11 @@ def _named_token_env_vars() -> frozenset[str]:
 def secret_env_names() -> frozenset[str]:
     """The `CHEMCLAW_*` environment-variable names this process holds a secret *value* under.
 
-    Both inventories the log redaction reads: `_SECRET_SETTINGS`, whose fields hold a credential's
-    value, and `_SECRET_ENV_SETTINGS`, whose fields hold the *name* of a variable a bearer lives in
-    (`_named_token_env_vars`). A credential added to either is scrubbed from a subprocess
-    environment by the same edit rather than a second one that can drift. The use is least
-    privilege: a child process (today, the KG git commands in `kg/git_writer.py`) has no need of
-    this process's LLM credential, database DSNs, Temporal key, the framing-envelope HMAC or the
-    three bearers it sends to its own backends, and a git remote, credential helper or hook that
-    reads its environment must not find them there.
-
-    `_KNOWLEDGE_REPO_TOKEN_ENV` is deliberately *not* here and not in `_SECRET_SETTINGS`: git's
-    own credential for the notes remote reaches it through the remote URL or a credential helper, so
-    a git child may legitimately need that one, and scrubbing it would break `push`. Runtime-
-    registered connector tokens are likewise omitted — they belong to MCP sessions, not a git child.
+    Both inventories: `_SECRET_SETTINGS` (values) and the `*_token_env` targets
+    (`_named_token_env_vars`). Used for least privilege: child processes (the KG git commands in
+    `kg/git_writer.py`) get none of these, so a git remote, credential helper or hook cannot read
+    them. `_KNOWLEDGE_REPO_TOKEN_ENV` is deliberately excluded because git legitimately needs it to
+    push; runtime-registered connector tokens are excluded because they belong to MCP sessions.
     """
     prefix = str(type(settings).model_config.get("env_prefix", ""))
     settings_values = frozenset(f"{prefix}{name}".upper() for name in _SECRET_SETTINGS)
@@ -776,16 +471,9 @@ def secret_env_names() -> frozenset[str]:
 def _configured_by(env_name: str) -> str:
     """The `Settings` value that environment variable configures, or `""` if it configures none.
 
-    **The half a registered name cannot see on its own.** `_secret_values` resolves a registered
-    name against `os.environ`, and `Settings.model_config` declares `env_file=".env"` — which
-    pydantic-settings reads *itself*, without exporting anything. So on the documented `.env`
-    posture the settings object held the credential and the inventory held an empty string, for
-    every registered name that also happens to be a config field. `vector_store_api_key` was the
-    measured instance and `core/config/store.py`'s comment named this registration as its
-    protection; the defect was the mechanism, not that one call site.
-
-    The prefix comes off `model_config` rather than being written here, because a second spelling of
-    `CHEMCLAW_` is a second thing to keep in step.
+    pydantic-settings reads `.env` itself without exporting it, so a registered name can be empty in
+    `os.environ` while `Settings` holds the credential; this resolves the value from `Settings`. The
+    prefix comes from `model_config` rather than a second spelling of `CHEMCLAW_`.
     """
     prefix = str(type(settings).model_config.get("env_prefix", ""))
     if not env_name.startswith(prefix):
@@ -799,144 +487,62 @@ _MIN_REDACTABLE = 8
 
 _REDACTED = "***"
 
-# A credential carried in a URL's userinfo — `scheme://user:secret@host`, which is how a token
-# reaches a git remote and how a password reaches a DSN. Matched structurally rather than by value
-# because this is the one credential class the inventory above *cannot* cover: a git helper, a
-# sidecar or a remote configured outside this process holds the token, so it is nowhere in
-# `os.environ` here and the substring pass has nothing to look for. The user is kept and only the
-# secret replaced, so a redacted line still says which remote and which principal failed.
-#
-# Two spellings, because the password form is not the common one for a token: `scheme://user:pw@`
-# carries a principal *and* a secret, while `scheme://token@` is the whole userinfo and is how a
-# PAT reaches a git remote (scheme, then the token, then `@`, then the host). Only the first was
-# matched,
-# so the more common credential form passed through verbatim. The user is still kept in the
-# two-part form, so a redacted line says which remote and which principal failed; in the one-part
-# form there is no principal to keep and the whole of it is the credential.
+# A credential in a URL's userinfo: `scheme://user:secret@host` (DSNs, git remotes) or
+# `scheme://token@host` (a PAT on a git remote). Matched structurally because such a token is often
+# held outside this process, where the value inventory cannot see it. The user is kept in the
+# two-part form so a redacted line still names the principal; in the one-part form the whole
+# userinfo is the credential.
 _URL_USERINFO = re.compile(
     r"([a-zA-Z][a-zA-Z0-9+.\-]{0,63}://)([^/\s:@]{0,512})(?::([^/\s@]{0,512}))?@"
 )
 
 
-# Credentials this process does **not** hold, matched by shape rather than by value.
+# Credentials this process does not hold (a caller's bearer, a third-party PAT in an upstream error,
+# a libpq `key=value` DSN), matched by shape rather than value.
 #
-# The value inventory above can only redact what this process configured, which leaves out the
-# whole class of credentials that merely *pass through*: the caller's own Entra bearer token, a
-# third-party PAT quoted in an upstream error, a warehouse DSN in libpq `key=value` form (the
-# userinfo pattern only sees the URL spelling). Measured, eleven realistic shapes reached the
-# stream verbatim.
+# A false positive corrupts a log line, and tracebacks quote source lines such as `access_token =
+# response.json().get("access_token")`, so a key-name anchor is not enough: the value must look like
+# a credential. `_OPAQUE` excludes quotes, parentheses, commas and semicolons, and a digit is
+# required (random credentials effectively always contain one; words and attribute paths do not). A
+# pure-letter token is the accepted miss; the value inventory is the primary mechanism. `Basic`
+# alone is not a rule: it is an ordinary word.
 #
-# Pattern matching was rejected once, for a good reason — a false positive corrupts a log line, and
-# an over-eager rule that ate molecule ids or note slugs would be worse than the leak. The first
-# version of these rules proved the point on itself: `[^\s&,;"']{8,}` after a key name ate the
-# *source lines of this repository*, which is the one text guaranteed to appear inside the
-# tracebacks the whole mechanism exists to protect —
-#
-#     access_token = response.json().get("access_token")   ->  access_token = ***"access_token")
-#     api_key=settings.llm_api_key or _KEYLESS_PLACEHOLDER  ->  api_key=*** or _KEYLESS_PLACEHOLDER
-#     Basic authentication rejected by the proxy            ->  Basic *** rejected by the proxy
-#
-# and `password=None)` became `password=***`. The innocent-content test passed throughout, because
-# it pinned *identifiers* (SMILES, note slugs, ADR ids) and no source line and no prose.
-#
-# So a key-name anchor is not enough on its own: the value has to look like a credential too. Two
-# extra requirements do that, and they are what separates a token from an expression:
-#
-# 1. `_OPAQUE` excludes the characters code and prose put there — quotes, parentheses, commas,
-#    semicolons — so `response.json().get(` and `settings.llm_api_key or` cannot match.
-# 2. A digit is required somewhere in the value. Real credentials are drawn from a random alphabet
-#    and effectively always contain one; English words and Python attribute paths do not.
-#
-# The cost is a token of pure letters (rare, and still covered by the value inventory when this
-# process holds it). That trade is the right way round: an unreadable traceback is a permanent loss
-# of the incident evidence, while this floor is a backstop under the inventory, not the mechanism.
-#
-# `Basic` is dropped entirely. It is an ordinary English word, and unlike `Bearer` it is not
-# followed by anything with usable structure.
-#
-# Every tail is *bounded*. Unbounded `{8,}` made the JWT rule quadratic — each `-eyJ` in the input
-# is a fresh word-boundary start whose tail rescans the remainder — measured at 46.7 ms for 10 KB
-# of `-eyJ` rising to 11.78 s for 160 KB. This runs inside `handler.handle()`, which holds the
-# logging lock, so that is a denial of service on every thread's logging, reachable by anything that
-# can get text into a log line.
-#
-# `(?P<keep>...)` is the part a reader still needs — the label, so a redacted line says *which*
-# credential failed rather than becoming an anonymous `***`.
+# Every tail is bounded: this runs inside `handler.handle()` under the logging lock, and an
+# unbounded tail is a quadratic denial of service reachable by anything that can get text into a log
+# line. `(?P<keep>...)` preserves the label so a redacted line says which credential failed.
 #
 # The characters a credential is made of. No quotes, parens, commas or semicolons: those are what a
 # repr, a call expression or a libpq string puts around a value, never inside one.
 _OPAQUE = r"[A-Za-z0-9_\-.~+/=]"
-# Not preceded by a token character. `\b` is not enough: it matches between `-` and `e`, so every
-# `-eyJ` in a hostile string is a fresh start position whose tail rescans the remainder — which is
-# what made the JWT rule quadratic. A real credential is preceded by a space, a quote, `=` or `:`,
-# never by another token character, so this costs nothing and removes the amplifier.
+# Not preceded by a token character. `\b` would match between `-` and `e`, making every `-eyJ` a new
+# start position whose tail rescans the remainder (quadratic). A real credential is preceded by a
+# space, quote, `=` or `:`.
 _NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
 
-#: The RFC 1421 header lines an encrypted traditional-format PEM carries between the `-----BEGIN`
-#: line and its body (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: <cipher>,<iv>`), each as its literal
-#: and the bound on its tail. Written as literals rather than as a widened character class because
-#: the class would need `-` and `:`, and a run class containing `-` walks through `-----END` and
-#: keeps going. The tails are bounded to what the format can hold and stop at a line break, so
-#: each alternative matches one line.
-#:
-#: **This is the one declaration of the set**, and the regex, the bound on how many of them may
-#: appear, and `tests/test_logging.py`'s pathological payloads are all derived from it. That is not
-#: tidiness: the rule shipped with a cost guard that hard-coded `Proc-Type:` while `DEK-Info:` was
-#: the wider tail of the two, so the axis nobody had written a case for was the expensive one —
-#: 117 s on 553 bytes with the logging lock held, and 120 green tests.
+#: The RFC 1421 header lines an encrypted traditional-format PEM carries between `-----BEGIN` and
+#: the body (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: <cipher>,<iv>`), each with the bound on its tail.
+#: Literals rather than a widened class, because a class containing `-` would walk through
+#: `-----END`. The one declaration of the set: the regex, its repeat bound and the pathological
+#: payloads in `tests/test_logging.py` all derive from it.
 _PEM_RFC1421_HEADERS: tuple[tuple[str, int], ...] = (("Proc-Type:", 40), ("DEK-Info:", 96))
 _PEM_RFC1421 = "|".join(rf"{name}[^\r\n\\]{{0,{bound}}}" for name, bound in _PEM_RFC1421_HEADERS)
 
-#: One step of the *whitespace* gap between a PEM header and its body: a JSON escape taken as a
-#: unit, or one whitespace or backslash character. A header line is deliberately **not** a branch
-#: here — see `_PEM_PREAMBLE`.
+#: One step of the whitespace gap between a PEM header and its body: a JSON escape as a unit, or one
+#: whitespace or backslash character. Header lines are not a branch here; see `_PEM_PREAMBLE`.
 _PEM_GAP = r"(?:\\[nrt]|[\s\\])"
 
 #: Everything the format allows between `-----BEGIN … PRIVATE KEY-----` and the body: a whitespace
 #: gap, then at most one of each RFC 1421 header line with its own gap after it.
 #:
-#: **The header lines are bounded in number rather than folded into the repeated gap, and that
-#: bound is what makes this rule affordable.** `[^\r\n\\]` includes whitespace and so does
-#: `_PEM_GAP`, so `Proc-Type:` followed by *k* spaces has *k+1* distinct ways to be consumed — the
-#: tail takes *j* of them and the enclosing repetition takes the rest, one at a time. When the
-#: header was a branch *inside* a `{0,64}` repetition, a lookahead that must ultimately fail made
-#: the engine enumerate that product once per group, exponentially in the number of groups an
-#: attacker writes. Measured on this box, growing groups rather than line length, with
-#: `redact_secrets` itself:
+#: The header lines are bounded in number rather than folded into the repeated gap. A header tail
+#: and the gap both match whitespace, so inside an enclosing repetition a failing lookahead
+#: enumerates their split once per attacker-supplied group — exponential backtracking under the
+#: logging lock, reachable from model-authored text and remote error messages. Bounded, the
+#: ambiguity is paid at most `len(_PEM_RFC1421_HEADERS)` times.
 #:
-#: | groups | payload | `Proc-Type:` axis | `DEK-Info:` axis | bounded |
-#: | --- | --- | --- | --- | --- |
-#: | 2 | 128 B / 238 B | 2.0 ms | 9.4 ms | 0.00 ms |
-#: | 4 | 228 B / 448 B | 2.04 s | 3.86 s | 0.00 ms |
-#: | 5 | 278 B / 553 B | 19.5 s | 55.1 s | 0.00 ms |
-#:
-#: The ambiguity is still there and is now paid at most `len(_PEM_RFC1421_HEADERS)` times instead
-#: of once per attacker-supplied group — a fixed small exponent rather than a free one. This filter
-#: runs inside `Handler.handle`, so it holds the stdlib logging lock for every other thread, and on
-#: the front door it runs on the single event loop; the bare `except Exception` around it cannot
-#: interrupt a regex. It is reachable from model-authored text — `logger.exception` renders
-#: `record.exc_info` itself and that text is unbounded, `api/runner.py` logs a failed turn that way,
-#: and `core/mcp_session` raises `McpRequestRefused` carrying a remote server's own message — and
-#: from an unbounded `Note.body` through `kg/record.py`.
-#:
-#: **Making the tails possessive is what this replaces, and it narrowed the language matched.**
-#: The claim it shipped with — "a possessive quantifier removes the ambiguity rather than narrowing
-#: the class, so the language matched is unchanged … there is nothing after it the tail could have
-#: wrongly eaten" — is false, and the thing after it is the *rest of the same repetition*. A
-#: possessive tail stops only at `\r`, `\n` or `\\`, so on a PEM whose header lines are separated
-#: by a tab or a space — one rendered onto a single line — it swallows the next header and the body
-#: with it; the `{0,64}` window then dead-ends, because its only other single-character branch is
-#: `[\s\\]`, which cannot consume a letter, so the required base64 run would have to start
-#: mid-token. Greedy gave the characters back and possessive cannot. Driven against
-#: `redact_secrets`, five shapes went from redacted to **leaking the key body verbatim**: the
-#: tab- and space-separated encrypted forms, and three minimal one-header spellings. Two of them
-#: are now in `_PEM_SHAPES_THAT_WALKED_PAST`.
-#:
-#: The quadratic guard cannot see either defect and it is worth saying why:
-#: `test_redaction_cannot_be_made_quadratic_by_a_log_line` grows the *line length* with `unit * N`,
-#: and the `pem` unit pins the number of header lines at two per repetition — so it grows the number
-#: of start positions, which is linear, and never the number of alternations after one header, which
-#: is the exponential axis. The exploit is 328 bytes against the 80 KB that test uses.
+#: The tails are greedy, not possessive: a possessive tail on a single-line PEM swallows the next
+#: header and the body and then fails, leaking the key (`_PEM_SHAPES_THAT_WALKED_PAST` in the
+#: tests).
 _PEM_PREAMBLE = (
     _PEM_GAP
     + r"{0,64}(?:(?:"
@@ -945,70 +551,27 @@ _PEM_PREAMBLE = (
     + _PEM_GAP
     + rf"{{0,64}}){{0,{len(_PEM_RFC1421_HEADERS)}}}"
 )
-# "Contains a digit" — the cheap discriminator between a token and an identifier.
-#
-# **Bounded, for the same reason `_NOT_MID_TOKEN` exists.** Written as `_OPAQUE*\d` this was the
-# JWT rule's defect wearing a different hat: `_OPAQUE` matches no whitespace, so a whitespace-free
-# run of `password=` gives an anchor every nine bytes and each anchor's lookahead rescans the whole
-# remainder — quadratic, and reached *unauthenticated* through the uvicorn access log, which puts
-# the raw request URL into a line this filter redacts. Measured before the bound: 18 KB → 0.5 s,
-# 36 KB → 2.0 s, 72 KB → 8.1 s (2x input, 4x time), and end to end a 115 KB request line stalled
-# the pod for 21 s — long enough for two consecutive readiness failures on the shipped chart, with
-# the stdlib logging lock held the whole time.
-#
-# The bound is what makes the work linear: every anchor scans at most 255 characters instead of the
-# rest of the line. It costs nothing real — a credential longer than 255 characters with its first
-# digit past position 255 is not a shape any of these rules is written for, and the rules' own
-# `{6,255}` / `{8,255}` tails already say so.
+# "Contains a digit" — the cheap discriminator between a token and an identifier. Bounded to 255
+# characters so each anchor scans a fixed window; unbounded, a whitespace-free run of `password=`
+# (reachable unauthenticated via the access log's request line) is quadratic under the logging lock.
 _HAS_DIGIT = r"(?=" + _OPAQUE + r"{0,255}\d)"
 
-# The framing between a key name and its value: an optional quote, the separator, an optional quote.
-# **Each quote may itself be backslash-escaped, and without that every key-anchored rule below was
-# blind to the one spelling this module's own redaction path produces.** `_redacted_field` renders a
-# non-string `extra=` value with `json.dumps(value, default=str)` and scrubs the *rendered* text, so
-# a credential nested one level inside a dict, a list, a tuple, an exception or a `bytes` arrives at
-# these patterns as `{\"password\": \"...\"}`. With the quote written `["']?` the key is followed by
-# a literal backslash, the optional quote matches nothing, `[=:]` meets `\` and the rule never
-# fires. Measured before this constant existed, one `json.dumps` level applied to each shape:
-# `password`, `PGPASSWORD`, `api_key`, `client_secret`, `token`, `secret`, `private_key`, `passwd`,
-# `pwd` and `AWS_SECRET_ACCESS_KEY` all reached the stream verbatim, while the single-quoted
-# `{'password': '...'}` spelling was caught — which is why this looked covered in review.
-#
-# The escaping is not only the redactor's own: `redact_secrets` is also what `kg/record.py` runs a
-# note's rendered body through before **committing it to Git**, what `deliver/message.py` runs a
-# recipient, subject, body and attachment through before **sending it**, and what `core/tracing.py`
-# runs a span description through — all on text a model or a driver authored, which routinely
-# carries a JSON document quoted inside a JSON string.
-#
-# Four backslashes, because escaping *doubles*: one `json.dumps` level spells a quote `\"` and two
-# spell it `\\\"`, so `{0,4}` covers text that was already encoded once before this process saw it.
-#
-# **Possessive (`{0,4}+`), and the quantifiers around it too — but that is a margin here rather than
-# the control, and saying so is the point.** Every other bound in this module was made possessive
-# after a measured denial of service, so a reader is entitled to assume the same of this one. It is
-# not: both runs are bounded by a constant and *nothing repeats around them*, which is what made
-# `_PEM_RFC1421` exponential (an enclosing `{0,64}`) and `_HAS_DIGIT` quadratic (an unbounded tail
-# behind a lookahead). Measured on 10 KB / 80 KB / 640 KB of adversarial `password\":\"`,
-# backslash-run, quote-run and plain `password=` input, both spellings scale at ~8x per 8x — linear
-# — with the non-possessive form ~10% slower and nothing worse. So the possessive spelling buys a
-# constant factor and the guarantee that a future reader cannot make it ambiguous by widening a
-# class; `tests/test_logging.py::test_the_escaped_quote_framing_is_not_quadratic` is what measures
-# the cost, and it **passes** with the possessiveness removed, which is the honest bound of what
-# that test holds. The language matched is identical either way, and the whole framing stays within
-# ~1.3x of the blind spelling it replaces.
+# The framing between a key name and its value: optional quote, separator, optional quote. Each
+# quote may be backslash-escaped, because a credential nested in a non-string `extra=` value is
+# scrubbed after `json.dumps` and arrives as `{\"password\": \"...\"}`; `redact_secrets` also runs
+# over note bodies, outgoing messages and span descriptions that carry JSON quoted inside JSON. Up
+# to four backslashes covers text already encoded once. The possessive quantifiers are a margin, not
+# the control: both runs are constant-bounded with nothing repeating around them, so the rule is
+# linear either way.
 _KEY_FRAMING = r"(?:\\{0,4}+[\"'])?\s*+[=:]\s*+(?:\\{0,4}+[\"'])?"
 
 _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
-    # GitHub tokens: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (classic, 36 chars) and the fine-grained
-    # `github_pat_` form. Both are vendor-assigned prefixes that occur in nothing else, so these
-    # two need no digit requirement — the prefix alone is decisive.
+    # GitHub tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and fine-grained `github_pat_`). The
+    # vendor-assigned prefix is decisive, so no digit requirement.
     re.compile(_NOT_MID_TOKEN + r"gh[pousr]_[A-Za-z0-9]{20,255}"),
     re.compile(_NOT_MID_TOKEN + r"github_pat_[A-Za-z0-9_]{20,255}"),
-    # Anthropic and OpenAI keys, including the project-scoped spellings. `admin` is OpenAI's
-    # Admin API key and was the one spelling of this family the table missed: the bare-tail rule
-    # below cannot reach it, because `sk-admin-…` has a second hyphen and that rule's tail is
-    # `[A-Za-z0-9]` only. Reconciled against OpenAI's and Anthropic's published prefixes on
-    # 2026-09-16; `tests/test_logging.py` holds the whole inventory and its date.
+    # Anthropic and OpenAI keys, including project-scoped and `sk-admin-` spellings (the bare-tail
+    # rule below cannot reach a second hyphen). `tests/test_logging.py` holds the prefix inventory.
     re.compile(_NOT_MID_TOKEN + r"sk-(?:ant|proj|svcacct|admin)-[A-Za-z0-9_\-]{16,255}"),
     re.compile(_NOT_MID_TOKEN + r"sk-[A-Za-z0-9]{32,255}"),
     # A JWT — three base64url segments separated by dots, the first starting `eyJ` because a JOSE
@@ -1024,75 +587,33 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
         re.IGNORECASE,
     ),
     # A credential in a query string, a header, or a rendered dict. Anchored on the key name so the
-    # bare words "token" or "secret" in prose cannot trigger it, and on the value's shape so an
-    # assignment in a source line cannot.
-    # `token`/`secret`/`private_key`/`passwd`/`pwd` are here beside the four compound names because
-    # the compound list only ever covered credentials *this* repository names. `core/connect.py`
-    # resolves a driver's own keyword arguments, so a warehouse binding chooses its own spellings
-    # and a driver's error text quotes them back — measured, `token=` and `secret=` both reached a
-    # log line intact. The digit and opacity requirements are what keep the bare English words
-    # "token" and "secret" in prose from matching.
+    # bare words in prose cannot trigger it, and on the value's shape so a source-line assignment
+    # cannot. The generic names (`token`, `secret`, `private_key`, `passwd`, `pwd`) are included
+    # because warehouse drivers choose their own keyword spellings and quote them back in errors.
     re.compile(
         r"(?P<keep>\b\w*?(?:access_token|refresh_token|api[_-]?key|client_secret|token|secret"
         r"|private_key|passwd|pwd)" + _KEY_FRAMING + r")" + _HAS_DIGIT + _OPAQUE + r"{8,255}",
         re.IGNORECASE,
     ),
-    # `Authorization: Basic <base64>`. The scheme was left out when the `Bearer|Token` rule was
-    # written, on the argument that "Basic" is an ordinary English word — true of the word, false
-    # of `Authorization` + `_KEY_FRAMING` + `Basic\s+`, which is unambiguous. Base64 of
-    # `user:password` need not contain a digit, so this rule deliberately does not require one; the
-    # header anchor carries the whole specificity.
-    #
-    # **The separator is `_KEY_FRAMING` rather than a bare `:`, because a header logged as a header
-    # is the easier half.** This rule spelled it `Authorization:\s*`, which requires the colon to
-    # touch the name — so the *rendered dict* spelling a `headers` mapping actually reaches a log
-    # line as, `{"Authorization": "Basic ..."}`, put a quote between the two and walked past it.
-    # Measured: leaked in the dict spelling, plain and escaped alike, while the bare-header spelling
-    # was caught. The sibling `Bearer|Token` rule never had this gap because it anchors on the
-    # scheme inside the value and never looks at the key at all.
+    # `Authorization: Basic <base64>`. The `Authorization` + framing + `Basic` anchor is
+    # unambiguous, so no digit is required (base64 of `user:password` may have none). `_KEY_FRAMING`
+    # as separator so the rendered-dict spelling `{"Authorization": "Basic ..."}` is caught too.
     re.compile(
         r"(?P<keep>\bAuthorization" + _KEY_FRAMING + r"Basic\s+)[A-Za-z0-9+/=]{8,4096}",
         re.IGNORECASE,
     ),
-    # The environment-variable spelling, which the key-name rule above structurally cannot reach:
-    # `_` is a word character, so `\bsecret` does not match inside `AWS_SECRET_ACCESS_KEY`, and the
-    # credential word is rarely the last segment (`..._ACCESS_KEY`, `..._TOKEN_ENV`). Measured: the
-    # AWS key was the one shape that survived the rule above. SCREAMING_CASE is the anchor — it is
-    # what an environment dump, an `os.environ` repr and a `docker run -e` line all look like, and
-    # it cannot fire on prose. Deliberately does not require a digit: an operator-chosen password
-    # need not have one, and the casing plus the `=` carries the specificity here.
-    # **One greedy run behind a lookahead, and that shape is the whole point.** The first version of
-    # this rule spelled the identifier as `[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*`, which is two nested
-    # quantifiers over the same alphabet: on input like `AAAAAAAA_TOKEN` repeated, the engine can
-    # split a run between them in exponentially many ways and backtracks through all of them.
-    # Measured, 2x the input cost 4x the time — 10 KB in 0.13 s, 40 KB in 2.2 s, 160 KB in 35.8 s —
-    # and this is reachable *unauthenticated*: uvicorn's access log renders the raw request line,
-    # `_` and uppercase are legal in a path, and a 60 KB line held the stdlib logging lock for
-    # 5.22 s. That is the same incident this module already records at `_NOT_MID_TOKEN`, made new.
+    # The SCREAMING_CASE environment spelling (`AWS_SECRET_ACCESS_KEY=…`, `PASSWORD=…`), which the
+    # key-name rule cannot reach because `_` is a word character. The casing and `=` carry the
+    # specificity, so no digit is required.
     #
-    # The lookahead asserts a credential word is somewhere in the next bounded run; the capture is
-    # then a single greedy `[A-Z][A-Z0-9_]*`, which has one way to match and cannot backtrack into
-    # itself. Measured on the same input: 160 KB in 0.0081 s, linear. It also fixes a miss the old
-    # form had — `[A-Z][A-Z0-9]*` required a character *before* the credential word, so the bare
-    # `PASSWORD=` and `TOKEN=` spellings, the most common shape of all, never matched.
+    # One greedy run behind a lookahead: nested quantifiers over the same alphabet backtrack
+    # exponentially, and this is reachable unauthenticated through the access log's request line.
+    # The lookahead asserts a credential word lies in the bounded run; the capture `[A-Z][A-Z0-9_]*`
+    # has one way to match.
     #
-    # `(?![A-Z0-9_]*(?:S|_COUNT|_LIMIT|_BUDGET|_ENV)\b)` is not used, and a digits-only value is
-    # excluded instead: `MAX_TOKENS=40960000` and `PROMPT_TOKENS: 12345678` are token *accounting*,
-    # which is the number this whole change exists to make visible, and redacting it would be this
-    # rule eating the thing it was shipped beside.
-    #
-    # **`_ENV=` in front of a bare identifier is the second carve-out, and it is narrower than the
-    # one that was rejected above on purpose.** A key ending `_ENV` holds a variable *name* by this
-    # tree's own convention — `core/connect.py`'s `ENV_SUFFIX`, and `_SECRET_ENV_SETTINGS` below,
-    # whose comment argues that redacting a name "would scrub the variable name out of every line
-    # that helpfully tells an operator which credential to set". This rule was doing exactly that:
-    # `CHEMCLAW_CALC_SERVER_TOKEN_ENV=CHEMCLAW_CALC_TOKEN`, the shape `.env.example` carries three
-    # times and a `docker run -e` line repeats, came out with the answer replaced and the question
-    # kept. Exempting the key alone would have been the leak — an operator who pastes the token
-    # itself into a `*_TOKEN_ENV` variable would log it in the clear — and exempting the *value*
-    # alone would drop every uppercase credential, base32 among them. Both conditions together are
-    # the `NAME=NAME` shape and nothing else: fixed-width lookbehind, single greedy run, no new
-    # backtracking.
+    # Carve-outs: a digits-only value is token accounting (`MAX_TOKENS=40960000`), not a secret; and
+    # a `*_ENV=NAME` pair is a variable name by this tree's convention. Both key and value
+    # conditions are required, so a token pasted into a `*_TOKEN_ENV` variable is still redacted.
     re.compile(
         r"(?<![A-Za-z0-9_])"
         r"(?=[A-Z0-9_]{0,128}?(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL))"
@@ -1100,85 +621,39 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
         r"(?![0-9]{1,255}(?![A-Za-z0-9_\-]))"
         r"(?!(?<=_ENV=)[A-Z][A-Z0-9_]*(?![A-Za-z0-9_\-]))" + _OPAQUE + r"{8,255}"
     ),
-    # Vendor-issued shapes whose prefix *is* the anchor, so none needs a key name beside it. These
-    # are minted elsewhere and pasted into environments and error messages, which is exactly the
-    # path a key-name anchor cannot see.
-    #
-    # **AWS ids are four prefixes, not one, and this rule carried one for as long as it existed.**
-    # `ASIA` is the *temporary* STS credential — the shape a workload actually runs with — and a
-    # pod assuming a role logs `ASIA…` where nothing here logs `AKIA…`. `ABIA` (bearer-token
-    # service) and `ACCA` (context-specific) complete AWS's documented unique-id set for access
-    # keys; an alternation of four literals has one way to match each input and adds no
-    # backtracking. Measured on 80 KB of `ASIA`-shaped adversarial input: linear.
+    # Vendor-issued shapes whose prefix is the anchor. AWS access-key ids carry four prefixes:
+    # `AKIA`, `ASIA` (temporary STS credentials, what a workload actually runs with), `ABIA` and
+    # `ACCA`.
     re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"),
-    # Slack, including the app-level token. `xapp-` is issued by the same product as `xox[baprs]-`
-    # and was outside the character class that named the other five.
+    # Slack tokens, including the app-level `xapp-` form.
     re.compile(r"\b(?:xox[baprs]|xapp)-[A-Za-z0-9-]{10,255}"),
-    # **A Databricks personal access token, which is the one vendor on this list this deployment
-    # certainly holds**: `D-2026-08-26-the-driver-s-signature-is-the-schema` names Pistachio on
-    # Databricks as the first live warehouse integration, and a driver quotes its own credential
-    # back in an authentication error. `dapi` plus exactly 32 lowercase hex is the issued shape,
-    # with an optional `-2`-style suffix on a named token. Fixed width, so there is nothing for an
-    # engine to backtrack over.
+    # A Databricks personal access token: `dapi` plus 32 lowercase hex, optional `-N` suffix. A
+    # warehouse driver quotes it back in authentication errors. Fixed width, nothing to backtrack
+    # over.
     re.compile(_NOT_MID_TOKEN + r"dapi[0-9a-f]{32}(?:-\d{1,2})?"),
-    # A GitLab personal/project access token. Here because the knowledge remote is a git remote
-    # whose host is a deployment's choice — `_URL_USERINFO` covers it inside a URL, and this covers
-    # the far more common form where git or a CI runner quotes the bare token in an error.
+    # A GitLab access token, as git or a CI runner quotes it bare in an error (`_URL_USERINFO`
+    # covers the in-URL form).
     re.compile(_NOT_MID_TOKEN + r"glpat-[A-Za-z0-9_\-]{16,255}"),
-    # A PEM private key, which is the highest-value secret in this list and had no rule at all.
-    # `core/config`'s `cryptography` row records key-pair auth for a warehouse driver, and a
-    # traceback that quotes a malformed key file puts the whole block into a log line.
+    # A PEM private key: the header is kept (it tells an operator which kind of key was there) and
+    # the body redacted.
     #
-    # **The header is kept and the body redacted, and the rule deliberately does not look for the
-    # END line.** A lazy `[\s\S]{0,8192}?` up to `-----END` would scan its whole bound from every
-    # `-----BEGIN` in a hostile input; a greedy run of a class that excludes `-` stops at the END
-    # line by itself, cannot backtrack into itself (nothing follows it, so nothing can force a
-    # retry), and costs one pass. The kept header is what tells an operator a key was there and
-    # which kind it was.
+    # The rule does not look for the END line: a greedy, unbounded run of a class excluding `-`
+    # stops at `-----END` by itself, and since nothing follows it, it cannot backtrack. A finite
+    # bound would leak the tail of a longer block. The lookahead requiring an unbroken base64 run
+    # after the header keeps it off prose such as `expected -----BEGIN PRIVATE KEY----- but found
+    # garbage`.
     #
-    # **The lookahead is what keeps it off prose, and without it this rule ate a sentence.** The
-    # body class has to contain letters and whitespace — base64 is letters, and a PEM body is
-    # wrapped across lines — so `expected -----BEGIN PRIVATE KEY----- but found garbage` came back
-    # with the second half replaced. Requiring an unbroken base64 run just after the header is the
-    # discriminator: that is what a key body starts with and what an English clause is not. Both
-    # bounds are fixed, so the lookahead adds a constant, not a scan.
-    #
-    # **Four shapes walked past the first version of this rule, and the encrypted one is the shape
-    # the rule's own motivation names.** `openssl genrsa -aes256`, `openssl rsa -aes256` and
-    # `ssh-keygen -m PEM -N <pass>` all emit the RFC 1421 form — two header lines and a blank line
-    # between `-----BEGIN` and the body — which is the *passphrase-protected* spelling of the
-    # warehouse key-pair credential the paragraph above cites. Measured on the first version:
-    # `redacted=False`, the whole block through verbatim, because a `[\s\\]{0,8}` window cannot
-    # cross `Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,<iv>` and the run class stops at the `-`
-    # in `Proc-Type`. So both halves name those two lines explicitly: they are a closed, documented
-    # set, and naming them is narrower than widening a character class with `-` and `:` — which
-    # would let the run walk straight through `-----END` and out the other side.
-    #
-    # The other three were each one number: an indent deeper than 8 columns (a YAML block scalar
-    # at 12 spaces — a Helm Secret quoted into an error — measured `redacted=False`), a body
-    # wrapped narrower than 32 columns (measured `redacted=False` at a 24-column wrap), and a body
-    # longer than the run's 8192 bound (measured: 85 body lines of a ~12 kB block survived *past*
-    # the `***`, which is the worst of the four because it looks redacted). The separator window is
-    # 64, the required run is 20, and the run itself is unbounded. Unbounded is safe here for the
-    # same reason the greedy run always was: nothing follows it, so there is no failure that can
-    # make the engine retry, and it terminates at the first character outside its class — the `-`
-    # of `-----END` in every well-formed block. A *finite* bound is what cannot be safe, because
-    # whatever it is, a longer block leaks its tail silently.
-    #
-    # `\\` is in the classes for the JSON-encoded spelling: a key inside a config blob reaches a
-    # log line as `-----BEGIN PRIVATE KEY-----\nMIIE…` with a literal backslash-n, and a class that
-    # stopped at the backslash would redact nothing at all while looking like it had matched.
-    # `\\[nrt]` is consumed as a *unit* in the separator rather than leaned on the way the first
-    # version did — it happened to work only because `n` is itself a base64 character, which is
-    # true of `\n` and false of the `\nProc-Type:` an encrypted key in a JSON blob arrives as.
+    # Covered shapes: the RFC 1421 encrypted form with `Proc-Type`/`DEK-Info` lines (named
+    # explicitly rather than widening the class), deep indents (YAML block scalars, 64-column
+    # separator window), narrow wraps (20-character required run), and the JSON-encoded spelling,
+    # where `\\[nrt]` is consumed as a unit and `\\` is in the classes.
     re.compile(
         r"(?P<keep>-----BEGIN (?:[A-Z]{1,16} ){0,3}PRIVATE KEY-----)"
         r"(?=" + _PEM_PREAMBLE + r"[A-Za-z0-9+/=]{20})"
         r"(?:" + _PEM_RFC1421 + r"|[\s\\A-Za-z0-9+/=])*"
     ),
-    # `Authorization: Bearer <opaque>` / `Token <opaque>` — the JWT rule covers the structured case;
-    # an opaque bearer has no internal structure, so the scheme is the anchor and the digit
-    # requirement is what keeps "Bearer token was rejected" intact.
+    # `Authorization: Bearer <opaque>` / `Token <opaque>`. The scheme is the anchor; the digit
+    # requirement keeps "Bearer token was rejected" intact.
     re.compile(r"(?P<keep>\b(?:Bearer|Token)\s+)" + _HAS_DIGIT + _OPAQUE + r"{16,4096}"),
 )
 
@@ -1199,9 +674,8 @@ def _redact_userinfo(match: "re.Match[str]") -> str:
 def _dsn_password(value: str) -> str:
     """The password inside a `scheme://user:password@host` DSN, or `""`.
 
-    Extracted so the redaction inventory and the published-defaults set below agree by
-    construction: they must decide the same thing about the same string, and two spellings of
-    "the password part" is exactly how they would stop.
+    Shared by the redaction inventory and the published-defaults set so both decide the same thing
+    about the same string.
     """
     if "://" not in value or "@" not in value:
         return ""
@@ -1213,18 +687,10 @@ def _dsn_password(value: str) -> str:
 def _published_values() -> frozenset[str]:
     """Every secret-shaped value this repository *commits* — and therefore does not have to hide.
 
-    A value anyone can read in `core/config/` is not a credential, and redacting it does nothing
-    but corrupt logs. The dev Postgres DSN's password is the literal string `chemclaw`, so
-    treating it as a secret replaced the product's own name with `***` in every dev and CI log
-    line that happened to contain it — including messages with nothing to do with the database.
-
-    **The derived values matter as much as the defaults themselves**, which is the half a first
-    attempt missed. `tests/conftest.py` repoints `postgres_dsn` at an isolated schema, so in CI
-    the DSN is *not* the shipped default and is redacted correctly — while the password inside it
-    still is `chemclaw`. Comparing only whole values passed locally, where no Postgres means no
-    repointing, and failed in CI. So the defaults' passwords are published too.
-
-    Cached: `model_fields` defaults are fixed at import and cannot change at runtime.
+    A value readable in `core/config/` is not a credential, and redacting it (the dev DSN's password
+    is `chemclaw`) would corrupt unrelated log lines. Default DSNs' passwords are published too,
+    because a test DSN repointed at another schema still carries the same password. Cached: defaults
+    are fixed at import.
     """
     published: set[str] = set()
     for name in _SECRET_SETTINGS:
@@ -1240,17 +706,9 @@ def _published_values() -> frozenset[str]:
 def _secret_text(value: object) -> str:
     """The string inside a settings value, whether it is a `str` or a `SecretStr`, else `""`.
 
-    **The type change that would have silently disabled this module.** Nine `Settings` fields are
-    redacted by exact value match, and both readers here tested `isinstance(value, str)` — which a
-    `SecretStr` is not. Converting the credentials to `SecretStr`
-    (`D-2026-08-26-a-credential-is-a-type-not-a-convention`) would therefore have skipped every one
-    of them: `str(SecretStr("k"))` is `"**********"`, so the filter would have gone on matching
-    asterisks against log lines and reporting success. Two guarantees that look like one, where the
-    stronger-looking one turns the other off.
-
-    `str` is still accepted, and not only for the DSNs: a test that monkeypatches a plain string
-    onto the settings object must still be redacted, because a filter that only covers correctly
-    typed values covers less than the one it replaced.
+    `str(SecretStr(...))` is asterisks, so an `isinstance(value, str)` check would silently skip
+    every `SecretStr` credential. Plain `str` stays accepted so a monkeypatched test value is still
+    redacted.
     """
     if isinstance(value, SecretStr):
         return value.get_secret_value()
@@ -1260,26 +718,16 @@ def _secret_text(value: object) -> str:
 def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
     """Return `text` with every credential this process can recognize replaced by `***`.
 
-    The redaction `SecretRedactingFilter` applies to a log line, exposed so anything that
-    *persists* an error message can apply the same one. The PR-gate was the case that forced it:
-    a failed submission stored git's stderr in `note_proposals.reason`, a compliance table nobody
-    prunes, and it bounded that text by truncating it — but truncation is not redaction, and a
-    realistic token-bearing push failure measures well under any length worth keeping, so the
-    credential was stored verbatim and in full. The gate is gone
-    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`); what persists model-adjacent text now
-    is `kg.record`, which redacts a note's own rendered body through this function.
-
-    `extra_secrets` is for values a caller resolved itself (the filter's per-connector bearer-token
-    variable names), keeping the lazy `connectors` import out of this module.
+    The redaction `SecretRedactingFilter` applies, exposed so anything that persists or sends text
+    (for example `kg.record` on a note body) applies the same one; truncation is not redaction.
+    `extra_secrets` is for values a caller resolved itself (the filter's connector bearer
+    variables), keeping the lazy `connectors` import out of this module.
     """
     redacted = text
     for secret in _secret_values(extra_secrets):
         redacted = redacted.replace(secret, _REDACTED)
-    # A *callable* replacement, not a `\1`-style template. A template is compiled lazily by the
-    # `re` machinery on first use, and that compilation does `import re` — on the logging path,
-    # which `tests/test_filtering_a_record_never_imports_anything` forbids for the reason recorded
-    # there: an import from inside a filter re-entered the filter under Temporal's sandbox and
-    # wedged the worker. The test caught this the first time it ran.
+    # A callable replacement, not a `\1` template: a template is compiled lazily and imports `re` on
+    # the logging path, which can re-enter the filter under Temporal's sandbox and wedge the worker.
     redacted = _URL_USERINFO.sub(_redact_userinfo, redacted)
     for pattern in _STRUCTURAL_SECRETS:
         redacted = pattern.sub(_redact_structural, redacted)
@@ -1289,23 +737,10 @@ def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
 def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...]:
     """The distinct secret values this process actually holds, longest first.
 
-    Longest first so a DSN is redacted before the password inside it — replacing the shorter one
-    first would leave a mangled DSN whose remaining half still names the host and user.
-
-    `connector_token_envs` is `SecretRedactingFilter`'s resolved list of per-connector bearer-token
-    variable names (`manifest.auth.token_env`) — passed in rather than looked up here, so this
-    function stays free of the lazy `connectors` import that resolving them requires (see the
-    filter's `__init__`). Read fresh from `os.environ` on every call, exactly like the `Settings`
-    values below: none of these are expected to rotate mid-process, but nothing here assumes it.
-
-    **Deliberately not memoised**, and that was measured rather than assumed. This runs once per
-    record per redaction pass and costs ~11 us of the ~116 us a JSON record took, so a cache looks
-    worthwhile — but a one-second TTL failed three of this module's own tests, each of which
-    registers a credential and logs it immediately. They are encoding the invariant
-    `_RUNTIME_SECRET_ENVS` states: a value that becomes secret mid-process must be redacted on the
-    *next* line, not on the next line after a window expires. The cost was addressed where it was
-    actually largest instead — `_REDACTED_MARK` removes the second, duplicate redaction pass the
-    formatter used to make over every record (~27 us of that 116 us).
+    Longest first so a DSN is redacted before the password inside it. `connector_token_envs` is the
+    filter's resolved list of connector bearer variables, passed in to keep the `connectors` import
+    out of here. Not memoised: a value that becomes secret mid-process must be redacted on the very
+    next line.
     """
     values = set()
     published = _published_values()
@@ -1318,27 +753,20 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
     for name in _SECRET_SETTINGS:
         value = _secret_text(getattr(settings, name, ""))
         _consider(value)
-        # A DSN's password is also worth matching on its own: libpq accepts several spellings and a
-        # connection error may quote only the credential rather than the whole string. Considered
-        # independently of the DSN, because the two can differ in whether they are published: a
-        # schema-scoped test DSN is not the shipped default, but the password inside it still is.
+        # A DSN's password is matched on its own too: a connection error may quote only the
+        # password, and the DSN and its password can differ in whether they are published defaults.
         _consider(_dsn_password(value))
     for env_name in (
         _KNOWLEDGE_REPO_TOKEN_ENV,
         *connector_token_envs,
         *sorted(_RUNTIME_SECRET_ENVS),
     ):
-        # The environment first — it is where a rotated credential lands, and a name registered
-        # from a manifest usually has no field behind it at all. `_configured_by` is the fallback
-        # for the `.env` posture, where the value never reaches `os.environ`.
+        # Environment first (where a rotated credential lands); `_configured_by` covers the `.env`
+        # posture.
         _consider(os.environ.get(env_name, "") or _configured_by(env_name))
-    # The bearers a `*_token_env` setting names. `os.environ` only, with no `_configured_by`
-    # fallback, and that is a fact about these names rather than a shortcut: the variable they name
-    # is `CHEMCLAW_`-prefixed and is *not* a `Settings` field, so `model_config`'s `extra="forbid"`
-    # refuses it outright in a `.env` file — `Settings()` will not construct at all. The value can
-    # therefore only ever arrive through the process environment, and skipping the fallback is what
-    # keeps this per-record: measured, `_configured_by` was 7.0 us of the 7.7 us these three added
-    # to a call that costs ~7.6 us without them.
+    # Bearers named by `*_token_env` settings: `os.environ` only. Their variables are not `Settings`
+    # fields, so `extra="forbid"` refuses them in `.env` and they can only arrive via the
+    # environment; skipping `_configured_by` keeps this cheap per record.
     for variable in _named_token_env_vars():
         _consider(os.environ.get(variable, ""))
     return tuple(sorted(values, key=len, reverse=True))
@@ -1352,35 +780,19 @@ _EXC_RENDERER = logging.Formatter()
 class SecretRedactingFilter(logging.Filter):
     """Replace any configured secret's value with `***` in a record's rendered message.
 
-    A filter rather than a formatter because a deployment may install its own formatter, and
-    redaction must not be something a formatting choice can switch off. It runs on the *rendered*
-    message so a secret passed as a `%s` argument is caught too — `logger.info("dsn=%s", dsn)`
-    keeps the secret in `record.args` until formatting, which is exactly how one escapes a filter
-    that only inspects `record.msg`.
-
-    `_SECRET_SETTINGS` is the inventory this class's own module docstring calls out as "visible in
-    review" — and two real credentials the process holds sat outside it structurally: the
-    knowledge-sync git token (no `Settings` field; `_secret_values` reads it directly) and each
-    connector's bearer token, resolved from `manifest.endpoint.auth.token_env` per enabled HTTP
-    connector. The latter needs `chemclaw.connectors`, which `core` may not import at module scope
-    (`tests/test_layering.py`) — the same constraint `ContextFilter.__init__` already solved for
-    `chemclaw.agent`, and for the same reason: resolved **once, here in `__init__`**, a safe,
-    single process entrypoint, never from `filter()`, which runs on every record and could be
-    reached while another module is mid-import.
+    A filter rather than a formatter, so a deployment's own formatter cannot switch redaction off.
+    It runs on the rendered message so secrets passed as `%s` arguments are caught. Connector bearer
+    variables come from `chemclaw.connectors`, which `core` may not import at module scope; they are
+    resolved once in `__init__`, never from `filter()`, which runs per record and may be reached
+    mid-import.
     """
 
     def __init__(self) -> None:
         """Resolve the connector bearer-token variable names once, tolerating discovery failure.
 
-        A broken connector manifest is a real misconfiguration and every other consumer of
-        `connectors.registry.enabled()` fails loudly on it — but that failure belongs to whichever
-        of those consumers hits it first, not to logging setup. So this degrades to redacting
-        nothing *extra* rather than blocking `configure_logging()`, and says so at **ERROR**, under
-        the marker `degraded[log_redaction]` and on a counter: a redaction inventory that quietly
-        stopped covering connectors would be a worse outcome than a boot that proceeds without
-        them, and it is the one *security* degradation in this file. The comment beside the handler
-        argues the severity in full. (This sentence said "at WARNING" for one commit after the
-        handler below stopped doing that — prose is evidence about what its author believed.)
+        A broken connector manifest degrades this to redacting nothing extra rather than blocking
+        `configure_logging()`, reported at ERROR as `degraded[log_redaction]` with a counter, since
+        it is a security degradation.
         """
         super().__init__()
         self._connector_token_envs: tuple[str, ...] = ()
@@ -1389,16 +801,10 @@ class SecretRedactingFilter(logging.Filter):
 
             self._connector_token_envs = bearer_token_env_names()
         except Exception:
-            # ERROR and counted, and the one degradation in this file that is a *security*
-            # degradation rather than a functional one: the process keeps logging, and keeps
-            # logging connector bearer tokens in the clear for its whole lifetime. The state is
-            # unbounded in time and its trigger is correlated with its consequence — what breaks
-            # this resolution is a bad connector manifest, and a bad connector manifest is exactly
-            # what produces the connector failures whose tracebacks carry the token. A WARNING in
-            # container startup output is the line nobody reads; `degraded[log_redaction]` is the
-            # stable marker to alert on. Safe to log from inside a filter's constructor: the filter
-            # is not installed yet, so there is no recursion, and `record_metric` swallows anything
-            # the registry could raise.
+            # ERROR and counted: the process would log connector bearer tokens in the clear for its
+            # lifetime, and a bad manifest is exactly what produces connector failures whose
+            # tracebacks carry tokens. `degraded[log_redaction]` is the marker to alert on. Safe
+            # here: this filter is not installed yet, and `record_metric` swallows registry errors.
             degraded(
                 logging.getLogger(__name__),
                 "log_redaction",
@@ -1410,33 +816,14 @@ class SecretRedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact in place and always keep the record.
 
-        All three places a record carries text, not just the message. The traceback is the one
-        that mattered: `logger.exception(...)` / `exc_info=True` renders the exception at *format*
-        time, so a filter that only rewrote the message left every credential in the inventory
-        readable in the very log lines a failure produces — measured leaking both an API key and a
-        DSN password verbatim. That is also the worst case, because an exception is exactly when a
-        connection string or an auth header ends up inside the error text.
+        Covers the message, the traceback and `extra=` fields. `exc_info` is rendered here because
+        the traceback text does not exist until format time; `Formatter.format` then reuses our
+        `exc_text`, even under a deployment's own formatter.
 
-        `exc_info` is rendered here rather than left to the formatter, because redaction cannot be
-        applied to a string that does not exist yet. `logging.Formatter.format` reuses a populated
-        `exc_text` instead of re-rendering, so ours is what is emitted — including under a
-        deployment's own formatter, which is the same reason this is a filter and not a formatter.
-
-        **Nothing this method does may raise**, which is why the whole of it sits in a try. Filters
-        run inside `Handler.handle` but *outside* the try/except that wraps `emit()`, so an
-        exception here is not logging's to report — it lands in whoever called `logger.info(...)`.
-        The `exc_info=False` crash below is one instance of that; measurement found five, every
-        field this method touches (a `%`-format mismatch, a `msg` whose `__str__` raises, a
-        pass-through `exc_info` tuple, a non-string `exc_text` or `stack_info`). Keeping the record
-        is the right answer to all five rather than merely the safe-looking one: each is a
-        malformation `Formatter.format` hits too, so the handler routes it to `handleError` ->
-        stderr, which is exactly what happens with no filter installed. Returning `False` would
-        trade a crash for a silently dropped log line, which is worse than either.
-
-        That route is *also* how an unredacted credential reached stderr, because `handleError`
-        prints the record's original `msg` and `args`. Fail-open is still right; what changed is
-        that `configure_logging` binds a redacting `handleError` on every handler it sweeps, so the
-        record this method gave up on is scrubbed by the path that reports it.
+        Nothing here may raise: filters run outside the try around `emit()`, so an exception lands
+        in the caller's `logger.info(...)`. A malformed record is kept, so `Formatter.format` routes
+        it to `handleError`, which `configure_logging` makes redacting. Dropping it would silently
+        lose a line.
         """
         try:
             self._redact(record)
@@ -1449,8 +836,7 @@ class SecretRedactingFilter(logging.Filter):
     def _redact(self, record: logging.LogRecord) -> None:
         """Rewrite every text field of `record` in place.
 
-        Called only from `filter`, which owns the guarantee that a malformed record is reported by
-        logging rather than raised at the caller — so this body is free to be written for the
+        Only called from `filter`, which handles malformed records, so this is written for the
         well-formed case.
         """
         message = record.getMessage()
@@ -1460,43 +846,21 @@ class SecretRedactingFilter(logging.Filter):
             # let a formatter re-render the original.
             record.msg = redacted
             record.args = None
-        # Truthiness, not `is not None`, and the difference is a crash. `Logger._log` stores
-        # whatever it was handed: `logger.error(..., exc_info=False)` puts the *bool* on the record,
-        # so `is not None` sent `False` into `formatException`, which subscripts it —
-        # `TypeError: 'bool' object is not subscriptable`, which reached production code through
-        # `metrics_bridge.degraded(..., exc_info=False)`: the one site passing it is
-        # `skill_manifest`, inside the `except` whose whole purpose is to skip a malformed
-        # `SKILL.md` and continue, so a single bad manifest made `build_langgraph_agent` raise.
-        # `logging`'s own `Formatter.format` has always tested truthiness here; matching it is both
-        # the fix and the reason no other formatter had this problem. Still load-bearing now that
-        # `filter` catches: `exc_info=False` is a *well-formed* call, and letting it raise into that
-        # catch would skip the two redaction steps below and leak a credential in `stack_info`.
+        # Truthiness, not `is not None`, matching `Formatter.format`: `exc_info=False` is a
+        # well-formed call that stores the bool, and `formatException(False)` would raise, skipping
+        # the redaction below.
         if record.exc_info and record.exc_text is None:
-            # `_EXC_RENDERER` is built once at module scope: constructing a `Formatter` here would
-            # be per-record work, and `formatException` reaches `traceback`, which `logging` has
-            # already imported — so nothing on this path imports anything (see `ContextFilter`).
+            # `_EXC_RENDERER` is built once at module scope so nothing on this path constructs or
+            # imports.
             record.exc_text = _EXC_RENDERER.formatException(record.exc_info)
         if record.exc_text:
             record.exc_text = redact_secrets(record.exc_text, self._connector_token_envs)
         if record.stack_info:
             record.stack_info = redact_secrets(record.stack_info, self._connector_token_envs)
-        # The `extra=` fields, which nothing swept until now. Latent while `JsonFormatter` dropped
-        # them and a live leak the moment it stopped: measured, a handler whose format string
-        # referenced `%(dsn)s` printed `postgresql://u:supersecret123@h/db` verbatim. This class's
-        # own docstring argues it is a filter rather than a formatter "because a deployment may
-        # install its own formatter, and redaction must not be something a formatting choice can
-        # switch off" — that guarantee did not hold for this one field.
-        #
-        # Strings only, here. A non-string extra is redacted where it is *rendered* rather than
-        # here — see `JsonFormatter.format` — because walking an arbitrary nested structure per
-        # record is work this hot path cannot afford, and because the thing that must be scrubbed
-        # is the text that actually reaches the stream, which does not exist until `json.dumps`
-        # has run `default=str` over it.
-        #
-        # This comment used to say the formatter's *fallback* pass covered them. It did not, twice
-        # over: the fallback only ran when the sentinel was unset, and it also tested `isinstance`.
-        # Measured, a `{"dsn": "postgresql://u:...@h/db"}` extra, a list holding one, and an
-        # exception whose message held one were all emitted verbatim.
+        # `extra=` fields: a handler format string may reference them directly. Strings only here; a
+        # non-string extra is redacted where `JsonFormatter` renders it, since the text to scrub
+        # does not exist until `json.dumps` runs, and walking nested structures per record is too
+        # costly.
         for key, value in structured_fields(record).items():
             if isinstance(value, str):
                 redacted = redact_secrets(value, self._connector_token_envs)
@@ -1512,15 +876,9 @@ class SecretRedactingFilter(logging.Filter):
         record.__dict__[_REDACTED_MARK] = True
 
 
-# Every attribute `logging` itself puts on a record. Anything else in `record.__dict__` arrived
-# through `extra=` (or from a filter like `ContextFilter`), which is precisely what
-# `structured_fields` below exists to find.
-#
-# Written as a literal rather than derived from a probe record, because a probe would miss the
-# attributes `logging` adds conditionally (`exc_text`, `stack_info`, `taskName` on 3.12+) and
-# the failure mode of missing one is that an internal attribute is published as if it were a
-# caller's field. `taskName` is listed unconditionally so this file does not branch on the
-# interpreter version.
+# Every attribute `logging` itself puts on a record; anything else arrived through `extra=` or a
+# filter. A literal rather than probed, because conditional attributes (`exc_text`, `stack_info`,
+# `taskName`) would be missed and then published as caller fields.
 _LOGRECORD_RESERVED = frozenset(
     {
         "args",
@@ -1547,25 +905,18 @@ _LOGRECORD_RESERVED = frozenset(
         "threadName",
         "taskName",
     }
-    # `ContextFilter`'s own three. They are not a caller's fields: they are stamped by this module
-    # onto every record and promoted to top-level keys by `JsonFormatter`, so leaving them in here
-    # made the redaction sweep call `redact_secrets` three extra times per record for values that
-    # are a uuid hex, an email and a session id. Measured: 234 us/record with them, 88 us without.
+    # `ContextFilter`'s own three: stamped by this module and promoted to top-level keys, so
+    # excluding them avoids redundant redaction passes per record.
     | {"correlation_id", "actor", "session_id"}
 )
 
-# Set by `SecretRedactingFilter._redact` once it has swept a record, and read by `JsonFormatter`
-# so the formatter does not redact the same strings a second time. Measured at 20,000 records:
-# the double pass was ~27 us of the ~116 us this path cost per record, and every microsecond of
-# it is spent under the stdlib logging lock. The formatter keeps its own pass for the case the
-# sentinel is absent — a handler carrying no filter, which is the case that fallback was added
-# for and which must not become a leak because this optimisation exists.
+# Set once `SecretRedactingFilter._redact` has swept a record, so `JsonFormatter` skips a second
+# pass under the logging lock. The formatter still redacts when the mark is absent (a handler with
+# no filter).
 _REDACTED_MARK = "_chemclaw_redacted"
 
-# Set by `ContextFilter` on a record whose identity fields were filled from a *claimed* caller
-# (below), and read by the redaction filter and the JSON formatter, which sweep those three fields
-# only then. They are skipped otherwise because a value this process bound itself is a uuid hex, an
-# oid or a session id; a value copied off a request header is whatever the sender wrote.
+# Set by `ContextFilter` when identity fields came from a *claimed* caller; only then are those
+# fields swept, since header-supplied values are whatever the sender wrote.
 _CLAIMED_MARK = "_chemclaw_claimed_caller"
 
 _IDENTITY_FIELDS = ("correlation_id", "actor", "session_id")
@@ -1578,17 +929,10 @@ _claimed_caller: ContextVar[tuple[str, str, str] | None] = ContextVar(
 def bind_claimed_caller(actor: str, session_id: str, correlation_id: str) -> object:
     """Make a caller's *claimed* identity the log attribution for this context; returns a token.
 
-    A connector pod (`connectors/server.py`) learns who it is serving from `X-Chemclaw-*` headers,
-    and until this existed it bound them only into `connectors/caller.py`'s own contextvars, which
-    `ContextFilter` never read: every record a `chemclaw-connector-<name>` pod wrote carried
-    `correlation_id=- session_id=- actor=-`, so a turn could not be followed by id across the one
-    hop where its expensive work happens.
-
-    **A separate variable rather than the core identity ones, and that is the point of it.**
-    `get_current_actor` is "the one reader every gate shares" and the session id scopes what a tool
-    may read; binding an unauthenticated header there would make it an identity to any in-process
-    gate — and the read-only MCP face runs core's own tools behind this same transport. The claimed
-    caller is read by the log filter and by nothing else, so the header stays advisory.
+    A connector pod learns who it serves from `X-Chemclaw-*` headers; binding them here lets its log
+    lines carry the turn's ids. A separate variable from the core identity ones on purpose: those
+    are read by authorization gates, and an unauthenticated header must never become an identity.
+    Only the log filter reads this.
     """
     return _claimed_caller.set((actor, session_id, correlation_id))
 
@@ -1601,9 +945,8 @@ def reset_claimed_caller(token: object) -> None:
 def structured_fields(record: logging.LogRecord) -> dict[str, object]:
     """The fields a caller attached with `extra=`, and nothing `logging` put there itself.
 
-    One definition, used by both the redaction filter (which must scrub them) and the JSON
-    formatter (which must publish them). Two spellings of "which keys are the caller's" is
-    exactly how one of them would come to publish an attribute the other never scrubbed.
+    One definition shared by the redaction filter (which scrubs them) and the JSON formatter (which
+    publishes them), so they cannot disagree.
     """
     return {
         key: value
@@ -1615,21 +958,10 @@ def structured_fields(record: logging.LogRecord) -> dict[str, object]:
 class ContextFilter(logging.Filter):
     """Attach the turn's correlation id, actor and session to every record.
 
-    The three getters are resolved **once, here in `__init__`**, and `filter` then does nothing but
-    call them. Not a style preference: a filter runs at arbitrary moments, including from inside
-    another module's import and from inside Temporal's workflow sandbox, which hooks `__import__`
-    and logs a warning when sandboxed code touches something restricted. An import on the logging
-    path closes that into a loop — the import trips a restriction, the restriction logs, the log
-    re-enters this filter, which imports again into a now half-initialised module. That is not a
-    hypothetical: it deadlocked the workflow worker until the test run's global timeout fired.
-
-    The getters themselves are imported at module scope, which is the strongest form of the same
-    guarantee: they are resolved before this class can be constructed, let alone run. That was not
-    available until the R2 layering move — `identity_context` and `session_context` lived in
-    `chemclaw.agent`, so importing them here would have made `core.logging`, which every entrypoint
-    imports first, depend on the conversation layer. They are stdlib-only kernel neighbours now.
-    `RedactionFilter` above still resolves the connector registry lazily, because that one is a
-    real sibling and the rule holds for it.
+    Nothing on the filter path may import: a filter can run inside another module's import or inside
+    Temporal's workflow sandbox, where an import that trips a restriction logs, re-enters this
+    filter and deadlocks. The getters are therefore stdlib-only kernel neighbours imported at module
+    scope.
     """
 
     def __init__(self) -> None:
@@ -1643,17 +975,10 @@ class ContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         """Stamp the ambient identity onto the record, without overwriting an explicit one.
 
-        `setdefault`, not assignment, and the difference is load-bearing. A caller that passes
-        `correlation_id` through `extra=` is doing so precisely because the ambient value is
-        *wrong* at that moment: `agent/audit.py`'s `audit_sink_failure` marker is written by a
-        shielded task after the turn's teardown has already reset the contextvars, so an
-        unconditional assignment replaced the id of the turn the record is about with `"-"`.
-        Measured before this change: that record — the one line in the tree designed to be
-        alerted on — carried `correlation_id: "-"`.
-
-        An identity this process bound itself wins; a connector's claimed caller
-        (`bind_claimed_caller`) fills only what is still absent, and marks the record so the
-        redaction filter sweeps what it filled.
+        `setdefault`: a caller passing `correlation_id` via `extra=` does so because the ambient
+        value is wrong at that moment (for example the audit sink-failure marker written after turn
+        teardown). An identity this process bound itself wins; a connector's claimed caller
+        (`bind_claimed_caller`) fills only what is absent and marks the record for redaction.
         """
         claimed = self._claimed()
         actor, session_id, correlation_id = claimed or ("", "", "")
@@ -1670,50 +995,20 @@ class ContextFilter(logging.Filter):
 def _redacted_field(value: object, swept: bool) -> object:
     r"""One `extra=` value, scrubbed in whatever form it will actually be written in.
 
-    A string the filter has already swept is passed through — that is what `swept` buys, and the
-    ~27 us per record it saves is why the sentinel exists. Anything else is *rendered first* and
-    scrubbed after, because a credential inside a dict, a list or an exception is not reachable by
-    a string check and is very much reachable by `json.dumps(default=str)`: measured, all three
-    forms reached the stream intact while this module's comment said the formatter covered them.
-
-    **Rendering first is also what made those three forms leak for as long as this function has
-    existed, and the fix is in the patterns rather than here.** `json.dumps` escapes the quotes in
-    every string one level down, so a JSON document nested inside a dict, a list, a tuple, an
-    exception message or a `bytes` reached `redact_secrets` as `{\"password\": \"...\"}` — and
-    every key-anchored rule framed its separator as `["']?\s*[=:]`, which a literal backslash
-    defeats. Measured through this function: a dict holding a JSON string, a `bytes` holding one, a
-    list holding one and a three-deep dict all returned the credential verbatim, while the same
-    credential in a *top-level* string was redacted correctly — so the sentence above was true
-    about reachability and false about the result. `_KEY_FRAMING` is what closes it, and the
-    `bytes` case needs nothing of its own: `default=str` renders it as a `repr`, whose quote
-    escaping is the same shape.
-
-    Rendering here rather than walking the structure in the filter is deliberate. A walk has to
-    decide how deep to go and what to do about cycles, keys, tuples and objects with a hostile
-    `__repr__`, on the logging hot path, per record — and it would still be scrubbing a form that
-    is not the one written out. `json.dumps` already does exactly that traversal once, for the
-    purpose of writing it, so the redaction goes where the text is.
-
-    The rendered value is returned as a **string** when it had to be rendered, so what the log
-    stack receives is what was scrubbed. A structure that survives redaction unchanged is returned
-    as itself, keeping the nested shape a query can index for the overwhelmingly common case.
-
-    A value that cannot be rendered at all becomes `***` rather than an exception: this runs inside
-    `format()`, and a field that cannot be produced safely must not take the record with it.
+    A string the filter already swept passes through (`swept`). Anything else is rendered with
+    `json.dumps(default=str)` first and scrubbed after, because the rendered text is what reaches
+    the stream and a credential inside a dict, list or exception is only reachable there;
+    `_KEY_FRAMING` handles the escaped quotes this produces. Rendered text is returned as a string
+    when redaction changed it; an unchanged structure is returned as itself so a log stack can index
+    it. A value that cannot be rendered becomes `***` rather than raising inside `format()`.
     """
     if isinstance(value, str):
         return value if swept else redact_secrets(value)
     try:
         rendered = json.dumps(value, default=str)
     except Exception:
-        # **`Exception`, not `(TypeError, ValueError)`, and the difference loses a whole record.**
-        # `default=str` calls `str()`, which falls through to `__repr__`, so a value with a hostile
-        # or merely broken `__repr__` raises whatever it likes — measured, a `RuntimeError` from a
-        # `__repr__` propagated out of `format()` and logging dropped the record onto stderr as a
-        # handler error. That is the input `_redacted_for_diagnostic` above already exists for, and
-        # it says why in as many words: a hostile `__repr__` is expected here, not exotic. The
-        # earlier version of this arm also called `repr(value)` again, which is the one thing
-        # guaranteed to raise a second time for the value that got it here.
+        # `Exception`, not `(TypeError, ValueError)`: `default=str` may hit a hostile `__repr__`
+        # that raises anything, and an escaping error would drop the whole record.
         return _REDACTED
     scrubbed = redact_secrets(rendered)
     if scrubbed == rendered:
@@ -1724,20 +1019,11 @@ def _redacted_field(value: object, swept: bool) -> object:
 class JsonFormatter(logging.Formatter):
     """One JSON object per line, so a log stack parses rather than guesses.
 
-    The fields are the ones a query actually starts from: when, how bad, from where, and the three
-    identifiers that join a line to the audit trail (`correlation_id`), to a conversation
-    (`session_id`) and to a person (`actor`). An exception is rendered into `exception` rather than
-    trailing after the line, because a multi-line traceback in a line-delimited format is how a
-    stack trace becomes forty unparseable entries.
-
-    **`exception` is taken from `record.exc_text`, never re-rendered from `exc_info`.** That is the
-    whole point of `SecretRedactingFilter` rendering the traceback itself: re-rendering here would
-    reach past the redaction into the original exception and emit the credential the filter had
-    already replaced. It did, and only in production — the chart sets `CHEMCLAW_LOG_JSON=true`
-    while the tests ran the plain formatter, so a measured leak of an API key and a DSN password
-    lived in the one path no test took. The `redact_secrets` fallback covers the case where this
-    formatter is used on a handler that carries no filter: it cannot see the per-connector bearer
-    tokens the filter resolves, but it must not be the reason a secret is emitted.
+    Fields: time, level, logger, message, and the three join keys (`correlation_id`, `session_id`,
+    `actor`); a traceback goes into `exception` rather than trailing lines. `exception` is taken
+    from `record.exc_text`, never re-rendered from `exc_info`, which would bypass the filter's
+    redaction. The `redact_secrets` fallback covers a handler with no filter, minus the connector
+    bearers only the filter resolves.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -1745,10 +1031,8 @@ class JsonFormatter(logging.Formatter):
         swept = record.__dict__.get(_REDACTED_MARK, False)
         message = record.getMessage()
         payload: dict[str, Any] = {
-            # ISO-8601 in UTC with an explicit offset. `formatTime` gives naive *local* time in a
-            # comma-millisecond format, so every join between a log line, an `audit_events.ts`
-            # (`timestamptz`) and an OTLP span's UTC timestamp went through a lossy parse and a
-            # guess at the pod's zone.
+            # ISO-8601 UTC with an explicit offset, so joins with `audit_events.ts` and span
+            # timestamps need no guess at the pod's zone.
             "time": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
                 timespec="milliseconds"
             ),
@@ -1769,14 +1053,8 @@ class JsonFormatter(logging.Formatter):
         for key in _IDENTITY_FIELDS:
             value = getattr(record, key, "-")
             payload[key] = redact_secrets(value) if scrub and isinstance(value, str) else value
-        # The caller's own fields. Until this existed the formatter built a fixed seven-key payload
-        # and never read `record.__dict__`, so **every** `extra=` was silently discarded — which is
-        # why there was exactly one `extra=` logging call in the tree, and why its `event` marker
-        # (the one thing designed to be alerted on) never reached the log stack as a field.
-        #
-        # Nested under `fields` rather than merged at the top level, so a caller cannot shadow
-        # `level`, `time` or `correlation_id` — a field named `level` arriving from a tool result
-        # would otherwise rewrite the severity a log stack routes on.
+        # The caller's own fields, nested under `fields` so a caller cannot shadow `level`, `time`
+        # or `correlation_id`.
         fields = structured_fields(record)
         if fields:
             payload["fields"] = {
@@ -1787,9 +1065,7 @@ class JsonFormatter(logging.Formatter):
         elif record.exc_info:
             payload["exception"] = redact_secrets(self.formatException(record.exc_info))
         if record.stack_info:
-            # Redacted here as well as by the filter. Without this, adding the field created a
-            # *new* unredacted channel in exactly the no-filter case the `exception` fallback was
-            # added for — before this commit `stack_info` was dropped entirely, so the fix would
-            # have introduced the leak it was closing.
+            # Redacted here too, so `stack_info` is not an unredacted channel when no filter is
+            # installed.
             payload["stack"] = record.stack_info if swept else redact_secrets(record.stack_info)
         return json.dumps(payload, default=str)

@@ -1,18 +1,8 @@
 """The pgvector HNSW recall knobs on the dense searches — off by default, transaction-local.
 
-Three halves, for the three things that can be wrong with a knob. Offline: what the configuration
-resolves to, including that the default resolves to *nothing* (no statement, no extra round trip,
-and — because pgvector reserves the `hnsw.` prefix — nothing a pre-0.8 server would reject).
-Server-backed: that the parameters actually land on the transaction running the search and are gone
-again when it commits, which is the property that makes them safe under a shared connection pool.
-And **that every dense search reads them at all** — which is where the knob was inert: it was
-applied inside `PostgresNoteIndex.search_dense` only, while the residual
-`settings.hnsw_ef_search` cites as its reason lives on the *document* index, whose dense path never
-issued the statement. `test_the_document_dense_path_runs_under_the_configured_parameters` is that
-gap, counted rather than asserted.
-
-The server half needs a real pgvector, so it skips in the offline sandbox exactly as every other
-Postgres-backed test here does.
+Offline: the default resolves to no statement at all. Server-backed: the parameters land on the
+search's transaction and are gone after commit, which makes them safe on a shared pool. And every
+dense search, including the document index's, issues them. The server half skips offline.
 """
 
 import asyncio
@@ -43,10 +33,7 @@ PGVECTOR_DEFAULT_EF_SEARCH = "40"
 def test_the_recall_knobs_are_off_by_default() -> None:
     """With nothing configured, the dense path issues no session statement at all.
 
-    The default has to be *silence*, not "the same values pgvector would have used": a deployment on
-    the `pgvector >= 0.7` floor the fingerprint migrations state has no `hnsw.iterative_scan`, and
-    the reserved `hnsw.` prefix makes setting an unknown parameter under it an error rather than an
-    ignored placeholder.
+    pgvector reserves the `hnsw.` prefix, so an unknown parameter on an older server is an error.
     """
     assert settings.hnsw_ef_search == 0
     assert settings.hnsw_iterative_scan == "off"
@@ -70,12 +57,9 @@ def test_each_knob_is_emitted_only_when_it_is_set(monkeypatch: pytest.MonkeyPatc
 
 
 def test_ef_search_has_a_documented_ceiling() -> None:
-    """The setting refuses a value past the band where the planner abandons the index.
+    """`ef_search` refuses values past the band where the planner abandons the HNSW index.
 
-    Not pgvector's own maximum (1000): above roughly 200–400 the estimated cost of the HNSW scan
-    can exceed a sequential scan, at which point a bigger `ef_search` buys the *opposite* of the
-    recall it was set for. A knob whose upper range silently inverts its own purpose is a knob with
-    a ceiling.
+    Above it a sequential scan becomes cheaper, inverting the knob's purpose.
     """
     assert Settings(_env_file=None, hnsw_ef_search=400).hnsw_ef_search == 400  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
@@ -106,11 +90,8 @@ async def test_recall_parameters_are_transaction_local_on_a_shared_connection(
 ) -> None:
     """The configured parameters hold for the search's transaction and are gone after it commits.
 
-    Pinned to a one-connection pool so the second block is guaranteed the *same* backend as the
-    first — otherwise "the parameters are gone" could be satisfied by simply getting a different
-    connection, which proves nothing. This is the property that makes the knob safe to set at all:
-    a session-level `SET` would leak one scoped query's widened candidate list onto every later
-    borrower of that connection.
+    A one-connection pool guarantees the same backend; a session-level `SET` would leak onto later
+    borrowers.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 1)
     monkeypatch.setattr(settings, "pg_pool_max_size", 1)
@@ -147,12 +128,10 @@ async def test_recall_parameters_are_transaction_local_on_a_shared_connection(
 async def test_dense_search_runs_under_the_configured_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scoped dense search still finds its note with both knobs turned on.
+    """A scoped dense search still finds its note with both knobs on.
 
-    The assertion that matters is not the hit — it is that the statement ran: pgvector reserves the
-    `hnsw.` prefix, so a misspelled parameter name or an invalid mode raises rather than being
-    ignored. This is therefore the test that would catch `hnsw.iterative_search`, a value of
-    `strict`, or a `set_config` call that never made it into the search's own transaction.
+    The point is that the statement ran: the reserved prefix makes a misspelled name or invalid mode
+    raise.
     """
     monkeypatch.setattr(settings, "hnsw_ef_search", 100)
     monkeypatch.setattr(settings, "hnsw_iterative_scan", "relaxed_order")
@@ -186,13 +165,8 @@ def test_the_document_dense_path_runs_under_the_configured_parameters(
 ) -> None:
     """The document index's dense leg issues the recall statement; its lexical leg does not.
 
-    **Counted, because the defect this pins was an omission and an omission has no wrong answer.**
-    Both knobs were applied inside `PostgresNoteIndex.search_dense` alone, so the document index —
-    the path `settings.hnsw_ef_search`'s own documentation names as the reason the knobs exist —
-    ran every dense search under pgvector's defaults, and every possible assertion about its *hits*
-    passed. What separates "wired up" from "inert" is whether the statement is sent at all, so that
-    is what is counted: one on the dense leg, none on the lexical leg (whose `ts_rank` over a GIN
-    index is exact and has no such parameter), and none anywhere when the knobs are off.
+    Counted, because an omission leaves every assertion about hits passing: one statement on the
+    dense leg, none on the exact `ts_rank` leg, and none anywhere when the knobs are off.
     """
     issued: list[str] = []
     real_execute = psycopg.AsyncCursor.execute

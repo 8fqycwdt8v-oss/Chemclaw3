@@ -1,18 +1,9 @@
 """The front door's per-process state: what `create_app` seeds onto `app.state`, typed once.
 
-`app.state` is the seam the whole `api/` split rests on (R3.2): every route and dependency reads
-the process's live structures — the session cache, the turn leases, the admission semaphore —
-through `request.app.state` rather than through lexical capture, which is what lets the routes
-live in `chemclaw/api/routes/` while `create_app` (`api/app.py`) stays the only factory. Tests
-lean on the same seam from the other side (`tests/test_service.py` replaces `app.state.
-turn_semaphore` and `app.state.live_sessions` wholesale), so nothing here may cache a snapshot of
-a state attribute: `FrontDoorState` reads through to `app.state` on every access.
-
-This module holds the *shapes* of that state — the live-session cache and its record type, the
-durable ownership/turn-claim Protocols and their config-gated default constructors, the process's
-claim-holder identity, and the in-process turn lease — plus the `state(request)` accessor that
-contains Starlette's untyped `app.state` in one place instead of leaking `Any` into every route
-(the D-117 lesson).
+Routes read live structures through `request.app.state`, so they can live in `chemclaw/api/routes/`
+with `create_app` the only factory. Holds the live-session cache, the durable ownership and
+turn-claim Protocols, the claim-holder identity and the in-process turn lease, plus
+`state(request)`, a read-through typed view (tests replace attributes wholesale).
 """
 
 import asyncio
@@ -44,12 +35,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LiveSession:
-    """One live conversation: its turn session, who owns it, and which profile it runs under.
-
-    A record rather than a tuple because it grew a third field and a fourth is plausible —
-    unpacking `(session, owner)` at five call sites was already the kind of thing that breaks
-    silently when the shape changes.
-    """
+    """One live conversation: its turn session, who owns it, and which profile it runs under."""
 
     session: Any
     owner: str | None
@@ -57,33 +43,19 @@ class LiveSession:
 
 
 class _LiveSessions:
-    """A bounded, LRU cache of the front door's live in-process sessions with their owner (COR-3).
+    """A bounded LRU cache of the front door's live in-process sessions with their owner.
 
-    The service keeps the live `TurnSession` handle per session id; without a bound this map grows
-    for the pod's whole lifetime (a memory leak). This caps it and evicts the least-recently-used
-    entry when full — an evicted session's durable history still lives in the session store,
-    only the live in-process handle is dropped, so the worst case under memory pressure is a
-    client starting a new session. Session, owner and profile are stored together so they can
-    never drift: the profile decides which agent runs the turn *and* which connectors it gets,
-    so a session that lost it would silently change agent mid-conversation.
-
-    `pinned` names the sessions eviction must skip: a session with a turn in flight. Evicting one
-    does not stop its turn — the turn holds the `TurnSession` handle directly — it makes the next
-    request rehydrate a *second* handle over the same durable history, and the two then diverge in
-    `session.state` (the hazard `chemclaw.api.deps._rehydrate_session`'s docstring names). The pin
-    source is the in-process turn lease, which expires (see `_claim_turn_slot`), so a leaked pin
-    releases the cache by itself rather than wedging eviction for the pod's lifetime.
-
-    The bookkeeping itself is `chemclaw.core.bounded.BoundedLru` — this class keeps the
-    session-shaped API (`add` takes the record's three fields and returns the stored entry) that
-    `create_app` and the tests drive.
+    Eviction drops only the live handle; history stays durable. Session, owner and profile are
+    stored together so they cannot drift. Sessions with a turn in flight are `pinned`, since
+    re-hydrating a second handle would diverge in `session.state`; pins come from expiring turn
+    leases. Built on `chemclaw.core.bounded.BoundedLru`.
     """
 
     def __init__(self, capacity: int, pinned: Callable[[str], bool] | None = None) -> None:
         """Create a registry holding at most `capacity` live sessions.
 
-        `pinned` says which session ids must not be evicted right now (default: none). It is
-        consulted at eviction time, not stored per entry, so a pin needs no bookkeeping to clear.
+        `pinned` says which session ids must not be evicted right now (default: none); consulted at
+        eviction time, so a pin needs no clearing.
         """
         self._entries: BoundedLru[str, LiveSession] = BoundedLru(capacity, pinned=pinned)
 
@@ -96,17 +68,10 @@ class _LiveSessions:
     ) -> LiveSession:
         """Register a live session (most-recently-used), evicting the oldest past capacity.
 
-        Returns the entry it stored, so a caller that needs the handle back does not have to
-        `get` what it just `add`ed — a round trip that reads as if the entry might be missing
-        when it cannot be, and whose `None` branch was previously silenced with a type ignore.
-
-        Eviction (see `BoundedLru.put`) takes the least-recently-used entry that is neither
-        pinned (a turn in flight) nor the entry just added (its handle is being handed to the
-        caller, so dropping it would leave a live handle writing outside the cache — the exact
-        divergence the pin prevents). When every candidate is pinned the map briefly holds more
-        than `capacity`: turns in flight are bounded by the admission semaphore, orders of
-        magnitude below the cache cap, so honoring the bound by corrupting a running conversation
-        would be the wrong trade.
+        Returns the stored entry. Eviction skips pinned entries and the one just added (its handle
+        is going to the caller). When every candidate is pinned the map briefly exceeds `capacity`:
+        turns in flight are bounded far below the cap by admission, and evicting one would corrupt a
+        running conversation.
         """
         entry = LiveSession(session=session, owner=owner, profile=profile)
         self._entries.put(session_id, entry)
@@ -118,11 +83,10 @@ class _LiveSessions:
 
 
 class SessionOwners(Protocol):
-    """The durable session-ownership registry the front door rehydrates from after a restart (F3).
+    """The durable session-ownership registry the front door rehydrates from after a restart.
 
-    Kept as a Protocol so the concrete `chemclaw.agent.session_store.SessionOwnerStore` (which
-    needs a
-    database) is imported only on the durable path, and a test can inject an in-memory fake.
+    A Protocol, so the database-backed `SessionOwnerStore` is imported only on the durable path and
+    tests can inject a fake.
     """
 
     async def record(self, session_id: str, owner: str | None, profile: str | None = None) -> None:
@@ -142,20 +106,17 @@ class SessionOwners(Protocol):
     ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
         """`(session_id, created_at, updated_at, title, profile)`, newest activity first.
 
-        Sessions with no messages are not listed — see `_OWNER_LIST` in
-        `chemclaw.agent.session_store` for both that and why the order is `updated_at`. `profile`
-        is what `GET /plans/pending` filters on before it reads any checkpoint; `None` means the
-        default profile.
+        Sessions with no messages are not listed (see `_OWNER_LIST` in
+        `chemclaw.agent.session_store`). `profile` is what `GET /plans/pending` filters on; `None`
+        means the default profile.
         """
         ...
 
 
 class SessionTurns(Protocol):
-    """The durable "who is running a turn on this session" claim (D-121).
+    """The durable "who is running a turn on this session" claim.
 
-    A Protocol for the same reason `SessionOwners` is one: the concrete
-    `chemclaw.agent.session_store.SessionTurnClaims` needs a database, so it is imported only on the
-    durable path and a test injects an in-memory fake.
+    A Protocol for the same reason as `SessionOwners`.
     """
 
     async def claim(
@@ -173,54 +134,23 @@ class SessionTurns(Protocol):
         ...
 
 
-# This process's identity as a claim holder. A fresh id per process (each uvicorn worker imports
-# this module in its own interpreter), so a claim can never be refreshed or released by anyone but
-# the process that took it — including a *previous* incarnation of this pod, whose leftover claims
-# must age out rather than be inherited.
+# This process's identity as a claim holder, fresh per process, so a previous incarnation's leftover
+# claims age out rather than being inherited.
 _WORKER_ID = uuid.uuid4().hex
 
 
 def claim_holder(token: str) -> str:
-    """This *turn's* identity as a durable claim holder — the process id plus its slot token.
+    """This *turn's* identity as a durable claim holder: the process id plus its slot token.
 
-    **The process id alone is not an identity, and `TurnLease.token` beside it says why.** The
-    in-process slot carries a per-turn token precisely because "both teardown paths used to remove
-    whatever entry sat under the session id, so once one lease had lapsed and a successor had
-    claimed the slot, the first turn's teardown revoked the successor's claim and a third turn was
-    admitted beside a live one — a guard undoing itself". The durable half was keyed by
-    `_WORKER_ID`, which is per *process*, so the same sentence applied to it unchanged. Driven
-    against the real `SessionTurnClaims`:
-
-    ```
-    turnA claim(P, 1s):  True        [lease lapses]
-    turnB claim(P, 60s): True        <- same process, a new turn
-    turnA refresh(P):    True        <- A cannot tell it lost; it just extended B's lease
-    turnA release(P):    rows []     <- A's teardown deleted B's claim
-    turnC claim(Q, 60s): True        <- a second replica admitted beside the live turn B
-    ```
-
-    In the shipped configuration this is latent rather than live — `_claim_turn_slot` refuses two
-    turns in one process first, and its lease (`turn_timeout + admission`) outlives the durable
-    one — so it is fixed because it is the guard documented as the fix for a failure it did not
-    actually cover, and because `tests/test_concurrency_claims.py` missed it by using two
-    *different* holder names, which production never does.
-
-    The slot token is already at every call site and is already the identity the sibling guard
-    checks, so the durable claim is now exactly as identity-checked as `_release_turn_slot`.
-
-    Args:
-        token: This turn's slot token from `_claim_turn_slot`.
-
-    Returns:
-        The holder string to claim, refresh and release under.
+    The token comes from `_claim_turn_slot`. Per-process identity is not enough: a turn whose lease
+    lapsed could refresh or release a successor's claim in the same process. With the token the
+    durable claim is identity-checked like `_release_turn_slot`.
     """
     return f"{_WORKER_ID}:{token}"
 
 
-# The claim is refreshed this many times per lease. Three, so two consecutive refreshes can fail —
-# a slow query, one blocked moment on the loop — before the lease is genuinely at risk. Not a
-# config knob: it is a property of how the lease is maintained, not something a deployment tunes
-# independently of `service_turn_claim_lease_seconds`.
+# Refreshes per lease: three, so two consecutive refreshes can fail before the lease is at risk. A
+# property of lease maintenance, not a deployment knob.
 _CLAIM_REFRESHES_PER_LEASE = 3
 
 
@@ -228,35 +158,10 @@ _CLAIM_REFRESHES_PER_LEASE = 3
 class TurnLease:
     """One session's in-process turn slot: which turn holds it, and until when.
 
-    `token` is what makes a release *identity-checked*. Both teardown paths used to remove
-    whatever entry sat under the session id, so once one lease had lapsed and a successor had
-    claimed the slot, the first turn's teardown revoked the successor's claim and a third turn was
-    admitted beside a live one — a guard undoing itself.
-
-    `deadline` is `math.inf` for as long as `post_message`'s own `try/finally` owns the cleanup,
-    and a real wall clock from the moment it stops (see `_start_turn_lease`). A record rather than
-    a bare float because those two fields are one fact and had to be read together.
-
-    `actor` is the principal whose turn holds this slot, and it is here rather than in a counter of
-    its own so the per-actor cap (`_actor_turns_in_flight`) inherits this record's expiry. A plain
-    `dict[str, int]` keyed by principal is the obvious shape and is wrong for this route: it has no
-    deadline, so the one window neither teardown covers — the never-advanced generator named above —
-    would leave that actor's count inflated for the pod's lifetime, refusing the human the cap
-    exists to protect. `None` marks a maintenance hold (fork, delete) that excludes a turn without
-    being one.
-
-    `claimed_at` exists because that inheritance was **half true when it was written**, and an
-    adversarial review proved the other half. `deadline` is `math.inf` for the whole reservation
-    phase, and that phase is not instantaneous: three store round trips run inside it (the title
-    write, the budget check, the durable claim), none of which carries a statement timeout. A
-    handler *parked* on one of those is covered by no `finally` — the session's own 409 accepts that
-    and says so, because a wedged store is already an outage — but the per-actor cap inherited it
-    silently and turned it into a permanent lockout of one chemist across *every* session, which is
-    precisely the brick the paragraph above claims the design avoids. So the actor count reads
-    `claimed_at` while a reservation is un-started, and an un-started reservation ages out at the
-    same width `_start_turn_lease` would have stamped. The session guard is untouched: its
-    `deadline` semantics, and the argument that only `post_message`'s `finally` may end the
-    reservation, are exactly as they were.
+    `token` identity-checks releases. `deadline` is `math.inf` while `post_message`'s `finally` owns
+    cleanup, then a wall clock (`_start_turn_lease`). `actor` feeds the per-actor cap (`None` for
+    fork/delete holds). `claimed_at` lets that cap age out an un-started reservation stuck on a
+    store call, so one wedged call cannot lock a chemist out everywhere.
     """
 
     token: str
@@ -270,36 +175,10 @@ def _claim_turn_slot(
 ) -> str | None:
     """Reserve the in-process one-turn-per-session slot, or report that a live turn holds it.
 
-    Returns this turn's token (its identity for `_start_turn_lease` and `_release_turn_slot`), or
-    `None` when another turn holds the session.
-
-    `actor` is keyword-only and has **no default** on purpose: it is what the per-actor cap counts,
-    and a default would let a new call site join the map without saying whether its hold is a turn.
-    The two maintenance holds (fork, delete) pass `None`.
-
-    The slot is a *lease*, not a latch — the same semantics D-121 gave its durable counterpart
-    (`session_turns`), for the same reason: every release site can be skipped. Both of this
-    guard's releases live in a `finally` (the SSE generator's and `post_message`'s, exchanged via
-    `handed_off` — see `chemclaw.api.routes.turns`), and one real window runs neither — a client
-    gone after the streaming response is handed off but before its generator is first advanced.
-    An async generator that never started runs no `finally` at all, so a latch then answered 409
-    for the pod's whole lifetime. A leased entry instead stops refusing once its deadline passes.
-
-    **The clock does not start here, and that is the correction.** The deadline used to be stamped
-    at this moment and justified as "the widest wall clock a *live* turn can hold the slot", but
-    two store round trips run between here and the streamed run — the title write and the durable
-    claim — so the real ceiling was `(store latency) + admission + turn timeout`, strictly larger.
-    Measured on the real app with a slow store, a second POST was admitted with 200 while the
-    first turn was still being set up, and both drove the same `TurnSession`. What actually holds
-    for that phase is stronger than any deadline: `post_message`'s `finally` releases the slot on
-    every exit, exception and cancellation alike, so the reservation needs no expiry until the
-    response is handed off and that `finally` stops owning it.
-
-    Expired entries (this session's or any other's) are swept here rather than by a timer: the
-    map stays bounded, the `turns_in_flight` gauge stays honest, and a leaked entry stops
-    pinning its session in the live cache (`_LiveSessions`) at the same moment it stops 409ing.
-    Check-and-set stays atomic on the event loop — no `await` between the test and the write —
-    so the gate has no race window.
+    Returns this turn's token, or `None` when another turn holds the session. `actor` is
+    keyword-only with no default (maintenance holds pass `None`). A lease, not a latch, because one
+    window runs no releasing `finally`; its clock starts at hand-off (`_start_turn_lease`). Expired
+    entries are swept here. No `await` between test and write.
     """
     now = time.monotonic()
     for stale_id, lease in list(active_turns.items()):
@@ -322,17 +201,10 @@ def _widest_turn_width() -> float:
 def _still_holding(lease: TurnLease, now: float) -> bool:
     """Whether `lease` may still belong to a running turn, for the per-actor count only.
 
-    A started lease answers from its own `deadline`, which is what the session guard reads. An
-    **un-started** one — `deadline=math.inf`, the reservation `post_message`'s `finally` owns — is
-    aged from `claimed_at` instead, because `inf` is not an expiry and a handler parked on one of
-    the reservation phase's three store round trips is covered by no `finally`. Left inheriting
-    `inf`, one wedged store call refused that chemist on every session until the pod restarted.
-
-    The width is the one `_start_turn_lease` would have stamped, so this can only ever expire a
-    reservation *later* than the lease it is about to become, never sooner — the count stays
-    conservative in the direction that protects other chemists rather than the one that bricks this
-    one. The session's own 409 is deliberately not changed: a wedged store is an outage either way,
-    and that guard's correctness rests on only the `finally` ending the reservation.
+    A started lease answers from its `deadline`. An un-started one (`deadline=math.inf`) is aged
+    from `claimed_at` at the width `_start_turn_lease` would stamp, so it never expires sooner than
+    the lease it would become, and one wedged store call cannot lock a chemist out indefinitely. The
+    session's own guard is unchanged.
     """
     if lease.deadline != math.inf:
         return lease.deadline > now
@@ -342,20 +214,10 @@ def _still_holding(lease: TurnLease, now: float) -> bool:
 def _actor_turns_in_flight(active_turns: dict[str, TurnLease], actor: str, *, besides: str) -> int:
     """How many live turns `actor` is running on sessions other than `besides`.
 
-    Read off the lease map rather than kept as its own counter, for the reason `TurnLease.actor`
-    gives: an unexpired lease is the same fact `chemclaw_turns_in_flight` counts, and it sweeps
-    itself. So a *detached* turn counts here too, deliberately — its admission permit came back as
-    fairness to a waiting client (`chemclaw.api.detach`), not because it stopped spending this
-    pod's CPU, tokens and store connection. A per-actor cap that released on detach would hand
-    itself straight back to the POST-and-hang-up case that module measured.
-
-    `besides` is this request's own session, excluded so a double-submit to a session that is
-    already running is still answered by the per-session 409 that names what happened, rather than
-    by a 429 whose code depends on how many other sessions the caller has open. It cannot be used
-    to exceed the cap: the 409 creates no lease.
-
-    Expired entries are filtered rather than deleted — `_claim_turn_slot`'s sweep owns the
-    deleting, and this is the same read the in-flight gauge already does.
+    Read off the lease map, which sweeps itself. Detached turns count: they gave their admission
+    permit back but still spend. `besides` excludes this request's session so a double-submit gets
+    the session's own answer rather than a 429; it cannot exceed the cap, since that path creates no
+    lease. Expired entries are filtered, not deleted (`_claim_turn_slot` sweeps).
     """
     now = time.monotonic()
     return sum(
@@ -368,13 +230,9 @@ def _actor_turns_in_flight(active_turns: dict[str, TurnLease], actor: str, *, be
 def _waiting_besides(waiters: dict[tuple[str, str], int], actor: str, *, besides: str) -> int:
     """How many of `actor`'s messages wait in this process, in lines other than `besides`'s.
 
-    The per-actor cap's second half
-    (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`): a waiting message
-    is a turn its sender has asked for and will get, so it counts
-    against `service_max_concurrent_turns_per_actor` beside the turns already running — otherwise
-    one chemist parks a message in every shared session they are in and each starts the moment its
-    line moves, past the cap all at once. `besides` for `_actor_turns_in_flight`'s reason: a second
-    message to the same session is the line's own one-per-sender refusal to answer, not this cap's.
+    A waiting message is a turn its sender will get, so it counts against
+    `service_max_concurrent_turns_per_actor`; otherwise messages parked in many shared sessions
+    could all start at once. `besides` for `_actor_turns_in_flight`'s reason.
     """
     return sum(
         count
@@ -386,14 +244,10 @@ def _waiting_besides(waiters: dict[tuple[str, str], int], actor: str, *, besides
 def _take_event_stream_slot(streams: dict[str, int], actor: str) -> Callable[[], None] | None:
     """Take one of `actor`'s long-lived stream slots, or `None` when a cap is already reached.
 
-    One ledger for every stream a chemist can hold open indefinitely on this process — the
-    push-back channel and, since a watcher can be anybody in a shared session, a followed turn — so
-    `service_max_event_streams_per_user` bounds what one person can open rather than what one route
-    can, and `service_max_event_streams_total` what the pod holds. The test and the take have no
-    `await` between them, so two concurrent opens cannot both pass at the cap.
-
-    Returns the release, idempotent, for the response that holds the stream to call wherever it
-    ends: a slot returned twice would let one person exceed the cap by the number of double ends.
+    One ledger for every stream a person can hold open indefinitely (push-back streams and followed
+    turns), bounded per user (`service_max_event_streams_per_user`) and per pod
+    (`service_max_event_streams_total`). No `await` between test and take. Returns an idempotent
+    release, so a double end cannot free two slots.
     """
     at_user_cap = streams.get(actor, 0) >= settings.service_max_event_streams_per_user
     if at_user_cap or sum(streams.values()) >= settings.service_max_event_streams_total:
@@ -419,20 +273,10 @@ def _take_event_stream_slot(streams: dict[str, int], actor: str) -> Callable[[],
 def _start_turn_lease(active_turns: dict[str, TurnLease], session_id: str, token: str) -> None:
     """Start this turn's lease clock, at the moment the request stops owning its cleanup.
 
-    Called immediately before the streaming response is handed off, which is exactly where the
-    unguarded window opens: from here on `post_message`'s `finally` no longer releases the slot,
-    and a client that vanishes before the generator's first advance runs no `finally` at all. So
-    from *here* the deadline is the widest wall clock a live turn can hold the slot — the
-    admission wait plus the streamed run's own timeout — and an expired entry again provably
-    belongs to no running turn.
-
-    Identity-checked like the release, so this can only ever restamp the entry it was given a
-    token for.
-
-    **Carries `actor` across the restamp**, which is the whole of the per-actor cap's correctness
-    here: this runs at the hand-off, so dropping the field would leave every lease anonymous from
-    the moment a turn actually starts streaming and the cap would count nothing while reading, in
-    review, exactly as it does now.
+    Called just before the streaming response is handed off; from here the deadline is the widest
+    wall clock a live turn can hold (admission wait plus turn timeout), so an expired entry belongs
+    to no running turn. Identity-checked like the release, and carries `actor` across the restamp so
+    the per-actor cap keeps counting the turn.
     """
     lease = active_turns.get(session_id)
     if lease is None or lease.token != token:
@@ -448,9 +292,7 @@ def _start_turn_lease(active_turns: dict[str, TurnLease], session_id: str, token
 def _release_turn_slot(active_turns: dict[str, TurnLease], session_id: str, token: str) -> None:
     """Give back the slot *this* turn holds — never a successor's.
 
-    The two teardown paths popped by key, so a turn whose lease had already lapsed removed
-    whatever entry it found and let a third turn in beside the second. Comparing the token first
-    makes a late teardown a no-op, which is the only correct thing it can be.
+    Compares the token first, so a teardown arriving after its lease lapsed is a no-op.
     """
     lease = active_turns.get(session_id)
     if lease is not None and lease.token == token:
@@ -462,27 +304,17 @@ async def _hold_turn_claim(
 ) -> None:
     """Keep this turn's claim alive for as long as the turn streams.
 
-    Cancelled by the stream's `finally`, so it lives exactly as long as the turn does. A refresh
-    that fails is logged and counted rather than fatal: killing a chemist's turn because one small
-    UPDATE did not land would trade a real answer for a hazard that also needs a second turn on
-    the same session to arrive inside the remaining lease. It is *counted* because this branch
-    already learned that lesson the expensive way — a guard that quietly switches itself off
-    (D-107's rollback watermark) is worse than one that fails loudly.
+    Cancelled by the stream's `finally`. A failed refresh is logged and counted, not fatal: killing
+    a turn over one UPDATE is worse than the race it guards against, and a guard that quietly stops
+    working must be visible.
     """
     interval = lease_seconds / _CLAIM_REFRESHES_PER_LEASE
     while True:
         await asyncio.sleep(interval)
         try:
             if not await claims.refresh(session_id, holder, lease_seconds):
-                # The claim is no longer ours: it lapsed and another worker took the session while
-                # this turn was still running. Nothing raised — the UPDATE simply matched no row —
-                # so before the 2026-08-05 review this was indistinguishable from a healthy
-                # refresh, and the warning below was unreachable in the one case it names.
-                #
-                # Stop rather than keep trying: every further refresh would match no row either,
-                # and a heartbeat that cannot succeed is a timer burning a connection every few
-                # seconds. The turn itself continues — cancelling a chemist's answer because a
-                # lease lapsed would trade a real result for a race that has already happened.
+                # The claim lapsed and another worker took the session (the UPDATE matched no row).
+                # Stop refreshing, since no later refresh can succeed; the turn itself continues.
                 METRICS.increment("chemclaw_turn_claims_lost_total")
                 logger.warning(
                     "the turn claim for session %s was taken over while the turn was running; "
@@ -491,11 +323,9 @@ async def _hold_turn_claim(
                 )
                 return
         except Exception:
-            # Widened for the reason the release below it was (D-130): this runs in a task the
-            # turn only ever cancels, never awaits, so an exception the tuple did not name would
-            # kill the heartbeat silently *and* surface later as an unretrieved-exception
-            # traceback. `psycopg.Error` is the concrete case — the store raises it and the old
-            # tuple did not cover it.
+            # Broad: this task is only ever cancelled, never awaited, so an unnamed exception (e.g.
+            # `psycopg.Error`) would kill the heartbeat silently and surface as an
+            # unretrieved-exception traceback.
             METRICS.increment("chemclaw_turn_claim_refresh_failures_total")
             logger.warning(
                 "could not refresh the turn claim for session %s; if this keeps failing the "
@@ -509,49 +339,25 @@ async def _hold_turn_claim(
 async def _release_turn_claim(claims: SessionTurns, session_id: str, holder: str) -> None:
     """Give a session's turn slot back, surviving the cancellation that usually causes it.
 
-    `holder` is this turn's, not this process's (`claim_holder`), so a teardown arriving after its
-    own lease has lapsed is a no-op rather than a revocation of whoever took the slot next.
-
-    **Shielded, and that is the entire point of this function** (D-130). Both callers reach it from
-    a `finally` that runs *because* their task was cancelled — a chemist closed the tab mid-turn —
-    and a bare `await` inside a cancelled task raises at its first suspension point. The release
-    therefore started on every abandoned turn and finished on none: measured on the real path, the
-    session then answered 409 to its own owner for the **full 60-second lease**, so reopening a
-    closed tab was refused for a minute. `shield` runs the release as an independent task that
-    outlives this frame, which is what makes the DELETE actually land.
-
-    Cancellation still propagates out of here — the caller's task is being torn down and must
-    continue to be. Only the *release* is protected, not the caller.
-
-    The lease remains the backstop for what shielding cannot cover (the process being killed, the
-    loop closing under it): a release that never lands costs the session one lease of
-    unavailability, not a permanent 409 — which is precisely why the claim expires at all.
+    `holder` is this turn's (`claim_holder`), so a late teardown cannot revoke a successor.
+    Shielded: callers are `finally` blocks running because their task was cancelled, where a bare
+    `await` raises at its first suspension and the release would never land, refusing the session's
+    owner for a whole lease. Cancellation still propagates to the caller. The lease remains the
+    backstop for what shielding cannot cover (a killed process).
     """
 
     async def _release() -> None:
         """The release itself — the part that must survive, so it owns its own error handling.
 
-        Handling the failure *inside* the shielded task rather than around the `await` is not a
-        style choice: when the caller is cancelled, `shield` drops its bookkeeping callback on the
-        inner task, so an exception raised there afterwards is never retrieved and asyncio reports
-        it as a bare `Task exception was never retrieved` traceback with nothing tying it to a
-        session. A task that cannot fail cannot produce one.
+        Errors are handled inside the shielded task: once the caller is cancelled nobody retrieves
+        its exception, which would surface as an unattributed `Task exception was never retrieved`.
         """
         try:
             await claims.release(session_id, holder)
         except Exception:
-            # `Exception`, not a tuple of the connection errors. The narrow tuple was written when
-            # a failure here could only propagate into a `finally` that was about to be discarded
-            # anyway; shielding turned it into a task nobody awaits, where anything uncaught
-            # becomes an unattributed `Task exception was never retrieved`. Chaos scenario C4 —
-            # Postgres stopped at the instant of the disconnect — produced exactly that, because
-            # the store raises `psycopg.errors.AdminShutdown`, which is a `psycopg.Error` and
-            # matched none of `(ConnectionError, OSError, RuntimeError)`.
-            #
-            # Breadth is the correct contract here rather than a concession: this function's whole
-            # promise is that a release which cannot happen costs the session one lease, and there
-            # is no failure mode for which crashing an orphan task is a better answer than saying
-            # so in the log.
+            # `Exception`, not a tuple: nobody awaits this task, so anything uncaught (e.g.
+            # `psycopg.errors.AdminShutdown` when Postgres stops mid-disconnect) would become an
+            # unattributed traceback. A release that cannot happen costs one lease and a log line.
             logger.warning(
                 "could not release the turn claim for session %s; it expires on its own",
                 session_id,
@@ -564,16 +370,10 @@ async def _release_turn_claim(claims: SessionTurns, session_id: str, holder: str
 class QueueSignal:
     """Wakes this process's waiting messages the moment the turn ahead of them may have moved.
 
-    A waiting message asks the queue for its place every `service_turn_queue_poll_seconds`, which is
-    what a waiter on another replica pays. On *this* replica the turn that ends, the message that
-    leaves the line and the one that is withdrawn all happen here, so they wake every local waiter
-    at once instead of leaving it to the clock. A wake is only a hint to ask again — the queue and
-    the claims are the truth — so a spurious one costs one query and a missed one costs one poll.
-
-    **The event is made per loop, lazily**, never at construction: an `asyncio` primitive binds to
-    the first loop that waits on it, and this object lives on `app.state`, which a test process can
-    drive from more than one loop (`tasks/lessons.md` rule 131). `notify` drops the event it set, so
-    the next waiter starts a fresh one rather than finding it already set.
+    Remote waiters poll every `service_turn_queue_poll_seconds`; local events (a turn ending, a
+    message leaving or withdrawn) wake local waiters at once. A wake is only a hint to re-ask the
+    queue. The event is created lazily per loop, because an `asyncio` primitive binds to its first
+    loop and tests drive `app.state` from several; `notify` drops the event it set.
     """
 
     def __init__(self) -> None:
@@ -603,10 +403,8 @@ class QueueSignal:
 def _default_turn_queue() -> TurnQueue:
     """Each session's line of waiting messages, durable exactly where the turn claim is.
 
-    Durable under `session_store="postgres"`, because that is the condition under which two
-    replicas share one session and so must share one order; in-process otherwise, where the session
-    is the process. Unlike the claim this is never `None`: under the in-memory store a second
-    message still has to wait for the first, only nobody outside this process can be in the line.
+    Durable under `session_store="postgres"`, where replicas share sessions and must share one
+    order; in-process otherwise. Never `None`: a second message must wait for the first either way.
     """
     if settings.session_store != "postgres":
         return InMemoryTurnQueue()
@@ -616,10 +414,8 @@ def _default_turn_queue() -> TurnQueue:
 def _default_owner_store() -> SessionOwners | None:
     """The durable session-ownership store, but only when durable sessions are on (else None).
 
-    Rehydration is meaningful only when there is durable history to resume, so it is gated on the
-    same `session_store="postgres"` switch: under the in-memory store there is nothing to reattach
-    to and a cache miss stays a 404 (today's behavior). Imported lazily so the dev/test path
-    never pulls in psycopg for a store it will not use.
+    Without durable history there is nothing to reattach to, so a cache miss stays a 404. Imported
+    lazily so the dev/test path never loads psycopg.
     """
     if settings.session_store != "postgres":
         return None
@@ -631,10 +427,8 @@ def _default_owner_store() -> SessionOwners | None:
 def _default_turn_claims() -> SessionTurns | None:
     """The durable turn claim, but only where two processes can share one session (else None).
 
-    Gated on the same `session_store="postgres"` switch as ownership, because that switch is
-    exactly the condition under which two processes share a conversation's durable history and can
-    therefore corrupt it. Under the in-memory store each process has its own history and the
-    in-process set already covers everything there is to cover.
+    Gated on `session_store="postgres"`; under the in-memory store the in-process slot covers
+    everything.
     """
     if settings.session_store != "postgres":
         return None
@@ -644,18 +438,11 @@ def _default_turn_claims() -> SessionTurns | None:
 
 
 class FrontDoorState:
-    """A typed, read-through view over the front door's `app.state` (D-117's lesson, kept).
+    """A typed, read-through view over the front door's `app.state`.
 
-    `app.state` is untyped by design in Starlette, so every direct read of it returns `Any` and
-    silently disables type checking on whatever it touches. Reading it through these properties
-    keeps that `Any` in one module instead of leaking into each route's return type — which is
-    what `api/` had been doing unchecked before it joined `make type`.
-
-    Every property reads `app.state` **at access time**, never a snapshot: tests (and a future
-    admin surface) replace whole attributes — `app.state.turn_semaphore = Semaphore(0)`,
-    `app.state.live_sessions = _LiveSessions(...)` — and a cached reference would silently keep
-    serving the replaced object. The two connector-health fields have setters because the
-    readiness route refreshes that snapshot; everything else is written only by `create_app`.
+    Keeps Starlette's untyped `app.state` (`Any`) in one module. Every property reads at access
+    time, never a snapshot, because tests replace whole attributes. The two connector-health fields
+    have setters for the readiness route; everything else is written only by `create_app`.
     """
 
     def __init__(self, app: FastAPI) -> None:
@@ -666,23 +453,15 @@ class FrontDoorState:
     def connector_factory(self) -> Callable[[str | None], list[Any]]:
         """Builds one turn's connectors for a profile — called per turn, never cached.
 
-        What comes back is the engine's own representation rather than a fixed one: the choice is
-        made once, in `chemclaw.agent.chemclaw_agent.connector_specs`, and `run_turn` opens
-        whichever it is handed. This property is deliberately untyped beyond `list[Any]` for that
-        reason — the two engines' connectors share no base class, and naming a union here would
-        put a `maf` import in the front door's type surface.
+        Typed `list[Any]`: the representation is chosen in
+        `chemclaw.agent.chemclaw_agent.connector_specs`, and `run_turn` opens whatever it is handed.
         """
         factory: Callable[[str | None], list[Any]] = self._app.state.connector_factory
         return factory
 
     @property
     def graph_factory(self) -> Callable[..., Any]:
-        """Builds one turn's compiled graph on the LangGraph engine — called per turn, never cached.
-
-        Read through this view rather than off `app.state` directly for the reason every property
-        here exists: `run_turn` needs it as an argument, and a route reaching into `app.state`
-        would take an `Any` with it.
-        """
+        """Build one turn's compiled graph; called per turn, never cached."""
         factory: Callable[..., Any] = self._app.state.graph_factory
         return factory
 
@@ -700,7 +479,7 @@ class FrontDoorState:
 
     @property
     def plan_approvals(self) -> ApprovalStore:
-        """The plan-approval store — the same instance `chemclaw.agent.plan_gate` reads (D-167)."""
+        """The plan-approval store — the same instance `chemclaw.agent.plan_gate` reads."""
         store: ApprovalStore = self._app.state.plan_approvals
         return store
 
@@ -712,7 +491,7 @@ class FrontDoorState:
 
     @property
     def turn_semaphore(self) -> asyncio.Semaphore:
-        """The admission-control permit set capping concurrent turns (AG-15)."""
+        """The admission-control permit set capping concurrent turns."""
         semaphore: asyncio.Semaphore = self._app.state.turn_semaphore
         return semaphore
 
@@ -732,8 +511,8 @@ class FrontDoorState:
     def turn_relay(self) -> "TurnRelay | None":
         """How a turn held by another replica is followed and stopped from here, and vice versa.
 
-        `None` exactly where `turn_claims` is: under the in-memory store no other replica can hold
-        a session's turn.
+        `None` exactly where `turn_claims` is: under the in-memory store no other replica holds a
+        turn.
         """
         relay: TurnRelay | None = self._app.state.turn_relay
         return relay
@@ -799,10 +578,8 @@ class FrontDoorState:
     def readiness_probes(self) -> dict[str, "asyncio.Task[Any]"]:
         """The readiness probes currently in flight, one entry per probe.
 
-        Started and awaited by `chemclaw/api/routes/ops.py`. On `app.state` rather than in a
-        module global for the reason every other structure here is: the probes belong to one app
-        and one event loop, and a global would be shared by two apps in one test process — and by
-        a task bound to a loop that has since closed.
+        Started and awaited by `chemclaw/api/routes/ops.py`. Per app rather than a module global,
+        since probes belong to one app and one event loop.
         """
         probes: dict[str, asyncio.Task[Any]] = self._app.state.readiness_probes
         return probes
@@ -822,10 +599,8 @@ class FrontDoorState:
     def schema_current(self) -> bool:
         """Whether the schema carries the newest migration this image ships (True until asked).
 
-        A second verdict beside `database_reachable` rather than a second reason folded into it,
-        because the two are different outages with different fixes — one is "the database is
-        down", the other "this pod's image is ahead of the schema" — and `/readyz`'s body is the
-        only diagnosis an operator running `curl` gets.
+        Separate from `database_reachable` because "database down" and "image ahead of schema" are
+        different outages, and `/readyz`'s body is the operator's diagnosis.
         """
         current: bool = self._app.state.schema_current
         return current

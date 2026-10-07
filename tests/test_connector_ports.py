@@ -1,26 +1,12 @@
 """Every port this repository's connectors claim is derived from the manifests, not transcribed.
 
-The fleet in `Chemclaw3-mcp` reserves 8850–8899 for itself and documents that block as
-"deliberately clear of Chemclaw3's own connectors at 8810–8815". That sentence was wrong the day
-`bo` was added at **8816**, and nothing on either side of the seam could notice: a port lives in a
-`connector.yaml` here, in a prose table there, and in a Markdown registry in a third repository.
-Two bundles are addressed by the same number the first time somebody guesses, and the collision
-surfaces when both pods are scheduled.
+* 8810–8819 is ours: `connectors_dev.DEV_PORT` and each locally served bundle's standalone
+  loopback address sit inside it.
+* A bundle whose server another repository runs (`chem`, `safety` in `Chemclaw3-mcp`) sits
+  outside it, at the address the host's registry allocates.
 
-So this repository states its own block once, here, and derives everything else from the manifests
-that actually ship:
-
-* **8810–8819 is ours.** `make connectors` mounts every locally-served bundle under one uvicorn on
-  `connectors_dev.DEV_PORT`, and each of those bundles also ships a standalone loopback address for
-  running it alone. Both are addresses of servers *this* repository builds and runs, so both are
-  inside the block.
-* **A bundle whose server somebody else runs must sit outside it** (`chem` and `safety`, which moved
-  to `Chemclaw3-mcp` wholesale). Its address belongs to the host's registry, and a bundle we do not
-  run that squatted one of our numbers would make the two blocks overlap in exactly the way the
-  fleet's sentence promises they do not.
-
-Deliberately about the *shipped* manifests rather than about a list written here: a new bundle is
-covered the day its `connector.yaml` lands, which is the property the transcribed range never had.
+Asserted over the shipped manifests, so a new bundle is covered the day its `connector.yaml`
+lands.
 """
 
 from pathlib import Path
@@ -93,11 +79,9 @@ def test_no_two_bundles_claim_the_same_port() -> None:
 
 
 def test_a_bundle_hosted_elsewhere_does_not_squat_one_of_our_numbers() -> None:
-    """`chem` and `safety` are addressed in another repository's registry, not in this block.
+    """A bundle hosted elsewhere does not squat one of our numbers.
 
-    The other direction of the same disjointness: a bundle with no `server/` here is reached at an
-    address the hosting fleet allocates, and if it also fell inside 8810–8819 then a future local
-    bundle could be given the same number by a reader who trusted this block to be ours alone.
+    Otherwise a future local bundle could be given the same port.
     """
     inside = {
         name: port

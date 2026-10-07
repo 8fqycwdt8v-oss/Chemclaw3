@@ -1,9 +1,7 @@
-"""ELN ingestion (plan Phase 4): the export adapters and the durable sync loop.
+"""Settings for ELN ingestion: the export adapters and the durable sync loop.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from pydantic import Field
@@ -18,98 +16,41 @@ class ElnSettings(BaseSettings):
     fires. ELN-specific format lives only in the adapter, never in config (G6).
     """
 
-    # The one concrete adapter reads a JSON-export ELN from this directory; the sync activity's
-    # timeout bounds one batch of fetch+validate+index work.
+    # Directory the JSON-export adapter reads; the sync timeout bounds one batch of
+    # fetch+validate+index work.
     eln_export_dir: str = "data/eln-exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
-    # How long one `regex` transform may spend on one warehouse cell
-    # (`D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`). A site
-    # writes the pattern in its `datasource.yaml` and this repository runs it over free-text cells
-    # whose length nobody here chose, so the work a match costs is unbounded in both factors and
-    # `re` has no timeout at any of them. This is the bound, and it is a bound on the *work*: a
-    # pattern that exceeds it fails the ingest naming itself, rather than being retried over the
-    # same page.
-    #
-    # 0.25 s because it is four orders of magnitude above what a real pattern costs. Measured on
-    # this box: a bounded pattern over a short cell is 1.2 us, and a full scan of a 1 MB cell with
-    # no match is 0.24 ms — so the ceiling is ~1,000x the worst honest case and the shortest
-    # catastrophic one tested reaches it in 0.25 s rather than never.
+    # Work bound on one `regex` transform over one warehouse cell (`re` has no timeout, and both the
+    # site's pattern and the cell are unbounded). Exceeding it fails the ingest naming the pattern
+    # rather than retrying the page. 0.25 s is ~1000x the worst honest case.
     eln_regex_timeout_seconds: float = Field(default=0.25, gt=0)
-    # How long **every** `regex` transform together may spend on one page, which is the bound the
-    # per-cell one above does not compose into. `warehouse/adapter._read` runs one match per
-    # reaction field, per attribute, and per component and impurity *row*, so a page is
-    # `eln_sync_batch_size x cells_per_entry` matches and the per-cell ceiling multiplies.
-    #
-    # **The reachable case is a pattern that is slow and *completes*, which is why the per-cell
-    # bound cannot see it.** A pattern that exceeds 0.25 s is refused and, because
-    # `PatternBudgetError` is in `durable/publish._BAD_DATA_TYPES`, ends the page after one cell. A
-    # *polynomial* pattern never trips it: measured on this box, `a*a*a*$` over a 6,000-character
-    # cell is **165 ms** — 66% of the per-cell budget, no refusal — and twenty such cells across a
-    # 100-entry batch is **330 s**, which is past `eln_sync_timeout_seconds` (1.1x) and past the
-    # heartbeat, after which the retry runs the identical page. `map_to_ord` is synchronous CPU
-    # work, so no asyncio timer interrupts it; 1,818 of 2,000 cells were reached before the
-    # activity's own deadline.
-    #
-    # **Half of `eln_sync_timeout_seconds`, and that is a split rather than a measurement.** This
-    # bounds *matching* time only — `expr._PageBudget` accumulates what `regex` is given per search
-    # rather than running a wall clock, so the page's writes and fetches are not charged to it. Half
-    # is therefore a generous share rather than an arithmetic one, and what it buys is that a
-    # refusal is *reported* by the activity instead of the activity being killed with nothing to
-    # say.
-    #
-    # It does not need to be tight. An honest cell measures **0.0024 ms** warm, so a whole honest
-    # page of 2,000 cells is **0.0048 s** and this ceiling is ~31,000x it; the pathological pattern
-    # above is ~68,000x an honest one. (An earlier version of this comment said 0.472 ms and ~160x:
-    # that timed the first call, including the `lru_cache` compile miss, which is 0.3 ms on its own.
-    # A review caught it, and the corrected ratio makes the same argument far more strongly.)
-    # Raising `eln_sync_timeout_seconds` without raising this only shrinks the matching share.
+    # Matching budget for all `regex` transforms on one page, which the per-cell bound does not
+    # compose into: a slow pattern that completes under the per-cell bound, multiplied across a
+    # page, would outlast the activity and retry the same page forever. Half of
+    # `eln_sync_timeout_seconds`, so a refusal is reported by the activity rather than the activity
+    # being killed. Counts matching time only (`expr._PageBudget`), not fetches or writes.
     eln_regex_page_budget_seconds: float = Field(default=150.0, gt=0)
-    # The sync fetches from this far *behind* its high-water cursor, so an export file that
-    # lands late with an older payload timestamp (an upstream export-job retry) is still picked
-    # up instead of being silently dropped forever. Re-fetching the window is safe and cheap
-    # because ingestion is idempotent; one day covers routine export retries — anything later
-    # needs a manual backfill (explicit `since`).
+    # How far behind its high-water cursor the sync re-fetches, so a late export with an older
+    # timestamp is still picked up. Safe because ingestion is idempotent; later arrivals need a
+    # manual backfill (explicit `since`).
     eln_sync_overlap_seconds: float = Field(default=86400.0, ge=0)
-    # An entry stamped further than this beyond the wall clock is rejected, not ingested: a
-    # typo'd future year would otherwise become the persisted high-water cursor and silently
-    # skip every later real entry (no code path ever lowers a stored cursor). One day tolerates
-    # clock skew and timezone mishaps while catching implausible timestamps.
+    # Entries stamped further than this into the future are rejected: one would become the persisted
+    # cursor and skip every later real entry (no path lowers a stored cursor).
     eln_sync_future_tolerance_seconds: float = Field(default=86400.0, ge=0)
-    # Bounds one sync activity attempt's *new* work: at most this many entries newer than the
-    # cursor are ingested per attempt, and the workflow loops chunk by chunk, persisting the
-    # advanced cursor after each one — so an arbitrarily large backlog makes bounded forward
-    # progress instead of timing out one giant attempt forever. Entries inside the overlap
-    # window re-ingest idempotently and do not count against the bound. Sized so a full chunk of
-    # per-entry writes fits comfortably inside `eln_sync_timeout_seconds` — it was sized against
-    # per-entry PR-gate pushes, a cost `D-2026-08-25-an-eln-transcription-is-data-not-a-claim`
-    # removed from this hop and nobody has re-measured without.
+    # Bound on new entries ingested per sync attempt; the workflow loops chunk by chunk, persisting
+    # the cursor after each, so a large backlog makes bounded progress. Overlap re-ingests do not
+    # count. Sized to fit inside `eln_sync_timeout_seconds`.
     eln_sync_batch_size: int = Field(default=100, ge=1)
-    # How many chunks one *run* of the drain may take before it hands the rest to a fresh run with
-    # `continue_as_new`. Nothing bounded this, and the ELN sync was the only drain in the package
-    # without it: each chunk emits two activities, measured at 12.2 history events, so a first
-    # backfill reached Temporal's 51,200-event ceiling at ~4,200 chunks — about 420,000 entries at
-    # the batch size above, against a warehouse ELN sized at ~700,000 — and was *terminated*, which
-    # is not a failure and so retries nothing and pushes nothing back. Same default and same
-    # reasoning as `label_sync_max_iterations` and `document_sync_max_iterations`.
-    # **Derived from `schedule_run_timeout_seconds` rather than chosen**, and it moved from 100
-    # to 90 when that arithmetic was first done: `_a_bounded_run_fits_the_ceiling_that_kills_it`
-    # refuses a count whose iterations cannot finish inside the `run_timeout` on the very run
-    # they bound. At 100 its three-dispatch loop was 90,300 s against 86,400 s. What the cut costs
-    # is one extra `continue_as_new`
-    # per 90 iterations and nothing else — the hop carries the drain's position — and what it
-    # buys is that a run large enough to use its budget is no longer killed near the end of one.
+    # Chunks per run before `continue_as_new`, bounding event history. Derived from
+    # `schedule_run_timeout_seconds`: `_a_bounded_run_fits_the_ceiling_that_kills_it` refuses a
+    # count whose iterations cannot finish inside the run timeout.
     eln_sync_max_iterations: int = Field(default=90, ge=1)
-    # Dead-worker detection for the (long-running) sync activity: it heartbeats while it
-    # ingests, so Temporal notices a dead worker within this window instead of waiting out the
-    # whole `eln_sync_timeout_seconds` start-to-close before retrying elsewhere.
+    # Heartbeat timeout for the sync activity, so a dead worker is noticed before the whole
+    # start-to-close lapses.
     eln_sync_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
-    # A second concrete adapter reads native Open Reaction Database messages (human-readable ORD
-    # JSON) from this directory — the "structured recipe" path, alongside the free-text JSON
-    # export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
+    # Directory the ORD adapter reads (native Open Reaction Database JSON messages); same
+    # `ElnAdapter` contract and sync loop as the JSON export.
     ord_export_dir: str = "data/eln-exports/ord"
-    # Temporal Schedule cadence for the ELN sync (`durable/schedules.py`, applied by `make
-    # schedules-apply`). The sync is self-cursoring (loads/stores its high-water mark in
-    # `sync_cursors`), so its Schedule passes no argument. Schedules live in Temporal
-    # (durability there, not host cron); overridable so a deployment tunes cadence without code
-    # change.
+    # Temporal Schedule cadence for the ELN sync (`durable/schedules.py`). The sync is
+    # self-cursoring (`sync_cursors`), so its Schedule passes no argument.
     eln_sync_schedule_minutes: float = Field(default=60.0, gt=0)

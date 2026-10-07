@@ -1,32 +1,8 @@
 """The local half of logD: a Crippen sum and one Henderson-Hasselbalch term over a remote pKa.
 
-`D-2026-08-16-the-physics-leaves-the-cache-stays` decomposed `predict_logd` rather than shipping
-it, and this module is the half that stayed. The reasoning is the ADR's and it is arithmetic: logD
-has **no cache key of its own** — it never had one, because its expensive half is a *cached* pKa and
-the rest is a sub-millisecond RDKit descriptor. Shipping the composite whole would have turned every
-repeat into a full recompute of the most expensive tool in the set (measured: pyridine 20.603 s cold
-against 0.005 s warm). Shipping the pKa as a primitive and composing here keeps the warm path warm.
-
-What is left is genuinely local: Crippen LogP is pure RDKit, RDKit stays in this repository, and the
-Henderson-Hasselbalch correction is one exponent. The **domain check is local too**, and that is not
-an accident of where the code sat — it is a statement about *this* arithmetic, not about the pKa
-predictor: `predict_pka` reports one pKa and one term consumes exactly one, so a molecule ionising
-at two sites is outside what this composition can express even though both halves it composes are
-inside theirs.
-
-**Domain, inherited from the pKa predictor and then narrowed once.** Neutral O-H/S-H **acids**
-(carboxylic acids, phenols, alcohols, thiols) and the conjugate acid of **aromatic or aryl
-nitrogen** (pyridines, azoles, anilines). Aliphatic amines and molecules with neither site raise on
-the server and the error propagates unchanged (gate G4). `_require_a_single_equilibrium` adds the
-narrowing: polyprotic acids, and amphoterics, which had been slipping past the aliphatic-amine
-refusal because a carboxyl sends the molecule down the acid branch before the amine is ever looked
-at.
-
-That domain widened underneath this composition once, and the widening had teeth: the predictor
-began returning bases where it previously raised, and the correction runs in the *opposite
-direction* for one. `PkaResult.site` is what makes the two distinguishable, and `logd_from_pka`
-branches on it. Depending on a collaborator's domain is fine; depending on it without reading which
-half of the domain you were handed is what produced a two-log-unit error that raised nothing.
+Composed here because logD has no cache key of its own: the pKa is a cached remote primitive and the
+rest is sub-millisecond RDKit. One term consumes one pKa, so `_require_a_single_equilibrium` refuses
+molecules it cannot describe, and `PkaResult.site` decides the sign of the correction.
 """
 
 import math
@@ -39,34 +15,15 @@ from chemclaw.core.config import settings
 from chemclaw.science.calc.models import LogdResult, PkaResult
 from chemclaw.science.calc.uncertainty import CalculationDomainError
 
-# The two site patterns, as SMARTS over the **hydrogen-explicit** molecule (`Chem.AddHs`), which is
-# what makes `X`/`D` in them mean the same thing the hand-written typing meant by `GetDegree()`
-# plus `GetTotalNumHs()`. One declarative table in place of ~80 lines of `GetBonds()` walking; the
-# partition is unchanged, and `tests/test_logd.py` proves that over every molecule it can reach.
-#
-# **An acidic site is one O-H or S-H proton**, counted per hydrogen rather than per heavy atom, so
-# a diol contributes two and water contributes two — the arithmetic `_require_a_single_equilibrium`
-# reads. The bond is spelled `-` because an explicit hydrogen's bond always is.
+# Site patterns as SMARTS over the hydrogen-explicit molecule (`Chem.AddHs`), so `X`/`D` count
+# hydrogens. An acidic site is one O-H or S-H proton, counted per hydrogen (a diol has two), which
+# is what `_require_a_single_equilibrium` reads. `tests/test_logd.py` pins the partition.
 _ACIDIC_SITE = Chem.MolFromSmarts("[#1;D1]-[#8,#16]")
 
-# **A basic site is a neutral nitrogen with a free valence whose lone pair is actually available.**
-# The first three primitives are the availability of a *valence* — nitrogen, uncharged, not already
-# four-connected — and the three recursive exclusions are the availability of the *pair*. Each
-# exclusion is a delocalized or unavailable lone pair, never a convenience:
-#
-# - `$([#7]#*)` — **nitrile** (any sp nitrogen). pKaH ~ -10; no aqueous pH protonates it.
-# - `$([n;!X1;!X2])` — **pyrrole-type aromatic nitrogen**: aromatic with three or more connections,
-#   so its lone pair is the ring's aromatic sextet rather than an in-plane orbital. The
-#   **pyridine-type** nitrogen beside it has two and *is* basic — imidazole's two nitrogens are one
-#   of each, which is why counting both put imidazole (pKaH 6.95) outside the single-equilibrium
-#   domain when it has exactly one basic centre.
-# - `$([#7]-[#6,#16]=[#8,#16])` — **amide, carbamate, urea, sulfonamide**: a nitrogen
-#   *single*-bonded to a carbon or sulfur that carries a double bond to O or S. The pair is
-#   conjugated into that C=O/S=O, and the consequence is not a shifted pKa but a different
-#   molecule: protonated acetamide has pKaH ~ -0.5 **and protonates on the oxygen**. The single
-#   bond is what keeps aniline out of it — aniline's bond to the ring is aromatic, and aniline is
-#   a weak base (pKaH 4.6) the calibration covers — and `=` likewise matches a double bond only,
-#   never an aromatic one.
+# A basic site is a neutral, not four-connected nitrogen with an available lone pair. Excluded:
+# nitriles (`$([#7]#*)`), pyrrole-type aromatic N (`$([n;!X1;!X2])`, pair in the sextet), and
+# amide/carbamate/urea/sulfonamide N (`$([#7]-[#6,#16]=[#8,#16])`, pair conjugated; the single
+# bond keeps aniline in).
 _BASIC_SITE = Chem.MolFromSmarts(
     "[#7;+0;X1,X2,X3;!$([#7]#*);!$([n;!X1;!X2]);!$([#7]-[#6,#16]=[#8,#16])]"
 )
@@ -75,18 +32,8 @@ _BASIC_SITE = Chem.MolFromSmarts(
 class IonisableSites(NamedTuple):
     """How many acid and base sites this molecule offers a single-equilibrium model.
 
-    `predict_pka` reports **one** pKa — the most acidic proton, or the most stable protomer —
-    because that is the number a chemist means by "the pKa". The arithmetic below assumes a single
-    acid/base equilibrium and needs to know when that assumption is false, and it cannot read that
-    off a `PkaResult`: a diprotic acid and a monoprotic one return the same shape.
-
-    **The enumeration is duplicated across the repository boundary, deliberately and with a
-    limit.** It mirrors the site enumeration the pKa predictor itself runs before any xTB, so this
-    counts what that predictor *would* evaluate. That was a shared function while both lived in one
-    process; it cannot be one now, and the honest reading is that this is exactly as good as the
-    predictor's enumeration and no better. It is also the cheap half — pure graph inspection, no
-    SCF — so re-deriving it here costs nothing and asking the server for it would cost a round trip
-    on a refusal path.
+    Mirrors the pKa predictor's own site enumeration, since a `PkaResult` does not reveal other
+    sites.
     """
 
     acidic: int
@@ -101,18 +48,15 @@ class IonisableSites(NamedTuple):
 def ionisable_sites(smiles: str) -> IonisableSites:
     """Count the acidic O-H/S-H protons and the protonatable nitrogens of a neutral molecule.
 
-    Structural, not energetic: it reports what the pKa predictor would *enumerate*, before any xTB
-    runs, so it is free to call. It does not rank the sites it keeps, so "two sites" here means two
-    the predictor would evaluate, not two that ionise in any particular pH window. Deciding that is
-    the caller's, and needs the pKa this function deliberately does not compute.
+    Structural, not energetic: what the pKa predictor would enumerate, not what ionises at a given
+    pH.
     """
     parsed = Chem.MolFromSmiles(smiles)
     if parsed is None:
         raise ValueError(f"invalid SMILES: {smiles!r}")
     mol = Chem.AddHs(parsed)
-    # Every match is keyed by one distinct atom — a hydrogen for an acid, a nitrogen for a base —
-    # so the atom count is the tightest honest ceiling on how many there can be, and passing it
-    # replaces RDKit's silent default of 1,000 with a bound that cannot truncate a real molecule.
+    # Each match is keyed by one distinct atom, so the atom count is a ceiling that cannot truncate
+    # (RDKit's default is 1,000).
     cap = mol.GetNumAtoms()
     return IonisableSites(
         acidic=len(mol.GetSubstructMatches(_ACIDIC_SITE, maxMatches=cap)),
@@ -123,31 +67,9 @@ def ionisable_sites(smiles: str) -> IonisableSites:
 def _require_a_single_equilibrium(result: PkaResult, ph: float, ionised_ratio: float) -> None:
     """Raise unless one Henderson-Hasselbalch term can describe this whole molecule.
 
-    `predict_pka` reports one pKa and this module applies one ionisation term, so a molecule with a
-    second ionisable site is only served correctly when that site is spectator. Two situations where
-    it is not, and neither is recoverable from the surface the pKa tool offers — a second pKa is
-    simply not computed — so both refuse rather than return a number:
-
-    - **Amphoteric** (an acid site *and* a base site). Refused at every pH. The predictor takes the
-      acid branch whenever any O-H/S-H is present, so the base site is never even evaluated and
-      nothing bounds its ionisation. Glycine at pH 7.4 is the measured case: it returned -2.81 with
-      no error, silently evading the very refusal raised for piperidine, because a carboxyl kept it
-      out of the aliphatic-amine branch it belonged in.
-    - **Polyprotic** (two or more sites of the same kind) *while the reported site is substantially
-      ionised*. The reported site is the most ionisable one, so when it is essentially neutral every
-      other site is even more so and the single term is exact to within
-      `settings.logd_negligible_ionised_fraction`'s bound — which is what keeps a diol or a sugar
-      (O-H sites with pKa ~15) working. Above that threshold the unseen equilibrium is unbounded:
-      succinic acid at pH 7.4 returned -1.48 +/- 1.6 against a true value near -5, one carboxyl
-      accounted for and one ignored.
-
-    **Refusal rather than an out-of-domain `Estimate`**, though both conventions exist in the tree
-    (`science/calc/models.py`'s `SolubilityResult` flags). Two reasons. This composition has only
-    ever had the first: its domain limits are `ValueError`s inherited from the pKa predictor, and
-    the aliphatic-amine case this closes is *already* a refusal, so flagging would make one hazard
-    visible in a field and its twin visible in an exception. And the two are not the same kind of
-    claim — ESOL on a salt returns a number of unknown validity, whereas this returns one known to
-    be wrong by 2-5 log units, which is a number no caller should be handed at all.
+    Refuses amphoterics at every pH (the base site is never evaluated), and polyprotics while the
+    reported site is ionised above `logd_negligible_ionised_fraction`. A refusal, not a flag: the
+    number would be known wrong by log units.
     """
     sites = ionisable_sites(result.smiles)
     if sites.acidic and sites.basic:
@@ -175,19 +97,8 @@ def _require_a_single_equilibrium(result: PkaResult, ph: float, ionised_ratio: f
 def logd_from_pka(pka_result: PkaResult, ph: float | None = None) -> LogdResult:
     """Combine a computed pKa with a local Crippen LogP into logD at `ph`.
 
-    Raises `CalculationDomainError` where a *single* Henderson-Hasselbalch term cannot describe the
-    molecule at this pH (see `_require_a_single_equilibrium`). Never a guessed logD (gate G4).
-
-    **The reported uncertainty changed in both directions**
-    (`D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity`): it is
-    now Crippen's reported RMSE combined in quadrature with the pKa residual scaled by the ionised
-    fraction, where it used to be the pKa residual alone. A barely-ionised base gets a *smaller*
-    bar (pyridine at pH 7.4: 0.680 against the 1.4 it used to publish, of which the pKa really
-    contributes 0.0094), and a fully ionised acid gets a *larger* one (benzoic acid at pH 7.4:
-    1.635 against 1.6, since both terms are then real).
-
-    Synchronous and sub-millisecond: the SCF is already paid for by the time this is called, and
-    both RDKit calls here are descriptor work on a molecule that has already been proven parseable.
+    Raises `CalculationDomainError` outside the single-equilibrium domain. The uncertainty combines
+    Crippen's RMSE and the pKa residual scaled by the ionised fraction, in quadrature.
     """
     ph = settings.logd_default_ph if ph is None else ph
     # `pka_result.smiles` is already the canonical form the pKa was computed on, so this reparse
@@ -196,24 +107,16 @@ def logd_from_pka(pka_result: PkaResult, ph: float | None = None) -> LogdResult:
     if mol is None:  # pragma: no cover - guaranteed by the predictor's own validation
         raise ValueError(f"the pKa result carries an unparseable SMILES: {pka_result.smiles!r}")
     clogp = Crippen.MolLogP(mol)
-    # Henderson-Hasselbalch, and the sign of this exponent is the entire content of it.
+    # Henderson-Hasselbalch; the sign of the exponent depends on the site:
     #   acid  HA  <-> A- + H+ : the ionized fraction *rises* with pH  -> 10**(pH - pKa)
     #   base  BH+ <-> B  + H+ : the ionized fraction *falls* with pH  -> 10**(pKa - pH)
-    # Written as a branch on `site` rather than one formula because getting it wrong is silent:
-    # before this, a base took the acid form and pyridine at pH 7.4 came out two log units too
-    # lipophobic while looking entirely ordinary.
     exponent = ph - pka_result.pka if pka_result.site == "acid" else pka_result.pka - ph
     # [ionized]/[neutral] — the same quantity the correction and the domain check both need,
     # computed once so the number that is refused on is the number that would have been used.
     ionised_ratio = 10.0**exponent
     _require_a_single_equilibrium(pka_result, ph, ionised_ratio)
-    # **The error bar is a propagation, not a copy.** `logD = clogP - log10(1 + 10**(±(pH - pKa)))`,
-    # so `dlogD/dclogP` is 1 and `dlogD/dpKa` is the *ionised fraction* — between 0 and 1, and near
-    # zero for most of what this composition may serve, since `_require_a_single_equilibrium`
-    # refuses a polyprotic molecule above `logd_negligible_ionised_fraction`. Reporting the pKa's
-    # residual unscaled published +/-1.4 for pyridine at pH 7.4, of which the pKa contributes
-    # 0.0094, while omitting Crippen's ~0.68 — the term that actually dominates there. The two are
-    # independent, so they combine in quadrature.
+    # Propagated error: `logD = clogP - log10(1 + 10**(±(pH - pKa)))`, so `dlogD/dclogP` is 1 and
+    # `dlogD/dpKa` is the ionised fraction. The two terms are independent and combine in quadrature.
     ionised_fraction = ionised_ratio / (1.0 + ionised_ratio)
     return LogdResult(
         smiles=pka_result.smiles,

@@ -1,18 +1,12 @@
 """A mounted SMB share, end to end: crawl, index, retrieve, and the two rules that protect it.
 
-Built against a real directory tree of real documents (`tests/document_fixtures.py` writes each one
-with its own format's writer), an in-memory index, and no database or broker — so what these tests
-exercise is the actual crawl/parse/chunk/embed loop rather than a set of mocks agreeing with each
-other.
+Built on a real directory tree of real documents (`tests/document_fixtures.py`), an in-memory
+index, and no database or broker, so the actual crawl/parse/chunk/embed loop runs.
 
-The two properties worth reading the file for:
-
-- **A complete crawl may sweep; an incomplete one may not.** A CIFS mount that dropped presents to
-  `scandir` as an empty directory, and pruning on that evidence deletes a corpus that took days to
-  build. `test_a_failed_root_prunes_nothing` is the guard.
-- **Cost is measured, not asserted.** The dedup and no-re-embed tests count real `embed_texts`
-  calls, because "an unchanged share re-embeds nothing" is a claim about behaviour and the only
-  honest way to hold it is a counter (D-2026-08-01: measure it, don't argue it).
+- **A complete crawl may sweep; an incomplete one may not.** A dropped CIFS mount looks like an
+  empty directory, and pruning on that deletes the corpus
+  (`test_a_failed_root_prunes_nothing`).
+- **Cost is measured.** The dedup and no-re-embed tests count real `embed_texts` calls.
 """
 
 import asyncio
@@ -135,9 +129,8 @@ def share(tmp_path: Path) -> dict[str, Any]:
 def as_user() -> Iterator[Callable[[str, set[str]], None]]:
     """Bind an ambient identity for one test and unbind it afterwards.
 
-    A `ContextVar` set inside a test leaks into every later one in the same process, and the leak
-    is invisible: a retrieval test would pass because a *previous* test happened to leave an
-    entitled actor bound. Resetting is what keeps each assertion about its own setup.
+    A `ContextVar` set in a test leaks into later ones, so a retrieval test could pass on an actor a
+    previous test left bound.
     """
     tokens: list[tuple[object, object]] = []
 
@@ -241,16 +234,11 @@ def test_a_symlink_out_of_the_mount_is_not_followed(tmp_path: Path) -> None:
 
 
 def test_a_symlink_cycle_inside_the_mount_is_walked_once(tmp_path: Path) -> None:
-    """`_within_mount` checks escape, and a cycle is the case it cannot see.
+    """A symlink cycle inside the mount is walked once.
 
-    With `follow_symlinks: true`, `descend` admitted any link whose resolved target is inside the
-    mount — which is exactly what `Projects/sub/current -> ..` is, and what a convenience link like
-    `Data/Archive/all -> /mnt/share/Data` is on any decade-old drive. The walk then recursed through
-    it, emitting the same file under an unbounded family of mount-relative paths until `scandir`
-    failed on path length, at which point the root was recorded as *failed* — so `prune_share`
-    refused to sweep, and from the first cycle onward the share's index was never pruned again:
-    deleted documents stayed searchable and citable forever. Before that, the cycle ate the bounded
-    chunk's `limit`, so a large share could drain without ever reaching its real files.
+    `_within_mount` checks escape, not cycles (`Projects/sub/current -> ..`). Recursing through one
+    emits the same file under unboundedly many paths until `scandir` fails, which marks the root
+    failed and stops every future prune, and eats the chunk's `limit` before real files are reached.
     """
     mount = tmp_path / "mount"
     (mount / "Projects" / "sub").mkdir(parents=True)
@@ -272,11 +260,10 @@ def test_a_symlink_cycle_inside_the_mount_is_walked_once(tmp_path: Path) -> None
 
 
 def test_two_roots_linked_to_one_directory_index_it_once(tmp_path: Path) -> None:
-    """The other shape of the same fault: `Archive/all -> Data`, two roots over one tree.
+    """Two roots linked to one directory index it once.
 
-    Not a cycle — the walk terminates — but the same file is emitted under two mount-relative paths,
-    so the index carries it twice and a citation names whichever copy the ranking picked. The walk's
-    visited set covers both because it is keyed on the directory's identity rather than on its path.
+    Otherwise the same file is indexed under two paths. The walk's visited set is keyed on the
+    directory's identity, not its path, which covers both shapes.
     """
     mount = tmp_path / "mount"
     (mount / "Data").mkdir(parents=True)
@@ -356,13 +343,9 @@ def test_unrelated_empty_files_are_each_their_own_document(
 ) -> None:
     """Identity is the content, and "no content" is not content unrelated files can share.
 
-    An empty workbook, a placeholder `.txt`, a `.docx` with no paragraphs: `SyncReport.empty`
-    counts them, so they are a real population on a departmental share rather than a curiosity.
-    Every one of them hashed to the same `doc_id`, so `known_documents` folded them into a single
-    logical document, `deduplicated` counted all but the first as copies of it, and `CITATION_SQL`'s
-    `min(f.path)` would name one arbitrary path for all of them. Harmless for retrieval today —
-    such a document carries no chunks and can never be a hit — and wrong by the size of that
-    population for anything reasoning per `doc_id`.
+    Empty files are a real population on a share (`SyncReport.empty`); hashing them all to one
+    `doc_id` would fold them into one logical document, count the rest as copies and cite one
+    arbitrary path for all.
     """
     # Three formats, three different files, one shared extraction: the empty string.
     (tmp_path / "SOPs" / "placeholder.txt").write_bytes(b"")
@@ -518,12 +501,10 @@ def test_a_failed_root_prunes_nothing(share: dict[str, Any], tmp_path: Path) -> 
 def test_a_dimension_the_column_cannot_hold_is_refused_at_construction(
     share: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The width check the config validator cannot make, made where both numbers are known.
+    """A dimension the column cannot hold is refused at construction.
 
-    `note_index`'s equivalent lives in the config validator because `vector`/`lexical` are shipped
-    names it can enumerate. A share's name is chosen by the deployment, so no name set finds one —
-    the guard sits on the constructors instead. Without it a deployment starts cleanly and pgvector
-    rejects every chunk write hours later, inside a worker.
+    A share's name is deployment-chosen, so the config validator cannot enumerate it; the guard sits
+    on the constructors, or pgvector would reject every chunk write hours later in a worker.
     """
     monkeypatch.setattr(settings, "embedding_dim", 3072)
     with pytest.raises(DocumentShareError, match="3072.*document_chunks.*1536"):
@@ -542,14 +523,11 @@ def _use_model(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
 def test_changing_the_model_re_embeds_the_corpus_without_touching_the_share(
     share: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The defect this closes is silent: a fingerprint does not move when the model does.
+    """Changing the model re-embeds the corpus without touching the share.
 
-    So the crawl re-embedded nothing, the table came to hold a mix of two models' vectors, and
-    every cosine between them was meaningless with no error anywhere.
-
-    **The share is deleted before the re-embed runs**, which is the point of the test: the chunk's
-    text was stored beside its vector, so refreshing it is a database-to-database operation. If
-    this ever starts needing the mount, this assertion is what says so.
+    A file fingerprint does not move when the model does, so without an embedding key the table
+    would silently mix two models' vectors. The share is deleted before the re-embed runs: the chunk
+    text is stored beside its vector, so refreshing is database-to-database.
     """
     index = InMemoryDocumentIndex()
     asyncio.run(sync_share(SOURCE, load_binding(share), index))
@@ -610,19 +588,11 @@ def test_a_bounded_re_embedding_drain_converges(
 def test_an_upgrade_that_moves_both_keys_embeds_the_corpus_once(
     tmp_path: Path, counted_embeddings: list[int], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The re-embed drain runs ahead of the crawl, and paid for text the crawl then re-cut.
+    """An upgrade that moves both keys embeds the corpus once.
 
-    Migrations 038 and 040 land together, so the first run after an upgrade has *both* keys moved:
-    every chunk is stale by embedding key, and every file is stale by chunking. The re-embed pass
-    therefore refreshed the whole old cutting from stored text, and the crawl then re-parsed,
-    re-cut and re-embedded the same text — twice the documented cost. Measured here: 17 embeddings
-    for a document worth 1.
-
-    It cannot be fixed by stamping the chunking during a re-embed: the chunking is *part of the
-    row's identity* (041), and a re-embed does not re-cut anything, so writing the current chunking
-    onto rows cut under the old one would be a lie the search then serves. What is true is that a
-    cutting no enabled share uses any more is about to be replaced, so re-embedding it is work
-    thrown away — and that is what the drain now skips.
+    When the embedding key and the chunking both move, re-embedding the old cutting is work the
+    crawl immediately throws away. The chunking is part of a row's identity, so it cannot be
+    restamped during a re-embed; instead the drain skips cuttings no enabled share uses.
     """
     index = InMemoryDocumentIndex()
     share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
@@ -703,11 +673,10 @@ def _long_share(tmp_path: Path, **chunking: int) -> dict[str, Any]:
 def test_changing_the_chunk_size_re_chunks_the_corpus(
     tmp_path: Path, counted_embeddings: list[int]
 ) -> None:
-    """The defect: neither gate could see a chunking change, so `chunk_chars` did nothing.
+    """Changing the chunk size re-chunks the corpus.
 
-    The file's `mtime_ns:size` does not move when a setting does, and the content hash does not
-    either — so the crawl skipped every file, and the sizes measured before this fix were unchanged
-    at `[1248, 1951, 1962, 1962]` after halving `chunk_chars`.
+    Neither the file's `mtime_ns:size` nor the content hash moves when `chunk_chars` does, so the
+    chunking key must gate the crawl too.
     """
     index = InMemoryDocumentIndex()
     share = _long_share(tmp_path, chunk_chars=2000, chunk_overlap_chars=200)
@@ -732,16 +701,12 @@ def test_changing_the_chunk_size_re_chunks_the_corpus(
 
 
 def test_a_coarser_re_chunk_leaves_no_trace_of_the_finer_one(tmp_path: Path) -> None:
-    """The corruption half: the superseded cutting must be deleted, not merely superseded.
+    """A coarser re-chunk leaves no trace of the finer one.
 
-    A stranded chunk belongs to no current cutting of the document, is cited as though it did, and
-    `reembed_stale` then stamps it with the current key — after which nothing can tell it apart.
-    Measured before any of this: 400 → 4000 chars left 19 leftovers beside the 2 real chunks.
-
-    The mechanism changed with the chunk row's identity (041): what is deleted is every cutting of
-    the documents just written that no file row claims any more, not "every ordinal above the new
-    count". The old form could not tell this share's superseded cutting from another share's live
-    one, because both are the same `doc_id`.
+    A stranded chunk belongs to no current cutting yet would be cited and then restamped by
+    `reembed_stale`, after which nothing distinguishes it. What is deleted is every cutting of the
+    written documents that no file row claims, so another share's live cutting of the same `doc_id`
+    survives.
     """
     index = InMemoryDocumentIndex()
     fine = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
@@ -763,13 +728,11 @@ def test_a_coarser_re_chunk_leaves_no_trace_of_the_finer_one(tmp_path: Path) -> 
 def test_a_share_indexed_under_the_previous_text_rule_is_re_read_and_re_cut(
     tmp_path: Path,
 ) -> None:
-    """The rows a deployment already holds are the other half of the sign-deletion fix.
+    """A share indexed under the previous text rule is re-read and re-cut.
 
-    Splitting `upsert`'s parameter repairs what is written next; every chunk already in
-    `document_chunks` still holds the mutated text, and the crawl skips a file whose fingerprint
-    has not moved. `_CHUNK_TEXT_VERSION` in `chunking_key` is what makes the next crawl re-read
-    and re-cut them, the same lever `_NOTE_TEXT_VERSION` is for notes. Driven by aging the stored
-    rows back to the boundaries-only spelling a pre-fix deployment wrote.
+    Fixing what `upsert` writes does not repair stored chunks, and the crawl skips unchanged files.
+    `_CHUNK_TEXT_VERSION` in `chunking_key` forces the re-read, as `_NOTE_TEXT_VERSION` does for
+    notes. Driven by aging stored rows back to the old spelling.
     """
     index = InMemoryDocumentIndex()
     share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
@@ -796,9 +759,8 @@ def test_a_share_indexed_under_the_previous_text_rule_is_re_read_and_re_cut(
 def _served_chunk_sizes(index: InMemoryDocumentIndex, source: str) -> list[int]:
     """The length of every chunk this source's search can actually cite, longest first.
 
-    Measured through `search_dense` rather than off the index's internals, because what a share
-    serves is the property at stake — and because the internals' key shape is exactly what the
-    defect below is about, so a test reading them could not describe both sides of it.
+    Measured through `search_dense`, because what a share serves is the property at stake and the
+    index's internal key shape is what the defect below is about.
     """
     query = embed_texts(["charge the vessel and hold"])[0]
     hits = asyncio.run(index.search_dense(source, query, 500, DocumentFilter()))
@@ -808,14 +770,11 @@ def _served_chunk_sizes(index: InMemoryDocumentIndex, source: str) -> list[int]:
 def test_a_second_share_that_chunks_differently_leaves_the_first_share_intact(
     tmp_path: Path,
 ) -> None:
-    """Two shares, one document, two chunk sizes — and the second share's crawl destroyed the first.
+    """A second share that chunks differently leaves the first share intact.
 
-    `doc_id` is the *content* hash and is shared across sources by design, while `chunking_key`
-    comes from the binding and is per-share. Keying chunk rows on `(doc_id, ordinal)` alone
-    therefore made two shares fight over the same rows: the coarse share's write took ordinal 0 and
-    its tail-drop deleted ordinals 1..15, and the fine share never repaired, because its own file
-    fingerprint had not moved and its gate read `unchanged` forever. Measured before the fix: the
-    fine share served one chunk of 6259 characters in place of its own sixteen of at most 400.
+    `doc_id` is the content hash, shared across sources, while `chunking_key` is per share; keyed on
+    `(doc_id, ordinal)` alone, one share's write and tail-delete would destroy the other's chunks,
+    and the victim would never repair because its own fingerprint had not moved.
     """
     index = InMemoryDocumentIndex()
     fine = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
@@ -925,13 +884,10 @@ def test_an_ungated_share_needs_no_identity(share: dict[str, Any]) -> None:
 def test_a_backend_failure_raises_so_the_sweep_can_report_it(
     share: dict[str, Any], as_user: Callable[[str, set[str]], None]
 ) -> None:
-    """An unreachable index is a fact about the deployment, not an answer about the share.
+    """A backend failure raises, so the sweep can report it.
 
-    This used to assert `== []`, on the argument that `gather_evidence` fanned its retrievers out
-    with a bare `asyncio.gather` and one raising leg would lose the whole question. That stopped
-    being true when the sweep became per-source graph branches (`retrieval.fanout`), and what was
-    left was a retriever telling a chemist that a share holds no precedent while its database was
-    down. `_sweep` is the catcher now: it degrades this branch and names the source in `failed`.
+    An unreachable index is a fact about the deployment, not "this share holds nothing". `_sweep`
+    catches it, degrades this branch and names the source in `failed`.
     """
 
     class Broken(InMemoryDocumentIndex):
@@ -952,13 +908,10 @@ def test_a_backend_failure_raises_so_the_sweep_can_report_it(
 def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     share: dict[str, Any], as_user: Callable[[str, set[str]], None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The query is embedded *inside* this leg, so the provider's own errors are this leg's too.
+    """An embedding provider failure costs this leg and no other.
 
-    A rate-limited endpoint's own exception type is none of the ones this retriever used to
-    enumerate, so it once escaped into `gather_evidence`'s bare `gather` and failed the whole turn.
-    The enumeration and its `except Exception` backstop are both gone: the sweep's branch catches
-    everything, and what this test now pins is that the leg is *reported* rather than silently
-    emptied — the failure this source suffered may not read as the corpus having nothing to say.
+    The query is embedded inside this leg, so any provider exception is this leg's. The sweep's
+    branch catches everything; what is pinned is that the leg is *reported*, not silently emptied.
     """
 
     class _ProviderError(Exception):
@@ -1024,9 +977,9 @@ def test_a_date_window_excludes_a_file_modified_outside_it(
 
 # --- the sweep only deletes what a complete pass really did not see ------------------------------
 #
-# Every prune test above this line used to hand `prune_share` a `crawl_was_complete` it decided
-# itself, so none of them ever asked the crawl whether sweeping was safe. These do. Each one is a
-# file **present and readable on the share** that got deleted from the index anyway.
+# These ask the crawl itself whether sweeping is safe, rather than handing `prune_share` a
+# `crawl_was_complete` decided by the test. Each case is a file present and readable on the share
+# that must not be deleted from the index.
 
 
 def _drain(binding: Any, index: InMemoryDocumentIndex, limit: int = 1000) -> Any:
@@ -1043,11 +996,11 @@ def _drain(binding: Any, index: InMemoryDocumentIndex, limit: int = 1000) -> Any
 
 
 def test_a_directory_that_prefixes_a_sibling_file_does_not_hide_it(tmp_path: Path) -> None:
-    """The walk's order must be the order `after` is compared in, or a resumed drain skips files.
+    """A directory that prefixes a sibling file does not hide it.
 
-    Siblings are sorted by bare name, but `after` is compared against the joined path. `Report`
-    (a directory) sorts before `Report.pdf`, yet `Report.pdf` sorts before `Report/a.pdf` — so a
-    chunk that stops inside the directory skips the file forever on every later pass.
+    The walk's order must match how `after` compares: `Report` (a directory) sorts before
+    `Report.pdf` by name, but `Report.pdf` sorts before `Report/a.pdf` as a path, so a chunk
+    stopping inside the directory would skip the file forever.
     """
     mount = tmp_path / "mount"
     (mount / "Docs" / "Report").mkdir(parents=True)
@@ -1098,11 +1051,10 @@ def test_sibling_roots_that_share_a_prefix_are_both_walked(tmp_path: Path) -> No
 
 
 def test_a_share_that_went_empty_is_not_swept(share: dict[str, Any], tmp_path: Path) -> None:
-    """A dropped mount with root `.` presents as an empty directory and no failed root.
+    """A share that went empty is not swept.
 
-    `crawl_share` is loud only when the mount path is *gone*. A CIFS volume that detaches leaves the
-    mount point behind as an empty directory — the exact case the whole mark-and-sweep exists for —
-    and with `roots: [{path: "."}]` there is no root left to report as missing.
+    A detached CIFS volume leaves an empty mount point, and with `roots: [{path: "."}]` there is no
+    missing root to report; `crawl_share` is loud only when the mount path itself is gone.
     """
     index = InMemoryDocumentIndex()
     binding = load_binding({**share, "roots": [{"path": "."}]})
@@ -1190,13 +1142,11 @@ def test_a_drain_that_never_finished_sweeps_nothing(share: dict[str, Any]) -> No
 
 
 def test_compaction_carries_the_sweep_guard_across_continue_as_new() -> None:
-    """The evidence `prune_share` reads must survive the workflow's own state compaction.
+    """Compaction carries the sweep guard across `continue_as_new`.
 
-    A drain of a large share is thousands of chunks, so `DocumentShareSyncWorkflow` folds them with
-    `_merge_by_source` before each `continue_as_new` — the carried state is the *input* of the next
-    run. If that fold dropped a failed root or the unfinished tail, the guard would pass on the
-    following run and sweep a share it never finished walking. This is the property that replaced
-    the `degraded` flag, so it is the one that has to hold.
+    `DocumentShareSyncWorkflow` folds chunk reports with `_merge_by_source` before each
+    `continue_as_new`; dropping a failed root or the unfinished tail there would let the next run
+    sweep a share it never finished walking.
     """
     from chemclaw.durable.document_sync import _merge_by_source
 
@@ -1222,19 +1172,13 @@ def test_compaction_carries_the_sweep_guard_across_continue_as_new() -> None:
 
 
 def test_the_continue_as_new_bound_is_carried_in_state_not_read_live() -> None:
-    """The command count must come from history, never from the replaying worker's config.
+    """The `continue_as_new` bound is carried in state, not read live.
 
-    `document_sync_max_iterations` decides when `continue_as_new` is emitted, so it decides how
-    many activity commands the run schedules — exactly what `resolve_notes_per_run` was added to
-    the memory jobs for (`D-2026-08-08-an-outage-is-not-a-missing-job`). Read live, a redeploy that
-    lowers it mid-drain replays `continue_as_new` earlier than history records it: a
-    non-determinism error, which is a workflow *task* failure, which retries forever and wedges the
-    run (the trap D-093 documents).
-
-    Temporal is unavailable in this environment, so this asserts the *structure* that makes the
-    replay safe rather than executing a replay: the value is captured once in the activity, carried
-    on the plan, and carried on the state across `continue_as_new`. The workflow body must contain
-    no live read of it — an AST check, because that is the property that actually broke.
+    `document_sync_max_iterations` decides how many commands a run schedules, so read live a
+    redeploy that changes it would replay non-deterministically and wedge the run
+    (`D-2026-08-08-an-outage-is-not-a-missing-job`). No Temporal here, so this asserts the
+    structure: captured once in the activity, carried on the plan and the state, and never read live
+    in the workflow body (an AST check).
     """
     import ast
     import inspect
@@ -1282,12 +1226,10 @@ def test_a_wedged_drain_leaves_has_more_set_for_the_guard() -> None:
 def test_a_statement_timeout_degrades_this_leg_and_leaves_the_others_answering(
     share: dict[str, Any],
 ) -> None:
-    """A statement timeout costs this source and not the turn — as a *reported* failure.
+    """A statement timeout degrades this leg and leaves the others answering.
 
-    `psycopg.Error` descends from `Exception` and not from `OSError`, which is why the retriever's
-    enumerated handlers never caught it; wrapping it in `DocumentIndexError` at the raiser is what
-    gave it a type this layer can name. Reaching the sweep is what makes it visible: the graph leg
-    beside it still answers, and `failed` says the share did not.
+    `psycopg.Error` is not an `OSError`; wrapping it in `DocumentIndexError` at the raiser gives it
+    a nameable type, and the sweep reports the share in `failed` while the graph leg still answers.
     """
     import psycopg
 
@@ -1321,18 +1263,11 @@ def test_a_statement_timeout_degrades_this_leg_and_leaves_the_others_answering(
 def test_a_backend_failure_is_reported_without_the_driver_s_connection_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`DocumentIndexError`'s message keeps `SubsystemUnavailableError`'s contract, at the raiser.
+    """A backend failure is reported without the driver's connection details.
 
-    `api/middleware._subsystem_unavailable` relays a `SubsystemUnavailableError`'s message to the
-    HTTP client verbatim, and its docstring says why that is safe: the type "carries no hostname,
-    port or driver text — those live on `__cause__`". This raiser was built as
-    `f"document search failed: {exc}"` around a `psycopg.Error`, whose string is exactly
-    `connection to server at "…" (…), port 5432 failed: …`. Nothing reaches the handler from here
-    today — both retrievers swallow this type — so the defect was a contract one raiser did not
-    keep, which is the kind that becomes a leak the day a route stops swallowing.
-
-    Asserted at the raiser rather than at the handler for that reason: the promise belongs to the
-    exception, and the handler is only one of the places it travels.
+    `api/middleware._subsystem_unavailable` relays a `SubsystemUnavailableError` message verbatim,
+    relying on it carrying no host, port or driver text (those live on `__cause__`). Asserted at the
+    raiser, since the promise belongs to the exception wherever it travels.
     """
     import psycopg
 
@@ -1390,13 +1325,11 @@ def test_one_unembeddable_chunk_does_not_starve_the_corpus(
 
 
 def test_a_root_that_is_itself_a_symlink_does_not_escape_the_mount(tmp_path: Path) -> None:
-    """The per-entry guard protects everything *inside* a root and never the root directory itself.
+    """A root that is itself a symlink does not escape the mount.
 
-    `walk.mount / root.path` is handed straight to `scandir`: `is_dir()` follows the link, and the
-    entries it then yields are ordinary files, so `entry.is_symlink()` is False and no check fires.
-    `Projects -> /` would index the container filesystem — the knowledge repo included — as cited
-    evidence, under paths that look mount-relative in the cursor, the citation and the logs.
-    `follow_symlinks: false` does not help: it only makes `descend` skip symlink *entries*.
+    The per-entry guard covers everything inside a root, not the root: `Projects -> /` would index
+    the container filesystem under mount-looking paths. `follow_symlinks: false` only skips symlink
+    *entries*, so the root needs its own check.
     """
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1413,11 +1346,10 @@ def test_a_root_that_is_itself_a_symlink_does_not_escape_the_mount(tmp_path: Pat
 
 
 def test_a_manifest_that_forgets_its_entitlement_is_refused_at_load() -> None:
-    """Omission must not mean "everyone". The documented workflow is to hand-author a manifest.
+    """A manifest that forgets its entitlement is refused at load.
 
-    A binding naming `mount` and `roots` but not `required_roles` served the whole AD-gated share to
-    every authenticated user, with no warning and nothing to distinguish it from a correctly gated
-    one. The security model was opt-in by default.
+    Manifests are hand-authored, and omitting `required_roles` must not serve an AD-gated share to
+    every authenticated user.
     """
     with pytest.raises(DocumentShareError, match="required_roles"):
         load_binding({"mount": "/mnt/x", "roots": [{"path": "."}]})
@@ -1438,14 +1370,11 @@ def test_public_and_required_roles_together_are_refused() -> None:
 
 
 def test_a_group_gated_share_answers_for_the_prefixed_claim_and_not_the_bare_one() -> None:
-    """An AD group entitlement is `group:<claim value>`, and the bare object-id is not one.
+    """A group-gated share answers for the prefixed claim and not the bare one.
 
-    `api.auth` namespaces every group claim with `GROUP_ROLE_PREFIX` before it reaches the turn's
-    roles, because this same set gates every write tool and skill — an unprefixed directory group
-    named like an app role would silently grant it. The consequence for a share is what this test
-    pins: a binding written against the bare object-id matches nothing, and because a declining
-    retriever returns *no evidence* rather than an error, the whole failure is a corpus that
-    answers nothing with no log line and no exception anywhere.
+    `api.auth` prefixes every group claim with `GROUP_ROLE_PREFIX` (so a directory group cannot pose
+    as an app role), so a binding naming the bare object-id matches nothing, and a declining
+    retriever fails silently by returning no evidence.
     """
     group = "11111111-2222-3333-4444-555555555555"
     claimed = f"{GROUP_ROLE_PREFIX}{group}"
@@ -1468,18 +1397,11 @@ def test_a_group_gated_share_answers_for_the_prefixed_claim_and_not_the_bare_one
 
 
 def test_every_place_that_teaches_a_group_gate_names_the_real_prefix() -> None:
-    """The prose that tells an operator how to write a group entitlement must name `group:`.
+    """Every place that teaches a group gate names the real prefix.
 
-    Four hand-typed copies of one security-relevant string, and three of them were wrong: the
-    shipped manifest, this package's README and the retriever's own docstring all said to name the
-    group's *object-id*, while `api.auth` has always prefixed it. Only the operator guide was
-    right. An operator following the manifest's own comment configures a gate that matches nothing,
-    and the share then returns no evidence — silently, because declining is how the gate is
-    supposed to behave.
-
-    Checked as a claim rather than trusted as prose (D-2026-08-01-a-path-in-prose-is-a-claim-a-gate-
-    can-check): the string these documents must agree on is now a constant, so the check is whether
-    each of them contains it.
+    The manifest, the README, the retriever docstring and the operator guide must all name `group:`;
+    following a wrong copy configures a gate that silently matches nothing. The string is a
+    constant, and the check is that each document contains it.
     """
     root = Path(__file__).resolve().parent.parent
     teaches_the_gate = [
@@ -1548,12 +1470,10 @@ def test_a_bracketed_line_of_prose_cannot_forge_a_citation_coordinate() -> None:
 def test_a_file_swapped_for_a_symlink_after_the_crawl_is_not_followed(
     share: dict[str, Any], tmp_path: Path
 ) -> None:
-    """The crawl and the read are different activities, minutes apart, on a writable share.
+    """A file swapped for a symlink after the crawl is not followed.
 
-    So the read is given a `FileRef` describing the file as it *was*: not a symlink, and under the
-    size limit. Publish an ordinary file, let it be accepted, then replace it with a link to
-    something the crawl never checked. `follow_symlinks: false` does not help — it is consulted at
-    crawl time, and this is after.
+    The crawl and the read are separate activities on a writable share, so the read must re-check
+    the `FileRef` it was given; `follow_symlinks: false` is consulted only at crawl time.
     """
     binding = load_binding(share)
     secret = tmp_path.parent / "token"
@@ -1588,11 +1508,10 @@ def test_a_file_that_grew_past_the_limit_after_the_crawl_is_refused(
 
 
 def test_a_top_level_archive_is_excluded_by_the_pattern_that_says_so(tmp_path: Path) -> None:
-    """`**/Archive/**` is the shipped pattern, and `fnmatch` gives `**` no special meaning.
+    """A top-level archive is excluded by the pattern that says so.
 
-    It translates to `.*?/Archive/`, which requires a separator before `Archive` — so a *top-level*
-    `Archive/` was not excluded at all. On a share with `roots: [{path: "."}]` that is the whole
-    archive tree an operator believed they had kept out.
+    `fnmatch` gives `**` no meaning, so `**/Archive/**` would require a separator before `Archive`
+    and miss a top-level `Archive/` under `roots: [{path: "."}]`.
     """
     mount = tmp_path / "mount"
     (mount / "Archive").mkdir(parents=True)
@@ -1613,18 +1532,13 @@ def test_a_top_level_archive_is_excluded_by_the_pattern_that_says_so(tmp_path: P
 
 
 def test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics() -> None:
-    """The compatibility check that licensed replacing three `fnmatch` calls with one spec.
+    """The shipped exclusions mean the same under gitignore semantics.
 
-    `_is_excluded` used to try every pattern three ways — the bare path, the path with a leading
-    `/`, and the basename — each compensating for something `fnmatch` does not do. Gitignore does
-    all three natively, but not *identically*: it drops basename-matching for a pattern that
-    contains a separator. So "this is additive" is a claim about what a deployment already excludes,
-    and the only honest way to hold it is to run both policies over the patterns that actually ship.
-
-    The old policy is transcribed here rather than imported, deliberately — the point is to compare
-    against what was deleted, and a comparison against the code that replaced it would agree with
-    itself forever. Every path below is a case that separates the two candidate semantics in some
-    way: depth, anchoring, basename position, and a near-miss (`Archived/`) that must stay indexed.
+    Gitignore matching replaced three `fnmatch` arms (bare, `/`-anchored, basename) and is not
+    identical (no basename matching for patterns with a separator), so both policies are run over
+    the shipped patterns. The old policy is transcribed here, since comparing against the
+    replacement would agree with itself. The paths separate the semantics by depth, anchoring,
+    basename position and a near-miss (`Archived/`) that must stay indexed.
     """
     manifest = (
         Path(__file__).resolve().parent.parent
@@ -1664,11 +1578,9 @@ def test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics() -> Non
     diverged = [path for path in files if by_fnmatch(path) != spec.match_file(path)]
     assert not diverged, f"gitignore semantics change what these files do: {diverged}"
 
-    # And the width of that claim, pinned, because the docstring above states it narrowly on
-    # purpose. As *predicates* the two policies do diverge — gitignore excludes everything under a
-    # matched directory and the three fnmatch arms did not — and the list above simply contains no
-    # instance. What made the old walk reach the same corpus anyway is the basename arm firing on
-    # the directory itself, which `descend` skipped before its files were ever offered here.
+    # As predicates the policies do differ (gitignore excludes everything under a matched
+    # directory); the old walk reached the same corpus because the basename arm fired on the
+    # directory itself.
     assert not by_fnmatch("scratch.tmp/report.pdf")
     assert spec.match_file("scratch.tmp/report.pdf")
     assert by_fnmatch("scratch.tmp")
@@ -1684,13 +1596,10 @@ def test_the_shipped_exclusions_mean_the_same_under_gitignore_semantics() -> Non
 def test_an_excluded_directory_is_never_listed_at_all(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The prune, measured where it pays: the archive subtree is not `scandir`'d.
+    """An excluded directory is never listed at all.
 
-    Excluding a folder already kept its files out of the index — one rejected entry at a time,
-    after listing every directory under it. On a share whose whole cost model is the `scandir` pass
-    that is the saving the exclusion was written for, and it was not being taken. Counted rather
-    than asserted, because "it is excluded" was true before this change and after it, and the only
-    thing that differs is how much of the share the walk opened.
+    Counted `scandir` calls, because the files were excluded either way; the saving is not opening
+    the excluded subtree, and the `scandir` pass is the share's cost model.
     """
     mount = tmp_path / "mount"
     (mount / "Archive" / "1998" / "q1").mkdir(parents=True)
@@ -1722,12 +1631,10 @@ def test_an_excluded_directory_is_never_listed_at_all(
 
 
 def test_a_pattern_gitignore_cannot_parse_is_refused_at_load_not_mid_crawl() -> None:
-    """An exclusion nobody can compile is a manifest error, and it says which pattern.
+    """A pattern gitignore cannot parse is refused at load, not mid-crawl.
 
-    The compile moved onto the binding, so it had to move into the *load*: left to first use it
-    would surface as a library exception from inside a bounded crawl chunk — a deterministic
-    failure outside the `DocumentShareError` family `chemclaw.durable.publish` registers as
-    non-retryable, so the sync would retry it forever and index nothing.
+    At first use it would be a library exception inside a crawl chunk, outside the non-retryable
+    `DocumentShareError` family, so the sync would retry forever and index nothing.
     """
     with pytest.raises(DocumentShareError) as refusal:
         load_binding(
@@ -1739,12 +1646,10 @@ def test_a_pattern_gitignore_cannot_parse_is_refused_at_load_not_mid_crawl() -> 
 def test_a_utf16_document_on_the_share_is_indexed_instead_of_counted_unreadable(
     tmp_path: Path,
 ) -> None:
-    """The decode fix where it matters to an operator: the corpus, and the number beside it.
+    """A UTF-16 document on the share is indexed instead of counted unreadable.
 
-    A file Notepad saved as "Unicode" kept its NUL bytes through the old single-encoding decode, so
-    `_read_and_parse`'s NUL guard refused it — correctly for the guard's own purpose, and with a
-    reason (`a Postgres text column cannot hold a NUL`) that told nobody what was actually wrong.
-    It landed in `skipped_unreadable` and the document was simply missing from the share.
+    Under the single-encoding decode its NULs survived and the NUL guard filed it under
+    `skipped_unreadable` with a Postgres reason that said nothing about the encoding.
     """
     mount = tmp_path / "mount"
     (mount / "SOPs").mkdir(parents=True)
@@ -1788,13 +1693,11 @@ async def _stored_cuttings() -> list[tuple[str, int]]:
 async def test_the_postgres_backend_gates_on_the_chunking_and_sweeps_only_unclaimed_cuttings() -> (
     None
 ):
-    """The same rules as the in-memory reference, in SQL — and migrations 040/041 applied.
+    """The Postgres backend applies the same rules as the in-memory reference, in SQL.
 
-    The durable backend had no test at all, so its statements were only ever exercised in
-    production. This one round-trips the gates that decide whether a re-chunk happens, and the two
-    halves of what a re-chunk may delete: a cutting no file row claims goes, and a cutting another
-    share still claims stays. Before 041 the second half was false — the delete was `doc_id` plus
-    an ordinal floor, and `doc_id` is content, so one share's re-chunk truncated the other's rows.
+    Round-trips the re-chunk gates and both halves of what a re-chunk may delete: a cutting no file
+    row claims goes, and a cutting another share still claims stays (`doc_id` is content, shared
+    across shares).
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -1877,24 +1780,16 @@ async def _stored_keys(doc_id: str) -> list[tuple[str, int, str]]:
 
 
 async def test_the_external_store_backend_carries_the_chunking_through_every_write() -> None:
-    """The other `DocumentIndex`, against the real catalogue and the reference `VectorStore`.
+    """The external-store backend carries the chunking through every write.
 
-    It had no live-Postgres test at all, and every method it overrides predates the chunking key —
-    so all four properties below were false and unobserved, reachable the day a deployment sets
-    `vector_store_provider` to anything but `pgvector`. Each was measured against this database
-    before the fix:
+    Tested against the real catalogue and the reference `VectorStore`; reachable whenever
+    `vector_store_provider` is not `pgvector`. Four properties:
 
-    1. `point_id` was `doc_id#ordinal`, so two shares holding one document wrote **one** point and
-       the second overwrote the first — a share then answering every query with another share's
-       vector.
-    2. `store_embeddings` keyed its `embedding_key` update on `(doc_id, ordinal)`, so re-embedding
-       one cutting stamped the new key on the other cutting too, whose vector was never touched.
-       That row reads as current forever and `reembed_stale` skips it — precisely the
-       silent-wrong-vector failure `embedding_key` exists to prevent.
-    3. `prune_stale` spelled "orphan" as `f.doc_id = c.doc_id`, a third definition disagreeing with
-       `CLAIMED_SQL`: a superseded cutting survived here and the base class deleted it next call.
-    4. `upsert` delegates to the base, which deletes unclaimed cuttings per write — and did so
-       without naming them, so their points stayed in the store with nothing left to address them.
+    1. `point_id` is per row, so two shares holding one document get two points.
+    2. `store_embeddings` marks only the re-embedded cutting, so another cutting's stale vector is
+       not stamped current.
+    3. `prune_stale` uses the same "unclaimed" definition as `CLAIMED_SQL`.
+    4. Unclaimed cuttings deleted by the base `upsert` have their points removed from the store too.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -1939,11 +1834,9 @@ async def test_the_external_store_backend_carries_the_chunking_through_every_wri
     await index.upsert([fine_file], fine, key)
     await index.upsert([coarse_file], coarse, key)
 
-    # (1) One point per row rather than per `(doc_id, ordinal)`, and each share still answers
-    # with *its own* vector. The **score** is the assertion, not the content: querying with a
-    # chunk's own embedding must score 1.0, and under the collision it did not — the content
-    # still came back right, because `CITATION_SQL` dropped the other share's row on the way
-    # out, so only the score ever showed that the wrong vector had been searched.
+    # (1) Each share answers with its own vector. The score is the assertion: a chunk's own
+    # embedding must score 1.0, since `CITATION_SQL` would return the right content even from a
+    # colliding vector.
     (fine_hit,) = await index.search_dense(SOURCE, fine_vector, 5, DocumentFilter())
     assert fine_hit.content == "the fine cutting of a protocol"
     assert fine_hit.score == pytest.approx(1.0)
@@ -1951,12 +1844,8 @@ async def test_the_external_store_backend_carries_the_chunking_through_every_wri
     assert coarse_hit.content == "the whole protocol at once"
     assert coarse_hit.score == pytest.approx(1.0)
 
-    # (2) Re-embedding one cutting marks that row and no other.
-    #
-    # The stored key is the caller's key namespaced by the store it went to
-    # (`retrieval/vectors/base.stored_embedding_key`), so that moving a corpus between backends
-    # cannot leave every row claiming a vector the new one has never held. What this step
-    # asserts is unchanged by that: *which* row got the new key, not how the key is spelled.
+    # (2) Re-embedding one cutting marks that row and no other. The stored key is namespaced by
+    # store (`retrieval/vectors/base.stored_embedding_key`); what matters here is which row got it.
     stored = partial(
         stored_embedding_key,
         provider=settings.vector_store_provider,
@@ -1990,11 +1879,10 @@ async def test_the_external_store_backend_carries_the_chunking_through_every_wri
 
 
 def test_a_chunked_document_can_be_read_back_whole(tmp_path: Path) -> None:
-    """The address the retriever has always emitted finally has a reader.
+    """A chunked document can be read back whole.
 
-    A chunk hit cites `sharedrive:doc-…#3`; until now there was no way to ask for the other pieces,
-    because `sync._read_and_parse` discards the parsed text once `doc_id` is taken from it. A
-    protocol is atomic, so a turn that can only see one cut of it cannot reason about the procedure.
+    A chunk hit cites `sharedrive:doc-…#3`, and a protocol is atomic, so a turn must be able to
+    fetch the other pieces (the parsed text is not kept elsewhere).
     """
     index = InMemoryDocumentIndex()
     share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
@@ -2097,12 +1985,9 @@ async def test_both_backends_read_the_same_whole_document() -> None:
         )
         for n in range(4)
     ]
-    # **Two copies with different modification times**, because a single file row with none
-    # holds constant the axis the two backends actually disagreed on: Postgres takes `max`
-    # across copies, and the reference backend used to take the cited path's own time.
-    # The cited copy is deliberately **not** the most recently touched one: `Archive/…` sorts
-    # first so it wins the citation, while `SOPs/…` carries the newer time. A fixture where the
-    # same row won both would pass against either rule and prove nothing about which is running.
+    # Two copies with different modification times, the cited one not the newest (`Archive/…` sorts
+    # first and wins the citation, `SOPs/…` is newer), so a backend taking the cited path's time
+    # instead of `max` across copies would fail.
     cited_but_older = file_row.model_copy(
         update={
             "path": "Archive/protocol.txt",
@@ -2139,12 +2024,9 @@ async def test_the_durable_backend_stores_the_documents_own_text_and_still_finds
 ):
     """A stored chunk is the document's text; only what feeds the tsvector is normalised.
 
-    `upsert` bound one `normalize_search_text` result to both the `content` column and
-    `to_tsvector`, so an SOP saying "cool to -78 °C" was stored, served and read back as
-    " 78 °C" — a sign flip in the excerpt a chemist cites, in a column `note_index` does not
-    have and so never had this defect. Both halves are asserted here because splitting the
-    parameter could have been "fixed" by dropping the normalisation, which is the regression
-    `core.fulltext` measured: `78` has to reach `-78`, and `108-24-7` has to keep working.
+    Binding one normalised string to both `content` and `to_tsvector` would store "cool to -78 °C"
+    as " 78 °C" — a sign flip in what a chemist cites. Both halves: the stored text is verbatim, and
+    search still matches `78` to `-78` and `108-24-7` (`core.fulltext`).
     """
     raw = "The mixture was cooled to -78 C over -0.5 h; CAS 108-24-7 was charged."
 
@@ -2191,14 +2073,11 @@ async def test_the_durable_backend_stores_the_documents_own_text_and_still_finds
 
 
 async def test_one_unstorable_document_costs_the_document_and_not_the_pass(tmp_path: Path) -> None:
-    """A NUL byte on a share used to kill the whole crawl, permanently — against the real database.
+    """One unstorable document costs the document and not the pass, against the real database.
 
-    A NUL is valid UTF-8, so the decode keeps it and `.strip()` does not remove it, and Postgres
-    refuses one in a `text` column. `DocumentIndex.upsert` has no per-file handler, so the write
-    took the good documents parsed in the same slice with it; the crawl keeps no cross-run cursor,
-    so every later run walked to the same file and died the same way. Driven against
-    `PostgresDocumentIndex` because that is the only backend the fault exists on — the in-memory
-    reference stores anything, which is why no test could see this.
+    A NUL is valid UTF-8 and Postgres refuses it in `text`; without a per-file guard the batch
+    fails, and with no cross-run cursor every later run dies on the same file. Only the Postgres
+    backend has the fault, so it is driven there.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -2229,11 +2108,10 @@ async def test_one_unstorable_document_costs_the_document_and_not_the_pass(tmp_p
 def test_an_oversized_document_is_bounded_at_the_fetch_not_after_assembly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The point is what was never materialised, so this asserts on pieces rather than on text.
+    """An oversized document is bounded at the fetch, not after assembly.
 
-    `document_read_max_chars`' own comment says it exists "so a 400-page report cannot be pulled
-    into the chat pod at all". The first version fetched every row and assembled the whole document
-    before trimming, so it prevented nothing — a binding allows a 52 MB file.
+    `document_read_max_chars` exists so a huge report is never pulled into the chat pod, so this
+    asserts on the pieces fetched, not on the trimmed text.
     """
     index = InMemoryDocumentIndex()
     share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
@@ -2315,15 +2193,12 @@ async def test_both_backends_stop_at_the_same_piece() -> None:
 
 
 async def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> None:
-    """A provider switch must not leave every chunk claiming a vector the new store never held.
+    """Moving the document corpus to another store re-embeds it.
 
-    The note index got this in D-2026-08-25; the document corpus did not, and it is the larger of
-    the two. `stale_chunks` selects on `embedding_key IS DISTINCT FROM`, and that key answered only
-    *which model made this vector* — so repointing `vector_store_provider` left every row matching,
-    the re-embedding drain finding nothing, and dense document search answering from an empty
-    collection with no error anywhere.
-
-    The catalogue is shared between backends by design, so the switch has to be visible in the row.
+    `stale_chunks` selects on `embedding_key IS DISTINCT FROM`, so the key must name the store as
+    well as the model; otherwise a provider switch leaves every row matching and dense search
+    answers from an empty collection. The catalogue is shared between backends, so the switch must
+    be visible in the row.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -2372,17 +2247,11 @@ async def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> Non
 
 
 def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration() -> None:
-    """`document_chunks.embedding_key` decided what got re-embedded and nothing about the search.
+    """Neither backend ranks a chunk from a superseded embedding configuration.
 
-    A share's chunks are the evidence a report cites, and an operator repointing `embedding_model`
-    or `llm_base_url` at another model of the same width raises nothing at insert. Every stored
-    vector then belongs to model A while every query is embedded by model B: the cosines stay
-    positive, so the `> 0` floor keeps them, and the chunks that come back are arbitrary text with
-    a real file path attached. The re-embed that heals it is a scheduled drain, so the window is at
-    least one pass over the share.
-
-    Asserted on both backends together, because the reference is only worth anything while it
-    answers the way the statement production runs does.
+    A same-width model switch raises nothing at insert, and old-model vectors still score positive
+    against new-model queries, returning arbitrary text with a real path until the re-embed drain
+    runs. Asserted on both backends, so the reference keeps answering as production does.
     """
 
     async def _run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2430,15 +2299,11 @@ def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration
 def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """One WARNING per skipped file makes log volume a function of the share.
+    """A systematic read failure costs log lines by the pass, not by the corpus.
 
-    Each of those lines is right for the case it was written for — one bad PDF, named so an
-    operator can go and look at it. The case that actually happens is systematic: a folder whose
-    permissions changed, an OCR pass that broke every extraction, a format the parser stopped
-    accepting. Then the count is the corpus's, the one line saying *why* is indistinguishable from
-    the other 999,999, and under a log driver with backpressure the volume slows the very pass that
-    is failing. The reasons and the total are what an operator can act on, and `SyncReport` already
-    carries the count.
+    Per-file WARNINGs suit one bad PDF, but failures are usually systematic (changed permissions, a
+    broken OCR pass), making log volume a function of the share and slowing the failing pass under
+    backpressure. The pass logs reasons and totals; `SyncReport` carries the count.
     """
     root = tmp_path / "share"
     (root / "Docs").mkdir(parents=True)
@@ -2470,10 +2335,8 @@ def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus
         "one line per file in the corpus, and the reason is in every one of them"
     )
     summary = warnings[0].getMessage()
-    # The reason is the *class name* `sync.py` counts by (`type(exc).__name__`), so it moves when a
-    # refusal is classified more precisely — which is a feature and is why this asserts the suffix
-    # rather than one name. `UnclassifiedParseError` is what a corrupt PDF earns today, and pinning
-    # `DocumentParseError` here is what turned that improvement into a red test.
+    # The reason is the class name `sync.py` counts by, which moves when a refusal is classified
+    # more precisely, so the suffix is asserted rather than one name.
     assert "40" in summary and "ParseError x40" in summary, (
         f"the one line an operator reads must carry the count and the distinct reasons: {summary!r}"
     )
@@ -2484,26 +2347,19 @@ def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus
 
 # --- one pathological document must not hold the whole pass -------------------------------------
 #
-# `_parse_changed` hands each file to a worker thread, and until the bound below it waited there
-# with no timeout at all: a document whose parse never returns held the sync activity for as long
-# as it liked, and with it the crawl of every file behind it. These tests use a *real* slow parse —
-# a reader that blocks in the worker thread — rather than a patched clock, because what is being
-# proved is that the pass comes back while the parse is still running.
+# `_parse_changed` waits on each file with a bound. These tests use a real blocking read rather
+# than a patched clock, because what is proved is that the pass returns while the read is still
+# running.
 
 
 class _BlockingParse:
     """A read that never comes back for one named file, and is the real parse for every other.
 
-    **It stands in for `parse_document_isolated`, which is what the crawl calls now, and the thing
-    it models is the half that call does not bound**: the mount. The parse itself runs in a child
-    that is killed on its own deadline (`ingest/documents/isolate.py`), so the crawl's `wait_for`
-    is a backstop over a *read* that hangs — a share that stopped answering — and that is exactly
-    what blocking in the calling worker thread here is.
-
-    A `threading.Event` rather than a `sleep`: the point is not that it is slow but that it is
-    *still running* when the pass returns, which is precisely what a wall-clock sleep leaves
-    ambiguous. The wait is bounded all the same, so a regression fails the assertions instead of
-    hanging the suite.
+    Stands in for `parse_document_isolated`. The parse itself runs in a child killed on its own
+    deadline (`ingest/documents/isolate.py`); the crawl's `wait_for` is the backstop over a hung
+    *read* (a share that stopped answering), which blocking in the worker thread models. A
+    `threading.Event`, so "still running" is unambiguous; the wait is bounded so a regression fails
+    rather than hangs.
     """
 
     def __init__(self, blocked_name: str) -> None:
@@ -2541,10 +2397,8 @@ def _pass_with_a_blocked_file(
 ) -> tuple[SyncReport, float]:
     """Run one pass while `trap` holds a file, and report how long the pass itself took.
 
-    The release happens *inside* the loop's lifetime on purpose: `asyncio.run` joins the default
-    executor before it returns, so timing the `asyncio.run` call would time the blocked thread
-    rather than the pass — and the whole claim under test is that those two are no longer the same
-    duration.
+    The release happens inside the loop's lifetime, because `asyncio.run` joins the default executor
+    and would otherwise time the blocked thread rather than the pass.
     """
 
     async def _run() -> tuple[SyncReport, float]:
@@ -2594,11 +2448,10 @@ def test_a_document_that_never_finishes_parsing_does_not_hold_the_pass(
 def test_a_timed_out_document_is_visible_in_the_run_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A skip nobody can see is a corpus silently smaller than the operator believes.
+    """A timed-out document is visible in the run summary.
 
-    The count has to survive all three renderings a run is read through: the report the activity
-    returns, the `ingest.finished` record the pass leaves, and the merge the drain folds its
-    chunks into (a field missing from `merge_reports` reads as zero for a whole drain).
+    The count must survive the activity's report, the `ingest.finished` record and `merge_reports`
+    (a missing field reads as zero for a whole drain).
     """
     share = _share_with_a_slow_file(tmp_path)
     trap = _BlockingParse("slow.txt")
@@ -2630,12 +2483,10 @@ def test_a_timed_out_document_is_visible_in_the_run_summary(
 def test_a_document_that_times_out_keeps_the_row_it_already_had(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A file the bound gave up on is still on the share, so the sweep must leave it alone.
+    """A document that times out keeps the row it already had.
 
-    The same rule as an unreadable file (see `test_a_file_that_changed_and_cannot_be_read...`),
-    and the one that decides whether this bound is safe to add at all: a timed-out file is absent
-    from this pass's *processed* set, and reading that absence as deletion would drop a document
-    the share still holds — every time the parse is slow.
+    A timed-out file is still on the share; reading its absence from the processed set as deletion
+    would drop it every time the parse is slow.
     """
     share = _share_with_a_slow_file(tmp_path)
     binding = load_binding(share)
@@ -2670,30 +2521,17 @@ def test_a_normal_share_is_untouched_by_the_bound(share: dict[str, Any]) -> None
 
 
 def test_a_share_document_is_parsed_in_a_process_the_crawl_can_kill(tmp_path: Path) -> None:
-    """The crawl's worker thread must end, and for a whole release it did not.
+    """A share document is parsed in a process the crawl can kill.
 
-    **The defect.** `sync.py` wrapped `asyncio.to_thread(_read_and_parse, …)` in `wait_for`, and
-    its own docstring stated the consequence in the present tense: Python cannot interrupt a
-    running parser, so the pass moved on while the thread ran the hostile document to completion.
-    That thread belongs to the **shared** default executor inside the Temporal worker, so N
-    pathological documents on an SMB share consume N executor threads for the life of the process
-    — the same wedge `agent/attachments.py` had, on a pool nothing caps, with the killable
-    subprocess already sitting one module over as a drop-in.
+    A thread cannot be interrupted, so a `wait_for` around `to_thread` would leave each hostile
+    document consuming a shared-executor thread for the life of the Temporal worker. Driven through
+    `sync_share` and the real `parse_document_isolated`, substituting only what the stalled child
+    does. It lands on `skipped_timeout`, not `skipped_unreadable` (`ParseWorkerLost` subclasses
+    `DocumentParseError`, so it needs its own arm).
 
-    Driven through the shipped `sync_share` and the real `parse_document_isolated` — only what the
-    stalled child *does* is substituted. The counter it lands on is `skipped_timeout` and not
-    `skipped_unreadable`: `ParseWorkerLost` is a `DocumentParseError` subclass, so without its own
-    `except` arm a killed parse would be filed beside a corrupt PDF and the one number that says a
-    bound fired would read zero.
-
-    **Why a stalled child rather than a large document, and a subprocess rather than this one.**
-    This test used a 20 MB CSV against a 0.2 s deadline and failed on CI once. Measured, that CSV
-    is not slow to parse: it ends in the child's memory ceiling (`document_parse_memory_bytes`) as a
-    `DocumentParseError`, so the test was a race between two bounds — on a fast runner the ceiling
-    won, the whole pass took a quarter of a second and the file was filed as unreadable. A child
-    that never answers and allocates nothing can only end on the deadline, so the deadline can be
-    generous for the quick document too. The stall has to live in the forkserver's preload, which
-    this process's forkserver was warmed without — `tests/parse_stalls.py` says why at length.
+    A stalled child rather than a large document, because a large one can end on the memory ceiling
+    instead, racing two bounds; a child that never answers and allocates nothing ends only on the
+    deadline. The stall lives in the forkserver preload (`tests/parse_stalls.py`).
     """
     mount = tmp_path / "mount"
     (mount / "Docs").mkdir(parents=True)

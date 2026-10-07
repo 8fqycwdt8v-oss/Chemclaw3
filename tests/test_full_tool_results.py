@@ -1,14 +1,10 @@
-"""A result the model was shown a cut of keeps its full text — for the chemist, never the model.
+"""A result the model was shown a cut of keeps its full text, for the chemist, never the model.
 
-`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`. The cut in
-`agent/tool_result_size.py` is the one lossy step between a tool and the model, and the removed
-middle used to reach no store: the tool-result store is fed from the stream, and the stream only
-ever sees the message the model got. So these drive each hop the full text now takes — the cut
-handing it to the turn's sink and stamping the ref, the stream naming that ref, a reload naming it
-again, the owner-scoped route serving it, and an erasure taking it — and each asserts the other half
-of the decision too: **what the model reads is unchanged, still cut.**
-
-The Postgres-backed tests skip cleanly with no database (`tests/pg.py`) and run for real in CI.
+The cut in `agent/tool_result_size.py` is the one lossy step between a tool and the model. These
+drive each hop the full text takes: the cut handing it to the turn's sink and stamping the ref, the
+stream naming the ref, a reload naming it again, the owner-scoped route serving it, and an erasure
+taking it. Each also asserts that what the model reads is still cut. Postgres-backed tests skip
+without a database (`tests/pg.py`).
 """
 
 import asyncio
@@ -136,11 +132,10 @@ def test_a_cut_result_keeps_its_full_text_and_the_model_still_reads_the_cut(
 def test_a_result_under_the_ceiling_is_stored_once_and_carries_no_cut_stamp(
     sink: _Collecting,
 ) -> None:
-    """Nothing was cut, so nothing says a cut happened — and the whole text is stored once.
+    """A result under the ceiling is stored once and carries no cut stamp.
 
-    Stored for its handle (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`):
-    the line at the foot of the model's copy names these bytes, so they are kept before the message
-    leaves the middleware, and the stream reuses the ref rather than writing them again.
+    It is stored for its handle, named at the foot of the model's copy, before the message leaves
+    the middleware; the stream reuses the ref rather than writing it again.
     """
     message = _bounded("a small result")
 
@@ -162,11 +157,10 @@ def test_with_no_sink_a_cut_is_still_marked_and_names_no_full_text() -> None:
 def test_a_cut_only_the_framing_pass_makes_keeps_the_text_before_escaping(
     monkeypatch: pytest.MonkeyPatch, sink: _Collecting
 ) -> None:
-    """Under the ceiling until escaping pushed it over: the outer pass cuts, and keeps the original.
+    """A cut that only the framing pass makes keeps the text from before escaping.
 
-    A disguised delimiter makes `framing._defang` escape every `<`, a 4x expansion, so a result the
-    inner `bound_tool_results` let through whole reaches the model cut by `frame_connector_results`
-    instead. Nothing stamped it on the way in, so the outer pass is the one that has to keep it.
+    A disguised delimiter makes `framing._defang` escape every `<`, so a result the inner
+    `bound_tool_results` passed whole is cut by `frame_connector_results`, which must keep it.
     """
     monkeypatch.setattr(settings, "agent_max_tool_result_chars", 5_000)
     opening, _ = envelope_delimiters("probe")
@@ -284,12 +278,11 @@ def test_a_reload_names_the_same_full_text_the_stream_named(sink: _Collecting) -
 def test_a_turn_through_the_front_door_names_the_full_text_it_kept(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """From `run_turn` in: the runner installs the sink, the real chain cuts, the event names it.
+    """A turn through the front door names the full text it kept.
 
-    The production entry point rather than the middleware alone, because the one hop no unit test
-    above can see is the runner installing the sink for the turn (`_turn_ambient`) — without it
-    every cut stamps `""` and the feature is silently off. The store is replaced by a collecting
-    sink at the runner's own import, so this needs no database; the rest is the compiled graph.
+    From `run_turn`: the hop no unit test above sees is the runner installing the sink
+    (`_turn_ambient`); without it every cut stamps `""`. The store is replaced by a collecting sink
+    at the runner's import, so no database is needed.
     """
     from langchain_core.tools import tool as make_tool
 

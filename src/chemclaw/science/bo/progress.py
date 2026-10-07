@@ -1,27 +1,8 @@
-"""Whether an optimization is still finding anything, judged against the assay's own noise (W1).
+"""Whether an optimization is still finding anything, judged against the assay's own noise.
 
-The question this answers is "have we plateaued, or is there more in it?" — asked by a lab leader
-who does not want to burn another two weeks. Nothing in the tree computed it: a campaign runs
-exactly the rounds it was given, and the only early stop is `space_exhausted`, which is
-discrete-space exhaustion rather than a plateau.
-
-**`assay_noise` is a required argument with no default, and that is the whole design.** A live
-probe was graded *fabricated* for asserting "the last 1-2% gains are real" against a +/-2%
-reproducibility the chemist had stated in the same question. A plateau test that supplied its own
-default noise would reproduce that error with a tool's authority behind it; one that demands the
-number cannot be answered without it.
-
-**A gain is measured from the last real gain, not from the last run** (D-2026-08-05). The first
-version compared each result to a continuously updated running best, which meant a campaign
-climbing in steps each smaller than the noise never reset the counter no matter how far it climbed:
-50.0 -> 70.9 over twelve runs, **+20.9 against a stated +/-2**, reported `plateaued`. That is the
-same harm this module exists to prevent, pointing the other way — telling a lab leader to stop a
-campaign that is working. The comparison is anchored instead, so cumulative drift counts.
-
-**No BoFire import, deliberately.** Hypervolume would be the textbook multi-objective convergence
-metric and `bofire.utils.multiobjective` ships one, but the arithmetic here needs none of it, and
-`science.bo.problem` — which this imports — is the campaign job's `params_model` and is loaded in
-the agent process, where `tests/test_connector_isolation.py` exists to keep `torch` out.
+`assay_noise` is required: a plateau verdict needs the chemist's stated reproducibility. Gains are
+measured from the last real gain, so a sub-noise climb counts once it accumulates. No BoFire import
+(agent process).
 """
 
 from typing import Literal
@@ -75,28 +56,12 @@ class CampaignProgress(BaseModel):
     window: int = Field(ge=1)
 
     n_observations: int = Field(ge=0)
-    # Distinct parameter combinations *run*: re-running one condition three times is one point of
-    # the grid, not three. Counts every distinct condition performed, including one an exclusion
-    # later forbade — a chemist who ran it still ran it, and this number is the record of that.
+    # Distinct parameter combinations run (replicates count once), including any an exclusion later
+    # forbade.
     n_distinct: int = Field(ge=0)
-    # How many of those occupy a cell of the *feasible* grid, which is what a coverage claim may
-    # divide by. `design_space` counts feasible cells, so dividing `n_distinct` by it compared two
-    # different quantities and could print "7 distinct out of the 6 the full grid holds", which is
-    # not a rounding error but a visibly impossible sentence.
-    #
-    # **Two things make a run not occupy a cell, and an earlier version of this comment named only
-    # one.** It said the counts differ "only under an `ExcludeConstraint`". They also differ when
-    # an observed *value* is outside the declared domain — no constraint involved — because
-    # `point_is_feasible` starts with `point_in_domain`. The realistic trigger is the one
-    # `read_campaign_thread` exists for: a resumed campaign whose space was edited, where a
-    # renamed category leaves the old label in the history. Measured on a 2x2 grid with all four
-    # cells run and two recorded under a since-renamed label: `n_distinct=4`,
-    # `n_distinct_in_space=2`, `design_space=4`, no constraints — a chemist who screened the whole
-    # grid told they covered half, with the contradicting count in the same payload.
-    #
-    # It is reported rather than repaired, because the two numbers are both true and the
-    # difference between them is the finding: `out_of_space` below is what makes it legible
-    # instead of leaving a reader to subtract.
+    # How many of those occupy a cell of the *feasible* grid — what a coverage claim may divide by.
+    # A run can fall outside it through an exclusion or a value outside the current domain (e.g. a
+    # category renamed on resume). Both counts are reported; `out_of_space` names the difference.
     n_distinct_in_space: int = Field(ge=0)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -104,18 +69,14 @@ class CampaignProgress(BaseModel):
     def out_of_space(self) -> int:
         """Distinct conditions run that occupy no cell of the feasible grid.
 
-        Zero for almost every campaign. Non-zero says the history holds runs the current problem
-        cannot express — a pairing excluded after being run, or a value left behind by an edited
-        space — which is the fact behind the two counts disagreeing.
+        Non-zero means the history holds runs the current problem cannot express: a pairing excluded
+        after being run, or a value left by an edited space.
         """
         return self.n_distinct - self.n_distinct_in_space
 
-    # The feasible grid size, or None when it cannot be stated. **`None` carries two meanings and
-    # the caller cannot always tell them apart**: a continuous parameter makes the space genuinely
-    # infinite, *or* an exclusion over a space too large to enumerate declined the walk
-    # (`bo_max_enumerated_cells`). `space_is_infinite` separates them, because "unbounded" and
-    # "ten million cells we chose not to count" are different answers to a chemist asking how much
-    # of the space is left.
+    # The feasible grid size, or None: either genuinely infinite (a continuous parameter) or too
+    # large to enumerate under an exclusion (`bo_max_enumerated_cells`). `space_is_infinite`
+    # separates the two.
     design_space: int | None = None
     # True only for the first of those two: at least one continuous parameter.
     space_is_infinite: bool = False
@@ -124,15 +85,11 @@ class CampaignProgress(BaseModel):
     # The running best after each evaluation, in the order supplied.
     best_so_far: list[float] = Field(default_factory=list)
     # Evaluations since a result beat the value at the **last real gain** by more than
-    # `assay_noise`. This is the headline number: it needs no window and it is what "the last real
-    # gain was N runs ago" means. Measured against the last real gain rather than against the
-    # running best, so a series climbing in sub-noise steps is not called a plateau once the
-    # accumulated climb exceeds the noise a chemist would measure between run 1 and run N.
+    # `assay_noise`: the headline "last real gain was N runs ago".
     evaluations_since_improvement: int = Field(default=0, ge=0)
 
-    # Spread of the raw values over the last `window` evaluations — the statement the op-13 grader
-    # actually asked for ("the last four results span 87-89 against a stated +/-2%, so they are
-    # indistinguishable"). None when there are fewer than two observations to span.
+    # Spread of raw values over the last `window` evaluations, to compare against the stated noise.
+    # None with fewer than two observations.
     window_span: float | None = None
     window_indistinguishable: bool = False
 
@@ -144,12 +101,7 @@ class CampaignProgress(BaseModel):
     def summary(self) -> str:
         """The reading in words, including the limit a plateau verdict may never exceed.
 
-        A `computed_field` rather than a bare property for the reason
-        `chemclaw.science.fingerprints.store.FingerprintSearch.verdict`
-        is one: a plain property is not serialized, so the caveat would never reach the model
-        composing the answer. The tool
-        docstring is read once when the tool is defined; this sentence is in the context window at
-        the moment the answer is written, and only one of those two is load-bearing.
+        A `computed_field` so it is serialized and reaches the model composing the answer.
         """
         if not self.enough_observations:
             return (
@@ -196,9 +148,8 @@ class CampaignProgress(BaseModel):
         """The design-space efficiency claim, when the space is finite enough to have one."""
         if self.design_space is None:
             return ""
-        # Both sides feasible: `design_space` counts the cells an exclusion leaves, so the
-        # numerator has to be the runs that occupy one. `n_distinct` is still reported beside it
-        # as what was actually run.
+        # Both sides feasible: the numerator is runs occupying a feasible cell; `n_distinct` is
+        # still reported beside it.
         stated = (
             f" ({self.n_distinct_in_space} distinct condition(s) out of the {self.design_space} "
             "the feasible grid holds"
@@ -222,20 +173,8 @@ def campaign_progress(
 ) -> CampaignProgress:
     """Read a campaign's observations for a plateau, against the noise the chemist stated.
 
-    Args:
-        problem: The decision space and objective the observations belong to.
-        observations: The runs so far, **in the order they were performed** — the running best and
-            "evaluations since" are both order-dependent, and a set reordered by value would report
-            a campaign that never stopped improving.
-        assay_noise: The assay's reproducibility, in the objective's own units. Required.
-        window: How many recent evaluations the span statement covers, defaulting to
-            `bo_plateau_window`.
-        objective: Which objective to read. Optional on a single-objective problem, where there is
-            only one; **required** on a multi-objective one, where a plateau is per axis and
-            picking the lead silently would answer a question nobody asked.
-
-    Returns:
-        The reading, with a `summary` stating what it does and does not establish.
+    `observations` must be in the order performed; `objective` is required on a multi-objective
+    problem.
     """
     if assay_noise <= 0:
         raise ValueError(
@@ -259,11 +198,8 @@ def campaign_progress(
     best_so_far: list[float] = []
     since = 0
     best: float | None = None
-    # The value at the last *real* gain. The counter measures distance from this anchor rather than
-    # from the running best, so a campaign creeping upward in sub-noise steps still registers as
-    # improving once the accumulated climb beats the noise. Comparing each run to a continuously
-    # updated best made the bar rise underneath the counter, and a monotone climb never reset it:
-    # 50.0 -> 70.9 over twelve runs, +20.9 against a stated +/-2, reported "plateaued".
+    # The value at the last *real* gain; the counter measures from here rather than the running
+    # best, so a sub-noise creep registers once it accumulates past the noise.
     anchor: float | None = None
     for value in values:
         # The running best is what the campaign has actually reached, and it moves on any gain —

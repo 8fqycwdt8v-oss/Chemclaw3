@@ -30,10 +30,8 @@ from chemclaw.science.bo.problem import (
 from tests.conftest import FakeWriter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
-# Taken from the registry rather than written out, for the reason the registry exists: a
-# hand-maintained list re-creates the "written, imported, absent from the worker's list, never
-# runs" failure one level down. This one caught it — the campaign gained a record-writing activity,
-# and a list spelled before that existed left the workflow task redelivering forever.
+# Taken from the registry rather than written out, so a new activity cannot be missing from this
+# worker and leave a workflow task redelivering forever.
 _BO_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities(bundle_queue("bo"))
 
 _PROBLEM = OptimizationProblem(
@@ -98,9 +96,8 @@ def test_note_from_campaign_result_maps_fields() -> None:
 def test_the_note_says_what_space_was_searched() -> None:
     """A recommended value is uninterpretable without the range it was chosen from (D-157).
 
-    "1.2 mol% Pd" means one thing when the campaign could have gone to 5 and another when 1.2 was
-    the ceiling — and the person reading the merged markdown has no other copy of the spec: it
-    lives in the job record and in Temporal's history, neither of which is in front of a reviewer.
+    The note's reader has no other copy of the spec; it lives in the job record and Temporal's
+    history.
     """
     body = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT).body
     # Categorical options in full, not counted: "one of 2 catalysts" would not tell a reviewer
@@ -114,22 +111,11 @@ def test_the_note_says_what_space_was_searched() -> None:
 def test_the_note_carries_the_molecules_it_recommends() -> None:
     """A recommendation has to name its structures *as* structures, or nothing downstream sees them.
 
-    This note used to write `- molecule: CCN=[N+]=[N-]` as plain markdown and set no
-    `compound_smiles`, so a machine-minted `bo-candidate` named no machine-readable structure at
-    all — while the molecule in question is an organic azide. `bo-candidate` is the note type that
-    proposes an experiment nobody has run, which is exactly the type whose molecules a reviewer
-    must be able to find and paste into a screen.
-
-    The assertion is the markdown itself, which is what a reviewer and every extractor read. It
-    used to also call the `kg-validate` hazard gate, which is how the defect was found; that gate
-    was retired with `D-2026-08-15-safety-is-a-tool-not-a-gate` and the property it happened to
-    expose is unchanged by its removal.
-
-    Both routes a campaign has to name a molecule are covered: `molecule` is a library-style
-    categorical whose levels are SMILES (`tests.bo_harness.molecule_library_problem`), `ligand` is a
-    featurized categorical carrying a label → SMILES `structures` map, and neither reaches the body
-    without the writer putting it there — a categorical's `structures` are not printed at all by
-    the searched-space listing, so no extractor change could have recovered them.
+    A `bo-candidate` proposes an unrun experiment, so its molecules must be findable and pasteable
+    into a screen. Both routes are covered: a library-style `molecule` categorical whose levels are
+    SMILES, and a featurized `ligand` with a label → SMILES `structures` map (which the
+    searched-space listing does not print). Asserted on the markdown, which reviewers and extractors
+    read.
     """
     note = note_from_campaign_result("azide_yield", _MOLECULE_PROBLEM, _MOLECULE_RESULT)
     assert "- molecule: `CCCN=[N+]=[N-]`" in note.body  # the level is itself a SMILES
@@ -149,12 +135,9 @@ def test_a_label_that_names_no_molecule_is_left_as_prose() -> None:
 def test_compound_smiles_is_set_only_when_one_molecule_is_recommended() -> None:
     """`compound_smiles` is what a by-compound search returns, so a wrong one is worse than none.
 
-    `kg.conflicts` groups on `(type, compound_smiles)` and `find_notes` searches it, and a
-    `bo-candidate` carried none at all — a recommendation to make a specific molecule was
-    invisible to both. It is filled in only when the recommendation names exactly one molecule,
-    for the reason `ingest/eln/record.py::_principal_product` gives about the same field: a point
-    naming a ligand *and* a substrate has no single subject, and picking one would file the note
-    under a compound nobody chose.
+    `kg.conflicts` and `find_notes` key on it. Set only when the recommendation names exactly one
+    molecule, as in `ingest/eln/record.py::_principal_product`: a point naming a ligand and a
+    substrate has no single subject.
     """
     from tests.bo_harness import molecule_library_problem
 
@@ -176,12 +159,10 @@ def test_compound_smiles_is_set_only_when_one_molecule_is_recommended() -> None:
 
 
 def test_a_campaign_cannot_suppress_its_own_record() -> None:
-    """`publish_to_graph` on the spec was a model-authored switch over a deployment's decision.
+    """A campaign cannot suppress its own record.
 
-    Default `False` and filled in by the LLM, it silently suppressed the only permanent artifact a
-    campaign produced — after which the result expired with Temporal's history and the run left no
-    trace at all. The decision is the manifest's alone now, and this pins that the field does not
-    come back: nothing in `CampaignSpec` may decide whether the campaign is remembered.
+    Whether a campaign is remembered is the manifest's decision; no `CampaignSpec` field (which the
+    model fills) may decide it.
     """
     assert "publish_to_graph" not in CampaignSpec.model_fields
 
@@ -195,19 +176,10 @@ def test_note_id_is_stable_for_the_same_recommendation() -> None:
 
 
 async def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue).
+    """A finished campaign writes a bo-candidate note (background queue).
 
-    This test carried `@pytest.mark.timeout(600)` on the reasoning that it is "slow, not hung"
-    because it fits a real BoTorch GP inside a Temporal worker. That reasoning was wrong, and it
-    kept `main` red: the core worker below registered activities only, so the
-    `ConnectorJobWorkflow` submitted to its queue had no registered handler and its workflow task
-    was never completed. `execute_workflow` then waits forever — and it is a *cheap* forever, with
-    no CPU burnt, which is why "slow" looked plausible.
-
-    Measured against the live Temporal dev server, with `background_task_queue` pointed at a private
-    name so no other worker could serve it: without `workflows=[ConnectorJobWorkflow]` the call
-    hung past 100 s; with it, the campaign completed in well under the 180 s global cap. So the
-    override is gone too — this test does not need one.
+    The core worker must register `ConnectorJobWorkflow` as well as the activities; without it the
+    workflow task is never completed and `execute_workflow` waits forever without burning CPU.
     """
     fake = FakeWriter()
     # The gate is core's now, so the submitter is patched where core publishes from.
@@ -265,10 +237,8 @@ async def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.Mo
 def test_a_library_campaigns_note_stays_readable(monkeypatch: pytest.MonkeyPatch) -> None:
     """A screening library is one categorical with hundreds of levels — not a note line.
 
-    `molecule_library_problem` makes every SMILES in the library a level, so listing them all put
-    a single multi-kilobyte line into the note a chemist reads to approve *one* experiment
-    (review of D-157). Bounded by the shared note-excerpt budget, with the omitted count stated
-    and the complete space still in the run record.
+    Bounded by the shared note-excerpt budget, with the omitted count stated; the full space stays
+    in the run record.
     """
     from tests.bo_harness import molecule_library_problem
 
@@ -302,12 +272,10 @@ def test_a_library_campaigns_note_stays_readable(monkeypatch: pytest.MonkeyPatch
 
 
 def test_the_note_says_how_sure_the_surrogate_was_of_what_it_recommends() -> None:
-    """F8-T1: BoFire computes a posterior sd on every model-guided ask and it was discarded.
+    """The note says how sure the surrogate was of what it recommends.
 
-    The recommended value reads identically whether the surrogate was exploiting chemistry it has
-    learned or extrapolating into chemistry it has not, and that is the question a chemist asks
-    before committing lab time. Deleting `predicted_sd` from the adapter, or `surrogate_sd` from
-    the observation, puts the note back to a bare number.
+    BoFire's posterior sd separates exploitation from extrapolation, the question a chemist asks
+    before committing lab time.
     """
     proposed = _RESULT.model_copy(
         update={
@@ -336,12 +304,10 @@ def test_a_seed_point_says_no_model_proposed_it_rather_than_staying_quiet() -> N
 
 
 def test_the_recommended_value_survives_the_excerpt_a_reader_actually_sees() -> None:
-    """The ordering fix, held against the real truncation rather than a guess at it.
+    """The recommended value survives the excerpt a reader actually sees.
 
-    `_excerpt` is a blind prefix of the body at `note_excerpt_chars`. The objective value used to
-    sit *after* the full conditions list, so a campaign over enough parameters produced an excerpt
-    quoting the conditions with no number attached at all — the worst of the possible cuts. Move
-    the value line back below the conditions and this fails.
+    `_excerpt` is a blind prefix at `note_excerpt_chars`, so the value line sits above the
+    conditions list.
     """
     from chemclaw.retrieval.retrievers import _excerpt
 
@@ -370,43 +336,27 @@ def test_the_recommended_value_survives_the_excerpt_a_reader_actually_sees() -> 
 
 #: What a model-facing description must never say about this bundle's note, one phrase per claim.
 #:
-#: Narrow on purpose. "These are proposals a human runs" is *true* and must survive — a candidate
-#: is a suggestion, and the skill says so at length. What is forbidden is the claim that a
-#: **reviewer stands between the note and the graph**, because none does.
+#: Narrow on purpose: "these are proposals a human runs" is true. What is forbidden is the claim
+#: that a reviewer stands between the note and the graph, because none does.
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 
 _GATE_CLAIMS = ("pr-gated", "pr gate", "pull request", "human review", "before it enters the graph")
 
 #: Lines in the corpus below that name the gate in order to say it is **gone**.
 #:
-#: Keyed by `path:line-text` rather than by path, so a file cannot pick up a *second*, live claim
-#: under an exemption granted for a historical one. The phrase list above cannot tell the two
-#: apart — "the PR gate … was deleted" contains "pr gate" exactly as a live claim would — and a
-#: negation-aware scan over model-facing prose is a worse trade than one named row: this repository
-#: keeps the reasoning that led to a decision on purpose, so these lines are the point rather than
-#: residue.
-#:
-#: The phrase is a fragment of the *matching line*, not of the sentence's point — this one's
-#: "was deleted (`D-2026-09-05-…`)" is on the line after the one the scan flags, and an exemption
-#: that has to hold a sentence across a wrap would break on a reflow rather than on a claim.
+#: Keyed by `path:line-text`, so a file cannot pick up a second, live claim under an exemption for a
+#: historical one. The phrase is a fragment of the matching line, so a reflow does not break it.
 _GATE_CLAIM_HISTORICAL = {
     "safety-screening/SKILL.md": "and the PR gate over agent-written knowledge",
 }
 
 
 def test_no_model_facing_bo_text_claims_a_recommendation_is_reviewed_before_it_lands() -> None:
-    """`connector.yaml`'s description is the tool description the model reads on every turn.
+    """No model-facing BO text claims a recommendation is reviewed before it lands.
 
-    It said `start_optimization_campaign` "opens its recommendation as a PR-gated note for human
-    review". `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed that gate and the
-    proposal queue behind it: `ConnectorJobWorkflow` now writes the note straight into the graph,
-    carrying `created_by: agent`. So the agent was telling a chemist their recommendation would be
-    checked by a person before it landed, and it landed immediately — a claim about a control that
-    does not exist, in the direction that overstates safety.
-
-    An absence test rather than a rewrite, in the shape
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` established: whoever
-    re-adds the claim has to add the producer too.
+    Notes are written straight into the graph with `created_by: agent`
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so a description promising human
+    review overstates safety. Whoever re-adds the claim must add the review too.
     """
     corpus = _model_facing_text()
     assert len(corpus) > 1, (
@@ -429,10 +379,7 @@ def test_no_model_facing_bo_text_claims_a_recommendation_is_reviewed_before_it_l
 def test_no_historical_gate_exemption_is_unspent() -> None:
     """An exemption whose line has gone is a permission nobody spends — the register's other half.
 
-    `_GATE_CLAIM_HISTORICAL` silences a line; a row whose line has been reworded or deleted goes on
-    silencing whatever lands at that path next. This is the same second half
-    `test_no_exemption_outlives_its_migration` gives the migration registers and
-    `test_no_retired_test_citation_is_unspent` gives the ADR one.
+    A row whose line was reworded or deleted would go on silencing whatever lands at that path next.
     """
     corpus = {f"{path.parent.name}/{path.name}": path.read_text() for path in _model_facing_text()}
     unspent = sorted(
@@ -448,13 +395,8 @@ def test_no_historical_gate_exemption_is_unspent() -> None:
 def _model_facing_text() -> list[pathlib.Path]:
     """Every file whose words reach the model: a tool description, or an injected skill.
 
-    **Scoped to the BO bundle until 2026-09-11, which made it a rule about one directory.** The
-    claim it refuses — that a recommendation is reviewed before it lands — is not a BO-specific
-    thing to say, and mutation testing put the identical sentence into a root `skills/*/SKILL.md`
-    and watched this pass. There are 28 skills under that root, every one of them injected into the
-    prompt by `SkillsMiddleware`, and every `connector.yaml` description is read on every turn.
-    So the corpus is the whole model-facing surface, and this test's name says "model-facing"
-    rather than "BO" because that is what it now means.
+    The claim refused is not BO-specific, so the corpus is every `connector.yaml` description and
+    every root `skills/*/SKILL.md`.
     """
     return [
         *sorted(_REPO.glob("src/chemclaw/connectors/*/connector.yaml")),

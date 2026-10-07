@@ -1,9 +1,7 @@
-"""Behavioral tests for ELN ingestion (plan Phase 4), all runnable without a server.
+"""Behavioral tests for ELN ingestion, all runnable without a server.
 
-Covers the ORD schema, the RDKit+mass-balance validator, the JSON adapter (structured and
-free-text mapping), the reaction-note mapping, and the ingest + sync flow into in-memory
-fingerprint stores and a fake PR-gate — the CHECKMATE 4 chain "ELN entry → validated note +
-fingerprint-indexed", proven end to end without a database or git.
+Covers the ORD schema, the RDKit + mass-balance validator, the JSON and ORD adapters, the
+reaction-record mapping, and the ingest and sync flow into in-memory stores.
 """
 
 import asyncio
@@ -65,9 +63,7 @@ _EPOCH = datetime.min.replace(tzinfo=UTC)
 def _labels() -> InMemoryLabelIndex:
     """A throwaway label index for a test that only cares that the record phase is written.
 
-    Named rather than inlined because every ingest call site needs one, and a test that had to
-    construct it positionally would drift from the production signature the first time an
-    argument moves.
+    Named so every call site follows the production signature when an argument moves.
     """
     return InMemoryLabelIndex()
 
@@ -160,15 +156,10 @@ def test_dimerization_passes_mass_balance() -> None:
 
 
 def test_prose_conditions_stay_on_the_step_that_states_them() -> None:
-    """A number read out of prose is the *step's*, and it is not promoted to the run's setpoint.
+    """A number read out of prose stays on the step that states it, not on the run's setpoint.
 
-    The transcription tier is ungated on the recorded grounds that it infers nothing
-    (`D-2026-08-25`), and this is the line where that stopped being true: the headline conditions
-    fell back to the **first** regex match in the whole procedure, so a run charged at 65 °C over
-    2.5 h and then held at 140 °C for 18 h was stored — in the typed columns a chemist compares
-    runs on, with nothing marking it as derived — as a reaction run at 65 °C for 2.5 h. The prose
-    is preserved verbatim either way, and each segment keeps the numbers *it* states, which is the
-    scope those numbers actually have.
+    The transcription infers nothing: a run charged at 65 °C and then held at 140 °C must not be
+    stored as a 65 °C run in the typed columns chemists compare on.
     """
     raw = RawEntry(
         entry_id="e1",
@@ -327,9 +318,8 @@ def _prose_entry(procedure: str) -> RawEntry:
 def _prose_temperature(procedure: str) -> float | None:
     """The temperature the prose states, read where it is kept: on the step that says it.
 
-    Read through the adapter rather than off the pattern, because what is being pinned is what a
-    reader of the record sees. Since `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` that
-    is the step's own value — the run's `temperature_c` stays absent unless the entry recorded one.
+    Read through the adapter, since what is pinned is what a reader of the record sees; the run's
+    `temperature_c` stays absent unless the entry recorded one.
     """
     steps = JsonExportAdapter().map_to_ord(_prose_entry(procedure)).steps
     return steps[0].temperature_c if steps else None
@@ -417,10 +407,8 @@ def test_fetch_logs_the_skipped_corrupt_file(
 def _filed_refusals(monkeypatch: pytest.MonkeyPatch, module: str) -> dict[str, dict[str, str]]:
     """Capture what an adapter files in the rejection ledger, without a database under it.
 
-    The ledger write is the half of these findings that matters most: an entry that vanishes with a
-    WARNING is a question nobody can be answered (`D-2026-08-27-a-refused-record-is-a-question-
-    somebody-will-ask`), and a log line is not queryable. `record_refusals` is patched at the
-    adapter's own import site so what is asserted is the call that adapter makes.
+    A refused entry must be queryable, not just a log line. Patched at the adapter's own import site
+    so the asserted call is the one that adapter makes.
     """
     filed: dict[str, dict[str, str]] = {}
 
@@ -434,22 +422,11 @@ def _filed_refusals(monkeypatch: pytest.MonkeyPatch, module: str) -> dict[str, d
 async def test_one_non_utf8_json_export_does_not_abort_the_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A file the codec cannot read costs itself, like every other unreadable export.
+    """One non-UTF-8 JSON export costs only itself, and is filed in the rejection ledger.
 
-    The twin of `test_one_non_utf8_ord_export_does_not_abort_the_directory`, on the adapter that
-    `data_sources` **ships enabled**. `UnicodeDecodeError` derives from `ValueError`, so it is a
-    *sibling* of `json.JSONDecodeError` rather than a child, and it is not an `OSError` — the file
-    opens and reads fine, the bytes are simply not UTF-8 — so it escaped the enumerated `except`,
-    escaped `asyncio.to_thread` and aborted `fetch_new_entries`. Driven with three exports in one
-    drop directory, the middle one latin-1 with `heat to 60°C`: the fetch raised and **neither** of
-    the two well-formed files was returned, against this method's own skip-and-continue contract and
-    with nothing in the rejection ledger, because the handler that writes it never ran.
-
-    The ordering is load-bearing: the bad file sorts in the middle, so under the defect the first
-    file is parsed and then lost with the rest — the assertion below fails on an empty list.
-
-    Permanent, not transient, which is why the ledger row matters here more than elsewhere: the file
-    stays in the directory, so every later run fails identically and the cursor never advances.
+    `UnicodeDecodeError` is a `ValueError` but neither a `JSONDecodeError` nor an `OSError`, so it
+    needs its own handling. The bad file sorts in the middle, so an abort would lose the first file
+    too. The failure is permanent, which is why the ledger row matters.
     """
     filed = _filed_refusals(monkeypatch, "json_adapter")
     _write_entry(tmp_path / "a-good.json", "a", "2026-01-01T00:00:00Z")
@@ -476,16 +453,10 @@ async def test_one_non_utf8_json_export_does_not_abort_the_directory(
 async def test_two_json_exports_sharing_one_entry_id_are_both_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One id claimed by two files is not two records, and it used to be reported as two.
+    """Two JSON exports claiming one entry id are both refused.
 
-    `reaction_records` is keyed `(ingest_source, reaction_id)` with every column refreshed on
-    conflict, so the second write replaces the first entirely — and `sync_entries` appended both to
-    `ingested`. Driven before this: `files=2 entries returned=2 ids=['EXP-88', 'EXP-88']`, one
-    experiment absent from the corpus, and a summary saying two arrived.
-
-    Both are refused rather than one kept, for the reason `records._one_of` gives about the same
-    ambiguity one layer up: returning either is a coin flip that reads as a fact. The ledger row
-    names both files, which is what makes the loss answerable.
+    Records are keyed `(ingest_source, reaction_id)` and refreshed on conflict, so the second would
+    silently replace the first. Keeping either is a coin flip; the ledger row names both files.
     """
     filed = _filed_refusals(monkeypatch, "json_adapter")
     for name in ("batch1_run7.json", "batch2_run7.json"):
@@ -504,11 +475,10 @@ async def test_two_json_exports_sharing_one_entry_id_are_both_refused(
 async def test_two_ord_exports_sharing_one_reaction_id_are_both_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The ORD adapter is wired to the same rule, because its key collides the same way.
+    """The ORD adapter reaches the same duplicate-id refusal.
 
-    Separate from the JSON case rather than parametrised with it: the two adapters read a different
-    id field out of a different shape, and what is being checked is that *this* one reaches the
-    shared refusal — the half a parametrised fixture would hide behind one construction.
+    Not parametrised with the JSON case: the two adapters read a different id field out of a
+    different shape, and each must reach the shared refusal.
     """
     filed = _filed_refusals(monkeypatch, "ord_adapter")
     for name in ("one.json", "two.json"):
@@ -543,12 +513,10 @@ async def test_two_ord_exports_sharing_one_reaction_id_are_both_refused(
 async def test_a_falsy_stated_entry_id_is_not_silently_the_file_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stated: object, expected_id: str | None
 ) -> None:
-    """`payload.get("id") or path.stem` is truthiness, and three falsy ids are not one answer.
+    """A falsy stated entry id is not silently replaced by the file name.
 
-    Measured before this: `id=0`, `id=""` and `id=false` in `EXP_2026_0412.json` **all** produced
-    `entry_id='EXP_2026_0412'`, and the record was then stored, cited and asked about under an id
-    the source never used. An integer `0` is an id; a blank string and a JSON boolean are a stated
-    field that names nothing, and the file name is not what the source said.
+    An integer `0` is an id; a blank string or a JSON boolean names nothing and is refused, rather
+    than storing the record under an id the source never used.
     """
     filed = _filed_refusals(monkeypatch, "json_adapter")
     payload: dict[str, Any] = {
@@ -569,11 +537,9 @@ async def test_a_falsy_stated_entry_id_is_not_silently_the_file_name(
 
 
 async def test_an_entry_with_no_id_field_at_all_is_still_named_by_its_file(tmp_path: Path) -> None:
-    """The documented fallback, pinned beside the refusal above so the two cannot merge.
+    """An export with no `id` key at all is still named by its file.
 
-    An export that carries no `id` key has no id but its file name, which is the only identifier
-    such a file has and is what this adapter has always used. Refusing it would break every
-    deployment whose ELN names its exports rather than stamping them.
+    The documented fallback, pinned beside the refusal above so the two cannot merge.
     """
     (tmp_path / "EXP_2026_0412.json").write_text(
         json.dumps(
@@ -668,11 +634,10 @@ def test_late_arrival_warning_is_one_bounded_line(
 def test_the_late_arrival_line_names_the_source_rather_than_the_format(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Two drop directories, two lines — and the line has to say which one it is about.
+    """The late-arrival warning names the source rather than the format.
 
-    `name` reaches every other warning these adapters log, and not this one, which is the one about
-    files that are *silently never ingested*: a deployment running two drop directories got two
-    identical lines naming a format ("ELN JSON export", "ORD export") and neither source.
+    A deployment with two drop directories must be able to tell which one has files that will never
+    be ingested.
     """
 
     async def _run() -> None:
@@ -968,11 +933,9 @@ class _ListAdapter:
 
 
 async def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
-    """An entry id that is not a valid note slug is one rejection, never a batch abort (G4).
+    """An entry id that is not a valid note slug is one rejection, never a batch abort.
 
-    `Note(id="reaction-EXP 2024/001")` raises a pydantic ValidationError, which is not a
-    ChemclawError — it must still be caught per entry, or one routinely-named ELN entry
-    permanently halts the whole sync source.
+    The pydantic `ValidationError` is not a `ChemclawError` and must still be caught per entry.
     """
     bad_id = _good_entry("EXP 2024/001", datetime(2026, 1, 1, tzinfo=UTC))
     good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
@@ -998,21 +961,11 @@ async def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
 
 
 async def test_a_nul_byte_in_free_text_is_one_rejection_not_a_half_written_batch() -> None:
-    """Free text the corpus cannot store is bad data per entry, refused before anything is written.
+    """Free text the corpus cannot store is refused per entry, before anything is written.
 
-    A NUL byte anywhere in an ELN's prose — a procedure, a hypothesis, an impurity name, an
-    unmapped attribute — reaches `reaction_records.body`, and Postgres refuses a NUL in a `text` or
-    `jsonb` value outright. `psycopg.DataError` is neither a `ChemclawError` nor a pydantic
-    `ValidationError`, so it used to escape the reject-and-continue loop at the *last* of
-    `ingest_reaction`'s five writes: the entry's fingerprint and label rows were already committed
-    while its record was not, no `ingest_rejections` row was written (the ledger write lives in
-    `durable/eln_sync.py`, after this function returns), and the activity failed identically on
-    every retry — so the cursor never advanced and every later entry of that source was starved.
-
-    Refusing the *input* is what makes it an ordinary rejection: it fails at record construction,
-    before the first store call, so nothing is written at all and the reason reaches the ledger
-    like any other bad-data refusal. Sanitising instead was the alternative and is the wrong one
-    here — see `ingest/rejections.py::_storable` for where the opposite trade is right, and why.
+    Postgres refuses a NUL in `text` and `jsonb`, and `psycopg.DataError` at the last write would
+    leave fingerprint and label rows committed, no ledger row, and the source's cursor stuck
+    forever. Refusing at record construction makes it an ordinary rejection.
     """
     poisoned = RawEntry(
         entry_id="EXP-2",
@@ -1049,12 +1002,9 @@ async def test_a_nul_byte_in_free_text_is_one_rejection_not_a_half_written_batch
 
 
 def test_a_lone_surrogate_in_free_text_is_refused_the_same_way() -> None:
-    r"""The other half of unstorable: a truncated `\\u` escape in a JSON export.
+    r"""A lone surrogate in free text is refused the same way.
 
-    `json.loads('"\\ud800"')` returns a lone surrogate happily, so a source whose exporter cut an
-    escape puts a `str` in a field that no UTF-8 consumer can accept — psycopg refuses it when it
-    encodes the parameter, one step before Postgres would. `kg.note._reject_unencodable` states
-    this rule for a note; a transcription is written to the same kind of storage and needs it too.
+    `json.loads` accepts a truncated `\\u` escape, but psycopg cannot encode the result.
     """
     with pytest.raises(ValidationError) as raised:
         record_from_ord_reaction(
@@ -1070,11 +1020,9 @@ def test_a_lone_surrogate_in_free_text_is_refused_the_same_way() -> None:
 
 
 def test_a_nul_in_a_condition_the_body_never_renders_is_refused_too() -> None:
-    """The check is on the record, not on the body — `conditions` is a JSONB column of its own.
+    """A NUL in a condition the body never renders is refused too.
 
-    An impurity name reaches `ProcessConditions.major_impurity`, and `jsonb` refuses a NUL exactly
-    as `text` does. Checking only the rendered body would pass this record and fail the write, the
-    defect one field away from where it was found.
+    The check is on the record, because `conditions` is a JSONB column of its own.
     """
     with pytest.raises(ValidationError) as raised:
         ReactionRecord(
@@ -1087,22 +1035,12 @@ def test_a_nul_in_a_condition_the_body_never_renders_is_refused_too() -> None:
 
 
 def test_a_non_finite_condition_is_refused_where_a_nul_is() -> None:
-    """The other value `jsonb` will not take, one field away from the NUL above.
+    """A non-finite condition is refused at model validation, where a NUL is.
 
-    `NaN` and `±Infinity` are not JSON, and Postgres says so only at the wall — as an
-    `InvalidTextRepresentation` naming a *token*, from a driver exception that
-    `chemclaw.ingest.eln.sync` does not catch. So this has to be a `ValidationError` here.
-
-    Four of the five numeric fields were already covered *by accident*, and only three of them
-    fully: `ge`/`le` bounds reject NaN because every comparison against it is false. That left
-    `temperature_c`, which has no bounds and is the field a Kelvin setpoint arrives on, and
-    `time_h`, whose `ge=0.0` admits `+Infinity`. An accidental guard is asserted here so that
-    removing a bound cannot silently remove a guarantee nobody wrote down.
-
-    **On the model, not on the record.** `ReactionRecord`'s storable walk refuses a NUL by
-    inspecting strings, and re-validates nothing: a `ProcessConditions` handed to it has already
-    been validated at construction, which is every path that builds one. So this is where the
-    refusal has to be, and there is no legacy row to migrate — Postgres never accepted one.
+    `NaN` and `±Infinity` are not JSON and Postgres refuses them with an error sync does not catch.
+    Bounded fields reject NaN by accident of comparison; `temperature_c` (no bounds) and `time_h`
+    (`ge=0` admits `+Infinity`) need the explicit check, and asserting all of them keeps the
+    accidental guards from being removed silently.
     """
     for field in (
         "temperature_c",
@@ -1123,16 +1061,10 @@ def test_a_non_finite_condition_is_refused_where_a_nul_is() -> None:
 
 
 def test_the_next_field_added_to_a_record_cannot_forget_the_storable_check() -> None:
-    """The walk's own claim, driven by actually adding a field to the record.
+    """A field added to the record cannot skip the storable check.
 
-    `_walk_storable` handled `str` and `BaseModel` only, while its docstring named
-    `kg.note._walk_encodable` as "the same shape over the same problem" — and that one walks lists
-    of both. No field of `ReactionRecord` is a list today, which is exactly why nothing caught it:
-    the first `list[str]` or `list[Model]` added here would walk straight past the guard into the
-    `psycopg.DataError` at the last of `ingest_reaction`'s writes that the guard exists to prevent.
-
-    A subclass rather than a synthetic model, because the claim is about *this* record gaining a
-    field, and the validator it has to reach is the record's own.
+    The walk must cover lists of strings and models as well as scalars. A subclass adding a field
+    exercises the record's own validator.
     """
 
     class _RecordWithLists(ReactionRecord):
@@ -1185,18 +1117,11 @@ async def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> No
 
 
 async def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> None:
-    """A typo in an amendment date must not delete a real experiment from the corpus.
+    """A future-dated amendment stamp costs the cursor, not the entry.
 
-    The guard exists to keep an implausible timestamp out of the *stored cursor*, because nothing
-    ever lowers one. It was moved onto `entry_window` — the value the cursor takes — and that
-    silently gave it a second job: an entry created in 2026 and amended with a typo'd 2062 was
-    rejected outright, and, because the fetch filters on the same watermark, re-fetched and
-    re-rejected on every run, forever. Its `created_at` is perfectly sane and its chemistry is
-    real. So the entry ingests and only the cursor refuses the value.
-
-    The other half — a *creation* date beyond the wall clock, which means the record is not about
-    anything that has happened — is still a rejection, and
-    `test_future_dated_entry_is_rejected_and_does_not_poison_cursor` pins it.
+    The guard keeps an implausible timestamp out of the stored cursor, which is never lowered; the
+    entry's own `created_at` is sane, so it ingests. A future creation date is still a rejection
+    (see `test_future_dated_entry_is_rejected_and_does_not_poison_cursor`).
     """
     amended = _good_entry("amended", datetime(2026, 1, 1, tzinfo=UTC)).model_copy(
         update={"modified_at": datetime(2062, 7, 23, tzinfo=UTC)}
@@ -1219,10 +1144,8 @@ async def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> 
 
     assert summary.ingested == ["amended", "good"]
     assert summary.rejected == []
-    # The cursor is what the batch's *plausible* entries reached. The amended one contributes
-    # nothing to it — not even its own sane `created_at`, because the fetch filters on the
-    # watermark and the simplest safe answer is to leave the cursor where the rest of the
-    # batch put it. So the entry is fetched again next run, as the warning says.
+    # The cursor is what the batch's plausible entries reached; the amended entry contributes
+    # nothing, so it is fetched again next run, as the warning says.
     assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # not 2062
 
 
@@ -1251,10 +1174,8 @@ async def test_sync_fetches_an_overlap_window_behind_the_cursor(
     assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
     assert summary.ingested == ["late"]
     assert summary.skipped_existing == []  # its note is not merged yet, so it ingests
-    # And it is flagged as awaiting merge, which is the honest report even on a first sync:
-    # the entry sits inside the replay window with no merged note, so the *next* run fetches
-    # and proposes it again. "Will come back until someone merges it" is what a single run can
-    # establish; "was proposed before" is not (this entry never was).
+    # Flagged as awaiting merge: inside the replay window with no merged note, the next run fetches
+    # it again.
     assert summary.next_cursor == cursor  # the cursor never moves backwards
 
 
@@ -1265,11 +1186,9 @@ _SEED_SOURCE = "test-eln"
 
 
 async def _seed_record(store: InMemoryReactionRecordStore, entry: RawEntry) -> None:
-    """Store the record for `entry` — exactly what an earlier sync run leaves behind.
+    """Store the record for `entry`, exactly what an earlier sync run leaves behind.
 
-    Rendered from the entry rather than stubbed, because the sync compares the stored *body* and
-    not only its id: a stub would make "already ingested" and "unchanged" indistinguishable, which
-    is what dropped every in-place ELN amendment before the body comparison existed.
+    Rendered from the entry because the sync compares the stored body, not only its id.
     """
     await store.record(
         [record_from_ord_reaction(JsonExportAdapter().map_to_ord(entry))], _SEED_SOURCE
@@ -1279,13 +1198,10 @@ async def _seed_record(store: InMemoryReactionRecordStore, entry: RawEntry) -> N
 async def test_sync_skips_overlap_entry_whose_note_already_merged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An overlap-window entry whose note is already merged is skipped, not re-ingested.
+    """An overlap-window entry already stored with the same body is skipped, not re-ingested.
 
-    The hourly overlap replay must not pay fingerprint upserts plus a full PR-gate git
-    cycle per already-ingested entry. What proves the entry was fully ingested is a merged note
-    whose **body matches** — not merely one with the same id, which is what this checked before and
-    is why every in-place ELN amendment was dropped. An unchanged entry costs a lookup and is
-    reported under `skipped_existing`, never inflating `ingested`.
+    Proof of full ingestion is a matching body, not just a matching id, so in-place amendments still
+    land. An unchanged entry costs a lookup and is reported under `skipped_existing`.
     """
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     cursor = datetime(2026, 1, 2, tzinfo=UTC)
@@ -1337,9 +1253,8 @@ async def test_sync_without_overlap_fetches_from_the_cursor_itself(
 ) -> None:
     """`apply_overlap=False` fetches from `since` (still inclusive), not the overlap floor.
 
-    The workflow's chunk loop passes this for every chunk after the first, so a backlog
-    drain replays the overlap window once per run instead of once per chunk — while the
-    inclusive same-second boundary entry is still picked up, preserving the cursor contract.
+    The chunk loop passes this after the first chunk, so a backlog drain replays the window once per
+    run while still picking up the same-second boundary entry.
     """
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
     cursor = datetime(2026, 1, 2, tzinfo=UTC)
@@ -1370,9 +1285,7 @@ def test_overlap_rerejection_logs_debug_not_warning(
 ) -> None:
     """A replayed rejection (inside the overlap window) logs at DEBUG, a fresh one at WARNING.
 
-    The cursor advances past sane-timestamped rejections, so an overlap-window rejection was
-    already warned about when first seen — re-warning it hourly would bury real new failures.
-    Both still appear in the summary, so the run's report stays complete.
+    Re-warning hourly would bury new failures; both still appear in the summary.
     """
     since = datetime(2026, 1, 2, tzinfo=UTC)
     bad_payload = {"reactants": [{"smiles": "CCO"}]}  # missing products → rejected
@@ -1472,32 +1385,20 @@ def test_nested_yield_object_is_a_mapping_error() -> None:
 
 
 def test_a_single_product_reaction_note_says_which_compound_it_is_about() -> None:
-    """The largest note class in the graph carried no `compound_smiles` at all.
+    """A single-product reaction note carries `compound_smiles`.
 
-    Nothing that groups by compound could therefore ever see a reaction: `kg.conflicts` groups on
-    `(type, compound_smiles)`, and every by-compound question starts there. The structure was in
-    the record the whole time — it goes into the body as part of the reaction SMILES — it simply
-    never reached the field.
+    Everything that groups by compound, `kg.conflicts` included, starts from that field.
     """
     assert record_from_ord_reaction(_ester()).compound_smiles == "CCOC(C)=O"
 
 
 def test_the_file_drop_adapters_stamp_a_date_they_read_off_the_entry_as_entry_dated() -> None:
-    """A date filled in from the entry's write time must say so, for both shipped ELN sources.
+    """Both file-drop adapters mark a date read off the entry's write time as entry-dated.
 
-    `date_source` exists to separate "the source stated when the run happened" from "the seam
-    filled it in when the record was written" (`D-2026-08-26-silence-is-not-a-successful-run`), and
-    both file-drop adapters were the case it was added for: neither shipped fixture carries an
-    experiment date at all — the JSON ELN's only date field is `timestamp`, the ORD record's is
-    `provenance.record_created.time` — so each mapped `raw.created_at.date()` onto the record and
-    left the stamp at its `"stated"` default. `memory/progression.py::Progression.entry_dated`
-    reads that stamp
-    to weaken the caveat, so for the two shipped sources it was always empty and the campaign note
-    asserted "Runs in the order they were performed" over an afternoon of transcription.
-
-    The date is unchanged; only the claim about where it came from is. `DatedIngest` supplies both
-    in one `model_copy`, and it is the one construction point every production reader resolves
-    through, so the two adapters have nothing left to do here.
+    Neither shipped fixture carries an experiment date, so the date comes from the record's creation
+    time, and `Progression.entry_dated` reads the stamp to weaken the run-order caveat.
+    `DatedIngest` supplies both in one `model_copy` at the one construction point readers resolve
+    through.
     """
     written = datetime(2026, 3, 10, 9, tzinfo=UTC)
     json_raw = RawEntry(
@@ -1527,14 +1428,10 @@ def test_the_file_drop_adapters_stamp_a_date_they_read_off_the_entry_as_entry_da
 
 
 def test_a_run_whose_only_recorded_conditions_are_zero_keeps_them() -> None:
-    """Absent means "not recorded", never "zero" — and the emptiness test used to say otherwise.
+    """A run whose only recorded conditions are zero keeps them.
 
-    `ProcessConditions`' own docstring states the rule and names what reads it: the distinction
-    `comparison.MISSING` renders and `drop_empty_columns` reads. A 0 °C ice bath is the commonest
-    cryo setpoint there is, a 0% yield is a complete failure — the case `OutcomeClass` exists to
-    preserve — and a truthiness test over the field values cannot tell either from silence. The
-    body still rendered the bullet, so the record said one thing in prose and another in the
-    column every numeric comparison actually reads.
+    Absent means "not recorded", never zero: a 0 °C bath and a 0% yield are real values that a
+    truthiness test cannot tell from silence.
     """
     ice_bath = OrdReaction(
         reaction_id="EXP-cryo",
@@ -1576,16 +1473,11 @@ def test_a_multi_product_reaction_names_no_principal_compound() -> None:
 
 
 def test_solvent_and_catalyst_go_in_the_agent_slot() -> None:
-    """The **record** form shows the solvent and the catalyst in the slot that says what they are.
+    """The record form puts the solvent and catalyst in the agent slot.
 
-    A notation claim and only that. This docstring used to say the three-part form was what stopped
-    the solvent dominating DRFP similarity; it never did — `DrfpEncoder.internal_encode` folds the
-    agent slot back onto the reactants, so the two forms encode identically. What changes the bits
-    is `transformation_smiles`, which leaves those species out; the measurements are in
-    `tests/test_rxnfp.py`.
-
-    A *reagent* stays on the left in both forms: a base or an oxidant participates
-    stoichiometrically and is part of what the transformation is.
+    A notation claim only: DRFP folds the agent slot back onto the reactants, so it does not change
+    similarity (`transformation_smiles` does; see `tests/test_rxnfp.py`). A reagent stays on the
+    left, since it participates stoichiometrically.
     """
     reaction = OrdReaction(
         reaction_id="rxn-agents",
@@ -1611,12 +1503,10 @@ def test_a_reaction_with_no_agents_still_renders_the_three_part_form() -> None:
 
 
 def test_the_record_form_keeps_the_solvent_the_fingerprint_form_drops_it() -> None:
-    """The two forms are two questions, and a note must keep answering the first one.
+    """The record form keeps the solvent; the fingerprint form drops it.
 
-    `reaction_smiles` is what a reaction note, a campaign step list and a playbook's representative
-    reaction render — and the solvent is a headline condition of a process-development run, so a
-    note that no longer named it would be a real loss in the graph's largest note class. That is
-    the whole reason the exclusion is a second method rather than an edit to this one.
+    Notes, campaign step lists and playbooks render the record form, and the solvent is a headline
+    condition, so the exclusion is a second method rather than an edit to this one.
     """
     reaction = OrdReaction(
         reaction_id="rxn-two-forms",
@@ -1638,16 +1528,10 @@ def test_the_record_form_keeps_the_solvent_the_fingerprint_form_drops_it() -> No
 async def test_an_amended_entry_is_re_proposed_rather_than_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A yield corrected after assay must reach the graph, not vanish into `skipped_existing`.
+    """An amended entry is re-written rather than dropped as already ingested.
 
-    The check was on the note *id*, which treats "already seen" and "unchanged" as the same thing.
-    They are not: an ELN amends an entry in place — a yield revised, an impurity added, a
-    retraction — while keeping its `created_at`, so every correction was silently dropped and
-    reported as an already-ingested replay. The justification given was "ELN exports are
-    immutable", which is an assumption about someone else's system.
-
-    The corrected entry is simply re-proposed, so the PR-gate shows a reviewer the diff. That is
-    what a git-backed graph is for, and why an amendment needs no separate note-versioning scheme.
+    An ELN amends entries in place (a corrected yield, a retraction) while keeping `created_at`, so
+    "already seen" is not "unchanged".
     """
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     cursor = datetime(2026, 1, 2, tzinfo=UTC)
@@ -1688,11 +1572,9 @@ async def test_an_amended_entry_is_re_proposed_rather_than_dropped(
 async def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The two reports are exclusive: a rejection must not also show up as awaiting merge.
+    """An entry that fails to ingest is reported only as rejected, not also as awaiting merge.
 
-    The unmerged-replay flag is decided before `ingest_reaction` runs (it needs the mapped note)
-    and recorded after it, so a bad entry inside the replay window — which is exactly where a
-    rejection is deterministic and repeats every run — reports one outcome, not two.
+    The replay flag is decided before ingestion and recorded after it, so one outcome is reported.
     """
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     cursor = datetime(2026, 1, 2, tzinfo=UTC)
@@ -1717,11 +1599,10 @@ async def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
 async def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A source that stamps `modified` on every export must not re-propose the whole corpus.
+    """An unchanged entry stamped `modified` still costs nothing.
 
-    The comparison is on content, not on the presence of a modification timestamp — otherwise an
-    exporter that touches every record would turn each sync into a full re-submission, which is a
-    worse failure than the one being fixed because it is loud and continuous.
+    The comparison is on content, so an exporter that touches every record does not cause a full
+    re-submission on each sync.
     """
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     cursor = datetime(2026, 1, 2, tzinfo=UTC)
@@ -1744,12 +1625,10 @@ async def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
 
 
 def test_an_amended_export_re_enters_the_fetch_window(tmp_path: Path) -> None:
-    """An adapter filtering on creation time alone can never see an in-place correction.
+    """An amended export re-enters the fetch window.
 
-    This is the half upstream of the sync's content check: an ELN amends an entry and leaves its
-    `timestamp` alone, so an entry created before the cursor is never fetched again no matter what
-    changed in it. `entry_window` filters on the later of the two, which is what brings the
-    corrected record back into view.
+    An ELN amends an entry without touching `timestamp`, so `entry_window` filters on the later of
+    the two.
     """
     created = datetime(2026, 1, 1, tzinfo=UTC)
     cursor = datetime(2026, 1, 5, tzinfo=UTC)
@@ -1852,13 +1731,9 @@ def test_ord_compound_resolves_from_a_known_reagent_name(tmp_path: Path) -> None
 
 
 def test_ord_compound_known_only_by_a_shorthand_is_carried_as_that_name(tmp_path: Path) -> None:
-    """A paper's internal shorthand is not a structure, and inventing one would be worse.
+    """An ORD compound known only by a paper's shorthand is carried as that name, with no structure.
 
-    This is the real Perera flow-Suzuki case: the source spreadsheet publishes the second
-    coupling partner only as `2a, Boronic Acid`. It used to refuse the whole reaction; since
-    `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` the name is carried
-    verbatim, with no structure, and the reaction is citation-only. What must not change is the
-    other half: no structure appears for it.
+    The reaction is citation-only; inventing a structure for the name would be worse than none.
     """
     reaction = _map_ord(tmp_path, [{"type": "NAME", "value": "2a, Boronic Acid"}])
     assert reaction.inputs == []
@@ -1885,11 +1760,8 @@ def _ord_reaction_with(**overrides: object) -> dict[str, object]:
 def test_ord_malformed_component_amount_is_treated_as_absent_not_crashed(tmp_path: Path) -> None:
     """A component whose `amount` is a list (not an object) never crashes the mapper.
 
-    A real exporter can produce this shape error. `_amount` used to call `.get()` straight on
-    the value, so this raised a bare `AttributeError` that escaped `map_to_ord`'s except clause
-    and would have aborted the whole sync batch (Ingest-1). Mirroring the sibling helpers
-    (`_measure`/`_temperature`), a malformed shape is treated the same as an absent one: the
-    component still maps, just with no mass/mole data.
+    A malformed shape is treated as absent, like the sibling helpers: the component maps with no
+    mass or mole data rather than raising an `AttributeError` that aborts the batch.
     """
     payload = _ord_reaction_with(
         inputs={
@@ -1937,17 +1809,11 @@ def _ord_charge(*amounts: dict[str, object]) -> dict[str, object]:
 def test_an_ord_reactant_charged_by_volume_reaches_the_record_and_its_scale(
     tmp_path: Path,
 ) -> None:
-    """`Amount` is a `oneof` over mass | moles | volume | unmeasured, and two of four were read.
+    """An ORD reactant charged by volume reaches the record and its scale.
 
-    A neat liquid reactant charged by volume is the ordinary case and every solvent is one. Driven
-    on a 9.3 g (10 mL) plus 40 g charge: the volumetric component came back `(None, None)`, `_scale`
-    reported **"40 g of reactants charged"** for a 49.3 g charge, and the charge sheet said "amount
-    not recorded" for a species whose amount the source *had* recorded. Under-reporting scale is the
-    direction `record._scale` argues matters — it makes a pilot batch read as a bench run — and this
-    reproduced it by a kind that function cannot see.
-
-    Not converted to grams: that needs a density this record does not carry, and inventing one would
-    present a derived number as a recorded one. A third labelled term is the honest form.
+    Neat liquids and solvents are charged by volume; ignoring it under-reports the scale. Not
+    converted to grams, since that needs a density the record does not carry; it is a third labelled
+    term.
     """
     payload = _ord_charge(
         {"volume": {"value": 10.0, "units": "MILLILITER"}},
@@ -1970,12 +1836,10 @@ def test_an_ord_reactant_charged_by_volume_reaches_the_record_and_its_scale(
 
 
 def test_an_ord_amount_the_source_declared_unmeasured_says_so(tmp_path: Path) -> None:
-    """`unmeasured` is a statement, not an absence, and it is the fourth arm of the `oneof`.
+    """An ORD amount the source declared `unmeasured` says so.
 
-    A catalytic or saturated charge is a real ORD message, so refusing the reaction over one would
-    lose a good record — it is carried as an attribute instead, which is where "whatever else the
-    source recorded about this species" belongs. The charge row then says the amount was not
-    recorded *and* why, rather than implying nobody wrote it down.
+    It is a statement, not an absence: carried as an attribute, so the charge row says why no amount
+    was recorded.
     """
     payload = _ord_charge({"unmeasured": {"type": "SATURATED"}})
     (tmp_path / "unmeasured.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -1993,13 +1857,11 @@ def test_an_ord_amount_the_source_declared_unmeasured_says_so(tmp_path: Path) ->
 def test_an_ord_amount_of_a_kind_this_ingest_cannot_read_is_refused_by_name(
     tmp_path: Path,
 ) -> None:
-    """After the four known kinds, an unread one can only be a kind ORD added since.
+    """An ORD amount of a kind this ingest cannot read is refused by name.
 
-    The defect this closes is a *silent* one — `(None, None)` for an amount the source stated — so
-    the remedy for a kind nobody has written a reader for is a refusal that names it and reaches the
-    rejection ledger, not a record that quietly under-reports its own scale. A malformed `amount`
-    that is not a mapping at all stays "treated as absent", which the sibling test above pins: that
-    one is a shape error, and this one is a statement in a vocabulary this code does not know.
+    After the four known kinds an unread one is a vocabulary this code does not know, so it is
+    refused into the ledger rather than silently under-reporting scale. A non-mapping `amount` is a
+    shape error and stays "absent".
     """
     payload = _ord_charge({"activity": {"value": 3.0, "units": "UNIT"}})
     (tmp_path / "unknown_kind.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -2016,10 +1878,7 @@ def test_an_ord_amount_of_a_kind_this_ingest_cannot_read_is_refused_by_name(
 def test_ord_malformed_workup_input_is_treated_as_absent_not_crashed(tmp_path: Path) -> None:
     """A workup whose `input` is a list (not an object) never crashes the mapper.
 
-    `_components` used to call `.get()` straight on the value, so a malformed workup `input`
-    raised a bare `AttributeError` reached through `_workup_step` (Ingest-1). Mirroring the
-    sibling helpers, the malformed shape now yields no components for that step rather than
-    crashing.
+    The malformed shape yields no components for that step.
     """
     payload = _ord_reaction_with(workups=[{"type": "FILTRATION", "input": [1, 2, 3]}])
     (tmp_path / "bad_workup.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -2049,13 +1908,10 @@ class _OrdListAdapter:
 
 
 async def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
-    """The batch-level proof: a malformed nested field never aborts the whole sync run.
+    """A malformed nested field never aborts the whole sync batch.
 
-    Reproduces the sync-aborting shape (Ingest-1) end to end through `sync_entries`: without the
-    `isinstance` guards in `_amount`/`_components`, the malformed entry's bare `AttributeError`
-    would escape `sync_entries`'s `except (ChemclawError, ValidationError)` entirely — aborting
-    the batch before the second entry is ever reached. With the guards, the malformed field maps
-    to "absent" (matching the sibling helpers) and both entries ingest in order.
+    End to end through `sync_entries`: without the `isinstance` guards the `AttributeError` escapes
+    the per-entry handler. With them the field maps to absent and both entries ingest in order.
     """
     malformed_payload = _ord_reaction_with(
         reactionId="malformed-amount",
@@ -2104,16 +1960,10 @@ async def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
 
 
 def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
-    """The round trip a chemist takes: a `similar_reactions` hit handed to `expand_note`.
+    """A `similar_reactions` hit id opens with `expand_note`.
 
-    `connectors.rxnfp.similar_reactions` used to return the fingerprint index's own key while the
-    ELN ingest stored the note under a `reaction-` prefix, so a hit could not be opened and the
-    chemist was told the procedure was not in the graph — with the note on disk. Asserted as an
-    equality between the two ends rather than against a literal, so the test still holds if the
-    prefix ever changes and fails if only one end changes.
-
-    The record is keyed on the bare ELN id and the citation carries the prefix, so the round trip
-    is now that `expand_note` strips exactly what `note_id_for_reaction` adds.
+    Asserted as an equality between the two ends rather than a literal, so it fails if only one end
+    changes: `expand_note` strips exactly what `note_id_for_reaction` adds.
     """
     reaction = _ester()
     cited = note_id_for_reaction(record_from_ord_reaction(reaction).reaction_id)
@@ -2121,16 +1971,10 @@ def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
 
 
 def test_an_impurity_known_only_by_its_rrt_is_named_rather_than_dropped() -> None:
-    """The remedy `Impurity._identifiable` prescribes, taken at the adapter that needed it.
+    """An impurity known only by its RRT is named rather than dropped.
 
-    That validator refuses a row carrying only `rrt` **and says where such a row belongs**: an RRT
-    is how a chemist refers to an unknown — "the RRT 0.94 peak" — and that reference is a name. The
-    decision was taken at the model and the action was never taken here, so the adapter dropped the
-    row two lines above the line that reads `rrt`, with a WARNING and nothing in the ledger
-    (in-entry drops are not filed). Driven: a three-row HPLC table came back with two rows, and
-    a table of unresolved peaks alone came back **empty** — a 1.9 area% peak and a 0.42% one gone,
-    and the record reading as though it carried no impurity profile at all. The largest peak in
-    a profile is routinely one of these.
+    `Impurity._identifiable` refuses an RRT-only row and prescribes naming it ("RRT 0.94 unknown");
+    the adapter applies that, so unresolved peaks, often the largest, stay in the profile.
     """
     entry = RawEntry(
         entry_id="E-rrt",
@@ -2161,11 +2005,10 @@ def test_an_impurity_known_only_by_its_rrt_is_named_rather_than_dropped() -> Non
 
 
 def test_an_impurity_row_that_identifies_nothing_at_all_is_still_dropped() -> None:
-    """The drop this keeps, pinned so the fix above cannot quietly become "never drop a row".
+    """An impurity row that identifies nothing at all is still dropped.
 
-    A row with no name, no structure and no *positive* retention time asserts nothing — a blank line
-    in an analytics table, or an `rrt` of 0, which `Impurity.rrt` refuses as not a chromatographic
-    observation. Dropped rather than rejected, so one such row cannot cost the reaction its record.
+    No name, no structure and no positive retention time asserts nothing. Dropped rather than
+    rejected, so one such row cannot cost the reaction its record.
     """
     entry = RawEntry(
         entry_id="E-blank",
@@ -2191,12 +2034,9 @@ def _with_impurities(*impurities: Impurity) -> OrdReaction:
 
 
 async def test_an_identified_impurity_is_findable_by_structure() -> None:
-    """An impurity question — "have we seen this one before?" — is a structure question.
+    """An identified impurity is findable by structure.
 
-    An impurity's SMILES used to reach the note *text* only, so the molecule it names was findable
-    by lexical search and invisible to `similar_molecules`/`substructure_matches` — the exact
-    inverse of the question. Asserted through the search, not through a record count: what matters
-    is that a chemist querying the structure gets the run back.
+    "Have we seen this one before?" is a structure question; asserted through the search.
     """
     rxn, mol, rec = (
         InMemoryFingerprintStore(),
@@ -2239,11 +2079,9 @@ async def test_an_impurity_with_no_structure_is_skipped_not_fatal() -> None:
 async def test_an_unparseable_impurity_structure_is_skipped_and_logged(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A malformed trace-impurity string must not cost the whole experiment.
+    """A malformed trace-impurity structure is skipped and logged, not fatal to the experiment.
 
-    `validate_ord` checks the reaction's own components, never the impurity profile, so a
-    structure the analytics software garbled reaches the fingerprinter unchecked. Dropping it
-    keeps the run; logging it keeps the drop visible.
+    `validate_ord` does not check the impurity profile, so the fingerprinter sees it unchecked.
     """
     rxn, mol, rec = (
         InMemoryFingerprintStore(),
@@ -2264,11 +2102,9 @@ async def test_an_unparseable_impurity_structure_is_skipped_and_logged(
 
 
 async def test_a_reaction_record_is_reachable_by_its_project_tag() -> None:
-    """`gather_evidence(tag=…)` is documented as the project filter and was inert on reactions.
+    """A reaction record is reachable by its project tag through `gather_evidence(tag=…)`.
 
-    Proven through the store's own eligibility gate rather than by reading a field: the project is
-    worth recording only because a filtered sweep reaches the record, and a wrong tag must still
-    exclude it.
+    Proven through the store's eligibility gate; a wrong tag must still exclude it.
     """
     store = InMemoryReactionRecordStore()
     record = record_from_ord_reaction(_ester().model_copy(update={"project": "prj-alpha"}))
@@ -2320,15 +2156,10 @@ def test_scale_falls_back_to_millimoles_when_no_mass_was_recorded() -> None:
 
 
 def test_a_mixed_unit_record_reports_both_charges_rather_than_dropping_one() -> None:
-    """A record charging one reactant by mass and another by moles must report both.
+    """A record charging one reactant by mass and another by moles reports both.
 
-    `Component` allows mass and moles independently, so "an ELN records one or the other" is true
-    of records and not of the schema — and preferring mass whenever *any* reactant had one dropped
-    the rest.
-
-    Here the 120 mmol of acetic acid is ~7.2 g, so the old rule reported "4.6 g" for an 11.8 g
-    charge: a 2.5x under-report of the single number this bullet exists to make legible, in the
-    direction that makes a pilot batch read as a bench run.
+    `Component` allows either per row, and preferring mass whenever any row had one under-reports a
+    mixed charge, making a pilot batch read as a bench run.
     """
     note = record_from_ord_reaction(
         _charged(
@@ -2363,21 +2194,11 @@ def test_the_charge_sheet_lists_every_input_with_what_was_recorded() -> None:
 
 
 def test_a_number_this_system_computed_is_rendered_without_its_binary_tail() -> None:
-    """A dry-ice bath is −78 °C, and a chemist reading `-77.99999999999997 °C` sees a broken system.
+    """A number this system computed is rendered without its binary tail.
 
-    `195.15 - 273.15` is exact in decimal and not in binary, so every Kelvin setpoint that is not a
-    round number of degrees Celsius reached the note — and retrieval, and a human — carrying
-    seventeen digits of an artefact this system introduced. The same arithmetic is behind
-    `time_h` (minutes and seconds are scaled) and behind `mass_mg` (4.6 g becomes
-    `4600.000000000001`).
-
-    The rule is the boundary: **a number this system computed is rendered; a number the source
-    reported is echoed.** Yield, purity and impurity area are read verbatim out of the entry, so
-    there is nothing there to clean and their digits are the chemist's own.
-
-    Frontmatter is untouched by any of this — `conditions.temperature_c` still carries the full
-    double, which is what every comparison and every `WHERE` clause reads. This is the body, which
-    is prose.
+    Kelvin-to-Celsius and unit scaling produce floats like `-77.99999999999997`. Computed numbers
+    are rendered; numbers the source reported (yield, purity, area) are echoed verbatim. Frontmatter
+    keeps the full double, which comparisons read; only the prose body is rounded.
     """
     kelvin_bath = _ester().model_copy(update={"temperature_c": 195.15 - 273.15, "time_h": 100 / 60})
     body = record_from_ord_reaction(kelvin_bath).body
@@ -2392,12 +2213,10 @@ def test_a_number_this_system_computed_is_rendered_without_its_binary_tail() -> 
 
 
 def test_the_charge_sheet_keeps_the_magnitude_a_balance_actually_measured() -> None:
-    """`:g` is six significant figures, so a kilo-scale charge was published as `1.23457e+06 mg`.
+    """The charge sheet keeps the magnitude a balance actually measured.
 
-    That is not a rounding a reader can undo: a five-place balance reports more digits than six,
-    and the charge sheet exists so the per-species amounts behind the one-line scale are legible
-    rather than taken on trust. Twelve is past any balance and short of the binary tail, which is
-    the whole of the choice.
+    Twelve significant figures is past any balance and short of the binary tail; `:g`'s six would
+    publish a kilo-scale charge in exponent form.
     """
     note = record_from_ord_reaction(
         _charged(
@@ -2421,11 +2240,10 @@ def test_a_record_with_no_amounts_says_nothing_about_scale() -> None:
 
 
 def test_scale_survives_the_retrieval_excerpt_of_a_procedure_heavy_note() -> None:
-    """Why scale leads the conditions: an excerpt is a blind character prefix of the body.
+    """Scale survives the retrieval excerpt of a procedure-heavy note.
 
-    `retrieval.retrievers._excerpt` truncates at `note_excerpt_chars`, so a figure appended after
-    the procedure is invisible to exactly the notes that carry the most detail — the ones a
-    process chemist most needs to place on a scale.
+    `retrieval.retrievers._excerpt` truncates the body at `note_excerpt_chars`, so scale leads the
+    conditions.
     """
     steps = [
         ReactionStep(
@@ -2451,18 +2269,10 @@ def test_scale_survives_the_retrieval_excerpt_of_a_procedure_heavy_note() -> Non
 async def test_one_non_utf8_ord_export_does_not_abort_the_directory(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A file the codec cannot read is skipped, like every other unreadable export.
+    """One non-UTF-8 ORD export is skipped, like every other unreadable export.
 
-    The sibling of `test_ord_malformed_entry_does_not_abort_the_sync_batch`, one layer lower and
-    with a cause the enumerated `except` genuinely did not cover. `UnicodeDecodeError` derives from
-    `ValueError`, so it is a *sibling* of `json.JSONDecodeError` rather than a child, and it is not
-    an `OSError` — the file opens and reads fine; the bytes are simply not UTF-8. One export written
-    by a tool that emitted latin-1 therefore escaped the handler and aborted the whole fetch,
-    contradicting the method's own skip-and-continue contract.
-
-    The ordering is what makes this a real check: the bad file sorts *first*, so under the defect
-    the good one is never reached at all and the assertion below fails on an empty list rather than
-    on a warning that did not appear.
+    `UnicodeDecodeError` is neither a `JSONDecodeError` nor an `OSError`. The bad file sorts first,
+    so an abort would fail the assertion on an empty list.
     """
     (tmp_path / "a-bad.json").write_bytes(
         '{"reaction_id": "bad", "notes": {"procedure_details": "caf\xe9"}}'.encode("latin-1")
@@ -2492,14 +2302,10 @@ async def test_one_non_utf8_ord_export_does_not_abort_the_directory(
 
 
 def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
-    """A chemist's prose reaches the note body verbatim, so it must not be able to spell a link.
+    """ELN free text cannot forge a knowledge-graph relation.
 
-    `kg.note` parses a body for `[[rel:id]]`, and `contradicts`/`supersedes` are in the allowed
-    vocabulary — so a free-text field could forge a real edge. The transcription is no longer a
-    note, which makes this *more* important rather than less: the body is served verbatim by
-    `expand_note` and quoted into report drafts, and nothing reviews it on the way. Every free-text
-    field is checked here rather than one, because the escape is applied to the assembled body and
-    each field is a way in.
+    `kg.note` parses `[[rel:id]]` links, and the body is served verbatim by `expand_note` and quoted
+    into reports with no review. Every free-text field is checked, since each is a way in.
     """
     reaction = _ester()
     reaction.hypothesis = "this run [[contradicts:reaction-1234]] the earlier one"
@@ -2519,13 +2325,10 @@ def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
 
 @pytest.mark.parametrize("brackets", [2, 3, 4, 5, 6])
 def test_no_depth_of_opening_bracket_spells_a_relation(brackets: int) -> None:
-    """`[[[` is the spelling that defeated the first version of this escape, so depth is a case.
+    """No depth of opening brackets spells a relation.
 
-    `str.replace("[[", "[ [")` consumes the first two brackets and leaves the third untouched, so
-    `[[[x]]` came out as `[ [[x]]` — a *new* valid delimiter, manufactured by the neutralizer
-    itself, and the edge was forged anyway. The test that shipped with that fix asserted only the
-    two-bracket spelling, so the suite was green while the control did not work. Parametrized
-    rather than fixed at three, because the property is "no depth works", not "three does not".
+    A naive `replace("[[", "[ [")` turns `[[[x]]` into `[ [[x]]`, a new valid delimiter.
+    Parametrised because the property is that no depth works.
     """
     reaction = _ester()
     reaction.hypothesis = "[" * brackets + "contradicts:reaction-1234]]"
@@ -2536,17 +2339,11 @@ def test_no_depth_of_opening_bracket_spells_a_relation(brackets: int) -> None:
 
 
 def test_mass_balance_catches_a_new_element_and_nothing_weaker() -> None:
-    """The check's real reach, pinned in both directions so its docstring cannot overstate it.
+    """Mass balance catches a new element and nothing weaker, pinned in both directions.
 
-    Element-set subsumption is a sound *necessary* condition and nothing more: it rejects a product
-    introducing an element no input supplies, and admits every fabrication assembled from elements
-    already present. Asserting the misses deliberately — a test that only showed the catch would
-    read as though mass balance validated the chemistry, which is what the docstring used to imply
-    and what a reviewer must not be told.
-
-    The backlog's own example for this gap (`benzene + methanol >> paracetamol`) is in the *caught*
-    group: paracetamol has nitrogen and neither input supplies it. Swapping benzene for aniline is
-    what actually gets through, which is why the example is here rather than in the row.
+    Element-set subsumption is a necessary condition only: it rejects a product introducing an
+    element no input supplies and admits any fabrication from present elements. Asserting the misses
+    keeps anyone from reading it as validating the chemistry.
     """
 
     def rx(inputs: list[str], outcomes: list[str]) -> OrdReaction:
@@ -2583,13 +2380,9 @@ _MINUS_DASHES = [
 
 @pytest.mark.parametrize("dash", _MINUS_DASHES)
 def test_a_typographic_minus_before_a_temperature_is_still_a_minus(dash: str) -> None:
-    """`−78 °C` must not be ingested as `+78 °C`.
+    """A typographic minus before a temperature is still a minus.
 
-    A dry-ice/acetone lithiation is one of the most common cryogenic conditions in synthesis, and
-    the sign used to be `-?` — U+002D alone. Seven of these eight characters were therefore not
-    consumed at all and the number was read bare, so `−78 °C` became `78.0`: a 156-degree error in
-    the wrong direction, rendered into the proposed note as `temperature: 78.0 °C`, and entirely
-    plausible to the reviewer at the PR-gate because the verbatim prose beside it still reads `−78`.
+    `−78 °C` read as `78.0` is a 156-degree error that looks plausible beside verbatim prose.
     """
     raw = RawEntry(
         entry_id="e-cryo",
@@ -2632,13 +2425,10 @@ def test_a_typographic_minus_survives_step_segmentation_too() -> None:
 
 
 async def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> None:
-    """The half of the label row that cannot be reconstructed later is written at ingest.
+    """Ingesting a reaction writes the label index's record phase.
 
-    Two things are asserted rather than one, and the second is the point: the row carries the
-    **record** form (`reactants>agents>products`, agents kept), not the fingerprint form. The
-    fingerprint deliberately drops solvent and catalyst — it has to, or a solvent swap dominates
-    DRFP similarity — and an index built from it could never answer "which solvent", which is
-    half of what the precedent questions ask.
+    The row carries the record form (agents kept), not the fingerprint form, which drops solvent and
+    catalyst and so could never answer "which solvent".
     """
     rxn, mol, rec = (
         InMemoryFingerprintStore(),
@@ -2652,10 +2442,8 @@ async def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> Non
     [row] = await labels.stale("any-version", limit=10)
     assert (row.source, row.reaction_id) == ("eln-json", reaction.reaction_id)
     assert row.record_smiles == reaction.reaction_smiles()
-    # Qualified by the source the row already carries, and asserted as a literal: deriving it
-    # from `note_id_for_reaction` would move both sides together, so a record phase that
-    # stopped passing the source would still pass. A precedent a chemist cannot follow back is
-    # not a precedent, and a bare id two sites both used follows back to a refusal.
+    # Qualified by source and asserted as a literal: deriving it from `note_id_for_reaction` would
+    # move both sides together. A bare id held by two sources resolves to a refusal.
     assert row.citation == f"reaction-eln-json.{reaction.reaction_id}"
     # Every component, with the role the record stated and nothing derived from it yet.
     assert [(s.ordinal, s.role) for s in row.species] == [
@@ -2665,11 +2453,10 @@ async def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> Non
 
 
 async def test_the_label_row_keeps_the_agents_the_fingerprint_drops() -> None:
-    """The measured difference the two-phase design exists for, asserted rather than argued.
+    """The label row keeps the agents the fingerprint drops.
 
-    `reaction_fingerprints` stores `transformation_smiles()`; the label index stores
-    `reaction_smiles()`. On a reaction with a solvent, those are not the same string, and only one
-    of them can be asked which solvent was used.
+    Fingerprints store `transformation_smiles()`, the label index `reaction_smiles()`; only the
+    second can say which solvent was used.
     """
     rxn, mol, rec = (
         InMemoryFingerprintStore(),
@@ -2690,20 +2477,11 @@ async def test_the_label_row_keeps_the_agents_the_fingerprint_drops() -> None:
 def test_the_validator_checks_the_sources_that_are_attached(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`eln-validate` asks the registry what is enabled instead of naming two adapters.
+    """`eln-validate` checks the sources the registry has enabled, not two named adapters.
 
-    It constructed `JsonExportAdapter` and `OrdJsonAdapter` by name, which was right while they were
-    the only two and became a gate looking somewhere other than where the data comes in the moment
-    an ELN could be attached through a manifest (D-120). A site whose ELN arrives that way was
-    outside the only check that maps and mass-balances entries before they land — and this printed
-    `OK` regardless, which is the shape `CLAUDE.md` records as "a README is not a gate", in the one
-    file whose whole job is being one (D-2026-08-26-silence-is-not-a-successful-run).
-
-    Two properties, and the second is the one that bites: the failure is labelled with the *source
-    name*, so an operator is sent to the manifest to fix rather than to a format; and an empty
-    enabled set neither prints `OK` nor exits 0. It printed "This is not a pass: nothing was
-    checked" and returned 0 for as long as that sentence existed — the human channel and the
-    machine channel of one function disagreeing, with CI reading the machine one.
+    An ELN attached through a manifest must be inside the check. A failure names the source, sending
+    the operator to the manifest; an empty enabled set neither prints `OK` nor exits 0, because CI
+    reads the exit code.
     """
     from chemclaw.ingest.eln.validate import main
 
@@ -2756,10 +2534,8 @@ def test_the_validator_checks_the_sources_that_are_attached(
     assert "not a pass" in nothing, "and it must not read as one either"
     assert "OK" not in nothing
 
-    # And the arm that reaches the same branch without anyone having chosen it: a source that is
-    # *enabled and known* but declares no `ingest:` half. `active_manifests` raises on an unknown
-    # name, so a typo is already loud; `graph` instead of `graph,eln-json` is not, and it is the
-    # shape an operator who meant to attach an ELN actually produces.
+    # The same branch reached by accident: an enabled, known source with no `ingest:` half. An
+    # unknown name already raises, but `graph` instead of `graph,eln-json` does not.
     monkeypatch.setattr(settings, "data_sources", "retrieve-only")
     assert main() == 1, "a deployment that meant to attach an ELN and did not must not go green"
 
@@ -2767,20 +2543,11 @@ def test_the_validator_checks_the_sources_that_are_attached(
 def test_the_validator_does_not_report_ok_over_a_source_that_yielded_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An OK line over zero entries is the empty-enabled-set defect, one level down.
+    """The validator does not report OK over a source that yielded nothing.
 
-    The problem counter was the only signal, so a source offering no entries produced zero problems
-    and a success line whose own text is the tell nobody reads in CI. A directory that does not
-    exist behaves identically — the adapter yields nothing rather than raising — so a typo'd
-    `export_dir`, or an ORD export that was not mounted into the image, reported OK while the
-    structure and mass-balance gate on everything entering the graph and the fingerprint index had
-    silently stopped running.
-
-    **Zero is not legitimate here, and that is the difference from an empty enabled set.** No
-    sources enabled is a configuration a deployment chose and can be read straight off
-    `CHEMCLAW_DATA_SOURCES`, so `main` states it and exits 0. A source that *is* attached and
-    supplies nothing is a claim that failed, and nothing in the adapter can tell an empty ELN from
-    a mis-mounted one — so it is reported and the gate fails.
+    An attached source that supplies nothing (a typo'd `export_dir`, an unmounted export) is a
+    failed claim, since the adapter cannot tell empty from mis-mounted. No sources enabled is a
+    deployment's choice and exits 0 with a statement.
     """
     from chemclaw.ingest.eln.validate import main
 
@@ -2802,27 +2569,15 @@ def test_the_validator_does_not_report_ok_over_a_source_that_yielded_nothing(
     assert "eln-empty" in printed and "no entries" in printed, printed
 
 
-# --- The retraction tier, and the absence it left ----------------------------------------------
-#
-# `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry` built one and it was removed on
-# review. The defect it named is real and open; what it shipped could not fix it, in three
-# independent places measured below. These two tests are what is left: the wrapper fix the ADR
-# found on the way, which was a live defect of its own, and an absence test naming what a working
-# implementation has to include.
+# --- The retraction seam ---
 
 
 def test_the_seam_wrapper_does_not_swallow_an_optional_capability() -> None:
-    """`DatedIngest` must not narrow what the adapter it wraps can do — measured, it did.
+    """`DatedIngest` does not narrow what the adapter it wraps can do.
 
-    The registry hands the durable sync `DatedIngest(...)` for *every* source, and a
-    `runtime_checkable` Protocol is structural, so a wrapper that does not redeclare a method
-    simply does not have it. `fetch_was_truncated` therefore answered `False` in every deployment,
-    including for the warehouse adapter that implements `fetch_truncated` precisely so the workflow
-    comes back for the truncated remainder — the signal `D-2026-08-27` added, dead through the seam
-    that carries it.
-
-    Read through the public `inner` instead, so a wrapper that exposes what it wraps forwards the
-    capability by doing nothing.
+    A `runtime_checkable` Protocol is structural, so a wrapper that does not redeclare a method
+    lacks it, and `fetch_was_truncated` would answer `False` for every source. Optional capabilities
+    are read through the public `inner`.
     """
 
     class _Bounded(_ListAdapter):
@@ -2837,9 +2592,7 @@ def test_the_seam_wrapper_does_not_swallow_an_optional_capability() -> None:
 def _withdrawal_entry(retracted_at: datetime | None, entry_id: str = "EXP-1001") -> RawEntry:
     """One ELN entry, optionally carrying the source's own withdrawal.
 
-    `entry_id` is a parameter because `retracted()` is deliberately **not** scoped by ingest
-    source — a `reaction-<id>` citation is a bare id, so a withdrawal by any source that
-    transcribed it counts — and two tests sharing one id in one schema would answer each other.
+    `entry_id` is a parameter so tests sharing one schema do not answer each other.
     """
     return RawEntry(
         entry_id=entry_id,
@@ -2870,26 +2623,16 @@ class _WithdrawingAdapter:
 
 
 def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
-    """Retract an entry, and show it stops being current evidence everywhere it was served.
+    """A withdrawn entry leaves the evidence set on every reader, against a real database.
 
-    **The state this replaces.** `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`
-    built the storage half and removed it, because the tombstone had no producer and three of its
-    four readers ignored it — measured then as `is_current` False, `eligible()` empty, and the
-    retracted reaction **still returned by the unfiltered sweep**. `infra/sql/066`'s column stayed,
-    unread, for whoever rebuilt it from the readers.
-
-    This drives all five halves through the shipped code, against a real database:
-
-    - the **producer** is `RawEntry.retracted_at`, riding the delta an adapter already exports —
-      never an entry's absence, which is the normal state of every entry ever ingested;
-    - the **store** persists it and `is_current`/`eligible` honour it;
-    - the **unfiltered** retrieval sweep — the one `gather_evidence` runs — drops it;
+    - the producer is `RawEntry.retracted_at` on the exported delta, never an entry's absence;
+    - the store persists it and `is_current`/`eligible` honour it;
+    - the unfiltered retrieval sweep `gather_evidence` runs drops it;
     - the bundle tool `similar_reactions` drops it;
-    - `expand_note` still **resolves** it and says it was withdrawn, because a citation to a
-      withdrawn run must not become a dangling link.
+    - `expand_note` still resolves it and says it was withdrawn, so citations do not dangle.
 
-    The first pass asserts the entry *is* served, on every one of those readers. Without that half
-    the second proves only that some ids are absent, which a broken retriever satisfies too.
+    The first pass asserts the entry is served on every reader, so the second cannot pass on a
+    broken retriever.
     """
     source = "retraction-probe"
     # The literal, not `note_id_for_reaction(...)`: deriving it from the function under test would
@@ -2923,11 +2666,8 @@ def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
             source=source,
         )
         before = await _served()
-        # **The second pass is a replay, which is what a real one is.** The cursor has advanced
-        # past the entry's `created_at` by the time a source withdraws it, so the withdrawal
-        # arrives through `sync_entries`' unchanged-check branch — and a withdrawal is not in the
-        # body, so that check used to skip it and the retraction never reached the row. Running
-        # this from `_EPOCH` again would take the new-entry path and never test that.
+        # The second pass is a replay, as a real one is: the cursor is past `created_at`, so the
+        # withdrawal arrives through the unchanged-check branch and must not be skipped there.
         await sync_entries(
             _WithdrawingAdapter([_withdrawal_entry(datetime(2026, 3, 4, tzinfo=UTC))]),
             reactions,
@@ -2967,12 +2707,10 @@ def test_a_withdrawn_entry_leaves_the_evidence_set_on_every_reader() -> None:
 
 
 def test_a_source_that_republishes_an_entry_un_retracts_it() -> None:
-    """The row is what the source last said, and that has to run in both directions.
+    """A source that republishes an entry un-retracts it.
 
-    A withdrawal that could not be reversed would make one bad export permanent, on a tier whose
-    whole rule is that an amendment overwrites. The upsert therefore refreshes `retracted_at` like
-    every other field rather than coalescing it, and this is the assertion that stops somebody
-    "fixing" that into a one-way door.
+    The row is what the source last said: the upsert refreshes `retracted_at` like every other
+    field, so one bad export is not permanent.
     """
 
     async def _run() -> tuple[bool, bool]:
@@ -3008,18 +2746,11 @@ def test_a_source_that_republishes_an_entry_un_retracts_it() -> None:
 def test_a_json_export_stamped_withdrawn_is_fetched_and_carries_its_tombstone(
     tmp_path: Path,
 ) -> None:
-    """The file-drop source's producer half: `retracted` on the export, and the cursor reaching it.
+    """A JSON export stamped withdrawn is fetched and carries its tombstone.
 
-    Two halves, and the second is the one that is easy to omit. Reading the field is arithmetic;
-    what makes it *reachable* is that a withdrawal joins the fetch window, because a source that
-    stamps a retraction without touching `modified` leaves the entry behind the cursor forever —
-    the tombstone written at the source and read by nobody, which is the whole failure
-    `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports` names.
-
-    So the entry is created in January, the cursor sits in June, and only the withdrawal is newer.
-    A control entry created on the same January day and never withdrawn is written beside it: it
-    must *not* come back, or the assertion below would also pass on an adapter that had simply
-    stopped filtering.
+    A withdrawal joins the fetch window, or an entry behind the cursor is never seen again. A
+    control entry from the same day, never withdrawn, must not come back, so an adapter that stopped
+    filtering fails.
     """
 
     async def _run() -> list[RawEntry]:
@@ -3042,24 +2773,15 @@ def test_a_json_export_stamped_withdrawn_is_fetched_and_carries_its_tombstone(
 
 
 def test_two_sources_behind_one_entry_id_are_two_citations_that_each_resolve() -> None:
-    """The collapse: `063` keyed the index by source and the citation stayed bare.
+    """Two sources behind one entry id are two citations that each resolve.
 
-    Migration `063` made `reaction_fingerprints` `(source, id)`, which is what stops one site's
-    chemistry overwriting another's — and the read side still spelled `reaction-<id>`, so a
-    two-source deployment returned **two hits citing one id**, and `records._one_of` raised
-    `AmbiguousReactionRecord` the moment a reader expanded either. Loud rather than wrong, and
-    still not an answer: the chemist cannot open the run the search just found.
+    Over a real database, through the shipped retriever and resolver:
 
-    Driven over a real database, through the shipped retriever and the shipped resolver:
+    - the two hits carry different citations, each naming its site;
+    - each expands to that site's own body;
+    - the bare form still resolves, and refuses when two sources hold the id.
 
-    - the two hits carry **different** citations, and each names its site;
-    - each expands to **that site's own body**, which is the half a de-duplicating fix would fail;
-    - the **bare** form still resolves — every citation committed before this spells it — and still
-      refuses when two sources hold the id, because a bare citation genuinely does not name one run.
-
-    The two entries carry different operators, so the provenance each row renders differs — which
-    is what makes "each resolved to its own row" a distinction rather than a coincidence of two
-    identical transcriptions.
+    The entries carry different operators so "each resolved to its own row" is a real distinction.
     """
 
     async def _run() -> tuple[list[str], list[str], object]:
@@ -3126,15 +2848,10 @@ def test_two_sources_behind_one_entry_id_are_two_citations_that_each_resolve() -
 
 
 def test_one_sites_withdrawal_does_not_retract_the_other_sites_run() -> None:
-    """A withdrawal belongs to the site that made it, and the index has always known which.
+    """One site's withdrawal does not retract another site's run.
 
-    `retracted()` first shipped keyed on the bare entry id, which is the same collapse the citation
-    had: `reaction_fingerprints` is `(source, id)` since `063`, so two sites behind one entry id
-    are two hits — and asking "is EXP-9002 withdrawn?" let site-alpha's retraction delete
-    site-beta's run from the evidence set, silently, with nothing in the sweep saying so.
-
-    Both directions are asserted, because "nothing was dropped" is satisfied by a filter that never
-    runs: alpha's hit must be gone and beta's must remain.
+    `retracted()` is keyed by `(source, id)`, like the index. Both directions are asserted, because
+    "nothing was dropped" is satisfied by a filter that never runs.
     """
 
     async def _run() -> tuple[list[str], set[tuple[str, str]]]:
@@ -3176,19 +2893,10 @@ def test_one_sites_withdrawal_does_not_retract_the_other_sites_run() -> None:
 
 
 def test_an_impurity_carries_the_rrt_its_docstrings_have_always_named() -> None:
-    """RRT is how a chemist says *which* peak, and there was nowhere to put it.
+    """An impurity carries its RRT.
 
-    `Impurity`'s own docstring said an ELN reports "often only a chromatographic name/RRT", and
-    `src/chemclaw/ingest/eln/warehouse/binding.py` said a site's analytics table carries "a
-    chromatographic name or RRT far more often than a structure" — while the model held name,
-    SMILES and area% and nothing else. So
-    the one identifier that distinguishes two unresolved peaks at 0.11% and 0.19% fell to
-    `OrdReaction.attributes`, a `dict[str, str]` whose own docstring says it holds "strings, not
-    values" with "no unit to normalise to"
-    (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
-
-    Driven through the JSON adapter rather than by constructing the model, because a field with no
-    producer is the defect this change exists to avoid rather than an instance of it.
+    RRT is how a chemist says which unresolved peak; without a field it fell to untyped attributes.
+    Driven through the JSON adapter so the field has a producer.
     """
     raw = RawEntry(
         entry_id="rrt-1",
@@ -3216,12 +2924,10 @@ def test_an_impurity_carries_the_rrt_its_docstrings_have_always_named() -> None:
 
 
 def test_an_rrt_alone_does_not_identify_an_impurity() -> None:
-    """Deliberate: an RRT says *where* a peak eluted, not *what* it is.
+    """An RRT alone does not identify an impurity.
 
-    A record carrying only `rrt` asks this model to stand in for a peak nobody has named — and the
-    honest place for that is a name of exactly that form ("RRT 0.94 unknown"), which is how a
-    chemist refers to one anyway. Letting it through would put rows in the corpus that no query can
-    join and no chemist can read, which is the failure `_identifiable` already exists to prevent.
+    It says where a peak eluted, not what it is; such a row must carry a name of that form
+    ("RRT 0.94 unknown").
     """
     with pytest.raises(ValidationError):
         Impurity(rrt=0.94, area_percent=0.11)

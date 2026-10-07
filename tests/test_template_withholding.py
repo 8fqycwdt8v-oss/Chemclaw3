@@ -1,13 +1,9 @@
 """A launcher no profile names is withheld while the capability its steps call is off.
 
-`D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off` takes the narrow
-rule `templates.registry.withheld_reason` implements, and these are its four edges: withheld at the
-default deployment, bound the moment the bundle is enabled, bound whenever a profile names it, and
-still *declared* either way so a validator and the prose contract keep reading it.
-
-`scale-up-thermal-envelope` is the shipped subject rather than a fixture template, because the row
-this closed was about its prefix cost, and a test over a synthetic file would stay green if the
-real one went back to being bound on every turn.
+The four edges of `templates.registry.withheld_reason`: withheld at the default deployment, bound
+once the bundle is enabled, bound whenever a profile names it, and still declared either way so
+validators keep reading it. The shipped `scale-up-thermal-envelope` is the subject, so the real
+template regressing turns this red.
 """
 
 import os
@@ -46,11 +42,10 @@ def _enable_the_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_default_deployment_binds_no_launcher_for_an_opt_in_capability() -> None:
-    """The prefix saving itself: no launcher, so no ~560 tokens on every model call.
+    """The default deployment binds no launcher for an opt-in capability.
 
-    Asserted on three readings of "bound" rather than one, because each is a different consumer —
-    the generator, the seven-space union the validators and the mock model resolve against, and
-    the surface a compiled graph binds — and a launcher surviving in any of them is paid for.
+    Asserted on the generator, the union the validators and mock model resolve against, and the
+    surface a compiled graph binds, since a launcher surviving in any of them is paid for.
     """
     assert registry.withheld_reason(_template()) == [
         "adiabatic_temperature_rise",
@@ -83,11 +78,10 @@ def test_enabling_the_bundle_binds_the_launcher(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_a_launcher_a_profile_names_is_never_withheld(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The measurement the old refusal rested on still binds wherever it applies.
+    """A launcher a profile names is never withheld.
 
-    `_reject_unknown_tool_names` raises for a profile listing a name the surface lacks, so
-    withholding a launcher some profile names would break every turn on that profile. With the
-    bundle still off, naming the launcher in any profile keeps it bound (and refused at launch).
+    `_reject_unknown_tool_names` raises for a profile naming an absent tool, so withholding it would
+    break every turn on that profile; it stays bound and is refused at launch.
     """
     monkeypatch.setitem(
         PROFILE_REGISTRY,
@@ -102,10 +96,8 @@ def test_a_launcher_a_profile_names_is_never_withheld(monkeypatch: pytest.Monkey
 def test_every_other_shipped_template_is_bound_by_default() -> None:
     """Only a template whose capability is off is withheld; a broken one keeps its refusal.
 
-    Every other shipped template names only default-enabled tools, so if one of them is withheld
-    the predicate has widened past "declared here and not bound" — for instance to "not in the
-    union", which would silently drop a template with a typo instead of refusing it with the
-    problem named.
+    If the predicate widened to "not in the union", a template with a typo would be dropped silently
+    instead of refused with the problem named.
     """
     withheld = {t.name for t in registry.enabled() if registry.withheld_reason(t)}
     assert withheld == {_OPT_IN}
@@ -127,11 +119,9 @@ def test_a_template_naming_a_tool_nothing_declares_keeps_its_launcher() -> None:
 def test_a_launcher_registered_under_another_configuration_is_still_withheld(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The registry only grows; the surface is the rule, not the history.
+    """A launcher registered by an earlier build in the process is still withheld.
 
-    Found in CI: the full suite bound this launcher on `default` while this file alone did not,
-    because an earlier build in the same process had registered it. Registered here directly, the
-    way that build left it, and every reader of the surface must still leave it out.
+    The registry only grows, so the surface, not the registration history, decides.
     """
     (launcher,) = [
         tool for tool in registry.template_tools(declared=True) if tool.__name__ == _LAUNCHER

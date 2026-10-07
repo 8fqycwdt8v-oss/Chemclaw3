@@ -1,11 +1,9 @@
 """A document artefact streams as `exhibit_draft` frames while the model writes its call.
 
-Driven through the real compiled graph and `graph_events` with a model that streams a call's
-arguments in fragments, the way a provider does — because what is pinned is a property of the
-stream: the frames arrive before the `tool_call`, `tool_result` and `exhibit` of the call they
-preview, each carries the whole text so far, the throttle bounds how many there are, and nothing is
-streamed for a call that is not a document. The fragment parser's edge cases (`edits`, a cap, a
-`kind` still being written) are driven on `DraftStream` directly.
+Driven through the real compiled graph and `graph_events` with a model streaming a call's
+arguments in fragments. Pinned: frames arrive before the call's `tool_call`, `tool_result` and
+`exhibit`, each carries the whole text so far, the throttle bounds their number, and nothing is
+streamed for a non-document call. Parser edge cases are driven on `DraftStream` directly.
 """
 
 import asyncio
@@ -249,10 +247,8 @@ def test_a_draft_past_the_spec_cap_stops_and_a_kind_in_progress_does_not(
     unkinded = json.dumps(
         {"title": "T", "spec": {"markdown": "# hi there " * 20, "kind": "document"}}
     )
-    # The throttle must not decide which frames exist: with the size-scaled interval at its real
-    # rate, a slow runner let a frame through after `kind` arrived (CI), a fast one did not. So the
-    # interval is driven to zero and the rule is asserted as it is — frames sent before `kind` is
-    # known draft as `""`, and any after it say `document`.
+    # The throttle must not decide which frames exist, so the interval is driven to zero: frames
+    # before `kind` is known draft as `""`, and any after it say `document`.
     monkeypatch.setattr(settings, "exhibit_draft_bytes_per_ms", 10**9)
     frames = [f for f in _feed(DraftStream(), "create_exhibit", unkinded, size=5) if not f.done]
     assert frames and frames[0].kind == ""
@@ -266,10 +262,8 @@ def test_a_draft_past_the_spec_cap_stops_and_a_kind_in_progress_does_not(
 def test_the_draft_interval_stretches_with_the_document(monkeypatch: pytest.MonkeyPatch) -> None:
     """After a frame of N bytes the next waits N / `exhibit_draft_bytes_per_ms` ms: linear cost.
 
-    Driven on a clock that advances one millisecond per fragment, with the floor at zero: under a
-    fixed interval every fragment that grew the text would be a frame and the bytes sent would grow
-    with the square of the document; stretched, the gap after each frame is at least its size over
-    the rate and the total stays within a small multiple of the document.
+    On a clock advancing one millisecond per fragment, a fixed interval would make bytes sent grow
+    with the square of the document; stretched, the total stays a small multiple of it.
     """
     now = [0.0]
 
@@ -361,10 +355,8 @@ def test_a_call_that_shows_nothing_is_parsed_a_logarithmic_number_of_times(
 ) -> None:
     """Before the first frame a call is re-parsed only when its arguments have doubled.
 
-    Measured before: ~75 kB of arguments in 12-character fragments was 6,306 whole-argument parses
-    (27 s of event-loop CPU) for the table and 6,341 (15 s) for the string spec — one per fragment,
-    for no frame. Now the table is parsed about log2 of its size, and the string spec stops at the
-    first parse that sees it.
+    Parsing on every fragment is quadratic event-loop CPU for no frame; this bounds it to about log2
+    of the size, and a string spec stops at the first parse that sees it.
     """
     from chemclaw.api import exhibit_drafts
 

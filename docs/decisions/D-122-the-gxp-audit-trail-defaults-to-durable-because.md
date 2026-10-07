@@ -1,5 +1,7 @@
 # D-122 — The GxP audit trail defaults to durable, because opting in per call site did not work
 
+**Superseded-by:** [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) (in part)
+
 **Context.** `PostgresAuditSink`, the tamper-evident hash chain (`chain_hash`, `row_hash`),
 `infra/sql/011`, `make audit-verify` and `scripts/verify_audit_chain.py` were all built, tested and
 documented as the GxP "who ran what" record. The sink was constructed in exactly **one** place:

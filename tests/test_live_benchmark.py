@@ -1,10 +1,8 @@
 """What keeps the external benchmark a measurement of this system rather than of its scorer.
 
-The corpus is vendored and keyed, so nothing here needs a model. What does need asserting is the
-part that went wrong first: a scorer that reads a model's *reasoning* instead of its *answer*
-scores the reasoning. Measured against a real gateway on the first five questions of this subset,
-the whole-answer scan credited the option `"5"` as `"1"` and `"4"` as `"2"` — 1/5 where the answers
-were 4/5 — because those digits appear inside sentences like "approximately 1.07%".
+The corpus is vendored and keyed, so nothing here needs a model. The scorer must read a model's
+*answer*, not its reasoning: digits inside sentences like "approximately 1.07%" must not be
+credited as option choices.
 """
 
 import json
@@ -43,11 +41,8 @@ def test_the_vendored_corpus_matches_its_recorded_checksum() -> None:
     assert len({q.id for q in questions}) == len(questions), "ids are this corpus's key"
     assert all(q.answer in q.options for q in questions), "a key naming no option scores nothing"
 
-    # **The per-category split is recorded once, in `dataset.json`, and checked against the
-    # corpus.** The README's prose said "13 from each of eight categories" while the manifest
-    # beside it already said the 100-question trim cut `toxicity_and_safety` short — a number in
-    # prose being wrong about the file it sits next to. It is data now, so a re-sampled subset that
-    # changes the shape fails here rather than leaving a sentence describing the old one.
+    # The per-category split is recorded once, in `dataset.json`, and checked against the corpus, so
+    # a re-sampled subset that changes the shape fails here.
     manifest = json.loads(
         (Path(settings.benchmark_dir) / "dataset.json").read_text(encoding="utf-8")
     )
@@ -57,11 +52,9 @@ def test_the_vendored_corpus_matches_its_recorded_checksum() -> None:
 
 
 def test_the_corpus_records_its_licence_and_where_a_human_got_it() -> None:
-    """The discipline the sibling fleet holds every vendored corpus to, applied here.
+    """The corpus records its licence and `retrieved_from`, as every vendored corpus must.
 
-    A corpus with no recorded licence is a legal question nobody can answer a year later, and
-    `retrieved_from` is the only record of where a human obtained the file. Nothing reads it as an
-    address.
+    Nothing reads `retrieved_from` as an address.
     """
     manifest = json.loads(
         (Path(settings.benchmark_dir) / "dataset.json").read_text(encoding="utf-8")
@@ -103,17 +96,10 @@ def test_the_scorer_reads_the_answer_and_not_the_reasoning(answer: str, expected
 
 
 def test_a_longer_option_wins_over_the_shorter_one_it_contains() -> None:
-    r"""One option routinely *contains* another, and shortest-first credits the wrong one.
+    r"""A longer option wins over a shorter option it contains.
 
-    **The fixture this replaces had no containment in it.** `"Only Ag+ is present"` is not a
-    substring of `"Ag+ is present, and Pb2+ may be present"` — it carries a leading `Only` — so
-    neither order could match it and deleting `sorted(..., reverse=True)` left this test green. A
-    test named for a property its fixture does not exhibit is worse than none: it reads as the
-    guard's coverage.
-
-    So the cases come from the shipped corpus, where the containment is real and the consequence is
-    the opposite answer. Driven over all 100 questions, four option-answers across three questions
-    score differently without the sort.
+    Cases come from the shipped corpus, where containment is real and shortest-first scoring would
+    credit the opposite answer.
     """
     questions = {q.id: q for q in load_questions(settings.benchmark_dir)}
 
@@ -152,16 +138,11 @@ def test_a_longer_option_wins_over_the_shorter_one_it_contains() -> None:
 def test_each_word_boundary_guard_refuses_a_match_it_alone_blocks(
     answer: str, options: list[str], expected: str, guard: str
 ) -> None:
-    r"""One case per guard in `_chosen`'s pattern, because all four were deletable individually.
+    r"""One case per guard in `_chosen`'s pattern, since each is individually deletable.
 
-    Driven before this test existed: removing `(?<!\w)`, `(?<!\.)`, `(?!\w)` or `(?!\.\d)` from
-    the pattern — one at a time — left the whole file green, including the corpus-wide scorability
-    tests above. Those bound the scorer from one side only: every option must be *findable*, and a
-    guard's job is to stop it being found where it is not.
-
-    The last case is the other direction, and it is why the guards are lookarounds rather than
-    `\b`: a full stop ends an option and a decimal point does not, so a rule that blocked both
-    would score "The answer is 5." as an abstention.
+    The corpus-wide tests prove every option is findable; these prove each guard stops a match where
+    it does not belong. The last case is why the guards are lookarounds rather than `\b`: a full
+    stop ends an option and a decimal point does not.
     """
     assert _chosen(answer, options) == expected, f"the {guard} guard is not holding"
 
@@ -176,11 +157,10 @@ def test_the_prompt_carries_every_option_and_asks_for_one() -> None:
 
 
 def test_the_report_separates_an_abstention_from_a_wrong_answer() -> None:
-    """A model that declines is not a model that guesses, and one number cannot say both.
+    """The report separates an abstention from a wrong answer.
 
-    It matters more here than on an ordinary benchmark: this system's instructions tell it not to
-    answer without evidence, so a closed-book chemistry question it declines is the guardrail
-    working. A report that folded those into "wrong" would read as a science failure.
+    This system is told not to answer without evidence, so a declined closed-book question is the
+    guardrail working, not a science failure.
     """
     results = [
         Answered(question_id="a", category="x", chosen="alpha", correct=True),
@@ -203,21 +183,18 @@ _NO_RECORD_SENTENCE = "you must never state a specific parameter as though it ca
 def _toolless_prompt(filename: str) -> str:
     """The system prompt an arm with no capability tools is actually sent.
 
-    `available` is what `build_langgraph_agent` passes — the names the graph binds — and for a
-    toolless profile that is the six `FilesystemMiddleware` verbs plus `task`, neither of which a
-    profile can strip. Passing it matters: `instructions_for(profile)` with no surface is the
-    *maximal* prompt, which is not what either arm sends.
+    `available` is what `build_langgraph_agent` passes: for a toolless profile, the
+    `FilesystemMiddleware` verbs plus `task`, which no profile can strip. Without it,
+    `instructions_for(profile)` returns the maximal prompt, which neither arm sends.
     """
     return instructions_for(_load(_PROFILE_DIR / filename), skill_tool_names() | {"task"})
 
 
 def test_the_arm_that_varies_the_tools_varies_only_the_tools() -> None:
-    """`tools-removed` is the contrast a tools claim may rest on, and this is why it can.
+    """`tools-removed` varies only the tools, so a tools claim may rest on it.
 
-    It declares `tool_names: []` and **no** `instructions:`, so the prose is the deployment's own —
-    narrowed only by the blocks that name an absent tool, which is a consequence of the treatment
-    rather than a second variable. The sentence no tool removal can remove survives in it, which is
-    the property the published 62-against-74 pair did not have.
+    It declares `tool_names: []` and no `instructions:`, so its prose is the deployment's own,
+    narrowed only by blocks naming an absent tool.
     """
     profile = _load(_PROFILE_DIR / "tools-removed.yaml")
 
@@ -232,14 +209,10 @@ def test_the_arm_that_varies_the_tools_varies_only_the_tools() -> None:
 
 
 def test_the_prompt_swapping_arm_cannot_be_read_as_a_tools_contrast() -> None:
-    """The other direction, and the one that catches a relabelling.
+    """`no-tools.yaml` replaces the whole default prose, so it cannot be read as a tools contrast.
 
-    `no-tools.yaml` is kept — it is the arm `make live-ab`'s merged measurement ran on — but it
-    replaces the whole default prose, so a document calling it a tools contrast is wrong about its
-    own fixture. Asserted as a property and a magnitude rather than a digit: the exact character
-    counts move whenever the prompt is edited, while "it replaces the prose, by thousands of
-    characters, including the sentence tools cannot remove" is the thing that would have to stop
-    being true for the label to become honest.
+    Asserted as a property and a magnitude rather than exact character counts, which move whenever
+    the prompt is edited.
     """
     profile = _load(_PROFILE_DIR / "no-tools.yaml")
     swapped = _toolless_prompt("no-tools.yaml")
@@ -253,13 +226,9 @@ def test_the_prompt_swapping_arm_cannot_be_read_as_a_tools_contrast() -> None:
     )
 
 
-# How a chemist — or a model — writes an option that the corpus stores as ChemBench's raw markup.
-# **Written the other way round from `_normalised` on purpose**: this spells the symbols out as
-# Unicode where the scorer folds them onto words, so the two meet in the middle rather than
-# agreeing by construction. An oracle derived from the implementation would pass whatever the
-# implementation does, which is the failure the sibling fleet's own corpus tests are built to
-# avoid — they check a vendored table against independently written numbers rather than against
-# the loader that reads it.
+# How a chemist or model writes an option the corpus stores as ChemBench markup. Written the other
+# way round from `_normalised` (symbols spelled out as Unicode where the scorer folds them to words)
+# so the oracle is independent of the implementation.
 _PLAIN_SPELLING = {
     "\\circ": "°",
     "\\Delta": "Δ",
@@ -280,14 +249,10 @@ def _as_a_chemist_writes_it(option: str) -> str:
 
 
 def test_every_option_is_scorable_in_the_spelling_a_model_would_use() -> None:
-    r"""The scorer must not be measuring typography, and on a fifth of this corpus it was.
+    r"""Every option is scorable in the plain spelling a model would use.
 
-    21 of the 100 keys carry `\\ce{}`, `\\pu{}` or math mode. Answered in the plain spelling above,
-    **88 of the corpus's 418 options** scored as something other than themselves before the
-    normaliser — most as an abstention, and at least one as a different option outright. The
-    measurement is the whole corpus rather than a sample, because the defect is per-item and a
-    sample would hide the arm-asymmetry: the two arms do not write markup equally often, so a
-    markup-blind scorer is not neutral between them.
+    Keys with `\\ce{}`, `\\pu{}` or math mode must not score as abstentions or as other options. The
+    whole corpus is checked because the defect is per item, and the arms use markup unequally.
     """
     questions = load_questions(settings.benchmark_dir)
     misscored = [
@@ -304,11 +269,10 @@ def test_every_option_is_scorable_in_the_spelling_a_model_would_use() -> None:
 
 
 def test_an_option_answered_verbatim_still_scores_as_itself() -> None:
-    r"""The other direction: normalising must not lose a match that already worked.
+    r"""Normalising must not lose a match that already worked.
 
-    A normaliser is a lossy transform applied to both sides, so it can break a comparison it was
-    supposed to leave alone — two options that differ only by a symbol command are the pair at
-    risk, which is why `_normalised` maps `\\Delta` to a word instead of deleting it.
+    Two options differing only by a symbol command are at risk, which is why `_normalised` maps
+    `\\Delta` to a word instead of deleting it.
     """
     questions = load_questions(settings.benchmark_dir)
     misscored = [
@@ -322,13 +286,10 @@ def test_an_option_answered_verbatim_still_scores_as_itself() -> None:
 
 
 def test_the_markup_defect_credited_a_wrong_option_for_a_right_answer() -> None:
-    r"""The worked example, from the run that found it, because the failure is not an abstention.
+    r"""A markup miss must not credit a wrong option for a right answer.
 
-    `materials_science:polymer_chemistry_19`'s key is `\\ce{FeSO4} + t-butyl hydroperoxide`. The
-    model's last line was `FeSO4 + t-butyl hydroperoxide` — correct — the exact matcher missed the
-    mhchem spelling, fell through to the whole-answer fallback, and credited the initiator the
-    model had named only to rule it out. A wrong answer recorded for a right one moves the score,
-    where an abstention only widens the gap.
+    The model's correct plain-spelling answer must match the mhchem key exactly, not fall through to
+    the whole-answer fallback and credit an option named only to rule it out.
     """
     question = next(
         q
@@ -344,13 +305,10 @@ def test_the_markup_defect_credited_a_wrong_option_for_a_right_answer() -> None:
 
 
 def test_a_turn_that_failed_is_not_a_turn_that_declined() -> None:
-    """Three outcomes, not two — and the third is the one only one arm can produce.
+    """A turn that failed is not a turn that declined.
 
-    `api/runner.py` turns every failure into an `ErrorEvent`: a loop cap, a spend cap, a connector
-    outage, a degraded capability. Each left `answer=""`, and an empty answer books as "named no
-    option" — the column this benchmark's central finding is read off. The tool-bearing arm binds
-    every connector and can fail all of those ways; the toolless control binds none and
-    structurally cannot, so the two were not being measured on the same scale.
+    Every runner failure yields `answer=""`. Only the tool-bearing arm can fail that way, so booking
+    failures as abstentions would measure the arms on different scales.
     """
     results = [
         Answered(question_id="a", category="x", chosen="alpha", correct=True),
@@ -364,16 +322,10 @@ def test_a_turn_that_failed_is_not_a_turn_that_declined() -> None:
 
 
 def test_a_decimal_is_not_a_choice_and_a_full_stop_is_not_a_decimal() -> None:
-    r"""The word-boundary rule, in both directions, on the one external number this repo publishes.
+    r"""A decimal is not a choice and a full stop is not a decimal.
 
-    The change that fixed it shipped with no test at all: `(?<!\w)(?<!\.)`, `(?<!\w)(?<!\d\.)`
-    and a bare `(?<!\w)` all left this file at 10 passed, so nothing in the suite distinguished
-    the buggy form, the fixed form and no lookbehind whatever — on the scorer behind the only
-    benchmark figure this repository reports to anyone outside it.
-
-    The rule the docstring states is that a `.` blocks only where a digit is on the other side of
-    it, which is the difference between a decimal and a full stop. Each arm below is one half of
-    that, and each fails under at least one of the three forms.
+    A `.` blocks a match only when a digit is on its other side; each case is one half of that rule
+    and fails under at least one wrong lookbehind form.
     """
     digits = ["1", "3", "4", "5"]
 
@@ -393,16 +345,10 @@ def test_a_decimal_is_not_a_choice_and_a_full_stop_is_not_a_decimal() -> None:
 
 
 def test_ask_reads_the_same_awkward_stream_the_probe_harness_does() -> None:
-    """The third of the three readers, against the fixture the other two are held to.
+    """`_ask` reads the same awkward SSE stream the probe harness does.
 
-    This one carried `line[5:].strip()` where the storm carried `line[6:]` and `evals/live` carried
-    a third spelling — three readings of one wire format, none of which handled a `data:` field
-    split over two lines. The cost here is specific: `_ask` collects the `answer` event and the
-    `error` event and nothing else, so a dropped `answer` frame scores as the model declining to
-    name an option, which `Answered.unparsed` reports as a fact about chemistry.
-
-    The fixture is `tests/test_live_probes.AWKWARD_STREAM`, imported rather than copied, so the
-    claim that the three agree is a shared object rather than three transcriptions of one.
+    A dropped `answer` frame would score as the model declining. The fixture is
+    `tests/test_live_probes.AWKWARD_STREAM`, imported so the readers share one object.
     """
     import asyncio
 
@@ -441,18 +387,11 @@ def test_ask_reads_the_same_awkward_stream_the_probe_harness_does() -> None:
 def test_ask_records_a_200_that_is_not_a_stream_as_an_empty_answer_rather_than_ending_the_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """`_ask` holds no handler, so anything the reader raises costs every question already asked.
+    """A 200 that is not an event stream is recorded as an empty answer rather than ending the run.
 
-    `_run` collects its `Answered` rows in a local list and `_ask` wraps nothing in a `try`, so an
-    exception out of the stream reader does not cost one question — it ends the run and takes the
-    whole partial result set with it. That is why the reader refuses a 200 whose content type is
-    not `text/event-stream` by yielding nothing and naming it in the log rather than by raising:
-    one misconfigured proxy in front of the front door should cost the benchmark one abstention,
-    not the afternoon.
-
-    The row it produces is the honest one — `chosen` empty, `unparsed` True — because the question
-    genuinely was not answered. `error_code` stays empty: no `error` event arrived, and inventing
-    one here would put a claim about the *agent* in the column that reads as one.
+    `_run` collects rows in a local list and `_ask` has no handler, so a raising reader would
+    discard every answer already collected. The row is `chosen` empty, `unparsed` True, and
+    `error_code` empty, since no `error` event arrived.
     """
     import asyncio
     import logging

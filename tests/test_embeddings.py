@@ -1,9 +1,8 @@
-"""The embedding provider seam builds vectors per config, and only here (plan F10-A1).
+"""The embedding provider seam builds vectors per config, and only here.
 
-Offline: the `hash` embedder is deterministic, correctly sized, orthogonal for disjoint text, and
-more similar for token-overlapping text (the property retrieval relies on). Wiring: the
-`openai_compatible` path calls the endpoint with the configured model and returns its vectors,
-with the client classes faked so no network happens.
+Offline: the `hash` embedder is deterministic, correctly sized, orthogonal for disjoint text and
+more similar for overlapping text. Wiring: the `openai_compatible` path calls the endpoint with the
+configured model, with the client classes faked so no network happens.
 """
 
 import math
@@ -99,16 +98,11 @@ def test_openai_compatible_path_calls_the_endpoint(monkeypatch: pytest.MonkeyPat
 def test_a_reordered_batch_is_paired_by_index_and_not_by_position(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every text keeps its own vector when the provider answers a batch out of order.
+    """A reordered batch is paired by `index`, not by position.
 
-    The OpenAI embeddings response carries a per-item `index` precisely because `data` order is not
-    part of the contract, and batching servers reorder: vLLM, TEI and gateway proxies all do. Read
-    positionally, a reordered batch assigns each text its neighbour's vector — and nothing
-    downstream can see it. `embed_texts` pairs the vectors with the de-duplicated texts by `zip(...,
-    strict=True)`, which catches a *count* mismatch and cannot see a *permutation*; the stored
-    vectors are then all wrong, `embedding_key` still reads as current, and the only symptom is bad
-    recall, which is what `embedding_config_key`'s docstring calls corrupting every similarity
-    silently.
+    `data` order is not part of the embeddings contract and batching servers reorder. Read
+    positionally each text gets its neighbour's vector, which `zip(strict=True)` cannot detect and
+    nothing downstream can see.
     """
     _use_settings(
         monkeypatch,
@@ -141,12 +135,10 @@ def test_a_reordered_batch_is_paired_by_index_and_not_by_position(
 def test_a_batch_whose_indices_are_not_its_own_positions_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sorting is only a fix while `index` says what it is supposed to say.
+    """A batch whose indices are not its own positions is refused.
 
-    A provider that omits the field, repeats a value, or numbers a chunk against the whole request
-    leaves `sorted` stable — which is arrival order again, silently. The corruption this prevents
-    is unrecoverable and invisible once written, so an index set that is not the chunk's own
-    positions is refused rather than sorted on trust.
+    A missing, repeated or request-relative `index` leaves `sorted` in arrival order, and the
+    resulting corruption is invisible once written.
     """
     _use_settings(
         monkeypatch,
@@ -183,12 +175,10 @@ def test_openai_compatible_half_config_is_rejected_at_build_time() -> None:
 def test_config_key_separates_two_endpoints_serving_the_same_model_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The defect: `provider:model:dim` read as identical across two different endpoints.
+    """The config key separates two endpoints serving the same model name.
 
-    Model names are not globally unique — `text-embedding-3-large` is served by the vendor and by
-    any gateway that proxies it, and two of them need not be the same weights. Repointing
-    `llm_base_url` therefore has to invalidate the stored vectors, or every key already on record
-    keeps reading as current and nothing is ever re-embedded.
+    Model names are not globally unique, so repointing `llm_base_url` must invalidate stored
+    vectors.
     """
     endpoint = {
         "embedding_provider": "openai_compatible",
@@ -214,16 +204,11 @@ def test_config_key_ignores_a_trailing_slash_on_the_endpoint(
 def test_config_key_carries_no_part_of_the_endpoint_it_identifies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The key is written into two durable columns, so it may not *be* the endpoint.
+    """The config key carries no part of the endpoint it identifies.
 
-    `document_chunks.embedding_key` and `note_index.embedding_key` get one copy of this string per
-    row, in tables nothing prunes and the runtime role can read. `llm_base_url` is a plain `str`
-    with no validator forbidding userinfo, so `https://svc:s3cr3t@llm.internal/v1` is a
-    configuration this deployment accepts — and the verbatim form persisted the password. Even
-    without one, the internal hostname does not belong in every row of the corpus.
-
-    A digest identifies the endpoint without carrying it, which is all the invalidation property
-    needs — and that property is asserted separately, immediately below.
+    It is written into every row of two durable tables, and `llm_base_url` may carry userinfo or an
+    internal hostname. A digest identifies the endpoint without carrying it; invalidation is
+    asserted separately below.
     """
     _use_settings(
         monkeypatch,
@@ -237,11 +222,9 @@ def test_config_key_carries_no_part_of_the_endpoint_it_identifies(
 
 
 def test_every_slot_of_the_config_key_says_what_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator reads this string out of two durable columns, so no slot may be empty.
+    """Every slot of the config key says what it is.
 
-    The default deployment rendered `hash:::1536` — two empty slots, because `embedding_model`
-    defaults to `""` as well as the endpoint — which reads as truncated or corrupt rather than as
-    "no endpoint, no model name". Filled and prefixed, every field names itself.
+    Operators read it out of durable columns, and empty slots read as truncated or corrupt.
     """
     _use_settings(monkeypatch, embedding_provider="hash")
     assert provider.embedding_config_key() == "hash:ep-none:d1536:model-none"
@@ -250,11 +233,9 @@ def test_every_slot_of_the_config_key_says_what_it_is(monkeypatch: pytest.Monkey
 def test_a_colon_in_the_model_name_cannot_be_read_as_a_separator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one free-form field is last, so Ollama/vLLM naming cannot make the key unparseable.
+    """A colon in the model name cannot be read as a separator.
 
-    `nomic-embed-text:v1.5` is an ordinary model name. With the dimension after it the key had five
-    colon-separated fields and no way to tell which was which; with the model last, everything after
-    the third colon is the model and nothing else can be.
+    The model is the last field, so everything after the third colon is the model.
     """
     _use_settings(
         monkeypatch,

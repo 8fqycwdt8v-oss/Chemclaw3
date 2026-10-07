@@ -1,25 +1,10 @@
 """Every value this system writes into a `jsonb` column goes through one guard, or says why not.
 
-**The rule existed and was applied by hand, which is how it was applied unevenly.**
-`protocols/models.py` sets `allow_inf_nan=False` on ten models, and the BO campaign store wrote
-the argument `core/jsonb.py` now carries — and wave 11 still found five paths without it, each
-failing differently: the calculation cache raised inside `cached_compute` so every concurrent waiter
-failed and the value recomputed forever; the ELN sync's `psycopg` error was neither `ChemclawError`
-nor `ValidationError`, so it escaped the per-entry reject-and-continue, aborted the pass and never
-advanced the cursor; the publish outbox lost the good records batched beside the poison one; and a
-campaign recorded against the in-memory oracle while raising against Postgres.
-
-So the enumeration is **derived**: this walks `src/` and finds every construction of psycopg's
-`Jsonb` there is. A tenth site added next year lands in one of the two sets below and its author has
-to say which. A hand-written list of "the paths we fixed" is a list of what the tree looked like the
-afternoon somebody fixed them, which is the shape this file exists to end.
-
-**On `NOT_YET_MEASURED`.** Those eight are not endorsed and not converted. Wave 11 measured
-reachability on the five paths it reviewed, not on these subsystems, and this repository's own rule
-is that a check is built after confirming the data it reads exists — converting them on the
-strength of "it compiles" would be a change with no measurement behind it. What the entry buys is
-that the gap is *stated* and counted rather than invisible, and that a tenth site cannot arrive
-unnoticed while it stands.
+`jsonb` cannot hold a non-finite float, and the resulting `psycopg` error escapes handlers written
+for domain errors. The enumeration is derived: this walks `src/` for every construction of
+psycopg's `Jsonb`, and each site must be in `GUARDED` (routed through
+`chemclaw.core.jsonb.json_column`) or `NOT_YET_MEASURED` (declared, with a reason). A new site fails
+until its author decides which.
 """
 
 import ast
@@ -27,15 +12,8 @@ import pathlib
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
-#: Sites wave 11 measured, fixed, and routed through `chemclaw.core.jsonb.json_column`.
-#:
-#: Each of these was reproduced against a live Postgres before it was changed. This comment also
-#: said each "has a test beside it that was watched failing against the unfixed source", and
-#: mutation testing measured that as true of two of the three: reverting
-#: `science/calc/postgres_store.py` or `science/bo/campaign_record_store.py` to a bare `Jsonb` goes
-#: red, and reverting `publish/outbox.py` leaves **44 tests across its three files green**, because
-#: that module's non-finite test refuses at *projection* and never reaches the column. So the
-#: sentence is corrected and `test_no_guarded_site_has_reverted` below is what now holds all three.
+#: Sites routed through `chemclaw.core.jsonb.json_column`. `test_no_guarded_site_has_reverted` holds
+#: each one to that.
 GUARDED = {
     "chemclaw/science/calc/postgres_store.py",
     "chemclaw/publish/outbox.py",
@@ -50,9 +28,8 @@ GUARDED = {
 
 #: Sites that still construct `Jsonb` directly, with the reason each is not yet converted.
 #:
-#: Not an endorsement. `jsonb` cannot hold a non-finite float at any of them either, so each is the
-#: same latent shape — what is missing is the measurement that says whether a non-finite value can
-#: *reach* it, which is what decides whether the fix is a guard or a model constraint one layer up.
+#: Not an endorsement: whether a non-finite value can reach each one has not been measured, and that
+#: decides whether the fix is a guard or a model constraint one layer up.
 NOT_YET_MEASURED = {
     "chemclaw/science/calc/postgres_structures.py": "geometry from a validated Structure model",
     "chemclaw/agent/session_store.py": "LangChain message dicts, shape-stamped on write",
@@ -72,16 +49,9 @@ _THE_GUARD = "chemclaw/core/jsonb.py"
 def _jsonb_sites() -> set[str]:
     """Every module under `src/chemclaw` that constructs psycopg's `Jsonb` directly.
 
-    `core/jsonb.py` is excluded by name rather than by adding it to a set below, because it is
-    neither a guarded boundary nor an unmeasured one — it is the guard, and putting it in either
-    table would make that table read as one entry longer than the surface actually is.
-
-    **What this cannot see, stated rather than implied**: an aliased import
-    (`from psycopg.types.json import Jsonb as J`) called as `J(...)`, because the walk matches the
-    callee's name. Driven, a plain new site in an undeclared module fails this correctly; the alias
-    arm does not. Resolving it would mean following bindings, which is the same import-tracking a
-    linter does better — and the shape being guarded against here is somebody adding a `jsonb`
-    write the ordinary way, not somebody hiding one.
+    `core/jsonb.py` is excluded by name: it is the guard, not a boundary. The walk matches the
+    callee's name, so an aliased import (`Jsonb as J`) is not seen; the guarded-against shape is an
+    ordinary new write, not a hidden one.
     """
     found: set[str] = set()
     for path in sorted(SRC.rglob("*.py")):
@@ -108,11 +78,9 @@ def test_the_scan_finds_something() -> None:
 
 
 def test_every_jsonb_boundary_is_guarded_or_declared() -> None:
-    """The partition is total, so a new boundary cannot arrive undeclared.
+    """Every `jsonb` boundary is guarded or declared: the partition is total.
 
-    This is what makes the rule durable rather than dated. The next module that writes a `jsonb`
-    column fails here until its author decides which set it belongs in — which is a smaller ask than
-    the four failures wave 11 measured, and the only one that arrives before a deployment does.
+    The next module that writes a `jsonb` column fails here until its author places it.
     """
     declared = GUARDED | set(NOT_YET_MEASURED)
     actual = _jsonb_sites()
@@ -124,18 +92,10 @@ def test_every_jsonb_boundary_is_guarded_or_declared() -> None:
 
 
 def test_no_guarded_site_has_reverted() -> None:
-    """A site in `GUARDED` constructs no `Jsonb` at all — that is what being guarded *is*.
+    """No guarded site has reverted to a bare `Jsonb`.
 
-    **The partition above cannot see this, which made it the one failure it exists to prevent.**
-    `test_every_jsonb_boundary_is_guarded_or_declared` asserts `actual <= declared`, and a guarded
-    module that regresses to a bare `Jsonb` is still *declared* — so it satisfies that assertion
-    exactly as the fixed version does. Measured: reverting wave 11's own fix in
-    `publish/outbox.py` (`json_column(...)` back to `Jsonb(...)`) left 44 tests across three files
-    green, this file's included. A register whose members can quietly leave the state the register
-    asserts is a claim that a control exists, which is the shape this repository keeps finding.
-
-    So the membership is checked rather than believed: `json_column` is the only route a guarded
-    module takes, and the scan below finds no direct construction in any of them.
+    The partition test asserts `actual <= declared`, which a regressed guarded module still
+    satisfies, so membership is checked: no guarded module constructs `Jsonb` directly.
     """
     reverted = sorted(GUARDED & _jsonb_sites())
     assert not reverted, (
@@ -147,11 +107,9 @@ def test_no_guarded_site_has_reverted() -> None:
 
 
 def test_no_declared_site_has_quietly_disappeared() -> None:
-    """A declaration that names nothing is a rule about a tree that has moved on.
+    """No declared site has quietly disappeared.
 
-    `NOT_YET_MEASURED` in particular must shrink as those subsystems are measured; an entry whose
-    file no longer constructs `Jsonb` has been fixed, and leaving it here would let the count read
-    as outstanding work that is already done.
+    An entry whose file no longer constructs `Jsonb` has been fixed and must leave the declaration.
     """
     stale = sorted(set(NOT_YET_MEASURED) - _jsonb_sites())
     assert not stale, (

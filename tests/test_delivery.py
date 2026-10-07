@@ -1,13 +1,8 @@
 """The outbound delivery seam: a message that leaves for a person.
 
-`durable/digest.py` stated the position this replaces in as many words — *"no new delivery
-mechanism, no email integration, no second notification system"* — which was right while the product
-was a chat window and is why a project leader could not be reached on a Monday morning: the only
-place a digest landed was a mailbox inside the app.
-
-Four properties are asserted rather than described, because each is a claim the README makes:
-delivery is off until a deployment names a channel, a message is redacted before any driver sees it,
-one channel's failure is not everyone's, and nothing reads *from* a channel.
+Four properties are asserted: delivery is off until a deployment names a channel, a message is
+redacted before any driver sees it, one channel's failure is not everyone's, and nothing reads
+*from* a channel.
 """
 
 import asyncio
@@ -92,9 +87,8 @@ def test_a_message_is_redacted_before_any_driver_sees_it(
 ) -> None:
     """The scrub is in the registry, not in each driver.
 
-    A redaction every driver has to remember is one the next driver forgets, and the one that
-    forgets is the one that sends outside the cluster. Driven end to end through the file channel,
-    with a real registered secret, so the assertion is over what actually lands on disk.
+    A redaction every driver must remember is one the next driver forgets. Driven end to end through
+    the file channel with a real registered secret, asserting on what lands on disk.
     """
     from chemclaw.core.logging import register_secret_env
 
@@ -163,9 +157,8 @@ def test_one_channels_failure_is_not_everyones(
 def test_nothing_reads_from_a_channel() -> None:
     """An absence pinned: a channel is write-only, and a driver that read would be an ingest source.
 
-    The mirror of the rule `ingest/sources/README.md` states in the other direction — "a source
-    cannot acquire a write path by declaring one". A `fetch`, `read` or `poll` on the driver
-    Protocol would make this seam a second, ungoverned way into the corpus.
+    The mirror of `ingest/sources/README.md`'s rule; a `fetch`, `read` or `poll` on the driver
+    Protocol would be an ungoverned way into the corpus.
     """
     protocol = (SRC / "deliver" / "driver.py").read_text(encoding="utf-8")
     for verb in ("def fetch", "def read", "def poll", "def receive"):
@@ -178,24 +171,18 @@ def test_nothing_reads_from_a_channel() -> None:
 def test_a_connector_bearer_token_is_scrubbed_from_an_outbound_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The claim this module made in prose and did not implement.
+    """A connector bearer token is scrubbed from an outbound message.
 
-    `Message.redacted()`'s docstring said "the same filter runs here" about `core/logging`'s scrub.
-    It did not: `redact_secrets` reaches a connector's bearer token only through its `extra_secrets`
-    argument, and nothing passed one — so a tool error quoting its own `Authorization` header was
-    scrubbed from the log line and shipped verbatim to the webhook host. Both sides now resolve the
-    names through `connectors.registry.bearer_token_env_names`, so they cannot cover different sets.
-
-    Reverting the `extra_secrets=` argument leaves every suite green, which is why this exists.
+    `redact_secrets` reaches a connector's token only through `extra_secrets`, so both the log
+    filter and `Message.redacted()` resolve the names through
+    `connectors.registry.bearer_token_env_names` and cannot cover different sets.
     """
     from chemclaw.deliver.message import Message
 
     secret = "sk-connector-token-abc123"
     monkeypatch.setenv("CHEMCLAW_CALC_MCP_TOKEN", secret)
-    # **Bare, deliberately.** An "Authorization: Bearer …" spelling is caught by the structural
-    # patterns whatever \ holds, so a test written that way passes with the fix
-    # reverted and proves nothing — which is exactly what the first version of this test did. Only a
-    # value recognisable *as a configured credential* exercises the argument that was missing.
+    # Bare, deliberately: an "Authorization: Bearer …" spelling is caught by the structural patterns
+    # anyway, so only a value recognisable as a configured credential exercises `extra_secrets`.
     body = f"the server refused; the token it rejected was {secret}"
     scrubbed = Message(recipient="u-1", subject="digest", body=body).redacted()
     assert secret not in scrubbed.body, "a connector bearer token reached an outbound message"
@@ -203,17 +190,10 @@ def test_a_connector_bearer_token_is_scrubbed_from_an_outbound_message(
 
 
 def test_the_webhook_sends_the_recipients_view_and_not_the_join_key() -> None:
-    """`correlation_id` is the key that joins a delivery to this system's audit trail.
+    """The webhook sends the recipient's view, not `correlation_id`, the audit-trail join key.
 
-    Its own field docstring says "never rendered to the recipient". The file driver honoured that;
-    the webhook driver serialised the whole model with `model_dump()` and posted it to a third-party
-    chat or ticketing host. The projection is an allow-list rather than a deny-list, so a field
-    added later is omitted rather than leaked.
-
-    **Driven through the real driver rather than re-derived here.** This test used to build the
-    projection itself and assert on that, which made it a claim about `model_dump` and not about
-    what leaves the process — a driver that added a field after the projection would have been
-    invisible to it. It reads the captured request body instead, which is where the guarantee is.
+    The projection is an allow-list, so a field added later is omitted rather than leaked. Asserted
+    on the captured request body, which is where the guarantee is.
     """
     message = Message(
         recipient="u-1", subject="s", body="b", kind="digest", correlation_id="corr-secret"
@@ -226,19 +206,10 @@ def test_the_webhook_sends_the_recipients_view_and_not_the_join_key() -> None:
 def test_the_webhook_never_follows_an_ambient_proxy() -> None:
     """A pod's `HTTP_PROXY` must not silently reroute a delivery — with its body and its bearer.
 
-    Every other client in this tree that reaches a real dependency sets `trust_env=False` and says
-    why (`connectors/registry.py`, `core/mcp_session.py`, `core/embeddings.py`,
-    `connectors/health.py`, `agent/llm_provider.py`, and the sibling seam
-    `publish/drivers/http.py`). The delivery channel — the one client whose payload is
-    human-readable message content *and* which attaches `Authorization: Bearer` — was the
-    exception. Measured against a recording listener installed as `HTTP_PROXY`: the proxy received
-    the full `POST`, the JSON body and `Authorization: Bearer s3cr3t-bearer-value`, and the
-    configured destination received nothing.
-
-    Driven through a real socket rather than by inspecting the client's attributes, because the
-    property under test is where the bytes go. A listener that accepts and answers `200` stands in
-    for the proxy; the configured host is unroutable, so *any* delivery that completes at all
-    completed through the proxy.
+    Every client here that reaches a real dependency sets `trust_env=False`; this one carries
+    message content and `Authorization: Bearer`. Driven through a real socket: a listener installed
+    as the proxy answers `200` and the configured host is unroutable, so any delivery that completes
+    went through the proxy.
     """
     import os
     import socket
@@ -303,12 +274,10 @@ def test_the_webhook_never_follows_an_ambient_proxy() -> None:
 def test_a_plaintext_channel_is_refused_under_the_enforced_posture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The floor the sibling outbound seam already had and this one shipped without.
+    """A plaintext channel is refused under the enforced posture.
 
-    `publish/drivers/http` refuses a non-loopback `http://` sink under `entra_required` because
-    confidential chemistry would cross the wire in cleartext. A delivery carries *more*
-    human-readable content than a sink record does — a chemist's standing query, note ids, an
-    escalation body — and, when `token_env` is set, a bearer credential in every request.
+    As `publish/drivers/http` refuses a non-loopback `http://` sink under `entra_required`; a
+    delivery carries human-readable content and possibly a bearer in every request.
     """
     from chemclaw.deliver.driver import WebhookDeliveryDriver
 
@@ -324,12 +293,10 @@ def test_a_plaintext_channel_is_refused_under_the_enforced_posture(
 
 
 def test_a_message_kind_cannot_escape_the_outbox() -> None:
-    """`kind` is a path component in the file driver, and was documented-but-unbounded.
+    """A message kind cannot escape the outbox.
 
-    The docstring called it "a bounded vocabulary" and the type was `str`, while
-    `FileDeliveryDriver` builds `directory / f"{kind}-{identity}{suffix}"` — so an absolute or
-    `../`-bearing value escapes the outbox, with `mkdir(parents=True)` creating whatever it
-    traverses to. The `Literal` is the bound; the prose was not.
+    `FileDeliveryDriver` builds `directory / f"{kind}-{identity}{suffix}"`, so an absolute or `../`
+    value would escape (with `mkdir(parents=True)`); the `Literal` type is the bound.
     """
     from pydantic import ValidationError
 
@@ -350,31 +317,13 @@ def _channel(root: Path, name: str, body: str) -> None:
 def test_the_config_gate_refuses_a_plaintext_channel_the_delivery_path_only_swallows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The refusal had nowhere to be heard, which is why it was not a refusal.
+    """The config gate refuses a plaintext channel that the delivery path would only swallow.
 
-    `_refuse_plaintext_channel` raises from driver construction, and construction happens inside
-    `deliver()`'s per-channel `try` — the swallow that exists so one broken channel does not cost
-    every other recipient their message, and that is correct. Measured before this test existed:
-    with `entra_required=true` and an enabled `http://` channel, `enabled()` returned it,
-    `deliver()` returned `[]`, and `make channel-validate` reported **no problems at all**. The
-    control named itself a refusal and was a per-message drop on a deployment that looked healthy.
-
-    So the gate an operator runs before delivering is where the question gets asked, and this
-    asserts it in both directions — including that the shipped `https://` manifest still passes,
-    since a posture check that failed everything would be removed by the next person.
-
-    **And it is asked whatever this environment's posture happens to be**, which is the half that
-    shipped inert. This test used to assert the opposite — "the posture check must not fire where
-    the posture is not enforced" — and that assertion was the defect written down as a contract:
-    `entra_required` defaults `False`, nothing in `ci.yml`, the chart or the runbook sets it where
-    `channel-validate` runs, so the rule added to stop a plaintext channel merging silently could
-    only ever fire on a deployment that had already turned enforcement on. It is the same
-    CI-blindness rules 2 and 3 work around by iterating discovered rather than enabled manifests,
-    one layer further in. A validator asks about the manifest, not about today's environment: a
-    channel that will be refused the day enforcement is turned on is a broken channel today.
-
-    The construction site is the one that still reads the setting, and
-    `test_a_driver_built_outside_the_gate_still_refuses_a_cleartext_destination` holds that half.
+    Driver construction raises inside `deliver()`'s per-channel `try`, which correctly swallows, so
+    at delivery the refusal is a silent per-message drop. `make channel-validate` is where it must
+    be heard, both directions (the shipped `https://` manifest passes), and *whatever this
+    environment's posture*: a validator asks about the manifest, and a channel refused once
+    enforcement is on is broken today. Construction still reads the setting; see the next test.
     """
     from chemclaw.cli.validate_channels import problems
 
@@ -402,17 +351,11 @@ def test_the_config_gate_refuses_a_plaintext_channel_the_delivery_path_only_swal
 def test_a_driver_built_outside_the_gate_still_refuses_a_cleartext_destination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half of the one definition: construction asks about *this* deployment.
+    """Construction asks about *this* deployment; the validator always asks under enforcement.
 
-    `plaintext_channel_refusal` takes the posture as a parameter now, so there are two askers and
-    they ask different questions. The validator asks "is this manifest legal under enforcement?"
-    and always passes `enforced=True`. Building a driver is an act rather than a review — it opens
-    a destination *now* — so it passes `settings.entra_required`, and a dev deployment with
-    enforcement off must still be able to run a plaintext channel against a local host.
-
-    Both directions here, because making the validator unconditional is exactly the change that
-    could have made construction unconditional too by accident, and that would refuse every
-    local-dev http channel in a repository whose whole live lane is local.
+    `plaintext_channel_refusal` takes the posture as a parameter. Building a driver passes
+    `settings.entra_required`, so local development can still use an `http://` channel. Both
+    directions, so making the validator unconditional cannot make construction unconditional too.
     """
     from chemclaw.deliver.driver import webhook_channel
 
@@ -430,18 +373,11 @@ def test_a_driver_built_outside_the_gate_still_refuses_a_cleartext_destination(
 def test_the_posture_check_reads_the_destination_whatever_the_driver_calls_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A `config:` block is free-form on purpose, so the check cannot key on the word `url`.
+    """The posture check reads the destination whatever the driver calls it.
 
-    The driver's own signature is the schema, so a site's driver may name its destination
-    `endpoint`, `hook` or `webhook_url`. A check that knew one spelling would pass every channel it
-    was written to catch — and would do so silently, which is the shape of the defect it exists to
-    end. Every value that *is* a URL is asked instead.
-
-    The `mounted` half is the one that would rot quietly: a mounted share's `directory` and `suffix`
-    are not URLs, and the first version of this check passed them only because
-    `PG_LOOPBACK_HOSTS` contains `''` for a Postgres DSN with no host. Asserted here so that
-    depending on somebody else's constant cannot come back — if it did, every file channel in every
-    enforced deployment would fail validation as a cleartext destination.
+    A `config:` block is free-form (the driver's signature is the schema), so every value that *is*
+    a URL is checked, not a `url` key. A mounted share's `directory`/`suffix` must not count as a
+    cleartext destination, which is asserted without relying on another module's constant.
     """
     from chemclaw.cli.validate_channels import problems
 
@@ -474,15 +410,10 @@ def test_the_posture_check_reads_the_destination_whatever_the_driver_calls_it(
 def test_the_posture_check_walks_into_a_list_or_a_nested_destination(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Free-form means the shape is free too, not only the key's spelling.
+    """The posture check walks into a list or a nested destination.
 
-    The first version of this rule looked at top-level `str` values, which is a second assumption
-    about a block whose whole design point is that a site writes any driver against it. A fan-out
-    driver taking `urls: [a, b]` and a failover driver taking `endpoints: {primary: …}` both
-    escaped it entirely — and escaped it silently, which is the failure mode the rule exists to end.
-
-    Bounded rather than fully recursive on purpose (`_config_strings`): the three shapes a
-    destination is realistically written in, and then it stops.
+    Free-form shape too: `urls: [a, b]` and `endpoints: {primary: …}` are realistic. Bounded rather
+    than fully recursive (`_config_strings`).
     """
     from chemclaw.cli.validate_channels import problems
 
@@ -516,17 +447,10 @@ def test_the_posture_check_walks_into_a_list_or_a_nested_destination(
 def test_the_posture_check_walks_into_a_fan_out_list_of_dicts_or_a_dict_of_lists(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The natural next step from the `urls`/`endpoints` examples was silently one hop too far.
+    """The posture check walks into a fan-out list of dicts or a dict of lists.
 
-    `_config_strings` shipped with `depth=2`, and its own docstring said it reached "a list, and one
-    level of nesting inside either" — but the `depth <= 0` guard fired on the *container itself*
-    before it looked inside it, one hop earlier than that prose promised. A fan-out driver pairing
-    each URL with per-target metadata (`targets: [{url: …}, {url: …}]`, headers or its own
-    `token_env` beside it) is exactly that natural next step, and it passed this security gate under
-    `entra_required=True` with **zero** problems reported — confirmed directly:
-    `_config_strings({"targets": [{"url": "http://b"}]})` returned `[]`. The gap was symmetric: a
-    dict of per-target lists (`endpoints: {primary: [url, …]}`) escaped the same way. Both are
-    asserted here, refused exactly like the shallower `urls`/`endpoints` shapes already are.
+    `targets: [{url: …}]` and `endpoints: {primary: [url, …]}` are within the documented depth (a
+    container, one level of nesting, the strings inside), and are refused like the shallower shapes.
     """
     from chemclaw.cli.validate_channels import problems
 
@@ -560,15 +484,10 @@ def test_the_posture_check_walks_into_a_fan_out_list_of_dicts_or_a_dict_of_lists
 
 
 def test_config_strings_depth_is_bounded_not_unbounded() -> None:
-    """Correcting the depth to match its documented intent must not turn it into a free traversal.
+    """`_config_strings` depth is bounded, not unbounded.
 
-    `_config_strings` is deliberately bounded — a destination buried deeper than the three
-    documented container hops (`config`'s own values, one level of nesting, and the strings inside
-    that nesting) is outside what rule 4 claims to see, and this proves the corrected depth still
-    stops there rather than walking arbitrarily deep structures. A fourth hop
-    (`targets: [{urls: [url]}]` — list of dicts of *lists*, one level past the fan-out shape the
-    other test closes) must still be silently out of scope, and a pathologically deep structure must
-    not raise or hang.
+    A fourth hop (`targets: [{urls: [url]}]`) stays out of scope, and a pathologically deep
+    structure must not raise or hang.
     """
     from chemclaw.cli.validate_channels import _config_strings
 
@@ -589,18 +508,12 @@ def test_config_strings_depth_is_bounded_not_unbounded() -> None:
 def test_a_file_channel_with_an_impossible_directory_is_a_config_fault_not_an_outage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The config-versus-outage split had a hole exactly where the file driver is.
+    """A file channel with an impossible directory is a config fault, not an outage.
 
-    `FileDeliveryDriver.__init__` touched no filesystem, so `build()` succeeded for any string at
-    all and a bad `directory:` first surfaced at `mkdir` time inside `deliver()` — on
-    `chemclaw_delivery_failures_total`, the series an operator reads as "the destination is having a
-    bad afternoon". A path with a regular file where a directory belongs will fail identically on
-    every message until somebody edits a manifest, which is the definition of the *other* counter.
-
-    Both directions, because the easy over-correction is worse than the defect: a directory that
-    does not exist yet is **not** a misconfiguration — creating it is what a first delivery to a
-    fresh mount does — and refusing it would turn every new deployment's first message into an
-    alert.
+    A regular file where the directory belongs fails every message until a manifest is edited, so it
+    must surface at build time on the config counter rather than on
+    `chemclaw_delivery_failures_total`. Both directions: a directory that does not exist yet is not
+    a misconfiguration, since the first delivery creates it.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -651,14 +564,11 @@ def test_a_file_channel_with_an_impossible_directory_is_a_config_fault_not_an_ou
 def test_a_channel_that_cannot_be_built_is_not_counted_as_a_destination_outage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The two facts have different lifetimes, and one counter could not tell them apart.
+    """A channel that cannot be built is not counted as a destination outage.
 
-    A send failure is usually a host having a bad afternoon. A channel whose driver will not build
-    — a bad `config:` block, an unimportable `module:callable`, a destination the posture forbids —
-    fails identically on every message until somebody edits a manifest. Both continue to the next
-    channel; only one of them is still true tomorrow, so the permanent fault goes to
-    `chemclaw_degraded_total{subsystem="delivery_channel_config"}` rather than hiding inside the
-    transient one's series.
+    A send failure is usually transient; a build failure (bad `config:`, unimportable callable, a
+    forbidden destination) is permanent until a manifest changes. Both continue to the next channel,
+    and the permanent fault goes to `chemclaw_degraded_total{subsystem="delivery_channel_config"}`.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -707,13 +617,10 @@ def test_a_channel_that_cannot_be_built_is_not_counted_as_a_destination_outage(
 def test_a_secret_in_the_recipient_is_scrubbed_like_one_in_the_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The seam's rule is "every message is redacted once, in the registry" — every free-text field.
+    """A secret in the recipient is scrubbed like one in the body.
 
-    `recipient` was the one it skipped. It is free text by construction — the address a driver
-    resolves, whose shape only the driver knows — and both shipped drivers put it where the body
-    goes: `FileDeliveryDriver` writes it into the file, `WebhookDeliveryDriver` POSTs it. Today's
-    only caller passes an actor id, so nothing carries a credential there yet; the guarantee is
-    supposed to be a property of the seam rather than of who happens to be calling it.
+    `recipient` is free text that both shipped drivers put where the body goes; the guarantee is a
+    property of the seam, not of today's caller.
     """
     from chemclaw.deliver.message import Message
 
@@ -729,19 +636,11 @@ def test_a_secret_in_the_recipient_is_scrubbed_like_one_in_the_body(
 def test_a_recipient_the_scrub_rewrote_is_reported_rather_than_silently_undeliverable(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A rewritten address is an undelivered message, and nothing said so.
+    """A recipient the scrub rewrote is reported rather than silently undeliverable.
 
-    `redact_secrets` rewrites *structural* shapes as well as this deployment's own secret values,
-    and a routable address can be one: a Teams channel URN
-    (`urn:teams:channel:19:meeting_TOKEN=…@thread.v2`) loses its token to the `TOKEN=` pattern, a
-    webhook URL with userinfo loses its password, and a `xoxb-`-shaped address is replaced whole.
-    The scrub stays — `recipient` is free text that both shipped drivers put where the body goes,
-    and the seam's guarantee must not depend on who is calling it — but a substitution here does
-    not merely redact a message, it re-addresses one, and the driver that fails to deliver it can
-    only report the address it was given.
-
-    The original is deliberately absent from the log line: what tripped the pattern may be a real
-    credential, and this module is the half that leaves the cluster.
+    `redact_secrets` rewrites structural shapes, and a routable address can match one (a Teams URN's
+    `TOKEN=`, URL userinfo, an `xoxb-` shape). The scrub stays, but a rewrite re-addresses the
+    message, so it is logged — without the original, which may be a real credential.
     """
     urn = "urn:teams:channel:19:meeting_TOKEN=abc12345678@thread.v2"
     with caplog.at_level(logging.WARNING, logger="chemclaw.deliver.message"):
@@ -794,10 +693,8 @@ def _post_and_capture(message: Message) -> tuple[dict[str, str], dict[str, objec
 
 #: How each shipped driver is driven, and what the destination then saw, as text.
 #:
-#: A fixture per driver is unavoidable — a file channel needs a directory and a webhook needs a URL
-#: — but the *list* is not hand-written: the test below derives the drivers from the discovery path
-#: and refuses to run if this mapping does not cover exactly them. That is what makes a third
-#: channel owe the same proof instead of shipping with two tests that each hold one driver.
+#: The test below derives the drivers from discovery and refuses to run unless this mapping covers
+#: exactly them, so a new channel owes the same proof.
 _DRIVER_PROBES: dict[str, str] = {
     "chemclaw.deliver.driver:file_channel": "file",
     "chemclaw.deliver.driver:webhook_channel": "webhook",
@@ -838,22 +735,12 @@ def _webhook_traces(message: Message, _tmp_path: Path) -> list[str]:
 
 
 def test_every_shipped_delivery_driver_makes_a_redelivery_identifiable(tmp_path: Path) -> None:
-    """The activity around these drivers is at-least-once, so the destination needs the handle.
+    """Every shipped delivery driver makes a redelivery identifiable.
 
-    `registry.deliver` walks the enabled channels serially and swallows each one's failure, so the
-    activity never fails *because* of a channel — what fails it is `start_to_close` expiring
-    mid-walk or the worker dying, both retryable under `BAD_DATA_RETRY`, and a retry re-walks
-    channel including the ones that already took the message. There is no per-channel delivery
-    record and deliberately none: a local row can say a POST was sent and never whether it landed,
-    and one activity per channel would shrink that window without closing it, because a retry of
-    *that* activity re-sends to *that* channel. `core/config/deliver.py` mitigated the same thing by
-    widening the budget 30 s → 300 s, which moves a threshold and bounds nothing — a worker restart
-    mid-walk is not covered by any timeout.
-
-    So what closes it is the destination being able to recognise a redelivery, and that is a
-    requirement on every driver rather than a property two of them happen to have. Two tests below
-    each hold one shipped driver to it; this one derives the set from the discovery path, so an
-    eighth channel cannot ship without either carrying `message_id` or being idempotent by
+    `deliver_message_activity` is at-least-once: a retry after a timeout or worker death re-walks
+    every channel, including ones that already took the message, and no local record can know
+    whether a POST landed. So each destination must be able to recognise a redelivery. The driver
+    set is derived from discovery, so a new channel must carry `message_id` or be idempotent by
     construction.
     """
     from chemclaw.deliver.driver import message_id
@@ -877,16 +764,11 @@ def test_every_shipped_delivery_driver_makes_a_redelivery_identifiable(tmp_path:
 
 
 def test_the_webhook_carries_a_dedup_handle_the_file_channel_already_had() -> None:
-    """Both shipped channels must answer "is this the same message" the same way.
+    """The webhook carries a dedup handle, as the file channel already did.
 
-    `deliver_message_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST landed
-    re-runs the activity and re-POSTs — at-least-once, which is the correct contract for delivery
-    and is precisely why the receiver needs a key. Measured before this: three `deliver()` calls of
-    one message left **one** file on the share and put **three** POSTs on the wire, with no field a
-    receiver could dedupe on, because `correlation_id` is (rightly) excluded from the payload.
-
-    Sent both ways: `Idempotency-Key` is what chat and ticketing hosts actually read, and
-    `message_id` in the body is what a site's own receiver reads.
+    A re-run activity re-POSTs, and `correlation_id` is excluded from the payload, so the receiver
+    needs a key: `Idempotency-Key` (what chat and ticketing hosts read) and `message_id` in the body
+    (what a site's own receiver reads).
     """
     from chemclaw.deliver.driver import message_id
 
@@ -899,9 +781,7 @@ def test_the_webhook_carries_a_dedup_handle_the_file_channel_already_had() -> No
 def test_two_messages_differing_only_in_kind_are_not_the_same_message() -> None:
     """A digest and a job result with the same body must not share an `Idempotency-Key`.
 
-    They would if the handle were the file driver's original three-field hash, which spelled the
-    kind as the filename's prefix instead — and a receiver deduping on it would drop a real
-    `job-result` because a digest with the same body had already arrived.
+    Otherwise a receiver deduping on it would drop a real `job-result`.
     """
     from chemclaw.deliver.driver import message_id
 
@@ -917,14 +797,9 @@ def test_two_messages_differing_only_in_kind_are_not_the_same_message() -> None:
 def test_the_file_channel_is_never_observed_half_written(tmp_path: Path) -> None:
     """A reader on the share must never see a truncated digest.
 
-    `Path.write_text` truncates and then writes; a share is read by people and scripts holding no
-    lock, and a re-delivery overwrites the same path by design (the filename is a content hash,
-    which is what makes this channel idempotent) — so the window opens on every retry. Measured on
-    the unfixed driver with a ~520 kB body, 60 re-deliveries and a concurrent reader: **227 of
-    1,883** observations (12%) saw a short file. After the temp-file + `os.replace`: 0 of 7,409.
-
-    Asserted as "never", not as a rate: `os.replace` is atomic within a filesystem, so one short
-    read is a regression rather than noise.
+    `Path.write_text` truncates then writes, and a redelivery overwrites the same content-hash path,
+    so readers holding no lock could see a short file. Temp file plus `os.replace` is atomic within
+    a filesystem, so this asserts "never", not a rate.
     """
     import threading
 
@@ -967,11 +842,10 @@ def test_the_file_channel_is_never_observed_half_written(tmp_path: Path) -> None
 
 
 def test_an_attachment_reaches_the_share_as_its_own_file(tmp_path: Path) -> None:
-    """A pointer is not a deliverable, and a CSV pasted into a Markdown body is not a file.
+    """An attachment reaches the share as its own file.
 
-    The whole point of the seam is that the artefact arrives with its own name and type, which a
-    chemist's spreadsheet or ELN can open — so what is asserted is a second file on the share
-    carrying the exact bytes, not a mention of one in the message.
+    Asserted as a second file carrying the exact bytes, which a spreadsheet or ELN can open, not a
+    mention of one in the message.
     """
     message = Message(
         recipient="u-1",
@@ -1052,25 +926,13 @@ def test_an_attachment_is_redacted_like_a_body(monkeypatch: pytest.MonkeyPatch) 
 def test_a_message_carries_no_credential_a_driver_quoted_back_as_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    r"""The structural half of the outbound scrub, in the spelling a driver actually produces.
+    r"""A message carries no credential a driver quoted back as JSON.
 
-    The tests above hold the *value* inventory — a credential this deployment configured, matched by
-    exact string. This holds the shapes `redact_secrets` recognises by **pattern**, which is the
-    only half that can reach a credential belonging to somebody else: a warehouse driver quoting its
-    own
-    `key=value` binding back in an error, which a tool result carries into a subject, a body and a
-    report attachment.
-
-    **Measured leaking, and the escaping was the reason.** A driver's message routinely carries a
-    JSON document *inside* a JSON string, so the text reaches the rules as
-    `{\"password\": \"...\"}` — and every key-anchored rule framed its separator `["']?\s*[=:]`,
-    which a literal backslash defeats. This is the exit path where that matters most after the
-    committed note (`tests/test_note.py`): `Message.redacted()`'s own docstring says this is "the
-    half of the redaction that leaves the cluster", and a driver writes it to a share or POSTs it.
-
-    Two credentials, from the two different rules, so a regression in either is visible here rather
-    than only in `tests/test_logging.py`: `password` is the libpq rule's, `api_key` the compound
-    key-name rule's.
+    The structural (pattern) half of the outbound scrub, the only half that can catch a credential
+    belonging to somebody else, e.g. a warehouse driver quoting its binding in an error. Driver
+    messages often carry JSON inside a JSON string, so the separator arrives backslash-escaped
+    (`{\"password\": …}`). Two credentials from two different rules (libpq `password`, compound
+    `api_key`) so a regression in either shows here.
     """
     monkeypatch.setattr(
         "chemclaw.deliver.message._connector_secret_envs",
@@ -1102,11 +964,10 @@ def test_a_message_carries_no_credential_a_driver_quoted_back_as_json(
 
 
 def test_a_binary_attachment_survives_the_redaction_rather_than_failing_the_delivery() -> None:
-    """A stated limit, not a silent one.
+    """A binary attachment survives the redaction rather than failing the delivery.
 
-    `redact_secrets` works on text. Bytes that do not decode have no text to scrub, and a redaction
-    that *raised* would turn the courtesy copy into the thing that fails the job whose real result
-    is already durable.
+    `redact_secrets` works on text; bytes that do not decode have none to scrub, and raising would
+    fail a courtesy copy of a result that is already durable.
     """
     payload = bytes(range(256))
     message = Message(
@@ -1117,11 +978,10 @@ def test_a_binary_attachment_survives_the_redaction_rather_than_failing_the_deli
 
 
 def test_an_attachment_crosses_the_wire_as_base64_and_comes_back_whole() -> None:
-    """`OutboundMessage` crosses a Temporal activity boundary, so the encoding is a durable payload.
+    """An attachment crosses the wire as base64 and comes back whole.
 
-    pydantic's default for `bytes` is a utf-8 *decode*, which raises on the first byte outside it —
-    so a seam that shipped text-only and widened later would be changing the wire under open
-    histories. Driven over the JSON a converter would actually send.
+    `OutboundMessage` is a durable Temporal payload, and pydantic's default `bytes` handling is a
+    utf-8 decode that raises outside it. Driven over the JSON a converter would send.
     """
     import json
 

@@ -1,23 +1,15 @@
 """Validate the result-sink manifests — `make sink-validate`.
 
-Three checks pydantic cannot make from a manifest alone, each guarding a declaration against the
-live surface. Rule 1 is a property of the enabled set; rules 2 and 3 run over every **discovered**
-manifest, because a sink that is broken while disabled is a sink nobody can enable:
+Three checks pydantic cannot make from a manifest alone:
 
 1. an **enabled** sink that no manifest declares — a deployment believing it publishes and not
-   doing so is indistinguishable from one with nothing to publish, which is the whole failure this
-   subsystem exists to end;
+   doing so;
 2. a **driver** that cannot be imported or is not callable;
-3. a **config block** the driver's signature will not accept — the same "the callable is the
-   schema" rule the data-source seam applies, checked by binding rather than by a second model.
+3. a **config block** the driver's signature will not accept (the callable is the schema).
 
-The property registry is deliberately **not** checked here: pydantic already refuses a definition
-with no prose, and `tests/test_publish_registry.py` holds the checks that need more than a manifest
-— that units convert within a dimension, and that no two properties of one dimension land on the
-same subject. A third copy here would be a check nobody maintains.
-
-Deliberately does *not* connect to anything. A sink's reachability is a deployment fact and belongs
-to `/readyz`-style probing, not to a manifest check that CI runs with no results database in sight.
+Rules 2 and 3 run over every *discovered* manifest: a sink broken while disabled is one nobody can
+enable. The property registry is checked by `tests/test_publish_registry.py`, not here. Connects to
+nothing: reachability is a deployment fact.
 """
 
 import argparse
@@ -78,10 +70,9 @@ def _driver_problems(manifest: ResultSinkManifest) -> list[str]:
             return [*problems, f"{manifest.name}: connection driver {reference!r}: {exc}"]
         if mismatch := signature_mismatch(nested, connection):
             problems.append(f"{manifest.name}: connection driver {reference!r} {mismatch}")
-        # A `*_env` key holds the NAME of an environment variable. The inbound seam checks this when
-        # its binding loads; this seam has no model to hang a validator on, so the gate is the only
-        # place it can be caught before a publish attempt fails on a variable that was never a
-        # variable name — the realistic mistake being a pasted value, or a lower-case one.
+        # A `*_env` key holds the NAME of an environment variable. This seam has no model to
+        # validate it, so the gate catches a pasted value or a lower-case name before a publish
+        # fails on it.
         for key, value in connection.items():
             if not key.endswith(ENV_SUFFIX):
                 continue
@@ -93,42 +84,23 @@ def _driver_problems(manifest: ResultSinkManifest) -> list[str]:
 
 
 def problems() -> list[str]:
-    """Every finding across every **discovered** sink, plus rule 1 over the enabled set.
+    """Every finding across every discovered sink, plus rule 1 over the enabled set.
 
-    Discovery, not enablement — the convention both sibling seams already state and this one did
-    not follow. `CHEMCLAW_RESULT_SINKS` is empty by default and empty in CI, and iterating it meant
-    rules 2 and 3 resolved zero drivers, bound zero config blocks and checked zero `*_env` names on
-    the shipped configuration: a gate that could only fail on rule 1, which by construction was
-    empty too. A rename in `publish/drivers/sql.py` would have stayed green through every release
-    and failed on the first deployment to enable publishing — in a worker, against a database a DBA
-    had already provisioned. `validate_connectors` and `validate_datasources` both give the reason
-    in the same words: a sink that is broken while disabled is a sink nobody can enable, and CI is
-    where that should surface rather than the day an operator turns it on.
-
-    Rule 1 stays a property of the enabled *set* rather than of any one manifest, which is why it
-    is computed separately and not folded into the loop.
-
-    **Zero discovered manifests is itself a finding**, because it is the same state one step
-    further out: a gate iterating nothing cannot fail, and this one was green on it.
+    Discovery, not enablement: `CHEMCLAW_RESULT_SINKS` is empty in CI, so iterating it would check
+    no driver at all and let a broken sink surface only on the first deployment that enables it.
+    Rule 1 is a property of the enabled set, so it is computed separately. Zero discovered manifests
+    is itself a finding.
     """
     try:
         manifests = discovered()
     except ResultSinkError as exc:
-        # A malformed or mis-named manifest stops discovery entirely, so there is nothing further
-        # to check — and it is reported as a problem line rather than escaping as a traceback, the
-        # way `validate_connectors` and `validate_datasources` already report the same input class.
-        # An operator reading a Python stack trace out of a manifest gate learns that it crashed;
-        # what they need is which file and what is wrong with it, which the message already holds.
+        # A malformed or mis-named manifest stops discovery; report it as one problem line naming
+        # the file, not a traceback.
         return [str(exc)]
 
     if not manifests:
-        # **Zero discovered is the state this docstring already describes, one level out.** The
-        # move from the enabled set to the discovered set fixed a gate that "could only fail on
-        # rule 1, which by construction was empty too" — and zero *discovered* manifests
-        # reproduces that identical state exactly. `CHEMCLAW_RESULT_SINKS_DIR` is a `PATH`-style
-        # operator override, so a typo in it, or an image that failed to ship
-        # `data/publish/sinks/`, turns all three rules off behind a green line. The wording is
-        # `validate_datasources`'.
+        # Zero discovered manifests (a typo in the `PATH`-style `CHEMCLAW_RESULT_SINKS_DIR`, or an
+        # image missing `data/publish/sinks/`) would turn all three rules off behind a green line.
         return [
             f"no result sinks discovered under {settings.result_sinks_dir!r} — no driver, no "
             "config block and no `*_env` name would be checked, and this gate would have checked "

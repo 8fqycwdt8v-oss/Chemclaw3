@@ -4,6 +4,8 @@
 `D-2026-10-02-ci-runs-the-fleets-servers-and-a-breached-allowance-is-held-not-raised` (its CI half
 stands: the `check` job still builds the fleet's environment and a sibling skip still fails).
 
+**Superseded-by:** [D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back](D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back.md) (in part)
+
 ## Context
 
 `SERVED_ELSEWHERE_ALLOWANCE` bounds the three bundles this repository declares and

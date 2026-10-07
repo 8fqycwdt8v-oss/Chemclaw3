@@ -2,6 +2,8 @@
 
 ## Status
 
+**Superseded-by:** [D-2026-09-07-a-driver-with-no-caller-is-not-a-capability](D-2026-09-07-a-driver-with-no-caller-is-not-a-capability.md) (in part)
+
 Accepted, 2026-08-27.
 
 ## Context

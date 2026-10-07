@@ -1,25 +1,15 @@
 """The durable path, end to end against a real Temporal server — the seam's central claim.
 
-The claim under test is that a connector can own a durable capability while core keeps every
-cross-cutting obligation, and that the only thing binding the two is a workflow *type name* and
-a task
-queue read from a manifest. So this runs the two workers a deployment runs:
+A connector owns a durable capability while core keeps the cross-cutting obligations, bound only
+by a workflow type name and a task queue from the manifest. Two workers, as a deployment runs:
 
-- a **core** worker on the background queue hosting `ConnectorJobWorkflow` and the real PR-gate and
-  push-back activities;
-- a **connector** worker on the bundle's own queue hosting only the bundle's own workflow
-  (`tests/fixtures/connectors/fixture/workflows.py`), which imports nothing from the wrapper.
+- a core worker on the background queue with `ConnectorJobWorkflow` and the real note-publishing
+  and push-back activities;
+- a connector worker on the bundle's own queue with only the bundle's workflow
+  (`tests/fixtures/connectors/fixture/workflows.py`).
 
-The generated tool from the fixture manifest launches it, and the assertions are about what core
-did on the connector's behalf: the envelope came back intact, the note went through the PR-gate
-as an agent-authored proposal, and the launching session was woken.
-
-The two activities are *registered for real* and only their side effects are stubbed — the git push
-and the database insert — so the workflow's activity wiring (queue, timeouts, retry policy,
-serialization) is genuinely exercised rather than replaced.
-
-Skipped when the test server's binary cannot be fetched (the offline sandbox), like every other
-Temporal-backed test here.
+Activities are registered for real with only their side effects stubbed, so wiring (queue,
+timeouts, retries, serialization) is exercised. Skipped when the test server cannot be fetched.
 """
 
 import asyncio
@@ -66,8 +56,7 @@ _SESSION = "session-under-test"
 _ACTOR = "oid-under-test"
 _EXPECTED_ID = job_workflow_id("fixture", "run_fixture_job", {"subject": "benzene"})
 
-# One launch input whose job declared a 20 s ceiling — the twenty-second job the fleet-wide
-# ceiling used to bound identically with a four-hour one.
+# One launch input whose job declared a 20 s ceiling, below the fleet-wide one.
 _CEILING_JOB = ConnectorJobInput(
     connector="fixture",
     job="run_fixture_job",
@@ -88,11 +77,10 @@ class _CeilingInfo:
 
 
 def test_the_wrapper_is_served_by_the_background_worker() -> None:
-    """A deployment must actually host the wrapper, or every connector job would hang unstarted.
+    """The wrapper is served by the background worker.
 
-    Sandbox-safe on purpose: the end-to-end test below needs a Temporal server and is skipped
-    offline, so the one property that would silently break *every* connector job — nobody
-    polling the queue the generated tool starts work on — is pinned by a test that always runs.
+    Runs without a server, so the property that would break every connector job (nobody polling the
+    queue) is always checked.
     """
     from chemclaw.durable.background_worker import BACKGROUND_WORKFLOWS
 
@@ -102,18 +90,11 @@ def test_the_wrapper_is_served_by_the_background_worker() -> None:
 def test_the_publish_activity_calls_the_pr_gate_the_way_the_pr_gate_expects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sandbox-safe for the same reason as the test above, and written because that gap bit.
+    """The publish activity calls `record_note` the way it expects.
 
-    `publish_memory_note_activity` is the single path every machine-written note takes to the
-    graph, and the only test exercising it needed a Temporal server — so it skipped on every local
-    run. When `record_note` gained a `dependencies` argument (D-133) and the end-to-end test's
-    stub did not, nothing local failed: the drift only surfaced in CI, as a note that was silently
-    never published.
-
-    This calls the activity directly with the gate stubbed, so the call shape is checked wherever
-    the suite runs. `bind` against the real signature is the assertion — it fails on a missing,
-    misspelled or reordered argument without restating the signature here and inviting the same
-    drift one level down.
+    `publish_memory_note_activity` is every machine-written note's path to the graph. Called
+    directly with the writer stubbed, binding the call against the real signature, so drift fails
+    wherever the suite runs.
     """
     seen: dict[str, Any] = {}
 
@@ -139,15 +120,11 @@ def test_the_publish_activity_calls_the_pr_gate_the_way_the_pr_gate_expects(
 def test_a_connector_workflow_returns_a_well_formed_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The connector-side half of the contract, checked without a server.
+    """A connector workflow returns a well-formed envelope, checked without a server.
 
-    The envelope is the entire cross-process agreement, so it is worth asserting directly: a
-    summary the chat can show, the job's own structured data, and an optional `Note` that has
-    already passed the graph's slug/schema validators — which is what stops a malformed proposal
-    from reaching the PR-gate and failing later at branch creation.
-
-    `memo_value` is stubbed because there is no run outside a workflow to carry a memo; the real
-    read is exercised end to end below, where core stamps it.
+    The envelope is the whole cross-process agreement: a summary, structured data, and an optional
+    `Note` that already passed the graph's slug/schema validators. `memo_value` is stubbed; the real
+    memo is exercised end to end below.
     """
     monkeypatch.setattr(
         "tests.fixtures.connectors.fixture.workflows.workflow.memo_value",
@@ -159,18 +136,15 @@ def test_a_connector_workflow_returns_a_well_formed_envelope(
     assert result.data["subject"] == "benzene" and result.data["ran"] is True
     assert result.note is not None
     assert result.note.id == "fixture-benzene"
-    # `created_by="agent"` is what routes it through the PR-gate rather than straight into the
-    # graph.
+    # `created_by="agent"` is the provenance the note lands with, readable beside its citations.
     assert result.note.created_by == "agent"
 
 
 def _fixture_job_tool(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Point the registry at the fixture bundle and return its generated launch tool.
 
-    Built through the registry rather than hand-constructed, so this exercises the real manifest
-    → tool path: a mistake in the fixture's YAML fails here as it would in production. Discovery
-    is cached, but `tests/conftest.py`'s autouse fixture guarantees it is empty on entry, so
-    repointing `connectors_dir` here takes effect without a local `cache_clear()`.
+    Built through the registry, so the real manifest → tool path is exercised. `tests/conftest.py`
+    clears discovery's cache on entry.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(_FIXTURE_DIR))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
@@ -182,20 +156,16 @@ def _fixture_job_tool(monkeypatch: pytest.MonkeyPatch) -> Any:
 def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole contract in one run: child on its own queue, note PR-gated, session woken."""
+    """The whole contract: child on its own queue, note recorded by core, session woken."""
     published: list[Any] = []
     notified: list[tuple[str, str, dict[str, Any]]] = []
     recorded: list[JobRecord] = []
 
     async def _fake_propose(*args: Any, **kwargs: Any) -> str:
-        """Capture the PR-gate proposal instead of pushing a git branch.
+        """Capture the note proposal instead of writing it.
 
-        Bound against the *real* `record_note` signature rather than restating it. A hand-written
-        stub signature is invisible to `mypy --strict` (the patched attribute is untyped) and only
-        executes where a Temporal server exists — so when `record_note` gained a `dependencies`
-        argument, this stub raised `TypeError` inside the activity, the note was never published,
-        and the failure surfaced as `[] == ['fixture-benzene']` in CI alone. Binding makes the drift
-        impossible to reintroduce: the stub accepts exactly what the real function accepts.
+        Bound against the real `record_note` signature, so the stub accepts exactly what the real
+        function does.
         """
         bound = inspect.signature(record_note).bind(*args, **kwargs)
         note = bound.arguments["note"]
@@ -205,10 +175,7 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     async def _fake_record(*args: Any, **kwargs: Any) -> None:
         """Capture the push-back event instead of inserting a `session_events` row.
 
-        Bound for the same reason as the stub above. Its hand-written signature happens to be
-        correct today, which is exactly why it is worth converting: nothing would report it
-        drifting, and the failure mode — a session that is silently never woken — reads as a
-        Temporal timing problem rather than as a broken stub.
+        Bound against the real signature for the same reason as the stub above.
         """
         bound = inspect.signature(record_session_event).bind(*args, **kwargs)
         notified.append(
@@ -284,12 +251,8 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
                 # the id is what comes back, and the result is awaited separately as a poll
                 # would.
                 assert job_id == _EXPECTED_ID
-                # `result_type` is required, not decoration. An untyped handle hands the pydantic
-                # converter nothing to decode into, so `.result()` returns the raw `dict` and every
-                # attribute read below fails with `'dict' object has no attribute 'summary'` — which
-                # is exactly how this test failed the first time CI actually ran it (D-117). The
-                # product path was fine throughout: `workflows/connector_job.py:106` already passes
-                # `result_type` on the child call, verified against a live server.
+                # `result_type` is required: without it the converter returns a raw `dict` and
+                # attribute reads below fail.
                 handle = client.get_workflow_handle(job_id, result_type=ConnectorJobResult)
                 result: ConnectorJobResult = await handle.result()
                 return result
@@ -299,19 +262,13 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     # The connector's own result crossed back through the envelope unchanged.
     assert result.summary == "fixture job ran on benzene"
     assert result.data["subject"] == "benzene" and result.data["ran"] is True
-    # And the requesting actor reached the connector's own workflow — on the run's memo, so it
-    # never became a payload field the model could author. This is the route every durable job
-    # depends
-    # on: its cluster submission runs under a shared service identity, and `requested_by` is the
-    # only thing that makes it attributable (F4-T3, D-118).
+    # The requesting actor reached the connector's workflow on the run's memo, never as a payload
+    # field the model could author; it is what makes a durable job attributable (F4-T3, D-118).
     assert result.data["requested_by"] == _ACTOR
-    # And so did the session, which is the key a bundle needs to speak *back* to the chemist.
-    # `BoCampaignWorkflow._evaluate` reads exactly this one and got `""` on every run, so a
-    # measured campaign's opening "this is waiting on you" notice, its 24-hour reminders and its
-    # final `expired` notice were all dropped by `AwaitAnswerWorkflow._push` — the campaign
-    # suspended for a fortnight and the chemist who launched it was told nothing.
+    # So did the session, the key a bundle needs to speak back to the chemist (e.g.
+    # `BoCampaignWorkflow._evaluate`'s waiting notices and reminders).
     assert result.data["session_id"] == _SESSION
-    # Core PR-gated the note the connector produced; the connector never touched the graph itself.
+    # Core recorded the note the connector produced; the connector never touched the graph itself.
     assert [note.id for note, _ in published] == ["fixture-benzene"]
     assert published[0][0].created_by == "agent"  # so a human must sign it off at the gate
     # And it went through the gate as a note *with its dependencies* (D-133): the fixture note
@@ -336,11 +293,8 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     assert record.payload == {"subject": "benzene"}
     assert record.result == result.data  # the full envelope, not a summary of it
     assert record.note_id == "fixture-benzene"
-    # And the run's measured duration reached the record. A lower bound in *seconds* is not
-    # available here: the fixture child returns immediately and the time-skipping server may report
-    # both of the wrapper's clock reads as the same instant, so `> 0` would be a flake rather than
-    # an assertion. What this pins is that the field survives the round trip through the activity
-    # and the pydantic converter; that it is *computed* rather than hardcoded is pinned offline, by
+    # The measured duration reached the record. No lower bound: the time-skipping server may report
+    # both clock reads as one instant. That it is computed is pinned offline by
     # `test_the_wrapper_measures_the_run_rather_than_hardcoding_it`.
     assert isinstance(record.runtime_seconds, float)
     # The note a human is asked to sign says *why* the run happened, stamped by core rather than
@@ -353,19 +307,11 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
 def test_a_failed_connector_job_wakes_the_session_before_the_failure_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A job that fails after its turn ended must reach the asker, and carry why.
+    """A failed connector job wakes the session before the failure propagates.
 
-    Found by the 2026-08-04 live pass, not by this suite, and the reason it was missed is worth
-    keeping: `ConnectorJobWorkflow` awaited its child with no failure path at all, so every test
-    here exercised the success path and the wrapper's obligations on failure were simply never
-    stated. In the live run a `compare_solvents` screen was launched, the turn told the chemist it
-    was running, and the child died ~30 s later on an unknown ALPB solvent name. No event of any
-    kind was emitted; the "started" promise stood indefinitely, and the reason existed only in
-    Temporal's history under an id nobody had kept.
-
-    Two assertions, and the second is the one with teeth. That an event fires is easy to satisfy
-    trivially; that the *innermost* failure message survives is what makes the event worth
-    delivering, because Temporal's outer frames say only "Child Workflow execution failed".
+    A job that fails after its turn ended must reach the asker with the reason. The second assertion
+    matters most: the innermost failure message survives, since Temporal's outer frames say only
+    "Child Workflow execution failed".
     """
     notified: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -444,20 +390,16 @@ def test_a_failed_connector_job_wakes_the_session_before_the_failure_propagates(
 
 # --- the ceiling one job actually gets ---------------------------------------------------------
 #
-# `connector_job_timeout_seconds` is the deployment's *maximum*; a bundle may declare less for one
-# of its own jobs and may never declare more (`JobSpec.timeout_seconds`,
-# `D-2026-08-27-a-bundle-may-lower-its-own-ceiling`). These four run offline, because the
-# asymmetry is the whole safety property and it must not be checkable only where a broker is.
+# `connector_job_timeout_seconds` is the deployment's maximum; a bundle may declare less for one of
+# its jobs, never more (`JobSpec.timeout_seconds`). These run offline, because the asymmetry is the
+# safety property.
 
 
 def test_a_declared_ceiling_may_only_lower_the_deployments_maximum() -> None:
-    """Both directions of the `min`, and the absent case that must not move at all.
+    """A declared ceiling may only lower the deployment's maximum.
 
-    The direction is the point. A bundle lives in this repository, so a manifest that could raise
-    its own ceiling would be a capability granting itself runtime the operator never funded —
-    which is why this setting was one global number with no per-job field for as long as it was.
-    Taking the *lower* of the two gives a bundle the only power that is safe to hand it, and a
-    declaration above the setting is clamped rather than obeyed.
+    A manifest that could raise its ceiling would grant itself runtime the operator never funded, so
+    the lower of the two wins and a higher declaration is clamped.
     """
     ceiling = settings.connector_job_timeout_seconds
     assert child_execution_timeout(20.0) == timedelta(seconds=20)
@@ -468,12 +410,9 @@ def test_a_declared_ceiling_may_only_lower_the_deployments_maximum() -> None:
 
 
 def test_a_job_that_declares_nothing_is_bounded_exactly_as_it_was_before() -> None:
-    """Every shipped manifest declares no ceiling, so `None` must be the identity, not a default.
+    """A job that declares nothing is bounded exactly as before.
 
-    Asserted separately from the `min` above because it is the compatibility claim: a manifest
-    written before this key existed, and a Temporal history in flight when it shipped, both decode
-    to `None`, and either would be silently re-bounded if the absent case resolved to anything but
-    the setting itself.
+    `None` (old manifests, in-flight histories) must resolve to the setting itself.
     """
     assert ConnectorJobInput.model_validate(_CEILING_JOB.model_dump()).timeout_seconds == 20.0
     unbounded = _CEILING_JOB.model_copy(update={"timeout_seconds": None})
@@ -485,15 +424,11 @@ def test_a_job_that_declares_nothing_is_bounded_exactly_as_it_was_before() -> No
 def test_the_child_is_started_with_the_resolved_ceiling_and_the_wrapper_still_clears_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The resolved number reaches `execute_child_workflow`, and the wrapper stays above it.
+    """The child starts with the resolved ceiling and the wrapper still clears it.
 
-    Two assertions because the second is the invariant the first could break. `ConnectorJobWorkflow`
-    is not a pass-through — after the child returns it writes the durable record, offers the result
-    to the results store, PR-gates the note and wakes the session — so the ceiling the *template*
-    path puts on the wrapper must stay strictly above whatever the child gets, or the wrapper
-    expires first and its failure push-back never runs. A declared ceiling can only lower the
-    child's, so `wrapper_execution_timeout` clears it by construction; this pins that rather than
-    trusting it, since the arithmetic lives in two functions.
+    After the child returns the wrapper records, publishes and pushes back, so its own ceiling must
+    stay strictly above the child's or its failure push-back never runs. Pinned because the
+    arithmetic lives in two functions.
     """
     starts: list[dict[str, Any]] = []
 
@@ -519,13 +454,11 @@ def test_the_child_is_started_with_the_resolved_ceiling_and_the_wrapper_still_cl
 def test_the_declared_ceiling_travels_from_the_manifest_to_the_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The producer half: a key nothing copies out of the manifest bounds nothing.
+    """The declared ceiling travels from the manifest to the launch.
 
-    The workflow reads `ConnectorJobInput.timeout_seconds`, and a workflow may not read a
-    `connector.yaml` off disk — so the manifest's number has to be copied at the launch site, the
-    way `publish_to_graph` is. Driven through the real generated tool rather than by constructing
-    the input, because the copy is exactly the step that can be forgotten, and forgetting it fails
-    nothing: every job would simply keep the global ceiling and the key would look like it worked.
+    A workflow cannot read `connector.yaml`, so the launch site copies it into
+    `ConnectorJobInput.timeout_seconds`. Driven through the real generated tool, because forgetting
+    the copy fails nothing.
     """
     _fixture_job_tool(monkeypatch)
     (manifest,) = enabled()
@@ -559,39 +492,21 @@ def test_the_declared_ceiling_travels_from_the_manifest_to_the_launch(
 
 
 def test_a_measured_campaigns_wait_does_not_fit_under_the_deployments_job_ceiling() -> None:
-    """The arithmetic first, because the fix reads as over-engineering without it.
+    """A measured campaign's wait does not fit under the deployment's job ceiling.
 
-    `BoCampaignWorkflow._measure` suspends a measured campaign on `AwaitAnswerWorkflow` for
-    `bo_measurement_deadline_days` — a plate turnaround, two working weeks. The child holding that
-    wait is bounded by `connector_job_timeout_seconds`, five hours, sized off the longest *job* in
-    the fleet (a CREST search). One wait is 67x the whole ceiling above it, so the feature could
-    not survive its own wait: five hours in, the campaign child is `TIMED_OUT`, the wrapper reports
-    `job_failed reason="Timed out"`, and every already-paid round is lost.
-
-    Neither number is wrong on its own and no manifest can reconcile them: `JobSpec.timeout_seconds`
-    may only *lower* the ceiling, so the one lever a bundle has moves the wrong way.
-
-    Pinned as a strict inequality over the shipped defaults rather than as the ratio, because the
-    ratio is a fact about one commit and the inequality is the reason the branch below exists — an
-    operator who raised the ceiling past a fortnight would still not want it for the other jobs.
+    `BoCampaignWorkflow._measure` waits `bo_measurement_deadline_days` on `AwaitAnswerWorkflow`, far
+    beyond `connector_job_timeout_seconds`, and `JobSpec.timeout_seconds` can only lower the
+    ceiling. Pinned as an inequality over the shipped defaults: it is why `awaits_answer` exists.
     """
     assert settings.bo_measurement_deadline_days * 86_400 > settings.connector_job_timeout_seconds
 
 
 def test_a_job_that_suspends_on_a_person_is_not_bounded_by_a_compute_ceiling() -> None:
-    """`awaits_answer` removes the wall-clock ceiling, and removes it for that job only.
+    """A job that suspends on a person is not bounded by a compute ceiling.
 
-    A workflow execution timeout is wall clock, and a job that suspends on a durable answer spends
-    wall clock without doing work. There is no finite number that is right for it either: a
-    measured campaign's total is `(n_rounds + 1)` waits, so the shipped default spec alone
-    (`n_rounds=10`) legitimately spans 154 days, and any ceiling large enough for that is a ceiling
-    that no longer reaps anything. So the job carries none — which is exactly what
-    `ConnectorJobWorkflow` itself already runs on for `_approve_effect`, whose three-day approval
-    works only because the direct launcher gives the wrapper no execution timeout either.
-
-    The second assertion is the half that makes this safe to ship: every job that did *not* declare
-    it keeps the deployment's ceiling unchanged, so the reaper that exists for a wedged xTB or CREST
-    job is not traded away to make a fortnight-long wait expressible.
+    `awaits_answer` removes the wall-clock ceiling for that job only: a suspended job spends wall
+    clock without working, and no finite number fits a multi-round campaign. Every other job keeps
+    the deployment's ceiling, so the reaper for wedged xTB or CREST jobs remains.
     """
     assert child_execution_timeout(None, awaits_answer=True) is None
     assert child_execution_timeout(None) == timedelta(
@@ -602,13 +517,10 @@ def test_a_job_that_suspends_on_a_person_is_not_bounded_by_a_compute_ceiling() -
 def test_the_suspension_declaration_travels_from_the_manifest_to_the_started_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The producer half, end to end: manifest -> launch input -> the child's `execution_timeout`.
+    """The suspension declaration travels from the manifest to the started child.
 
-    Two hops, and forgetting either one fails nothing at runtime — the job simply keeps the global
-    ceiling and the declaration looks like it worked, which is the failure
-    `test_the_declared_ceiling_travels_from_the_manifest_to_the_launch` was written for one field
-    earlier. Driven through the real generated tool for the first hop and the real workflow body for
-    the second, so what is asserted is the wiring rather than a value passed by hand.
+    Two hops (manifest to launch input, input to `execution_timeout`), each driven for real, since
+    forgetting either fails nothing at runtime.
     """
     _fixture_job_tool(monkeypatch)
     (manifest,) = enabled()
@@ -660,15 +572,10 @@ def test_the_suspension_declaration_travels_from_the_manifest_to_the_started_chi
 
 # --- the headroom the wrapper keeps for what it owes *after* its child ---------------------------
 
-# The scaled configuration below, and why each number is what it is. The relation under test is
-# `wrapper_execution_timeout() - connector_job_timeout_seconds` against what the post-child steps
-# may spend, so only the ratio matters and the shipped seconds would make this a seven-hour test.
-#
-# `_LATE_SECONDS` is the one number that is not arbitrary: it stands in for the wait these writes
-# were bounded against. `durable/publish.py::light_write_queue_wait_timeout` measures the expected
-# wait for a slot on `background-jobs` at ~150 s at target load and 41.6 s behind a full slate —
-# both far over the 120 s the old count-based headroom reserved for the whole finish path, which is
-# why "the queue was busy" and "the job's failure was never recorded" used to be the same event.
+# The scaled configuration below. Only the ratio of the wrapper's headroom to what the post-child
+# steps may spend matters, so seconds are scaled down. `_LATE_SECONDS` stands in for the expected
+# wait for a `background-jobs` slot under load
+# (`durable/publish.py::light_write_queue_wait_timeout`).
 _SCALED = {
     "connector_job_timeout_seconds": 2.0,
     # The old reservation was `activity_timeout_seconds * 4`, so this fixes the old headroom at 4 s.
@@ -687,27 +594,13 @@ _LATE_SECONDS = 8.0
 async def test_a_job_that_fails_records_and_says_so_even_when_the_write_queue_is_busy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A child that hit its own ceiling must still reach `job_records` and the chemist.
+    """A job that fails still records and says so when the write queue is busy.
 
-    The wrapper reserved `activity_timeout_seconds * 4` — 120 s at the shipped defaults — for
-    everything it does after its child returns, while `_record_run` and the failure push-back each
-    pass `light_write_queue_wait_timeout()` (900 s) as their `schedule_to_start` and the other
-    three post-child steps pass core's hour. So the reservation was smaller than either half of the
-    failure path was permitted to wait, and a job that hit its own ceiling — the bounded, intended
-    outcome — was reaped as `TIMED_OUT` before it could write the failure row or push `job_failed`
-    back. A workflow execution timeout is not delivered to workflow code, so the `except
-    BaseException` clause that exists for exactly this never ran: the failure this function's own
-    docstring says it prevents, produced by its own arithmetic.
-
-    Driven on the **real-time** dev server rather than the time-skipping one, for the reason
-    `tests/temporal_env.py` gives: the thing under test is a wall-clock race between the wrapper's
-    ceiling and a worker that is not there yet, and time skipping would fast-forward past both.
-
-    The activities are hosted by a *second* worker started `_LATE_SECONDS` in, which is what queue
-    pressure looks like from the wrapper's side — the task is dispatched and nobody claims it yet.
-    Both assertions are about what survives that: the durable row and the message. On the old
-    reservation neither existed and the run's own status said `TIMED_OUT`, which names neither the
-    child's failure nor the queue.
+    The wrapper's headroom after its child must cover the post-child steps' queue waits, or a child
+    that hit its ceiling is reaped as `TIMED_OUT` before `_record_run` and the failure push-back run
+    (workflow timeouts are not delivered to workflow code). Driven on the real-time dev server, with
+    activities hosted by a second worker started `_LATE_SECONDS` in, which is queue pressure from
+    the wrapper's side. Asserted: the durable row and the message both survive.
     """
     for name, value in _SCALED.items():
         monkeypatch.setattr(settings, name, value)
@@ -843,15 +736,11 @@ def _foreign_child_run(returns: dict[str, Any], job_id: str) -> tuple[list[Any],
 
 
 def test_a_child_that_returns_a_foreign_result_still_records_and_says_so() -> None:
-    """The one failure that used to die outside workflow code entirely.
+    """A child that returns a foreign result still records and says so.
 
-    Measured on the live broker before the fix: with `result_type=ConnectorJobResult` on the child
-    call, the decode happens in the SDK's *activation-apply* phase — outside the coroutine — so the
-    `except BaseException` clause never ran. Zero activities were scheduled on the failing run: no
-    `job_records` row, no `job_failed` event, and a chemist still holding a "this is running"
-    message. That is `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` through the exact
-    door the wide clause was written to close, so this asserts the clause's own two obligations
-    rather than merely that the run failed.
+    With `result_type` on the child call, the decode happens in the SDK's activation-apply phase,
+    outside the coroutine, so the wrapper's failure clause must handle it rather than the run dying
+    with no row and no event.
     """
     recorded, notified, status = _foreign_child_run({"not": "an envelope"}, "wrapper-foreign-child")
 
@@ -866,14 +755,10 @@ def test_a_child_that_returns_a_foreign_result_still_records_and_says_so() -> No
 
 
 def test_a_newer_bundle_may_add_a_field_to_the_envelope_it_returns() -> None:
-    """Bundle-to-core skew is a rolling upgrade, not a bug: the result envelope ignores extras.
+    """A newer bundle may add a field to the envelope it returns.
 
-    Five fields on this wire say in as many words that they are "additive and defaulted because it
-    crosses the Temporal wire and histories are in flight". That rule made **core to bundle**
-    additions safe and left the other direction closed: `extra="forbid"` on the *result* meant a
-    bundle image newer than core's — the normal state of a rolling upgrade — killed every in-flight
-    job of that bundle the moment it emitted one field this core had not learned yet. Measured, that
-    death was the F1 one: no row, no push-back.
+    During a rolling upgrade a bundle image may be newer than core, so `ConnectorJobResult` ignores
+    extras instead of failing every in-flight job.
     """
     envelope = ConnectorJobResult(summary="a newer bundle ran").model_dump(mode="json")
     recorded, notified, status = _foreign_child_run(
@@ -886,33 +771,22 @@ def test_a_newer_bundle_may_add_a_field_to_the_envelope_it_returns() -> None:
 
 
 def test_the_launch_side_of_the_wire_still_refuses_what_it_does_not_know() -> None:
-    """The asymmetry is on purpose, so state it: input forbids extras, the result ignores them.
+    """The launch side of the wire still refuses what it does not know.
 
-    An unknown field on `ConnectorJobInput` is core writing to itself — this repository builds every
-    launch site, so it is a bug and must fail loudly at the boundary. An unknown field on
-    `ConnectorJobResult` comes from a separately-deployed image and is simply not this core's
-    business. Same wire, opposite postures, and nothing but this test says which is which.
+    `ConnectorJobInput` is written only by this repository, so an unknown field is a bug and fails
+    loudly; `ConnectorJobResult` comes from a separately deployed image and ignores extras.
     """
     assert ConnectorJobInput.model_config["extra"] == "forbid"
     assert ConnectorJobResult.model_config["extra"] == "ignore"
 
 
 def test_a_workflow_instance_torn_down_mid_job_attempts_nothing_on_the_way_out() -> None:
-    """An eviction is not a job failure, and the failure clause must not half-run through one.
+    """A workflow instance torn down mid-job attempts nothing on the way out.
 
-    When Temporal evicts a cached instance — a terminate, a cache eviction, a worker going down —
-    the parked `run` coroutine is *closed* from outside the workflow event loop. Python throws that
-    into it at its await point, `except BaseException` catches it, and every line of the clause is
-    then executing somewhere none of its work can happen: measured, `workflow.now()` raised
-    `_NotInWorkflowEventLoopError` and the interpreter printed a bare "Exception ignored in:
-    <coroutine object ...>" on **every** eviction of a parked connector job. Nothing was lost — the
-    server had not cancelled the run and another worker replays it — but a failure clause that
-    partially runs while claiming to record and announce a failure is noise that will hide the
-    teardown problem that matters.
-
-    Driven on the real dev server rather than the time-skipping one, because the property is about
-    a wall-clock eviction of a run that is still going, which time skipping fast-forwards away.
-    `sys.unraisablehook` is the only place this failure was ever visible, which is the point.
+    An eviction closes the parked `run` coroutine from outside the event loop; `except
+    BaseException` must not run its clause there (`workflow.now()` would raise and Python would
+    print "Exception ignored"). Driven on the real-time dev server; `sys.unraisablehook` is where
+    this shows.
     """
     caught: list[BaseException | None] = []
 

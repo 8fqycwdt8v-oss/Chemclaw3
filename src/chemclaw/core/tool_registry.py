@@ -1,37 +1,19 @@
 """In-process capability-tool registry — the extension seam for the agent's function tools.
 
-Why this exists: adding an agent tool used to mean editing a hardcoded list inside
-`chemclaw.agent.chemclaw_agent._capability_tools` — the *one* extension seam that forced an edit to
-orchestration code. Every other capability declares itself at its definition site and is
-discovered by name (skills by folder, MCP servers + data sources by config token, metrics by
-`@metric`). This module gives function tools the same locality: a tool decorates itself with
-`@tool` where it is defined, and `build_langgraph_agent` assembles the advertised set from the
-registry.
-
-The shape deliberately mirrors `chemclaw.evals.metric` (`_REGISTRY` + decorator + duplicate-name
-guard),
-so no new pattern is introduced. It holds only the in-process function tools; the MCP capability
-capability lives behind a connector bundle (`connectors/`), and the two shared middlewares (audit +
-per-tool authz) still wrap every tool uniformly in `build_langgraph_agent`. The registry changes
-*how tools are collected*, never how they are gated — the safety rubric is untouched.
-
-Registration happens on import, so the caller that assembles the toolset imports the tool-bearing
-modules for their side effect (exactly as `evals/__init__.py` seeds the metric registry).
-
-**In `core/` rather than `agent/`, since the R2 layering move**, for the reason a name-keyed dict
-over `Callable` has no layer of its own: this file imports `typing` and `collections.abc` and
-nothing else, while its users are spread across `agent` (the hand-written tools), `connectors` (the
-generated job launchers) and `templates` (template tools). Filing the registry under the
-conversation layer meant those last two had to import `chemclaw.agent` in order to declare a
-function — a dependency on orchestration to name a callable.
+A tool registers itself with `@tool` where it is defined, and `build_langgraph_agent` assembles the
+advertised set from the registry, so adding a tool never edits orchestration code. Mirrors
+`chemclaw.evals.metric` (registry + decorator + duplicate-name guard). It changes how tools are
+collected, never how they are gated: audit and authorization middlewares wrap every tool uniformly.
+Registration happens on import, so the assembler imports tool-bearing modules for their side effect.
+In `core` because its users span `agent`, `connectors` and `templates`, and it imports nothing but
+typing.
 """
 
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-# A capability tool is any callable the agent can advertise; the framework derives its schema from
-# the signature and docstring, so the registry stores the function unchanged (the decorator is
-# identity).
+# Any callable the agent can advertise; the framework derives its schema from the signature and
+# docstring, so the decorator is identity.
 CapabilityTool = Callable[..., Any]
 _ToolT = TypeVar("_ToolT", bound=CapabilityTool)
 
@@ -42,10 +24,8 @@ _REGISTRY: dict[str, CapabilityTool] = {}
 def register_tool(fn: CapabilityTool) -> None:
     """Register one in-process capability tool under its function name.
 
-    The key is `fn.__name__` because that is exactly the name advertised to the model —
-    deriving it here rather than passing it separately removes a whole drift class (see the
-    name-drift guard in `tests/test_langgraph_agent.py`). A duplicate name is a programming
-    error, as in `chemclaw.evals.metric.register`.
+    Keyed by `fn.__name__`, the name advertised to the model, so the two cannot drift. A duplicate
+    is a programming error.
     """
     name = fn.__name__
     if name in _REGISTRY:
@@ -56,7 +36,7 @@ def register_tool(fn: CapabilityTool) -> None:
 def tool(fn: _ToolT) -> _ToolT:
     """Decorator form of `register_tool` — the idiom a tool uses at its definition site.
 
-    Returns the function unchanged so the decorated object is exactly what gets wrapped as a tool.
+    Returns the function unchanged.
     """
     register_tool(fn)
     return fn
@@ -72,23 +52,17 @@ def registered_tool_names() -> list[str]:
     return sorted(_REGISTRY)
 
 
-# Names of tools whose answer to *identical* arguments legitimately changes within one turn. Kept
-# beside the registry rather than in any consumer, so the property is declared where the tool is
-# defined (`@polls_moving_state`) and a consumer asks — never keeps its own list of other people's
-# tools.
+# Names of tools whose answer to identical arguments legitimately changes within one turn, declared
+# at the definition site (`@polls_moving_state`) so consumers ask rather than keep their own lists.
 _POLLS: set[str] = set()
 
 
 def polls_moving_state(fn: _ToolT) -> _ToolT:
     """Declare that this tool *reads something that moves*, so asking again is not a repeat.
 
-    A status poll is the one read whose whole purpose is to be asked the same question twice: a
-    durable job answers `running`, then `completed`, to byte-identical arguments. Declared at the
-    definition site, like `@tool`, because it is a fact about the tool; `agent/repeat_guard.py` is
-    the reader, and its premise — "it will not answer differently" — is exactly what this
-    declaration says is false for the tool.
-
-    Identity, like `tool`, so it composes in either order with it.
+    A status poll answers `running`, then `completed`, to identical arguments, so
+    `agent/repeat_guard.py` must not refuse it. Identity, so it composes with `@tool` in either
+    order.
     """
     _POLLS.add(fn.__name__)
     return fn
@@ -97,7 +71,7 @@ def polls_moving_state(fn: _ToolT) -> _ToolT:
 def is_a_poll(name: str) -> bool:
     """Whether the tool registered under `name` declared `@polls_moving_state`.
 
-    Keyed by the name a call carries. A name nothing registered — a hallucinated or injected call —
-    is never in the set, so it cannot claim the exemption by spelling.
+    An unregistered (hallucinated or injected) name is never in the set, so it cannot claim the
+    exemption.
     """
     return name in _POLLS

@@ -1,30 +1,9 @@
 """Content-addressed store for a calculation's by-products (D-124).
 
-The calculation cache (`science/calc/store.py`) persists the *answer* — a small JSON payload.
-Everything else a run produced was deleted with its temporary directory: the xtb driver executed
-the binary inside a `tempfile.TemporaryDirectory`, parsed the Hessian and `vibspectrum` into
-numbers, and lost the files. (That driver is `Chemclaw3-mcp`'s now,
-`D-2026-08-16-the-physics-leaves-the-cache-stays`; the argument for keeping the bytes is unchanged,
-and so is this store.) On a drug-sized substrate that Hessian costs minutes, and it is
-exactly the input that makes the *next* question cheap — thermochemistry at a second temperature, IR
-at a different broadening, a transition-state search seeded from a known curvature.
-
-This module keeps those bytes. Two ideas, each doing one job:
-
-- **Content addressing.** A blob is named by the SHA-256 of its uncompressed bytes, so two
-  calculations that produced an identical geometry store one copy. The hash is also the read
-  path: `open(content_hash)` is the whole retrieval API.
-- **A named link from the calculation.** `(calc_key, name)` says *which run* produced the blob and
-  *what role* it played (`hessian`, `xtbopt.xyz`). A future DFT wavefunction or restart file is
-  another `(calc_key, name)` row over the same blob table — nothing here is xTB-specific.
-
-**An artifact is optional by construction.** `put` returns `None` rather than raising when the
-payload exceeds `artifact_max_bytes` or the store is disabled, and every caller ignores the
-return. Capturing a by-product must never be able to fail the calculation it is a by-product of.
-
-The shape deliberately mirrors `science/calc/store.py`: a `Protocol` with an in-memory backend
-for tests and a Postgres backend for real (`science/calc/postgres_artifacts.py`), plus a
-`default_artifact_store()` seam that tests monkeypatch at the importing module.
+Keeps the bytes a run produced (a Hessian, a geometry), named by the SHA-256 of their uncompressed
+content and linked to the run as `(calc_key, name)`. Optional by construction: `put` returns `None`
+rather than raising when disabled or over `artifact_max_bytes`, so capturing a by-product never
+fails its calculation.
 """
 
 import base64
@@ -47,21 +26,16 @@ from chemclaw.science.calc.store import (
 
 logger = logging.getLogger(__name__)
 
-# How a blob's bytes are stored. `zlib` is the stdlib deflate codec — Python 3.11 has no stdlib
-# zstd, and pulling a dependency in for the remaining ~15% on already-compressible text is not a
-# trade this codebase makes. The codec is recorded per row, so adding one later is a new value,
-# never a migration.
+# How a blob's bytes are stored. `zlib` is stdlib; the codec is recorded per row, so adding one
+# later is a new value, never a migration.
 Codec = str
 
 
 def content_address(data: bytes) -> str:
     """The SHA-256 hex digest of `data` — an artifact's content address.
 
-    Over the *uncompressed* bytes deliberately: the address must not change when the compression
-    level changes or a row is rewritten under a different codec. Raw bytes, so
-    `chemclaw.core.ids.stable_hash` (which hashes a JSON rendering, for calculation *identity*) is
-    the
-    wrong tool here.
+    Over the uncompressed bytes so the address is independent of codec and level. Raw bytes, unlike
+    `core.ids.stable_hash`, which hashes a JSON rendering.
     """
     return hashlib.sha256(data).hexdigest()
 
@@ -69,10 +43,8 @@ def content_address(data: bytes) -> str:
 def encode(data: bytes) -> tuple[Codec, bytes]:
     """Compress `data` for storage; return the codec that was used and the payload.
 
-    Returns `("none", data)` when compression is disabled or does not actually shrink the payload
-    — an already-compressed or high-entropy artifact would otherwise be stored *larger* than it
-    arrived, plus a decompression cost on every read. Text artifacts (a Turbomole `hessian`, an
-    `xyz` ensemble) compress several-fold, which is the case this exists for.
+    Returns `("none", data)` when compression is disabled or does not shrink the payload, so
+    incompressible artifacts are not stored larger.
     """
     level = settings.artifact_compression_level
     if level <= 0:
@@ -84,9 +56,7 @@ def encode(data: bytes) -> tuple[Codec, bytes]:
 def decode(codec: Codec, payload: bytes) -> bytes:
     """Return the original bytes of a payload stored under `codec`.
 
-    An unknown codec raises rather than returning the payload as-is: handing a caller deflate
-    bytes labelled as a Hessian would surface much later as an unparseable file, and the cause
-    would be invisible.
+    An unknown codec raises rather than passing compressed bytes off as the file.
     """
     if codec == "none":
         return payload
@@ -132,8 +102,8 @@ class ArtifactStore(Protocol):
     ) -> ArtifactRef | None:
         """Store `data` under `(calc_key, name)`; return its ref, or `None` if it was not stored.
 
-        `compute_seconds` is the wall time of the calculation that produced it — the cost of *not*
-        having it, which is what the eviction sweep orders by.
+        `compute_seconds` is the producing calculation's wall time — the cost of not having it,
+        which eviction orders by.
         """
         ...
 
@@ -149,10 +119,8 @@ class ArtifactStore(Protocol):
 async def find_link(store: ArtifactStore, calc_key: str, name: str) -> ArtifactRef | None:
     """The stored `(calc_key, name)` link, or `None` — the one lookup by name the store offers.
 
-    Through `list_for` because that is the protocol's read by calculation, and a calculation keeps
-    a handful of by-products, so filtering them here costs nothing a dedicated query would save.
-    Shared by `fetch_artifact` and the artefact surfaces, which all address an artifact by its
-    `<calc_key>#<name>` reference rather than by content hash.
+    Filters `list_for`, since a calculation keeps only a handful of by-products. Used by every
+    surface that addresses an artifact as `<calc_key>#<name>`.
     """
     return next((ref for ref in await store.list_for(calc_key) if ref.name == name), None)
 
@@ -160,9 +128,7 @@ async def find_link(store: ArtifactStore, calc_key: str, name: str) -> ArtifactR
 def split_ref(text: str) -> tuple[str, str] | None:
     """`<calc_key>#<name>` as its two halves, or `None` when it is not one.
 
-    Split at the **first** `#`: a calculation key may hold any non-whitespace character except
-    `#` (real keys carry `/`, `+`, `@` and `:`), so the first `#` is the separator and whatever
-    follows it — a `#` included — is the producer's name for the file.
+    Split at the **first** `#`: a calculation key never contains `#`, while a name may.
     """
     calc_key, separator, name = text.partition("#")
     if not separator or not calc_key or not name:
@@ -179,15 +145,7 @@ def too_large(byte_size: int) -> bool:
 class InMemoryArtifactStore:
     """Process-local `ArtifactStore` — the reference the Postgres one is written to match.
 
-    **A differential oracle, not a deployment backend.** No configuration returns it — every
-    `default_*()` in this tree resolves to the Postgres implementation — and that is deliberate
-    (`D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend`). It stays in
-    `src/` because it is the executable statement of the contract its Postgres sibling is written
-    to reproduce, and it is read beside that sibling; `tests/test_reference_stores.py` holds both
-    halves of that — the absence of a shipped caller, and the absence of this claim.
-
-    Proves the content-addressing and dedup behavior without a database; the Postgres backend
-    implements the same interface for durable, cross-process storage.
+    A differential test oracle, not a deployment backend: no configuration returns it.
     """
 
     def __init__(self) -> None:
@@ -238,9 +196,7 @@ async def put_all(
 ) -> list[ArtifactRef]:
     """Store every captured file for one calculation; return the refs that were actually stored.
 
-    The single call site the calculators share (DRY): capture hands back a `{name: bytes}` map and
-    this persists it, dropping whatever the store refused. Media types are derived from the name
-    so a caller never has to restate them.
+    Media types are derived from the name; whatever the store refuses is dropped.
     """
     stored: list[ArtifactRef] = []
     for name in sorted(files):
@@ -258,11 +214,8 @@ async def put_all(
     return stored
 
 
-# Media types for the by-products this system captures. `chemical/x-xyz` is the conventional type
-# for a coordinate file; the xtb-specific formats have no registered type, so they carry a
-# vendor-style name that says what a reader would need to parse them. A name that is not listed
-# falls back to opaque bytes rather than guessing — the type is metadata for a human or a future
-# reader, and a wrong one is worse than none.
+# Media types for captured by-products. xtb-specific formats get vendor-style names; an unlisted
+# name falls back to opaque bytes, since a wrong type is worse than none.
 _MEDIA_TYPES: dict[str, str] = {
     "hessian": "application/x-turbomole-hessian",
     "vibspectrum": "application/x-turbomole-vibspectrum",
@@ -270,14 +223,11 @@ _MEDIA_TYPES: dict[str, str] = {
     "crest_conformers.xyz": "chemical/x-xyz",
     "crest_rotamers.xyz": "chemical/x-xyz",
     "cre_members": "text/plain",
-    # Packed numeric arrays this system writes itself rather than captures — the Hessian in the
-    # form `calc.xtb_hessian` reads back (STO-2), and the dipole derivatives the in-process
-    # backend needs to derive IR intensities from it.
+    # Packed numeric arrays written rather than captured: the Hessian and the dipole derivatives
+    # needed to derive IR intensities from it.
     "hessian.npy": "application/x-npy",
     "dipole_derivatives.npy": "application/x-npy",
-    # Reserved for the DFT tier (STO-5, gated on D-010): a converged density or orbital set, whose
-    # reuse cuts mean SCF iterations from ~33 to ~2 in published measurement. The name and role are
-    # fixed now so the contract exists before the implementation does; nothing writes these yet.
+    # Reserved names for a converged density or orbital restart file; nothing writes these yet.
     "density.restart": "application/x-scf-restart",
     "orbitals.molden": "chemical/x-molden",
 }
@@ -288,9 +238,8 @@ def media_type_for(name: str) -> str:
     return _MEDIA_TYPES.get(name, "application/octet-stream")
 
 
-# Which fields of a Hessian payload are packed arrays, and the artifact name each is stored under.
-# Both names were already reserved in `_MEDIA_TYPES` for exactly this role, which is why they carry
-# the `.npy` suffix that table keys on.
+# Which fields of a Hessian payload are packed arrays, and the artifact name each is stored
+# under (both `.npy` names in `_MEDIA_TYPES`).
 HESSIAN_ARRAYS: Mapping[str, str] = MappingProxyType(
     {"hessian_npy": "hessian.npy", "dipole_derivatives_npy": "dipole_derivatives.npy"}
 )
@@ -299,32 +248,10 @@ HESSIAN_ARRAYS: Mapping[str, str] = MappingProxyType(
 class ArrayOffloadingStore:
     """A `ResultStore` that keeps a payload's packed arrays here instead of in the result row.
 
-    **Why this exists as a store rather than as a second caching path.** One calculation in this
-    system returns megabytes where every other returns numbers: a Hessian is 99x99 doubles at 33
-    atoms and about 1.4 MB at 120. `durable/retention.py` refuses to prune `calculation_results`
-    outright, because D-011 says a persisted result is never recomputed — so a matrix stored inline
-    is a row that can never be reclaimed, in the one table that has no reclaim path. D-124 answered
-    this before the capability migration and the answer still holds: the arrays belong in the
-    content-addressed artifact store, which `durable/artifact_eviction.py` sweeps by cost and idle
-    time, and the row keeps their content hashes. Evicting a cold matrix costs a recomputation,
-    which is the trade that policy exists to make.
-
-    Expressing it as a `ResultStore` is what keeps `cached_remote` — and every caller of it —
-    unchanged: the decision "is this a hit?" already lives behind `get`, and "is this worth
-    caching?" already lives behind `put`. A caller wraps its store and nothing else about the call
-    site moves.
-
-    Two rules carry the whole design, and both are the pre-split implementation's, kept because the
-    reasoning behind them did not change:
-
-    1. **A hit is a hit only if the blobs come back.** Every reason they might not — the store
-       disabled, the matrix evicted as cold, a database restored without its artifact table — is an
-       ordinary one, so a missing blob is a *miss to recompute from*, never an error.
-    2. **The blobs are written first, and the row only if they all landed.** A row addressing an
-       artifact that does not exist would be served as a hit forever and rejected on every read,
-       which is strictly worse than not caching. Losing a by-product costs a future recomputation
-       and never the calculation in hand, which the caller already holds — so a store that refuses
-       is a debug line and an uncached result, not a raise.
+    `calculation_results` is never pruned, so megabyte Hessians go to the evictable artifact store
+    and the row keeps their hashes. A hit counts only if every blob comes back (else it is a miss to
+    recompute); blobs are written before the row, and a refusal leaves the result uncached rather
+    than raising.
     """
 
     def __init__(
@@ -401,10 +328,8 @@ class ArrayOffloadingStore:
     async def find(self, query: CalculationQuery) -> list[StoredResult]:
         """Delegate, deliberately without restoring anything.
 
-        `find` answers "which calculations exist", which `find_calculations` renders as a listing.
-        Rehydrating megabytes per row to build a table nobody reads the matrices from would make a
-        listing the most expensive call in the system. The rows come back naming their artifacts,
-        which is what `fetch_artifact` takes.
+        A listing does not read the matrices, so rows come back naming their artifacts (what
+        `fetch_artifact` takes) rather than rehydrating megabytes each.
         """
         return await self._results.find(query)
 

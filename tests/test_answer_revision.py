@@ -2,22 +2,11 @@
 
 ADR: `D-2026-09-15-a-flagged-answer-that-goes-out-flagged-is-a-verdict-nobody-acted-on`.
 
-`agent/verifier.py` has always *marked* an answer whose claims its evidence does not support, and
-`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` states in as many words what
-happened next: "Nothing routes a flagged answer back for another pass." These tests drive the loop
-that does, through the real `run_turn` over a real compiled graph (`tests/fakes_turn`), because the
-thing under test is the *runner* and a stand-in for the graph would prove only that the stand-in was
-called.
-
-**The test that matters most is the one where revising does not help.** That is the shape
-D-2026-08-16 found `RubricMiddleware` lacking — its `_finalize_evaluation` rewrites the result to
-`max_iterations_reached` and mutates no message, so a grader outage ships every answer ungraded with
-a log line nothing reads. Here, running out of rounds must leave the answer exactly as it would have
-been with the loop off: shipped, and still marked — **and now, a person asked to read it**. That
-last half is Paperclip's `maxReviewRounds`, whose bound ends in an escalation to a named human
-rather than in a counter; the arms at the bottom of this file drive it through the real
-`run_turn` and assert on the `AwaitRequest` the runner hands `durable/awaiting.open_wait`, because
-the request is the whole contract — who it is raised as, what it says, and what two of them join.
+`agent/verifier.py` marks an answer whose claims its evidence does not support; these tests drive
+the revision loop through the real `run_turn` over a real compiled graph (`tests/fakes_turn`). The
+most important case is revision not helping: the answer still ships, still marked, and a person
+is asked to read it. The escalation arms assert on the `AwaitRequest` the runner hands
+`durable/awaiting.open_wait`, because that request is the contract.
 """
 
 import asyncio
@@ -131,10 +120,8 @@ def test_a_flagged_answer_is_sent_back_and_the_revision_is_what_ships(
 ) -> None:
     """The whole point: the answer a chemist receives is the grounded one.
 
-    And it is the revision *alone*. `ledger.answer_text` joins the accumulated parts, so without
-    clearing them the answer would be the flagged prose with the corrected prose stapled to its end
-    — which is worse than either, and is what the mid-turn resume does on purpose because a resume
-    continues an answer where a revision replaces one.
+    And the revision alone: `ledger.answer_text` joins accumulated parts, so they are cleared first
+    — a revision replaces an answer where a resume continues one.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -153,9 +140,7 @@ def test_a_revision_that_does_not_help_still_answers_and_stays_flagged(
 ) -> None:
     """Exhaustion is the case that must not silently ship, and must not swallow the turn either.
 
-    A deployment that runs out of rounds ends up exactly where it would have been with the loop off:
-    the answer goes out, carrying `review_required`. Nothing is lost that was not already lost — the
-    second model call simply bought nothing, which is what the counter is for.
+    Out of rounds, the answer goes out carrying `review_required`, as with the loop off.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -171,15 +156,9 @@ def test_a_revision_that_does_not_help_still_answers_and_stays_flagged(
 
 
 def test_the_loop_turned_off_is_a_complete_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
-    """At 0 rounds the turn is byte-for-byte what it was before this loop existed.
+    """At 0 rounds the turn is exactly what it would be without this loop.
 
-    **This asserted that 0 was the shipped default until the default became 2.** The deployment now
-    turns the loop on, paired with `answer_shape_gate_enabled` so that it is reachable at all —
-    `core/config/llm.py` carries both arguments. What the test was really pinning survives that
-    flip and is the part worth keeping: a deployment that sets 0 gets the un-looped turn exactly,
-    with no second model call and no counter movement. Re-expressed as a monkeypatched arm rather
-    than deleted, because "the off path costs nothing" is a claim about the code, which is still
-    true, and not about the default, which is not.
+    No second model call and no counter movement; monkeypatched because the shipped default is on.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 0)
@@ -225,9 +204,7 @@ def test_the_revision_names_the_claims_rather_than_saying_try_again(
 ) -> None:
     """A revision prompt with no specifics licenses rewording instead of regrounding.
 
-    Asserted on the message the graph is actually driven with, captured off the fake, because the
-    text is the whole mechanism: `_revision_message` naming nothing would leave every other test
-    here passing.
+    Asserted on the message the graph is actually driven with, because the text is the mechanism.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 1)
@@ -255,13 +232,9 @@ def test_the_revision_note_says_the_chemist_never_saw_it_and_asks_for_an_answer_
 ) -> None:
     """The note arrives in the user position, so its wording decides who the reply is written to.
 
-    Driven live against a real model (2026-09-27): 5 of 31 answers opened "You're right —",
-    "Understood. I am dropping both claims…" or "Good catch —", and three more called themselves
-    "the corrected answer" — each replying, in the chemist's transcript, to a critique the chemist
-    never made. The first wording ("Your previous answer was checked… Answer again") read as a
-    person pushing back. Asserted on the message the graph is actually driven with, because the
-    text is the whole mechanism; whether the model then *obeys* is what the live eval's
-    `acknowledged_critique` counts (`evals/live.opens_by_acknowledging_a_critique`).
+    It must say the chemist never saw the critique and ask for an answer to them; otherwise the
+    model replies "You're right —" to a critique the chemist never made. Whether the model obeys is
+    the live eval's `acknowledged_critique` (`evals/live.opens_by_acknowledging_a_critique`).
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 1)
@@ -320,11 +293,8 @@ def test_a_revision_that_produces_no_text_ships_the_answer_the_turn_already_had(
 ) -> None:
     """A blank round must not turn a usable flagged answer into a blank bubble.
 
-    `_revise_answer` clears `answer_parts` before the round, because a revision *replaces* an
-    answer; the emptiness guard had already run, against the *flagged* text. So a round that
-    produced nothing shipped `AnswerEvent(text='')` booked `outcome='answered', completed=True` —
-    strictly worse than the un-looped turn, and invisible, because
-    `chemclaw_turn_empty_answers_total` had already declined to fire on the text that *was* there.
+    `_revise_answer` clears `answer_parts` before the round, after the emptiness guard ran on the
+    flagged text, so an empty round must fall back to the answer the turn already had.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -347,10 +317,8 @@ def test_a_revision_that_raises_ships_the_answer_the_turn_already_had(
 ) -> None:
     """A gateway failure on the second call must not cost the chemist the first call's answer.
 
-    The round was unwrapped, so a raise propagated to `run_turn`'s `except Exception` and the
-    chemist got a generic internal error in place of a complete, already-graded answer the turn was
-    holding — and `_record_review_rounds` never ran, so the exhaustion counter was blind to the
-    entire class.
+    The round is guarded, so a raise ships the graded answer and the review rounds are still
+    recorded.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -376,11 +344,9 @@ def test_a_spend_cap_tripped_inside_a_revision_is_announced(
 ) -> None:
     """A cap that fires during the revision must reach the chemist, not just stop the graph.
 
-    Both guards were evaluated once, above the loop, so a turn whose *second* model call tripped
-    the spend cap emitted no `ErrorEvent` at all and booked `outcome='answered', completed=True`.
-    The cap always enforced — it shares `cap_carry` across both invocations — it simply could not
-    report. Driven through the real `agent/spend_cap.py` with a budget the first pass exceeds, so
-    the revision's `before_model` is where it fires.
+    The guards are checked after every pass, not once above the loop. Driven through the real
+    `agent/spend_cap.py` with a budget the first pass exceeds, so the revision's `before_model`
+    fires.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -412,9 +378,8 @@ def test_a_verdict_with_no_claim_to_act_on_is_never_sent_back(
 ) -> None:
     """Low confidence with every claim supported is a flag, not a thing to re-answer.
 
-    `_revision_message` frames whatever it is given, so an empty `unsupported` list produced
-    exactly the "just try again" prompt the wording exists to avoid — `answer_review_max_rounds`
-    times, for every such turn in the deployment.
+    An empty `unsupported` list would produce exactly the "just try again" prompt the wording
+    avoids.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
@@ -445,11 +410,8 @@ def test_a_judge_outage_does_not_multiply_every_flagged_turn_s_spend(
 ) -> None:
     """The status a crashed check leaves behind is not a claim the model can drop.
 
-    `score_answer` flags a crashed verifier, and that status used to land in `unsupported` — so the
-    loop quoted "verification did not run" back at the model as prose to re-ground. The judge keeps
-    failing, so every round exhausted: a judge outage multiplied every flagged turn's model spend
-    by `answer_review_max_rounds + 1`, fleet-wide, for nothing. The wire is unchanged, which is the
-    second assertion: a reviewer still reads the reason.
+    Otherwise a judge outage would make every flagged turn exhaust its rounds, multiplying model
+    spend for nothing. The wire is unchanged: a reviewer still reads the reason.
     """
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -477,11 +439,9 @@ def test_the_turn_counter_moves_once_for_a_turn_that_revised_and_never_otherwise
 ) -> None:
     """The denominator the exhaustion alert divides by, in the unit the numerator is in.
 
-    `chemclaw_answer_revisions_total` counts *passes*, so dividing exhausted turns by it compared
-    two units: with every flagged turn exhausting, the ratio read 1.00 at one allowed round and
-    0.20 at five — silent at total failure for every setting but the smallest, with its own advice
-    (allow more rounds) pushing it further below threshold. Both directions are asserted, because a
-    counter that also moves on the off path is a denominator that never shrinks.
+    `chemclaw_answer_revisions_total` counts passes, so the alert divides exhausted turns by revised
+    turns. Both directions are asserted: a counter that also moved on the off path would never
+    shrink.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -506,16 +466,10 @@ def test_the_turn_counter_moves_once_for_a_turn_that_revised_and_never_otherwise
 def test_a_revision_still_reaches_the_turn_s_connectors(monkeypatch: pytest.MonkeyPatch) -> None:
     """The pass that exists to re-ground an answer must still have the evidence tools.
 
-    **Every other arm here passes `connectors=[]`, which is exactly why this was invisible.**
-    `_open_turn_surface` enters one `HeldConnectorSession` per bundle on the turn's
-    `AsyncExitStack`, and the revision loop used to sit *below* that block — so the stack had
-    already unwound and every MCP tool was dead during the revision. In-process tools kept working,
-    which made it silent rather than obvious. Probed on this fixture before the fix:
-    `session OPENED -> TokenEvent -> session CLOSED -> [revision] -> call on a closed session ->
-    ToolFailedEvent`.
-
-    The fake session is entered on the runner's own stack through the seam the runner uses, so what
-    is asserted is the stack's lifetime rather than a stand-in's.
+    Every other arm passes `connectors=[]`. The revision loop must run while the turn's
+    `AsyncExitStack` still holds each `HeldConnectorSession`, or every MCP tool is dead during the
+    revision. The fake session is entered on the runner's own stack, so the stack's lifetime is what
+    is asserted.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 1)
@@ -580,11 +534,9 @@ def test_a_revision_still_reaches_the_turn_s_connectors(monkeypatch: pytest.Monk
 def test_the_dev_page_replaces_the_answer_bubble_rather_than_only_filling_it() -> None:
     """This repository's own reference client must not render the answer the loop retracted.
 
-    `case "token"` appends to the bubble, so by the time the `answer` event arrives the element
-    holds the *flagged* prose the first pass streamed. Filling only an empty element therefore
-    displayed flagged-text + revised-text concatenated and dropped `AnswerEvent.text`, which is the
-    authoritative answer. Asserted against the source because the page is plain script with no
-    harness to execute it — the same way `test_dev_page_events.py` checks its `switch`.
+    `case "token"` appends to the bubble, so the `answer` event must replace its content with
+    `AnswerEvent.text`. Asserted against the source because the page has no script harness, as in
+    `test_dev_page_events.py`.
     """
     source = (
         Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "api" / "static" / "app.js"
@@ -640,15 +592,9 @@ def test_neither_the_revision_prompt_nor_the_retracted_answer_stays_on_the_threa
 ) -> None:
     """The model's own record of the conversation must not carry this system talking to itself.
 
-    `turn_input` makes `_revision_message` a `("user", …)` message and the Postgres checkpointer
-    persists it, so the chemist's *next* turn opened on the retracted `ai` claim, then a `human`
-    message they never wrote, then their real question. `ledger.exchanges` collects only
-    tool-bearing messages, so `session_messages` had neither — the transcript and the thread
-    disagreed, uncounted, and the claim this system had just rejected stayed restatable for the
-    rest of the conversation.
-
-    Driven on a real `AsyncPostgresSaver` rather than the in-memory default, because the whole
-    subject is what survives the turn.
+    The revision prompt is a `("user", …)` message the checkpointer would persist, so the next turn
+    would open on a retracted claim and a message the chemist never wrote. Driven on a real
+    `AsyncPostgresSaver`, since the subject is what survives the turn.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 1)
@@ -688,11 +634,7 @@ def test_a_round_that_bought_nothing_leaves_the_thread_exactly_as_it_was(
 ) -> None:
     """The withdrawal is by outcome, and the outcome here is that the *previous* answer ships.
 
-    The symmetric half of the arm above, and the one a single rule gets wrong in both directions.
-    Withdrawing the retracted answer unconditionally would leave the model's record ending on the
-    round's empty reply while the chemist holds the flagged answer; withdrawing nothing would leave
-    the fabricated prompt on the thread, which is the whole defect. What must be true on either
-    break-out path is that the thread is byte-for-byte what it was before the round: the chemist's
+    On either break-out path the thread must be exactly what it was before the round: the chemist's
     question, then the answer they were actually given.
     """
     _grades_by_text(monkeypatch)
@@ -720,10 +662,7 @@ _CHEMIST = "oid-chemist-7"
 def _asks(monkeypatch: pytest.MonkeyPatch) -> list[AwaitRequest]:
     """Capture every wait the runner opens, in place of the broker.
 
-    Patched at `runner.open_wait` rather than at the Temporal client, because the seam under test
-    is the request the runner *builds* — who it is raised as, what its subject dedups on, what its
-    rationale says. A fake broker would assert the same thing through two more layers of
-    serialisation and would need a live task queue to be honest about the rest.
+    Patched at `runner.open_wait`, because the seam under test is the request the runner builds.
     """
     asked: list[AwaitRequest] = []
 
@@ -744,17 +683,8 @@ def _drive_as(
 ) -> list[Any]:
     """One turn's events, run as an authenticated chemist — what `_drive` deliberately is not.
 
-    Every other arm in this file drives an unauthenticated turn, which is why none of them opens a
-    wait: the escalation refuses to invent a requester. Kept as a second helper rather than as
-    parameters on `_drive` so that stays obvious at each call site.
-
-    **`authenticated` sets `entra_required`, and it has to, because `actor` alone does not say
-    what this file thought it said.** Off the authenticated path the front door does not pass
-    `None`: `api/auth.py` manufactures a stand-in whose `oid` is the literal `dev-user`, and
-    `Principal.oid` is `min_length=1`. So every arm here passed `actor=_CHEMIST` and exercised a
-    posture — a named actor with `entra_required` off — that no deployment runs, while the guard
-    the file believed it was testing keys on the setting. A review found the escalation firing as
-    `dev-user` in exactly the default posture.
+    Sets `entra_required` as well as the actor: with it off, the front door supplies a `dev-user`
+    stand-in, never `None`, so a named actor without it is a posture no deployment runs.
     """
 
     async def _collect() -> list[Any]:
@@ -778,11 +708,9 @@ def _drive_as(
 def test_an_exhausted_revision_loop_asks_a_person_to_read_the_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gap this closes: the rounds were spent, the answer shipped flagged, and nobody was told.
+    """An exhausted revision loop asks a person to read the answer.
 
-    `_record_review_rounds` counted the exhaustion and warned into a log, which is the
-    `RubricMiddleware` shape this file's header rejects one level up: a verdict nobody acted on.
-    The whole of the assertion is on the request, because that is what a person receives.
+    The assertion is on the request, because that is what a person receives.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -806,9 +734,7 @@ def test_an_exhausted_revision_loop_asks_a_person_to_read_the_answer(
 def test_a_revision_that_worked_asks_nobody(monkeypatch: pytest.MonkeyPatch) -> None:
     """The trigger is the surviving flag, not the loop having run.
 
-    Without this, an escalation placed one line higher would file a review request for every
-    flagged turn in the deployment — including every turn the loop successfully fixed, which is
-    the case the loop exists to produce.
+    Otherwise every turn the loop fixed would also file a review request.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -825,10 +751,8 @@ def test_the_loop_turned_off_asks_nobody_and_makes_no_call(
 ) -> None:
     """`answer_review_max_rounds = 0` stays a complete no-op, escalation included.
 
-    The escalation hangs off `if rounds:` rather than off a second reading of the setting, so this
-    is the arm that would catch a future author moving it out of that block: at 0 rounds the turn
-    never enters the loop, so there is nothing to exhaust and nobody to ask — even though the
-    answer is flagged and `answer_review_escalation_enabled` ships on.
+    The escalation sits inside `if rounds:`; this catches it being moved out, since at 0 rounds
+    there is nothing to exhaust even though the answer is flagged.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 0)
@@ -847,11 +771,8 @@ def test_an_escalation_that_cannot_be_filed_still_ships_the_answer(
 ) -> None:
     """A chemist must never lose an answer because a review request could not be opened.
 
-    Best-effort on the `deliver_best_effort` / `notify_session_best_effort` precedent: the answer
-    is built and about to be yielded, and a broker that is down must cost the review request and
-    nothing else. Counted through `degraded()` rather than swallowed silently, because an
-    escalation that never happens is invisible from outside — it looks exactly like a deployment
-    that turned the escalation off.
+    Best-effort, like `deliver_best_effort`, and counted through `degraded()`, since a missing
+    escalation otherwise looks like one that was switched off.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -880,13 +801,8 @@ def test_a_turn_with_no_authenticated_actor_invents_nobody(
 ) -> None:
     """`require_actor`'s reject-if-absent rule, at the one place a runner could quietly break it.
 
-    A wait carries `requested_by`, and `pending_requests` puts it in front of people as the person
-    who asked. Off the authenticated path there is nobody to name, and the two available
-    fabrications are both refused elsewhere in this tree for the same reason: synthesizing an
-    identity (`D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, which declined a
-    whole scheduled agent over exactly this) or writing an attribution nothing can produce
-    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`). So the escalation is
-    skipped, and the answer ships exactly as it does everywhere else in this file.
+    A wait's `requested_by` is shown to people as who asked; with no authenticated actor there is
+    nobody to name, and synthesising one is refused. The escalation is skipped and the answer ships.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -921,12 +837,9 @@ def test_two_exhausted_turns_in_one_conversation_join_one_wait(
 ) -> None:
     """The dedup subject, asserted as an id rather than described in a docstring.
 
-    `request_id_for` keys on `(kind, subject, asked_of)`, so the subject *is* the dedup policy.
-    Naming the conversation makes the unit of review a thread: a chemist who pushes the same
-    ungroundable question three times raises one review request, not three, which is what keeps an
-    over-firing shape gate from becoming a notification storm. Two different conversations are two
-    different reviews, because they are two different things to read — the control half, without
-    which "always the same id" would pass just as well.
+    `request_id_for` keys on `(kind, subject, asked_of)`. The subject names the conversation, so
+    repeated exhausted turns in one thread raise one review; two conversations are two reviews (the
+    control half).
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -945,18 +858,10 @@ def test_two_exhausted_turns_in_one_conversation_join_one_wait(
 def test_the_unauthenticated_posture_raises_no_request_as_the_stand_in_principal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The dev principal is not an absent one, and the guard that thought so keyed on the wrong bit.
+    """The dev stand-in principal raises no request.
 
-    `test_a_turn_with_no_authenticated_actor_invents_nobody` passes `actor=None`, which the front
-    door never passes: with `entra_required` off, `api/auth.py` manufactures a stand-in whose `oid`
-    is the literal `dev-user`, and `Principal.oid` is `min_length=1`. So the escalation's
-    `if not actor` was false in exactly the posture it was written for, and every review request in
-    an unauthenticated deployment was raised as — and addressed to — `dev-user`. That is the
-    attribution-nothing-can-write shape `D-2026-08-26` deletes on sight, arriving through the
-    branch meant to prevent it.
-
-    Driven with a real actor string and `entra_required` off, which is the combination the old
-    guard could not tell from the authenticated one.
+    With `entra_required` off the front door passes a `dev-user` stand-in, not `None`, so the guard
+    must key on the setting; otherwise every review would be raised as and addressed to `dev-user`.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -975,13 +880,9 @@ def test_the_unauthenticated_posture_raises_no_request_as_the_stand_in_principal
 def test_a_verdict_naming_no_claim_asks_nobody(monkeypatch: pytest.MonkeyPatch) -> None:
     """The loop refuses to revise on a contentless verdict; the escalation must refuse to file one.
 
-    The re-grade at the loop's bottom is a *fresh* verdict, so a turn can exit with rounds spent
-    and `unsupported` empty — a judge outage leaves the claims empty and sets `review_required`, and
-    so does a low-confidence verdict whose every claim is supported. Both produced a rationale
-    ending `"What the checks could not ground: "` with nothing after it: a review request whose
-    entire stated reason is blank. A judge outage is fleet-wide, so unguarded this files one such
-    request per active conversation — a verdict nobody can act on, which is the failure the
-    escalation exists to end.
+    The final re-grade can leave rounds spent with `unsupported` empty (a judge outage, or low
+    confidence with every claim supported). A request with a blank reason is unactionable, and a
+    fleet-wide judge outage would file one per conversation.
     """
     from chemclaw.agent.verifier import TurnReview
     from chemclaw.api.events import AnswerEvent as _AnswerEvent
@@ -1028,21 +929,12 @@ def _escalation_series() -> dict[str, float]:
 def test_every_way_an_escalation_can_end_books_its_own_series(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Five outcomes, five series — and four of them were a log line and nothing else.
+    """Five outcomes, five series.
 
-    `chemclaw_answer_review_exhausted_total` counts turns that went out flagged, which is the same
-    number whether a person was actually asked, an already-open wait absorbed the ask, the turn had
-    no authenticated actor to ask as, the verdict named no claim to ask about, or the broker was
-    down. So an operator could not tell an escalation that is working from one that reaches nobody.
-
-    `joined` is the one worth the label rather than a boolean, because it is where a busy
-    deployment spends most of its time: the dedup subject is the *conversation*, so every later
-    exhausted turn of a thread already under review asks nobody anything new. A deployment where
-    `joined` dominates `opened` is piling reviews into a handful of threads.
-
-    Driven end to end through the runner for all five, so this asserts the escalation's own
-    branches rather than the helper's arithmetic — the helper is four lines and the branches are
-    what rot.
+    Opened, joined, no actor, no claims and broker down each book their own outcome, so an operator
+    can tell a working escalation from one reaching nobody. `joined` dominating `opened` means
+    reviews are piling into a few threads. Driven end to end through the runner so the escalation's
+    own branches are asserted.
     """
     _grades_by_text(monkeypatch)
     monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
@@ -1067,11 +959,8 @@ def test_every_way_an_escalation_can_end_books_its_own_series(
     monkeypatch.setattr(runner, "open_wait", _join)
     _drive_as(_StubbornAgent(), session_id="s-outcome-no-actor", authenticated=False)
 
-    # `no_claims` needs the *re-grade* to come back empty, not the first verdict: a contentless
-    # first verdict makes the loop refuse to revise, `rounds` stays 0, and the escalation is never
-    # reached at all. Which is why this arm is here rather than in
-    # `test_a_verdict_naming_no_claim_asks_nobody` — that test proves nobody is asked, and cannot
-    # prove how the refusal was booked, because on its path there is no refusal to book.
+    # `no_claims` needs the re-grade to come back empty, not the first verdict: a contentless first
+    # verdict means the loop never runs and the escalation is never reached.
     graded: list[str] = []
 
     async def _empties_on_regrade(answer: str, *_: Any, **__: Any) -> VerificationResult:
@@ -1106,10 +995,8 @@ def test_a_checkpointer_that_fails_before_the_round_ships_the_graded_answer(
 ) -> None:
     """The thread read that marks where a round starts must not sink a turn that already answered.
 
-    It ran outside the round's `try`, so a checkpointer error there reached `run_turn`'s generic
-    handler: an internal error in place of a complete, graded answer. Revising without the mark is
-    not the fallback either — the round's `human` prompt would stay on the thread — so the loop
-    stops and the flagged answer ships.
+    A checkpointer error there stops the loop and ships the flagged answer; revising without the
+    mark would leave the round's prompt on the thread.
     """
 
     async def _broken(*_: Any, **__: Any) -> str | None:

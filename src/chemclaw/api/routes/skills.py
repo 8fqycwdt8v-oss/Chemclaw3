@@ -1,34 +1,9 @@
 """A chemist's own skills over HTTP: the only way one is written, listed or removed.
 
-`agent/local_skills.py` holds the tier and says why it exists; this is the surface that makes it
-usable, and three of its four properties are requirements rather than conveniences.
-
-**The write is a route and never a tool**, which is the same shape `api/routes/plan.py` uses and
-the same reason: a model must never be able to authorize its own behaviour change. A skill is
-injected into the prompt and reshapes every later answer with no citation trail — the exact
-inverse of the property that makes ungated knowledge safe
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) — so the agent may draft one into its
-answer and a person decides whether it becomes judgment.
-`agent/skill_backend.SkillsReadOnlyRefusal` is what makes that structural rather than a convention,
-and it is untouched by this module.
-
-**The read and the delete are the tier's licence to exist.** That ADR's §3 grants the local tier its
-exemption from review on one condition, stated as a requirement: *"a chemist must be able to list
-and read the local skills acting on their turns, and remove one. A behaviour change nobody can
-inspect is the property that makes the shared tier need a gate."* An inspectable change nobody can
-withdraw is the worse bargain of the two, because the person has learned something is acting on
-them and still cannot stop it.
-
-**Owner-scoped by construction, not by a check.** Every handler reads `principal.oid` and passes it
-to a namespace derived from it — there is no path parameter naming whose tier to touch, so there is
-no authorization decision here to get wrong. That is deliberate: `GET /notes/{id}` can afford to be
-un-scoped because the graph is the organisation's, and this is the opposite case.
-
-**Availability rides the memory store, and the coupling is stated rather than switched.** The tier
-is stored in the same `AsyncPostgresStore` that serves `/memories/`, so it is available exactly when
-that is — `agent_memory_enabled` and a Postgres session store. A second flag would be a second
-switch for one resource, and `D-2026-09-16-a-setting-that-ships-off-is-a-feature-nobody-has` is the
-reason it is not defaulted off besides.
+A route, never a tool, so a model cannot change its own behaviour
+(`agent/skill_backend.SkillsReadOnlyRefusal`). Read and delete let a chemist inspect and withdraw
+what acts on their turns. Owner-scoped via a namespace derived from `principal.oid`; available
+exactly when the memory store is.
 """
 
 from fastapi import FastAPI, HTTPException
@@ -83,13 +58,7 @@ class LocalSkillsOut(BaseModel):
 
 
 async def _store_or_refuse() -> object:
-    """This deployment's store, or a 503 saying the tier is unavailable rather than empty.
-
-    The distinction is the whole point of raising here: with no store, a list would answer `[]` and
-    a save would appear to succeed and vanish — a surface that reads as "you have no skills" when
-    the truth is "this deployment cannot keep any". A confident empty answer about a mechanism that
-    is not running is the failure `Chemclaw3_ui`'s review queue has had to delete twice.
-    """
+    """This deployment's store, or a 503 saying the tier is unavailable rather than empty."""
     return store_or_503(
         await turn_store(),
         "this deployment keeps no personal skills: it needs the durable memory store "
@@ -115,18 +84,15 @@ async def read_skill(name: str, principal: CurrentUser) -> LocalSkillOut:
 async def save_skill(body: LocalSkillIn, principal: CurrentUser) -> LocalSkillOut:
     """Keep one skill for this chemist, replacing any earlier version of that name.
 
-    Replacing rather than versioning: a skill is judgment its owner is asserting *now*, and a tier
-    that accumulated drafts would make "what is acting on my turns" a question with a list for an
-    answer. The earlier body is not recoverable from here, which is why the response echoes what
-    was stored.
+    Replaced, not versioned, so "what acts on my turns" has one answer; the response echoes what was
+    stored.
     """
     store = await _store_or_refuse()
     try:
         name = validated_skill(body.body)
     except SkillRefused as refusal:
         raise skill_refusal_http(refusal) from refusal
-    # The cap is the writer's, not this route's: it has to be counted and spent under one lock, and
-    # a check here would be the second copy that the acceptance door already proved goes stale.
+    # The cap is the writer's: it is counted and spent under one lock.
     try:
         await save_local_skill(store, principal.oid, name, body.body)
     except SkillRefused as refusal:
@@ -135,11 +101,7 @@ async def save_skill(body: LocalSkillIn, principal: CurrentUser) -> LocalSkillOu
 
 
 async def forget_skill(name: str, principal: CurrentUser) -> LocalSkillsOut:
-    """Remove one of this chemist's own skills, and answer with what is left.
-
-    The remainder rather than a bare 204, because the question behind a delete is "what is acting
-    on me now" and answering it costs one query the caller would otherwise make.
-    """
+    """Remove one of this chemist's own skills, and answer with what is left."""
     store = await _store_or_refuse()
     if not await delete_local_skill(store, principal.oid, name):
         raise HTTPException(404, f"you have no personal skill named {name!r}")
@@ -149,8 +111,7 @@ async def forget_skill(name: str, principal: CurrentUser) -> LocalSkillsOut:
 def register(app: FastAPI) -> None:
     """Attach this module's routes to `app` — called once, by `create_app` only.
 
-    Registered with the app's own decorators rather than an `APIRouter` + `include_router`, for the
-    reason every `register` in this package gives.
+    Registered on the app rather than via the lazy `include_router`.
     """
     app.get("/skills/mine", response_model=LocalSkillsOut)(list_skills)
     app.post("/skills/mine", response_model=LocalSkillOut)(save_skill)

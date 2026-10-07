@@ -1,32 +1,17 @@
 """The `bo` connector's MCP tool surface: one-shot Bayesian-optimization experiment design.
 
-Exposes BoFire's ask step to the conversation agent so a "which experiment should I run next?"
-question is answered from data the agent has already gathered: the agent assembles the decision
-space and the runs so far (from ELN history via the research tools) and asks for the next
-point(s) to try. Like the fast calculators, a single ask is inline and sub-second — the GP fit
-runs off the event loop; the durable `BoCampaignWorkflow` remains the path for an *automated*
-closed loop that evaluates its own objective over many rounds. This tool is the one-shot
-human-in-the-loop suggestion.
+Exposes BoFire's ask step so "which experiment should I run next?" is answered from data the agent
+has gathered: it assembles the decision space and the runs so far and asks for the next point(s).
+A single ask is inline (the GP fit runs off the event loop); the durable `BoCampaignWorkflow` is
+the path for an automated closed loop. `resume_campaign` reads back the suggestions recorded per
+campaign, so the ask→observe→ask loop can cross sessions.
 
-`resume_campaign` is the read side of that: every suggestion is recorded against the campaign its
-decision space defines, and until it existed nothing could read one back, so the `campaign_id` the
-suggestion tool tells the agent to quote was a handle onto a store with no reader and the
-ask→observe→ask loop could not cross a session.
-
-Layer discipline (G6): this is deterministic *capability*, not judgment. The judgment — how to turn
-a vague "optimize the reaction" into a concrete problem, which historic runs are comparable enough
-to seed it, and how to present a suggestion a human must still run — lives in the bundled
-`experiment-design` skill. This line used to say "read-only", which is false of two of the five
-tools and was false when written: `suggest_next_experiment` and `predict_outcome` both featurize,
-which runs xTB and writes `calculation_results`, and the first also writes `bo_campaigns` and
-`bo_suggestions`. `connector.yaml` classifies both as `state_changing` accordingly, and
-`tests/test_bo_tools.py` derives that classification from these bodies so the two cannot drift.
-
-BoFire lives on this side of the connector boundary now: only the neutral
-`chemclaw.science.bo.problem` types
-cross it, as the model-facing schema of this tool and of the campaign job. That is what keeps
-`bofire` and `botorch` out of the chat service's image while the agent can still ask both
-questions.
+Deterministic capability only; the judgment lives in the bundled `experiment-design` skill.
+`suggest_next_experiment` and `predict_outcome` featurize (xTB, writing `calculation_results`) and
+the first also writes `bo_campaigns`/`bo_suggestions`, so both are `state_changing` in
+`connector.yaml`; `tests/test_bo_tools.py` derives that from these bodies. Only the neutral
+`chemclaw.science.bo.problem` types cross the connector boundary, keeping `bofire` and `botorch`
+out of the chat service's image.
 """
 
 import asyncio
@@ -132,38 +117,26 @@ class ExperimentSuggestion(BaseModel):
 
     campaign_id: str = Field(min_length=1)
     candidates: list[Candidate] = Field(default_factory=list)
-    # How many were asked for, so a batch that could not be filled says so instead of reading as a
-    # complete answer. `propose_candidates` returns fewer than `n` by design when a finite space has
-    # run low — "Fewer than `n` is allowed and is not an error", and the durable loop stops on
-    # `space_exhausted` before it can happen, so this only ever shortens an *inline* answer, which
-    # is the chemist-facing one. Measured: three cells of a 2x2 run, a batch of three asked for, one
-    # candidate returned, and every word of the summary was about that one candidate.
-    # Zero means "not stated" and suppresses the clause, so a directly-constructed suggestion (the
-    # summary is a pure function of the fields and several tests build one) claims nothing.
+    # How many were asked for, so a short batch says so. `propose_candidates` may return fewer than
+    # `n` when a finite space runs low (the durable loop stops on `space_exhausted` first, so this
+    # affects only inline answers). Zero means "not stated" and suppresses the clause.
     requested: int = Field(default=0, ge=0)
     calc_refs: list[str] = Field(default_factory=list)
     # What the objective spans in the runs behind these candidates, so each candidate's
     # `predicted_sd` can be read against something. One per objective, lead first.
     scale: ObjectiveScale | None = None
     scales: list[ObjectiveScale] = Field(default_factory=list)
-    # The non-dominated subset of the observations the **caller supplied** — the trade-off the runs
-    # actually show. Empty on a single-objective problem, where there is one best point and no front
-    # to draw. This is what turns "here is the trade-off" from a sentence into a computation (W3).
+    # The non-dominated subset of the observations the caller supplied — the trade-off the runs
+    # show. Empty on a single-objective problem.
     front: list[Observation] = Field(default_factory=list)
-    # The assay reproducibility the front was drawn with, or None when it was drawn at exact
-    # precision. Carried so the summary can say which, rather than leaving a reader to assume the
-    # stricter reading was the deliberate one.
+    # The assay reproducibility the front was drawn with, or None for exact precision, so the
+    # summary can say which.
     front_tolerance: float | None = None
-    # True when this ask opened a campaign that had no prior suggestions *while observations were
-    # supplied* — almost always an accidental fork rather than a new optimization
-    # (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
-    #
-    # A campaign id is a hash of its decision space, so a widened bound or a swapped ligand is a
-    # different campaign with no history, correctly. The canonicalisation in `campaign_id_for`
-    # removes the ways a *re-typed* space forks without meaning to; this reports the ones it
-    # cannot — an added option, a bound the chemist moved and did not mention — because the
-    # symptom is silent by construction: `record_suggestion` upserts, so a fork looks exactly like
-    # a first ask. Runs supplied against a campaign with no history is the signature of one.
+    # True when this ask opened a campaign with no prior suggestions while observations were
+    # supplied — almost always an accidental fork. A campaign id hashes its decision space, so an
+    # added option or a moved bound is a new campaign; `campaign_id_for` canonicalises away
+    # re-typing, and this reports the rest, which `record_suggestion`'s upsert would otherwise make
+    # look like a first ask.
     opened_new_campaign: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
@@ -171,24 +144,15 @@ class ExperimentSuggestion(BaseModel):
     def summary(self) -> str:
         """Each candidate's posterior sd read against the observed spread, in one sentence each.
 
-        A `computed_field` rather than a bare property, for the reason
-        `chemclaw.science.fingerprints.store.FingerprintSearch.verdict`
-        is one: a plain property is not serialized, so the reading would never reach the model
-        composing the answer. The skill can
-        say "compare the sd to the spread"; only this is in the context window at the moment the
-        comparison has to be made.
+        A `computed_field` so it is serialized and reaches the model composing the answer.
         """
         if not self.candidates:
             return "No candidates were proposed."
         spread = self.scale.spread if self.scale else None
         readings = []
         if self.requested > len(self.candidates):
-            # First, because it is the one sentence that changes what the rest of this means: the
-            # readings below describe the candidates that exist and say nothing about the ones that
-            # do not, so a short batch presented without this reads as a complete answer to the
-            # question asked. The cause is always the same — a finite, all-categorical space with
-            # fewer fresh conditions left than the batch wanted — because a continuous space never
-            # runs out of points to propose.
+            # First, because a short batch otherwise reads as a complete answer. The cause is always
+            # a finite, all-categorical space with fewer fresh conditions than requested.
             readings.append(
                 f"You asked for {self.requested} candidate(s) and only {len(self.candidates)} "
                 "could be proposed: every other condition in this decision space has already been "
@@ -207,9 +171,8 @@ class ExperimentSuggestion(BaseModel):
                 "indistinguishable, so neither knocked the other off."
             )
             if not self.scales[0].n:
-                # Cold start. The trade-off sentence below would announce an empty `front` and tell
-                # the model to quote it, about a campaign with nothing supplied to draw one from —
-                # a contradiction the model has to resolve, and it resolves it by inventing.
+                # Cold start: the trade-off sentence below would describe an empty front, which the
+                # model would resolve by inventing one.
                 readings.append(
                     f"This is a trade-off over {len(self.scales)} objectives ({named}), and no "
                     "runs were supplied, so there is no front yet: `front` is empty because "
@@ -255,33 +218,12 @@ def _require_observed_params_match(
 ) -> None:
     """Reject an observation whose parameters are not exactly the problem's declared ones.
 
-    BoFire indexes the experiments dataframe by the domain's input keys, so a parameter the
-    problem declares but an observation omits — or a key an observation carries that the problem
-    never declared — is discovered deep inside the library rather than at the call. In the live
-    run that prompted this check it surfaced as `KeyError: 'base'` from
-    `bofire...acqf_optimization._optimize_acqf_discrete`, and `chemclaw.connectors.server`
-    deliberately forwards only `ValueError` verbatim, so what actually reached the model was
-    "an internal error occurred" — a string nothing can be repaired from. Raising here instead
-    makes the same fault a caller-fixable message naming the observation and the parameter, which
-    that sanitizer passes through untouched.
-
-    **What this does not claim.** The live trigger was never reproduced — not by the four
-    hand-built calls in the report (with and without `structures`, two and three factors,
-    observations complete and incomplete), and not by the two more measured while writing this,
-    which drove the all-categorical domain the traceback's `_optimize_acqf_discrete` frame implies.
-    So this closes the *class* of fault — a declared/observed parameter mismatch reaching BoFire as
-    an internal error — and whether it closes that specific live failure is **unproven**. Do not
-    write it up as the fix for the observed `KeyError`.
-
-    **What was measured, since the two directions are not worth the same.** A *missing* declared
-    parameter already fails well without this check: BoFire's own `validate_experimental` raises
-    `ValueError: invalid values for 'base', ...` on both the continuous-plus-categorical and the
-    all-categorical route, and the connector forwards that intact — so here the gain is only a
-    better message (which observation, and what to do). An *undeclared* extra parameter, by
-    contrast, **silently succeeds**: BoFire ignores the stray column and returns candidates, so a
-    chemist who reported a condition the problem never declared was answered from a decision space
-    that quietly dropped it. That direction is the one this turns from a wrong answer into a
-    question the caller can fix.
+    BoFire indexes experiments by the domain's input keys, so a mismatch surfaces deep in the
+    library, and `chemclaw.connectors.server` forwards only `ValueError` verbatim. A missing
+    declared parameter already fails in BoFire's `validate_experimental`; this adds a clearer
+    message. An undeclared extra parameter would silently succeed with the stray column ignored —
+    this turns that wrong answer into a fixable error. (A specific live `KeyError: 'base'` that
+    prompted this was never reproduced; this closes the class, not provably that instance.)
 
     Raises:
         ValueError: Naming the offending observation's index and the parameter(s) at fault.
@@ -292,29 +234,13 @@ def _require_observed_params_match(
 def _require_points_match(
     problem: OptimizationProblem, points: list[dict[str, ParamValue]]
 ) -> None:
-    """The same check for the points `predict_outcome` is asked about, **and one more** (W5).
+    """The same check for the points `predict_outcome` is asked about, plus a value check.
 
-    A prediction goes through `strategy.predict`, not through the acquisition step, so a missing
-    column surfaces as a different library error than the one the observation check was written
-    for — but the caller's mistake and the sentence that repairs it are identical, so the name
-    check is shared rather than restated.
-
-    **The values need checking here and do not need it for observations**, which is the half this
-    function was missing. The asymmetry is BoFire's, and it is measured: `tell` runs
-    `validate_experimental`, so a bad *observation* value already comes back as a plain `ValueError`
-    the connector forwards verbatim — "invalid values for `ligand`, allowed are: `['L1','L2','L3']`"
-    for an undeclared level, "not all values of input feature `T` are numerical" for a string.
-    `predict` runs no validation at all, so the identical mistake in a *point* arrived as a
-    `KeyError` ("None of [Index(['L9'], ...)] are in the [index]") or a `TypeError` ("can't convert
-    np.ndarray of type numpy.object_"). Neither is a `ValueError` nor one of the engine's
-    `_SURROGATE_FAILURES`, so `chemclaw.connectors.server` replaced both with "an internal error
-    occurred" — nothing the model can repair from, and it retries.
-
-    **A value outside a continuous bound is deliberately not caught.** That is the case
-    `predict_outcome` documents as answered rather than refused: the model extrapolates, the sd
-    widens roughly sixfold, and `Prediction.in_domain` labels it. So this is not `point_in_domain`,
-    which returns False for both — it is the narrower question of whether the surrogate has an
-    *encoding* for the value at all. A level nobody declared has no column; a string has no number.
+    Names are checked as for observations. Values too, because `strategy.predict` validates nothing:
+    an undeclared level or a non-numeric continuous value would raise a `KeyError`/`TypeError` that
+    the server sanitises to "an internal error". A value outside a continuous bound is deliberately
+    allowed — it is answered as an extrapolation, labelled by `Prediction.in_domain`; this asks only
+    whether the surrogate can encode the value at all.
 
     Raises:
         ValueError: Naming the offending point's index and the parameter(s) at fault.
@@ -368,55 +294,22 @@ def _require_params_match(
         )
 
 
-# The namespace stamped onto an actor this process was in no position to authenticate. Not a
-# setting: it is part of the shape of a written record, and a marker that varied per deployment
-# would make the column unreadable across two of them.
+# The namespace stamped onto an actor this process cannot authenticate. A constant, not a setting:
+# it is part of the record's shape across deployments.
 _UNVERIFIED_ACTOR_PREFIX = "unverified:"
 
 
 def _recorded_provenance() -> tuple[str, str, str]:
     """The caller's `(actor, session_id, correlation_id)`, with the actor marked unauthenticated.
 
-    **The actor reaching this tool is a claim, not an identity, and the record has to say so.**
-    `caller_provenance` reads `X-Chemclaw-Actor` off the serving HTTP request, and
-    `chemclaw.connectors.caller` says in its own module docstring that these values "arrive on an
-    unauthenticated header from outside this process's trust boundary". Measured before this
-    existed — a call carrying `X-Chemclaw-Actor: victim-oid` wrote `victim-oid` verbatim into
-    `bo_campaigns.opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains
-    as the answer to "who framed this campaign's decision space", indistinguishable from a real one.
+    `caller_provenance` reads the actor from the unauthenticated `X-Chemclaw-Actor` header, and the
+    values land in `bo_campaigns.opened_by` and `bo_suggestions.actor`. The bundle's bearer proves
+    the caller holds its credential (core, in the shipped deployment), not which chemist core was
+    serving, so the actor is recorded as `unverified:<name>`. A synchronous MCP call has no channel
+    for a validated principal (the durable path reads `requested_by` off the Temporal memo instead).
 
-    **Who can make that claim is narrower than this paragraph used to say, and the marker survives
-    the narrowing.** It read "this bundle's manifest declares `auth: mode: none`, so the pod does
-    not even authenticate *core*: anything that can open a socket to it can name any chemist it
-    likes". The manifest declares `mode: bearer` with `token_env: CHEMCLAW_BO_MCP_TOKEN`
-    (`D-2026-08-20-a-networkpolicy-selects-peers-not-paths` closed that, and
-    `tests/test_connector_identity.py::test_every_bundle_this_repository_hosts_authenticates_its_own_mcp`
-    holds it for every bundle); driven against the real app, `/mcp` answers **401** with no token
-    and 401 with a wrong one. So the forgery is a *token-holder's*, not anyone's.
-
-    That is a smaller threat and not a closed one, which is exactly why the marking stays. A bearer
-    proves this request came from something holding this bundle's credential — in the shipped
-    deployment, core — and says nothing about *which chemist* core was serving. The header is still
-    the only thing carrying that, and it is still unauthenticated, so a column that recorded it bare
-    would be indistinguishable from one filled by a validated principal. Dropping the prefix on the
-    strength of the bearer would be trusting a credential to answer a question it does not answer.
-
-    **Why marking rather than sourcing the real principal.** The durable sibling
-    (`connectors/bo/workflows.py`) reads `requested_by` off the run's Temporal memo, which core sets
-    from the validated front-door principal — a value that crossed no attacker-writable surface. No
-    such channel exists here: a synchronous MCP call carries headers and nothing else, there is no
-    memo, no token bound to the user, and no signed assertion. Inventing one is connector
-    bearer/OIDC auth, a separate piece of work. So the honest move is the one this codebase already
-    makes everywhere else — the system flags, it never certifies — and the two writers of this
-    column now say which of them could vouch for the name it holds.
-
-    **An absent actor stays absent.** Empty means "not recorded" (a test, a CLI, a direct call), and
-    stamping `unverified:` onto nothing would manufacture a claim where none was made.
-
-    `session_id` and `correlation_id` pass through unmarked on purpose: they are join keys, not
-    attribution, and they are what lets an auditor recover the *validated* actor from core's own
-    audit trail, which is the same recovery `record_campaign_run` argues for when it declines to
-    duplicate a session id.
+    An absent actor stays empty. `session_id` and `correlation_id` pass through unmarked: they are
+    join keys that let an auditor recover the validated actor from core's audit trail.
     """
     actor, session_id, correlation_id = caller_provenance()
     return (
@@ -429,18 +322,9 @@ def _recorded_provenance() -> tuple[str, str, str]:
 def _as_list(value: object, noun: str) -> list[Any]:
     """Accept an array the model JSON-*encoded* as a string, and refuse anything that is not a list.
 
-    **The tolerance is real and worth keeping.** On a large batch the model occasionally emits the
-    observations array as a single JSON string rather than as an array — a live e2e finding on a
-    six-parameter problem. Schema validation would reject the whole call before the tool body runs,
-    so nothing reaches the model to self-correct from; decoding the string is strictly more
-    permissive and costs a correct call nothing.
-
-    **The refusal is the part that was missing.** `json.loads` decodes *any* JSON, so the three
-    call sites that did this inline turned `"null"` into `None`, `"42"` into an int and `"{}"` into
-    a dict, then iterated it — `for item in None` is a `TypeError` the model reads as an internal
-    error, and iterating `"{}"` yields its *keys*, so a malformed call became a confusing
-    validation failure about strings that were never observations. One helper, one sentence, three
-    call sites, per this repo's Rule of Three.
+    Models occasionally emit a large observations array as one JSON string, which schema validation
+    would reject before the body runs. Decoding is more permissive, but `json.loads` accepts any
+    JSON, so a non-list result is refused rather than iterated.
 
     Raises:
         ValueError: When the string does not decode, or decodes to something that is not a list.
@@ -555,12 +439,8 @@ async def suggest_next_experiment(
         The proposed candidate point(s), the campaign they belong to, and the calculation keys the
         decision space was built from.
     """
-    # A tool call arrives as JSON, so the framework hands this function plain dicts and lists —
-    # never `OptimizationProblem`/`Observation` instances, because the wire format has no model
-    # concept. This is the one tool here with a nested-model parameter, so it is the one boundary
-    # that has to bridge back into typed objects. Re-validating an already-correct instance is a
-    # no-op (`model_validate` short-circuits on an exact-type match), so every direct and test
-    # caller that passes real models is unaffected.
+    # A tool call arrives as JSON, so nested models arrive as plain dicts and are re-validated here;
+    # `model_validate` is a no-op for callers already passing real models.
     problem = OptimizationProblem.model_validate(problem)
     history = [Observation.model_validate(item) for item in _as_list(observations, "observations")]
     # The tool owns its contract, so the declared/observed parameter agreement is checked here —
@@ -568,10 +448,9 @@ async def suggest_next_experiment(
     require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
-    # Featurize before the engine sees the problem: descriptors change how the surrogate
-    # models the categorical space, so this must happen for the seeding path too — otherwise
-    # a problem that declares structures would silently fall back to an opaque category.
-    # Runs *after* the coercion above, because it needs a real `OptimizationProblem`.
+    # Featurize before the engine sees the problem, including on the seeding path, so declared
+    # structures are modelled by descriptors rather than as opaque categories. Needs the coerced
+    # problem.
     featurized = await featurize_problem(properties_for(default_store()), problem)
     # After featurization, not before: two labels pointing at the same molecule are distinct until
     # xTB gives them the same descriptor row, and from there the surrogate cannot tell them apart.
@@ -580,33 +459,15 @@ async def suggest_next_experiment(
         candidates = await asyncio.to_thread(propose_candidates, featurized.problem, history, count)
     else:
         candidates = await asyncio.to_thread(initial_candidates, featurized.problem, count)
-    # Recorded after the candidates exist and never at the cost of them: `record_suggestion`
-    # swallows its own failures, because the chemist asked for a suggestion and a database blip
-    # must not turn one into an error. The campaign id is a pure function of the problem, so it is
-    # the right handle to return even on the turn where the write did not land.
+    # Recorded after the candidates exist; `record_suggestion` swallows its own failures so a
+    # database blip never costs the suggestion. The campaign id is a pure function of the problem,
+    # so it is returned even when the write did not land. `_recorded_provenance` marks the
+    # header-supplied actor as unverified. The fork signal comes from the write itself, so
+    # concurrent openers cannot both claim it (`RecordedSuggestion`).
     #
-    # `_recorded_provenance`, not `caller_provenance`: this path's actor is an unauthenticated
-    # header, and the row it writes is the record of who proposed an experiment. See that
-    # function for why the name is marked rather than replaced by a validated one.
-    #
-    # The fork signal comes out of the write itself. It used to be a `campaign_is_known` read taken
-    # just before it, which could not answer the question: two turns opening the same decision
-    # space concurrently both read no campaign and both claimed to have opened one, while the
-    # upsert underneath serialized them so exactly one was right. See `RecordedSuggestion`.
-    #
-    # **`job_id` is what makes the write idempotent, and the inline path passed none** — so the
-    # partial index `ON CONFLICT (campaign_id, job_id) WHERE job_id <> ''` did not cover this row
-    # and a replay landed a second one. That is not hypothetical since
-    # `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up`: a tool killed
-    # mid-call is re-run with its original arguments, and `record_suggestion`'s own parameter
-    # docstring already said what the absence costs ("empty for the inline tool. Makes the write
-    # idempotent — a Temporal activity is retried by design").
-    #
-    # Derived rather than minted, the way every other idempotency key in this tree is: a hash over
-    # the campaign, what was asked and what was known when it was asked. Two *genuinely* identical
-    # requests dedupe, and that is correct rather than a cost — a suggestion is a function of the
-    # problem and its observations, so asking the same question of the same evidence has one
-    # answer. A new observation changes `history` and therefore the key.
+    # `job_id` makes the write idempotent for replays of a killed call: a hash over the campaign,
+    # the request and the history, so identical requests over identical evidence dedupe and a new
+    # observation changes the key.
     inline_key = "inline-" + stable_hash(
         [
             featurized.problem.model_dump(mode="json"),
@@ -631,9 +492,8 @@ async def suggest_next_experiment(
         calc_refs=featurized.calc_refs,
         scale=scales[0],
         scales=scales,
-        # The front of the runs the caller gave us, not of anything the model predicted — a
-        # trade-off is a statement about measurements. Empty for one objective, where `best_of`
-        # already answers "which run won".
+        # The front of the caller's runs, not of predictions: a trade-off is a statement about
+        # measurements. Empty for one objective.
         front=(
             pareto_front(problem, history, assay_noise or 0.0)
             if len(problem.objectives) > 1
@@ -698,13 +558,8 @@ async def campaign_progress(
     require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
-    # Off the event loop, like every other compute-bearing tool on this surface. `read_progress`
-    # looks like arithmetic over a list and is not: `discrete_candidate_count` walks the whole
-    # categorical cross product whenever the space carries an exclusion, and both that space and
-    # the observation list arrive from the model. Run inline, a wide decision space stalled every
-    # other request this server was serving — the one tool here that did its work on the loop
-    # thread while `suggest_next_experiment` and `predict_outcome` beside it already offloaded.
-    # The walk is bounded too, at `bo_max_enumerated_cells`; this is the other half.
+    # Off the event loop: `discrete_candidate_count` can walk the whole categorical cross product
+    # (bounded by `bo_max_enumerated_cells`), and both inputs come from the model.
     return await asyncio.to_thread(read_progress, problem, history, assay_noise, window, objective)
 
 
@@ -833,10 +688,8 @@ async def generate_screening_design(
     if criterion != "factorial":
         return await asyncio.to_thread(optimal_design, problem, n_experiments, criterion, formula)
     if n_experiments:
-        # The rule this tool's own docstring already applies to `n_center` and `n_repetitions`: a
-        # silently ignored argument is worse than an error. A factorial's size is the product of its
-        # level counts, so a caller who passed a budget is asking for a design this criterion cannot
-        # give — and being handed 128 rows after asking for 24 is the failure.
+        # A silently ignored argument is worse than an error: a factorial's size is fixed by its
+        # level counts, so a budget cannot be honoured.
         raise ValueError(
             f"a factorial's run count is the size of the grid, so n_experiments={n_experiments} "
             "cannot be honoured here. Pass a criterion that takes a budget — 'd-optimal' for "
@@ -868,8 +721,7 @@ class SurrogateAnswer(BaseModel):
     def summary(self) -> str:
         """The fit quality first, because it is what licenses reading the predictions at all.
 
-        An absent fit says so in words rather than as an empty string. A blank summary reads as "no
-        caveat" to whatever composes the answer, which is the opposite of what it means.
+        An absent fit says so in words; a blank summary would read as "no caveat".
         """
         if not self.fit:
             return (
@@ -940,9 +792,7 @@ async def predict_outcome(
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
     _require_points_match(problem, asked)
-    # Featurized for the same reason the suggestion path is: descriptors change how the surrogate
-    # models a categorical space, so a prediction made without them would answer about a different
-    # model than the one that proposed.
+    # Featurized as on the suggestion path, so the prediction uses the same surrogate model.
     featurized = await featurize_problem(properties_for(default_store()), problem)
     require_descriptors_distinguish_categories(featurized.problem)
     predictions, fit = await asyncio.to_thread(

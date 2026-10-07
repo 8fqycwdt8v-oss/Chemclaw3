@@ -1,16 +1,8 @@
-"""Started jobs and PR-gate proposals reach the turn's event stream (gaps RCH-4, RCH-5).
+"""Started jobs and plans reach the turn's event stream.
 
-`JobStartedEvent` and `PlanEvent` had been in the typed contract and rendered by the chat UI since
-F2 — and were never emitted by anything. `plan_only` autonomy (the Helm chart's production default)
-therefore asked a human to approve a plan the surface could not show, and a chemist whose turn
-opened a knowledge PR was never told: the reference went into the model's context and the review
-"human signs off" line existed only in a git host's UI.
-
-The runner only sees the model's streamed updates, so tools hand these facts over out of band
-through `chemclaw.core.turn_signals` (a contextvar, task-local like the ambient session/identity).
-These
-tests drive the real runner with a fake agent whose "tool" records a signal, and assert the events
-come out interleaved in order.
+The runner sees only the model's streamed updates, so tools hand these facts over out of band
+through `chemclaw.core.turn_signals`, a task-local contextvar. These tests drive the real runner
+with a fake agent whose tool records a signal, and assert the events come out in order.
 """
 
 import asyncio
@@ -51,15 +43,9 @@ class _SignallingAgent(ScriptedTurn):
 def _events(agent: ScriptedTurn) -> list[Any]:
     """Collect one turn's events, with no connectors and without the capability announcement.
 
-    `connectors=[]` is stated rather than defaulted: omitting it means *every enabled connector*,
-    which in a test process is six hosts that are not running — so the turn genuinely degrades and
-    now says so (D-139). These tests are about signal ordering, and a turn that dials six dead hosts
-    to assert an event list was asserting more than it meant to.
-
-    `capability_degraded` is dropped for exactly the same reason and one more: no Temporal broker
-    runs in a test process either, so every turn here truthfully opens by announcing the durable
-    subsystem is down. That announcement has its own tests; keeping it in this list would mean
-    every signal-ordering assertion doubled as an assertion about an unrelated outage.
+    `connectors=[]` is explicit because the default dials every enabled connector, none of which run
+    here. `capability_degraded` is dropped because no Temporal broker runs either; that announcement
+    has its own tests.
     """
 
     async def _collect() -> list[Any]:
@@ -94,20 +80,11 @@ def test_a_recorded_note_becomes_a_note_recorded_event() -> None:
 
 
 def test_signals_are_ordered_between_the_tokens_around_them() -> None:
-    """A signal surfaces where it happened, not batched at the end, so the transcript reads true.
+    """A signal surfaces where it happened, not batched at the end.
 
-    **The assertion is the invariant, not the transcript, and that is a measurement rather than a
-    concession.** Under MAF the runner consumes the model's generator directly, so the sequence is
-    exactly `token, job_started, note_recorded, token, answer`. Under LangGraph the tokens travel
-    through `astream`'s queue, and a fake model that never suspends between chunks fills that queue
-    before the consumer is scheduled once: measured, the consumer needs four event-loop hops inside
-    the model's reply to dequeue the first chunk, so the same turn reads `job_started,
-    note_recorded, token, token, answer`. That difference is a property of the stream's buffering —
-    a real provider's chunks are separated by a network read — and not of the drain-first rule both
-    engines implement, so pinning the exact list would pin the fake.
-
-    What both engines must agree on, and what is asserted: the signals come out in the order they
-    were recorded, and they are *not* batched at the end — a token still follows the last one.
+    The exact interleaving with tokens depends on `astream`'s buffering of a fake model, so the
+    assertion is the invariant: signals come out in recording order, and a token still follows the
+    last one.
     """
     events = _events(
         _SignallingAgent(jobs=[("report-1", "report")], proposals=[("r-1", "note/r-1")])
@@ -148,27 +125,20 @@ def test_signals_are_isolated_per_turn() -> None:
 
 
 def test_recording_outside_a_graph_is_a_no_op_rather_than_an_error() -> None:
-    """The same tools run where nothing is streaming; that must not blow up.
+    """Recording outside a graph is a no-op rather than an error.
 
-    This is the case the port made sharp. `get_stream_writer()` does not return `None` outside a
-    runnable context — it raises `RuntimeError: Called get_config outside of a runnable context`
-    (measured). A Temporal activity replaying a template step calls these same tools with no graph
-    anywhere, so an unguarded publish would fail a durable job because it tried to *narrate*. The
-    CLI and most tests are in the same position.
+    `get_stream_writer()` raises `RuntimeError` outside a runnable context, and a Temporal activity
+    or the CLI calls these same tools with no graph; narrating must not fail a durable job.
     """
     record_job_started("qm-1", "qm")
     record_note_written("n-1", "note/n-1")
 
 
 def test_recording_from_a_governed_call_outside_a_graph_is_a_no_op() -> None:
-    """The path the guard actually exists for, which the first version of it did not cover.
+    """Recording from a governed call outside a graph is a no-op.
 
-    `agent/tool_invocation.invoke_governed` runs a tool through the middleware chain in a Temporal
-    activity — a runnable context with no graph. `get_stream_writer()` raises a *different*
-    exception there than it does off any runnable context at all: `KeyError: '__pregel_runtime'`
-    rather than `RuntimeError`, because the config exists and the runtime key in it does not.
-    Catching only the second left a durable template step failing because a tool tried to narrate,
-    and the unit test above passed throughout — it drives a bare call, which raises the other one.
+    Inside `invoke_governed` there is a runnable context but no graph runtime, so
+    `get_stream_writer()` raises `KeyError: '__pregel_runtime'` instead of `RuntimeError`.
     """
     from langchain_core.tools import StructuredTool
 
@@ -181,11 +151,10 @@ def test_recording_from_a_governed_call_outside_a_graph_is_a_no_op() -> None:
 
 
 def test_a_signal_reaches_the_stream_from_inside_a_tool() -> None:
-    """The other half: where a writer *does* exist, the publish actually lands.
+    """Where a writer does exist, the publish actually lands.
 
-    Asserted against a real graph rather than a patched writer, because the guard above swallows
-    `RuntimeError` — and a guard that swallows everything is indistinguishable from one that
-    swallows nothing unless something proves the success path too.
+    Asserted against a real graph, since the guard above swallows errors and only a proven success
+    path distinguishes it from swallowing everything.
     """
 
     async def _record() -> str:
@@ -205,20 +174,11 @@ def test_plan_is_absent_when_the_harness_is_off(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_nothing_in_the_tree_can_open_a_durable_approval_hold() -> None:
-    """An absence pinned, so re-adding the claim without a producer turns this red.
+    """Nothing in the tree can open a durable approval hold.
 
-    D-032 built an asynchronous "Save this knowledge? [Yes]/[No]" hold and shipped every consumer
-    of it — three HTTP routes, a Temporal workflow, an owner-scoped dependency and an
-    `approval_request` stream event — while its only producer, `start_approval`, was called by
-    nothing in `src/`. So `GET /approvals` could only ever return `[]`, and an owner-scoped
-    decision route *looked* like a human sign-off that existed. That is the shape
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted `record_handoff`
-    for, and `D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` deletes this one for.
-
-    Asserted as an absence rather than as plumbing: nothing under `src/` names the workflow, the
-    starter or the turn signal. Whoever re-adds the hold fails this test, which is the point — the
-    producer and the surface have to arrive in the same change. The PR-gate the synchronous
-    `record_confirmed_answer` opens is untouched and is where the human decision is actually taken.
+    A hold with consumers but no producer looks like a human sign-off that cannot happen. Asserted
+    as an absence: nothing under `src/` names the workflow, the starter or the turn signal, so
+    whoever re-adds it must ship producer and surface together.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     banned = ("InteractionApprovalWorkflow", "start_approval", "record_approval_request")

@@ -1,38 +1,15 @@
-"""The front door's authorization gates, as dependencies every route shares (H1, R3.2).
+"""The front door's authorization gates, as dependencies every route shares.
 
-`CurrentUser` is `Depends(require_principal)` spelled once. Before this module every route wrote
-`principal: Principal = Depends(require_principal)` verbatim — twenty copies of the same line
-enforcing "no route skips authentication or the per-principal rate budget" (`_within_budget`
-lives inside `require_principal`, `chemclaw.api.auth:129-154`). A convention repeated twenty times
-is a convention the twenty-first route can forget; nothing failed if it did.
+`CurrentUser` is `Depends(require_principal)` spelled once, so every route has the same
+dependency shape and `tests/test_route_auth_coverage.py` can assert that every route is gated
+(authentication plus the per-principal rate budget). It stays a dependency, not middleware, so it
+raises a clean `HTTPException` inside FastAPI's handling. A handler that takes
+`principal: CurrentUser` and never reads it is authenticated and deliberately unscoped.
 
-This does not make the gate itself any stronger — `require_principal` is unchanged, and this is
-still a `Depends`, not middleware (see `tests/test_request_limits.py` for why the gate must stay a
-dependency: it needs to run *inside* FastAPI's request handling to raise a clean `HTTPException`
-rather than reject at the ASGI layer). What it buys is a single spelling to grep for, and a
-`route.dependant` tree with exactly one shape to look for `require_principal` in — which is what
-`tests/test_route_auth_coverage.py` walks to make "every route is gated" an assertion instead of a
-convention.
-
-A handler that takes `principal: CurrentUser` and never reads the value (a handful of routes:
-`GET /schedules`, `GET /profiles`, `GET /jobs`, `GET /jobs/{job_id}`) is not a mistake — it is
-"authenticated, deliberately unscoped": the route needs a caller to exist, but nothing about the
-answer depends on *which* caller it is. The alias is what makes that legible; the old spelled-out
-`Depends()` looked identical whether the ownership check was intentionally absent or simply
-forgotten.
-
-The second half of this module (R3.2) is the resource-level gates the routes in
-`chemclaw/api/routes/` resolve before touching anything: session ownership (`CurrentSession`,
-which also rehydrates a durable session after a restart) and the reviewer check. Both session
-paths share one refusal — `_refuse_unless_participant`, the "same 404 for unknown and not-yours"
-rule — because they authorize the same way: the stored owner, or a member that owner let in
-(`agent/session_members.participant_permits`). The acts only an owner may perform are
-`OwnedSession`'s.
-
-There used to be a third gate here, proposal visibility, and it was the interesting one: a reviewer
-could see *any* proposal, a privilege a session has no analogue for. It went with the PR-gate
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) — knowledge is written directly now, so
-there is no queue of other people's pending knowledge to be privileged about.
+The resource gates: session access (`CurrentSession`, which also rehydrates a durable session after
+a restart), where the owner or an admitted member passes and anything else gets the same 404 as an
+unknown id (`_refuse_unless_participant`); owner-only acts (`OwnedSession`); and the reviewer
+check.
 """
 
 import logging
@@ -52,23 +29,14 @@ from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
-# The resources this module can refuse, as a closed label set: a conversation, an experiment design
-# and the organisation's skills. A source literal at every call site, so
-# `chemclaw_authz_refusals_total` can never grow a series from anything a caller sends.
+# The resources this module can refuse, as a closed label set of source literals, so
+# `chemclaw_authz_refusals_total` cannot grow a series from caller input.
 _SESSION = "session"
-#: `POST /protocols/{id}/revisions` and `/status` refuse in their own module, with a 403 rather
-#: than this module's 404, and for a reason that module argues: a design is a shared artifact whose
-#: reads are open, so its id's existence is not the secret. **The record is the same record**, and
-#: it was not being written — the two design writes raised inline, so a scan of design ids was
-#: invisible on the one surface where the distinction between "no such design" and "not yours"
-#: survives at all. `record_refusal` is exported for exactly that call.
+#: Design writes refuse in their own module with a 403 (a design's reads are open, so its existence
+#: is no secret) and record through `record_refusal`.
 DESIGN = "design"
-#: `POST /skills/org`, its revert and its delete refuse in their own module with a 403, for
-#: `DESIGN`'s reason: the tier's reads are open — every chemist pays for it in their prefix and is
-#: entitled to see it — so a skill's *name* existing is not the secret and only the right to change
-#: it is withheld. The `target` is therefore a skill name, which is deployment configuration, and
-#: never a third party's oid: that is one of the properties the promotion design was chosen for
-#: (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`).
+#: Organisation-skill writes refuse in their own module with a 403, as for `DESIGN`: the tier's
+#: reads are open. The target is a skill name, never a person's oid.
 ORG_SKILL = "org-skill"
 
 
@@ -77,22 +45,9 @@ def _refuse(
 ) -> HTTPException:
     """Record one authorization refusal, then build the 404 that discloses none of it.
 
-    **404-not-403 is right and is exactly why this exists.** Answering 403 would confirm the id
-    exists, so the response is deliberately indistinguishable from "no such thing" — which leaves
-    the server-side record as the *only* place the distinction can survive, and until now that
-    record was not written at all: five raise sites, zero log lines, zero metrics. A session-id
-    enumeration scan was therefore indistinguishable from ordinary 404 traffic, on the one surface
-    where it matters.
-
-    `reason` is a source literal naming which of the gate's arms fired, so an operator reading the
-    trail can tell "someone else's session" from "no such session" without re-deriving it from the
-    route and the actor.
-
-    **`target` is the caller's own id and is clipped before it is logged.** It reaches here
-    straight off the path, unbounded and by definition unrecognised — that is what the gate just
-    refused — and it was interpolated into the message at full length: measured at 8,000
-    characters, an 8,093-character record for `SecretRedactingFilter` to regex-scan with the
-    logging lock held. A refused id is worth recording; the bytes past a real id's length are not.
+    404, not 403, so an id's existence is not confirmed; the server-side record is therefore the
+    only place the distinction survives, which is what makes an enumeration scan visible. `reason`
+    names which arm fired. `target` is caller input and is clipped before logging.
     """
     record_refusal(resource, reason, principal, target, status=404)
     return HTTPException(status_code=404, detail=detail)
@@ -103,14 +58,8 @@ def record_refusal(
 ) -> None:
     """Write the server-side record of one authorization refusal, whatever the response says.
 
-    Separate from `_refuse` because the response and the record are different decisions. This
-    module answers 404 so the id's existence stays undisclosed;
-    `chemclaw/api/routes/protocols.py` answers 403 because a design's reads are open and only the
-    right to change it is withheld. Both are refusals an operator needs to see, and only one of
-    them was being written.
-
-    `status` is a source literal from the caller, so the trail says what the caller was actually
-    told rather than what this module would have said.
+    Separate from `_refuse` because some callers answer 403 (`chemclaw/api/routes/protocols.py`).
+    `status` is what the caller was actually told.
     """
     clipped = clip_for_log(target)
     METRICS.increment("chemclaw_authz_refusals_total", labels={"resource": resource})
@@ -133,26 +82,16 @@ def record_refusal(
 
 
 # The authenticated caller for this request (401/429 handled inside `require_principal`). Every
-# route that is not in the health/metrics probe allowlist takes this — see
-# `tests/test_route_auth_coverage.py` for the enforced list.
+# route outside the probe allowlist takes this; see `tests/test_route_auth_coverage.py`.
 CurrentUser = Annotated[Principal, Depends(require_principal)]
 
 
 def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
     """Whether a stored owner (a session's, today) lets `principal` reach the row.
 
-    Mirrors `_is_reviewer`'s dev/enforced split, applied to ownership rather than role: in dev
-    (`entra_required` off) there is no real actor, so an owner-less row degrades open, exactly as
-    every other route does. Once identity is enforced, a *recorded* absence of an owner is no
-    longer "everyone's" — `entra_required` never mints a new owner-less row, so a `None`/empty
-    owner surviving into enforcement is a leftover from a dev-mode write, and treating it as
-    "anyone's" would let it be read, resumed or decided by every authenticated principal instead
-    of nobody. `owner` is falsy for both `None` and `""`, so a row written without one and a row
-    whose owner column holds the empty-string sentinel are refused the same way.
-
-    **The rule itself lives in `agent/session_store.owner_permits`**, because the agent resolves the
-    same question for a tool handed an explicit session id and two copies would drift. This keeps
-    the `Principal` signature the routes read against; only the predicate moved.
+    In dev (`entra_required` off) an owner-less row is open. Under enforcement no owner-less row is
+    ever written, so one that exists is a dev leftover and is refused to everyone (`None` and `""`
+    alike). The rule lives in `agent/session_store.owner_permits`, shared with the agent.
     """
     return owner_permits(owner, principal.oid)
 
@@ -160,18 +99,12 @@ def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
 async def _refuse_unless_participant(
     session_id: str, owner: str | None, principal: Principal, detail: str
 ) -> None:
-    """404 unless `principal` owns the session or is a member — the no-existence-leak gate (S3).
+    """404 unless `principal` owns the session or is a member — the no-existence-leak gate.
 
-    One helper for the two session-resolution paths, whose rule is identical: the live entry and the
-    rehydrated durable row. An unknown row and somebody else's are indistinguishable from outside,
-    which is the entire point — a 403 would confirm the id exists. A **member** passes
-    (`agent/session_members.participant_permits`, `D-2026-09-27-in-a-shared-session-the-sender-
-    governs`): the owner let them in, so the session's existence is no secret from them, and what
-    they may *do* there is decided per act — every turn they send runs as them, a plan only its
-    author decides, and the owner's own acts go through `require_owner`.
-
-    Membership is asked on every non-owner request rather than cached on the live entry, so a
-    member the owner removes is refused on their very next request.
+    Shared by the live and rehydrated paths. Unknown and not-yours are indistinguishable. A member
+    passes (`agent/session_members.participant_permits`); what they may do is decided per act, and
+    owner-only acts go through `require_owner`. Membership is checked on every non-owner request, so
+    removal takes effect immediately.
     """
     if not await participant_permits(session_id, owner, principal.oid):
         raise _refuse(_SESSION, "not the owner or a member", principal, session_id, detail)
@@ -180,10 +113,9 @@ async def _refuse_unless_participant(
 def require_owner(live: LiveSession, principal: Principal, session_id: str, act: str) -> None:
     """403 unless `principal` is the session's owner — for the acts a member may not perform.
 
-    A 403 rather than the gate's 404, because the caller has already passed `resolve_session`: a
-    member knows the session exists, so the refusal hides nothing and saying *why* is the useful
-    answer. The acts are the owner's by the decision this module cites — deleting or forking the
-    session, and admitting or removing somebody else — and the refusal is recorded like every other.
+    A 403 because the caller already passed `resolve_session` and knows the session exists.
+    Owner-only acts: deleting or forking the session, and admitting or removing members. Recorded
+    like every refusal.
     """
     if not owner_permits(live.owner, principal.oid):
         record_refusal(_SESSION, "a member, not the owner", principal, session_id, status=403)
@@ -191,19 +123,10 @@ def require_owner(live: LiveSession, principal: Principal, session_id: str, act:
 
 
 def _is_reviewer(principal: Principal) -> bool:
-    """Whether the caller may reach *other people's* jobs and experiment designs.
+    """Whether the caller may reach other people's jobs and experiment designs.
 
-    The same role set that guards every write tool (`entra_privileged_roles`), rather than a new
-    one. Its first subject was the PR-gate's review queue, and
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted that; what the role now decides
-    is reading somebody else's durable job and writing to somebody else's design. **The role is
-    also what an admin will hold when a skill is proposed** — that ADR puts the one remaining human
-    gate on behaviour rather than on knowledge, and names this role for it, so this is the seam
-    that grows a subject again rather than one that lost its only one.
-
-    Dev (`entra_required` off) has no real roles and is open, exactly as `authorize_tool` is; a
-    deployment that enables identity and names no privileged role fails closed, also as
-    `authorize_tool` does.
+    The same role set that guards every write tool (`entra_privileged_roles`). Dev is open, as in
+    `authorize_tool`; an enforced deployment naming no privileged role fails closed.
     """
     if not settings.entra_required:
         return True
@@ -213,12 +136,9 @@ def _is_reviewer(principal: Principal) -> bool:
 async def _resolve_session(request: Request, session_id: str, principal: Principal) -> LiveSession:
     """Return the caller's live session — from the cache, or rehydrated from durable ownership.
 
-    A live-cache hit is authorized against its stored owner. On a miss, if durable rehydration
-    is on (`session_store="postgres"`), the durable owner is looked up: a session the caller
-    owns is rebuilt as a live handle over its persisted history, so a pod restart no longer
-    forces the client onto a new session (orphaning its history and unconsumed push-back).
-    An unknown session — or one owned by someone else — is a 404 with no existence leak
-    either way.
+    A cache hit is authorized against its stored owner. On a miss under `session_store="postgres"`,
+    a session the caller may reach is rebuilt over its persisted history, so a pod restart does not
+    orphan it. Unknown and not-yours are the same 404.
     """
     entry = state(request).live_sessions.get(session_id)
     if entry is not None:
@@ -241,23 +161,13 @@ async def _rehydrate_session(
     if not found:
         raise _refuse(_SESSION, "no such session", principal, session_id, "unknown session")
     await _refuse_unless_participant(session_id, owner, principal, "unknown session")
-    # Re-check the cache after the awaited lookup: two racing requests would otherwise each
-    # mint a live handle over the same durable thread, and the loser's handle would keep
-    # writing outside the cache. The first rehydrator's handle wins; both callers share it.
+    # Re-check the cache after the await so two racing requests share one handle over the thread.
     entry = front.live_sessions.get(session_id)
     if entry is not None:
         return entry
-    # The durable history provider reloads the thread on the session's first use, so
-    # rebuilding the handle is enough to resume the conversation; register it so later turns
-    # hit the cache.
-    #
-    # On its own profile, not the default (REV-14). This used to come back on the default and
-    # was documented as degrading gracefully — "the conversation resumes with the full tool
-    # surface rather than a narrowed one". That has the direction backwards: a profile is
-    # *attenuation only* (`agents.chemclaw_agent`), so restoring the full surface is a silent
-    # widening, and it did not need a restart to happen. The live LRU has a capacity and no
-    # TTL, so on a busy pod one session evicts another while both are in use; a chemist
-    # mid-conversation regained every tool their profile had removed, having done nothing.
+    # The history provider reloads the thread on first use, so a new handle resumes the
+    # conversation. Rebuilt on the session's own profile: the default would silently widen the tool
+    # surface, since a profile only attenuates and the LRU can evict a session mid-conversation.
     session = TurnSession(session_id=session_id)
     return front.live_sessions.add(session_id, session, owner, profile)
 
@@ -265,17 +175,11 @@ async def _rehydrate_session(
 async def resolve_session(request: Request, session_id: str, principal: CurrentUser) -> LiveSession:
     """`_resolve_session` as a FastAPI dependency — the session-scoped routes' ownership gate.
 
-    Depending on `CurrentUser` (rather than taking a bare `Principal`) is what keeps
-    `require_principal` in each session-scoped route's dependency tree, so
-    `tests/test_route_auth_coverage.py` resolves the gate through this dependency exactly as it
-    did through the handler's own parameter.
+    Depends on `CurrentUser` so `require_principal` stays in each route's dependency tree.
     """
     live = await _resolve_session(request, session_id, principal)
-    # The session becomes ambient here rather than at request entry, because it is a *routed* path
-    # parameter: the router runs below `_RequestObservability`, so at entry there is no session to
-    # bind and the raw path is the wrong place to look for one. Every session-scoped route resolves
-    # through this dependency, so this is the funnel — the same argument that puts the actor's bind
-    # inside `require_principal`. The reset is the middleware's (see `bind_request_session`).
+    # Bound here, not at request entry: the session is a routed path parameter, unknown until the
+    # router runs. Every session-scoped route passes here. The middleware resets it.
     bind_request_session(request, session_id)
     return live
 
@@ -290,9 +194,8 @@ async def resolve_owned_session(
 ) -> LiveSession:
     """`resolve_session`, then `require_owner` — for a route that only the session's owner may call.
 
-    Deleting and forking a session are the owner's (`D-2026-09-27-in-a-shared-session-the-sender-
-    governs`): a fork hands the whole shared transcript — every member's words — to a new session
-    the forker alone owns, beyond the reach of the owner's later decision to remove anybody.
+    Forking is owner-only because it copies every member's words into a session the forker alone
+    owns.
     """
     live = await resolve_session(request, session_id, principal)
     require_owner(live, principal, session_id, "do this")

@@ -1,27 +1,10 @@
-"""Concrete source retrievers — thin adapters over existing layers (plan step 5b.3).
+"""Concrete source retrievers — thin adapters over existing layers.
 
-Four retrievers behind the one `SourceRetriever` contract, proving the harness core is
-source-agnostic (a fifth — analytics, or external literature — is another adapter here, not a core
-change): `GraphRetriever` reads the knowledge graph (Phase 2), `FingerprintReactionRetriever` runs
-reaction-fingerprint search (Phase 3), and `VectorRetriever`/`LexicalRetriever` read the derived
-note index (F10-A). None introduces a new store. Every chunk they emit carries the id of the note it
-came from, so the harness can cite it (5b.2). This paragraph said "two real sources" and named the
-first two for as long as the file held four.
-
-**Three of them are legs over one corpus, and two of those three are lexical** — `GraphRetriever`
-scores a substring match in this process, `LexicalRetriever` asks Postgres for `ts_rank` over the
-same notes — which reads as a duplicate and was measured rather than argued on 2026-09-16, with
-`make retrieval-arms` over 20 probes and 46 labelled (query, note) pairs. At a matched slot budget
-(one leg at `retrieval_top_k=24` against the shipped three at 8) the Postgres leg alone finds 42 of
-46 gold notes to this leg's 40, with 24 of them in the top 3 against 19, and **this leg contributes
-no gold note the Postgres one misses**. It is kept anyway, for two reasons neither of which is
-ranking quality: it is the only note leg that needs no derived index, and the index the others read
-is rebuilt only where `lexical` or `vector` is in `CHEMCLAW_DATA_SOURCES`
-(`settings.note_reindex_effective`) while the shipped default is `graph,eln-json`; and the two are
-not one rule — see `_relevance` for what removing its half of the duplication measured. Making this
-leg read the index instead was declined in
-`D-2026-09-26-the-graph-leg-keeps-its-own-rule-because-the-index-is-not-fresh`: the index is rebuilt
-hourly and never on a write, so a note just recorded would vanish from this leg until the next pass.
+`GraphRetriever` (knowledge graph), `FingerprintReactionRetriever` (reaction-fingerprint search) and
+`VectorRetriever`/`LexicalRetriever` (the derived note index), behind one `SourceRetriever`
+contract; every chunk carries the id of the note it came from. The graph leg overlaps the lexical
+one but needs no derived index, which is rebuilt only when `lexical` or `vector` is configured and
+never on a write.
 """
 
 import asyncio
@@ -54,27 +37,9 @@ log = logging.getLogger(__name__)
 def _excerpt(body: str, terms: Sequence[str] = ()) -> str:
     """A report-sized excerpt of a note body, windowed on the match, with wikilinks stripped.
 
-    An excerpt must not carry a source note's `[[links]]` verbatim into the report body — that
-    would add unintended (possibly dangling) graph edges — so `chemclaw.kg.note.strip_links` is
-    applied here. It is applied *again* at the report, on every chunk rather than only on
-    note-backed ones: the share and warehouse retrievers build their content from raw document
-    text and never reach this function, so this was never the whole of that guarantee.
-
-    **The window follows the match, because a reviewer has to see what the note was retrieved
-    for.** A note matches on its whole searchable text — id, type, SMILES, tags and body — and the
-    excerpt was a blind character prefix of the body, so a note whose answer is at the end read as
-    an unexplained bullet plus a citation. Measured over the committed corpus for the query
-    `yield`: 32 of 38 notes have bodies past the 240-character budget, and 6 of 16 returned chunks
-    did not contain the term that matched. `campaign` and `optimization-campaign` are the worst
-    case by construction, since their yields and outcomes are in a table at the end — the same
-    failure `core/config/retrieval.py` articulates for `protocol_digest_max_chars`. In the
-    conversational tools this is recoverable with `expand_note`; in `report_note` it is the final
-    artifact a chemist reads, and nothing there expands.
-
-    `terms` are the query's terms (`kg.search.query_terms`) when the caller has them. With none, or
-    with a match the head already covers, or with a match that is *not* in the body at all — the
-    note was found by its id, its type, its tags or its structure — this is a plain prefix, which
-    is what every excerpt was before and still is for the callers that pass nothing.
+    Links are stripped so an excerpt cannot add graph edges to a report. The window follows the
+    match so a reviewer sees why the note was retrieved; with no `terms`, or no match in the body,
+    it is a plain prefix.
     """
     stripped = strip_links(body.strip())
     window = settings.note_excerpt_chars
@@ -83,56 +48,21 @@ def _excerpt(body: str, terms: Sequence[str] = ()) -> str:
     start = _window_start(stripped, terms, window)
     if start == 0:
         return stripped[:window]
-    # The leading marker is inside the budget rather than added to it: the cap is what a sweep's
-    # `gather_evidence_max_chars` was measured against, and an excerpt that silently starts
-    # mid-document reads as the note's opening line.
+    # The leading marker is inside the budget, not added to it, and marks an excerpt that does not
+    # start at the note's opening.
     return "…" + stripped[start : start + window - 1]
 
 
 def _window_start(text: str, terms: Sequence[str], window: int) -> int:
     """Where to start the excerpt so it shows as much of the query as one window can. `0` = head.
 
-    A third of the budget is spent on what came *before* the match, because a number with no
-    sentence in front of it is a number a reader cannot place — and the sentence a chemist wants
-    is the one the match is in, not the one after it. The start is pushed forward to the next word
-    boundary so the excerpt does not open mid-word, which is how the pre-windowing excerpts ended
-    (`in place of the cla`) and is no better at the other end.
-
-    **Which match, though — and the answer used to be "the earliest", which is no answer.** This
-    took `min(offsets)`: the first occurrence of *any* matched term, and then `return 0` whenever
-    that offset was inside the budget. So a single framing word in the note's opening line pinned
-    the excerpt to the head, and the docstring's promise that "the window follows the match"
-    guaranteed only the *first* term. Measured over the 19 independently-authored
-    `knowledge.yaml` probes: of 30 delivered gold chunks whose body exceeds the 240-char budget,
-    **25 were the plain head** and 13 showed every term that matched. `rxn-suzuki-biaryl` for
-    "what isolated yield did the Suzuki coupling of 4-bromoanisole give" lost `isolated` and
-    `yield` — the question and the 76% answer — to `suzuki` in its title.
-
-    **The rule now: the candidate window that shows the most of the query, weighted by how much
-    each term narrows *this note*.** A term occurring once in the body points at a place; a term
-    occurring six times points nowhere, so it is worth `1/6` of the one that occurs once. That
-    weighting is what separates this from counting distinct visible terms, which was measured
-    beside it: plain counting scores marginally better on term visibility (94/110 against 92/110,
-    inside the noise on 110 judgments) and leaves the p01 excerpt on the title, because it values
-    `give` and `isolated` equally. Weighted: visibility 84/110 → 92/110, full coverage 13/30 →
-    17/30, `isolated yield: 76%` inside the excerpt. Two chunks show one fewer term than before
-    and one of those two gained the playbook's actual `Order to try:` line, so the raw count is
-    not the objective either.
-
-    **Rarity is measured inside the note, not against the corpus.** An IDF would be better and is
-    reachable on the graph leg only — `_rank_by_terms` has the document frequencies, the dense and
-    lexical legs have nothing — and one excerpt rule that behaves differently per leg is the drift
-    `kg.search` exists to prevent. `str.count` over the body is available at every call site and
-    is a real signal about where in *this* note the query is answered.
-
-    Bounded by construction: one candidate per matched term plus the head, each scored by a
-    substring test over a `window`-length slice, so the cost is the query's own length and not the
-    body's.
+    Picks the candidate window (one per matched term, plus the head) covering the most query terms,
+    each weighted by `1/count` in this note, since a rare term points at a place. A third of the
+    budget precedes the match, and the start snaps to a word boundary.
     """
     lowered = text.casefold()
-    # A matched term and how many times it occurs, which is both the weight and the membership
-    # test. Absent terms drop out here, so a note found by its id, type, tags or SMILES has no
-    # candidate at all and falls through to the head — the pre-windowing behaviour, unchanged.
+    # Matched terms with their counts: both the weight and the membership test. A note found by its
+    # id, type, tags or SMILES has no candidate and falls through to the head.
     folded = dict.fromkeys(term.casefold() for term in terms)
     counts = {term: count for term in folded if (count := lowered.count(term))}
     if not counts:
@@ -164,50 +94,18 @@ def _window_start(text: str, terms: Sequence[str], window: int) -> int:
 async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str, Note]:
     """Load the notes eligible as current evidence under `filters`, as an id→Note map.
 
-    The one eligibility gate for every graph-backed retriever (graph, dense, lexical): the
-    type/tag/date filters plus the currency check — a not-yet-valid or expired note is never
-    served as current evidence (KM-7), whichever entry point found it. It stays in Git and
-    reachable by explicit id; it is only dropped from current-evidence sweeps. Offloaded to a
-    thread — `load_notes` is a synchronous full parse. Empty when the directory is absent.
-
-    **"Current" means as of the period the caller asked about.** A sweep that names no window is
-    asking what is true now and is judged against today, which is every unwindowed call and the
-    whole of KM-7's intent. A sweep that names one is asking what was true then, and judging it
-    against today too was a second date rule nobody requested — see `_eligible_sync`.
-
-    `since`/`until` window the notes by `valid_from` — for a reaction note, the day the
-    experiment was run (D-162). "What have I tried on this step in the last two weeks" was
-    unanswerable without it: the dates were on the notes and no filter could reach them.
-
-    Deliberately not cached, though a three-source sweep runs it three times: the parse behind it
-    is cached (`load_notes`), so the repeated work is this filter loop — a few milliseconds per
-    leg at 10⁴ notes — and a cache over it would need the corpus fingerprint, the filter dict
-    *and* the current date in its key (`is_current(today)` makes the answer date-sensitive).
-    Three cheap loops beat one cache with a three-part invalidation story.
-
-    **The filter runs in the worker thread with the load, and that is the whole of this
-    function.** It used to be a `for` loop over the offloaded result, i.e. on the event loop that
-    serves every other concurrent turn on the pod — "a few milliseconds per leg" is true of a
-    small corpus and false of the one this is sized for, and the loop it stalls is shared by every
-    user the pod is serving. `_eligible_sync` says what that measured.
+    The one eligibility gate for every graph-backed retriever: type/tag/date filters plus currency
+    (expired or not-yet-valid notes are never current evidence; see `_eligible_sync` for windowed
+    sweeps). Load and filter run in a worker thread. Empty when the directory is absent.
     """
     return await asyncio.to_thread(_eligible_sync, directory, filters, date.today())
 
 
 def _is_windowed(filters: dict[str, Any]) -> bool:
-    """Whether this sweep names a period, which is what decides *both* date rules it applies.
+    """Whether this sweep names a period, which decides *both* date rules it applies.
 
-    One definition, because there are two consumers and they have to agree: `_eligible_sync` skips
-    the currency check for a windowed sweep, and `_conflict_index` has to scan the same set that
-    skip admits. They were written independently and disagreed — the sweep served notes retired
-    today while the conflict index was computed `as_of=date.today()`, so `find_conflicts` never
-    scanned them and every chunk came back with `conflicts_with=[]`. Driven on three notes, two of
-    them declaring `[[contradicts:]]` on each other: the same corpus left open-ended reports one
-    conflict on each of the pair, and retired inside the requested window reports zero on all three.
-    A flag that is *structurally* empty is worse than absent, because an empty list is what an
-    unconflicted note looks like — and contradiction is one of the three mechanisms
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` names as what makes unreviewed knowledge
-    safe.
+    `_eligible_sync` and `_conflict_index` must agree on it, or retired notes in the window get an
+    empty `conflicts_with`.
     """
     return filters.get("since") is not None or filters.get("until") is not None
 
@@ -215,24 +113,15 @@ def _is_windowed(filters: dict[str, Any]) -> bool:
 def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dict[str, Note]:
     """The synchronous body of `_eligible_notes`: load, then filter, in one worker thread.
 
-    Split out rather than inlined into a lambda so `GraphRetriever` can reuse it *inside its own
-    single thread hop* — its scoring loop needs the same notes, and two hops would put the
-    hand-back between them on the event loop again.
-
-    `today` is passed in rather than read here so that every note in one sweep is judged current
-    against the same date, and so a test can drive the currency rule without moving the clock. It
-    governs the *unwindowed* sweep only — a query that names a period is asking what was true
-    then, and the comment on the currency branch below says why that is one rule and not two.
+    `today` is passed in so one sweep is judged against one date.
     """
     want_type = filters.get("type")
     want_tag = filters.get("tag")
     since = filters.get("since")
     until = filters.get("until")
     notes: dict[str, Note] = {}
-    # The directory check goes into the worker thread with the load, rather than being a `stat` on
-    # the event loop before it. It is a small syscall, but this runs per retriever per query on the
-    # loop that serves every other concurrent turn, and the reason the load below is offloaded
-    # applies to it unchanged.
+    # The directory check runs in the worker thread with the load, keeping even the `stat` off the
+    # event loop.
     windowed = _is_windowed(filters)
     for note in _load_if_present(directory):
         if want_type is not None and note.type != want_type:
@@ -241,20 +130,9 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
             continue
         if not _in_window(note, since, until):
             continue
-        # **Currency is judged as of the period the caller asked about.** With no window that is
-        # today, unchanged (KM-7, D-055): a superseded playbook is not an answer to "what do we do
-        # now". With one, this test used to run *first* and against `date.today()` anyway, so a
-        # windowed sweep applied two date rules — the caller's, and one it did not ask for — and
-        # the second silently removed notes the first had admitted. A note valid through 2024 is
-        # exactly what "what did we recommend in 2024" is asking for, and it returned zero chunks
-        # from every leg, shape-identical to a period with nothing in it.
-        #
-        # No overlap predicate is written here, deliberately: for any note `_in_window` admits,
-        # `since <= valid_from <= until` holds and `valid_to >= valid_from` is a `Note` model
-        # invariant, so the note *was* current somewhere inside the requested period by
-        # construction. A second check asserting that would be a control with nothing to decide —
-        # the `reject_widening` shape. `tests/test_retrieval_window.py` asserts the implication
-        # instead, so loosening `_in_window` fails there rather than re-opening this quietly.
+        # Currency is judged as of the period asked about: today with no window (a superseded note
+        # is not an answer to "what now"), and not at all with one, since a note `_in_window` admits
+        # was current somewhere inside the period by construction (`valid_to >= valid_from`).
         if not windowed and not note.is_current(today):
             continue
         notes[note.id] = note
@@ -264,34 +142,22 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
 def _rank_by_terms(
     directory: Path, filters: dict[str, Any], terms: Sequence[str], today: date
 ) -> tuple[list[tuple[int, float, float, Note]], int]:
-    """`GraphRetriever`'s whole search, synchronously: eligible notes, scored, ranked and cut.
-
-    One function rather than three awaits, because each hand-back between them lands on the event
-    loop — see `GraphRetriever.retrieve` for the measurement, and `_eligible_sync` for why the
-    filter half moved first. The scoring loop is here rather than in the coroutine for the same
-    reason it was written: `term_frequencies` rebuilds each note's searchable text and lowercases
-    its body, which is O(corpus) pure Python and belongs in the worker thread with the load.
+    """`GraphRetriever`'s whole search in one worker-thread hop: filter, score, rank, cut.
 
     Returns:
-        `(chosen, found)` — `(coverage, relevance, confidence, note)` for the best
-        `retrieval_top_k` matches, best first, and the **pre-cut** total. Both, because only this
-        function can see the second: it scores every eligible note and then truncates, and the
-        caller reports `found` so that a cut does not look like a corpus.
+        `(chosen, found)`: `(coverage, relevance, confidence, note)` for the best `retrieval_top_k`
+        matches, and the pre-cut total.
     """
     frequencies: list[tuple[int, dict[str, int], Note]] = []
     for note in _eligible_sync(directory, filters, today).values():
-        # **Membership is `term_coverage`, weight is `term_frequencies`, and they disagree on
-        # purpose.** Coverage is substring — the coarseness that makes `ester` find `polyester`
-        # — so gating on the frequency dict instead would silently narrow the hit set, which is
-        # a recall decision this ranking change has no business taking.
+        # Membership is `term_coverage` (substring, so `ester` finds `polyester`); weight is
+        # `term_frequencies`. Gating on the frequency dict would silently narrow recall.
         coverage = term_coverage(note, terms)
         if not coverage:
             continue
         frequencies.append((coverage, term_frequencies(note, terms), note))
-    # Document frequency over the *matched* population, which is the same number as over the
-    # eligible one: a term's df counts the notes containing it, and a note containing it
-    # matched. So the rarer term in a two-term query earns the larger weight without a second
-    # pass over the corpus.
+    # Document frequency over the matched population equals that over the eligible one: a note
+    # containing the term matched.
     population = len(frequencies)
     document_frequency: dict[str, int] = {}
     for _, counts, _ in frequencies:
@@ -299,33 +165,22 @@ def _rank_by_terms(
             document_frequency[term] = document_frequency.get(term, 0) + 1
     scored: list[tuple[int, float, float, Note]] = []
     for coverage, counts, note in frequencies:
-        # Confidence is a *trust* signal (KM-5), so it decides which of two equally relevant
-        # notes survives truncation — never relevance itself; see `_relevance`. A note with no
-        # confidence takes the configured neutral default.
+        # Confidence is a trust signal: it breaks ties between equally relevant notes, never decides
+        # relevance. A note with none takes the configured neutral default.
         confidence = (
             note.confidence
             if note.confidence is not None
             else settings.retrieval_default_confidence
         )
-        # `coverage`, not `len(counts)` — the widening and the complete-match rule are keyed
-        # on how many terms *matched*, which is the substring question, while `counts` holds
-        # only the terms that matched as whole tokens and is the weight.
+        # `coverage`, not `len(counts)`: widening is keyed on substring matches, while `counts`
+        # holds only whole-token matches and is the weight.
         scored.append(
             (coverage, _relevance(counts, document_frequency, population), confidence, note)
         )
     complete = [entry for entry in scored if entry[0] == len(terms)]
-    # RRF reads each source's list as ranked best-first, so the list must be ordered by this
-    # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
-    # the widened search (on the complete one it is the same for every hit, so this reduces
-    # to confidence exactly as before). Note id breaks ties deterministically.
-    #
-    # Ranked *then* cut *then* materialized, bounded by the `retrieval_top_k` every sibling
-    # leg honours. This was the one unbounded retriever: a broad query on a large corpus
-    # built an `EvidenceChunk` (an excerpt scan plus a conflicts lookup each) for every
-    # scored note before the merge budget threw all but a handful away — and the graph leg
-    # then arrived at the round-robin with thousands of entries against every other leg's k,
-    # which is the crowding-out asymmetry D-2026-08-01 was written about, relocated from the
-    # cut to the input.
+    # RRF reads each list as best-first, so order by this leg's relevance; note id breaks ties.
+    # Rank, then cut to `retrieval_top_k`, then materialize, so this leg is bounded like its
+    # siblings and does not crowd the merge.
     ranked = sorted(
         complete or scored,
         key=lambda entry: (-entry[0], -entry[1], -entry[2], entry[3].id),
@@ -336,11 +191,8 @@ def _rank_by_terms(
 def _load_if_present(directory: Path) -> list[Note]:
     """Every note under `directory`, raising `RetrieverSkip` when there are none at all.
 
-    A tree with zero parseable notes is a deployment fact, not a corpus answer: a mis-pointed
-    `knowledge_path` (or an unmounted volume) used to zero the graph, dense and lexical legs at
-    once with nothing anywhere saying so — three sources reporting "found nothing" about a corpus
-    they never saw. Filters that exclude everything are the legitimate empty answer and do not
-    come through here.
+    Zero parseable notes is a deployment fault (wrong `knowledge_path`, unmounted volume), not an
+    empty answer.
     """
     notes = load_notes(directory) if directory.exists() else []
     if not notes:
@@ -351,10 +203,7 @@ def _load_if_present(directory: Path) -> list[Note]:
 def _in_window(note: Note, since: date | None, until: date | None) -> bool:
     """Whether the note falls inside the requested date window (no window = everything).
 
-    An undated note fails a windowed query rather than passing it. It cannot be *shown* to fall
-    in the window, and the query that asks for one is asking what happened in a period — serving
-    a note of unknown date would answer a question the caller did not ask. Unwindowed sweeps are
-    unaffected, which is every existing call.
+    An undated note fails a windowed query: it cannot be shown to fall in the period asked about.
     """
     if since is None and until is None:
         return True
@@ -366,23 +215,10 @@ def _in_window(note: Note, since: date | None, until: date | None) -> bool:
 
 
 async def _conflict_index(directory: Path, filters: dict[str, Any]) -> dict[str, NoteConflicts]:
-    """Map each note id to what it is known or suspected to disagree with (KM-8).
+    """Map each note id to what it is known or suspected to disagree with.
 
-    The whole computation goes to a worker thread, not only the note load: the scan over the corpus
-    is the expensive half (measured at 1,525 ms on a 2,000-note programme-shaped corpus), and it
-    used to run on the event loop, where it stalled every other concurrent turn on the worker.
-    `chemclaw.kg.conflicts.conflict_index` caches the result behind the same stat fingerprint the
-    parsed notes and the assembled graph are cached behind, so the three note-backed retrievers of
-    one sweep now compute it once between them instead of once each — and behind `as_of` too, so
-    the two rules below are two cache entries rather than one stale one.
-
-    **`as_of` is the sweep's own date rule, not today's date.** `find_conflicts` scans only the
-    notes current at `as_of`, so an unwindowed sweep gets today (a retired note is not in the
-    evidence either, so flagging it would be noise) and a windowed one gets `None` — the whole
-    corpus, matching the currency check `_eligible_sync` deliberately skips for a window. There is
-    no single date that would do instead: a windowed sweep serves every note whose subject falls in
-    the period, which is not the set current on any one day of it, and `until` in particular misses
-    exactly the notes that retired inside the window. See `_is_windowed` for what that measured.
+    Runs in a worker thread; `kg.conflicts.conflict_index` caches per corpus and `as_of`. `as_of` is
+    today when unwindowed and `None` (whole corpus) when windowed, matching `_eligible_sync`.
     """
     as_of = None if _is_windowed(filters) else date.today()
     return await asyncio.to_thread(conflict_index, directory, as_of)
@@ -394,10 +230,8 @@ class GraphRetriever:
     def __init__(self, notes_dir: str | None = None, name: str = "graph") -> None:
         """Read notes from the given directory, or the configured `knowledge_dir`.
 
-        `name` is the data-source name this retriever is cited under, passed by
-        `chemclaw.ingest.sources.registry` from the manifest. It defaults to the name of the
-        folder that ships this retriever, so direct construction in a test or a script keeps
-        working without repeating it.
+        `name` is the data-source name this retriever is cited under, passed by the registry from
+        the manifest.
         """
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
         self.name = name
@@ -405,50 +239,18 @@ class GraphRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> Hits:
         """Return chunks from notes matching every term of `query`, ranked best first.
 
-        Deterministic and case-insensitive over `chemclaw.kg.search.search_text` — the note's id,
-        type, structure, tags and body, the one haystack the dense index, the lexical index,
-        `find_notes` and the digest all read. Until that was made one function this retriever
-        searched a *narrower* text than the agent's own `find_notes`, so a note the model had just
-        found by its type or its SMILES could not then be cited in a report.
-
-        Matching is per *term*, not on the query
-        verbatim: a whole-phrase substring test only found a note that literally contained the
-        sentence a chemist typed, so `biaryl` returned the campaign, the compound and the
-        playbook while `the biaryl` returned nothing at all (D-138). That is the failure mode
-        that matters here, and it was the opposite of the one the old docstring warned about:
-        under-matching, silently, on ordinary phrasing. With the graph retriever the only source
-        enabled by default, an empty result sent the agent back to the chemist asking for
-        details the record already held.
-
-        Every term must be present, so precision is unchanged for a query that used to work — a
-        phrase match implies all its terms match. When nothing satisfies all of them the search
-        widens to any term rather than answering "nothing known", and coverage then orders the
-        result: a note matching three of four terms outranks one matching a single term.
-
-        This remains a coarse *candidate* filter — a short term can still match incidentally
-        (`ester` in `polyester`). The `development-report` skill judges relevance; this retriever
-        only guarantees the note exists, not that it answers the question.
+        Case-insensitive over `kg.search.search_text`. When no note has every term, the search
+        widens to any term and coverage orders the result. A coarse candidate filter: relevance is
+        judged downstream.
         """
         terms = query_terms(query)
-        # Load, filter, score, rank and cut in **one** worker thread. Every one of those steps is
-        # O(corpus) pure Python — `term_frequencies` alone rebuilds each note's searchable text and
-        # lowercases its body — and every one of them used to run on the event loop that serves
-        # every concurrent turn, SSE stream and probe on the pod. Measured on the sibling path
-        # (`agent/graph_tools.py::find_notes`, the same scan over the same corpus) with a 5 ms
-        # heartbeat over 10 000 notes: p50 loop lag 418 ms at eight concurrent calls, against
-        # 26 ms once the scan moved. It buys latency and jitter, not throughput — the scan holds
-        # the GIL either way.
+        # Load, filter, score, rank and cut in one worker thread: each step is O(corpus) pure Python
+        # and would otherwise stall the event loop shared by every concurrent turn.
         chosen, found = await asyncio.to_thread(
             _rank_by_terms, self._dir, filters, terms, date.today()
         )
         conflicts = await _conflict_index(self._dir, filters)
-        # **`found` is the pre-cut total, and this leg is the one that can honestly report it.**
-        # It scores every eligible note and then truncates, so both numbers exist here. Measured on
-        # 5,000 notes that all matched every term, `gather_evidence` reported `chunks=8,
-        # total_before_cap=8, truncated_by=None` while 4,992 matching notes were discarded inside
-        # this function — the model was told "8 found, nothing was cut" about a corpus it had seen
-        # 0.16% of. `EvidenceSweep` exists so "a cut does not look like a corpus"; this is the
-        # number that makes that true of the per-leg bound rather than only of the merge caps.
+        # `found` is the pre-cut total, so a per-leg cut is reported rather than read as the corpus.
         return Hits(
             (
                 _chunk_for(note, self.name, confidence, conflicts.get(note.id), terms)
@@ -458,10 +260,8 @@ class GraphRetriever:
         )
 
 
-# BM25's saturation constant, in its usual range. Named rather than inlined because it is the one
-# number deciding how much a repeated term is worth: at 1.2 a term occurring twice scores 0.63 of a
-# term occurring endlessly, and a note that merely *mentions* the query cannot out-rank one about it
-# by repetition alone.
+# BM25's saturation constant: bounds how much a repeated term is worth, so mentioning the query
+# often cannot out-rank a note about it.
 _TERM_SATURATION = 1.2
 
 
@@ -470,33 +270,7 @@ def _relevance(
 ) -> float:
     """A matched note's within-corpus relevance: saturating term frequency, weighted by rarity.
 
-    **Why this exists at all.** The graph leg used to rank its hits by `confidence` and break ties
-    on the note id, and confidence is a *trust* signal rather than a relevance one — so a
-    well-trusted note that mentions the query once outranked a note about it, and any tie fell
-    through to alphabetical order. Measured on 5,000 notes that all matched every term, the leg
-    returned `reaction-00000`, `-00001`, `-00002`: the first eight ids in the corpus, which is not
-    a ranking. On the shipped 38-note corpus confidence takes only ten distinct values and 18 notes
-    share one of two, so the alphabetical fall-through is the common case rather than the edge.
-
-    Trust has not been discarded, it has been demoted to what it can honestly decide: among notes
-    of *equal relevance*, the more-trusted one still survives the cut first (KM-5's intent), rather
-    than deciding relevance itself.
-
-    This is BM25 without the document-length normalisation — deliberately, because `search_text` is
-    a note's whole metadata-plus-body haystack and its length tracks how much a note *records*
-    rather than how padded it is; penalising a thorough campaign note for being thorough is the
-    wrong correction here. The saturation term is what bounds repetition instead.
-
-    **It is the second BM25 over this corpus — `LexicalRetriever` asks Postgres for `ts_rank` over
-    the same notes — and deleting it was measured rather than reasoned about** (2026-09-16,
-    `make retrieval-arms`, 20 probes and 46 labelled pairs). Reverting this leg to its pre-relevance
-    `(-coverage, -confidence, id)` order costs rank in every configuration it was measured in: the
-    graph leg alone at `retrieval_top_k=24` moves mean gold rank 4.72 → 5.67 with 18 pairs down
-    against 8 up, `graph`+`lexical` 4.61 → 4.98, and the shipped three legs at 8 **lose a gold
-    note** (39 → 38 found) because a per-leg cut spends its slots in this order. So the duplication
-    stays until the graph leg itself does: the removal that would end it is dropping this leg, and
-    that is blocked on `settings.note_reindex_effective` — the index the other legs read is not
-    maintained in the shipped `graph,eln-json` configuration at all.
+    BM25 without length normalisation: a note's length reflects what it records, not padding.
     """
     return sum(
         math.log(1 + population / (1 + document_frequency[term]))
@@ -514,11 +288,8 @@ _NOTE_FILTERS = ("type", "tag", "since", "until")
 class ReactionMetadata(Protocol):
     """The one question this package asks of the ELN transcription tier.
 
-    Declared here rather than imported from `chemclaw.ingest.eln.records`, and that is a layering
-    fact rather than a style preference: `ingest` depends on `retrieval`, so importing back would
-    make a cycle out of what is really a one-method need. A Protocol is structural, so the concrete
-    `ReactionRecordStore` satisfies this without either package knowing about the other — and the
-    retriever ends up declaring what it needs instead of where it comes from.
+    Declared as a Protocol because `ingest` depends on `retrieval`; importing `ReactionRecordStore`
+    here would make a cycle.
     """
 
     async def eligible(self, reaction_ids: Sequence[str], filters: dict[str, Any]) -> set[str]:
@@ -528,8 +299,7 @@ class ReactionMetadata(Protocol):
     async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
         """Which of `refs` — `(ingest_source, reaction_id)` — no structure search may serve.
 
-        Withdrawn by the source, or citation-only: a record naming a species without its structure
-        (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+        Withdrawn by the source, or citation-only (a record naming a species without its structure).
         """
         ...
 
@@ -542,13 +312,8 @@ class FingerprintReactionRetriever:
     def __init__(self, store: FingerprintStore, records: ReactionMetadata) -> None:
         """Search `store`, resolving a metadata filter against `records`.
 
-        Both are injected, and `records` is **required** rather than defaulted: this package may not
-        import the transcription tier (see `ReactionMetadata`), and a default that reached for the
-        production store would be that import wearing a different hat. The caller — `agent` or
-        `durable`, both of which may depend on `ingest` — supplies it.
-
-        The metadata lookup only happens when a filter is actually given. This took a `notes_dir`
-        while reactions were markdown notes on disk; they are rows now (D-2026-08-25).
+        `records` is required: this package may not import the transcription tier, so the caller
+        (`agent` or `durable`) supplies it. It is consulted only when a filter is given.
         """
         self._store = store
         self._records = records
@@ -556,48 +321,16 @@ class FingerprintReactionRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for reactions similar to `query` (a reaction SMILES), or none.
 
-        A query that is not a valid reaction SMILES yields no evidence (not an error) — each
-        retriever answers only what its source can, so prose queries simply return empty here.
-        **Only that**, which is why the catch below names `FingerprintInputError` rather than its
-        parent: `FingerprintError` also covers the index refusing to be searched (`cannot compare
-        fingerprints of different widths` — an index built under different parameters than the
-        query), and returning `[]` for that told a chemist the corpus holds no similar reaction.
-        The sweep's `sources_failed` channel is where that belongs, and `fanout._sweep` puts it
-        there the moment this stops swallowing it — the same correction the share, warehouse and
-        vendored halves already took.
-        Each match cites the corresponding `reaction-<id>` record, which resolves *outside* the
-        markdown graph (`kg.note.EXTERNAL_ID_PREFIXES`): the transcription is a row written by the
-        same `ingest_reaction` call that indexed the fingerprint, so a hit and the thing it cites
-        land together. This paragraph used to state a precondition instead — the note was "merged
-        separately" and a still-pending one reached a reviewer as a dangling citation on the
-        report's own PR — and both halves are gone: D-2026-08-25 made the transcription a row and
-        `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the PR.
-
-        **`type`/`tag`/`since`/`until` narrow the result** when given (D-170). The fingerprint index
-        holds bits and a label and knows nothing about note metadata, so the filter cannot go into
-        its SQL: this searches *deeper* than the requested page and applies the corpus's own
-        eligibility gate to the neighbours, then truncates. Filtering the page instead would let a
-        single unwanted neighbour cost a wanted one, and a filtered search would return fewer hits
-        the *better* the index got at surfacing near-duplicates.
-
-        **A withdrawn run is dropped on both paths, and the unfiltered one is why this is a second
-        question rather than the same one.** `_eligible` drops a match whose record is missing,
-        deliberately, because a record nobody can read cannot be shown to satisfy a narrowing — and
-        an unfiltered sweep must still surface every structural hit the index holds, so it cannot go
-        through that gate. `structurally_withheld` is the positive form: it asks only what makes a
-        hit unservable, over this page of ids. Measured before the withdrawal half existed, with the
-        producer in place and the readers absent: `is_current` False, `eligible()` empty, and the
-        retracted reaction still returned by the ordinary `gather_evidence` sweep, which is
-        unfiltered. The same question also drops a citation-only record, which can hold a stale
-        fingerprint row only through an amendment that took a structure away.
+        Only `FingerprintInputError` (not a reaction SMILES) yields empty; an index that refuses the
+        search surfaces in the sweep's `sources_failed`. `type`/`tag`/`since`/`until` are applied by
+        searching deeper, filtering through the records' eligibility gate, then truncating.
+        Withdrawn and citation-only records are dropped on both paths (`structurally_withheld`).
         """
         wanted = {key: filters[key] for key in _NOTE_FILTERS if filters.get(key) is not None}
         page = settings.fingerprint_top_k
         try:
-            # `.hits` here and not the whole search: a retriever's contract is evidence chunks, and
-            # an unbuilt index yields none of those. The distinction the search now carries is for
-            # the *conversational* tools, where a chemist reads "nothing similar" as an answer; a
-            # report leg that contributes no chunks is visible to its reviewer as a missing source.
+            # `.hits` only: a retriever's contract is evidence chunks, and an unbuilt index yields
+            # none.
             matches = (
                 await find_similar_reactions(
                     self._store, query, top_k=self._depth(page) if wanted else None
@@ -607,22 +340,19 @@ class FingerprintReactionRetriever:
             return []
         if wanted:
             matches = await self._eligible(matches, wanted, page)
-        # On both paths, because `eligible` answers a filter and this answers whether a hit may be
-        # served at all: a withdrawn run, and a citation-only record whose fingerprint row predates
-        # an amendment that took a structure away (`ReactionRecordStore.structurally_withheld`).
+        # On both paths: `eligible` answers a filter, this answers whether a hit may be served at
+        # all.
         asked = [(match.source, match.id) for match in matches]
         withheld = await self._records.structurally_withheld(asked)
         matches = [match for match in matches if (match.source, match.id) not in withheld]
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
-                # Qualified by the source the index matched in, because two sites behind one
-                # entry id are two hits and a bare id names both and neither
-                # (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+                # Qualified by source: two sites behind one entry id are two hits.
                 source_note_id=note_id_for_reaction(match.id, match.source),
                 retriever=self.name,
-                # Structural hits score by their Tanimoto similarity — a closer precedent survives
-                # truncation first (KM-5). Clamped to [0, 1] to stay a valid chunk score.
+                # Tanimoto similarity as the score, so a closer precedent survives truncation;
+                # clamped to [0, 1].
                 score=min(max(match.similarity, 0.0), 1.0),
             )
             for match in matches
@@ -632,9 +362,8 @@ class FingerprintReactionRetriever:
     def _depth(page: int) -> int:
         """How many neighbours to ask the index for when a filter will thin them afterwards.
 
-        Bounded by `fingerprint_max_top_k`, the same ceiling every other caller of the index is
-        clamped to: the over-fetch may not become a way around the one cap on how much of the
-        index a single query can pull into memory.
+        Bounded by `fingerprint_max_top_k`, so the over-fetch cannot bypass the per-query memory
+        cap.
         """
         return min(page * settings.retrieval_filter_overfetch, settings.fingerprint_max_top_k)
 
@@ -643,21 +372,13 @@ class FingerprintReactionRetriever:
     ) -> list[Match]:
         """Keep the neighbours whose record passes `wanted`, most similar first, cut to `page`.
 
-        A match with no stored record is dropped here, and deliberately: a filter says "only
-        records that are X", and a record nobody can read cannot be shown to be X, so serving it
-        would answer a narrowed question with an unnarrowed hit. An unfiltered sweep never reaches
-        this and still surfaces every structural hit the index holds.
-
-        The gate itself is `records.eligible_reaction_ids`, which applies the same type/tag/window
-        rules every note-backed retriever applies — against columns rather than parsed frontmatter,
-        and over this page of candidates rather than the whole corpus.
+        A match with no stored record cannot be shown to satisfy the filter and is dropped.
         """
         eligible = await self._records.eligible([match.id for match in matches], wanted)
         kept = [match for match in matches if match.id in eligible]
         if len(matches) >= self._depth(page) and len(kept) < page:
-            # The deeper search was itself exhausted and still did not fill a page, so there may be
-            # matching reactions further down the ranking that were never looked at. Said out loud
-            # rather than returning a short list that reads as "this is all there is".
+            # The deeper search was exhausted without filling a page, so more matches may lie
+            # further down; say so rather than return a short list that reads as complete.
             log.warning(
                 "filtered reaction search returned %d of %d wanted hits after scanning the "
                 "%d-neighbour limit; raise CHEMCLAW_RETRIEVAL_FILTER_OVERFETCH to look deeper",
@@ -675,20 +396,10 @@ def _chunk_for(
     conflicts: NoteConflicts | None,
     terms: Sequence[str] = (),
 ) -> EvidenceChunk:
-    """Build one evidence chunk from a note, carrying its provenance (D-160).
+    """Build one evidence chunk from a note, carrying its provenance.
 
-    One builder for every note-backed retriever, so provenance cannot be attached on the graph
-    path and forgotten on the index path — which is precisely the drift that would produce a
-    partially-provenanced evidence list, the worst of the three possible states. `terms` is what
-    lets the excerpt window on the match rather than on the head of the body; a caller with no
-    terms to offer gets the prefix, which is the honest fallback (see `_excerpt`).
-
-    `terms` is also what fills `matched_terms`, and it is filled *here* for the same reason
-    provenance is: every note-backed leg goes through this function, so the graph leg's widened
-    hit and the dense leg's semantic hit report match quality on the same terms. A caller with no
-    terms leaves the field `None` — "not reported" rather than "nothing matched", the distinction
-    `Hits.found` argues one class over. The membership test is `term_coverage`'s, so the field
-    cannot disagree with the number that decided the note was a hit at all.
+    The one builder for every note-backed leg. `matched_terms` is `None` when no terms were given
+    ("not reported", not "nothing matched").
     """
     return EvidenceChunk(
         content=_excerpt(note.body, terms) or note.id,
@@ -700,12 +411,8 @@ def _chunk_for(
         created_by=note.created_by,
         source=note.source or "",
         confidence=note.confidence,
-        # **The date the note stopped being valid, because a windowed sweep serves retired notes.**
-        # `_eligible_sync` admits a note whose subject falls inside the requested period whether or
-        # not it is still current — which is right, and left the chunk byte-identical to one built
-        # from a live note. The conflict flag above is the other half of the same gap and is not a
-        # substitute: a note can be retired without anything contradicting it. `None` means the
-        # note's validity window is open, which is every note an unwindowed sweep can return.
+        # A windowed sweep serves retired notes, so the chunk carries when the note stopped being
+        # valid. `None` means its validity window is open.
         valid_to=note.valid_to,
         # `None`, not `[]`, when the caller offered no terms: "not reported" rather than
         # "nothing matched", the distinction `Hits.found` argues one class over.
@@ -722,11 +429,8 @@ def _chunks_from_hits(
 ) -> list[EvidenceChunk]:
     """Map index hits to cited evidence chunks, dropping any hit whose note no longer loads.
 
-    A derived index can hold a stale row for a note deleted from disk (or a backend may ignore
-    the `within` scope); any hit not in `notes` is dropped — the graph on disk stays authoritative
-    and a citation never dangles. The hit's own score (cosine similarity / `ts_rank`) survives
-    into the chunk so downstream ranking keeps the index's ordering signal; it is clamped to the
-    chunk's [0, 1] score domain because `ts_rank` is not bounded by 1.
+    The graph on disk is authoritative, so a citation never dangles. Scores are clamped to [0, 1]
+    (`ts_rank` is unbounded).
     """
     chunks: list[EvidenceChunk] = []
     for hit in hits:
@@ -746,13 +450,10 @@ def _chunks_from_hits(
 
 
 class VectorRetriever:
-    """Retrieve notes by dense-embedding similarity to the query. A `SourceRetriever` (F10-A).
+    """Retrieve notes by dense-embedding similarity to the query. A `SourceRetriever`.
 
-    An *entry point* into the graph, not a replacement (D-004): it surfaces notes semantically
-    related to the query even when they share no substring or wikilink with it, which the agent
-    then expands via `expand_note`. The index backend is injected for testability, and defaults to
-    the production one so `sources/vector/datasource.yaml` can name this class directly — a
-    manifest passes construction *config*, not pre-built objects.
+    An entry point into the graph, not a replacement. The index defaults to the production one so a
+    manifest can name this class directly.
     """
 
     def __init__(
@@ -763,8 +464,7 @@ class VectorRetriever:
     ) -> None:
         """Search `index` (the production note index by default); excerpts from `notes_dir`.
 
-        `name` is the data-source name, passed by the registry from the manifest — see
-        `GraphRetriever.__init__` for why every retrieve half takes one.
+        `name` is the data-source name, passed by the registry from the manifest.
         """
         self._index = index if index is not None else default_note_index()
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
@@ -776,39 +476,23 @@ class VectorRetriever:
         if not notes:
             return []
         query_embedding = (await asyncio.to_thread(embed_texts, [query]))[0]
-        # Scope the index query to the eligible notes so the top-k slots are spent on notes the
-        # filters allow — filtering after a global top-k would silently lose eligible matches
-        # whenever the nearest neighbors are ineligible.
+        # Scope the index query to eligible notes so top-k slots are not spent on filtered-out
+        # notes.
         hits = await self._index.search_dense(
             query_embedding, settings.retrieval_top_k, within=set(notes)
         )
-        # The query's own terms, even on the dense leg: this note was surfaced by meaning, but if
-        # a word the chemist typed is *in* the body then that is the part of it they can check.
-        # Where none is, `_excerpt` falls back to the head exactly as before.
+        # The query's own terms even on the dense leg: a typed word found in the body is the part a
+        # chemist can check; otherwise `_excerpt` falls back to the head.
         return _chunks_from_hits(
             hits, notes, self.name, await _conflict_index(self._dir, filters), query_terms(query)
         )
 
 
 class LexicalRetriever:
-    """Retrieve notes by full-text term match (Postgres FTS). A `SourceRetriever` (F10-A).
+    """Retrieve notes by full-text term match (Postgres FTS). A `SourceRetriever`.
 
-    The lexical/BM25-style entry point: `ts_rank` over the GIN-indexed `tsvector` of the same notes
-    `GraphRetriever` scans. Also an entry point into the graph, not a replacement (D-004). The index
-    backend is injected for testability, and defaults to the production one for the same reason as
-    `VectorRetriever`.
-
-    **What it beats the graph leg at, and where the two genuinely differ.** This docstring said the
-    graph retriever "cannot rank", which stopped being true when `_relevance` shipped, so the
-    difference is now stated as what it measures. On the 46-pair gold set at a matched slot budget
-    (2026-09-16, `make retrieval-arms`): this leg alone finds 42 gold notes to the graph leg's 40
-    and puts 24 in the top 3 to its 19, and the two gold notes only one leg finds are both this
-    one's.
-    The rules are different rather than better and worse, though, which is why both legs still ship:
-    Postgres stems and stop-words by a text-search configuration, `kg.search.term_coverage` matches
-    substrings, and measured against live PostgreSQL 16 `couplings`/`coupled`/`dry`/`films` are hits
-    here and not there while `ester` matches `polyester` there and not here
-    (`tests/test_note_search.py`).
+    `ts_rank` over the same notes `GraphRetriever` scans, with different rules: Postgres stems and
+    drops stop-words, while the graph leg matches substrings.
     """
 
     def __init__(
@@ -819,8 +503,7 @@ class LexicalRetriever:
     ) -> None:
         """Search `index` (the production note index by default); excerpts from `notes_dir`.
 
-        `name` is the data-source name, passed by the registry from the manifest — see
-        `GraphRetriever.__init__` for why every retrieve half takes one.
+        `name` is the data-source name, passed by the registry from the manifest.
         """
         self._index = index if index is not None else default_note_index()
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path

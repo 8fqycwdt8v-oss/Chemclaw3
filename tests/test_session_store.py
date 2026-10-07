@@ -1,8 +1,7 @@
-"""The durable session store persists and resumes a conversation (plan Phase F3-T1).
+"""The durable session store persists and resumes a conversation.
 
-The round-trip test runs against a real database (CI provides Postgres; the offline sandbox has
-none, so it skips). The provider-selection test is a pure unit test with no database — it proves
-`build_agent` swaps the history provider by config, which is the wiring that makes sessions durable.
+The round-trip tests need Postgres and skip without one; the provider-selection test is a pure
+unit test of the wiring that makes sessions durable.
 """
 
 import asyncio
@@ -60,13 +59,7 @@ async def _provider_or_skip() -> PostgresHistoryProvider:
 
 
 async def _clear(session_id: str) -> None:
-    """Empty one session's rows, so a rerun starts from the state the test describes.
-
-    Written here rather than borrowed from the provider: the store used to expose `rollback_to`,
-    and these tests reached for it as a truncate because it happened to be there. It was the
-    disconnect rollback's delete, it is gone with that rollback, and a fixture concern should never
-    have been resting on a production method's side effect anyway.
-    """
+    """Empty one session's rows, so a rerun starts from the state the test describes."""
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM session_messages WHERE session_id = %s", (session_id,))
@@ -114,14 +107,9 @@ async def _spoke_in(session_id: str, text: str = "a turn") -> None:
 
 
 async def test_session_owner_lists_only_its_own_sessions_most_recently_used_first() -> None:
-    """Listing is owner-scoped and most-recently-used first — the sidebar `GET /sessions` renders.
+    """Listing is owner-scoped and ordered by last stored message, most recent first.
 
-    A dedicated owner string per test: the table is shared across this module's cases, so scoping
-    to a real owner is also what keeps the assertion independent of the other rows in there.
-
-    Ordered by the last stored message, not by when the row was created. Those disagree for exactly
-    the conversation a chemist is most likely to want — an old one they have come back to — which
-    under the previous ordering was pinned to the bottom of the list forever.
+    A dedicated owner per test keeps the assertion independent of other rows in the shared table.
     """
     await migrated_db_or_skip()
     store = SessionOwnerStore()
@@ -144,13 +132,7 @@ async def test_session_owner_lists_only_its_own_sessions_most_recently_used_firs
 
 
 async def test_session_owner_does_not_list_a_session_nobody_spoke_in() -> None:
-    """A created-but-unused session is not a conversation and is not listed as one.
-
-    The companion UI creates the session on the first keystroke so the first message costs one
-    round-trip instead of two, so every abandoned draft leaves an ownership row behind. The lateral
-    join that establishes last-activity is what drops them: no messages, no `max(created_at)`, no
-    row. Deriving the two facts in one query is why this needs no separate cleanup job.
-    """
+    """A created-but-unused session is not listed: the last-activity join drops it."""
     await migrated_db_or_skip()
     store = SessionOwnerStore()
     await store.record("sess-warmed-unused", "owner-warmed-test")
@@ -162,11 +144,9 @@ async def test_session_owner_does_not_list_a_session_nobody_spoke_in() -> None:
 
 
 async def test_session_owner_keeps_the_title_its_first_turn_gave_it() -> None:
-    """A conversation is named by how it started, and a later turn must not rename it.
+    """A session keeps the title its first turn gave it.
 
-    The route calls this on every turn — it has no cheap way to know which one is first — so the
-    `title IS NULL` guard is what makes that safe. Without it a sidebar entry would change under a
-    chemist on every message, which is the one thing a navigation label must not do.
+    The route sets the title on every turn, so the `title IS NULL` guard keeps it stable.
     """
     await migrated_db_or_skip()
     store = SessionOwnerStore()
@@ -196,13 +176,9 @@ async def test_session_owner_lists_an_unnamed_session_rather_than_dropping_it() 
 
 
 async def test_session_owner_listing_carries_the_profile_each_session_runs_under() -> None:
-    """The listing returns `profile`, which is what `GET /plans/pending` filters on.
+    """The listing returns `profile`, which `GET /plans/pending` filters on.
 
-    Not cosmetic and not for the sidebar: it is the one column that says whether a session can be
-    holding a plan waiting on a decision, and the alternative to reading it here is one serialized
-    checkpointer statement per conversation to discover the same thing. `None` is a real value and
-    means the default profile — `agent.profiles.get_profile(None)` resolves exactly that — so it
-    must come back rather than being normalised into a name the row does not hold.
+    `None` means the default profile and must come back as `None`.
     """
     await migrated_db_or_skip()
     store = SessionOwnerStore()
@@ -219,13 +195,9 @@ async def test_session_owner_listing_carries_the_profile_each_session_runs_under
 
 
 async def test_session_owner_lists_the_null_owner_sessions() -> None:
-    """A NULL owner matches itself when listing — `owner = NULL` would silently return nothing.
+    """A NULL owner matches itself when listing; `owner = NULL` would return nothing.
 
-    The shared dev principal records a real SQL NULL, and three-valued logic makes `= %s` false for
-    every row, so the dev/no-Entra deployment would show an empty conversation list with sessions
-    sitting right there in the table. `_OWNER_LIST`'s second owner arm — `o.owner IS NULL AND
-    %s::text IS NULL` — is what makes this row come back; it used to be `IS NOT DISTINCT FROM`, and
-    the two match exactly the same rows (see `test_the_owner_predicate_stays_indexable`).
+    `_OWNER_LIST`'s second arm, `o.owner IS NULL AND %s::text IS NULL`, matches these rows.
     """
     await migrated_db_or_skip()
     store = SessionOwnerStore()
@@ -236,14 +208,10 @@ async def test_session_owner_lists_the_null_owner_sessions() -> None:
 
 
 def test_the_owner_predicate_stays_indexable() -> None:
-    """`_OWNER_LIST` must keep the shape `session_owners_owner_idx` can serve.
+    """`_OWNER_LIST` keeps the two-arm shape `session_owners_owner_idx` can serve.
 
-    The static half of the pair below, and it runs with no database. `IS NOT DISTINCT FROM` is not
-    a btree-searchable operator, so `046_review_hardening_indexes.sql` added an index for a
-    predicate that could not use it and every `GET /sessions` stayed a sequential scan while paying
-    the index's write cost. The two-arm spelling is not a style choice — it is the only reason that
-    index does anything — so a revert to the terser operator fails here rather than silently in the
-    planner.
+    `IS NOT DISTINCT FROM` is not btree-searchable, so reverting to it would silently force a
+    sequential scan. Static; no database.
     """
     assert "IS NOT DISTINCT FROM" not in _OWNER_LIST, (
         "IS NOT DISTINCT FROM cannot use session_owners_owner_idx (046); every GET /sessions "
@@ -253,20 +221,11 @@ def test_the_owner_predicate_stays_indexable() -> None:
 
 
 async def test_the_session_listing_uses_the_owner_index() -> None:
-    """The live half: the planner actually reaches `session_owners_owner_idx` for this statement.
+    """The planner reaches an owner index for the listing statement.
 
-    `enable_seqscan = off` rather than a seeded corpus large enough to make the index the cheaper
-    plan. That is the honest form of the question here: with the sequential scan disabled, a
-    predicate the index *can* serve produces an index scan at any row count, and one it cannot
-    produces a sequential scan anyway — which is exactly what the shipped statement did at 200,000
-    rows, unchanged, before the predicate was rewritten. So this asserts the property (the index is
-    reachable) rather than a timing that depends on how much the test seeded.
-
-    The retired predicate is explained beside it, and that arm is not decoration: it is the premise
-    the rewrite and both migration comments rest on, asserted rather than believed. If a future
-    Postgres learns to serve `IS NOT DISTINCT FROM` from a btree, this fails and says the
-    workaround has outlived its reason — the same shape `tests/test_upstream_surface.py` uses for
-    an absence.
+    With `enable_seqscan = off`, a predicate the index can serve yields an index scan at any row
+    count. The retired `IS NOT DISTINCT FROM` predicate is checked too, so if Postgres learns to
+    index it, this fails and the workaround can go.
     """
     await migrated_db_or_skip()
     store = SessionOwnerStore()
@@ -283,14 +242,8 @@ async def test_the_session_listing_uses_the_owner_index() -> None:
             shipped = "\n".join(str(row[0]) for row in await cur.fetchall())
             await cur.execute(f"EXPLAIN (COSTS OFF) {retired}", ("owner-plan-test",))
             before = "\n".join(str(row[0]) for row in await cur.fetchall())
-    # **Either owner-scoped index, and the reason is migration 092.** The property is that the
-    # listing is *served from an index on `owner`* rather than scanning every session in the
-    # table; which index serves it is the planner's choice between two that both do. Before 092
-    # there was one candidate, so naming it was the same claim. 092 added
-    # `(owner, updated_at DESC, session_id DESC)` to take the sort key off a lateral the keyset
-    # cursor could not prune — 158 ms to 0.46 ms at 20,000 lifetime sessions — and the planner
-    # now prefers it, measured. Pinning the older name would fail on a *better* plan, which is
-    # a test asserting an implementation detail while claiming to assert a property.
+    # Either owner-scoped index: the property is that the listing is served from an index on
+    # `owner`, and the planner now prefers `(owner, updated_at DESC, session_id DESC)`.
     assert "session_owners_owner_idx" in shipped or "session_owners_owner_updated_idx" in shipped, (
         "GET /sessions reaches no owner-scoped index; the plan was:\n" + shipped
     )
@@ -315,12 +268,9 @@ async def _claims_or_skip() -> SessionTurnClaims:
 
 
 async def test_a_second_process_cannot_claim_a_session_that_is_already_running() -> None:
-    """Two *separate* claim stores — the model of two workers — cannot both hold one session.
+    """Two separate claim stores, modelling two workers, cannot both hold one session.
 
-    This is the guarantee the in-process `active_turns` set could not give: the shipped chart runs
-    two front-door replicas, so the second POST for a session can arrive at a process that has
-    never heard of the first. The claim is one statement so the check and the take cannot be
-    interleaved; releasing hands the slot to the next caller.
+    The claim is one statement, so check and take cannot interleave; releasing frees the slot.
     """
     worker_a = await _claims_or_skip()
     worker_b = SessionTurnClaims()
@@ -335,11 +285,9 @@ async def test_a_second_process_cannot_claim_a_session_that_is_already_running()
 
 
 async def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
-    """An expired lease is takeable; a refreshed one is not — the two halves of the lease.
+    """An expired lease is takeable; a refreshed one is not.
 
-    Expiry is why this is a lease and not a lock: a worker SIGKILLed mid-turn runs no cleanup, and
-    without expiry its session would 409 forever. Refresh is the other half — a turn that
-    legitimately outlives one lease must not be declared dead while it is still streaming.
+    Expiry recovers from a killed worker; refresh keeps a long turn from being declared dead.
     """
     claims = await _claims_or_skip()
     session_id = "sess-d120-lease"
@@ -361,23 +309,10 @@ async def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None
 
 
 async def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
-    """`get_messages` still has no `LIMIT`, for a reason that changed under it.
+    """`get_messages` returns the whole session, not a window.
 
-    It used to be a data-safety rule: the read repaired orphaned pairings and *wrote the repair
-    back*, so over a windowed read a `tool_result` whose `tool_use` merely fell outside the window
-    was indistinguishable from a real orphan and would be stripped and committed. That repair is
-    gone — nothing feeds this back to a model any more — and the previous version of this test said
-    in as many words that its own deletion should turn it into a different test. This is that test.
-
-    The surviving reason is the reader. The one caller is `GET /sessions/{id}/messages`, rendered
-    for a person reloading a conversation, and a transcript that silently drops its own beginning
-    is worse than a slow one: it does not look truncated, it looks like the conversation started
-    later than it did. Compaction is what bounds this table, and it deletes whole pairing
-    components (`droppable_rows`, D-145) so what remains is always coherent.
-
-    Asserted behaviorally rather than by grepping the SQL, which is what the old version had to do
-    (the write-back was unobservable without a database). A window would show up here as a short
-    list, however it were implemented.
+    Its reader is a person reloading the conversation, and a silently truncated transcript looks
+    like it started later. Compaction bounds the table by deleting whole pairing components.
     """
     await migrated_db_or_skip()
     provider = PostgresHistoryProvider()
@@ -397,21 +332,11 @@ async def test_the_transcript_read_returns_the_whole_session_not_a_window() -> N
 
 
 async def test_a_structured_turn_survives_the_round_trip_with_its_calls_intact() -> None:
-    """The shape stamp decides how a row is read, and nothing else asserted that it decides right.
+    """A structured turn survives the round trip with its tool calls intact.
 
-    `test_messages_survive_a_new_provider_instance` asserts a substring, and a substring is exactly
-    what the degraded fallback produces: deleting `message_from_row`'s `LANGCHAIN_SHAPE` branch
-    sends every row this system writes through the legacy converter, which refuses it, and the
-    recovered prose still contains "phenol". Measured with that branch removed, the transcript came
-    back as flat prose — the `AIMessage` with `tool_calls == []` and the `ToolMessage` as an
-    `AIMessage` with no `tool_call_id`, so a reloaded conversation attributes the tool's answer to
-    the model's own voice and loses the call that produced it — while the whole suite stayed green.
-
-    So the assertion is identity, not substring: the classes, the call and the id that pairs the
-    two. **And the counter on the happy path**, because that is the other half of what the wide
-    catch costs. `chemclaw_degraded_total{subsystem=session_transcript}` is what separates "one
-    unreadable legacy row" from "the reader is broken for everyone", and a reader that degrades
-    every row looks identical to a healthy one unless something asserts the counter stays put.
+    Asserted by identity (classes, the call and its pairing id), since the degraded fallback would
+    still match a substring. The `session_transcript` degraded counter must not move on the happy
+    path.
     """
     writer = await _provider_or_skip()
     session_id = "sess-f3-structured"
@@ -446,15 +371,10 @@ async def test_a_structured_turn_survives_the_round_trip_with_its_calls_intact()
 def test_a_row_that_will_not_convert_is_marked_as_recovered_rather_than_passing_as_a_message() -> (
     None
 ):
-    """A guess must not be readable as the record — the fallback's own failure mode.
+    """A row that will not convert is marked as recovered rather than passing as a message.
 
-    The catch is deliberately wide (a chemist must not lose a conversation to one bad row) and what
-    it returns is an ordinary message of a guessed class carrying the row's prose. Unmarked, that
-    is a forgery every reader downstream accepts: `chemclaw.cli.explain` printed a guessed speaker
-    as the audit record, and no test could tell a decoded transcript from a recovered one, which is
-    what let a deleted dispatch branch pass 251 tests.
-
-    No database: this is the reader, not the store.
+    The fallback guesses a message class, so readers must be able to tell a guess from a decoded
+    row. No database: this is the reader.
     """
     recovered = message_from_row({"role": "assistant", "contents": ["not a content part"]}, None)
     assert is_degraded_render(recovered), "a recovered row is indistinguishable from a decoded one"
@@ -465,14 +385,10 @@ def test_a_row_that_will_not_convert_is_marked_as_recovered_rather_than_passing_
 
 
 async def test_the_bounded_user_read_returns_the_chemists_own_words_and_only_those() -> None:
-    """`recent_user_texts` is the other read of this table, and it answers a different question.
+    """`recent_user_texts` returns the chemist's own words and only those, within a bound.
 
-    `get_messages` renders a whole conversation for a person and must never grow a `LIMIT`; this
-    one fills `core/turn_text`'s ambient — what a `basis="stated"` quote may be checked against —
-    and is bounded because it runs once per turn on the answer path. The filter is the whole
-    property: a tool result quoted back as the chemist's own words is the fabrication that check
-    exists to refuse, and a tool-heavy turn is where a naive "last N rows" would find nothing but
-    them.
+    It is the evidence a `basis="stated"` quote is checked against, so a tool result must never be
+    returned as the chemist's words; bounded because it runs once per turn.
     """
     writer = await _provider_or_skip()
     session_id = "sess-stated-quote-window"
@@ -507,13 +423,10 @@ async def test_the_bounded_user_read_returns_the_chemists_own_words_and_only_tho
 
 
 async def test_an_unstamped_legacy_row_is_not_offered_as_the_chemists_own_words() -> None:
-    """The conservative half of a rule about evidence, and it is a rule about *producers*.
+    """An unstamped legacy row is not offered as the chemist's own words.
 
-    An unstamped row is MAF (`message_from_row`), written by an engine whose history provider was
-    called on every run rather than once after the answer — so what carried the `user` role there
-    is not the set this system can now say a person typed. It still renders in the transcript,
-    which is a different promise: a reader is being shown a conversation, not being handed evidence
-    to grade an attribution against.
+    The legacy engine stored rows on every run, so a `user`-role row there may carry tool text. It
+    still renders in the transcript.
     """
     writer = await _provider_or_skip()
     session_id = "sess-stated-quote-legacy"
@@ -535,20 +448,11 @@ async def test_an_unstamped_legacy_row_is_not_offered_as_the_chemists_own_words(
 
 
 async def test_a_converted_legacy_row_is_still_not_offered_as_the_chemists_own_words() -> None:
-    """The axis the test above holds constant: the migration that rewrites the row.
+    """A converted legacy row is still not offered as the chemist's own words.
 
-    `make db-migrate` and the chart's post-upgrade Job both run
-    `message_migration.convert_stored_messages`, which rewrites every MAF row into
-    `message_to_dict(HumanMessage(...))` and stamps it `langchain`. So a shape-only exclusion holds
-    exactly until an operator migrates, and then stops — while nothing about the row's provenance
-    has changed. That provenance is the whole property: MAF's history provider was called on every
-    run rather than once after the answer, so a `user`-role row there can carry a tool result
-    rendered as text, and this read is the evidence set `require_quotes_are_verbatim` grades a
-    `basis="stated"` quote against.
-
-    The conversion is run for real rather than simulated, because the discriminator this relies on
-    (`message_original`) is written by the migration's own UPDATE and a fixture that stamped the
-    row by hand would only prove the test agrees with itself.
+    `convert_stored_messages` restamps legacy rows, but their provenance is unchanged, so the
+    exclusion keys on `message_original`. The conversion runs for real, since it writes that
+    discriminator.
     """
     writer = await _provider_or_skip()
     session_id = "sess-stated-quote-converted"
@@ -614,19 +518,10 @@ async def test_the_in_memory_provider_answers_the_bounded_read_the_same_way() ->
 
 
 async def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrote_it() -> None:
-    """The only key between what was said and what was run, asserted at both ends.
+    """A stored message carries the correlation id of the turn that wrote it.
 
-    `save_messages` stamps `get_current_correlation_id()` so a transcript row joins to the audit
-    rows and job records of its own turn (D-2026-07-31-the-audit-chain-is-versioned). Stamping `""`
-    instead passes every test that touches the store, the explain CLI, the audit trail and the
-    pairing closure — and a blank column is not a missing feature, it reads exactly like a row
-    written before the id existed. `chemclaw explain` groups by that column, so every turn in the
-    session collapses into one "unattributed" pseudo-turn and the report is wrong in the one way
-    nobody double-checks: tool calls printed under a question that did not cause them.
-
-    So this asserts the *grouping*, through the real reconstruction over the real table, and not
-    only the column: the existing renderer test builds `(role, text)` tuples by hand and never
-    proves the two halves are joinable in the first place.
+    That id joins a transcript row to its turn's audit rows and job records; `chemclaw explain`
+    groups by it. Asserted as the grouping, through the real reconstruction over the real table.
     """
     writer = await _provider_or_skip()
     session_id = "sess-correlated"
@@ -656,18 +551,10 @@ async def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrot
 
 
 def test_a_cursor_round_trips_its_position_exactly_and_refuses_anything_else() -> None:
-    """A cursor is the sort key it was minted from, to the microsecond, and nothing else parses.
+    """A cursor round-trips its sort key to the microsecond, and nothing else parses.
 
-    The round trip has to be exact: the listing resumes with `(updated_at, session_id) < (…)`, so a
-    timestamp that lost its microseconds or its offset would name a *different* position — one that
-    re-serves the row the caller has already seen, or skips a conversation that shares its second
-    with another. Asserting the pair back is what makes "opaque" a property of the wire format
-    rather than of the value.
-
-    The refusals are the other half. The token is client-supplied, so every way it can arrive
-    wrong — not base64, base64 of something else, a missing field, a timestamp nothing can parse —
-    has to land on one `ValueError` the route can turn into a 422, rather than on a `binascii`
-    error or a `UnicodeDecodeError` reaching the handler as a 500.
+    A lossy timestamp would name a different position. Every malformed token raises one
+    `ValueError` the route turns into a 422, never a decode error reaching the handler.
     """
     stamp = datetime(2026, 8, 27, 14, 3, 2, 123456, tzinfo=UTC)
     cursor = encode_session_cursor(stamp, "sess-cursor-1")
@@ -682,19 +569,11 @@ def test_a_cursor_round_trips_its_position_exactly_and_refuses_anything_else() -
 
 
 def test_the_session_listing_pages_past_its_ceiling_without_skipping_or_repeating() -> None:
-    """Every conversation is reachable, and a list that reorders itself mid-read stays honest.
+    """The session listing pages past its ceiling without skipping or repeating.
 
-    `service_max_listed_sessions` used to be the end of the list rather than a page: a chemist with
-    more sessions than the cap could not reach the older ones from any client, because nothing said
-    where the answer stopped. So the first assertion is simply that all six of a six-session owner
-    come back through a ceiling of two.
-
-    The second is why the cursor is a keyset and not an `OFFSET`. This list is ordered by *last
-    activity*, so speaking in an old conversation moves it to the top — the list mutates while it is
-    being read, which is the case an offset cannot survive: rows that move above the boundary push
-    the ones below it down, so `OFFSET 2` re-serves a row the caller already has and never shows the
-    one it displaced. Here a new session is created and an already-listed one is revived *between*
-    pages, and the remaining pages must still deliver each unseen conversation exactly once.
+    All six sessions come back through a page size of two. The list is ordered by last activity
+    and mutates while being read, so a keyset cursor is used; a session is created and another
+    revived between pages, and every unseen one must still arrive exactly once.
     """
 
     async def _run() -> list[str]:
@@ -749,19 +628,10 @@ async def _rows(table: str, column: str, value: str) -> int:
 
 
 def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> None:
-    """One conversation goes; the conversation beside it, and the person's own rows, stay.
+    """Deleting a session clears every table it reaches, and no one else's.
 
-    The table set is the erasure sweep's (`chemclaw.agent.leaver._ERASE`) rather than a second list
-    written here — that is what `_session_delete_statements` is for — so this asserts the sweep
-    actually *reaches* each of them with a row in it. A delete that removed the ownership row and
-    left the messages would be worse than no delete at all: every session-scoped sweep in this
-    system starts from `session_owners`, so those rows would be unreachable by name and invisible to
-    the erasure that is supposed to be able to find them later.
-
-    The bystander session is the other half, and it is not decoration. `tool_result_blobs` is
-    content-addressed, so two conversations that ran the same tool over the same arguments share one
-    row, and the link rows cascade with it — deleting the blob unconditionally would take a stored
-    result out of a conversation nobody asked to delete.
+    The table set is the erasure sweep's own, and the ownership row must go with the rest.
+    Content-addressed blobs shared with a bystander session survive.
     """
 
     async def _run() -> tuple[dict[str, int], dict[str, int], int, int]:
@@ -925,12 +795,9 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
 
 
 def test_deleting_a_session_leaves_what_belongs_to_the_person() -> None:
-    """A conversation is not a person: their preferences and subscriptions survive its deletion.
+    """Deleting a session leaves what belongs to the person: preferences and subscriptions.
 
-    `_ACTOR_SCOPED_ONLY` is the classification that makes this true, and it is checked here rather
-    than asserted in prose because the tables sit in the *same* erasure set the session sweep
-    derives itself from — one wrong entry and closing a conversation would quietly clear the
-    chemist's memories, preferences and standing queries across every other one.
+    `_ACTOR_SCOPED_ONLY` classifies those tables within the same erasure set.
     """
 
     async def _run() -> tuple[int, int]:
@@ -966,11 +833,8 @@ def test_deleting_a_session_leaves_what_belongs_to_the_person() -> None:
     )
 
 
-# The sort key the sidebar orders by, and what it costs to produce (092). `043_session_listing.sql`
-# derived it per page and argued a mirrored column "would be a second write per turn that can
-# silently fall out of step with the first"; the three tests below are what makes that objection
-# answerable rather than merely disagreed with — the column has one definition, the writers of the
-# table it summarises are enumerable, and the listing's membership decision does not read it.
+# The sort key the sidebar orders by. The tests below show the mirrored column has one definition,
+# enumerable writers, and that listing membership does not depend on it.
 _OWNER_UPDATED_INDEX = "session_owners_owner_updated_idx"
 
 
@@ -999,28 +863,9 @@ async def _stored_updated_at(session_id: str) -> datetime | None:
 def test_the_sort_key_is_what_it_is_defined_to_be_after_every_writer() -> None:
     """`session_owners.updated_at` is `max(session_messages.created_at)`, at both writers.
 
-    The whole of 043's objection to this column, asked of the code: a mirror is only as good as the
-    number of places that maintain it, and this one has two — `_OWNER_INSERT` and the touch inside
-    `save_messages` — both spelling the value as `_NEWEST_MESSAGE` rather than as a timestamp the
-    caller happens to hold.
-
-    The three cases are the three orders a session can be written in:
-
-    - **a new session, then turns** — the ordinary path, where the ownership row exists first and
-      each turn moves the column;
-    - **a transcript, then the ownership row** — `agent/session_fork.py`'s order, which imports
-      `_OWNER_INSERT` and runs it *after* copying the parent's messages onto the child id. A row
-      inserted with a NULL sort key here is a fork that never appears in `GET /sessions`;
-    - **a session with nothing said in it** — NULL, which is not a gap but the honest value, and
-      the one the listing drops.
-
-    The fourth case is the drift the mirror *can* take and the reason it cannot matter: rows
-    deleted under it (`durable/retention.py`'s message window) leave the column naming activity
-    that is gone, and the listing drops the session anyway because membership is the `EXISTS` arm
-    rather than the column.
-
-    Watched failing with the `_OWNER_TOUCH` line removed from `save_messages`: `the second turn
-    did not move the sort key, so the sidebar sorts on stale activity`.
+    Covers a new session then turns, a transcript then the ownership row (the fork's order), and a
+    session with nothing said (NULL). Deleted messages can leave the column stale, but membership
+    is the `EXISTS` arm, so such a session is still dropped.
     """
 
     async def _run() -> tuple[bool, bool, bool, bool, bool, bool]:
@@ -1092,30 +937,11 @@ def test_the_sort_key_is_what_it_is_defined_to_be_after_every_writer() -> None:
 
 
 def test_the_session_listing_orders_from_an_index_rather_than_sorting_every_session() -> None:
-    """The listing must be able to answer its `ORDER BY … LIMIT` from an index (092).
+    """The listing answers its `ORDER BY … LIMIT` from an index rather than sorting every session.
 
-    **This is the property, and the property is the whole finding.** While the sort key came out of
-    a `LATERAL max(created_at)`, the planner had to evaluate it for every session the owner had
-    ever created before it could discard one, and the keyset cursor could not prune the loop
-    because its predicate read the same lateral output. Measured on one corpus, both statements,
-    100-row pages, warm cache: at 6,000 lifetime sessions **33.8 ms / 18,177 buffers** derived
-    against **0.45 ms / 307 buffers** mirrored; at 20,000, **158.4 ms / 60,589 buffers** against
-    **0.46 ms / 307**. Flat rather than merely faster — the index walk stops after the page.
-
-    Asked with `enable_sort = off` rather than of a seeded corpus, for the reason
-    `test_the_session_listing_uses_the_owner_index` states beside it: a property the index can
-    serve produces an ordered plan at any row count, and one it cannot produces a sort anyway. The
-    absence of a `Sort` node is what "the LIMIT stops early" *is*.
-
-    **What this does not cover is stated rather than implied**: with the shared dev principal's NULL
-    owner the two-arm predicate is a filter rather than an index condition — `owner = NULL` is not
-    something a btree can search — so that page keeps a scan and a top-N sort. Measured at 20,000
-    sessions it still halves (146.2 ms derived, 67.7 ms mirrored), and a deployment with
-    `entra_required` on has no NULL owners at all.
-
-    Watched failing against 043's derived statement, restored verbatim: `the listing still sorts to
-    produce its order`. The index assertion beside it passed there — the planner reaches the index
-    for the *owner* predicate either way — so the `Sort` node is the half that carries this.
+    Asked with `enable_sort = off`: the absence of a `Sort` node is what "the LIMIT stops early"
+    means. A NULL owner's page still filters and sorts, since `owner = NULL` is not
+    index-searchable.
     """
 
     async def _run() -> str:
@@ -1145,17 +971,9 @@ def test_the_session_listing_orders_from_an_index_rather_than_sorting_every_sess
 
 
 def test_only_the_two_known_statements_write_the_table_the_sort_key_mirrors() -> None:
-    """A third writer of `session_messages` fails here rather than mis-sorting the sidebar.
+    """Only the two known statements write `session_messages`, the table the sort key mirrors.
 
-    The residual risk 043 named and this is the answer to it: `updated_at` is maintained by the two
-    statements in `agent/session_store.py` that append to `session_messages`, and the fork's own
-    copy reaches it through `_OWNER_INSERT` a statement later. Nothing structural stops a third
-    `INSERT INTO session_messages` from appearing somewhere else in `src/` — so the scan is the
-    control, in the shape `tests/test_message_pairing.py` already uses for the stored-message shape
-    stamp: the day a writer lands that does not maintain the mirror, this says so by name.
-
-    Watched failing with the literal added to `agent/leaver.py`: `agent/leaver.py appends to
-    session_messages`.
+    A third writer that does not maintain `updated_at` fails here by name.
     """
     package = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     writers = sorted(
@@ -1172,17 +990,9 @@ def test_only_the_two_known_statements_write_the_table_the_sort_key_mirrors() ->
 
 
 def test_the_batch_turn_claims_take_refresh_and_release_only_what_is_theirs() -> None:
-    """The set-shaped claim is the single-session one, per session, and must stay that way.
+    """The batch turn claims take, refresh and release only what is theirs.
 
-    `agent/leaver.py` claims a departing person's whole fleet at once because one statement per
-    session ran at ~56 sessions/s and outran its own 60 s lease. What must not come with that speed
-    is a weaker guarantee: a batch that took a session somebody else is running a turn on, a
-    refresh that extended a claim already taken over, or a release that deleted another holder's
-    row. Each is asserted against a live claim held by a different holder in the same batch.
-
-    Watched failing with the holder guard neutralised in `_TURN_REFRESH_MANY`'s locking sub-select:
-    `the batch refresh extended ['sess-batch-ours', 'sess-batch-theirs'] — a claim that is not
-    ours`.
+    Each is asserted against a claim held by another holder in the same batch.
     """
 
     async def _run() -> tuple[set[str], set[str], set[str], str | None, str | None]:
@@ -1226,26 +1036,11 @@ def test_the_batch_turn_claims_take_refresh_and_release_only_what_is_theirs() ->
 
 
 def test_the_two_session_delete_orders_really_do_deadlock() -> None:
-    """The reproduction. `_session_delete_statements` and `retention._DELETE_SESSIONS` cycle.
+    """The route's session delete and the retention delete really do deadlock.
 
-    `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller`. The route's delete
-    takes `session_turns` before `session_owners`; the retention pass takes the ownership row first
-    and reads its `RETURNING`. **Neither order can be changed** — the `BACKLOG.md` row this closes
-    measured both alternatives and each trades the deadlock for a correctness bug — and that row
-    recorded the consequence as **"has not been reproduced"**. It reproduces on every attempt.
-
-    Driven 16 times on a migrated schema with the real orders: the deadlock fired **every time**,
-    and Postgres chose the victim — **9 times the route's side, 7 the retention pass's**. That is
-    the half of the row that was wrong in the direction that matters: it called the deadlock
-    "self-healing on the retention side (a Temporal activity retries)", which covers about half the
-    occurrences, and the other half was a chemist's `DELETE /sessions/{id}` with no retry behind it.
-
-    The assertion is that **exactly one** of the two transactions is aborted. Both committing means
-    no cycle formed and the run is evidence about nothing, which is why it is asserted rather than
-    assumed; both aborting would mean Postgres resolved a deadlock by killing everyone, which it
-    does not do. Which one loses is deliberately *not* asserted — that is the finding.
-
-    Real concurrency on two real connections, because a deadlock is not a thing a double has.
+    They take `session_turns` and `session_owners` in opposite orders, and neither order can change.
+    Exactly one transaction must abort; which one is deliberately not asserted, because Postgres
+    chooses. Real concurrency on two real connections.
     """
 
     async def _run() -> None:
@@ -1307,24 +1102,10 @@ def test_the_two_session_delete_orders_really_do_deadlock() -> None:
 def test_deleting_a_session_survives_being_the_deadlock_victim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The route's half of the remedy: a delete aborted as the victim is tried again, and lands.
+    """A session delete chosen as the deadlock victim is retried and lands.
 
-    `D-2026-09-13-a-deadlock-victim-is-chosen-by-postgres-not-by-the-caller`. Since neither lock
-    order can be changed, retrying is what is left, and the sibling above is why the route needed
-    it: Postgres picked the route as the victim 9 times in 16, and the retention side's retry
-    (a Temporal activity) covers only the other seven.
-
-    **The abort is injected rather than raced, and that is deliberate.** Which transaction Postgres
-    kills is decided by which lock request closes the cycle, so a test orchestrating two real
-    connections can reliably make the *other* side the victim and cannot reliably make this one —
-    the window in which the route holds `session_turns` and has not yet asked for `session_owners`
-    is inside one transaction and microseconds wide. So the cycle is proven against real
-    connections next door, and the response to losing it is proven here, against the real exception
-    class on the real transaction boundary.
-
-    Both halves of the assertion matter: the delete has to **answer**, and the rows have to be
-    **gone**. A retry that swallowed the abort and reported an empty result would pass a test that
-    only checked for an absent exception — which is the shape `tasks/lessons.md` records.
+    The abort is injected, since the route's window cannot be raced reliably; the sibling test
+    proves the cycle. Both the answer and the rows being gone are asserted.
     """
 
     async def _run() -> None:

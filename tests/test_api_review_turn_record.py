@@ -1,9 +1,8 @@
 """What a turn books about itself: whose booking runs first, when the clock is read, and by whom.
 
-Three of the four defects here are about *ordering* rather than about a value — new work placed
-ahead of a booking that must not be prevented, a clock read after the work that moves it, and a
-counter taken over events the answer does not contain. The fourth is a second writer of a column
-whose comment says it has one, which is why `turn_costs.outcome` could not be queried honestly.
+The budget record and cost row are booked before anything that can fail, the deadline is sampled
+when the cancellation lands, TTFT counts only root-agent tokens, and the template step writes a
+real `turn_costs.outcome`.
 """
 
 import asyncio
@@ -51,13 +50,11 @@ def booked(monkeypatch: pytest.MonkeyPatch) -> list[TurnCost]:
 def test_a_failed_settle_still_books_the_budget_and_the_row(
     booked: list[TurnCost], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_settle_outcome` and `_resolved_model` were computed *before* `budget.record`.
+    """A failed settle still books the budget and the row.
 
-    So anything raising in either lost both the budget record and the `turn_costs` row — the two
-    instruments a runaway is found with — and, because this function runs from a `finally` that is
-    usually unwinding a `CancelledError`, replaced that cancellation with its own exception. The
-    booking is a dict write; it goes first, and the derivations are settled where a failure costs
-    one row's precision instead of the row.
+    The booking is a dict write and goes first; `_settle_outcome` and `_resolved_model` run after,
+    so a failure there costs one row's precision, not the row, and does not replace an unwinding
+    `CancelledError`.
     """
     monkeypatch.setattr(settings, "budget_enabled", True)
     monkeypatch.setattr(settings, "budget_max_tokens_per_session", 1)
@@ -137,17 +134,11 @@ class _OneTokenAgent(ScriptedTurn):
 async def test_a_stop_just_short_of_the_deadline_is_not_a_timeout(
     booked: list[TurnCost], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The claim was "an exact test rather than a tolerance"; the reading was taken too late.
+    """A Stop just short of the deadline is not a timeout.
 
-    `_settle_outcome` runs in the `finally`, *after* `_roll_back_unfinished` and after an approval
-    spend — so a Stop delivered at `deadline − ε` behind a slow teardown crossed the deadline while
-    being torn down and booked `timed_out`, a wall-clock kill that never happened.
-
-    **No sleep races anything here.** The deadline is set a whole horizon out, the cancellation is
-    delivered inside it (asserted), and the rollback then blocks until 50 ms *past* it — computed
-    from the deadline rather than guessed at, so the reproduction is the same on a loaded machine
-    as on an idle one. The horizon only has to outlast building the real graph, and the assertion
-    says so if it ever does not.
+    `_settle_outcome` runs after the rollback, so the deadline must be sampled when the cancellation
+    lands; otherwise a slow teardown books `timed_out` for a kill that never happened. The rollback
+    blocks until 50 ms past a deadline computed far out, so the reproduction is deterministic.
     """
     horizon = 2.0
 
@@ -200,13 +191,10 @@ def test_the_deadline_reading_is_still_what_names_a_wall_clock_kill() -> None:
 
 
 def test_a_subagent_only_turn_reports_no_time_to_first_token() -> None:
-    """TTFT and `answer_text` disagreed about what a token is, in one row.
+    """A subagent-only turn reports no time to first token.
 
-    `_stream_into` appends to `answer_parts` only for `not event.agent` — the filter its docstring
-    calls load-bearing — while `note_event` set `first_token` for *any* `TokenEvent`, and
-    `graph_stream.py` marks every chunk from below the root `agent="subagent"`. A turn in which
-    only a subagent ever spoke therefore booked `outcome="empty_answer"` beside a non-null
-    `ttft_seconds`: a time-to-first-token for an answer that never had a first token.
+    `answer_parts` takes only root-agent tokens, so `first_token` must apply the same filter, or an
+    `empty_answer` turn could carry a non-null `ttft_seconds`.
     """
     ledger = _TurnLedger(correlation_id="c" * 32, usage=TurnUsage())
     ledger.note_event(TokenEvent(text="working on it", agent="subagent"))
@@ -233,12 +221,7 @@ def test_the_supervisor_s_own_first_token_is_still_the_first_token() -> None:
 def _drive_step(
     monkeypatch: pytest.MonkeyPatch, script: Any, rows: list[TurnCost]
 ) -> BaseException | None:
-    """Run the real `run_agent_step` and keep the cost row **even when the step raises**.
-
-    `tests/test_template_agent_step._drive` returns its rows only on the success path, and the
-    outcomes worth pinning here are the failing ones — so this is the same three substitutions with
-    the exception handed back instead of propagated.
-    """
+    """Run the real `run_agent_step` and keep the cost row **even when the step raises**."""
     from chemclaw.durable import template_activities
 
     monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: _NullSink())
@@ -276,13 +259,10 @@ class _NullSink:
 def test_a_template_step_books_a_real_outcome(
     monkeypatch: pytest.MonkeyPatch, booked: list[TurnCost]
 ) -> None:
-    """Every row this second writer has ever written carried `outcome='unknown'`.
+    """A template step books a real outcome.
 
-    That is the column's *default*, meaning "written before the column existed" — so an outcome
-    query could not tell a backfilled row from a step booked today, and the index on that column
-    indexed a value with two meanings. `infra/sql/060_turn_outcome.sql` and `core/turn_cost.py`
-    both still say `_settle_outcome` is the only producer; this is what makes the second one honest
-    about how it ends.
+    `outcome='unknown'` is the column default, meaning "written before the column existed", so a
+    second writer must not leave it there.
     """
     rows: list[TurnCost] = []
     assert (
@@ -312,9 +292,8 @@ class _Outage(Exception):
 class _Erroring(ScriptedChatModel):
     """A model that raises instead of answering.
 
-    `*args, **kwargs` on both hooks for the reason `tests/test_template_agent_step._ProviderOutage`
-    gives: upstream calls `_generate` and `_stream` with different arities, and pinning either here
-    would make this fake fail on a LangChain bump for a reason unrelated to what it tests.
+    `*args, **kwargs` on both hooks: upstream calls `_generate` and `_stream` with different
+    arities.
     """
 
     def _generate(self, *_args: Any, **_kwargs: Any) -> Any:

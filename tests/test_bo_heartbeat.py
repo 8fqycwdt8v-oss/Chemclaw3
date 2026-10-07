@@ -1,15 +1,9 @@
-"""BO activities heartbeat, and their `execute_activity` calls declare a timeout for it (Conn-F2).
+"""BO activities heartbeat, and their `execute_activity` calls declare a timeout for it.
 
-Before this, all four `workflow.execute_activity` calls in `BoCampaignWorkflow.run` carried a flat
-`start_to_close_timeout` and no `heartbeat_timeout`, and none of `propose_initial`/`propose_next`/
-`evaluate_candidates` ever called `activity.heartbeat` — the same silently-killed-and-retried shape
-REV-3 already fixed for calc's CREST jobs (D-136): a worker that dies mid-round is only noticed at
-the full `bo_activity_timeout_seconds` budget, burning the round's cost again on every retry.
-
-`propose_initial`/`propose_next` wrap the BoFire fit/acquisition step in the shared
-`chemclaw.durable.heartbeat.beating` timer (the same helper `connectors.calc`'s two CREST jobs use,
-Rule of Three); `evaluate_candidates` heartbeats directly between candidates, since a batch has a
-real unit boundary the timer would only obscure.
+Without a heartbeat, a worker that dies mid-round is noticed only at the full
+`bo_activity_timeout_seconds`, and each retry re-burns the round. `propose_initial`/`propose_next`
+wrap the BoFire step in the shared `chemclaw.durable.heartbeat.beating` timer;
+`evaluate_candidates` heartbeats between candidates, a natural unit boundary.
 """
 
 import ast
@@ -38,9 +32,8 @@ def _capture_heartbeats(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def test_evaluate_candidates_heartbeats_once_per_candidate(_capture_heartbeats: list[str]) -> None:
     """A batch is the natural unit boundary here, so it beats directly between candidates.
 
-    Proven against a fast objective (no calculator involved) so the beats can only be coming from
-    the explicit per-candidate call this fix adds — a timer-based wrapper would not produce one
-    beat per candidate, it would produce zero for a batch this fast.
+    A fast objective, so the beats can only come from the explicit per-candidate call; a timer would
+    produce none.
     """
     problem = build_problem(load_dataset())
     candidates = initial_candidates(problem, 3)  # valid params for the real registered objective
@@ -54,9 +47,8 @@ def test_propose_initial_heartbeats_through_the_shared_timer(
 ) -> None:
     """A slow BoFire fit still beats, via `chemclaw.durable.heartbeat.beating`.
 
-    `initial_candidates` is monkeypatched to a slow function (real BoFire sampling is fast, and
-    the point under test is the wiring — that a stuck fit would be noticed — not the sampling
-    itself). `bo_activity_heartbeat_timeout_seconds` is shrunk so the test costs milliseconds.
+    `initial_candidates` is replaced by a slow function (the wiring is under test, not sampling),
+    and the heartbeat timeout is shrunk so the test costs milliseconds.
     """
     monkeypatch.setattr(settings, "bo_activity_heartbeat_timeout_seconds", 4.0)  # -> 1s interval
 
@@ -101,16 +93,9 @@ def test_propose_next_heartbeats_through_the_shared_timer(
 def test_every_bo_activity_call_declares_a_heartbeat_timeout() -> None:
     """`BoCampaignWorkflow` passes `heartbeat_timeout` to every `execute_activity` call.
 
-    Checked over the AST rather than by running the workflow: the property under test is a keyword
-    argument at a call site, which a live (Temporal-server-requiring, offline-skipped) workflow
-    test cannot see any more directly than a parse can, and the parse runs everywhere.
-
-    **Walked over the whole class rather than over `run`**, and that widening is the correction a
-    real change forced. D-2026-08-29 moved the evaluate call out of `run` into `_evaluate`, which
-    is where the measured/computed branch lives — and a walk scoped to `run` would have gone from
-    six calls to four and reported the *count* as the failure while the call it stopped watching
-    was the one that had moved. A helper is exactly where an unbounded activity call would appear
-    next; the count is a floor, and the keyword is the rule.
+    Checked over the AST, since the property is a keyword argument at a call site. Walked over the
+    whole class rather than `run`, because helpers such as `_evaluate` are where calls move; the
+    count is a floor and the keyword is the rule.
     """
     tree = ast.parse(inspect.getsource(workflows))
     campaign = next(
@@ -125,13 +110,8 @@ def test_every_bo_activity_call_declares_a_heartbeat_timeout() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "execute_activity"
     ]
-    # Seed propose, loop propose, the one evaluate in `_evaluate`, and *two* campaign-record
-    # writes: one per completed round, and the terminal one. The per-round write is what stops a
-    # cancelled or killed campaign from answering `resume_campaign` with nothing about hours of
-    # evaluation it already paid for, and it needs a heartbeat timeout for the same reason every
-    # other call here does. Five rather than the earlier six because the seed and the loop now
-    # share one evaluate call site — the branch a measured campaign takes must be identical for
-    # both, and writing it twice is how the second one eventually forgets what the first learned.
+    # Seed propose, loop propose, the one shared evaluate in `_evaluate`, and two campaign-record
+    # writes (per round and terminal); the per-round write keeps a killed campaign resumable.
     assert len(calls) == 5, f"expected 5 execute_activity calls, found {len(calls)}"
     for call in calls:
         heartbeat_kwarg = next((kw for kw in call.keywords if kw.arg == "heartbeat_timeout"), None)

@@ -1,38 +1,19 @@
 """Keep the index in step with the share: crawl, diff, parse, chunk, embed, sweep.
 
-Backend-agnostic and dependency-injected, like `chemclaw.ingest.eln.sync` — the Temporal wrapper in
-`chemclaw.durable.document_sync` does the scheduling and the bounding, and this does the work, so
-the loop can be run end-to-end in a test against a temporary directory with no database and no
-broker.
+Backend-agnostic and dependency-injected; `chemclaw.durable.document_sync` does the scheduling and
+bounding, so this loop runs end to end in a test with no database or broker.
 
-Three properties carry the whole design at TB scale:
-
-**Nothing is read twice.** A file whose `mtime_ns:size` matches what the index stored is not opened
-— it is restamped as seen and skipped. A scheduled run over an unchanged share therefore costs one
-`scandir` pass and zero embedding calls.
-
-**Nothing is embedded twice.** A document's identity is the hash of its *parsed text*, so the same
-report sitting in four project folders is one set of chunks and one embedding call, and moving or
-renaming a file costs nothing at all.
-
-**Nothing is deleted on doubt.** Deletion is a mark-and-sweep, and the sweep runs only when a
-crawl walked every root to completion. An unmounted share presents to `scandir` as an empty
-directory, which is indistinguishable from "somebody deleted everything" — and of the two possible
-mistakes, re-indexing a corpus is recoverable and deleting one is not.
-
-**And nothing is quietly comparable to nothing.** Each stored vector records the embedding
-configuration that made it (`embedding_config_key`). Pointing the deployment at a different model
-does not move any file's fingerprint, so before this the crawl re-embedded nothing and the table
-came to hold a mix of two models' vectors — every cosine between them meaningless, with no error
-anywhere. `reembed_stale` closes it from the *stored chunk text*, so a model swap heals itself on
-the next run without the share being touched at all. The chunking that cut each row is recorded the
-same way and for the same reason (`binding.chunking_key`), and both of the gates below compare it —
-the fingerprint gate decides whether a document is re-read, the `known_documents` gate whether it is
-re-embedded, and a chunk-size change must be visible to both or one of them skips the file.
-
-**And nothing is skipped silently.** A decade-old share is full of scanned PDFs and of `.doc` files
-this system cannot read. Both are counted, per extension, and reported. Silence would be read as
-"the share held nothing else", which is the one answer that is never true.
+- **Nothing is read twice.** A file whose `mtime_ns:size` matches the index is restamped as seen and
+  not opened.
+- **Nothing is embedded twice.** A document's identity is the hash of its parsed text, so copies
+  share one set of chunks and a rename is free.
+- **Nothing is deleted on doubt.** The sweep runs only after a crawl walked every root to
+  completion; an unmounted share looks like an empty one.
+- **Nothing is silently incomparable.** Each vector records its embedding configuration and its
+  chunking; `reembed_stale` heals a model change from stored chunk text, and both crawl gates
+  compare the chunking key.
+- **Nothing is skipped silently.** Scans and unsupported formats are counted per extension and
+  reported.
 """
 
 import asyncio
@@ -72,10 +53,7 @@ logger = logging.getLogger(__name__)
 class DocumentShareSource(Protocol):
     """A data source that carries a crawlable share — the marker the sync job selects on.
 
-    Structural rather than declared, so enabling a share stays exactly one thing:
-    `CHEMCLAW_DATA_SOURCES`. A second list naming which of the enabled sources are *also* document
-    shares would be a declaration whose only correct value is computable from the source itself,
-    which D-150 spells out is not a configuration point but an opportunity to be wrong.
+    Structural rather than declared, so `CHEMCLAW_DATA_SOURCES` stays the only enable switch.
     """
 
     name: str
@@ -107,12 +85,8 @@ class SyncReport(BaseModel):
     skipped_scan: int = 0
     # Opened and refused, or unreadable on the share (a permission error, a truncated file).
     skipped_unreadable: int = 0
-    # Still being read when the per-file bound expired. Its own counter rather than a second
-    # meaning for `skipped_unreadable`, because the two ask for different things: an unreadable
-    # file is a fact about the file, while a timed-out one says only that this deployment's budget
-    # ran out first — and the worker thread it left behind is a cost `skipped_unreadable` does not
-    # carry. A share whose count is persistently non-zero is one where either the bound or the
-    # document needs looking at; see `_parse_changed`.
+    # Still being read when the per-file bound expired. Separate from `skipped_unreadable`: this
+    # says the budget ran out, not that the file is bad; see `_parse_changed`.
     skipped_timeout: int = 0
     skipped_oversized: int = 0
     # Parsed successfully to no text at all — an empty workbook, a placeholder file. Indexed as a
@@ -129,18 +103,13 @@ class ReembedReport(BaseModel):
     """One bounded re-embedding pass: how many chunks were refreshed, and whether more remain."""
 
     embedded: int = 0
-    # Chunks the provider would not embed even one at a time. They keep a superseded vector, which
-    # is reported rather than hidden — a silently wrong vector is what this whole mechanism exists
-    # to prevent, so the count of ones it could not fix has to be visible too.
+    # Chunks the provider would not embed even one at a time; they keep a superseded vector, so the
+    # count is reported.
     failed: int = 0
     has_more: bool = False
-    # **The pass stopped with work left, and `has_more` cannot say so.** `has_more` is gated on
-    # progress deliberately — a batch where every chunk failed is deterministic, so returning
-    # "there is more" would hand the caller the identical batch forever — but that gate makes a
-    # total provider outage arrive at the caller as `has_more=False`, which is byte-identical to
-    # "everything is up to date" and is what makes the drain report COMPLETED while the corpus
-    # still holds superseded vectors. This is the third state, so the two the caller had are not
-    # asked to mean three things.
+    # The pass stopped with work left. `has_more` is gated on progress (so an all-failing batch is
+    # not retried forever), which makes a total provider outage look like "up to date"; this is the
+    # third state.
     stalled: bool = False
 
 
@@ -155,17 +124,14 @@ class _Parsed(BaseModel):
 def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
     """Read one file off the share and extract its text (blocking; called in a worker thread).
 
-    The crawl checked this path minutes ago, in a different activity: it confirmed the entry was
-    not a symlink and that its size was under `max_file_bytes`. Both can be false by now, and on a
-    share every member can write to, deliberately so. **The open re-checks rather than trusts.**
-    `O_NOFOLLOW` refuses a path that became a symlink — pointing at, say, the workload-identity
-    token the crawl never saw — and the size is re-read from the *open descriptor*, so a file that
-    grew from 1 KB to 20 GB after being accepted is refused rather than read into the worker.
+    The crawl's checks are re-done at open time, since the share is writable by its members:
+    `O_NOFOLLOW` refuses a path that became a symlink, and the size is re-read from the open
+    descriptor so a file that grew past `max_file_bytes` is refused.
 
     Raises:
         ScannedDocumentError: A PDF with no text layer.
-        DocumentParseError: An unsupported format, one the library could not open, or one whose
-            text carries a character the index cannot store.
+        DocumentParseError: An unsupported format, one the library could not open, or one whose text
+        carries a character the index cannot store.
         OSError: The share could not be read at this path, or it became a symlink.
     """
     # `os.open` with the flag, not `Path.read_bytes`: the check and the read must be the same
@@ -184,39 +150,21 @@ def _read_and_parse(ref: FileRef, max_bytes: int) -> _Parsed:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    # **In a killable child, not on this thread.** Python cannot interrupt a running parser, so a
-    # hostile document used to hold a thread of the *shared* default executor for as long as it
-    # liked — in the Temporal worker, where N such documents on a share permanently consume N
-    # executor threads and the crawl's `wait_for` frees only the pass. `parse_document_isolated`
-    # gives the parse its own process and kills it on the deadline, which is what makes the thread
-    # end. The deadline is `attachment_parse_timeout_seconds` for the reason the caller's docstring
-    # gives: an upload and a share document are the same work, so the number is decided once.
+    # In a killable child, not on this thread: Python cannot interrupt a parser, and a hostile
+    # document would otherwise hold a shared executor thread. Same deadline as uploads
+    # (`attachment_parse_timeout_seconds`), since it is the same work.
     parsed = parse_document_isolated(ref.path, raw, None, settings.attachment_parse_timeout_seconds)
-    # **Refused here, where the pass can absorb it.** A NUL byte is valid UTF-8, so
-    # `_parse_text`'s `errors="replace"` decode keeps it and `chunk_document`'s `.strip()` does not
-    # remove it — and Postgres refuses one in a `text` column outright. Left to the write it was a
-    # `psycopg.DataError` out of `DocumentIndex.upsert`, which has no handler and no per-file arm:
-    # the whole bounded pass died, taking the good documents already parsed in the same slice with
-    # it, and the crawl keeps no cross-run cursor, so every later run walked to the same file and
-    # died again. `DocumentParseError` is caught per file, so the share loses one document instead.
-    # The ELN tier states the same argument at `ingest/eln/records._reject_unstorable`.
+    # Refused here, per file: a NUL survives decoding but Postgres refuses it in a `text` column,
+    # and failing at `upsert` would abort the whole pass on every run. Same rule as
+    # `ingest/eln/records._reject_unstorable`.
     if "\x00" in parsed.text:
         raise DocumentParseError(
             f"{ref.path} contains a NUL (0x00) byte at position {parsed.text.index(chr(0))}; a "
             "document is stored in a Postgres text column, which cannot hold one"
         )
-    # The identity is the content, never the path — so four copies of one report collapse to one
-    # document and a rename is free.
-    #
-    # **Except when there is no content, where that rule stops being true of anything.** A document
-    # that extracts to nothing — an empty workbook, a placeholder `.txt`, a `.docx` with no
-    # paragraphs; `SyncReport.empty` counts them, so they are a real population on a departmental
-    # share — hashes to one value whatever it is, so every empty file on the share became one
-    # logical document: `known_documents` folded them together, `deduplicated` counted all but the
-    # first as copies, and `index.CITATION_SQL`'s `min(f.path)` would name one arbitrary path for
-    # all of them. Salting with the path makes an empty file its own document, which is what it is.
-    # Nothing is lost by declining to collapse them: such a document carries no chunks, so it can
-    # never be a retrieval hit and there is no embedding to share.
+    # The identity is the content, never the path, so copies collapse and a rename is free. An empty
+    # extraction is salted with the path, otherwise every empty file on the share would be one
+    # document; it has no chunks, so nothing is lost.
     identity = parsed.text if parsed.text.strip() else f"{ref.path}\x1fempty"
     return _Parsed(
         ref_path=ref.path, doc_id=f"doc-{stable_hash(identity, chars=16)}", text=parsed.text
@@ -239,15 +187,9 @@ def _file_record(source: str, ref: FileRef, doc_id: str, chunking_key: str) -> F
 def _summarise_skips(what: str, reasons: Counter[str], example: str) -> None:
     """One WARNING for a pass's whole population of one kind of skip; nothing when there was none.
 
-    **Log volume must be a function of the pass, not of the corpus.** These lines were written for
-    one bad file and are right for it; what happens in practice is systematic — a folder whose
-    permissions changed, a format the parser stopped accepting, an OCR run that broke every
-    extraction — and then the count is the share's. At share scale that is millions of lines into
-    the pod's stdout in one pass, the one line saying *why* indistinguishable from the other
-    999,999, and under a log driver with backpressure it slows the very pass that is failing.
-
-    So the per-item trail moves to DEBUG and this is what an operator sees: how many, which
-    distinct reasons, and one path to go and look at. `SyncReport` carries the counts as data.
+    Log volume must follow the pass, not the corpus: a systematic fault (a permission change, a
+    broken parser) would otherwise be one line per file. Per-item lines go to DEBUG; this reports
+    the count, the distinct reasons and one example path.
     """
     if not reasons:
         return
@@ -265,38 +207,14 @@ async def _parse_changed(
 ) -> tuple[list[_Parsed], dict[str, FileRef], list[str]]:
     """Read and parse each changed file, tallying every refusal rather than dropping it.
 
-    Reject-and-continue, the discipline the ELN sync uses: one unreadable PDF must not abort a pass
-    over ten thousand files.
+    Reject-and-continue: one unreadable file must not abort the pass. Each file is bounded by
+    `attachment_parse_timeout_seconds` (the upload path's number, since it is the same work). The
+    parse runs in a killable child (`isolate.py`), so the deadline ends the thread as well as the
+    wait; the `wait_for` here covers the read off the mount and allows
+    `attachment_parse_reap_grace_seconds` extra for forkserver start-up.
 
-    Reading is also **bounded per file**, and the bound is the front door's own
-    `attachment_parse_timeout_seconds` rather than a second number beside it: an upload and a share
-    document are the same work — untrusted bytes through the same `parse_document`, in the same
-    kind of worker thread — so a deployment that has decided how long that may take has decided it
-    once. Without it, one pathological document (a decompression bomb inside the size limit, a PDF
-    whose `/ToUnicode` table took the previously locked pypdf 33.8 s, a read off a mount that
-    stopped answering) held this activity for as long as it liked, and with it the share's whole
-    crawl: `document_sync_timeout_seconds` bounds the activity attempt, not any file within it.
-
-    **The bound now frees the thread as well as the pass, and it did not.** Python cannot interrupt
-    a running parser and none of the libraries behind `parse_document` — pypdf, python-docx,
-    openpyxl, python-pptx — offers an interruption hook, so a `wait_for` over `to_thread` moved the
-    crawl on while the worker thread ran the hostile document to completion. That thread belongs to
-    the Temporal worker's *shared* default executor, so N pathological documents on a share consumed
-    N executor threads permanently — the same wedge `agent/attachments.py` had, on a pool nothing
-    caps. `_read_and_parse` now parses in the killable child
-    `ingest/documents/isolate.py` already provided for the upload path, so the parse is killed on
-    its deadline and the thread ends with it.
-
-    The `wait_for` here stays, and what it covers is now narrow and stated: the *read* off the
-    mount, which happens on this thread before any child exists and which a share that stopped
-    answering can hang. It is the parse budget plus `attachment_parse_reap_grace_seconds` for the
-    reason `agent/attachments.py` gives — the forkserver's own first start is 0.86 s and happens
-    before the child's clock begins — so it fires only when the read, not the parse, is the thing
-    that did not come back.
-
-    Returns the parsed documents, their refs by path, and the paths that were **refused but are
-    still on the share** — the caller restamps those, because a file that failed to open did not
-    stop existing and the sweep must not read this pass's silence about it as deletion.
+    Returns the parsed documents, their refs by path, and the paths that were refused but are still
+    on the share, which the caller restamps so the sweep does not read them as deleted.
     """
     parsed: list[_Parsed] = []
     by_path: dict[str, FileRef] = {}
@@ -314,23 +232,16 @@ async def _parse_changed(
                     + settings.attachment_parse_reap_grace_seconds
                 ),
             )
-        # A refused file gets **no index row**, so its fingerprint is not stored and the next crawl
-        # opens it again. That is a deliberate trade, not an oversight: recording it would make the
-        # file look unchanged forever, and `skipped_scan` would then read zero on every run after
-        # the first — losing exactly the number that tells an operator how much of the share is
-        # invisible. The cost is one read per refused file per cycle and no embedding at all; the
-        # alternative costs the measurement. `docs/planning/BACKLOG.md` carries the row for
-        # revisiting it if a share's refused population makes that read volume material.
+        # A refused file gets no index row, so the next crawl opens it again. Deliberate: storing
+        # its fingerprint would zero `skipped_scan` after the first run and hide how much of the
+        # share is invisible. The cost is one read per refused file per cycle.
         except ScannedDocumentError:
             report.skipped_scan += 1
             refused.append(ref.path)
             continue
-        # **Before the `OSError` arm, and that order is load-bearing**: the builtin `TimeoutError`
-        # is an `OSError` subclass, so catching them the other way round would file every timeout
-        # under `skipped_unreadable` and lose the one number that says a bound fired. The same
-        # kinship makes this arm slightly wider than the bound: a share read that fails with
-        # `ETIMEDOUT` arrives here too. Both mean "this file did not come back in time", which is
-        # what the counter is named for.
+        # Before the `OSError` arm: `TimeoutError` subclasses `OSError`, so the other order would
+        # file timeouts as unreadable. An `ETIMEDOUT` share read lands here too, which fits the
+        # counter's meaning.
         except TimeoutError:
             logger.debug(
                 "%s exceeded %ss; the pass moved on and its worker thread runs on",
@@ -342,10 +253,8 @@ async def _parse_changed(
             report.skipped_timeout += 1
             refused.append(ref.path)
             continue
-        # A parse the child was killed for is the same event as the `wait_for` above firing, and
-        # must not be filed as an unreadable document: `skipped_timeout` is the number that says a
-        # bound fired, and `ParseWorkerLost` is a `DocumentParseError` subclass, so without this
-        # arm every killed parse would land in `skipped_unreadable` beside a corrupt PDF.
+        # A killed parse is a timeout, not an unreadable document; `ParseWorkerLost` subclasses
+        # `DocumentParseError`, so it needs its own arm.
         except ParseWorkerLost:
             logger.debug(
                 "%s was still being read after %ss; its reader process was killed",
@@ -358,9 +267,7 @@ async def _parse_changed(
             refused.append(ref.path)
             continue
         except (DocumentParseError, OSError) as exc:
-            # DEBUG per file, one WARNING for the pass — see `_summarise_skips`. The path stays
-            # visible here for whoever is debugging one document; the count and the distinct
-            # reasons are what an operator needs when the whole share stopped parsing.
+            # DEBUG per file, one WARNING for the pass — see `_summarise_skips`.
             logger.debug("skipping %s: %s", ref.path, exc)
             unreadable[type(exc).__name__] += 1
             first_unreadable = first_unreadable or ref.path
@@ -379,9 +286,7 @@ async def _parse_changed(
 def _chunks_for(documents: list[_Parsed], binding: DocumentShareBinding) -> list[ChunkRecord]:
     """Chunk and embed every document that needs it, in one batch.
 
-    One `embed_texts` call for the whole pass rather than one per document: the provider seam is a
-    batch API, and a per-document call over a bounded chunk of a TB share is the difference between
-    one request and a thousand.
+    One `embed_texts` call for the whole pass, since the provider seam is a batch API.
     """
     pending: list[tuple[str, int, str, str]] = []
     for document in documents:
@@ -412,8 +317,7 @@ def _chunks_for(documents: list[_Parsed], binding: DocumentShareBinding) -> list
 def _count_records(source: str, outcome: str, count: int) -> None:
     """Add `count` to this source's tally of one outcome.
 
-    A named function rather than a lambda in the loop below, because a lambda closing over a loop
-    variable is bound late — the classic defect where all three updates land on the last outcome.
+    A named function rather than a lambda in a loop, which would bind the loop variable late.
     """
     record_metric(
         lambda m: m.increment(
@@ -425,26 +329,13 @@ def _count_records(source: str, outcome: str, count: int) -> None:
 def _record_pass(report: SyncReport, duration_s: float) -> None:
     """Emit the one record a sweep leaves behind: the whole report as fields, plus its duration.
 
-    **`SyncReport` was returned and never logged.** A pass over a terabyte share emitted a few
-    WARNINGs about what it could not read and was otherwise silent, so the only way to see what a
-    scheduled sweep did was to open the workflow result in the Temporal UI — which
-    `durable/publish.py` already concedes "is not something anyone watches". Twelve counters,
-    including the per-extension skips this module's own docstring calls the answer that is never
-    silence, existed and reached nobody.
+    One structured line per bounded pass (not per file), so a scheduled sweep is observable without
+    opening the workflow result.
 
-    One line per bounded pass, not per file: log volume stays a function of the pass, which is the
-    rule `_summarise_skips` states. Every field of the report rides as a structured field so the
-    line can be filtered and aggregated rather than only grepped, and `duration_s` and
-    `next_cursor` are on it because neither is derivable from anything else the run leaves behind.
-
-    The three outcomes on `chemclaw_ingest_records_total` partition the candidates this pass saw,
-    and the split is by *what happened to the corpus*, not by severity: `ingested` is a file with an
-    index row, `rejected` is one that was opened or reached and could not be read — a scanned PDF,
-    a permission error, or a read that ran past its bound (the population that is invisible to a
-    chemist and that OCR, a permission fix or a longer budget would recover), `skipped` is one
-    this pass deliberately did not process — unchanged since last time, over the size limit, or a
-    format the allowlist turns away. `deduplicated` is not its own outcome because such a file does
-    get an index row and is counted in `indexed`.
+    `chemclaw_ingest_records_total` partitions the candidates by what happened to the corpus:
+    `ingested` has an index row (including deduplicated files), `rejected` was reached but could not
+    be read (scan, permission error, timeout), and `skipped` was deliberately not processed
+    (unchanged, over the size limit, unsupported format).
     """
     rejected = report.skipped_scan + report.skipped_unreadable + report.skipped_timeout
     skipped = report.unchanged + report.skipped_oversized + sum(report.skipped_unsupported.values())
@@ -494,10 +385,8 @@ async def sync_share(
 ) -> SyncReport:
     """Bring one bounded slice of the share into the index, starting past `after`, and record it.
 
-    The pass is timed and reported here rather than by each of its four early returns: a pass that
-    crawled nothing, one that found nothing changed and one that indexed a thousand files all leave
-    exactly one `ingest.finished` record, which is what makes the absence of a record mean
-    something. See `_record_pass`.
+    Every pass, including the early returns, leaves exactly one `ingest.finished` record
+    (`_record_pass`), so a missing record means something.
 
     Args:
         source: The data-source name; the index partitions on it and the citations carry it.
@@ -508,7 +397,7 @@ async def sync_share(
 
     Returns:
         What was indexed, deduplicated and skipped, plus the resume cursor and whether more remain.
-        Pruning is *not* done here — see `prune_share`, which needs a whole drain to be safe.
+        Pruning is not done here — see `prune_share`, which needs a whole drain to be safe.
     """
     started = time.perf_counter()
     report = await _index_slice(source, binding, index, after=after, limit=limit)
@@ -543,14 +432,11 @@ async def _index_slice(
     changed = [ref for ref in crawl.files if stored.get(ref.path) != ref.fingerprint]
     unchanged = [ref.path for ref in crawl.files if stored.get(ref.path) == ref.fingerprint]
     report.unchanged = len(unchanged)
-    # The mark half of the sweep, and its meaning is **"observed to exist"** — not "successfully
-    # processed". Everything the walk saw goes in: files whose fingerprint matched, and files it
-    # could see but not stat. Marking only what this pass handled is how a transient `EACCES` on a
-    # subtree, or a lock on one document, turns into a deletion of rows whose files never moved.
+    # The mark half of the sweep, meaning "observed to exist", not "processed": fingerprint matches
+    # and entries seen but not stat'ed, so a transient `EACCES` never turns into a deletion.
     await index.touch(source, unchanged + crawl.unreadable)
-    # `crawl_share` records these rather than logging them one by one, for `_summarise_skips`'s
-    # reason: a permission change on one folder is one line per file under it. `OSError` is the
-    # only way an entry lands in that list, so it is the whole reason histogram.
+    # Summarised once rather than logged per entry (`_summarise_skips`); `OSError` is the only
+    # reason an entry lands here.
     _summarise_skips(
         "unreadable share entries",
         Counter({"OSError": len(crawl.unreadable)}) if crawl.unreadable else Counter(),
@@ -560,9 +446,8 @@ async def _index_slice(
         return report
 
     parsed, by_path, refused = await _parse_changed(changed, report, binding.max_file_bytes)
-    # Same rule: a file that was opened and refused is still on the share. Its fingerprint is
-    # deliberately not stored (so the refusal stays visible in the counters, see above), but its
-    # existence is, so the sweep leaves the row it already had alone.
+    # A refused file is still on the share: its fingerprint is not stored, but its existence is
+    # marked so the sweep keeps its row.
     await index.touch(source, refused)
     if not parsed:
         return report
@@ -573,9 +458,8 @@ async def _index_slice(
     known = await index.known_documents({document.doc_id for document in parsed}, key, chunking)
     unseen = {d.doc_id: d for d in parsed if d.doc_id not in known}
     fresh = list(unseen.values())
-    # Counted as "files that cost no embedding", which is both duplicates *within* this pass and
-    # content already on record from an earlier one. Counting only the latter reported zero for the
-    # commonest case there is — the same report filed into two project folders on one crawl.
+    # Files that cost no embedding: duplicates within this pass as well as content already on
+    # record.
     report.deduplicated = len(parsed) - len(fresh)
     chunks = await asyncio.to_thread(_chunks_for, fresh, binding)
     report.embedded_chunks = len(chunks)
@@ -591,20 +475,10 @@ async def reembed_stale(
 ) -> ReembedReport:
     """Re-embed up to `limit` chunks whose vectors were made by a superseded configuration.
 
-    **Reads the database, never the share.** The chunk's text was stored beside its vector, so
-    changing the embedding model is a database-to-database operation: no crawl, no mount, no
-    parse. That is what makes this cheap enough to run at the head of every scheduled sync rather
-    than being a flag somebody has to remember at the moment they change a setting — and the
-    failure it prevents is silent, so a flag would not have been run.
-
-    **And never for text the crawl is about to re-cut.** `chunkings` names the cuttings the enabled
-    shares currently use; a row cut under any other one is superseded, and the crawl will re-parse,
-    re-cut and re-embed it. Refreshing it here would be paid for and then discarded — measured at
-    17 embedding calls for a document worth 1 on the run after an upgrade, because migrations 038
-    and 040 move both keys at once. The chunkings are passed in rather than read here because this
-    module is deliberately dependency-injected: the caller owns which shares are enabled. That
-    also means a *disabled* share's rows are excluded and no crawl will ever repair them — right
-    for the other reason, that no search reaches a disabled source either.
+    Reads stored chunk text, never the share, so it is cheap enough to run at the head of every sync
+    and a model change heals itself. Rows cut under a chunking no enabled share uses are skipped,
+    since the crawl will re-cut and re-embed them; `chunkings` is passed in because the caller owns
+    which shares are enabled.
 
     Args:
         index: The document index to refresh.
@@ -625,12 +499,9 @@ async def reembed_stale(
         refreshed = list(zip(stale, embeddings, strict=True))
         failed = 0
     except Exception:
-        # **One chunk must not starve the whole corpus.** `stale_chunks` is deterministic — same
-        # `ORDER BY`, same `LIMIT`, same first batch on every attempt — so a chunk the provider
-        # refuses (an over-long hard split, a content refusal) failed this activity identically on
-        # every retry. And this drain runs *ahead* of the crawl, so that one chunk stopped all
-        # document indexing, for every share, permanently. Retrying per chunk isolates it: the rest
-        # of the batch is refreshed, and only what genuinely cannot be embedded is left behind.
+        # One chunk must not starve the corpus: `stale_chunks` returns the same first batch every
+        # time and this drain runs before the crawl, so a batch failure is retried per chunk and
+        # only the unembeddable ones are left behind.
         logger.warning("batch re-embed failed; retrying %d chunk(s) individually", len(stale))
         refreshed, failed = await _reembed_individually(stale)
     if refreshed:
@@ -654,10 +525,8 @@ async def reembed_stale(
             "against queries embedded by the current model until this is fixed",
             failed,
         )
-    # A full pass means there may be more — **but only if this pass made progress**. A batch where
-    # every chunk failed would otherwise return the identical batch forever, which is the same wedge
-    # one layer up. `stalled` is what keeps that gate from being read as "up to date": stale rows
-    # remain, and this pass is declining to spin on them rather than reporting them handled.
+    # More may remain only if this pass made progress; otherwise the same failing batch would repeat
+    # forever. `stalled` reports that stale rows remain.
     stalled = bool(stale) and not refreshed
     if stalled:
         logger.error(
@@ -679,12 +548,9 @@ async def _reembed_individually(
 ) -> tuple[list[tuple[StaleChunk, list[float]]], int]:
     """Embed one chunk at a time so a single unembeddable one costs only itself.
 
-    **The distinct reasons are summarised once, at WARNING** — `_summarise_skips`'s pattern, for
-    the same reason and against the same failure. The per-chunk line stays at DEBUG because 500
-    identical lines saying the endpoint is down is not more information than one; but until this,
-    DEBUG was *all* there was: the caller's ERROR carried a count and nothing else, so "the
-    provider is unreachable" and "these particular chunks are unembeddable content" reached an
-    operator as the same number, and the first is an outage while the second is a corpus fact.
+    Distinct failure reasons are summarised once at WARNING (as in `_summarise_skips`), so an
+    unreachable provider is distinguishable from individually unembeddable content; per-chunk lines
+    stay at DEBUG.
     """
     refreshed: list[tuple[StaleChunk, list[float]]] = []
     reasons: Counter[str] = Counter()
@@ -710,25 +576,14 @@ async def prune_share(
 ) -> int:
     """Sweep index rows this run never saw — but only when the run actually saw the whole share.
 
-    **This guard is the point of the function.** A CIFS mount that dropped, a root renamed by
-    someone reorganizing the share, a permission change on one folder: each presents as "these
-    files are not there", and sweeping on that evidence deletes a corpus that took days to build.
+    A dropped mount, a renamed root or a permission change all look like "these files are gone", so
+    the guard is the point. It takes the drain's merged report rather than a caller-computed
+    boolean, so every caller applies one rule. Refused when:
 
-    It takes the **drain's own merged report** rather than a boolean the caller worked out, because
-    there were two callers computing that boolean and only one of them was right: the durable
-    workflow caught a wedged drain and the CLI did not, so `--limit 0` swept a source it had not
-    looked at. Evidence a caller derives is a rule each caller can get wrong; evidence a caller
-    *hands over* is one rule.
-
-    Three ways a drain fails to be evidence of absence, all refusals:
-
-    - **A root failed to walk.** Half a share is not a share.
-    - **The drain never finished** (`has_more` still set). It stopped early or wedged, so the
-      unvisited tail is unmarked and would sweep wholesale.
-    - **It saw no candidates at all.** A detached CIFS volume leaves its mount point behind as an
-      empty directory, and with `roots: [{path: "."}]` there is no missing root to notice. A share
-      that is genuinely empty keeps stale rows until it has a file again, which is the harmless
-      half of the trade this whole module is built on.
+    - **A root failed to walk.**
+    - **The drain never finished** (`has_more` still set), so the unvisited tail is unmarked.
+    - **It saw no candidates at all.** A detached volume leaves an empty mount point; a genuinely
+      empty share keeps stale rows until it has a file again.
 
     Args:
         source: The data-source name whose rows may be swept.

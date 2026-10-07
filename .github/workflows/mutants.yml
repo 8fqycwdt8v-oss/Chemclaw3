@@ -7,9 +7,6 @@
 # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` had already deleted along with the whole
 # PR gate. A weekly job advertising coverage of a file that does not exist is the same defect class
 # this repository records for its validator list and its Makefile target count.
-# `tests/test_docstring_paths.py` is what keeps it honest now: its corpus was widened to cover
-# `.github/` in the same commit, so a module named in a workflow comment must resolve on disk
-# exactly as one named in a docstring must.
 #
 # `make mutants` is excluded from the `ci` target because it costs an order of magnitude more than
 # the gate — and until this file it had **no schedule
@@ -61,8 +58,7 @@ jobs:
     # `pytest_add_cli_args_test_selection` gate on `tests/pg.py::migrated_db_or_skip`; derive the
     # set rather than reading it here, because the list this paragraph used to give named two files
     # that do not exist (`test_note_proposals.py`, `test_pr_gate_read_window.py`) and one that does
-    # not gate, and `tests/test_docstring_paths.py` cannot catch a bare filename with no directory
-    # segment. Without a database those files skip and still report green, so every mutant in
+    # not gate. Without a database those files skip and still report green, so every mutant in
     # `science/calc/store.py` and `agent/audit_store.py` would be scored SURVIVED for a reason that
     # has nothing to do with the mutation. That is worse than not running: it manufactures
     # survivors in exactly the two modules this job exists for.

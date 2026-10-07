@@ -1,25 +1,12 @@
 """`make kg-validate`: the graph's own checks plus the citations only a store can answer.
 
-Checks that belong to different layers, run as one gate. `kg.validate` is pure — it reads a
-notes directory and knows nothing about a database, which is what lets `kg` sit one edge above
-`core` and nothing else. The existence halves need the stores — the ELN transcription tier for
-`[[reaction-*]]` citations, the calculation cache for `calc_refs` — and `ingest` and `science`
-both depend on `kg`, so the checks cannot live there without inverting the layering for a
-one-method need. They live here instead, in the entrypoint layer that is allowed to see both —
-the same reason `cli.validate_connectors` is a CLI rather than a `connectors` module.
+`kg.validate` is pure and knows no database. The existence checks need stores — the ELN
+transcription tier for `[[reaction-*]]` citations, the calculation cache for `calc_refs` — and
+`ingest`/`science` depend on `kg`, so they live in this entrypoint layer. `dangling_links` ignores
+`[[reaction-<id>]]` targets on purpose, which makes this gate their only check; CI runs it with a
+Postgres service.
 
-**Why the second half exists at all.** Since D-2026-08-25 an ELN transcription is a row rather than
-a file, so `kg.graph.dangling_links` deliberately does not report `[[reaction-<id>]]` as broken —
-it cannot see the store. That trade is only acceptable because something else checks it, and this
-is that something: CI runs with a Postgres service, so the check really runs there rather than
-being a claim in a docstring.
-
-When the database is unreachable the gate says so, loudly, and does **not** pass silently. A
-validator that quietly skips is indistinguishable in a log from one that found nothing wrong, which
-is the failure mode `map_to_hpc_identity` is remembered for. **The same rule now covers the corpus
-half**, which it did not: a notes directory that is empty, holds no `.md`, or is not a directory at
-all walked zero notes and printed the success line, so a mis-set `CHEMCLAW_NOTE_REPO_DIR` turned
-the only check on `[[reaction-*]]` citations off in silence.
+An unreachable database or an empty corpus fails the gate loudly rather than passing silently.
 """
 
 import argparse
@@ -43,10 +30,8 @@ from chemclaw.science.calc.postgres_store import PostgresStore
 def main(argv: Sequence[str] | None = None) -> int:
     """Validate the graph, then its store-backed citations; print problems; return an exit code.
 
-    The notes directory is a real positional and stays one — this gate is genuinely run against a
-    dedicated note checkout (`CHEMCLAW_NOTE_REPO_DIR`) as well as the shipped tree. What it did not
-    have was a *declaration*: reading `sys.argv[1]` raw meant `--help` was taken for a directory
-    name and reported as missing, and a second argument was discarded in silence.
+    The notes directory is a positional, run against the shipped tree or a dedicated note checkout
+    (`CHEMCLAW_NOTE_REPO_DIR`).
     """
     parser = argparse.ArgumentParser(
         prog="python -m chemclaw.cli.validate_kg",
@@ -61,36 +46,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     options = parser.parse_args(argv)
     notes_dir = Path(options.notes_dir) if options.notes_dir else settings.knowledge_path
-    # `is_dir()`, not `exists()`. A *file* passed where a directory belongs exists, walks zero
-    # notes and printed the success line — the same green-on-nothing arm the empty-corpus refusal
-    # below closes, reached one step earlier.
+    # `is_dir()`, not `exists()`: a file would walk zero notes and pass.
     if not notes_dir.is_dir():
         print(f"notes directory does not exist, or is not a directory: {notes_dir}")
         return 1
     try:
         # One parse for all the halves: the citation checks read the same corpus `validate` just
-        # walked, and the second `read_note` loop this used to run doubled the gate's cost.
+        # walked.
         problems, notes = validate_with_notes(notes_dir)
     except ChemclawError as exc:
         print(f"cannot determine this deployment's note vocabulary: {exc}")
         return 1
 
     if not notes:
-        # Appended as a *problem* rather than returned early, so a corpus whose only file is
-        # unparseable still reports the parse failure beside this line: `validate_with_notes`
-        # yields no notes in that case too, and an early return would hide the finding that
-        # explains it.
-        #
-        # **A corpus of zero notes is a problem, not a pass.** Four sibling validators already
-        # refuse this and say why in the same words (`validate_templates`: "this gate would have
-        # checked nothing"; `validate_datasources`, `validate_skills`, `ingest/eln/validate`), and
-        # this module's own docstring makes the argument for the *database* half — "a validator
-        # that quietly skips is indistinguishable in a log from one that found nothing wrong" —
-        # while leaving the corpus half unguarded. It matters most here: since D-2026-08-25
-        # `dangling_links` ignores every `reaction-` target on purpose, so this gate is the only
-        # thing checking those citations, and a `CHEMCLAW_NOTE_REPO_DIR` pointing at a fresh
-        # clone, the wrong branch, or a PVC mounted after its directory was created makes it green
-        # forever.
+        # Appended rather than returned early, so an unparseable sole file still reports its parse
+        # failure. A corpus of zero notes is a problem, not a pass: a mis-set
+        # `CHEMCLAW_NOTE_REPO_DIR` would otherwise turn off the only check on `[[reaction-*]]`
+        # citations.
         problems.append(
             f"no notes found under {notes_dir} — this gate would have checked nothing. "
             "Check CHEMCLAW_NOTE_REPO_DIR / CHEMCLAW_KNOWLEDGE_DIR before reading this as a pass."
@@ -110,9 +82,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CHEMCLAW_POSTGRES_DSN to reach a migrated database."
             )
     if calc_refs:
-        # The calculation half of the same question: `_calc_ref_shape` checks a ref's *form* and
-        # concedes existence "is a question only a database can answer" — this is where it is
-        # answered. Same store the cache writes (`calculation_results`), same failure posture.
+        # The calculation half: `_calc_ref_shape` checks a ref's form; existence is checked here
+        # against `calculation_results`, with the same failure posture.
         try:
             problems.extend(asyncio.run(unresolved_calc_refs(calc_refs, PostgresStore())))
         except Exception as exc:
@@ -129,12 +100,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"\n{len(problems)} problem(s) found in {notes_dir}")
         return 1
     if unchecked:
-        # **Non-zero, not zero.** This module's own docstring promised the gate "does not pass
-        # silently" when the store is unreachable, and then returned success anyway — the printed
-        # line was the whole of the control. It matters more here than it would elsewhere: since
-        # D-2026-08-25 `dangling_links` ignores every `reaction-` target on purpose, so this half is
-        # the *only* thing standing between a typo'd run id and a merge. A gate that cannot run its
-        # one remaining check has not passed; it has not looked.
+        # Non-zero: a gate that cannot run its store check has not passed, and this is the only
+        # check on `[[reaction-*]]` citations.
         print(
             f"\n{unchecked} store-backed citation(s) could not be checked, so this gate did not "
             "pass. Point CHEMCLAW_POSTGRES_DSN at a migrated database and run it again."
@@ -145,13 +112,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"({len(citations)} reaction citation(s) and {len(calc_refs)} calc_ref(s) verified)"
     )
     if not citations and not calc_refs:
-        # **Said out loud, because the two zeros above are easy to read past.** This is the shipped
-        # tree's state on every CI run, and it is not a corpus defect to be fixed here: a seed
-        # `calc_ref` is a fabricated key and would fail this gate on every fresh database, which
-        # `tests/test_seed_corpus.py` requires for that reason. What the reader needs is to know
-        # that the half of this gate needing a database did not run — a success line that reads
-        # like a whole gate is the shape `map_to_hpc_identity` is remembered for. Not an error:
-        # a corpus with no external citations is a legitimate corpus.
+        # Said out loud so a reader knows the database half had nothing to check. Not an error: the
+        # shipped tree has no external citations (a seed `calc_ref` would fail on every fresh
+        # database).
         print(
             "NOTE: this corpus cites no reaction record and no calculation, so the two "
             "store-backed halves of this gate had nothing to check. "

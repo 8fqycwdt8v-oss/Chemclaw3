@@ -1,8 +1,7 @@
-"""The `rxnfp` connector's FastAPI app — the reaction capability behind its own server.
+"""The `rxnfp` connector's FastAPI app: the reaction capability behind its own server.
 
-The three-way split every bundle uses: `chemclaw.science.fingerprints.rxnfp` computes, `tools.py`
-beside this file advertises those functions as MCP tools, and this module gives them the transport
-the connector seam expects (`/healthz` + `/mcp`), so DRFP and the reaction fingerprint table leave
+`chemclaw.science.fingerprints.rxnfp` computes, `tools.py` advertises it over MCP, and this module
+adds the transport (`/healthz` + `/mcp`), keeping DRFP and the reaction fingerprint table out of
 the chat service's process.
 
 Run it with `uvicorn chemclaw.connectors.rxnfp.server.app:app --port 8812`, or through `make

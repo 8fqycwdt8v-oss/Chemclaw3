@@ -1,5 +1,7 @@
 # D-048 — F5: real HPC execution via a Nextflow launcher behind the QM activities (D-A5, D-A5a)
 
+**Superseded-by:** [D-2026-08-26-semiempirical-is-the-whole-tier](D-2026-08-26-semiempirical-is-the-whole-tier.md)
+
 **Context.** The QM spine was mocked (a SLURM-style sleep). Its module docstring promised that
 making compute real would touch *only* `workflows/activities.py`. F5 keeps that promise.
 

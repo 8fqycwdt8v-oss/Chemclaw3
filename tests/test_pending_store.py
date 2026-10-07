@@ -1,14 +1,9 @@
 """The projection behind the durable wait, driven against a real database.
 
-The workflow is the authority on whether a wait is open; this table is what makes "what is waiting
-on *me*" answerable, because Temporal can list its own runs and knows nothing about the subject
-line, the requester or the reason.
-
-The property worth the database is the **transition guard**. An expiry racing a person's click is
-the ordinary case here, not an edge one — the deadline fires on a timer and the answer arrives from
-a browser — and without `WHERE state = 'waiting'` in the SQL the outcome would be decided by
-whichever transaction commits second. A guard in the worker would not do: the two writers are two
-processes.
+The workflow decides whether a wait is open; this table makes "what is waiting on me" answerable.
+The property worth the database is the transition guard: an expiry racing a person's answer is
+ordinary, the two writers are different processes, and `WHERE state = 'waiting'` in the SQL is
+what decides it.
 """
 
 import asyncio
@@ -27,11 +22,9 @@ REQUESTER = "pending-test-requester"
 
 
 async def _clean() -> None:
-    """Remove this file's rows, so a re-run starts from the same place.
+    """Remove this file's rows, including archived answers, so a re-run starts clean.
 
-    The archive too: the application holds no DELETE on `pending_request_answers` by design
-    (`infra/sql/grants/app_privileges.sql`), and this runs as the owner, so a left-over row from a
-    previous run would make the re-ask assertions read the wrong cycle.
+    The application has no DELETE on `pending_request_answers`; this runs as the owner.
     """
     async with await connect(settings.postgres_dsn) as conn:
         await conn.execute("DELETE FROM pending_requests WHERE requested_by = %s", (REQUESTER,))
@@ -62,9 +55,8 @@ async def _open(
 async def test_a_wait_can_be_settled_exactly_once() -> None:
     """The first writer wins; the second is told it did not settle, and the row is unchanged.
 
-    The return value is the whole point. An expiry that silently no-ops looks identical to one that
-    succeeded, so the workflow could not tell "somebody answered while I was timing out" from "I
-    ended this", and the inbox and the outcome would disagree.
+    The return value lets the workflow tell "somebody answered while I was timing out" from "I ended
+    this".
     """
     await migrated_db_or_skip()
     await _clean()
@@ -89,9 +81,8 @@ async def test_a_wait_can_be_settled_exactly_once() -> None:
 async def test_reopening_a_settled_request_does_nothing() -> None:
     """`open_request` is idempotent for a retry and inert for a decided wait.
 
-    The activity that opens the projection runs at-least-once, so it must be replayable. It must
-    also never resurrect a settled request: a retry arriving after somebody answered would put the
-    question back in their inbox with the answer already recorded.
+    The opening activity runs at-least-once, and a late retry must not put an answered question back
+    in an inbox.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -107,11 +98,9 @@ async def test_reopening_a_settled_request_does_nothing() -> None:
 
 
 async def test_the_inbox_shows_what_is_routed_to_you_and_what_is_routed_to_nobody() -> None:
-    """An unrouted request is waiting on whoever is entitled, so it appears in a named query.
+    """An unrouted request appears in a named inbox query.
 
-    Hiding it would make the common case invisible: a question raised without knowing the right
-    name is the default, and an inbox that only showed personally-addressed rows would show
-    almost nothing.
+    It is waiting on whoever is entitled, and unrouted is the common case.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -170,15 +159,11 @@ async def test_a_reminder_counts_only_while_the_request_is_open() -> None:
 
 
 async def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
-    """The case `ALLOW_DUPLICATE` exists for, which the projection used to drop on the floor.
+    """Asking again after a deadline lapsed reopens the row.
 
-    `request_id_for` is deterministic, so a re-ask reuses the workflow id; `request_external_input`
-    sets `WorkflowIDReusePolicy.ALLOW_DUPLICATE` precisely so a lapsed question can be asked again.
-    The projection guarded its upsert on `state = 'waiting'` and never reset the state, so the new
-    wait inherited the old cycle's `expired` row: invisible to `open_requests`, frozen for
-    `record_reminder`, and refused 409 by the answer route — forever, while the workflow ran on.
-
-    The run id is what separates a retry from a re-ask, so both halves are asserted here.
+    `request_id_for` is deterministic and `ALLOW_DUPLICATE` permits re-asking, so a new run must
+    reset an `expired` row or the question is invisible and unanswerable while the workflow waits.
+    The run id separates a retry from a re-ask; both halves are asserted.
     """
     await migrated_db_or_skip()
     request_id = "req-reask"
@@ -207,12 +192,7 @@ async def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
 
 
 async def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() -> None:
-    """The case the original guard was written for, which must survive the fix.
-
-    An activity retry carries the *same* run. If that reopened a settled row, an at-least-once
-    delivery could resurrect a wait the workflow had already answered — which is why the reopen is
-    keyed on the run id changing rather than on the state alone.
-    """
+    """A retry of the opening activity (same run) does not disturb a settled row."""
     await migrated_db_or_skip()
     request_id = "req-retry"
     await _clean()
@@ -230,36 +210,19 @@ async def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() 
 
 
 def test_a_re_ask_of_an_answered_question_opens_and_the_answer_is_archived() -> None:
-    """All five shapes `_OPEN`'s guard admits, and what each does to the row and to the archive.
+    """All five shapes `_OPEN`'s guard admits, and what each does to the row and the archive.
 
-    `D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`. Migration 079 scoped
-    the reopen to the terminal states in which **nobody answered**, because reopening blanks
-    `answered_at`/`answered_by`/`answer` and this table is in `retention._NOT_PRUNED` as "the
-    attribution for an answer that released a durable workflow" — the only record there is.
-    Refusing was the right direction and the wrong outcome: a legitimate re-ask of a standing
-    question — the same measurement in a later campaign round, a re-launched approval — met an
-    `answered` row, wrote nothing, and `durable/awaiting.py` raised a **non-retryable**
-    `ApplicationError`, so the workflow failed rather than waiting. The question could not be asked
-    again for as long as the old answer stood, which for this table is for ever.
-
-    So `_ARCHIVE_ANSWER` moves the answer into `pending_request_answers`, keyed on the run that
-    *answered*, in the same transaction and before the upsert — and `'answered'` joins the reopen.
-
-    **This test replaced the one that asserted the refusal, and it drives every shape rather than
-    the one that changed**, because the edit is to a `WHERE` clause that has now been rewritten
-    three times (076, 079, 096) and each rewrite broke a different one of these:
+    A re-ask of an answered question must open a new wait, so `_ARCHIVE_ANSWER` moves the previous
+    answer into `pending_request_answers` (keyed on the answering run) in the same transaction
+    (`D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`). Shapes:
 
     * a first ask opens;
-    * a **retry by the owning run** against an answered row leaves that row alone — an at-least-once
-      activity must be replayable, and archiving its own answer or blanking it would both be wrong;
-    * a **re-ask by a different run** reopens, and the previous answer is in the archive, whole;
-    * a re-ask after an `expired` cycle reopens and archives **nothing**, because nobody answered;
-    * a caller with no `run_id` is a different run to any named one, and behaves like one.
+    * a retry by the owning run leaves an answered row alone;
+    * a re-ask by a different run reopens, with the previous answer archived whole;
+    * a re-ask after an `expired` cycle reopens and archives nothing;
+    * a caller with no `run_id` behaves as a different run.
 
-    The archive is read with a direct query rather than through a store function: there is no reader
-    for it in `src/` and deliberately none — nothing in the system consults an archived answer, it
-    exists so that the record is not destroyed. A helper written only for this test would be the
-    reader, and then the test would be asserting its own code.
+    The archive is read by direct query: nothing in `src/` reads it, by design.
     """
 
     async def _archived(request_id: str) -> list[tuple[str, str, dict[str, Any]]]:
@@ -323,12 +286,10 @@ def test_a_re_ask_of_an_answered_question_opens_and_the_answer_is_archived() -> 
 
 
 async def test_an_expiry_does_not_claim_somebody_answered() -> None:
-    """`answered_at` is a fact about a person, not about a state transition.
+    """An expiry does not stamp `answered_at`.
 
-    It was stamped on every settle, so an `expired` row carried a timestamp beside an empty
-    `answered_by` — the front door and the agent both read that as "somebody answered at some
-    point". Migration 076's `pending_requests_answer_is_attributed` exists to prevent exactly that
-    claim and only fires on `state = 'answered'`; the write walked around it from the other side.
+    `answered_at` is a fact about a person, and an `expired` row carrying one reads as "somebody
+    answered".
     """
     await migrated_db_or_skip()
     await _clean()
@@ -350,20 +311,11 @@ async def test_an_expiry_does_not_claim_somebody_answered() -> None:
 
 
 async def test_a_redelivered_reminder_does_not_count_one_escalation_twice() -> None:
-    """A Temporal activity is at-least-once, so the write it makes has to be.
+    """A redelivered reminder does not count one escalation twice.
 
-    `record_reminder_activity` ran `reminders = reminders + 1` under a 5-attempt retry policy, and
-    an execution whose UPDATE commits and whose completion report is then lost — a worker that
-    dies, a broker that misses the response, an attempt that overruns its own `start_to_close`
-    after committing — is redelivered and increments again. Established on a real broker before the
-    fix: one escalation, two attempts, `reminders = 2` against `AwaitAnswerWorkflow._reminders` of
-    1 — and this column is what an inbox shows and what `AwaitOutcome.reminders` is compared
-    against, so the two counters silently disagreed.
-
-    Driven as the redelivery rather than as the broker, because what has to hold is a property of
-    the *write*: the same call made twice with the same replay-stable number leaves the same row.
-    The second half is the one that keeps the fix honest — a `GREATEST` that never advanced would
-    pass the first assertion and record nothing.
+    The activity is at-least-once, so the write takes the replay-stable reminder number rather than
+    incrementing. Driven as the redelivery: the same call twice leaves the same row, and a later
+    number still advances it.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -387,15 +339,10 @@ async def test_a_redelivered_reminder_does_not_count_one_escalation_twice() -> N
 
 
 async def test_the_inbox_query_says_how_much_it_did_not_return() -> None:
-    """A page of the inbox used to be byte-identical to the whole of it.
+    """The inbox query says how much it did not return.
 
-    Measured against a real database: 35 rows waiting, `open_requests(limit=20)` returned 20, and
-    nothing in the return value, in a log line or in a counter said the other 15 existed. The cost
-    is the one an inbox exists to prevent — a question raised, never surfaced to anybody, expiring
-    unanswered — and a bare list cannot even express it.
-
-    `limit_applied` is the second half: the store clamps to 200, so a caller asking for 10,000
-    silently got 200 and had no way to tell that from a corpus of 200.
+    A page must be distinguishable from the whole inbox, or a question can expire unsurfaced.
+    `limit_applied` reports the store's clamp to 200.
     """
     await migrated_db_or_skip()
     await _clean()
@@ -420,14 +367,11 @@ async def test_the_inbox_query_says_how_much_it_did_not_return() -> None:
 async def test_a_request_is_built_from_the_columns_by_name_and_keeps_its_iso_stamps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reversing `_COLUMNS` must change nothing, and the three timestamps stay ISO strings.
+    """Requests are built from columns by name, and the three timestamps stay ISO strings.
 
-    `_COLUMNS` and `PendingRequest`'s field list are now one declaration — fifteen positional
-    subscripts used to be the second copy, over seven adjacent `TEXT` columns. The stamps are
-    asserted alongside because a row factory converts nothing: `due_at`, `answered_at` and
-    `created_at` are `TIMESTAMPTZ` and reach `GET /pending` as `datetime.isoformat()` spells them,
-    which is now a `BeforeValidator` and deliberately not a SQL `::text` that would spell them
-    otherwise.
+    `_COLUMNS` and `PendingRequest`'s fields are one declaration, so reversing it changes nothing.
+    The `TIMESTAMPTZ` stamps are formatted by a `BeforeValidator` as `datetime.isoformat()` spells
+    them.
     """
     from chemclaw.durable import pending_store as store
 
@@ -444,10 +388,8 @@ async def test_a_request_is_built_from_the_columns_by_name_and_keeps_its_iso_sta
     assert await store.get_request("pending-by-name") == straight, (
         "the column order must not be able to decide which field a value lands in"
     )
-    # The inbox is global — other files leave waiting rows behind — so this asserts membership
-    # and the count's relationship to the page rather than an exact roster. What it is here to
-    # prove is that the page and its count survived being split across two cursors, which they
-    # had to be: a row factory belongs to a cursor and `count(*)` is not a `PendingRequest`.
+    # The inbox is global across test files, so this asserts membership and the count's relation to
+    # the page, which come from two cursors.
     page = await store.open_requests(limit=store._MAX_PAGE)
     assert "pending-by-name" in [row.request_id for row in page.requests]
     assert page.total_waiting >= len(page.requests) >= 1, (

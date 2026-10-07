@@ -1,14 +1,8 @@
-"""Publishing an archived run is a projection of the record, not a re-derivation of it (AG-13).
+"""Publishing an archived run to Phoenix is a projection of the record, not a re-derivation of it.
 
-These drive `evals/phoenix.py` against a recording stand-in rather than a live Phoenix, for the
-reason the module's own docstring gives about the transcripts: the thing under test is the mapping
-from what this repo stored to what Phoenix is told, and a server in the loop would make a mapping
-bug and a server bug the same failure. The live half is recorded in the ADR, where it belongs — a
-real Phoenix 20.1.0 took every archived arm in this repo.
-
-The one test that matters most is `test_a_partial_run_does_not_shrink_the_corpus`: building the
-dataset from a run's own transcripts is the obvious implementation, it passes every other check
-here, and it silently records a run that covered less as a corpus that lost questions.
+Driven against a recording stand-in rather than a live Phoenix: what is tested is the mapping from
+what this repository stored to what Phoenix is told. The key test is
+`test_a_partial_run_does_not_shrink_the_corpus`.
 """
 
 import json
@@ -116,10 +110,8 @@ def archived(tmp_path: Path) -> Path:
 def test_a_partial_run_does_not_shrink_the_corpus(archived: Path) -> None:
     """The dataset is every committed probe; a run that covered two of them logs two runs.
 
-    Building the examples from the run's own transcripts passes every other test in this file and
-    is wrong: it was measured against a live Phoenix cutting a 190-example version down to 92 when
-    the shorter sonnet arm was published, which reads as a corpus that lost 98 questions rather
-    than a run that answered fewer.
+    Building examples from the run's own transcripts would publish a shorter run as a corpus that
+    lost questions.
     """
     client = _Client()
     published = publish_run(archived, experiment_name="arm", client=client, probe_dir=_PROBE_DIR)
@@ -170,11 +162,9 @@ def test_the_judge_and_the_transcript_are_different_kinds_of_claim(archived: Pat
 
 
 def test_an_ungraded_probe_still_publishes_its_objective_signals(archived: Path) -> None:
-    """Only one of the two probes was graded; both are published.
+    """An ungraded probe still publishes its objective signals.
 
-    Requiring `grades.json` would make the most common state of a fresh run — transcripts written,
-    judge pass not yet run — unpublishable, and the signals that need no grader are exactly the
-    ones a fresh run wants to look at.
+    Requiring `grades.json` would make a fresh run, before its judge pass, unpublishable.
     """
     client = _Client()
     publish_run(archived, experiment_name="arm", client=client, probe_dir=_PROBE_DIR)
@@ -228,27 +218,12 @@ def test_a_run_window_uses_the_latency_the_transcript_kept(archived: Path) -> No
 
 
 def test_an_unmeasurable_signal_is_absent_rather_than_scored_zero(tmp_path: Path) -> None:
-    """A zero is a claim, and two of these evaluations were making it about probes nobody measured.
+    """An unmeasurable signal is absent rather than scored zero.
 
-    `_evaluations` wrote `1.0 if outcome.expected_tools_met else 0.0`, so `None` — "this probe
-    declares no expected tool", the correct state of 57 of the 258 committed probes and of 53 of
-    the bucket-C ones, where calling no tool *is* the right behaviour — scored identically to
-    `False`, "the tool existed and was not called". It wrote `1.0 if verdict == "served" else 0.0`,
-    so `ungraded` — "the judge's own reply hit the token ceiling" — scored identically to
-    `unserved`, "the system did not serve the asker". Measured, a bucket-C outcome with an ungraded
-    judgement published
-
-        expected_tools_met -> score 0.0 label none
-        judge_verdict      -> score 0.0 label ungraded
-
-    byte-identical in score to a probe that failed a user. The docstring calls those scores "the
-    number a second run should be compared on": the published `expected_tools_met` mean was capped
-    at 0.78 by the corpus's composition and a release adding bucket-C probes "regressed" it, while
-    a run whose judge timed out on twenty probes was indistinguishable from one that failed twenty
-    chemists. `live_judge` already keeps `ungraded` separate for the same reason — collapsing it
-    "mislabelled 65 of 190 probes and inflated the headline unserved rate from at most 22 to 87".
-
-    Phoenix's aggregate wants the evaluation *absent*. The labels stay on the run either way.
+    `expected_tools_met=None` (the probe declares no expected tool) is not `False`, and an
+    `ungraded` judgement (the judge hit its token ceiling) is not `unserved`. Scoring either as 0.0
+    makes it identical to a probe that failed a user. Phoenix's aggregate needs the evaluation
+    absent; the labels stay on the run.
     """
     probe = load_probes(_PROBE_DIR)[-1]
     directory = tmp_path / "transcripts"
@@ -324,24 +299,11 @@ def _publish_one(tmp_path: Path, name: str, **outcome: Any) -> dict[str, dict[st
 
 
 def test_a_loud_failure_is_published_and_an_unobserved_one_is_not(tmp_path: Path) -> None:
-    """The `failed_loudly` guard and the value it published disagreed on both edges.
+    """A loud failure is published, and an unobserved one is not.
 
-    `failed_loudly` is `tools_failed or error_code`; the row was gated on
-    `error_code or transport_error`. So a turn whose tools fell over with **no** `error` event was
-    `True` and published nothing at all — the aggregate silently excluded exactly the runs it
-    counts — while a turn that died in transport was `False` and published
-
-        {'name': 'failed_loudly', 'score': 0.0, 'label': 'transport_error'}
-
-    "this run did not fail loudly", stamped with the name of the failure that killed it. Both are
-    the same defect as the one the test above records: a number published about something nobody
-    measured.
-
-    A transport death now publishes no `failed_loudly` row — the stream broke, so whether the
-    system announced its own failure was not observed, and `publish_run` already stamps the run
-    itself with `error=`. Every turn the harness *did* observe publishes one, so the aggregate is
-    the run's loud-failure rate rather than a constant 1.0 over the turns that carried an error
-    code.
+    `failed_loudly` is `tools_failed or error_code`, so the row is published for every turn the
+    harness observed. A transport death publishes no row, since whether the system announced its own
+    failure was not observed; `publish_run` already stamps the run with `error=`.
     """
     broke = _publish_one(
         tmp_path,
@@ -371,16 +333,11 @@ def test_a_loud_failure_is_published_and_an_unobserved_one_is_not(tmp_path: Path
 
 
 def test_the_premise_a_probe_was_scored_under_travels_with_it(archived: Path) -> None:
-    """Both halves of "what the system was assumed to be", on every published example.
+    """The premise a probe was scored under travels with every published example.
 
-    `asserts_absent` says which capability the question was scored as *lacking*. `needs_bundle` says
-    which deployment it was scored *against* — and it is the harder of the two to reconstruct later,
-    because unlike a corpus field it changes with **no corpus edit at all**: pointing
-    `CHEMCLAW_CONNECTORS_DIR` somewhere else is enough for `evals/live._tool_expectation_applies` to
-    drop an expectation, silently, on the same probe text.
-
-    Without both on the example, two runs of one probe in two lanes are indistinguishable in the
-    published dataset, and whoever compares them is comparing two different questions.
+    `asserts_absent` names the capability the question was scored as lacking; `needs_bundle` names
+    the deployment it was scored against, which can change with no corpus edit (a different
+    `CHEMCLAW_CONNECTORS_DIR`). Without both, two runs in two lanes are indistinguishable.
     """
     client = _Client()
     publish_run(archived, experiment_name="arm", client=client, probe_dir=_PROBE_DIR)

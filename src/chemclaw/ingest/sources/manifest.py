@@ -1,32 +1,11 @@
 """The data-source manifest: one validated declaration of where a body of evidence comes from.
 
-The counterpart of `connectors/manifest.py`, for the other thing this system attaches to the
-outside world. A connector contributes *capability* (work whose result is a value); a data source
-contributes *corpus* (records to ingest, evidence to retrieve). They are different enough to
-deserve different manifests and similar enough that a second idiom would be indefensible — so this
-file mirrors that one deliberately: a folder plus a YAML file, `extra="forbid"`, discovered from
-disk, enabled by a config token.
-
-**Why a manifest replaced a dict of factories.** `ingest/sources/registry.py` used to hold
-`DATA_SOURCES: dict[str, Callable[[], DataSource]]`, so every source's adapter was constructed by
-a lambda in that module — which meant the module imported every adapter at module scope. Asking
-for the *retrieve* sources, which under the default config yields exactly one source (`graph`),
-loaded all five ELN *ingest* modules and 836 modules in total. Nothing was wrong with any one of
-those imports; the coupling was in the registry's shape, and it grows with every source added.
-That matters here more than it would elsewhere: a data source's dependency is a *driver* — a
-database client, a vendor SDK — and a warehouse ELN connector would otherwise have put its driver
-in the chat pod, which will never ingest anything.
-
-A manifest fixes it by making the one fact you need in order to *skip* a source available as
-data: `ingest:` and `retrieve:` say which halves exist without importing either. So
-`active_retrieve_sources()` can filter first and import second, and a source's driver is loaded
-only in the process that uses that half.
-
-**Halves are `module:callable` strings, resolved late.** The same late-binding the connector seam
-uses for `params_model` — and the same hazard, which `connectors/calc/specs.py` was split out to
-avoid: a name in YAML is an import that no reader of the importing module can see. The rule
-that falls out is worth stating, because it is the discipline of this seam: *a half's callable may
-import whatever it needs, because only the processes that use that half will ever resolve it.*
+The counterpart of `connectors/manifest.py`: a connector contributes capability, a data source
+contributes corpus, and both use the same idiom (a folder plus a YAML file, `extra="forbid"`,
+discovered from disk, enabled by a config token). Declaring halves as data lets a process skip a
+source without importing it, so a driver (database client, vendor SDK) loads only where its half is
+used. Halves are `module:callable` strings resolved late; a half's callable may import whatever it
+needs, because only processes using that half resolve it.
 """
 
 from typing import Any, Self
@@ -133,11 +112,10 @@ class DataSourceManifest(BaseModel):
 
     @model_validator(mode="after")
     def _must_provide_a_half(self) -> Self:
-        """Reject a source declaring neither half — nothing could ever use it.
+        """Reject a source declaring neither half: nothing could ever use it.
 
-        The manifest-level twin of `SourceSpec.__post_init__`. Both exist because the two can be
-        reached independently: a manifest is validated before anything is built, and `SourceSpec`
-        is also constructed directly in tests.
+        The manifest-level twin of `SourceSpec.__post_init__`; either can be reached without the
+        other.
         """
         if self.ingest is None and self.retrieve is None and self.commitments is None:
             raise ValueError(
@@ -150,9 +128,8 @@ class DataSourceManifest(BaseModel):
     def _halves_are_module_qualified(self) -> Self:
         """Reject a half that is not `module:callable`.
 
-        Caught here rather than at import time so the failure names the manifest and the field. A
-        bare `JsonExportAdapter` would otherwise surface as an opaque `ValueError: not enough
-        values to unpack` from the resolver, in whichever process happened to need that half first.
+        Caught here so the failure names the manifest and field instead of an opaque unpacking
+        error.
         """
         halves = (
             ("ingest", self.ingest),
@@ -172,15 +149,11 @@ class DataSourceManifest(BaseModel):
 
     @model_validator(mode="after")
     def _config_does_not_shadow_the_name(self) -> Self:
-        """Reject a `config:` block carrying a `name` key — the folder already decides that.
+        """Reject a `config:` block carrying a `name` key: the folder already decides that.
 
-        `_build_retrieve_half` passes `name=<this manifest's name>` on top of `**config`, so a
-        `name` in `config` is a duplicate keyword and the source cannot be built at all. Refusing
-        it here is what keeps the validator honest: `make datasource-validate` builds the kwargs as
-        a *dict*, where a second `name` silently overwrites the first, so the manifest validated
-        green and then the process died at startup with `got multiple values for keyword argument
-        'name'`. A validator that passes what startup refuses is worse than no validator, because it
-        is the thing an operator trusts before deploying (D-2026-08-08-a-source-is-named-by-...).
+        The registry passes `name=` on top of `**config`, so a duplicate would fail at startup with
+        "multiple values for keyword argument", while `make datasource-validate` (which builds a
+        dict) would pass it.
         """
         if "name" in self.config:
             raise ValueError(

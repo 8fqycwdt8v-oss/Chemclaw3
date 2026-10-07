@@ -1,9 +1,7 @@
 """The artefact spec: what each kind accepts, what it refuses, and the caps a write is held to.
 
-`exhibits.models` is the one validator both writers go through — the agent's untyped `spec` and a
-browser's JSON body — so every refusal here is a refusal for both. Driven on the functions the tools
-and routes call (`parse_spec`, `require_writable`), not on the pydantic classes, because those two
-are the seam.
+`exhibits.models` is the one validator both writers go through (the agent's `spec` and a browser's
+JSON body). Driven on `parse_spec` and `require_writable`, the functions tools and routes call.
 """
 
 from typing import Any

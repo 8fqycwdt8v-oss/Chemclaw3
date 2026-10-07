@@ -1,40 +1,20 @@
 """`python -m chemclaw.cli.live_turn_cost` — score `turn_cost_ratio` over turns this system ran.
 
-**The gap this closes.** `turn_cost_ratio` is a good metric attached to a case that cannot exercise
-it. `data/evals/cases/autonomy-turn-cost.md` commits four literal `TurnCost` records, so the metric
-returns 0.9845458333333333 to every decimal whatever changes in the agent — the case file says so
-itself, the metric's docstring says so, and `evals.baseline.render_comparison` labels the row
-`pinned`. A 32% growth of the static prefix, the regression `tests/test_context_floor.py` exists to
-catch, leaves that row untouched. A cost metric that cannot see a cost regression is the shape
-`D-2026-09-14-a-gate-nothing-has-failed-is-a-gate-that-cannot-fail` names one layer up.
+The committed `autonomy-turn-cost` case is a fixed arithmetic fixture, so it cannot see a cost
+regression such as prefix growth. This command drives a fixed scripted `WORKLOAD` against the live
+lane on one session and scores the turns that session recorded — cost is a property of (system,
+workload), so the workload must be the same to compare runs.
 
-**What makes it measurable is that the bill has to follow the request.** The obvious wiring — read
-whatever `turn_costs` rows the lane happens to hold — produces a second gate that cannot fire, and
-that is measured rather than supposed: every behaviour in `cli/storm_behaviours.py` but two names a
-*constant* `input_tokens` (900), so a turn against the default behaviour bills 900 whether the
-prefix is 40,000 tokens or 400,000. `WORKLOAD` therefore carries `h-size-billed`'s marker, the one
-behaviour whose bill is `input_tokens_per_char` over the serialized request — which is what puts
-the instructions, the skills listing and every bound tool schema into the number. Against a real
-gateway the marker is inert prose and the gateway bills for itself, which is the same measurement
-by a better instrument.
+`WORKLOAD` carries `h-size-billed`'s marker, the mock behaviour that bills per character of the
+serialized request, so instructions, skills listing and tool schemas reach the number; against a
+real gateway the marker is inert and the gateway bills for itself.
 
-**And the workload is driven here rather than read.** Cost is a property of (system, workload), so
-comparing this run against a recorded one requires the workload to be the same one — a reader over
-whatever rows a lane left behind would compare two different questions and call the difference a
-regression. The turns are scripted, fixed in this file, and the session they open is the only one
-this command reads back.
-
-The recorded expectation is an ordinary eval case, `CASE_ID`, emitted by `--emit`. That keeps one
-format, one loader and one metric: `make eval` prints it beside the arithmetic fixture with its own
-provenance, and this command re-measures and compares within `eval_drift_epsilon`. Refreshing it is
-the same deliberate act as `make eval-baseline`.
-
-The arithmetic fixture stays, deliberately. It is the only case that exercises the cache-write and
-cache-read weighting and the counting of a turn that never answered — a mock lane produces none of
-those — and it is honest about being a fixture.
+The expectation is an ordinary eval case, `CASE_ID`, written by `--emit` and compared within
+`eval_drift_epsilon`; refreshing it is as deliberate as `make eval-baseline`. The arithmetic
+fixture stays, as the only case exercising cache weighting and unanswered turns.
 
 Exit codes: 0 within the band, 1 on a worsening drift, 3 when the lane could not be reached (never
-counted as a pass, the posture `live_probes` and `validate_template_args_live` already take).
+counted as a pass).
 """
 
 import argparse
@@ -67,19 +47,13 @@ WORKLOAD: tuple[str, ...] = (
     f"{BEHAVIOUR_MARKER} Summarise that for a process chemist in two sentences.",
 )
 
-#: Billed token-equivalents the ratio is taken against. A constant of the *case*, carried through
-#: every re-measurement so the recorded and the fresh value are the same quantity — a denominator
-#: that moved with the numerator would make every ratio read 1.0 and measure nothing.
+#: Billed token-equivalents the ratio is taken against — a constant of the case, so the recorded
+#: and fresh values are the same quantity.
 BASELINE_TOKENS = 1_000_000
 
-#: The fields the emitted case carries: what the turn cost, and the correlation id that joins it
-#: back to the trail. Nothing else. `TurnCost` carries **more fields than this set** — how many is
-#: `len(TurnCost.model_fields)` and is deliberately not written here, because the figure that was
-#: written said "eighteen" against a model that had grown to 28 — and `model_dump()` writes every
-#: one, so the first emitted case published `model: ""` and `outcome: "unknown"` beside real
-#: numbers — defaults wearing the appearance of measurements, in a file whose whole claim is that
-#: every number in it was measured. `actor` and `session_id` are dropped for a second reason: they
-#: identify a person and a conversation, and neither is part of what a turn cost.
+#: The fields the emitted case carries: what the turn cost and the correlation id joining it to the
+#: trail. `model_dump()` would also write unmeasured defaults, and `actor`/`session_id` identify a
+#: person and a conversation, which are no part of a cost.
 _EMITTED = frozenset(
     {
         "correlation_id",
@@ -91,11 +65,7 @@ _EMITTED = frozenset(
         "estimated_tokens",
         "duration_seconds",
         "completed",
-        # Not read by the metric, and carried anyway: these three are what turn an unexplained
-        # number into a diagnosis. Measured across two boots of the same commit, the same three
-        # questions cost 900,198 and 429,076 billed token-equivalents, and the ledger says how they
-        # differed — `context_unreducible` true on every turn of the expensive run and false on
-        # every turn of the cheap one, with the model calling a tool on 3 of 3 turns against 1 of 3.
+        # Not read by the metric; carried because they explain a cost difference between runs.
         "tool_calls",
         "compacted",
         "context_unreducible",
@@ -115,9 +85,8 @@ _READ = """
 async def _recorded(session_id: str) -> list[TurnCost]:
     """The ledger rows this run's own session produced, oldest first.
 
-    `turn_id` is deliberately not selected: it is minted per record and would make the emitted case
-    differ on every run for a reason that is not a cost. `TurnCost` mints a fresh one, which is
-    correct — the case is a record of what a turn cost, not of which row said so.
+    `turn_id` is not selected: it is minted per record and would make the emitted case differ on
+    every run for a reason that is not a cost.
     """
     async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -162,11 +131,8 @@ async def _recorded(session_id: str) -> list[TurnCost]:
 async def _drive(base_url: str) -> str:
     """Ask every question in `WORKLOAD` on one session and return its id.
 
-    The event stream is drained and discarded: this command grades nothing, and folding the stream
-    through `evals.live.run_turn` would tie a cost measurement to citation scoring, tool
-    expectations and a `Probe`'s graded shape — none of which has anything to say about what a turn
-    cost. `open_session` *is* reused, because how a session is opened is exactly the part that must
-    not diverge.
+    The event stream is drained and discarded — this grades nothing — but `open_session` is reused
+    so session opening cannot diverge from the probes.
     """
     timeout = httpx.Timeout(settings.live_probe_timeout_seconds)
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout, trust_env=False) as client:
@@ -232,10 +198,8 @@ genuinely changed and the change is the intended one.
 def main(argv: list[str] | None = None) -> int:
     """Drive the workload, score what it cost, and compare against the recorded case."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    # `live_probe_base_url` rather than `service_host`/`service_port`: the first is a *bind*
-    # address (0.0.0.0 is not a destination — the egress guard refused it) and the second is the
-    # chart's port, while the live lane serves on its own. One setting already names where the lane
-    # answers, and `live_probes` reads the same one.
+    # `live_probe_base_url`, not `service_host`/`service_port`: those are a bind address and the
+    # chart's port, while the live lane serves on its own.
     parser.add_argument(
         "--base-url",
         default=settings.live_probe_base_url,
@@ -252,13 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         session_id = asyncio.run(_drive(args.base_url))
         turns = asyncio.run(_recorded(session_id))
     except (httpx.HTTPError, OSError) as exc:
-        # `httpx.HTTPError` is the front door and `OSError` is the database — `core/db` maps an
-        # unreachable or saturated one onto `ConnectionError`, which is an `OSError`. A driver
-        # error that is *not* one of those is deliberately not caught: `chemclaw.cli` may not
-        # import `psycopg` (`tests/test_third_party_layering.py`, and `cli/explain.py`'s
-        # `_is_database_refusal` is the workaround where one is genuinely needed), and a
-        # malformed query reported as "could not reach the live lane" would be a measurement
-        # failure wearing an outage's message.
+        # `httpx.HTTPError` is the front door; `OSError` is the database (`core/db` raises
+        # `ConnectionError`). Other driver errors are deliberately not caught, so a malformed query
+        # is not reported as an outage; `chemclaw.cli` may not import `psycopg`.
         print(f"could not reach the live lane ({exc}); nothing was measured")
         return 3
     if not turns:
@@ -267,10 +227,8 @@ def main(argv: list[str] | None = None) -> int:
 
     result = get_metric("turn_cost_ratio")(_case(turns))
     print(f"live turn_cost_ratio = {result.value:.6g} — {result.provenance}")
-    # Beside the value rather than only in the emitted file: a drift this command reports is read
-    # by somebody deciding whether a commit made the system more expensive, and the honest answer
-    # is sometimes "the context policy was in a different regime". Stating it is what separates
-    # those two readings without anybody having to open the database.
+    # Printed beside the value so a reader can tell a regression from a different context-policy
+    # regime without opening the database.
     print(
         f"regime: {sum(1 for t in turns if t.context_unreducible)}/{len(turns)} turn(s) "
         f"unreducible, {sum(1 for t in turns if t.compacted)} compacted, "

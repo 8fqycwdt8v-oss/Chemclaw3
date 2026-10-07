@@ -1,10 +1,9 @@
-"""The ELN adapter contract (plan step 4.2).
+"""The ELN adapter contract.
 
-Only the *contract* is fixed, never an ELN's shape: an adapter fetches raw entries newer
-than a cursor and maps each into the canonical `OrdReaction`. Every ELN-specific quirk
-lives behind this seam (G6), so the sync (`chemclaw.durable.eln_sync`) and everything above it are
-identical no matter which ELN is wired. There is no universal ELN abstraction — one adapter
-per source (docs/planning/DEFERRED.md: generalize only from a third source).
+An adapter fetches raw entries newer than a cursor and maps each into the canonical `OrdReaction`.
+Every ELN-specific quirk lives behind this seam, so the sync (`chemclaw.durable.eln_sync`) and
+everything above it are identical whichever ELN is wired. One adapter per source; no universal ELN
+abstraction.
 """
 
 import inspect
@@ -20,27 +19,17 @@ from chemclaw.ingest.eln.ord import OrdReaction
 
 _LATE_ARRIVAL_NAMES_LOGGED = 10
 
-# How many colliding file names one refusal message spells out. The same bound as
-# `_LATE_ARRIVAL_NAMES_LOGGED` and for the same reason: the reason column is capped
-# (`ingest.rejections._MAX_REASON_CHARS`), so an unbounded list would be cut mid-name and the
-# count is what a reader needs first.
+# How many colliding file names one refusal message spells out; the reason column is capped
+# (`ingest.rejections._MAX_REASON_CHARS`), so the count comes first and the list is bounded.
 _COLLIDING_NAMES_NAMED = 5
 
 
 def entry_id_or_stem(stated: object, path: Path, field: str) -> str:
     """The id one export file claims, falling back to its file name when it claims none.
 
-    **Absent and blank are different answers and used to read alike.** Both adapters spelled this
-    `str(payload.get("id") or path.stem)`, which is truthiness: an id of `0`, `""` or `false`
-    reached the corpus as the *file stem*, and the record was then stored, cited and asked about
-    under an id the source never used. Measured: `id=0`, `id=""` and `id=false` in
-    `EXP_2026_0412.json` all produced `entry_id='EXP_2026_0412'`.
-
-    So a field the source omitted (or left `null`) falls back to the file name, which is the
-    documented behaviour and the only id such a file has; a field the source *stated* is
-    transcribed as given, `0` included; and a stated field that names nothing at all is refused,
-    because a source that wrote an id key wrote it to say something and the file name is not what
-    it said.
+    Absent and blank differ: an omitted or `null` field falls back to the file stem; a stated id is
+    transcribed as given (`0` included); a stated field that names nothing is refused, since the
+    file name is not what the source said.
 
     Args:
         stated: whatever the payload carried in its id field — `None` when it carried none.
@@ -48,14 +37,13 @@ def entry_id_or_stem(stated: object, path: Path, field: str) -> str:
         field: the field's name in this format, for the refusal message.
 
     Raises:
-        ElnMappingError: the field is present and names nothing. Both adapters' scan handlers
-            catch this class, so the file costs itself and the directory is still read.
+        ElnMappingError: the field is present and names nothing. Both adapters' scan handlers catch
+        this, so the file costs only itself.
     """
     if stated is None:
         return path.stem
-    # A JSON `true`/`false` is not an id in any ELN, and `bool` is an `int` in Python, so the
-    # transcription below would file the entry under the literal string `"False"` — nonsense that
-    # reads like an id rather than like the malformed field it is.
+    # A JSON boolean is not an id (and `bool` is an `int`), so it is treated as naming nothing
+    # rather than filed under `"False"`.
     text = "" if isinstance(stated, bool) else str(stated).strip()
     if not text:
         raise ElnMappingError(
@@ -71,29 +59,15 @@ def refuse_colliding_ids(
 ) -> dict[str, str]:
     """Refuse every entry id two or more export files claim, and say which files claimed it.
 
-    A file-drop directory is one source, and `reaction_records` is keyed
-    `(ingest_source, reaction_id)` with every column refreshed on conflict — so two files carrying
-    one `id` are not two records, they are one row written twice, and the second write replaces the
-    first entirely. Measured before this existed: two exports, one `EXP-88`, `entries returned=2`,
-    `ingested=2` in the summary, and one of the two experiments simply absent from the corpus with
-    nothing refused, warned or filed.
-
-    **Both are refused, not one kept**, and the precedent is `records._one_of`, which answers the
-    identical question one layer up: with two transcriptions behind one id "there is genuinely no
-    right answer — and returning either is a coin flip that reads as a fact". Keeping the
-    alphabetically-first file would put an arbitrary one of two contradictory runs in the corpus
-    under an id a chemist then cites, with nothing at the point of use to say the other existed.
-    Refusing both costs the corpus one record it cannot identify and gains the ledger a row that
-    names both files, which is the answer to the question somebody will ask
-    (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`).
-
-    Collisions are looked for across the *whole* directory rather than across the fetch window: the
-    id is supposed to be unique in the source, so a run that happens to return only one of the two
-    is still wrong about which record it is returning.
+    `reaction_records` is keyed `(ingest_source, reaction_id)`, so two files with one id would be
+    one row written twice, silently losing one experiment. Both are refused rather than one kept, as
+    `records._one_of` does one layer up: keeping either is a coin flip that reads as fact, while a
+    refusal names both files in the ledger. Collisions are checked across the whole directory, not
+    the fetch window.
 
     Args:
         logger: the calling adapter's own, so the record carries that module's name.
-        source: the data source's name, for the log line — two drop directories log alike.
+        source: the data source's name, for the log line.
         files_by_id: every parsed entry id, mapped to the file names that claimed it.
 
     Returns:
@@ -120,11 +94,9 @@ def refuse_colliding_ids(
 def parse_iso_utc(value: str) -> datetime:
     """Parse an ISO-8601 timestamp (accepting a trailing 'Z') as a tz-aware UTC datetime.
 
-    A naive timestamp (no UTC offset) is read as UTC: exports that omit the offset are common,
-    UTC is the least-surprising reading, and a naive datetime would later raise `TypeError` when
-    compared against the sync's offset-aware cursor. Raises `ValueError` on an unparseable string;
-    callers wrap that in their layer-specific format error with the source path/context (DRY: both
-    the free-text and ORD adapters share this exact rule).
+    A naive timestamp is read as UTC, since exports often omit the offset and a naive datetime
+    cannot be compared with the sync's aware cursor. Raises `ValueError` on an unparseable string;
+    callers wrap it with their own context.
     """
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
@@ -133,28 +105,11 @@ def parse_iso_utc(value: str) -> datetime:
 def is_late_arrival(path: Path, floor: datetime) -> bool:
     """True if `path` appeared at/after the *run's* floor although its payload predates it.
 
-    **`floor` is the run's, never a continuation chunk's**, and the difference is not academic. A
-    drain advances its cursor per chunk, so on a bulk-copy backfill — files whose mtime is the copy
-    time and whose payload timestamps are old — every file the earlier chunks already ingested sits
-    behind the new cursor with an mtime after it, and re-qualifies here on every later chunk.
-    Measured on a 3,000-file corpus at the shipped batch size: 43,471 ledger writes across 30
-    chunks, growing 99, 199, 299 … per chunk, each row telling a chemist that no scheduled run will
-    fetch an entry that is already in the corpus. The question this answers — *will any scheduled
-    run ever fetch this file* — is a question about the floor the run reached down to, which is why
-    `fetch_new_entries` takes `report_late_arrivals` and the sync says False on every chunk whose
-    floor is not that one.
-
-    Why this exists: a file-export adapter keeps entries stamped `>= since` and drops the rest,
-    and the sync's overlap window (`eln_sync_overlap_seconds`) rewinds `since` only far enough to
-    catch entries written slightly late. A file dropped into the export directory *after* that
-    window, carrying an older payload timestamp, is therefore filtered out on this run and on
-    every run after it — real data lost with no rejection and no counter. The file's modification
-    time is the one available evidence that it arrived late rather than being old data already
-    ingested, so it separates "genuinely stale" from "silently dropped".
-
-    A file whose mtime cannot be read (removed mid-fetch, permission error) is *not* reported: the
-    caller's own skip-and-continue path already handles unreadable files, and a false alarm here
-    would train operators to ignore the warning.
+    A file dropped into the export directory after the sync's overlap window, carrying an older
+    payload timestamp, would be filtered out on every run; its mtime is the only evidence it arrived
+    late. `floor` must be the run's own floor, never a continuation chunk's advancing cursor, or
+    every file the run already ingested would re-qualify. A file whose mtime cannot be read is not
+    reported; the caller's skip path handles it.
     """
     try:
         mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
@@ -166,11 +121,9 @@ def is_late_arrival(path: Path, floor: datetime) -> bool:
 def warn_late_arrivals(logger: Logger, source: str, names: list[str]) -> None:
     """Log one aggregated WARNING naming export files that arrived too late to be ingested.
 
-    Aggregated, not one line per file, because a permanently-late file re-qualifies on *every*
-    sync run: one bounded line per fetch stays readable where an unbounded per-file storm would
-    be scrolled past. Names are capped at `_LATE_ARRIVAL_NAMES_LOGGED` with the full count kept,
-    so the log line cannot grow without limit. Logs nothing when nothing was late (the normal case),
-    and takes the caller's `logger` so the record carries the adapter's own module name.
+    Aggregated because a late file re-qualifies on every run; names are capped at
+    `_LATE_ARRIVAL_NAMES_LOGGED` with the full count kept. Logs nothing when nothing was late, and
+    uses the caller's `logger`.
     """
     if not names:
         return
@@ -192,32 +145,18 @@ def entry_window(
 ) -> datetime:
     """The timestamp an entry should be filtered on: the latest thing the source did to it.
 
-    One definition, because an adapter that filtered on `created_at` alone would silently drop
-    every in-place correction its source makes — the failure this exists to close — and an adapter
-    that filtered on `modified_at` alone would drop every entry that has never been amended.
-
-    **A withdrawal is one of those things, and it is here because it is the only way the producer
-    half of a retraction can reach a cursor-based sync.** A source stamping a retraction column
-    without touching its amendment column leaves the entry behind the cursor forever, so the
-    tombstone is written at the site and never fetched — a producer nobody can write, which is the
-    shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted three
-    modules for. Folding it in costs nothing where a source *does* amend in place (the retraction
-    stamp is then no later than the amendment) and is the whole of the fix where it does not.
-
-    `max` rather than "the latest present one" only differs when a source reports an amendment
-    *older* than the creation it amends, which is clock skew rather than chemistry. It is
-    cheap insurance and no test can distinguish the two; said here so the choice does not read as
-    load-bearing.
+    The max of creation, amendment and withdrawal, so an in-place correction or a retraction moves
+    the entry past the cursor; filtering on creation alone would never fetch them, and on amendment
+    alone would drop never-amended entries.
     """
     return max(stamp for stamp in (created_at, modified_at, retracted_at) if stamp is not None)
 
 
 class ElnMappingError(ChemclawError):
-    """An adapter could not map a raw entry to a canonical reaction (G4).
+    """An adapter could not map a raw entry to a canonical reaction.
 
-    Defined at the contract level (not in a concrete adapter) so the sync's
-    reject-and-continue handler catches *any* adapter's mapping failure, not just one
-    adapter's error type. Concrete adapters raise this (or a subclass) for a bad entry.
+    Defined at the contract level so the sync's reject-and-continue handler catches any adapter's
+    mapping failure.
     """
 
 
@@ -231,28 +170,15 @@ class RawEntry(BaseModel):
     entry_id: str = Field(min_length=1)
     created_at: datetime
     payload: dict[str, Any]
-    # When the source last *amended* this entry, if it says. An ELN corrects an entry in place — a
-    # yield revised after assay, an impurity added, a retraction — while keeping `created_at`, so
-    # an entry filtered on creation time alone is never fetched again and the correction is lost
-    # with no rejection and no counter. An adapter that maps a modification timestamp lets the
-    # fetch window see the amendment and the sync compare content rather than skipping on id.
-    #
-    # Optional because a source may genuinely not record one; `None` means "not reported", not
-    # "never amended", and the overlap replay remains the only thing that catches those.
+    # When the source last amended this entry, if it says. ELNs correct entries in place while
+    # keeping `created_at`; mapping this lets the fetch window see the amendment and the sync
+    # compare content. `None` means "not reported", not "never amended".
     modified_at: datetime | None = None
-    # When the source reported this entry **withdrawn**, if it reports withdrawals at all.
+    # When the source reported this entry withdrawn, if it reports withdrawals at all.
     #
-    # **An explicit field, never absence**, and that is the whole producer half of a retraction: an
-    # ELN fetch is a delta, so "not seen this run" is the normal state of every entry ever
-    # ingested, and reading it as a withdrawal would retract the entire corpus on the first quiet
-    # pass. A source that amends entries in place already re-exports a withdrawn one — the same
-    # channel that carries a corrected yield — so a tombstone rides the delta an adapter already
-    # produces and needs no second fetch, no capability probe and no corpus sweep.
-    #
-    # `None` means "not reported withdrawn", which is also what every adapter that says nothing
-    # about withdrawals produces. Re-publishing an entry without one *un*-retracts it, because this
-    # tier's rule is that the row is what the source last said
-    # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+    # An explicit field, never absence: a fetch is a delta, so "not seen this run" is normal for
+    # every ingested entry. A withdrawn entry rides the same re-export channel as a correction.
+    # Re-publishing without it un-retracts, because the row is what the source last said.
     retracted_at: datetime | None = None
 
 
@@ -263,52 +189,22 @@ class ElnAdapter(Protocol):
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Return entries created *or amended* at or after `since` (the sync's high-water cursor).
 
-        Inclusive on purpose: the cursor is the newest timestamp already seen, and an
-        entry stamped in that same second but exported after the run would be skipped
-        forever under strictly-after semantics. Re-fetching the boundary entry is safe
-        because ingestion is idempotent (id-keyed upserts + idempotent note branch).
+        Inclusive, so an entry stamped in the cursor's own second is not skipped forever;
+        re-fetching it is safe because ingestion is idempotent. Amended entries count as new,
+        compared via `entry_window`.
 
-        **Amended entries count as new.** An adapter whose source reports a modification time must
-        compare the later of the two against `since` and set `RawEntry.modified_at` — otherwise a
-        correction to an old entry is never fetched, and the sync cannot notice what it never
-        sees. `entry_window` is that comparison, written once so two adapters cannot disagree.
-
-        **`limit` bounds the read, where the read can be bounded.** The durable sync drains a
-        source in chunks and truncates what it gets back to `eln_sync_batch_size`
-        (`durable/eln_sync.py::_BoundedIngest`) — so without this, every chunk re-read the whole
-        outstanding set to keep a hundredth of it, and a drain cost O(corpus²/batch). Measured on a
-        3,000-file drop: 30 chunks, 90,000 file reads, 2.55 s against 0.31 s for a corpus a third
-        the size. Passing the number down lets a source that can push the bound into its own read
-        do so; the warehouse adapter turns it into its `LIMIT`, cutting a continuation
-        chunk's read from the binding's page (500 rows by default) to the chunk (100).
-
-        It is a **capability, not a requirement**, on the same terms as `fetch_was_truncated`
-        below: an adapter that cannot bound its read may ignore it, because the caller truncates
-        anyway. What an adapter may **never** do is return a non-prefix subset — the entries it
-        withholds must all be *later*, in `entry_window` order, than every entry it returns.
-        Anything else advances the cursor past an entry that was never offered, and no later fetch
-        offers it again. That is why the file-drop adapters ignore this: their scan is ordered by
-        filename and an entry's window is inside the payload, so a break in that scan drops
-        entries the cursor then skips for good.
-
-        `None` means unbounded, which is what a caller reading a whole corpus passes.
-
-        **`report_late_arrivals` is the second capability, and it is a per-*run* question.** An
-        adapter that reads a whole directory can see files it is *not* returning — payload behind
-        the floor, mtime after it — and reports them as arrivals no scheduled run will fetch. That
-        is only answerable against the floor the run reached down to: a continuation chunk's floor
-        is the advancing cursor, and every file between the two was ingested by this very run, so
-        judging lateness there re-refuses what the drain has just taken in. The sync passes `False`
-        on exactly those chunks. An adapter that does not declare the parameter is never told, and
-        keeps its previous behaviour.
+        `limit` and `report_late_arrivals` are optional capabilities an adapter may declare (probed
+        by `accepts_a_limit` / `accepts_a_late_arrival_switch`), not protocol requirements. An
+        adapter that bounds its read must return a prefix in `entry_window` order — everything
+        withheld must be later than everything returned — or the cursor skips entries for good; the
+        file-drop adapters cannot guarantee that and ignore `limit`.
 
         Args:
             since: The fetch floor — entries at or after it, in `entry_window` order.
-            limit: At most this many entries *strictly newer* than `since`; entries at or before
-                it (the sync's overlap replay) are not counted against it. `None` is unbounded.
-            report_late_arrivals: Whether `since` is the run's own floor, so a file behind it that
-                arrived after it may be reported as never-to-be-fetched. `False` on a continuation
-                chunk, whose floor answers a different question.
+            limit: At most this many entries strictly newer than `since`; the overlap replay is not
+            counted. `None` is unbounded.
+            report_late_arrivals: Whether `since` is the run's own floor, so a late-arriving file
+            behind it may be reported. `False` on a continuation chunk.
         """
         ...
 
@@ -329,10 +225,8 @@ class BoundedFetch(Protocol):
 def _accepts(adapter: object, parameter: str) -> bool:
     """Whether `adapter.fetch_new_entries` declares `parameter`, so it may be offered.
 
-    The one place the introspection happens, because two capabilities are now asked this way and
-    the answer for a callable with no introspectable signature has to be the same for both.
-    `inspect.signature` rather than a `runtime_checkable` Protocol because structural checks see
-    method *names*, not their parameters — the distinction these questions are entirely about.
+    `inspect.signature` rather than a `runtime_checkable` Protocol, which sees method names but not
+    parameters.
     """
     fetch = getattr(adapter, "fetch_new_entries", None)
     if fetch is None:
@@ -340,21 +234,16 @@ def _accepts(adapter: object, parameter: str) -> bool:
     try:
         return parameter in inspect.signature(fetch).parameters
     except (TypeError, ValueError):
-        # A builtin or a C-implemented callable has no introspectable signature. "It does not take
-        # this" is the safe answer for both callers: the sync bounds the result itself, and it
-        # keeps reporting late arrivals on every chunk, which is what every adapter did before
-        # either capability existed.
+        # No introspectable signature (a builtin): "does not take it" is safe — the sync bounds the
+        # result itself and late arrivals keep being reported.
         return False
 
 
 def accepts_a_late_arrival_switch(adapter: object) -> bool:
     """Whether `adapter.fetch_new_entries` will take the `report_late_arrivals` flag.
 
-    Asked rather than required, for the reason `accepts_a_limit` gives below: the protocol may not
-    grow a parameter an out-of-tree adapter has never heard of. An adapter that does not take it is
-    simply never told to stay quiet — it reports late arrivals on every chunk, which is what every
-    adapter did before this existed, and which is only wrong for an adapter that reads a whole
-    directory per chunk.
+    Asked rather than required so out-of-tree adapters written to the published signature keep
+    working; one that lacks it reports late arrivals on every chunk.
     """
     return _accepts(adapter, "report_late_arrivals")
 
@@ -362,19 +251,9 @@ def accepts_a_late_arrival_switch(adapter: object) -> bool:
 def accepts_a_limit(adapter: object) -> bool:
     """Whether `adapter.fetch_new_entries` will take the optional `limit` this sync can offer.
 
-    **A capability, asked for, rather than a parameter every adapter must grow** — the same shape
-    as `fetch_was_truncated` above and for a sharper version of the same reason. Bounding the read
-    rather than the result was measured worth having (a continuation chunk dropped from 500 rows
-    to 100), and the first cut of it put `limit` into the `ElnAdapter` protocol. That is a
-    breaking change to the one seam D-120 promises is not one: "a new source is one
-    `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with
-    **zero** core edits". An out-of-tree adapter written to the documented signature would have
-    been called with two positional arguments and raised `TypeError` on its first chunk.
-
-    So the protocol keeps the signature it published, an adapter that *can* bound its read simply
-    declares the parameter, and this is how the caller finds out. `inspect.signature` rather than
-    a `runtime_checkable` Protocol because structural checks see method *names*, not their
-    parameters — the distinction this question is entirely about.
+    A capability rather than a protocol parameter: adding a parameter to `ElnAdapter` would break
+    out-of-tree adapters written to the published signature. An adapter that can bound its read
+    declares it; the caller truncates the result either way.
     """
     return _accepts(adapter, "limit")
 
@@ -382,28 +261,11 @@ def accepts_a_limit(adapter: object) -> bool:
 def fetch_was_truncated(adapter: object) -> bool:
     """Whether `adapter`'s last fetch was cut short by its own page limit; `False` if it cannot say.
 
-    **Only the side that issued the `LIMIT` knows this**, and the durable sync has to: it decides
-    whether to come back for another chunk, and its wedge guard turns "more waiting, cursor did not
-    move" into a loud stop. Inferring it from the batch is not possible — a fetch that returns only
-    rows at or behind the cursor is an ordinary quiet day *and* the signature of a source truncating
-    inside a block of tied watermarks, and treating the two alike either cries wolf on every idle
-    run or misses the truncation entirely. It missed it: a source stuck on a tie reported
-    `has_more=False` and read as a day with no new entries.
-
-    Optional rather than a method on `ElnAdapter` because the file-drop adapters read a whole
-    directory and have no page to be cut short by, so `False` is the true answer for them and a
-    method they would all have to implement would only be a way to get it wrong.
-
-    **Asked through the seam's wrappers, not only of the object handed over.** The registry always
-    returns `DatedIngest(...)`, and a `runtime_checkable` Protocol is structural: a wrapper that
-    does not redeclare a method simply does not have it. So this read `False` for every source in
-    every deployment, including the warehouse adapter that implements `fetch_truncated` precisely
-    so the workflow would come back for the truncated remainder. The capability belongs to the
-    adapter, so the question has to reach it — the walk below is that rule, and a wrapper that
-    exposes what it wraps through the public `inner` satisfies it by doing nothing.
-
-    The visited set is not defensiveness about a cycle anyone would write: it is what keeps a
-    mistaken `inner` returning `self` from hanging a sync run rather than failing it.
+    Only the side that issued the `LIMIT` knows, and the durable sync needs it to come back for more
+    and to detect a wedge; a batch of rows at the cursor looks the same as a quiet day. Optional,
+    since file-drop adapters have no page. The walk follows each wrapper's public `inner`, because
+    the registry always wraps the adapter (`DatedIngest`) and a structural check does not see
+    through a wrapper; the visited set stops a self-referencing `inner` from hanging.
     """
     seen: set[int] = set()
     candidate: object | None = adapter
@@ -418,42 +280,13 @@ def fetch_was_truncated(adapter: object) -> bool:
 class DatedIngest:
     """An `ElnAdapter` that carries the entry's own timestamp onto a record with no date.
 
-    **Why this is a floor and not a duplicate.** `performed_at` is what makes a series a timeline:
-    `memory.progression` orders on it, and `Progression.is_timeline()` refuses to narrate a
-    trajectory without it, so a corpus that loses the date loses the whole "what was tried, in what
-    order" question — honestly, but completely. The warehouse adapter maps `performed_at` from its
-    own bound column and has no fallback, so a site whose ELN keeps its conditions in prose — no
-    experiment-date column to bind — produces an entire corpus of undated records while
-    `RawEntry.created_at` sits in every one of them, **required**, because the sync watermark cannot
-    advance without it.
+    `performed_at` is what makes a series a timeline (`memory.progression`), so a record the adapter
+    left undated gets `RawEntry.created_at`'s date. An adapter's own date always wins. Neither
+    file-drop export carries an experiment date, so all of them rely on this.
 
-    **Both file-drop adapters are served by this wrapper too**, where this docstring used to say
-    they "already map `raw.created_at.date()` onto the record and are unaffected" — treating as
-    fine the exact case the stamp below was added for. Neither shipped export carries an experiment
-    date (the JSON ELN's only date field is `timestamp`, the ORD record's is
-    `provenance.record_created.time`), so each was filling `performed_at` from the entry's write
-    time with `date_source` left at `"stated"`: the right value under a claim nothing could
-    distinguish from a chemist-entered date. They now map no date at all and this supplies both.
-
-    So the rule belongs to the seam rather than to any adapter: an adapter *may* know better than
-    the entry timestamp and its value always wins; when it does not, the entry's own time is a
-    defensible ordering and nothing is a better one.
-
-    **What the date then means, and why the note must not overclaim.** A record-creation time is
-    when the entry was written, not necessarily when the run was performed — usually the same day,
-    and sometimes three weeks of bench work transcribed in one afternoon. That is a weaker fact than
-    a chemist-entered experiment date, so the record is stamped `date_source="entry"` and
-    `ordering_caveat` says so above the table.
-
-    An earlier draft of this asserted that `ordering_caveat` "already exists to describe" the
-    weakening. It did not: it distinguished *missing* dates from present ones and knew nothing about
-    where a present one came from. A filled-in date that says nothing about its own provenance turns
-    `Progression.is_timeline()` true and makes the note claim "Runs in the order they were
-    performed" over an afternoon of typing — the exact shape of defect this whole change is about,
-    reintroduced by the fix for it. The stamp is what makes the sentence true rather than hoped for.
-
-    It licenses no causality either: `memory.progression`'s rule that a date proves sequence and
-    never response is untouched, and is if anything more load-bearing here.
+    An entry's write time is weaker than a chemist-entered experiment date, so the record is stamped
+    `date_source="entry"` and `ordering_caveat` says so above the table. It licenses ordering, never
+    causality.
     """
 
     def __init__(self, inner: ElnAdapter) -> None:
@@ -464,10 +297,7 @@ class DatedIngest:
     def inner(self) -> ElnAdapter:
         """The adapter this wraps.
 
-        Public because the wrapper sits between the registry and every caller that asks what a
-        source is: without it, "which adapter did this manifest build?" is unanswerable from outside
-        and a test can only reach it through a private name. Read-only — nothing swaps an adapter
-        out from under a built source.
+        Public so callers and `fetch_was_truncated` can reach the built adapter. Read-only.
         """
         return self._inner
 
@@ -476,14 +306,9 @@ class DatedIngest:
     ) -> list[RawEntry]:
         """Delegate unchanged — dating is purely a mapping concern, and so is bounding.
 
-        The wrapper declares both optional parameters so the two probes answer `True` for a source
-        whose adapter takes them; it forwards each only when the wrapped adapter actually does, for
-        the reason those functions give. A wrapper that advertised a capability its inner adapter
-        lacks would move the `TypeError` rather than prevent it.
-
-        Only a `False` `report_late_arrivals` is forwarded, because `True` is the default every
-        adapter already has and passing it would make the call fail for an adapter that predates
-        the flag — the one thing the probe exists to prevent.
+        Declares both optional parameters so the probes see them, but forwards each only when the
+        inner adapter accepts it. Only a `False` `report_late_arrivals` is forwarded; `True` is
+        every adapter's default.
         """
         extra: dict[str, Any] = {}
         if limit is not None and accepts_a_limit(self._inner):
@@ -497,11 +322,9 @@ class DatedIngest:
         reaction = self._inner.map_to_ord(raw)
         if reaction.performed_at is not None:
             return reaction
-        # `model_copy` rather than a mutation: the mapped reaction is the adapter's answer, and a
-        # wrapper that edits it in place makes "what did the adapter return" unanswerable in a
-        # debugger and in a test. Validation is deliberately not re-run — the only field changed is
-        # a date the model already accepts as optional, and re-validating would re-do the structural
-        # checks `sync_entries` runs immediately afterwards anyway.
+        # `model_copy` rather than mutation, so the adapter's own answer stays inspectable. Not
+        # re-validated: the only change is an optional date, and `sync_entries` validates next
+        # anyway.
         return reaction.model_copy(
             update={"performed_at": raw.created_at.date(), "date_source": "entry"}
         )

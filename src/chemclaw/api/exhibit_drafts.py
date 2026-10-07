@@ -1,36 +1,17 @@
 """A `document` artefact streamed while the model is still writing the call that creates it.
 
-**Why this reads the fragmented tool-call chunks that `graph_stream` otherwise refuses to.** A
-report drafted into `create_exhibit` is a minute of generation that arrives, through the `updates`
-mode, as one whole call at the end — so the chemist watches nothing and then everything. The text
-exists earlier, in the `messages` mode's `tool_call_chunks`, which `graph_stream` deliberately does
-not read *calls* from: reassembling them is what cost the previous engine two live-run defects
-(D-138). This module reads them for a **preview** and nothing else
-(`D-2026-10-03-a-draft-is-read-off-the-arguments-the-model-is-still-writing`): every
-`tool_call`, `tool_result` and `exhibit` event still comes from the completed node, a frame here is
-never persisted and never decides anything, and a reassembly mistake costs a wrong preview that the
-`exhibit` event then replaces — the failure mode a preview is allowed to have.
+The `updates` mode delivers a `create_exhibit` call whole at the end; the text exists earlier in the
+`messages` mode's `tool_call_chunks`. This reads them for a preview only
+(`D-2026-10-03-a-draft-is-read-off-the-arguments-the-model-is-still-writing`): every `tool_call`,
+`tool_result` and `exhibit` event still comes from the completed node, a draft frame is never
+persisted, and a reassembly mistake costs only a preview the `exhibit` event replaces.
 
-**Whole text, throttled, growth only, capped.** `markdown` is everything so far, so a dropped frame
-costs nothing. Frames of one call are at least `exhibit_draft_min_interval_ms` apart, and further
-apart as the text grows (`_interval_seconds`), so a document's draft bytes are linear in its size.
-The throttle is checked *before* the arguments are re-parsed, so the cost of parsing a growing
-document is bounded by the frame rate rather than by the chunk rate; a frame is sent only when the
-text grew; past `exhibit_max_spec_bytes` the call stops streaming, because the tool will refuse it.
-
-**Before the first frame the throttle is the arguments' length, not the clock.** A call that has
-not shown text yet — a table whose `kind` comes last, a `spec` the model wrote as a JSON *string* —
-used to be re-parsed whole on every fragment, and `parse_partial_json` is linear in what it reads:
-measured on 75 kB of arguments in 12-character fragments, 6,306 parses and 27 s of event-loop CPU
-for a table, 6,341 and 15 s for a string spec, for zero frames. So it is parsed again only once the
-arguments have doubled since the last parse (`_Call.parse_at`), which bounds the parses to the
-logarithm of the size; a `spec` that parses as anything but an object stops the call; and so do
-arguments longer than the spec cap plus what else a call may carry (`_argument_bound`), which the
-tool would refuse whatever they hold.
-When the model finishes the call (`close`), one last `done` frame carries whatever the throttle
-held back — once per call, so it is outside the throttle by construction.
-
-A revision by `edits` streams nothing: what it holds is replacements, not the document.
+Each frame carries the whole text so far (a dropped frame costs nothing). Frames are throttled by
+`_interval_seconds`, so draft bytes are linear in document size, and the throttle is checked before
+re-parsing. Before the first frame, arguments are re-parsed only when they have doubled
+(`_Call.parse_at`). A call stops streaming when its spec is not an object, its arguments exceed
+`_argument_bound`, or its text passes `exhibit_max_spec_bytes`. `close` sends one final `done`
+frame per call. A revision by `edits` streams nothing.
 """
 
 from __future__ import annotations
@@ -70,7 +51,7 @@ class DraftStream:
     """The `exhibit_draft` frames one turn's model chunks produce, call by call.
 
     One instance per turn, fed every root-agent chunk in order (`feed`) and closed whenever the
-    model node completes (`close`), which is the moment its calls are whole.
+    model node completes (`close`), when its calls are whole.
     """
 
     def __init__(self) -> None:
@@ -80,8 +61,7 @@ class DraftStream:
     def feed(self, chunk: Any) -> list[ExhibitDraftEvent]:
         """The frames this chunk's tool-call fragments are due, in call order (usually none).
 
-        A fragment is keyed by its message and its `index`, because only the first fragment of a
-        call carries the call's id and name and every later one carries the index alone.
+        Keyed by message and `index`, because only a call's first fragment carries its id and name.
         """
         if not isinstance(chunk, AIMessageChunk):
             return []
@@ -103,9 +83,8 @@ class DraftStream:
                 continue
             now = time.monotonic()
             interval = _interval_seconds(call.sent_bytes)
-            # Once a frame has gone, throttled on the last *parse* rather than the last frame, so
-            # arguments that stopped growing the text (a title written after the spec) are not
-            # re-parsed per chunk. Before it, on the arguments' growth (see the module docstring).
+            # After the first frame, throttle on the last parse, so arguments that stopped growing
+            # the text are not re-parsed per chunk; before it, on the arguments' growth.
             if call.sent_chars:
                 if call.checked_at is not None and now - call.checked_at < interval:
                     continue
@@ -120,8 +99,7 @@ class DraftStream:
     def close(self) -> list[ExhibitDraftEvent]:
         """The closing `done` frame of every call that grew since its last frame; then forget them.
 
-        Called on each completed root node: the model node's completion is when its calls are
-        whole, and any other node finds nothing open.
+        Called on each completed root node; only the model node's completion finds calls open.
         """
         frames = [
             frame
@@ -137,11 +115,9 @@ class DraftStream:
 def _interval_seconds(sent_bytes: int) -> float:
     """How long a call waits after a frame of `sent_bytes` before its next one is considered.
 
-    The floor `exhibit_draft_min_interval_ms`, stretched to
-    `sent_bytes / exhibit_draft_bytes_per_ms` once the document is long: every frame is the whole
-    text, so at a fixed interval a document's draft bytes grow with the square of its size, and
-    this makes them grow with the size alone. It also bounds the parse — `parse_partial_json`
-    over 200 kB is ~17 ms on the event loop.
+    The floor `exhibit_draft_min_interval_ms`, stretched to `sent_bytes /
+    exhibit_draft_bytes_per_ms` for long documents: each frame is the whole text, so a fixed
+    interval would make draft bytes quadratic in size. It also bounds the parse cost.
     """
     floor = settings.exhibit_draft_min_interval_ms
     return max(floor, sent_bytes / settings.exhibit_draft_bytes_per_ms) / 1000
@@ -150,12 +126,9 @@ def _interval_seconds(sent_bytes: int) -> float:
 def _argument_bound() -> int:
     """The longest a call's arguments may be and still hold a spec under `exhibit_max_spec_bytes`.
 
-    The spec cap, plus the title and the note at their caps with every character escaped at worst
-    (`_WORST_ESCAPE`), plus `exhibit_draft_argument_slack_chars` for the keys, an artefact id, a
-    revision number and whatever whitespace the model puts between them. Characters against bytes
-    is the safe direction: the cap is on the spec's compact JSON with non-ASCII escaped, which is
-    never shorter than the characters the model wrote for it — so a call over this would be refused
-    by the tool.
+    The spec cap, plus title and note at their caps fully escaped (`_WORST_ESCAPE`), plus
+    `exhibit_draft_argument_slack_chars` for keys and whitespace. Counting characters against a byte
+    cap is the safe direction, so a call over this would be refused by the tool.
     """
     escaped = _WORST_ESCAPE * (settings.exhibit_max_title_chars + settings.exhibit_max_note_chars)
     return settings.exhibit_max_spec_bytes + escaped + settings.exhibit_draft_argument_slack_chars

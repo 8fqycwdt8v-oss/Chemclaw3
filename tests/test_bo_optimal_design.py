@@ -1,9 +1,8 @@
 """`engine.optimal_design`: the design a factorial cannot give, and the one BoFire will.
 
-`factorial_design` enumerates corners and refuses a constrained problem outright, so a chemist with
-a real limit and a fixed run budget had nowhere to go. This is that gap closed with BoFire's
-`DoEStrategy`. Most of this file is about the two things the returned rows cannot say for
-themselves: which model the design is optimal *for*, and whether it has enough runs to estimate it.
+`factorial_design` refuses a constrained problem, so a fixed-budget constrained design uses
+BoFire's `DoEStrategy`. Most tests cover what the rows cannot say themselves: which model the
+design is optimal for, and whether it has enough runs to estimate it.
 """
 
 import pytest
@@ -50,11 +49,9 @@ def _problem(*, constrained: bool = False, categorical: bool = True) -> Optimiza
 
 
 def test_every_run_satisfies_a_constraint_a_factorial_refuses_outright() -> None:
-    """The whole reason this function exists.
+    """Every run satisfies a constraint a factorial refuses outright.
 
-    `factorial_design` raises on a constrained problem, saying so in its own message — it
-    enumerates the corners of the space and most corners violate the limit. Here every run is
-    feasible, which is what makes the design runnable rather than a list to hand-filter.
+    Every run feasible makes the design runnable rather than a list to hand-filter.
     """
     design = optimal_design(_problem(constrained=True), n_experiments=12, seed=5)
     assert len(design.runs) == 12
@@ -66,12 +63,10 @@ def test_every_run_satisfies_a_constraint_a_factorial_refuses_outright() -> None
 
 
 def test_a_budget_too_small_for_its_model_is_refused_although_bofire_returns_one() -> None:
-    """The refusal this wrapper exists to add.
+    """A budget too small for its model is refused although BoFire returns one.
 
-    Measured on bofire 0.4.1: a `fully-quadratic` criterion over three continuous factors, asked
-    for three runs against a ten-term model, returns three rows and no error. The information
-    matrix is singular, so no coefficient of that model is estimable and nothing in the frame says
-    so — a chemist runs them, fits nothing, and concludes the chemistry is noisy.
+    BoFire returns three rows for a ten-term quadratic model with no error; the information matrix
+    is singular, so nothing is estimable.
     """
     with pytest.raises(ValueError, match="singular"):
         optimal_design(_problem(), n_experiments=4, formula="fully-quadratic")
@@ -118,9 +113,8 @@ def test_space_filling_is_not_refused_for_a_small_budget() -> None:
 def test_the_summary_states_the_formula_the_design_is_optimal_for() -> None:
     """Calling a design optimal, without the model it is optimal for, states nothing about it.
 
-    The same factors and budget give a different design for a linear model than a quadratic one,
-    and a linear design is blind to curvature — which is usually what a process chemist is looking
-    for. `summary` is a `computed_field` so this reaches the model composing the answer.
+    A linear design is blind to curvature. `summary` is a `computed_field`, so the formula reaches
+    the model.
     """
     design = optimal_design(_problem(), n_experiments=12, formula="linear-and-interactions", seed=2)
     assert "linear-and-interactions" in design.summary
@@ -130,9 +124,8 @@ def test_the_summary_states_the_formula_the_design_is_optimal_for() -> None:
 def test_a_repeated_row_is_counted_and_named_rather_than_looking_like_a_fault() -> None:
     """Replication at an informative corner is what minimises the criterion.
 
-    Two identical rows are the design working. A chemist who reads them as a duplicate and deletes
-    one has changed the design, so the count is carried and the summary says to run them as
-    written. Driven over a budget generous enough that the optimizer reuses points.
+    Identical rows are counted and the summary says to run them as written, so a chemist does not
+    delete one as a duplicate.
     """
     design = optimal_design(_problem(categorical=False), n_experiments=10, formula="linear", seed=3)
     keyed = [tuple(sorted(run.items())) for run in design.runs]
@@ -208,12 +201,10 @@ def test_an_unsolvable_space_is_translated_rather_than_raised_as_bofires_own_err
 
 
 def test_the_tolerance_is_the_one_the_engine_enforces_not_a_tighter_one() -> None:
-    """The bug this pair of tests had, and the reason the constant is shared rather than repeated.
+    """The tolerance is the one the engine enforces, not a tighter one.
 
-    The first version asserted 1e-6 against a solver that only ever promised its own tolerance. It
-    passed locally and failed on CI, whose different scipy build landed on the other side — a flaky
-    assertion, not a flaky solver. Measured over 20 seeds x 4 criteria, the worst excursion was
-    7.5e-06, so the engine refuses at 1e-4 and these tests assert the same number by importing it.
+    The solver only promises its own tolerance and excursions vary across scipy builds, so the
+    engine refuses at 1e-4 and the tests import the same constant.
     """
     assert _CONSTRAINT_TOLERANCE == pytest.approx(1e-4)
     design = optimal_design(_problem(constrained=True), n_experiments=8, seed=5)
@@ -223,9 +214,7 @@ def test_the_tolerance_is_the_one_the_engine_enforces_not_a_tighter_one() -> Non
 def test_a_run_outside_a_constraint_is_reported_rather_than_returned() -> None:
     """The check is not vacuous: a genuinely infeasible run is named, with the constraint.
 
-    Driven with a hand-built run rather than by hoping the solver misbehaves, because the whole
-    point of the tolerance above is that it does not — and a check that only ever sees feasible
-    input is one nothing proves.
+    Driven with a hand-built run, since the solver itself stays within tolerance.
     """
     breaches = _constraint_breaches(
         _problem(constrained=True), [{"temp": 80.0, "base_equiv": 3.0, "ligand": "XPhos"}]
@@ -290,11 +279,8 @@ def test_rounding_a_feasible_solve_at_a_large_magnitude_is_not_read_as_a_breach(
 ) -> None:
     """The breach check reads the solver's values, and a run cleaning would break is returned raw.
 
-    Ten significant digits move a value by up to 5e-11 of itself, which at ~1e6 and times a
-    coefficient is past the absolute `_CONSTRAINT_TOLERANCE`. Checked after rounding, a solve
-    sitting exactly on its limit was refused as infeasible — measured on a space-filling design
-    over `7·a + 13·b <= 3.1e7`. The solver is replaced so the point is fixed rather than
-    depending on one scipy build's arithmetic.
+    Rounding to ten significant digits at large magnitudes can exceed `_CONSTRAINT_TOLERANCE`, so
+    the check runs before rounding. The solver is replaced so the point is fixed.
     """
     from types import SimpleNamespace
 

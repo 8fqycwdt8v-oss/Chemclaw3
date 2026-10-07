@@ -1,25 +1,12 @@
 """The agent's three artefact tools: create one, revise one, read one back.
 
-An artefact is **part of the answer, not an effect**
-(`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`): it changes nothing in a
-laboratory, the knowledge graph or another system, so these tools are read-only for authorization
-(`agent/authz.READ_ONLY_TOOLS`) and need no approved plan. The two that write announce the write on
-the chemist's stream (`record_exhibit`), which is exactly why they are kept off every helper
-(`agent/subagents.SPEAKS_TO_THE_CHEMIST`): a helper creating one would put something on the
-chemist's screen from a context the chemist cannot see.
+An artefact is part of the answer, not an effect, so these tools are read-only for authorization
+and need no approved plan. The two that write announce on the chemist's stream, which is why they
+are kept off every helper.
 
-**The spec is an untyped object at this boundary and validated behind it.** The decision record
-measured a typed union at 1,989 prefix tokens for the three tools against 961 for this shape, with
-the typed create tool alone over `MAX_SINGLE_TOOL_TOKENS`. What that gives up is constrained
-generation; what replaces it is `exhibits.models.parse_spec`, which refuses a malformed spec with a
-worded error the model can correct in one retry.
-
-**What the model is told is defanged, never framed.** `read_exhibit` returns text a chemist may have
-typed and text an earlier turn wrote, and a stored delimiter would otherwise be replayed into every
-later read — `protocol_design_tools._readable`'s argument, for the same kind of document.
-
-**Only the turn's own session is reachable.** Every call resolves the artefact against the ambient
-session id, so an id from another conversation answers as an unknown one.
+The spec is an untyped object at the schema boundary (a typed union costs too many prefix
+tokens) and is validated by `exhibits.models.parse_spec` with errors the model can correct.
+`read_exhibit` output is defanged, and only the turn's own session is reachable.
 """
 
 from __future__ import annotations
@@ -85,12 +72,10 @@ HTML_CLAUSE = "; html `html` (self-contained, no network), `height`"
 
 
 def described_for_deployment(tool: BaseTool) -> BaseTool:
-    """`tool`, or a copy of `create_exhibit` without the html clause when html artefacts are off.
+    """Return `tool`, or a copy of `create_exhibit` without the html clause when html is off.
 
-    A copy per build rather than a second registered function: the schema stays the one
-    `tool_schema.as_structured_tool` derived once, and only the description text differs. The
-    clause is required to be in the description, so an edit to the docstring that drops or rewords
-    it fails here rather than leaving html advertised on a deployment that refuses it.
+    Only the description differs, so the schema stays the one derived once. The clause must be
+    present in the docstring, so rewording it fails here rather than advertising html wrongly.
     """
     if tool.name != "create_exhibit" or settings.agent_html_artefacts_enabled:
         return tool
@@ -110,9 +95,8 @@ def _session() -> str:
 def _store() -> ExhibitStore:
     """The deployment's artefact store, resolved per call.
 
-    Per call rather than bound at import, because the backend follows `session_store` and a tool
-    module is imported once for the life of the process — and so that a test patching this one
-    name reaches every tool here.
+    Per call because the backend follows `session_store`, and so a test patching this name reaches
+    every tool here.
     """
     return default_exhibit_store()
 
@@ -255,9 +239,8 @@ async def read_exhibit(exhibit_id: str, revision: int = 0) -> str:
         readout["bindings"] = [binding.model_dump(mode="json") for binding in shown.bindings]
     readout["unchecked_figures"] = view.unverified_figures
     readout["changes_since_agent"] = await _changes_since_agent(store, session_id, view)
-    # No read mark is set here, deliberately: a helper holds this tool too, and a helper reading
-    # the chemist's edit is not the agent that answers the chemist having seen it. The mark moves
-    # on the agent's own writes and when the turn note announces an edit (`agent/exhibit_notes`).
+    # No read mark here: helpers hold this tool too, and a helper reading an edit is not the agent
+    # having seen it.
     return defang(json.dumps(readout, ensure_ascii=False))
 
 
@@ -266,8 +249,7 @@ async def _changes_since_agent(
 ) -> dict[str, Any] | None:
     """The chemist's changes between the agent's last revision and `view`, capped — or `None`.
 
-    `None` when there is nothing to compare: the agent wrote `view` itself, or never wrote this
-    artefact at all (a result the chemist pinned, a table they started).
+    `None` when the agent wrote `view` itself or never wrote this artefact.
     """
     history = await store.revisions(session_id, view.exhibit_id) or []
     agent_revisions = [
@@ -300,8 +282,8 @@ def _revised_spec(
     """The spec a revision writes: a whole new one, or the document with `edits` applied.
 
     Raises:
-        ChemclawError: neither or both were given, edits were given for something not a document,
-            or an `old` does not occur exactly once in the text it is applied to.
+        ChemclawError: Neither or both were given, edits target a non-document, or an `old` does
+            not occur exactly once.
     """
     if (edits is None) == (spec is None):
         raise ChemclawError("pass exactly one of `edits` (a document) or `spec` (a whole new spec)")

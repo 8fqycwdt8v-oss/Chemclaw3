@@ -1,9 +1,7 @@
-"""The report harness (plan Phase 5b) and sub-agent fan-out (F10-D).
+"""Settings for the report harness and sub-agent fan-out.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from pydantic import Field
@@ -18,31 +16,14 @@ class ReportSettings(BaseSettings):
     groups).
     """
 
-    # Per-section retrieval budget for the durable development-report workflow — one section is
-    # one activity, so a long report resumes section by section after a worker restart.
+    # Per-section retrieval budget for the durable development-report workflow — one section is one
+    # activity, so a long report resumes section by section after a worker restart.
     report_section_timeout_seconds: float = Field(default=300.0, gt=0)
-    # A fan-out job (report sections, memory-synthesis groups) runs its independent sub-tasks as
-    # child workflows; this bounds how many run at once so a large report/corpus does not spawn
-    # hundreds of children simultaneously. Per-child retry + durability come from each child's
-    # own retry policy; the bound is on concurrency only.
+    # Bound on concurrent child workflows in one fan-out job (report sections, memory-synthesis
+    # groups). Concurrency only; retries come from each child's own policy.
     orchestrator_max_parallel_children: int = Field(default=8, ge=1)
-    # Wall-clock ceiling on one fan-out child. **A retry policy is not a ceiling**: `BAD_DATA_RETRY`
-    # bounds how many times a child may *fail*, and a child that neither fails nor finishes — an
-    # activity stuck on a dead dependency, a heartbeat that stops arriving — is retried zero times
-    # and waited on forever, inside the parent's `asyncio.gather`. `ConnectorJobWorkflow` already
-    # bounds its child this way (`connector_job_timeout_seconds`); the orchestrator's children had
-    # nothing above them at all.
-    #
-    # An hour is generous against what these children do (one retrieval section, one note publish)
-    # and is meant as a "this is stuck" bound rather than a service level. `Settings` checks it
-    # against the section budget it has to contain, so lowering it below that budget is refused
-    # rather than silently pre-empting work that was still running.
-    #
-    # **It has to contain the child's queue wait as well as its work, and for a while it did not.**
-    # Both children passed core's flat hour as their `schedule_to_start`, which is this very
-    # number, so the composite `q + w` was 3,900 s under a 3,600 s ceiling and the child's own
-    # schedule-to-start expiry was unreachable — every parked child came back as a bare execution
-    # timeout, delivered to no workflow code. `durable/publish.py::fan_out_queue_wait_timeout`
-    # now derives the children's wait from what is left of this ceiling, so raising or lowering it
-    # moves the wait with it and the composite fits by construction.
+    # Wall-clock ceiling on one fan-out child, including its queue wait: a retry policy does not
+    # bound a child that never fails nor finishes. `Settings` refuses a value below the section
+    # budget, and `durable/publish.py::fan_out_queue_wait_timeout` derives the queue wait from what
+    # is left.
     fan_out_child_timeout_seconds: float = Field(default=3600.0, gt=0)

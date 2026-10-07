@@ -1,31 +1,9 @@
 """The tool-result store: where a turn's full tool output lives so a surface can fetch it.
 
-`ToolResultEvent.preview` is 200 characters cut at whatever byte the budget lands on, and its own
-docstring says it will stay that way — "never a whole evidence sweep streamed to a browser". The
-consequence was that everything a tool actually *returned* reached the chemist as prose the model
-wrote about it: a hazard screen's severities and citations, a charge table's rows, a solvent
-ranking. The full text already existed at emit time — `ToolCallTrace.returned` is handed the whole
-result and truncates only the preview — and was dropped on the floor once the event was built.
-
-This is the other half of the split the preview created. The stream keeps its budget — the event
-carries a *reference*, not a payload — and a surface that decides to render one result pulls that
-one result, once, through `GET /sessions/{id}/tool-results/{ref}`. Streaming the typed payload on
-the event instead would re-open exactly the question the truncation closed.
-
-**Content-addressed, so a repeat stores nothing.** The ref is the SHA-256 of the result text, which
-makes an identical result from an identical call the same row — the "never compute twice" position
-(D-011) applied to bytes. It also means the ref is derivable from the text alone, so nothing has to
-be threaded back from the database to build the event.
-
-**Storing must never fail a turn**, and that is the whole reason this module returns `""` rather
-than raising. An empty `result_ref` is the honest statement "not stored", which is also what a
-surface sees when the store is off or the result was over the cap; there is exactly one way for a
-consumer to read the absence, and no path in which a database outage costs a chemist an answer.
-
-`api` rather than `science/calc` (where the artifact store lives, D-124): an artifact is a
-by-product of a *calculation* and is keyed by its calculation, while this is a by-product of a
-*turn* and is keyed by the session that ran it. Sharing a store would have meant one of the two
-keys pretending to be the other.
+Events carry a preview and a ref; a surface fetches one result's full text through `GET
+/sessions/{id}/tool-results/{ref}`. The ref is the SHA-256 of the text, so repeats store nothing
+new. Storing never fails a turn: every failure yields `""`. Keyed by session, unlike the
+calculation-keyed artifact store.
 """
 
 import hashlib
@@ -40,41 +18,21 @@ from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
-# A tool result reaches a consumer as text; the address is over its UTF-8 bytes so the same string
-# addresses identically whatever encoded it.
+# Addressed over the text's UTF-8 bytes, so a string addresses identically whatever encoded it. `DO
+# UPDATE SET created_at = now()` rather than `DO NOTHING`: here `created_at` is the retention clock,
+# so a repeat write keeps the blob alive; the bytes are still stored once.
 _INSERT_BLOB = """
     INSERT INTO tool_result_blobs (content_hash, byte_size, data)
     VALUES (%s, %s, %s)
     ON CONFLICT (content_hash) DO UPDATE SET created_at = now()
 """
 
-# `DO UPDATE SET created_at = now()` and not `DO NOTHING`, which is what the artifact store does
-# with the identical statement — the difference is what each `created_at` means. There it is a
-# provenance stamp beside a separate `last_access_at` that drives eviction; here it *is* the
-# retention clock, so leaving it at the first write would expire a blob on the clock of a turn
-# from three weeks ago while two of its links are from this morning. The bytes are still stored
-# once; only the clock moves.
 
-# **`tool` and `correlation_id` collapse to `''` on disagreement rather than taking the last
-# writer's word**, and that is the one place a *label* can be wrong here. The row is keyed on
-# `(session_id, content_hash)`, so two calls in one session that returned identical text are one
-# row; `SET tool = EXCLUDED.tool` then relabelled that row with whichever call wrote last, and the
-# fetch route served the right bytes under a different call's tool name and correlation id — with
-# nothing in the payload saying so, which is exactly the near-miss pairing
-# `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one` refuses on the read side ("a mispaired
-# result is worse than an absent one").
-#
-# Guaranteed rather than hypothetical: `include_detailed_errors` is off (`agent/tool_authz.py`
-# documents why), so **every** unexpected tool exception in the system returns the same byte string
-# "Error: Function failed." — one blob per session for every failed call it ever makes, and the
-# `correlation_id` `StoredToolResult` calls "the join a reviewer asks for" would name one
-# arbitrary turn among them.
-#
-# An empty column is the honest answer: these bytes are not one call's, so the store names no call.
-# It is a `CASE` rather than a read-modify-write because it must stay one statement on the turn
-# path, and it is monotone — once a value disagrees it is `''`, and `''` disagrees with every
-# subsequent write, so the collapse never silently un-collapses. `created_at` still moves, because
-# it is the retention clock (above) and not a label.
+# The row is keyed on `(session_id, content_hash)`, so identical text from two calls is one row.
+# `tool` and `correlation_id` collapse to `''` on disagreement rather than taking the last writer's
+# label, which would serve the bytes under the wrong call (every unexpected tool error returns the
+# same text, so this is common). A `CASE` keeps it one statement, and it is monotone: once `''`,
+# always `''`. `created_at` still moves (retention clock).
 _UPSERT_LINK = """
     INSERT INTO tool_result_links (session_id, content_hash, tool, correlation_id)
     VALUES (%s, %s, %s, %s)
@@ -89,10 +47,9 @@ _UPSERT_LINK = """
         created_at = now()
 """
 
-# Joined on the link rather than read straight off the blob, and that join *is* the authorization:
-# a ref names bytes, a link names whose conversation produced them, so a caller holding a ref from
-# somebody else's session finds nothing. The route's `resolve_session` has already established that
-# this caller owns this session; this establishes that this session produced this result.
+# The join on the link is the authorization: a ref from another session's result finds nothing.
+# `resolve_session` established the caller owns the session; this establishes the session produced
+# the result.
 _SELECT_RESULT = """
     SELECT l.tool, l.correlation_id, b.byte_size, b.data
     FROM tool_result_links AS l
@@ -100,18 +57,9 @@ _SELECT_RESULT = """
     WHERE l.session_id = %s AND l.content_hash = %s
 """
 
-# Which of a session's results are fetchable *right now* — the transcript's question, asked once
-# per reload rather than once per tool call. Only the links are read: `ON DELETE CASCADE` (042)
-# means a link cannot outlive its blob, so the link's existence is the blob's existence, and
-# joining `tool_result_blobs` would re-derive a fact the foreign key already guarantees.
-#
-# Served by the table's **primary key**, `(session_id, content_hash)`: the predicate is its leading
-# column and the projection is its second, so the whole answer is inside the index. Measured on
-# 20,000 links over 200 sessions — `Index Only Scan using tool_result_links_pkey`, `Heap Fetches:
-# 0`. Not by `tool_result_links_session_idx`, which this comment used to name: that index is
-# `(session_id, created_at DESC)` and carries no `content_hash`, so it cannot answer this query
-# without going to the heap. It exists for a recency-ordered read of a session's links, which is a
-# different question and not one this module asks.
+# Which of a session's results are fetchable now, asked once per transcript read. Only links are
+# read: `ON DELETE CASCADE` means a link cannot outlive its blob. Answered by an index-only scan of
+# the primary key `(session_id, content_hash)`.
 _SELECT_SESSION_REFS = "SELECT content_hash FROM tool_result_links WHERE session_id = %s"
 
 
@@ -144,17 +92,15 @@ class StoredToolResult(BaseModel):
     text: str
 
 
-# `(tool, text) -> ref`, empty when nothing was stored. The trace holds one of these rather than a
-# session id and a store, because the trace's whole design is that it knows nothing about sessions
-# (see its module docstring) — a closure the runner builds keeps that true.
+# `(tool, text) -> ref`, empty when nothing was stored; a closure, so the trace never knows about
+# sessions.
 ResultSink = Callable[[str, str], Awaitable[str]]
 
 
 def content_address(text: str) -> str:
     """The ref for a result: the SHA-256 hex digest of its UTF-8 bytes.
 
-    Pure, so the producer can name a result before — or without — writing it, and two producers
-    that never meet agree on the name.
+    Pure, so a result can be named before or without writing it.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -162,10 +108,8 @@ def content_address(text: str) -> str:
 async def store_tool_result(*, session_id: str, correlation_id: str, tool: str, text: str) -> str:
     """Store one tool result for `session_id` and return its ref.
 
-    Two statements, like the artifact store's write: the blob by content address (a no-op on the
-    bytes when the same result is already there) and the link that makes it reachable from the
-    session. Raises on a database failure — the swallowing belongs to `session_sink`, so a caller
-    that genuinely wants to know a write failed (a test, an operator script) can still find out.
+    The blob by content address, then the link that makes it reachable from the session. Raises on a
+    database failure; `session_sink` is where failures are swallowed.
     """
     ref = content_address(text)
     payload = text.encode("utf-8")
@@ -180,9 +124,8 @@ async def store_tool_result(*, session_id: str, correlation_id: str, tool: str, 
 async def load_tool_result(session_id: str, ref: str) -> StoredToolResult | None:
     """The stored result `ref` names *within* `session_id`, or `None` when there is none.
 
-    One answer for three different misses — never stored, swept by retention, or belongs to a
-    different conversation — because distinguishing them would tell an unauthorized caller that a
-    ref exists somewhere. The route turns it into one 404.
+    One answer for never stored, swept, or another conversation's, so an unauthorized caller learns
+    nothing; the route makes it one 404.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -204,31 +147,9 @@ async def load_tool_result(session_id: str, ref: str) -> StoredToolResult | None
 async def fetchable_refs(session_id: str) -> frozenset[str]:
     """Every ref `session_id` can currently fetch — what the transcript needs to advertise one.
 
-    **Why the transcript needs this at all, when the ref is derivable from the bytes.** A stored
-    tool call is paired to its blob by *content address*: the transcript holds the result text, and
-    the SHA-256 of that text is the address the store wrote it under. That pairing is exact by
-    construction — no timestamp window, no "the nearest link row with the same tool", nothing that
-    is right most of the time — and it is why `tool_result_links` is not consulted as a *join key*.
-    What the address cannot say is whether those bytes are still there: `result_ref` on the live
-    event means "stored", and a transcript that computed an address for every past result would
-    hand a client refs for results the store never took (the store is off, the result was over the
-    cap, the write failed) and for results retention has since swept. This turns the derivable
-    address into a checked one, so an empty `TranscriptToolCall.result_ref` keeps the one meaning
-    it has on the stream: not fetchable.
-
-    Returned frozen because it is a lookup table the projection only reads, and it crosses from a
-    route into a pure function that must not be able to change it.
-
-    **A failure is an empty set, not an error**, for the reason `session_sink` swallows its write:
-    a fetchable full result is a rendering, and a transcript a chemist is reloading must not fail
-    because the blob store is unreachable — they still get every message, every tool call and the
-    400-character result. The swallow goes through `degraded()` under the same subsystem name as
-    the write side, because from an operator's seat "the tool-result store is not answering" is one
-    condition whether it was noticed writing or reading.
-
-    Skipped entirely when `stream_max_result_bytes` is 0, which is the store's documented off
-    switch: nothing was written, so there is nothing to ask about and no reason to open a
-    connection to ask.
+    The content address pairs a call with its blob but cannot say the blob still exists (store off,
+    over cap, failed write, swept), so this set makes a ref checked. A failure yields an empty set
+    via `degraded()`; skipped when `stream_max_result_bytes` is 0.
     """
     if settings.stream_max_result_bytes <= 0:
         return frozenset()
@@ -255,21 +176,9 @@ async def fetchable_refs(session_id: str) -> frozenset[str]:
 def session_sink(session_id: str, correlation_id: str) -> ResultSink:
     """A `ResultSink` that stores this turn's results against this session.
 
-    The failure policy lives here rather than in the trace or the store: a tool result reaching a
-    browser is a rendering, and no rendering is worth failing a turn over. A write that raises is
-    answered with `""` — the same value an over-cap result gets, so a consumer has one thing to
-    check and "not stored" has one meaning.
-
-    Through `degraded()` rather than a bare `logger.warning`, which is this repository's rule for a
-    deliberate swallow: the log line names one lost write, and the counter is what makes a run of
-    them visible to an operator. It matters more here than at most `degraded` sites because the
-    write is per *tool call* rather than per turn — a development CLI pointed at no database will
-    produce one line per call, and the aggregate is the thing worth alerting on.
-
-    `level=WARNING` rather than the ERROR default, and `exc_info=False`: what is lost is a
-    rendering, which is the "cosmetic" case the helper documents for the lower level, and an
-    unreachable database is already loud on paths that do matter (`ConnectionError` classifies as
-    `storage_unavailable` and fails the turn there). A stack trace per tool call would bury both.
+    A failed write returns `""`, as an over-cap result does: no rendering is worth failing a turn.
+    Reported through `degraded()` at WARNING without a traceback — per tool call, so the counter is
+    what matters, and an unreachable database is already loud elsewhere.
     """
 
     async def _put(tool: str, text: str) -> str:
@@ -297,20 +206,10 @@ def session_sink(session_id: str, correlation_id: str) -> ResultSink:
 async def stored_within_cap(sink: ResultSink | None, tool: str, text: str) -> str:
     """Store `text` and return the ref a surface fetches it by, or `""` when it was not stored.
 
-    The one place the store's size cap is applied, for both of its writers: the trace storing what
-    the model read (`api/runner_trace.py`) and the cut keeping what the tool returned
-    (`full_result_sink`). The bound comes from `settings` rather than a literal, an over-cap result
-    is *refused rather than trimmed*, and the refusal is logged. Trimming would be the worse failure
-    — a truncated `ScreenResult` is still valid JSON and would render as a complete hazard screen
-    with flags missing, which is the "silent truncation reads as completeness" problem made worse
-    by the payload looking whole.
-
-    Measured in bytes, not characters, because the cap is protecting a `BYTEA` column: a result
-    full of multi-byte characters is up to four times its length in what is actually written.
-
-    `""` covers every way a result can fail to be stored — no sink, the store off, over the cap, or
-    a write that raised (swallowed one layer down in `session_sink`). One value, one meaning, and
-    none of them fails the turn.
+    The one place the size cap is applied, for both writers (the trace and `full_result_sink`). An
+    over-cap result is refused and logged, never trimmed: a truncated JSON payload would render as
+    complete with data missing. Measured in bytes, since the cap protects a `BYTEA` column. `""`
+    covers every way of not storing, and none fails the turn.
     """
     if sink is None or settings.stream_max_result_bytes <= 0:
         return ""
@@ -330,16 +229,11 @@ async def stored_within_cap(sink: ResultSink | None, tool: str, text: str) -> st
 def full_result_sink(session_id: str, correlation_id: str) -> ResultSink:
     """Where a cut result keeps its full text: this session's store, under the store's own cap.
 
-    The consumer is the chemist, never the model
-    (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`): the cut in
-    `agent/tool_result_size.py` hands the full text here, stamps the returned ref on the message,
-    and the stream names it on `ToolResultEvent.result_ref`, so `GET /sessions/{id}/tool-results/
-    {ref}` opens what the tool returned. The same tables, the same link-join authorization, the same
-    retention and the same erasure as every other stored result — a full text is a stored result,
-    and a second store would have needed a second answer to each of those.
-
-    Installed by `api/runner._turn_ambient` through `set_full_result_sink`, which is the only way
-    it reaches the middleware: `tests/test_layering.py` forbids `agent -> api`.
+    The consumer is the chemist, never the model: the cut in `agent/tool_result_size.py` stores the
+    full text here and stamps the ref, so `GET /sessions/{id}/tool-results/{ref}` opens what the
+    tool returned. Same tables, authorization, retention and erasure as any stored result. Installed
+    by `api/runner._turn_ambient` via `set_full_result_sink`, since the layering forbids `agent ->
+    api`.
     """
     put = session_sink(session_id, correlation_id)
 

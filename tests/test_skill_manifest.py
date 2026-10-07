@@ -1,11 +1,8 @@
-"""The validated skill manifest + explicit enable-list (config-extensibility item 5).
+"""The validated skill manifest and the explicit enable-list.
 
-Proves the two halves of "discovery is not enablement": a `SKILL.md` frontmatter is a typed
-contract whose declared capabilities are checked against the live registries (so a skill teaching a
-renamed tool fails CI instead of surviving as stale prose), and a deployment can narrow which
-discovered skills are advertised without deleting folders. Both only ever *attenuate* — neither can
-advertise a skill no directory provides, and the role gate still runs on top. Offline; the shipped
-`skills/` tree is the fixture. See `docs/archive/audit/10-config-extensibility.md` §9 item 5.
+A `SKILL.md` frontmatter is a typed contract whose declared capabilities are checked against the
+live registries, and a deployment can narrow which discovered skills are advertised. Both only
+attenuate; the role gate still runs on top. Offline, over the shipped `skills/` tree.
 """
 
 from pathlib import Path
@@ -83,13 +80,9 @@ def test_gate_catches_a_skill_declaring_a_vanished_tool(tmp_path: Path) -> None:
 
 
 def test_gate_catches_a_skill_declaring_an_unknown_connector_tool(tmp_path: Path) -> None:
-    """A skill teaching a tool no connector serves fails the gate — the cross-process drift case.
+    """A skill teaching a tool no connector serves fails the gate.
 
-    The declared-tool check spans both halves of the surface, so a skill may legitimately name a
-    tool
-    that lives behind a connector rather than in this process. The failure mode this guards is the
-    same one it guards in-process: a bundle renamed or removed its tool, and the skill still teaches
-    it.
+    The check spans in-process and connector tools, so a renamed bundle tool is caught too.
     """
     skill_dir = tmp_path / "ghost-connector-tool"
     skill_dir.mkdir()
@@ -168,21 +161,11 @@ def test_skills_enabled_list_parses_the_pathsep_token() -> None:
 
 
 def test_every_template_tool_a_skill_names_is_a_real_template_tool() -> None:
-    """A skill's routing table named seven tools that do not exist, and no gate saw it.
+    """Every `run_*` tool a skill names is a real template tool.
 
-    `templates/registry.py::tool_name` is `f"run_{name.replace('-', '_')}"`, so the tool for
-    `data/templates/tautomer-resolution.yaml` is `run_tautomer_resolution`. Both shipped skills
-    wrote `run_tautomer-resolution` — the file stem, dashes and all — in every row of the "which
-    workflow" table the whole feature exists to provide.
-
-    `make skill-validate` could not catch it. Its "taught implies declared" half extracts tool names
-    with `validate_prose_contract._BARE`, whose lookbehind excludes a backticked name with no
-    parens — so it extracted *nothing* from `ensemble-workflows/SKILL.md` and the bidirectional
-    check was vacuous on exactly the file that needed it. This closes that specific hole rather than
-    widening `_BARE`, which would change what every other skill is checked against.
-
-    Scanned over the raw text, not the frontmatter, because the wrong names were in prose: a
-    `run_*` token anywhere in a skill is a claim that a template by that name is launchable.
+    `tool_name` is `run_` plus the template stem with dashes as underscores. `skill-validate`'s
+    `_BARE` does not extract backticked names without parens, so this scans the raw text rather
+    than widening `_BARE` for every skill.
     """
     import re
 
@@ -209,13 +192,10 @@ def test_every_template_tool_a_skill_names_is_a_real_template_tool() -> None:
 
 
 def test_a_frontmatter_defect_cannot_widen_what_a_skill_is_scoped_to(tmp_path: Path) -> None:
-    """A read error must cost a skill its visibility, never buy it back.
+    """A frontmatter defect cannot widen what a skill is scoped to.
 
-    `declared_tools` fed `ToolScopedSkills`, which reads a missing entry as "declares nothing" and
-    therefore leaves the skill **visible to every caller**. So while this walked the whole
-    `SkillManifest`, any frontmatter defect — a description one character over
-    `MAX_SKILL_DESCRIPTION_CHARS`, a misspelled `tags:` key — silently unscoped the skill. Neither
-    is evidence about which tools the skill teaches, and the filter's whole contract is one-way.
+    `ToolScopedSkills` reads a missing entry as "declares nothing", i.e. visible to everyone, so a
+    read error must never drop the entry.
     """
     from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS, _declared_tools
 
@@ -240,23 +220,11 @@ def test_a_frontmatter_defect_cannot_widen_what_a_skill_is_scoped_to(tmp_path: P
 
 
 def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> None:
-    """The residue of the rule above, and it used to be asserted the other way round.
+    """A skill with no readable name is scoped to nothing.
 
-    **This test asserted `declared_tools(...) == {}` and called staying out of the map "the
-    conservative answer". It is the fail-open answer**, and the test directly above says why: the
-    consumer is `ToolScopedSkills._permits`, which reads a *missing* entry as "declares nothing" and
-    therefore leaves the skill **visible to every caller**. So the pair contradicted each other on
-    one rule — "a read error must cost a skill its visibility, never buy it back" — with this half
-    buying it back for every defect the sibling's two cases do not cover. Measured against a profile
-    holding **zero** callable tools: a scalar `tools:`, a mapping `tools:` and an unparseable
-    frontmatter were all visible, where the over-long `description` the sibling covers was not.
-
-    So the unreadable case is keyed too, with a declaration nothing can satisfy. The key is the
-    *directory* name, because the frontmatter is the thing that could not be read — and
-    `make skill-validate` requires the directory and the frontmatter `name` to agree
-    (`cli/validate_skills.py`), so in any tree CI has walked this is the same string the readable
-    path would have produced. In a tree it has not walked, a skill scoped to nothing is the safe
-    answer rather than a guess, which is the direction the sibling's contract asks for.
+    It is keyed by its directory name with a declaration nothing can satisfy, since a missing entry
+    would be visible to every caller. `skill-validate` requires directory and frontmatter names to
+    agree.
     """
     from chemclaw.agent.skill_access import ToolScopedSkills
     from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_tools
@@ -278,16 +246,9 @@ def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> N
         "bad-yaml": UNREADABLE_DECLARATION,
     }, "an unreadable manifest stayed out of the map, which leaves the skill visible to everyone"
 
-    # **The half that makes the assertion above mean something.** A key in the map is only
-    # conservative if the value cannot be satisfied, so this asks the consumer rather than trusting
-    # the sentinel's name.
-    #
-    # **`available=frozenset()` alone is the one value that cannot tell the two apart**, and it was
-    # the only one asserted. An empty surface satisfies no declaration whatever it names, so setting
-    # the sentinel to a real tool name (`frozenset({"predict_pka"})`) left 91 tests green — while a
-    # profile holding `predict_pka`, which `data/profiles/` ships, saw every skill with an
-    # unreadable manifest. So the surfaces below include realistic non-empty ones, and the widest
-    # of them is every name this deployment can actually serve.
+    # Ask the consumer whether the sentinel is satisfiable, over realistic non-empty surfaces up to
+    # everything this deployment serves; an empty surface alone cannot tell a sentinel from a real
+    # tool name.
     from tests.surface import surface
 
     served = surface().tool_names
@@ -302,11 +263,7 @@ def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> N
             f"{sorted(available)[:4]}{'…' if len(available) > 4 else ''}"
         )
 
-    # **And the sentinel's unsatisfiability is derived, not asserted about its wording.** The reason
-    # `required & available` is always empty is that the name carries a NUL, which no tool name in
-    # this deployment can — so that is what is checked, against the served surface rather than
-    # against a sentence. A sentinel changed to any name a real profile could hold fails here as
-    # well as in the loop above, which is what makes the two independent.
+    # The sentinel is unsatisfiable because its name carries a NUL, which no served tool name can.
     assert any("\x00" in name for name in UNREADABLE_DECLARATION), (
         f"the unreadable-manifest sentinel {sorted(UNREADABLE_DECLARATION)} holds no character a "
         "tool name cannot, so nothing stops a real profile satisfying it"
@@ -320,27 +277,11 @@ def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> N
 
 
 def test_a_skill_manifest_read_is_always_a_whole_triple(tmp_path: Path) -> None:
-    """`_declared_pair` is total, over every way a manifest can fail to be read.
+    """`_declared_pair` always returns a whole `(name, tools, requires)` triple.
 
-    **The dead code this replaces was invisible to `mypy --strict`.** The function was annotated
-    `-> tuple[str, frozenset[str]] | None`, its summary line said "or None (logged) if the file
-    cannot be read at all", and `_declared_tools` guarded on `if pair is not None:` — all three long
-    after the `except` arm was changed to return `(directory name, UNREADABLE_DECLARATION)`. Nothing
-    can return `None` any more, so the guard was a branch no test could cover and the annotation was
-    a licence: a future `return None` would type-check, pass the guard, drop the entry, and leave
-    the skill **visible**, which is the fail-open answer that arm exists to refuse.
-
-    So the annotation is narrowed and this is what holds it. Driven over six shapes, which is the
-    set that reaches the `except` for six different reasons — a file that is not there at all, a
-    name that is empty, a name that is only whitespace, bytes no decoder accepts, a `tools:` key of
-    the wrong type, and a `requires:` key of the wrong type.
-
-    **Both halves of the answer are asserted, which is why the last case is here.** The read returns
-    `(name, tools, requires)`, and `ToolScopedSkills` consults the two sets with opposite
-    quantifiers: a skill survives on *any* declared tool and is hidden unless *every* required one
-    is present. A failure arm that sentinelled `tools` and left `requires` empty would therefore be
-    fail-closed on one rule and fail-*open* on the other, from the same unreadable file — so the
-    triple is compared whole rather than by its first two elements.
+    Driven over six ways a manifest can fail to read. `tools` and `requires` are consulted with
+    opposite quantifiers, so sentinelling only one would fail open on the other; the triple is
+    compared whole.
     """
     from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_pair
 

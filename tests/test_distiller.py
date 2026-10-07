@@ -1,15 +1,9 @@
 """The self-confirmation guard, driven — including the arm where it changes the answer.
 
-`tasks/todo.md` has carried this as a requirement since the plan was written: *nothing distilled may
-count evidence it itself produced*, and *the guard ships with its caller*. Building it found a third
-thing that had to ship with both, and this file is where that shows: the guard reads
-`turn_costs.skills_loaded`, which did not exist, because `chemclaw_skill_loads_total{skill}` says a
-skill was read and never in which turn.
-
-**The test that matters is the one where the guard changes the verdict.** A guard asserted only on
-a corpus where it is a no-op is `map_to_hpc_identity` with extra steps — a claim that a control
-exists. So the first two tests here differ in nothing but whether the candidate skill was already
-loaded, and they must disagree.
+Nothing distilled may count evidence it produced itself: the guard reads
+`turn_costs.skills_loaded` to discount sessions where the candidate skill was already loaded. A
+guard asserted only where it is a no-op is a claim, so the first two tests differ only in whether
+the skill was already loaded, and must disagree.
 """
 
 import pytest
@@ -54,13 +48,10 @@ def test_a_trajectory_that_recurs_independently_is_a_candidate() -> None:
 
 
 def test_the_same_trajectory_is_not_a_candidate_where_the_skill_was_already_acting() -> None:
-    """The arm that makes the guard a control rather than a claim.
+    """The same trajectory is not a candidate where the skill was already acting.
 
-    Identical corpus, identical census, one difference: the sessions had already loaded a skill of
-    the name this candidate would take. A skill is injected into the prompt and *shapes the
-    trajectories that follow*, so counting those would make the loop self-confirming by
-    construction — propose, accept, observe the behaviour the acceptance caused, propose again with
-    a larger count.
+    A loaded skill shapes the trajectories that follow, so counting them would make the loop
+    self-confirming by construction.
     """
     already = {session: frozenset({skill_fingerprint(_NAME)}) for session in ("s1", "s2")}
 
@@ -73,11 +64,10 @@ def test_the_same_trajectory_is_not_a_candidate_where_the_skill_was_already_acti
 
 
 def test_the_guard_only_ever_removes_evidence() -> None:
-    """It can make a proposal harder to justify and never easier — a one-way property.
+    """The guard only ever removes evidence.
 
-    Stated as a property rather than as an example, because the failure that would matter is a
-    guard that *added* a session (by mis-keying, by defaulting a missing row to "independent" in a
-    way that outvoted a present one), and an example would not catch it.
+    Stated as a property, since the failure that matters is a guard that *adds* a session
+    (mis-keying, defaulting a missing row to independent), which an example would not catch.
     """
     sessions = ["s1", "s2", "s3", "s4"]
 
@@ -117,9 +107,8 @@ def test_the_bar_is_the_census_s_own_bar_on_the_surviving_evidence() -> None:
 def test_a_scaffold_is_deterministic_and_says_it_is_unfinished() -> None:
     """Two runs over one corpus must propose the same bytes.
 
-    `behaviour_proposals` keys on the content hash, so a body carrying a timestamp or a re-ordered
-    session list would turn one idempotent proposal into a new one every run — and a rejection
-    would stop meaning anything, which is the property the whole queue is built on.
+    `behaviour_proposals` keys on the content hash, so a timestamp or a reordered session list would
+    make every run a new proposal and a rejection meaningless.
     """
     candidate = Candidate(_TOOLS, ("s2", "s1"), 6, ())
     other = Candidate(_TOOLS, ("s1", "s2"), 6, ())
@@ -149,11 +138,10 @@ def test_a_scaffold_is_a_valid_skill_the_queue_will_accept() -> None:
 def test_a_miner_cannot_fill_a_queue_past_what_a_person_could_accept(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bounded by the cap every accepted skill is charged against.
+    """A miner cannot fill a queue past what a person could accept.
 
-    Proposing more than a person could accept is asking them to do the ranking the miner should
-    have done — and the cap exists because every accepted skill sits in the prefix of every later
-    turn.
+    Bounded by the cap every accepted skill is charged against, since an accepted skill sits in
+    every later turn's prefix and the miner, not the person, should do the ranking.
     """
     monkeypatch.setattr(settings, "agent_local_skills_max", 2)
     many = [
@@ -170,12 +158,10 @@ def test_a_miner_cannot_fill_a_queue_past_what_a_person_could_accept(
 async def test_a_distilled_candidate_really_reaches_the_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`propose` had no test: replacing its store call with an undefined name left 27 green.
+    """A distilled candidate really reaches the queue.
 
-    It is the only join between the miner and the queue, and the two things it decides are not
-    derivable anywhere else — which actor the row is filed under, and what the rationale says. A
-    proposal filed under the wrong actor lands in a queue its evidence did not come from, and one
-    filed under `""` lands where nobody looks.
+    `propose` is the only join between miner and queue and decides the actor the row is filed under
+    and its rationale; the wrong actor (or `""`) lands where its evidence did not come from.
     """
     from chemclaw.agent import behaviour_proposals
     from chemclaw.agent.behaviour_proposals import InMemoryProposalStore, content_hash
@@ -198,12 +184,10 @@ async def test_a_distilled_candidate_really_reaches_the_queue(
 
 
 def test_the_guard_s_finding_is_carried_and_not_only_counted() -> None:
-    """`Candidate.self_confirming` is what `propose` reports and nothing asserted it non-empty.
+    """The guard's finding is carried, not only counted.
 
-    Mutation: `candidates()` appending `()` instead of `discounted` stays green over the whole file.
-    That field is the guard's *output* — the trajectory that recurs only where a skill of its name
-    was already teaching it — and an empty one reads as "nothing was discounted", which is the
-    reassuring direction.
+    `Candidate.self_confirming` is the guard's output; an empty one reads as "nothing discounted",
+    the reassuring direction, so it is asserted non-empty here.
     """
     from chemclaw.agent.skill_fingerprint import skill_fingerprint
 
@@ -220,11 +204,10 @@ def test_the_guard_s_finding_is_carried_and_not_only_counted() -> None:
 
 
 def test_the_strongest_candidate_is_the_one_with_the_most_independent_sessions() -> None:
-    """`bounded`'s primary key is session count, and the old fixture held it constant at 3.
+    """The strongest candidate is the one with the most independent sessions.
 
-    So ranking by occurrences alone passed, while the two keys answer different questions: a
-    trajectory repeated ten times in one conversation is one person doing one thing twice, and two
-    conversations is the bar the census itself sets.
+    Session count is the primary key: a trajectory repeated ten times in one conversation is one
+    person doing one thing; two conversations is the census's bar.
     """
     from chemclaw.agent.distiller import bounded
 

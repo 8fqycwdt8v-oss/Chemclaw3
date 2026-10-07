@@ -1,15 +1,11 @@
 """Where a designed arm's outcomes are kept: in memory, or in `experiment_arm_results`.
 
-The same two-backend shape `protocols/store.py` has, and for its reason — an in-memory instance is
-a real backend for a deployment without Postgres, not a test double. Split into its own module
-rather than added to that one because the two answer different questions: that store holds the
-document a chemist revises, this holds the numbers a plate produced, and 073's own header is about
-keeping the prescriptive and descriptive tiers apart.
+The same two-backend shape as `protocols/store.py` (the in-memory one is a real backend, not a
+test double), split out because that store holds the document a chemist revises and this one
+the numbers a plate produced.
 
-**Append-only in both backends.** Neither offers an update or a delete, and the Postgres role is
-granted `INSERT` and nothing else on the table (`infra/sql/grants/app_privileges.sql`), because a
-re-measured well is a second observation rather than a correction of the first. Overwriting would
-delete the evidence that two assays disagree, which is the one thing the shape exists to keep.
+**Append-only in both backends**, and the Postgres role has `INSERT` only: a re-measured well
+is a second observation, and overwriting would delete the evidence that two assays disagree.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -127,12 +123,7 @@ class PostgresArmResultStore:
         author_kind: AuthorKind,
         author: str = "",
     ) -> int:
-        """Insert every result in one transaction, so a half-attached plate cannot happen.
-
-        `executemany` rather than a loop of `execute`: the plate is the unit a chemist attached, and
-        eleven of twenty-four wells landing because the connection dropped is a state nobody can
-        tell from a half-run plate.
-        """
+        """Insert every result in one transaction, so a half-attached plate cannot happen."""
         payload = [
             (
                 design_id,
@@ -187,10 +178,10 @@ _IN_MEMORY = InMemoryArmResultStore()
 
 
 def default_arm_result_store() -> ArmResultStore:
-    """The store this deployment uses — the same switch `default_design_store` reads.
+    """The store this deployment uses: the same switch `default_design_store` reads.
 
-    Module-level in-memory instance for that function's reason: a backend that forgot every
-    attached result between two calls would be worse than none at all.
+    The in-memory instance is module-level, since one that forgot results between calls would be
+    worse than none.
     """
     if settings.session_store == "postgres":
         return PostgresArmResultStore()

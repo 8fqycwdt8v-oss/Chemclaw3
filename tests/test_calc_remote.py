@@ -1,23 +1,9 @@
 """The calculation client: the cache still decides, and nothing here derives a `calc_version`.
 
-`connectors/calc/remote.py` is what the twelve `run_cached_*` wrappers become once the physics
-lives in `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`). Two properties carry
-the whole design, and both are asserted here rather than believed:
-
-1. **D-011 survives the wire.** A persisted result is never recomputed — the miss path just got
-   longer. Driven against a fake session that counts calls, because "was it recomputed?" is a
-   question about call counts and nothing else.
-2. **No `calc_version` is derived in this repository.** That one is a *static* check over the
-   source, not a behavioural one, because the failure it guards is silent: `binary_version()`
-   answered the literal string `"absent"` rather than raising when a binary was missing, so a
-   locally-derived version would be well-formed, match zero ledger rows, and make
-   `calculator_trust` report a confident `UNCALIBRATED`. A test that called something would pass
-   while the defect sat one import away.
-
-The live server is deliberately not required: what this file proves needs no physics at all. The
-key contract *against* a running server was measured once and recorded in the ADR — every identity
-byte-identical across the two repositories — because that check needs a server and this suite must
-not.
+Two properties, both asserted here: a persisted result is never recomputed across the wire
+(D-011, counted on a fake session), and no `calc_version` is derived in this repository (a static
+check, because a locally derived version is well-formed, matches no ledger row and fails silently).
+No live server is required.
 """
 
 import ast
@@ -50,10 +36,8 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.durable.publish import _BAD_DATA_TYPES
 from chemclaw.science.calc.store import CALCULATION_EPOCH, InMemoryStore
 
-# A version carrying *both* key delimiters, which is not a contrived string: `esol-delaney@2004`
-# is the solubility model's real name and `cal-0.28733:-29.3116` is the pKa calibration pair, both
-# read off the running server. A client that split the flat `type@version:input:params` form would
-# reassemble a different key from either one.
+# A version carrying both key delimiters (real model and calibration names), so a client that split
+# the flat `type@version:input:params` form would reassemble a different key.
 _AWKWARD_VERSION = "esol-delaney@2004/rdkit-2026.3.5/cal-0.28733:-29.3116"
 
 
@@ -77,12 +61,8 @@ class _FakeSession:
 class _Result:
     """The `CallToolResult` shape the client reads: `isError` plus text content.
 
-    A *failed* call carries plain text rather than JSON, which is what the wire actually looks
-    like: `Tool.run` raises `ToolError(f"Error executing tool {name}: {e}")` and
-    `_make_error_result` puts `str(e)` in one text block untouched. The fake used to JSON-wrap
-    every answer, error included — harmless while the client matched its markers anywhere in the
-    text, and load-bearing now that it matches them at the head, since a wrapped marker is exactly
-    the *echoed* shape `server_marked` exists to reject.
+    A failed call carries plain text rather than JSON, as on the real wire; a JSON-wrapped marker
+    would be the echoed shape `server_marked` rejects.
     """
 
     def __init__(self, payload: dict[str, Any] | str, is_error: bool = False) -> None:
@@ -122,12 +102,10 @@ _KEY = {
 async def test_a_persisted_result_is_never_recomputed_across_the_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """D-011 is the reason the cache stayed behind; the split must not weaken it.
+    """D-011 holds across the split: a cache hit makes no compute call.
 
-    The assertion is the *compute* count, not the elapsed time: a remote call that happened is a
-    remote call, however fast. `key_calls` is checked too, because the design deliberately pays one
-    cheap round trip on a hit — if that ever became zero the client would be deriving keys locally,
-    which is the thing this module exists to prevent.
+    `key_calls` is checked too: a hit pays one cheap key round trip, and zero would mean the client
+    derives keys locally.
     """
     fake = _FakeSession(_KEY, {"log_s_mol_per_l": -2.1268648})
     _session(monkeypatch, fake)
@@ -147,10 +125,7 @@ async def test_a_version_carrying_both_delimiters_round_trips(
 ) -> None:
     """The key crosses as four fields, so a version containing `@` and `:` survives it.
 
-    This is why `remote_key` reads an object rather than splitting the flat form. With
-    `esol-delaney@2004/…/cal-0.28733:-29.3116`, a split on `@` takes the type as
-    `solubility@esol-delaney` and a split on `:` takes the input hash as `-29.3116` — either one a
-    key that matches nothing, forever, with no error anywhere.
+    Splitting the flat form on either delimiter would produce a key that matches nothing, silently.
     """
     fake = _FakeSession(_KEY, {})
     _session(monkeypatch, fake)
@@ -160,19 +135,14 @@ async def test_a_version_carrying_both_delimiters_round_trips(
     async with calc_session() as session:
         identity = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
     assert identity is not None
-    # `remote_key` answers with the key *and* the geometry the calculation runs on
-    # (D-2026-08-21) — the server reports both from one round trip and this client used to
-    # read only the first. A molecule-keyed calculator is about a compound and not about any
-    # particular geometry of it, so this one reports none, which is the honest value.
+    # A molecule-keyed calculator is about a compound, not a geometry, so it reports no structure
+    # id.
     assert identity.structure_id == ""
     key = identity.key
     assert key.calc_version == _AWKWARD_VERSION
     assert key.calc_type == "solubility"
-    # Three of the four parts are the server's verbatim; `params_hash` is deliberately not.
-    # `CALCULATION_EPOCH` is folded into it here because `CalculationKey.build` — the only
-    # place that ever folded it in — has no `calc` caller left since the physics moved, so a
-    # bump invalidated the DFT rows and nothing else while three documents prescribed it as the
-    # remedy for a changed payload meaning.
+    # Three of the four parts are the server's verbatim; `params_hash` has `CALCULATION_EPOCH`
+    # folded in on this side.
     assert key.as_str().startswith(f"solubility@{_AWKWARD_VERSION}:07010a68dabf6858:")
     assert key.params_hash != "a075a6029c28d314", (
         "the epoch is not in the key: bumping CALCULATION_EPOCH would invalidate nothing"
@@ -185,20 +155,11 @@ async def test_a_version_carrying_both_delimiters_round_trips(
 async def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_recomputed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unkeyable tool reaching the cache is a miswiring, and it now says so.
+    """An unkeyable tool reaching the cache is a miswiring and is refused, not recomputed.
 
-    This used to fall through and compute every time, on the reasoning that `predict_logd` has no
-    cache row of its own — which is true, and was still the wrong branch. `predict_logd` is composed
-    *client-side* from a cached remote pKa plus a local Crippen sum, so it never arrives here at
-    all: measured against the running server, every one of the eleven tools production passes to
-    `cached_remote` returns a key, and the single tool the server refuses to key is the one that
-    never comes. So the fallthrough was unreachable, and an unreachable fallthrough is not a safety
-    net — it is where a future miswiring lands silently and recomputes an expensive calculation on
-    every call, forever.
-
-    The refusal is a `CalcToolError` because that is what it is: the server was reached and said
-    this has no identity. Non-retryable, so a durable job fails fast and names the tool instead of
-    paying for the same answer three more times.
+    Every tool production passes to `cached_remote` is keyable, so a fallthrough would only hide a
+    future miswiring that recomputes on every call. `CalcToolError` is non-retryable, so a durable
+    job fails fast and names the tool.
     """
     fake = _FakeSession(None, {"logd": 0.65})
     _session(monkeypatch, fake)
@@ -214,19 +175,11 @@ async def test_a_tool_the_server_will_not_key_is_refused_rather_than_quietly_rec
 async def test_a_refused_call_and_an_unreachable_server_are_different_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one distinction a durable job acts on, and the reason it is not one error any more.
+    """A refused call and an unreachable server are different failures.
 
-    They were one, on the reasoning that "the caller's options are identical in every case: a
-    calculation did not happen". That holds for a tool, which surfaces either to a chemist. It is
-    false for a Temporal activity, where the two are opposites: an unreachable server is fixed by
-    exactly one thing — a retry — and a refused request is fixed by exactly one thing that is not a
-    retry. Conflated, the durable jobs either burn `activity_max_attempts` on an unparameterised
-    solvent or give up on a pod restart.
-
-    So the classification is asserted on the *hierarchies*, which is what
-    `durable/publish.py` matches on: `CalcToolError` is a `ChemclawError` (registered non-retryable,
-    checked by `tests/test_publish.py`'s completeness walk) and `CalcServerError` is a
-    `SubsystemUnavailableError` (deliberately absent from that list).
+    A durable job acts on the difference: an unreachable server is fixed by a retry, a refused
+    request is not. Asserted on the hierarchies `durable/publish.py` matches: `CalcToolError` is a
+    non-retryable `ChemclawError`, and `CalcServerError` is a retryable `SubsystemUnavailableError`.
     """
 
     class _Failing(_FakeSession):
@@ -271,21 +224,10 @@ async def test_a_key_answered_with_no_content_is_a_refusal_not_a_crash(
 async def test_the_servers_internal_error_is_an_outage_not_bad_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An infrastructure fault on the calc server must stay retryable, though it arrives as isError.
+    """An infrastructure fault on the calc server stays retryable, though it arrives as isError.
 
-    This is the door the split above did not cover. FastMCP turns *every* exception in a tool body
-    into `isError=True`, and `Chemclaw3-mcp`'s `mcp_server_kit.app._sanitize_tool_errors` replaces
-    anything that is not a deliberate `ValueError` with the literal "an internal error occurred" —
-    which is the path `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/xtb_cli.py` takes
-    *by design*, since `CliError` is a `RuntimeError`.
-
-    So an xtb subprocess timeout, a non-zero exit, a full scratch directory and an OOM all looked
-    exactly like an unparameterised solvent, and `CalcToolError` is registered non-retryable: the
-    single most likely fault on that server failed an expensive durable job on attempt 1 with
-    `activity_max_attempts` untouched.
-
-    The refusal case in the test above still classifies as bad data, which is what makes this a
-    distinction rather than a blanket loosening.
+    The server sanitises every non-`ValueError` exception to "an internal error occurred"; xtb
+    timeouts, crashes and OOMs take that path and must not be classified as bad data.
     """
 
     class _Broken(_FakeSession):
@@ -303,21 +245,11 @@ async def test_the_servers_internal_error_is_an_outage_not_bad_data(
 
 
 async def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The third state, and the one the taxonomy above did not have.
+    """A full pod is backpressure, not bad data.
 
-    `servers/calc` refuses when every calculation slot is taken, and that refusal arrived here
-    indistinguishable from an unparameterised solvent: `isError=True`, a `ValueError`'s text, so
-    `McpRequestRefused` -> `CalcToolError` -> `_BAD_DATA_TYPES` -> the durable job marked
-    **non-retryable and failed on attempt 1**, carrying the serving side's own sentence "Retry once
-    one finishes" to the chemist. It only bites under load, which is exactly when a shared
-    calculation backend is full — one CREST search costs the whole pod — so at target load every
-    cache *miss* failed permanently while warm molecules kept working.
-
-    The refusal text is transcribed as the literal the server sends rather than built from this
-    repository's constant, for the reason the sibling fleet's own identity-contract test
-    gives about header spellings: a test that imports the constant agrees with itself and says
-    nothing about what the other side writes. The two repositories share no package, so this pair
-    of literals is the whole contract.
+    The at-capacity refusal must not become a non-retryable `CalcToolError`, or every cache miss
+    fails permanently under load. The refusal text is the literal the server sends rather than this
+    repository's constant: the two repositories share no package, so the literal is the contract.
     """
 
     class _Full(_FakeSession):
@@ -354,16 +286,10 @@ async def test_a_full_pod_is_backpressure_not_bad_data(monkeypatch: pytest.Monke
 async def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other direction, which is what stops the fix above from being a blanket loosening.
+    """A domain refusal without the marker is still bad data.
 
-    A marker matched too loosely would reclassify an unparameterised solvent as backpressure and
-    retry it to exhaustion — the mirror image of the defect, and the more expensive one, since a
-    bad molecule is bad on every attempt. The token is bracketed precisely so no sentence anybody
-    writes contains it by accident; this drives a refusal that talks about capacity in English and
-    asserts it is *still* classified as bad data.
-
-    **The absent case is the easy half and it was the only half tested.** A caller cannot write the
-    token by accident; it can write it *on purpose*, which is what the sibling test below drives.
+    A marker matched too loosely would retry a bad molecule to exhaustion. A refusal that talks
+    about capacity in plain English stays bad data.
     """
 
     class _Wordy(_FakeSession):
@@ -386,25 +312,12 @@ async def test_a_domain_refusal_is_still_bad_data_when_the_marker_is_absent(
 async def test_the_marker_cannot_be_forged_from_a_tool_argument(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reachable half of the case above: a refusal that quotes the token back at us.
+    """The capacity marker cannot be forged from a tool argument.
 
-    `servers/calc` interpolates the caller's own strings into its domain refusals — the solvent
-    check raises "…has no parameters for {name!r}…", the xTB wrapper does the same with
-    {method!r} — and `solvent` is a free-form argument on that tool surface. So while the client
-    matched `SERVER_AT_CAPACITY` anywhere in the message, `solvent="[calc-at-capacity]"` was a
-    permanently bad input classified as backpressure: reproduced end to end, it raised
-    `CalcBusyError`, bought ~28 minutes of `calculation_retry` backoff on an input no retry can
-    fix, **and** incremented `chemclaw_calc_backend_at_capacity_total`, which the shipped alert
-    rule pages "scale the calculation tier" on. A caller could manufacture that page from a tool
-    argument.
-
-    The refusal text is the one the calc server's solvent table actually produces for an
-    unsupported solvent name, transcribed rather than built from this repository's constant, for
-    the reason the test above gives: the two repositories share no package, so a literal is the
-    whole contract.
-
-    The counter is asserted as well as the class, because the alert is the half that reaches a
-    person at 3 a.m. and it moves on the *classification*, not on the exception the chemist sees.
+    The calc server interpolates caller strings (e.g. `solvent`) into its refusals, so a marker
+    matched anywhere would let a caller turn a bad input into backpressure: retries, backoff and the
+    "scale the calculation tier" alert. The counter is asserted as well as the class, because the
+    alert moves on the classification.
     """
 
     class _Echo(_FakeSession):
@@ -433,13 +346,10 @@ async def test_the_marker_cannot_be_forged_from_a_tool_argument(
 
 
 def test_the_marker_is_read_at_the_head_where_the_server_writes_it() -> None:
-    """The unit under the two tests above: what `server_marked` accepts and what it refuses.
+    """What `server_marked` accepts and refuses.
 
-    Driven directly because the classification tests can only show the two ends. The transport's
-    own prefix must pass (`Tool.run` raises `ToolError(f"Error executing tool {name}: {e}")`,
-    which `_make_error_result` sends verbatim), a bare marker must pass — the server writes it at
-    the head and `mcp_server_kit` may re-wrap after redaction — and a marker anywhere else must
-    not, because everywhere else is where a quoted argument lands.
+    The transport's own `Error executing tool …:` prefix and a bare leading marker pass; a marker
+    anywhere else does not, because that is where a quoted argument lands.
     """
     marker = mcp_session.SERVER_AT_CAPACITY
 
@@ -455,16 +365,10 @@ def test_the_marker_is_read_at_the_head_where_the_server_writes_it() -> None:
 
 
 def test_a_black_holed_server_fails_to_connect_in_seconds_not_quarter_hours() -> None:
-    """The connect bound is the connectors' 5 s, not the 900 s a calculation is allowed to take.
+    """The connect bound is the connectors' 5 s, not the calculation's 900 s.
 
-    `streamablehttp_client(timeout=…)` composes one `httpx.Timeout` for connect, write and pool
-    alike, so `calc_server_timeout_seconds` — necessarily large, these are the calculations — also
-    became the time a deleted pod had to accept a TCP connection. Measured before the factory:
-    `connect 900.0`. A durable activity stalled fifteen minutes per attempt while its heartbeat
-    reported it healthy.
-
-    The read leg is asserted too, because it must stay long: shortening it is the measured hang
-    `calc_session` documents, where the client swallows a read timeout and the caller waits forever.
+    A black-holed pod must fail to connect in seconds. The read leg is asserted to stay long,
+    because a short httpx read timeout is swallowed by the client and the caller waits forever.
     """
     composed = httpx.Timeout(settings.calc_server_timeout_seconds, read=905.0)
     factory = mcp_session.short_connect_client(settings.calc_server_timeout_seconds)
@@ -477,9 +381,8 @@ def test_a_black_holed_server_fails_to_connect_in_seconds_not_quarter_hours() ->
 class _Wire:
     """`streamablehttp_client` — an async CM yielding the `(read, write, _)` triple.
 
-    Deliberately a *separate* fake from the session below. Conflating the two is not a hypothetical
-    slip: it fails at the tuple unpack, the connection guard catches that, and every test built on
-    it then passes for the wrong reason — the code under test is never reached at all.
+    Kept separate from the session fake: conflating them fails at the tuple unpack, which the
+    connection guard catches, and the test would pass without reaching the code under test.
     """
 
     def __call__(self, *args: Any, **kwargs: Any) -> "_Wire":
@@ -551,15 +454,10 @@ def _real_session(monkeypatch: pytest.MonkeyPatch, transport: _Transport) -> Non
 async def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
     monkeypatch: pytest.MonkeyPatch, raised: BaseException, expected: type[BaseException]
 ) -> None:
-    """`calc_session` guards the *connection*, and nothing else — measured, not assumed.
+    """`calc_session` guards the connection only, not the caller's block.
 
-    `@asynccontextmanager` re-injects whatever the caller's block raises back into the generator at
-    its `yield`, so a guard wrapping the yield catches the caller's own exceptions too. That was
-    live: `cached_remote` runs `store.get`/`store.put` inside the block, so a Postgres outage was
-    reported to the chemist as "the calculation service is not answering" — the wrong subsystem
-    entirely — and a `ChemclawError` from the store came back out as `CalcServerError`, which is
-    *retryable*. A durable job then burned `activity_max_attempts` on data no retry could fix,
-    which is precisely the inversion the two error classes exist to prevent.
+    `@asynccontextmanager` re-raises the caller's exceptions at the `yield`, so a guard there would
+    relabel a store failure as a retryable `CalcServerError` outage.
     """
     _real_session(monkeypatch, _Transport())
 
@@ -582,13 +480,7 @@ async def test_a_failure_inside_the_session_body_is_not_relabelled_as_an_outage(
 async def test_a_protocol_error_is_classified_by_who_is_at_fault(
     monkeypatch: pytest.MonkeyPatch, code: int, expected: type[Exception], retryable: bool
 ) -> None:
-    """An `McpError` is two opposite failures wearing one type, told apart by its code.
-
-    `session.call_tool` raises `McpError` identically for a request the server rejected and for a
-    server that broke mid-call. Classified as one, either the durable jobs retry an unparameterised
-    solvent to exhaustion or they give up on a pod restart. The code is the only thing that
-    separates them, so it is what `_call` reads.
-    """
+    """An `McpError` is classified by its code: rejected request versus broken server."""
     _real_session(monkeypatch, _Transport(McpError(ErrorData(code=code, message="refused"))))
 
     with pytest.raises(expected) as caught:
@@ -605,28 +497,17 @@ _DERIVATION_NAMES = frozenset(
 _SRC = Path(__file__).resolve().parent.parent / "src" / "chemclaw"
 _SEARCHED = (
     pytest.param(_SRC / "connectors" / "calc", id="connectors"),
-    # `science/calc` carried nine derivations while the in-process engines sat beside the client —
-    # `xtb_spec`, `pka`, `solubility`, `descriptors`, `complexes` and the two `binary_version`s — so
-    # this parameter was `xfail(strict=True)` and its marker was the migration's own finish line.
-    # The engines are gone; the marker went with them, which is exactly what `strict=True` was for.
     pytest.param(_SRC / "science" / "calc", id="science"),
 )
 
 
 @pytest.mark.parametrize("root", _SEARCHED)
 def test_no_module_here_derives_a_calc_version(root: Path) -> None:
-    """The one rule the whole transport rests on, checked statically because the failure is silent.
+    """No module here defines a function that derives a calc version.
 
-    A locally-derived version does not raise and does not look wrong. `binary_version()` answered
-    `"absent"` rather than raising when the binary was missing, so a pod without xtb would build a
-    well-formed string, match **zero** rows in a ledger keyed exactly on `(calc_type, calc_version,
-    input_hash)`, and `calculator_trust` would report `UNCALIBRATED` — the state D-139 built that
-    machinery to distinguish, reached by a route it never anticipated, with every historical
-    residual unreachable at the same time.
-
-    Definitions only, never references: reading a version off a result is the correct thing to do
-    and must stay legal. The check is therefore on `def <name>`, which is what deriving one looks
-    like.
+    A locally derived version is well-formed, matches no ledger row, and makes `calculator_trust`
+    report `UNCALIBRATED` silently. Only definitions are checked: reading a version off a result is
+    correct and stays legal.
     """
     offenders: list[str] = []
     for path in sorted(root.rglob("*.py")):
@@ -647,25 +528,11 @@ def test_no_module_here_derives_a_calc_version(root: Path) -> None:
 
 
 def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
-    """The function every other test in this file patches away, and what hid inside it.
+    """`calc_session` bounds the call with the timeout that raises.
 
-    `calc_session` is monkeypatched wholesale by every test above — reasonably, since none of them
-    wants a socket — with the consequence that the function is *never executed as written*. Three
-    defects lived there behind that.
-
-    The one this pins is the timeout pair. `connectors/registry.py` records the measurement:
-    `ClientSession(read_timeout_seconds=...)` is the bound that *raises* (`McpError`), while httpx's
-    read timeout is caught by `mcp.client.streamable_http` at debug level with no reconnect — so
-    when the invisible one fires first the answer is lost silently and the caller waits forever.
-    This function had `read_timeout_seconds` unset, which upstream documents as waiting forever, and
-    `timeout=` sets connect/write/pool only — so the only live bound was `sse_read_timeout`'s
-    un-overridden **300 s** default, not the 900 s `calc_server_timeout_seconds` names. A CREST
-    search past five minutes never returned while `durable/heartbeat` kept heartbeating, so Temporal
-    saw a healthy activity and the job burned its full four hours.
-
-    Asserted on the arguments actually handed to the transport and the session, because the values
-    are the whole finding — a test that only checked "a session was opened" would have passed
-    throughout.
+    `ClientSession(read_timeout_seconds=...)` raises `McpError`; httpx's read timeout is swallowed
+    by the transport and the caller waits forever. So the session timeout must be set to
+    `calc_server_timeout_seconds`, asserted on the arguments handed to the transport and session.
     """
     import asyncio
     from datetime import timedelta
@@ -721,24 +588,17 @@ def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
 
 _CONFIG_MODULE = "chemclaw.core.config"
 
-# Every module that derives the bytes an identity is made of, and where therefore *no* setting may
-# be read at all. Three rather than one, because the read that re-keys a deployment does not have to
-# happen in the model: `store.CalculationKey.build` assembles the key and folds in
-# `CALCULATION_EPOCH`, and `core/ids.stable_hash` is the digest under both. A knob in any of them
-# has the identical consequence, and a single-file check said nothing about two of them.
+# Modules that derive the bytes of a calculation identity; none may read a setting, because a knob
+# there re-keys a deployment.
 _IDENTITY_MODULES = (
     Path("science") / "calc" / "models.py",
     Path("science") / "calc" / "store.py",
     Path("core") / "ids.py",
 )
 
-# The client is not on that list, because it legitimately reads settings: the server URL, the
-# bearer's env var and two timeouts. None of those is a byte on the wire — a socket bound is not
-# an argument.
-# What *is* on the wire is the `arguments` mapping, so the rule for this module is scoped to the
-# functions that hold one: a payload-carrying function may not read a setting, because anything it
-# reads can be folded into what the server hashes. Derived from the signature rather than from a
-# hand-kept list of function names, so a new payload path is covered the day it is written.
+# The client reads settings legitimately (URL, bearer env var, timeouts), so the rule there is
+# scoped to functions that hold an `arguments` payload, derived from their signatures so a new
+# payload path is covered automatically.
 _PAYLOAD_CLIENT = Path("connectors") / "calc" / "remote.py"
 _PAYLOAD_PARAMETER = "arguments"
 
@@ -746,10 +606,8 @@ _PAYLOAD_PARAMETER = "arguments"
 def _settings_aliases(tree: ast.Module) -> set[str]:
     """Every local dotted name bound to the one settings object in this module.
 
-    The whole point of the alias walk: `from chemclaw.core.config import settings as cfg` binds the
-    same object under a name a check keyed on the literal `settings` cannot see, and `import
-    chemclaw.core.config` reaches it through a dotted prefix instead. Both are ordinary Python and
-    neither is unusual enough to notice in review.
+    Covers `import … as` aliases and dotted `import chemclaw.core.config` access, which a check on
+    the literal name `settings` would miss.
     """
     aliases: set[str] = set()
     for node in ast.walk(tree):
@@ -775,9 +633,7 @@ def _dotted(node: ast.expr) -> str | None:
 def _settings_reads(tree: ast.AST, aliases: set[str]) -> list[str]:
     """Every settings field read under `tree`, by whichever name the module bound the object to.
 
-    An accessor is covered as well as a name: an attribute taken off the result of a call whose
-    function is named `…settings` (`get_settings().x`, `Settings().x`) is the same read through one
-    more door, and a check that only knew names would be blind to it the day someone adds one.
+    Also covers an attribute taken off a call to a `…settings` accessor.
     """
     reads: list[str] = []
     for node in ast.walk(tree):
@@ -794,30 +650,11 @@ def _settings_reads(tree: ast.AST, aliases: set[str]) -> list[str]:
 
 
 def test_no_setting_shapes_the_bytes_the_server_hashes() -> None:
-    """The sibling rule to the version check, and it failed the same way: silently.
+    """No setting shapes the bytes the server hashes.
 
-    `Structure` normalization used to round coordinates to `settings.xtb_geometry_decimals`, an
-    ordinary ENV-overridable field. Those bytes are what crosses the wire, so it was a local knob
-    shaping half of a *remote* cache key: an operator who changed it made every relaxation, Hessian,
-    scan point and CREST search miss forever and diverge from every other deployment, with nothing
-    raising — a miss is not an error, it is a recomputation.
-
-    Checked statically over the modules that *are* the wire contract, because the failure has no
-    observable symptom other than a bill.
-
-    **An audit defeated the first version of this while it stayed green**, twice over, and both
-    defeats are the same mistake: it checked a spelling instead of a meaning.
-
-    - It matched `ast.Attribute` on a bare `ast.Name` called `settings`, so
-      `from chemclaw.core.config import settings as cfg` — one alias, the same object, the same
-      consequence — read the knob straight back into `_GEOMETRY_DECIMALS` and passed. Fixed by
-      resolving the import: whatever local name the module bound that object to is the name checked
-      (`_settings_aliases`), including a dotted `import chemclaw.core.config` and a `…settings()`
-      accessor.
-    - It read one file, and the identity is not assembled in one file. `store.CalculationKey.build`
-      and `core/ids.stable_hash` shape the same bytes, and the client builds the `arguments` the
-      server hashes. All four are checked now — the client by the rule its own settings reads
-      require (see `_PAYLOAD_CLIENT`), which is a scope rather than an exemption.
+    A local knob in the identity path would make every remote cache key miss and diverge from other
+    deployments, with no error. Checked statically over every module that is the wire contract,
+    resolving aliases and accessors rather than matching the spelling `settings`.
     """
     offenders: list[str] = []
     for relative in _IDENTITY_MODULES:
@@ -867,30 +704,20 @@ def _status_error(status: int) -> httpx.HTTPStatusError:
 
 
 def test_a_refused_credential_is_not_an_outage() -> None:
-    """A 401 is a refusal, and calling it an outage costs a durable job its whole retry budget.
+    """A 401 is a refusal, not an outage.
 
-    Measured against a live `calc` server before this was classified: a bad bearer produced
-    `CalcServerError("the calculation service is not answering ... the same request will work once
-    it is back")`, of which every clause is false. The service answered — with 401. It *is* a
-    problem with what was asked. And it will never work once "it is back", because it never left.
-
-    The cost is not the wording. `CalcServerError` is `SubsystemUnavailableError`, which is
-    retryable by construction, so every calculator activity spent `activity_max_attempts` — each
-    one behind a heartbeat-detection window — being refused identically. That is precisely the
-    inversion `CalcToolError` exists to prevent, surviving at the one boundary that still collapsed
-    it.
+    `CalcServerError` is retryable, so misclassifying a bad bearer would spend every activity's
+    retry budget on an identical refusal.
     """
     assert mcp_session.auth_rejection(_status_error(401)) == 401
     assert mcp_session.auth_rejection(_status_error(403)) == 403
 
 
 def test_the_rejection_is_found_inside_the_task_groups_exception_group() -> None:
-    """The status is nested, so neither `except HTTPStatusError` nor one `__cause__` hop sees it.
+    """The HTTP status is found inside the task group's `ExceptionGroup`, not by exception type.
 
-    `streamablehttp_client` runs its transport in an anyio task group, so the real shape at this
-    boundary is `ExceptionGroup(... [HTTPStatusError(401)])` reached through `__cause__`. This is
-    the assertion that would have failed had the fix caught the exception by type, which was the
-    obvious implementation and the wrong one.
+    `streamablehttp_client` runs its transport in an anyio task group, so the 401 arrives nested
+    under `__cause__`.
     """
     nested = ExceptionGroup("unhandled errors in a TaskGroup", [_status_error(401)])
     wrapper = RuntimeError("connect failed")
@@ -900,12 +727,7 @@ def test_the_rejection_is_found_inside_the_task_groups_exception_group() -> None
 
 
 def test_a_server_that_is_genuinely_down_stays_an_outage() -> None:
-    """The negative half: only 401 and 403 are refusals.
-
-    A 500 or a 502 is the server failing and may well pass on retry, so it must keep the retryable
-    classification. A fix that turned every HTTP status into bad data would trade one wrong answer
-    for another.
-    """
+    """Only 401 and 403 are refusals; a 500 or 502 stays a retryable outage."""
     assert mcp_session.auth_rejection(_status_error(500)) is None
     assert mcp_session.auth_rejection(_status_error(502)) is None
     assert mcp_session.auth_rejection(ConnectionRefusedError("no listener")) is None
@@ -920,18 +742,11 @@ def test_the_refusal_lands_in_the_non_retryable_hierarchy() -> None:
 def test_the_two_epochs_compose_rather_than_having_to_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two constants named `CALCULATION_EPOCH`, one address, and no equality between them.
+    """The two `CALCULATION_EPOCH` constants compose rather than having to match.
 
-    `Chemclaw3-mcp`'s `servers/calc` folds *its* epoch into the `params_hash` it returns, and
-    `remote_key` folds *this* one in on top. That composition is the whole relationship: the stored
-    address moves when either side bumps, and neither side can see the other's value — so requiring
-    them to be equal is a coupling the code does not have, and one that would fail on a legitimate
-    one-sided bump.
-
-    Asserted rather than argued, because the two numbers *look* like they must match and a reader
-    who assumes it will "fix" one of them. Both halves are checked here: this side's bump changes
-    the key while the server's answer is byte-identical, and the server's own digest survives
-    verbatim inside the composed one, which is what makes its bump reach the key too.
+    The server folds its epoch into `params_hash` and `remote_key` folds this one on top, so a bump
+    on either side moves the key. Both halves are checked: this side's bump changes the key, and the
+    server's digest survives inside the composed one.
     """
     fake = _FakeSession(_KEY, {})
     _session(monkeypatch, fake)
@@ -962,9 +777,7 @@ def test_the_two_epochs_compose_rather_than_having_to_match(
 def _in_flight() -> float:
     """What Prometheus would read for `chemclaw_calc_requests_in_flight` right now.
 
-    Read off the exposition rather than the module's counter, because the claim is about what a
-    scrape sees: a counter that is right and a gauge that is not bound are the same outage from the
-    alert's point of view.
+    Read off the exposition, because the claim is about what a scrape sees.
     """
     for line in METRICS.render().splitlines():
         if line.startswith("chemclaw_calc_requests_in_flight "):
@@ -975,13 +788,10 @@ def _in_flight() -> float:
 def test_a_held_calculation_session_is_visible_to_a_scrape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The live half of the calculation backend's admission budget (BS-07).
+    """A held calculation session is visible on the in-flight gauge.
 
-    `worker_max_concurrent_activities` caps one worker *process* and `servers/calc` is one shared
-    pod, so the fleet's real demand is that cap times the replica count — and the `calc` bundle's
-    own MCP server pods dispatch there too, from a tool call, with no per-process cap at all.
-    `Settings` refuses a bad *product* at startup; only this gauge can see the sum, so it has to be
-    bound in every process that dispatches and it has to read *current* state.
+    Per-process caps cannot see fleet-wide demand on the shared calc pod; only this gauge can, so it
+    must be bound in every dispatching process and read current state.
     """
     seen: list[float] = []
 
@@ -1005,11 +815,10 @@ def test_a_held_calculation_session_is_visible_to_a_scrape(
 async def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gauge must fall on every exit path, and an outage is the one that repeats.
+    """The gauge falls on every exit path, including a failed open.
 
-    A backend that is down fails every open, so a count that only decremented on success would
-    climb by one per attempt and the saturation alert would fire on an idle pod — the classic way a
-    load signal becomes noise nobody acts on.
+    Otherwise an outage climbs the gauge by one per attempt and the saturation alert fires on an
+    idle pod.
     """
 
     @asynccontextmanager
@@ -1028,11 +837,9 @@ async def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
 
 
 def test_every_server_s_full_pod_is_recognised_by_its_format() -> None:
-    """The fleet's one at-capacity format, with the same head-of-message rule as calc's literal.
+    """The fleet's one at-capacity format is recognised at the head of the message.
 
-    Five of six gated servers used to refuse with no marker, so a full `rxnpredict` pod read as a
-    bad SMILES; the format is what lets a caller queue any of them. An echoed token still does not
-    count, for `server_marked`'s reason.
+    An echoed token anywhere else still does not count.
     """
     assert mcp_session.at_capacity("[rxnpredict-at-capacity] 0 of 2 slots free")
     assert mcp_session.at_capacity("Error executing tool predict: [pyexec-at-capacity] full")
@@ -1045,15 +852,10 @@ def test_every_server_s_full_pod_is_recognised_by_its_format() -> None:
 async def test_a_time_budget_stop_is_named_and_stays_a_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The server's inline clock stopping a calculation is told apart from a refusal of the input.
+    """A time-budget stop is named (`CalcTimeBudgetError`) and stays a non-retryable refusal.
 
-    Wall clock depends on load, so this is the one refusal that is not a property of the molecule.
-    Named — `CalcTimeBudgetError`, which a screen records as a `time_budget` stop — and still
-    non-retryable, because a retry runs the same work against the same clock
-    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`). The marker is the literal the
-    calc server writes at the head (`engine/budget.TIME_BUDGET_MARKER`), transcribed for the reason
-    the capacity test above gives; the sentence after it is *shaped like* `Deadline.check`'s, not
-    copied, because only the head is matched.
+    A retry would run the same work against the same clock. The marker is the calc server's literal,
+    transcribed; only the head of the message is matched.
     """
 
     class _Stopped(_FakeSession):

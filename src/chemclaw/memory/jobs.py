@@ -1,21 +1,10 @@
-"""Memory synthesis jobs (plan steps 5.3, 5.4, core) — chains/candidates → agent notes.
+"""Memory synthesis builders: chains and candidates into agent notes.
 
-The deterministic core of the periodic background jobs: `build_campaign_notes` turns detected
-chains into `campaign` notes, `build_playbook_notes` turns cross-project candidates into `playbook`
-notes, and `build_optimization_notes` groups same-transformation runs — each then written through
-the **same** path as every other agent note (`kg/record.py`), no new write path. D-005's PR-gate is
-gone (D-2026-09-05-the-gate-follows-behaviour-not-knowledge): knowledge lands when it is
-learned, carrying `created_by: agent`, and is corrected rather than pre-approved.
-
-**Building and publishing are separate, and only building lives here.** `durable/memory_jobs.py`
-runs each builder as one activity and fans each note out to its own write child (F10-D2), so a
-note that cannot be published does not take its siblings with it. The reaction set is injected, so
-every builder runs in-memory in tests. The factual note bodies are built here; the richer narrative
-or distilled rule is the corresponding skill's judgment, and **nothing applies it automatically** —
-those skills are loaded on demand in a chat turn and no durable path invokes one. Every body built
-here therefore has to stand on its own as a factual statement, which is the bar
-`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` found the cross-project
-playbook failing: it ended with an instruction to a reader who never came.
+`build_campaign_notes`, `build_playbook_notes` and `build_optimization_notes` build notes without
+writing them; `durable/memory_jobs.py` publishes each through `kg/record.py` in its own write child,
+so one failure does not take its siblings down. Reactions are injected, so builders run in memory in
+tests. Bodies are factual and must stand alone: the narrative and distillation skills are applied
+only on demand in a chat turn, never automatically.
 """
 
 import logging
@@ -58,10 +47,8 @@ def build_campaign_notes(
 ) -> list[SynthesisUnit]:
     """Detect chains and build (not publish) one `campaign` unit per chain, retirements paired.
 
-    The deterministic half of campaign synthesis: it produces the notes but writes nothing, so the
-    durable workflow that fans each unit out to its own write child (plan F10-D2) decides *how*
-    they are written while this decides *what* they are. "What" includes retiring the notes this
-    run's clusters replaced (`_units`), the one thing here that reads the corpus.
+    Includes retiring the notes this run's clusters replaced (`_units`), the one part that reads the
+    corpus.
     """
     by_id = {r.reaction_id: r for r in reactions}
     return _units(
@@ -87,9 +74,8 @@ def build_playbook_notes(
                 _summary(candidate, by_id),
                 [f"reaction-{rid}" for rid in candidate.reaction_ids],
                 minted_on=supported_from(candidate.reaction_ids, by_id),
-                # This producer finds a recurrence; it does not generalise one. The other caller
-                # (`durable/observation_jobs.py`) promotes an observation whose `statement` is a
-                # real claim, and passes nothing here.
+                # This producer finds a recurrence but does not generalise it;
+                # `durable/observation_jobs.py` promotes a real claim and passes nothing here.
                 distilled=False,
             )
             for candidate in find_playbook_candidates(reactions)
@@ -117,23 +103,10 @@ def build_optimization_notes(
     )
 
 
-#: What a note built from a truncated corpus read says about itself, in the body a chemist reads.
-#:
-#: **`memory_corpus_max_reactions`'s whole justification is that a deployment over the bound gets
-#: "partial knowledge that says it is partial"**
-#: (`D-2026-09-14-the-memory-corpus-is-a-memory-bound-not-a-time-bound`), and until this existed
-#: the note said nothing: the flag skipped the retirement pass and logged a
-#: WARNING into a worker's log, while the note landing in `knowledge/` was byte-identical to one
-#: distilled from the whole record. A caveat in a log is a caveat for whoever is reading logs, and
-#: nobody reading the note is.
-#:
-#: It names the two consequences separately because they are different risks. The evidence may be a
-#: subset — the cluster's other members were in the part that was not read. And the id itself may
-#: differ from the one the same cluster mints when read whole: `stable_id` anchors on the
-#: *smallest* member id, so a truncation that drops that member mints a different id (measured:
-#: `["r-001","r-002","r-003"]` → `playbook-22484f4007b4`, the same cluster minus `r-001` →
-#: `playbook-3a61d1964e6d`), and this is exactly the run whose retirement pass is skipped, so
-#: nothing supersedes the note it does not recognise as its predecessor.
+#: What a note built from a truncated corpus read says about itself, in the body a chemist reads. A
+#: read over `memory_corpus_max_reactions` yields partial knowledge, so it says so. Two risks: the
+#: evidence may be a subset, and the id may differ from the full read's (if the anchor member was
+#: dropped) with no retirement pass to supersede the old note.
 PARTIAL_READ_CAVEAT = (
     "\n> Derived from an **incomplete** corpus read: this run hit "
     "`memory_corpus_max_reactions`, so the evidence cited above may be a subset of what the record "
@@ -145,61 +118,24 @@ PARTIAL_READ_CAVEAT = (
 def _marked_partial(note: Note) -> Note:
     """The note, saying in its own body that the read behind it was incomplete.
 
-    Stamped here rather than in the three builders because this is the one function both publish
-    paths go through — the same argument that put the retirement pairing here, and the same
-    failure if it were duplicated: a fourth builder would inherit the caveat and could not forget
-    it. A later run over a complete corpus rewrites the note without the line, which is the note
-    being corrected rather than a second note appearing beside it.
+    Applied here, the one function both publish paths share, so every builder inherits it. A later
+    complete run rewrites the note without the line.
     """
     return note.model_copy(update={"body": f"{note.body}{PARTIAL_READ_CAVEAT}"})
 
 
 def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -> date | None:
-    """The day the note's *anchor* run was performed, or `None` when the corpus cannot say.
+    """The day the note's anchor run was performed, or `None` when the corpus cannot say.
 
-    **Keyed on the one member the note's id is keyed on, and that is the whole safety argument.**
-    Every synthesized note is `stable_id(kind, reaction_ids)`, which `memory/ids.py` documents as
-    hashing `min(member_ids)` *deliberately* — hashing the whole set would mint a new id whenever a
-    cluster gained a member, leaving the subset note behind as stale "current" knowledge. So the id
-    survives a cluster growing, and any date derived from the *set* moves underneath it.
+    Becomes `valid_from`, which the digest reads as news. The note id hashes only the smallest
+    member id (`memory/ids.py`), so the date must not move while the id holds; a `max` over members
+    would re-notify on every new run, and a partial read could lower it silently. Two tiers, ordered
+    by stability:
 
-    That is the defect this function shipped with, and it is worth stating plainly because the
-    docstring here previously asserted the opposite ("when a member joins, the id changes too").
-    It does not. Measured: `{r1,r2}` and `{r1,r2,r3}` both mint `playbook-aee3d30407cc`, and
-    `max(performed_at)` moved that note's `valid_from` from 2026-07-10 to 2026-08-20 under one
-    unchanged id. Forwards that is the hourly re-notification storm
-    `D-2026-09-14-an-undated-note-is-not-news-every-hour` closed, in a new dress — `digest._is_new`
-    reads a risen `valid_from` as news about a note the subscriber already holds. Backwards is
-    worse and silent: a member dropping out, or a `corpus_complete=False` partial read that misses
-    the newest run, lowers `valid_from` under the same id, and `_is_new` then answers `False`
-    forever for a note whose content has just changed.
+    1. the anchor's own `performed_at`, fixed while the anchor is; failing that,
+    2. the earliest dated member, which later runs joining do not move.
 
-    Anchoring on `min(reaction_ids)` makes the identity and the date functions of the same single
-    input, so they genuinely move together or not at all: a cluster that grows keeps both, and a
-    cluster whose anchor changes has become a different note by the id's own rule.
-
-    **What it costs, stated rather than hidden.** The anchor is the smallest member id, not the
-    earliest or the most recent run, so this is not "when the pattern became knowable" — no stable
-    function of a growing set can be.
-
-    **And anchoring alone was a coverage regression, which the first version of this fix stated as
-    a residual without measuring it.** `None` used to mean *every* member was undated; anchoring
-    made it mean *the anchor* was undated, however many members carried dates — so for a per-member
-    dating probability `p` over an `n`-member cluster the undated rate goes from `(1-p)^n` to
-    `(1-p)`. On a corpus where two runs in three state a date, a three-member cluster went from 4%
-    undated to 33%, and an undated note reaches no subscriber holding a watermark. That is a loss
-    in exactly the direction `D-2026-09-14-an-undated-note-is-not-news-every-hour` and this fix
-    exist to repair.
-
-    So the rule is two-tier, and the tiers are ordered by *stability* rather than by preference:
-
-    1. the anchor's own `performed_at`, which cannot move while the anchor does not; failing that,
-    2. the **earliest** dated member, which a cluster growing forward in time does not move either
-       — a later run joining leaves `min` alone, where `max` moved on every arrival.
-
-    `None` only when no member carries a date at all, which restores the old coverage. Tier 2 is
-    not fully stable — a member with an *earlier* date joining does move it — and that is a strict
-    improvement on a tier that is not reached at all, rather than a claim to have solved it.
+    `None` only when no member is dated. Tier 2 can still move if an earlier-dated member joins.
     """
     if not reaction_ids:
         return None
@@ -216,28 +152,15 @@ def supported_from(reaction_ids: list[str], reactions: dict[str, OrdReaction]) -
 
 
 def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
-    """Pair each new note with the retirements it carries (D-078, retirement half).
+    """Pair each new note with the retirements it carries.
 
-    Applied inside each builder rather than at the two publish sites, so the in-process job and
-    the durable activity both get it and neither can forget. Every retirement
-    `supersede_updates` produces has at least one successor among `notes` (that is its
-    definition), and it is assigned to that successor's unit so the pair travels together — the
-    cap's rotating window can never again split "retire A" from the replacement it names.
+    Applied inside each builder so both publish paths get it. Each retirement from
+    `supersede_updates` is assigned to its successor's unit, so a retirement never travels without
+    the replacement it names.
 
-    **A partial corpus read builds notes that say so, and retires nothing.** A read that skipped
-    entries can
-    legitimately stop minting a cluster's id — the cluster's members were in the skipped part —
-    and retiring knowledge on the strength of a read that saw less than the record would retract
-    notes that are still true. That used to be caught, if at all, by a reviewer with no way to know
-    the read was partial; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the
-    reviewer, so this guard is the whole control. Said out loud, because a run that quietly skips
-    its retirement half looks identical to one with nothing to retire.
-
-    A run producing zero notes retires nothing by construction — `supersede_updates` only retires
-    a note some new note *replaced*, and a vanished cluster has no successor to point at. That is
-    a stated limit, not an oversight: a retirement with no successor would have nothing to write
-    in its "superseded by" line, and "the corpus stopped supporting this" is a `failure-mode`
-    note somebody writes, not a mechanical retraction.
+    A partial corpus read marks its notes and retires nothing: missing members could make a cluster
+    look gone, and retracting true notes on a partial read is wrong. A vanished cluster is never
+    retired (it has no successor); "the corpus stopped supporting this" is a `failure-mode` note.
     """
     if not notes:
         return []
@@ -255,37 +178,12 @@ def _units(notes: list[Note], *, corpus_complete: bool) -> list[SynthesisUnit]:
     return list(units.values())
 
 
-# Three `synthesize_*`/`distill_*` coroutines and their shared `_propose_all` stood here: build the
-# notes, then publish them all in one pass. Nothing ran them. F10-D2 split each job into a builder
-# and a durable fan-out — `durable/memory_jobs.py` imports only `build_campaign_notes`,
-# `build_playbook_notes` and `build_optimization_notes` and gives each note its own write child,
-# so a note that fails to publish no longer takes its siblings with it — and the old whole-batch
-# publishers were left behind with the tests that exercised them.
-#
-# One of those tests asserted a *parity* between the live builder and the dead publisher, which is
-# the strongest reason to delete rather than keep: it read as coverage of the shipped path while
-# pinning a path nothing runs, and it would have gone on passing after the live half broke. The
-# tests now build and propose the way the durable job does.
-
-
 def _summary(candidate: PlaybookCandidate, reactions: dict[str, OrdReaction]) -> str:
     """What the miner actually found: a recurrence, its projects and a representative reaction.
 
-    **The sentence this used to end with was an instruction to a reader who never came.** It said
-    "Distil the transferable rule and conditions from the cited evidence", and nothing in this
-    repository ever did — `skills/playbook-distillation/SKILL.md` is loaded only in a chat turn and
-    no durable path invokes it. So the note went into `knowledge/` carrying a to-do, and
-    `knowledge/` is read by retrieval: measured on a two-project fixture, the excerpt a chemist is
-    shown for the term "recurring" contains that sentence verbatim, and `Note.headline()` — which
-    a digest now uses to announce new knowledge — renders as "Transformation recurring across 2
-    projects … Distil the…". A knowledge note asking its reader to finish it is worse than no note:
-    an absent playbook is discovered at once, and this one is discovered by acting on it.
-
-    What is left is the finding, which is real, deterministic and knowledge the moment it is made
-    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). The epistemic status is carried by
-    `UNDISTILLED_TAG` on the note rather than by prose in its body, so a reader sees it as a label
-    and `kg.analytics` can count it — the difference between a state the system knows it is in and
-    one it merely wrote down.
+    States the finding only, with no instruction to distil it, since nothing applies distillation
+    automatically and the body is read by retrieval and digests. That it is not yet a rule is
+    carried by `UNDISTILLED_TAG`, which `kg.analytics` counts.
     """
     representative = reactions[candidate.reaction_ids[0]].reaction_smiles()
     return (

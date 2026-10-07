@@ -1,15 +1,9 @@
 """The data path leaves evidence behind: one record per pass, a duration, and a number to alert on.
 
-Measured before any of this existed: a grep for `perf_counter` or `monotonic` over `ingest/`,
-`retrieval/`, `memory/`, `kg/`, `publish/` and `core/` returned **two** hits, both a cache TTL in
-`kg/graph.py`. Not one duration was measured anywhere in ~26,000 lines, and the only two latency
-histograms in the system were both recorded from `api/` and `agent/`. So the packages that carry
-every corpus, every embedding, every published result and every database call were, from outside,
-indistinguishable from packages that were not running.
-
-These tests drive the real functions against the real registry rather than asserting that a call
-was made — the discipline `tests/test_metrics_bridge.py` records — because the failure mode being
-closed is not "the wrong function was called", it is "nothing was emitted at all".
+Ingest, retrieval, memory, the knowledge graph and publishing must be distinguishable from
+outside from packages that are not running. These tests drive the real functions against the real
+registry rather than asserting a call was made, because the failure being closed is "nothing was
+emitted at all".
 """
 
 import asyncio
@@ -53,8 +47,7 @@ def _counter(name: str) -> float:
 def _series(name: str, **labels: str) -> float:
     """One labelled series' value, read out of the rendered exposition.
 
-    Read from the text rather than from a private dict on purpose: the exposition *is* the
-    contract with Prometheus, and a series that renders wrong is a series nobody can alert on
+    The exposition is the contract with Prometheus; a series that renders wrong cannot be alerted on
     however right the in-memory number is.
     """
     wanted = [f'{label}="{value}"' for label, value in labels.items()]
@@ -68,18 +61,10 @@ def _series(name: str, **labels: str) -> float:
 def _baseline(name: str, **labels: str) -> float:
     """The same reading taken *before* the act under test, with absence read as zero.
 
-    A counter nothing has observed yet is genuinely **absent** from the exposition — Prometheus'
-    convention, and this registry's own stated rule — so `_series` raising on it is right for an
-    assertion made *after* the act and wrong for a baseline taken before one. Reading baselines
-    through `_series` is what made three tests in this file depend on a *predecessor* having minted
-    their series: deselect the two that first mint `source="lexical"` and `source="graph"` and the
-    deltas below fail with "no series", measured `2 failed, 18 passed, 2 deselected`. The file
-    passed as a whole and in the suite, so nothing was red — and a test that only passes in one
-    order is not asserting what its name says.
-
-    The registry is process-wide and these counters are monotonic, so a delta against a baseline is
-    the only self-contained reading available. `_series` is still what reads the *result*, because
-    after the act the series must exist.
+    A counter nothing has observed is absent from the exposition, so `_series` raising is right
+    after the act and wrong for a baseline; reading baselines through it would make tests depend on
+    a predecessor having minted their series. The registry is process-wide and monotonic, so a delta
+    against a baseline is the only self-contained reading.
     """
     try:
         return _series(name, **labels)
@@ -154,9 +139,8 @@ def test_a_pass_that_indexed_nothing_still_leaves_a_record(
 ) -> None:
     """An empty crawl returns early — which is the pass most worth being able to see.
 
-    A share that stopped mounting crawls to nothing, and the four early returns in the pass each
-    used to end in silence. The record is emitted by the wrapper, so the absence of a record now
-    means the pass did not run rather than the share being empty.
+    The wrapper emits the record, so no record means the pass did not run, not that the share is
+    empty.
     """
     (tmp_path / "empty").mkdir()
     binding = load_binding(
@@ -172,11 +156,10 @@ def test_a_pass_that_indexed_nothing_still_leaves_a_record(
 
 
 def test_a_cursor_that_stands_still_reports_a_growing_lag() -> None:
-    """`sync_cursors` carried a cursor and an `updated_at` and nothing read either for monitoring.
+    """A cursor that stands still reports a growing lag.
 
-    The lag is computed at scrape time from the observed cursor, so a wedged source — one whose
-    fetch keeps returning the same page and never advances — reports a climbing number while its
-    own log keeps reading `ingested=N rejected=0`.
+    The lag is computed at scrape time from the observed cursor, so a wedged source reports a
+    climbing number while its own log still reads healthy.
     """
     eln_cursor.observe_cursor("wedged-eln", datetime.now(UTC) - timedelta(hours=3))
     eln_cursor.observe_cursor("fresh-eln", datetime.now(UTC))
@@ -190,9 +173,8 @@ def test_a_cursor_that_stands_still_reports_a_growing_lag() -> None:
 def _gauge(name: str) -> float:
     """One unlabelled gauge's reading, out of the rendered exposition.
 
-    Read from the text for the reason `_series` gives: a gauge bound to a source that raises is
-    *omitted* from the scrape and counted as a read failure, so the in-memory callable answering
-    correctly is not evidence that anything can be alerted on.
+    A gauge whose source raises is *omitted* from the scrape, so the in-memory callable answering is
+    not evidence of anything alertable.
     """
     for line in METRICS.render().splitlines():
         if line.startswith(f"{name} "):
@@ -203,17 +185,12 @@ def _gauge(name: str) -> float:
 def test_a_pod_serving_a_frozen_knowledge_corpus_says_how_old_it_is(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The knowledge graph coming *in* had no first-party signal, only the graph going out.
+    """A pod serving a frozen knowledge corpus says how old it is.
 
-    `ChemclawKnowledgeNotesLost` covers a note that failed to reach the PR-gate. Nothing covered a
-    pod whose corpus stopped arriving: `knowledge-sync.sh`'s `loop` swallows a failed refresh so a
-    dead remote cannot kill the pod, and the pod then serves the frozen snapshot indefinitely while
-    logging one WARNING per interval into a stream nobody tails. The sidecar's heartbeat lives in
-    its own container's `/tmp`, so this is the half that is readable from the process that answers
-    from the tree.
-
-    Driven through the real registry's rendered exposition, because that is the contract the rule
-    evaluates against — and because a gauge whose source raises is silently absent from it.
+    `knowledge-sync.sh`'s `loop` swallows a failed refresh, so a pod can serve a frozen snapshot
+    indefinitely. The sidecar's heartbeat is in its own container, so this gauge is the signal
+    readable from the process that answers from the tree. Driven through the rendered exposition,
+    since a gauge whose source raises is silently absent from it.
     """
     # Through the two settings `knowledge_path` derives from, because it is a read-only property:
     # one definition of where notes live, which is the point of it being derived at all.
@@ -221,10 +198,8 @@ def test_a_pod_serving_a_frozen_knowledge_corpus_says_how_old_it_is(
     (corpus / "insight").mkdir(parents=True)
     monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
     monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
-    # The stat scan behind the gauge is cached for `knowledge_age_scan_ttl_seconds`, so this test
-    # busts it after each write — it rewrites the tree three times inside one second, which is a
-    # local writer's pattern and exactly what `invalidate_cache` exists for, not a pod's.
-    # `test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape` is where the cache itself is driven.
+    # The gauge's stat scan is cached for `knowledge_age_scan_ttl_seconds`, so this test busts it
+    # after each write; `test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape` drives the cache.
     kg_graph.invalidate_cache()
 
     assert _gauge("chemclaw_knowledge_sync_age_seconds") == kg_graph.NO_NOTES, (
@@ -251,20 +226,12 @@ def test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape(
 ) -> None:
     """A live gauge callback runs inside `/metrics`, which is served on the event loop.
 
-    The gauge shipped as an unguarded `rglob` + `stat` sweep of the whole knowledge tree, evaluated
-    on every scrape. Measured on this sandbox, `METRICS.render()` went from 0.128 ms on an empty
-    tree to 8.7 ms at 1k notes and 102.6 ms at 10k — and `api/routes/ops.py::metrics` renders
-    synchronously inside an `async def`, so that is the front door's whole event loop stalled every
-    30 s, not one request's latency. `_dir_fingerprint` does the same sweep and has been TTL-gated
-    since DA-5; this one had no gate at all.
-
-    Both halves are asserted here, because fixing the cost by capping the freshness would have
-    replaced a slow gauge with a lying one:
+    An unguarded tree walk per scrape would stall the front door's event loop on a large corpus.
+    Both halves are asserted, so the cost is not fixed by making the gauge lie:
 
     1. Repeated scrapes inside the window walk the tree **once**.
-    2. The age still **grows in real time** while that entry is warm — a corpus that stopped
-       arriving cannot be cached into looking fresh, because what is cached is the newest note's
-       mtime and the age is recomputed from the clock on every read.
+    2. The age still **grows in real time** while the entry is warm: what is cached is the newest
+       note's mtime, and the age is recomputed from the clock on every read.
     """
     corpus = tmp_path / "knowledge" / "insight"
     corpus.mkdir(parents=True)
@@ -293,11 +260,9 @@ def test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape(
     )
     assert all(7_000 < value < 7_400 for value in readings), readings
 
-    # The half that must survive the cache: an hour passes with no sync and no rescan. The reading
-    # has to move, or a wedged corpus would read as whatever it read when the entry was filled.
-    # `kg/graph.py` reads the clock as `time.time()` through the stdlib module, so this is the same
-    # object it will call. Captured before the patch, or the replacement calls itself; monkeypatch
-    # puts it back, and the shift is a shifted log timestamp to everything else in the meantime.
+    # An hour passes with no sync and no rescan; the reading must move. `kg/graph.py` reads
+    # `time.time()` through the stdlib module, so this patches the object it calls; captured first
+    # so the replacement does not call itself.
     real_time = time.time
     monkeypatch.setattr(time, "time", lambda: real_time() + 3600)
     assert 10_600 < _gauge("chemclaw_knowledge_sync_age_seconds") < 11_000, (
@@ -310,22 +275,12 @@ def test_the_corpus_age_gauge_is_not_a_tree_walk_per_scrape(
 def test_a_slower_earlier_scan_cannot_clobber_a_fresher_concurrent_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The exact race a fresh-context review found: last-writer-wins was not last-*scanner*-wins.
+    """A slower, earlier scan cannot overwrite a fresher concurrent result.
 
-    Two scrapes can race a cold `_NEWEST_MTIME` entry. Before this fix the write back was plain
-    last-writer-wins with no check against `scanned_at`, so whichever call happened to *finish*
-    last won — even if it *started* first and therefore looked at an older, possibly-stale view of
-    the corpus. Concretely: scan A starts, then a note is written, then scan B starts and finishes
-    (sees the new note, writes the fresh result), then scan A — slower, e.g. scheduling or disk
-    contention — finally finishes and overwrites B's fresh result with its own stale one. For up to
-    one more `knowledge_age_scan_ttl_seconds` window, `knowledge_sync_age_seconds()` would then
-    over-report staleness by however old A's view was.
-
-    Reproduced deterministically rather than with real thread timing (a timing-dependent test would
-    be flaky rather than a proof): `time.monotonic` is patched to hand out the two scans'
-    `scanned_at` values in *start* order while the two calls to `_newest_note_mtime` still happen in
-    *finish* order — B (started later) first, A (started earlier) second — which is exactly "A
-    started first but finished last" without needing real concurrency.
+    Without the `scanned_at` check, whichever scan *finished* last would win, even one that started
+    first and saw an older corpus, over-reporting staleness for a TTL window. Reproduced
+    deterministically: `time.monotonic` hands out `scanned_at` in start order while the scans
+    complete in the opposite order.
     """
     corpus = tmp_path / "knowledge" / "insight"
     corpus.mkdir(parents=True)
@@ -405,20 +360,17 @@ class _Retriever:
 def _chunk(source: str, note_id: str = "note-1") -> EvidenceChunk:
     """One chunk attributed to `source`, citing `note_id`.
 
-    The id is a parameter because the kept counter is keyed on `(source_note_id, content)` — the
-    same key both merge paths dedup on — so two chunks sharing an id are *one note two legs found*,
-    which is a different situation from two legs finding different notes.
+    The kept counter is keyed on `(source_note_id, content)`, the merge paths' dedup key, so two
+    chunks sharing an id are one note two legs found.
     """
     return EvidenceChunk(content="x", source_note_id=note_id, retriever=source)
 
 
 def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
-    """The ADR's own table, as a ratio: contributed 2, survived 0.
+    """A starved source reads as zero rather than as absent.
 
-    `chemclaw_evidence_source_chunks_total` counts what a retriever handed over — pre-merge — so a
-    leg that contributes and survives nothing is indistinguishable from a healthy one. Seeding the
-    kept series at zero is what gives the ratio a denominator at the moment it matters; without it
-    the starved source would simply be missing from the metric.
+    The contributed counter is pre-merge, so a leg whose chunks never survive looks healthy there.
+    Seeding the kept series at zero gives the ratio a denominator when it matters.
     """
     before_graph = _baseline("chemclaw_evidence_source_kept_total", source="graph")
     before_lexical = _baseline("chemclaw_evidence_source_kept_total", source="lexical")
@@ -434,12 +386,9 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
 def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
     """Agreement is the healthy case and must not read as starvation.
 
-    Both merge paths keep the *first* occurrence of a note, so `chunk.retriever` names only the leg
-    that found it first. Attributing the kept count by that field credited every shared note to
-    whichever source `_sources()` happened to list first — measured on a healthy three-leg corpus,
-    `graph 16, lexical 0, vector 0`, which is exactly what a starved leg looks like. The one metric
-    built to detect `D-2026-08-01-a-cap-that-starves-a-source` was therefore pinned at zero for
-    every index-backed leg in every hybrid deployment.
+    Merge keeps the first occurrence of a note, so `chunk.retriever` names only one leg; attributing
+    by it would credit every shared note to one source and make healthy legs look starved
+    (`D-2026-08-01-a-cap-that-starves-a-source`).
     """
     shared = _chunk("graph")
     before_lexical = _baseline("chemclaw_evidence_source_kept_total", source="lexical")
@@ -450,17 +399,10 @@ def test_a_note_two_legs_agreed_on_counts_for_both_of_them() -> None:
 
 @pytest.mark.anyio
 async def test_gathering_evidence_records_the_surviving_count_without_being_asked_to() -> None:
-    """Driven through `gather_evidence`, because the unit test above cannot see the defect.
+    """Driven through `gather_evidence`: a helper's unit test cannot see a missing caller.
 
-    `record_kept_chunks` shipped with **no caller**: the only invocation in the tree was the test
-    one line up, calling it directly. So the helper was covered, the metric was declared, the ADR
-    said `research_tools` "must call" it, a dashboard panel queried it — and the series had no
-    producer, which is the `audit_events.agent` shape this repository has two ADRs about.
-    `test_every_declared_metric_is_named_somewhere_in_the_source` could not catch it either: the
-    name is a literal inside the helper, and a helper nothing calls still names it.
-
-    A test that drives the real path is the only kind that can fail for the real reason, so this
-    one asks `gather_evidence` for evidence and looks at the registry afterwards.
+    A helper that is declared, covered and named in the source can still have no production caller;
+    only driving the real path and reading the registry can fail for that reason.
     """
     before = _baseline("chemclaw_evidence_source_kept_total", source="graph")
     await gather_evidence("anything at all")
@@ -475,9 +417,7 @@ async def test_gathering_evidence_records_the_surviving_count_without_being_aske
 def test_every_evidence_source_is_timed_including_the_one_that_failed() -> None:
     """A vector store that is timing out and one that is empty both return `[]`.
 
-    So the duration is the only thing that separates them, and it has to be recorded on the
-    failing path too — a leg that raises after twenty seconds and one that raises immediately are
-    different faults.
+    The duration is what separates them, so it is recorded on the failing path too.
     """
     sources: list[tuple[str, SourceRetriever]] = [
         ("graph", _Retriever("graph", [_chunk("graph")])),
@@ -502,12 +442,8 @@ def test_points_the_catalogue_cannot_resolve_are_counted_and_named(
     matches in and zero hits out, and the fan-out books an honest `chunks=0`.
     """
     before = _counter("chemclaw_vector_unresolved_points_total")
-    # The WARNING is throttled per collection (`tests/test_datapath_review_metrics.py`), so this
-    # names one nothing else uses — the point here is that drift is *said*, not how often. The
-    # throttle's memory is a process-wide dict, though, and "nothing else uses this name" is not
-    # the same claim as "this process has not warned about it": run a second time in one process
-    # the WARNING was throttled and the assertion below read as a regression. Cleared here, so
-    # what this test asserts is the first report rather than the registry's history.
+    # The WARNING is throttled per collection in a process-wide dict, so it is cleared here: this
+    # test asserts the first report, not the registry's history.
     external_index._LAST_UNRESOLVED_WARNING.pop("observability-drifted", None)
     with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.documents.external_index"):
         _report_unresolved(addressed=5, rows=3, hits=2, collection="observability-drifted")
@@ -538,11 +474,10 @@ def test_every_embedding_call_is_counted_and_timed() -> None:
 def test_a_failing_embedding_provider_names_itself(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Retries live inside the SDK with no callback, so a failure had to be visible here or nowhere.
+    """A failing embedding provider names itself.
 
-    The exception still propagates — nothing continues with less — but the *embedder* is named,
-    with the exception type and the batch size, neither of which survives into any caller's own
-    handler.
+    Retries live inside the SDK with no callback. The exception still propagates, but the embedder,
+    the exception type and the batch size are logged, which no caller's handler would see.
     """
 
     def broken(text: str) -> list[float]:
@@ -638,17 +573,12 @@ def test_an_authentication_failure_is_classified_apart_from_a_partition() -> Non
 
 
 def test_a_bare_403_stays_transient_because_a_forge_throttles_with_one() -> None:
-    """The status line alone must not make a note proposal permanent.
+    """The status line alone must not make a note write permanent.
 
-    `GitWriteError` is in `durable/publish.py`'s `non_retryable_error_types`, so classifying a
-    push failure as auth *drops* the proposal rather than backing off. GitHub answers a bare
-    `The requested URL returned error: 403` for secondary rate limits and abuse detection — both
-    of which clear on their own — so treating the code as a credential fact would let a throttle
-    silently stop the PR-gate while every run reported success.
-
-    A genuine denial is not lost by this: it carries a phrase too (the test above), and the marker
-    list is documented as wrong in the safe direction — a missed phrase retries, a false positive
-    is permanent.
+    `GitWriteError` is non-retryable, so classifying a push failure as auth drops the write instead
+    of backing off. GitHub answers a bare 403 for rate limits and abuse detection, which clear on
+    their own. A genuine denial carries a phrase (the test above); the marker list errs in the safe
+    direction — a missed phrase retries, a false positive is permanent.
     """
     assert not _is_auth_failure(
         "fatal: unable to access 'https://h/': The requested URL returned error: 403"
@@ -724,17 +654,12 @@ def test_a_migration_names_the_file_it_is_applying(caplog: pytest.LogCaptureFixt
 
 
 def test_the_outbox_backlog_is_a_count_and_an_age(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The documented formula was wrong three ways; this reads the queue instead.
+    """The outbox backlog is a count and an age, read off the queue.
 
-    Executed on the old formula: queued=10, published=0, failures=50, and the true pending row
-    count was 0. The age is what separates a backlog of five that turns over every second from a
-    backlog of five that has not moved since Tuesday.
-
-    The probe sink is enabled for the duration, because the reading is deliberately scoped to the
-    *enabled* set: rows queued for a sink an operator removed from `CHEMCLAW_RESULT_SINKS` are
-    drained by nobody and pruned by nobody, and counting them here made
-    `ChemclawResultOutboxStuck` page permanently for a destination that was switched off on
-    purpose. Those rows are reported on the degradation series instead.
+    The age separates a backlog that turns over every second from one that has not moved for days.
+    Scoped to the *enabled* sinks: rows for a sink removed from `CHEMCLAW_RESULT_SINKS` are drained
+    by nobody and would page `ChemclawResultOutboxStuck` permanently; they are reported on the
+    degradation series instead.
     """
     asyncio.run(migrated_db_or_skip())
     monkeypatch.setattr(outbox, "enabled_names", lambda: ["lims"])

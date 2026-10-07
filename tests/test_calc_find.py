@@ -1,14 +1,8 @@
 """Browsing the calculation store: `CalculationQuery`, both backends, and the tool over them.
 
-The store has always been addressable — give it the exact key and it hands back the result — and
-that is all it was. "What have we already computed for this molecule" had no answer, so the only
-way to reach a stored value was to ask for the identical calculation again and get a cache hit.
-For xTB that is merely wasteful; for the DFT results W2.1 started persisting it means hours of
-compute sitting in a table nothing could look into.
-
-What is pinned here is the part that is easy to get wrong: `input_hash` is not reversible, so a
-molecule is found by hashing the query the same way the key was built — which is also why an
-equivalent SMILES for the same molecule has to find the same rows.
+"What have we already computed for this molecule" is answerable without re-asking for the identical
+calculation. `input_hash` is not reversible, so a molecule is found by hashing the query the way
+the key was built, and an equivalent SMILES must find the same rows.
 """
 
 import asyncio
@@ -128,20 +122,11 @@ async def test_an_undated_result_falls_outside_every_window() -> None:
 
 
 async def test_an_undated_result_sorts_ahead_of_every_dated_one() -> None:
-    """Where an undated row lands in the ordering — and that mixing the two kinds does not crash.
+    """An undated result sorts ahead of every dated one, and mixing the two does not crash.
 
-    The in-memory store keeps no clock, so `find`'s docstring says insertion order stands in for
-    time; the consistent reading is that a row nobody dated is the newest thing the store knows.
-    Nothing stated it, and writing this test found out why it had never come up: the sentinel that
-    expressed it, `created_at or datetime.max`, is **naive**, while every real `created_at` in this
-    codebase is timezone-aware. One store holding one dated and one undated result raised
-    `TypeError: can't compare offset-naive and offset-aware datetimes` — not a wrong order, no
-    order at all. `test_an_undated_result_falls_outside_every_window` never saw it because a
-    single-element list is never compared.
-
-    This is also the only place the two backends *can* differ by construction — Postgres stamps
-    `created_at` itself and has no undated row to place — so the in-memory choice is pinned here or
-    nowhere. Reversing the partition (`dated + undated`) still fails this.
+    The in-memory store has no clock, so an undated row is the newest. The sentinel must be
+    timezone-aware, since every real `created_at` is. Postgres stamps `created_at` itself, so this
+    choice is pinned here or nowhere.
     """
     store = await _populated()  # three dated results, newest at `_NOW`
     await store.put(_stored("CCC"))  # no created_at
@@ -207,16 +192,10 @@ def test_the_browse_marks_a_row_whose_epoch_was_never_recorded(
 ) -> None:
     """Three standings, and only two of them can be a listing.
 
-    `CALCULATION_EPOCH` rides inside `params_hash`, which is neither a filter nor invertible, so
-    the browse used to hand a superseded row back beside its replacement with nothing to tell them
-    apart — and `find_calculations` tells the model to use a listed value instead of recomputing
-    and to cite its `calc_ref` in a knowledge note. A row whose *recorded* epoch is not the current
-    one is now excluded outright (`store._matches`), because such a row is wrong rather than old.
-
-    The third standing is the one this asserts: a row written before migration 090 records no
-    epoch, cannot be classified after the fact, and is therefore returned and **marked**. Hiding it
-    would answer "nothing found" about an entire existing store the day the migration ran; calling
-    it current would be the claim the column exists to stop being guessed at.
+    `CALCULATION_EPOCH` is inside `params_hash`, so the epoch is recorded separately: a row whose
+    recorded epoch is not current is excluded (`store._matches`). A row written before migration 090
+    records no epoch and cannot be classified, so it is returned and marked rather than hidden or
+    called current.
     """
 
     async def _run() -> list[tuple[str, bool]]:
@@ -262,12 +241,9 @@ async def _many(count: int, calc_type: str = "pka") -> InMemoryStore:
 
 
 def test_a_capped_page_says_how_many_it_is_a_page_of(monkeypatch: pytest.MonkeyPatch) -> None:
-    """30 stored rows answered as 20 records, with nothing saying ten more existed.
+    """A capped page says how many it is a page of.
 
-    The measured "before": `find_calculations(smiles="CCO", calc_type="pka")` over a store holding
-    30 returned a bare `list` of 20 `CalculationRecord`s whose fields are `calc_ref`, `calc_type`,
-    `calc_version`, `compute_seconds`, `computed_at`, `epoch_recorded`, `provenance`, `result` and
-    `result_omitted` — a per-row payload marker and nothing about the *list*.
+    Otherwise 30 stored rows answered as 20 would look like the whole set.
     """
 
     async def _run() -> tools.CalculationSearch:
@@ -343,9 +319,8 @@ def test_a_store_that_reports_no_page_is_read_as_possibly_incomplete() -> None:
 async def _write_unreadable_row(key: CalculationKey) -> None:
     """Put a jsonb value that is not a result object into `calculation_results`, bypassing `put`.
 
-    The column is bare `JSONB NOT NULL`, so a string, an array or a number is a value a restore, an
-    operator or a calculation server returning an unchecked shape can leave behind — and the store's
-    own `put` is exactly the path such a row did not take.
+    The column is bare `JSONB NOT NULL`, so a restore, an operator or a server returning an
+    unchecked shape can leave one.
     """
     async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
         await cur.execute(
@@ -369,12 +344,9 @@ async def _write_unreadable_row(key: CalculationKey) -> None:
 def test_a_dropped_row_is_counted_rather_than_leaving_a_shorter_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_readable_row`'s own docstring measured "seven rows of which one held a jsonb string".
+    """A dropped row is counted rather than leaving a shorter list.
 
-    It fixed the crash — the browse no longer answers zero — and left the reader unable to tell six
-    of seven from seven of seven. A calculation whose row cannot be read back still exists, and a
-    model told "we have two" about three is being handed the same authoritative absence the row cap
-    hands it.
+    An unreadable row still exists; "we have two" about three is a false absence.
     """
 
     async def _run() -> tools.CalculationSearch:

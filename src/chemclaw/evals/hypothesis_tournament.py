@@ -1,23 +1,11 @@
 """Does the tournament's ranking carry information, and how much judging does that take?
 
-**The question this answers, and the one it does not.** It measures the *instrument*: given a judge
-of a stated accuracy, does Swiss pairing plus a Bradley-Terry fit recover a known ordering, and by
-how much does it beat the null of not ranking at all? That is a property of
-`hypotheses/pairing.py` and `hypotheses/rating.py`, it is simulable, it needs no model, and it runs
-in CI. What it cannot tell anybody is whether a *language model* judging real chemistry is an
-accurate judge — that is `backtest_shape` below, which needs a credential and has never run.
-
-Both halves are here on purpose. `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`
-deleted 1,442 lines of the nearest previous attempt at this feature partly because the measurement
-meant to justify it had a denominator that depended on the model volunteering the behaviour being
-measured. Simulating the ranking machinery has no such problem: the ground truth is constructed, so
-the denominator is fixed, and a regression in the pairing or the fit shows up as a number moving.
-
-**The null control is the point.** `D-2026-08-16` measured a revision loop that cleared 10 of 39
-flags and looked like it worked, until re-scoring the same answers *unchanged* cleared 2.0 per roll
-and the benefit over doing nothing turned out to be zero. So every figure here is reported beside
-the same statistic computed on a shuffled ordering, and a tournament that does not beat its own
-shuffle is decoration.
+Measures the instrument: given a judge of stated accuracy, how well do Swiss pairing and a
+Bradley-Terry fit (`hypotheses/pairing.py`, `hypotheses/rating.py`) recover a known ordering,
+compared with the null of a shuffled ordering. Simulated, so the ground truth is fixed and it runs
+in CI without a model. Whether a language model is an accurate judge of real chemistry is a
+different question (`backtest_shape`), which needs a credential. A tournament that does not beat its
+own shuffle is decoration.
 """
 
 from __future__ import annotations
@@ -34,9 +22,9 @@ from chemclaw.hypotheses.rating import Judgement, rate
 class Recovery:
     """How well one simulated tournament recovered the ordering it was given.
 
-    `top_one` is the statistic that matters most for this feature, because the report names a single
-    next experiment: it is the fraction of runs whose top-rated hypothesis really was the best one.
-    `spearman` says whether the rest of the table is informative or only the leader is.
+    `top_one` matters most, since the report names a single next experiment: the fraction of runs
+    whose top-rated hypothesis really was the best. `spearman` says whether the rest of the table is
+    informative.
     """
 
     field: int
@@ -56,8 +44,7 @@ class Recovery:
 def _spearman(order: Sequence[str], truth: Sequence[str]) -> float:
     """Rank correlation between a recovered order and the true one, -1 to 1.
 
-    Written out rather than pulled from scipy: it is six lines for distinct ranks, and this
-    package already avoids a dependency it would use once.
+    Written out (six lines for distinct ranks) to avoid a scipy dependency used once.
     """
     n = len(order)
     if n < 2:
@@ -70,9 +57,8 @@ def _spearman(order: Sequence[str], truth: Sequence[str]) -> float:
 def _judge(stronger: str, weaker: str, accuracy: float, rng: random.Random) -> tuple[str, str]:
     """A judge that names the genuinely better hypothesis with probability `accuracy`.
 
-    A blunt model of a judge, deliberately: making the error rate depend on how close the pair is
-    would flatter the tournament, because the pairs Swiss generates after round one are exactly the
-    close ones. A flat accuracy is the pessimistic assumption.
+    A flat accuracy is the pessimistic model: Swiss pairs close hypotheses after round one, so
+    making error depend on closeness would flatter the tournament.
     """
     return (stronger, weaker) if rng.random() < accuracy else (weaker, stronger)
 
@@ -87,8 +73,7 @@ def simulate(
 ) -> Recovery:
     """Run `runs` tournaments over a constructed ordering and report what was recovered.
 
-    Truth is `0 > 1 > ... > field-1`, which costs nothing in generality — the pairing never sees an
-    id's meaning — and makes the null trivially statable: a shuffled order.
+    The null is a shuffled order.
     """
     rng = random.Random(seed)
     hits = nulls = 0
@@ -96,12 +81,9 @@ def simulate(
     comparisons_total = 0
 
     for _ in range(runs):
-        # **The ids are re-assigned to truth ranks every run, and that is load-bearing.** A fixed
-        # `truth = ["h0", "h1", ...]` makes the best hypothesis also the lexically-first one, so any
-        # ordering artefact in the pairing reads as recovery and the null cannot see it: measured
-        # against the shipped pairing before this, a judge with *literally zero information* scored
-        # Spearman +0.22 and `beats_null=True`. A null that controls for shuffling but not for the
-        # labels does not control for the one artefact the instrument can have.
+        # Ids are re-assigned to truth ranks every run: with fixed ids the best hypothesis is also
+        # the lexically first, and any ordering artefact in the pairing would read as recovery that
+        # the null cannot see.
         truth = [f"h{i}" for i in range(field)]
         rng.shuffle(truth)
         entered = sorted(truth)
@@ -149,15 +131,10 @@ def simulate(
 def backtest_shape() -> str:
     """What a corpus backtest would be, and why this module does not run one.
 
-    The measurement that would settle whether a *model* judges chemistry well is: take
-    `optimization-campaign` notes whose decisive run is on file, truncate the series before it,
-    generate hypotheses for what was going on, and ask whether the Elo-top-1 names the cause that
-    actually turned out to be right — against two nulls, a shuffled ordering and generation order.
-
-    It is not run here because it needs a model credential, and a simulated judge cannot stand in
-    for the thing under test. Saying so is the point: `evals/delegation.py` has sat unrun against a
-    model for the same reason and its docstring says so plainly, which is better than a number
-    produced by a mock and reported as a measurement.
+    The backtest: take `optimization-campaign` notes whose decisive run is on file, truncate before
+    it, generate hypotheses, and ask whether the top-rated one names the actual cause — against a
+    shuffled ordering and generation order. It needs a model credential, and a simulated judge
+    cannot stand in for the thing under test.
     """
     return (
         "Truncate `optimization-campaign` series before the decisive run; generate; rank; compare "

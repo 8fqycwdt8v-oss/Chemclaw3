@@ -1,15 +1,9 @@
-"""Behavioral tests for detailed step-by-step recipe ingestion (plan Phase 4).
+"""Behavioral tests for detailed step-by-step recipe ingestion.
 
-Two entry paths must carry a full development recipe into the canonical schema:
-
-* **free text** — the JSON adapter segments a prose procedure into ordered, labeled steps
-  and preserves the verbatim text (no SMILES is guessed from prose);
-* **structured ORD** — the ORD adapter maps a native Open Reaction Database message into
-  component-linked addition/condition/workup steps, converting units.
-
-Both produce the same `OrdReaction` and flow through the one `sync_entries` pipeline, and the
-reaction note renders the numbered procedure so the recipe survives to the graph. All runnable
-without a server, database, or git.
+Two entry paths carry a development recipe into the canonical schema: the JSON adapter segments a
+prose procedure into ordered steps and keeps the verbatim text (no SMILES guessed from prose), and
+the ORD adapter maps a native ORD message into component-linked steps, converting units. Both
+produce one `OrdReaction` through `sync_entries`. Runnable without a server or database.
 """
 
 import json
@@ -214,23 +208,11 @@ def _ord_product(
 
 
 def test_the_headline_yield_is_the_products_the_source_marked_desired() -> None:
-    """A by-product listed first must not become the reaction's yield (D-2026-09-04).
+    """The headline yield is the product the source marked desired, not the first one listed.
 
-    The defect measured: `_outcomes` took the *first* product that stated a YIELD and recorded it as
-    the reaction's, so an ORD record listing the des-ethyl by-product at 12% ahead of the desired
-    ester at 85% transcribed 12% — into `conditions.yield_percent`, the number every comparison
-    renders, and into the body's `- yield:` bullet. `record.py::_principal_product` already refuses
-    to *name* a compound in exactly this situation; the number had no such guard, so the record
-    named no product while confidently asserting one product's figure.
-
-    ORD marks the answer itself. `ProductCompound.is_desired_product` is the source's own
-    statement about which compound the run was for, and this adapter ignored the field entirely.
-    Reading it is a transcription; picking by array position is an inference, and a wrong one is
-    worse than none because it looks right.
-
-    The three fallbacks are asserted beside it because a rule with no honest default is a guess with
-    extra steps: unmarked with several yields is `None`, unmarked with exactly one yield keeps it,
-    and one product is unambiguous by construction.
+    `ProductCompound.is_desired_product` is the source's own statement; picking by array position is
+    an inference that looks right when wrong. Fallbacks: unmarked with several yields is `None`,
+    unmarked with exactly one yield keeps it, and a single product is unambiguous.
     """
     by_product = _ord_product("CC=O", yield_percent=12.0, purity_percent=90.0, desired=False)
     desired = _ord_product("CC(=O)OCC", yield_percent=85.0, purity_percent=99.0, desired=True)
@@ -257,11 +239,8 @@ def test_the_headline_yield_is_the_products_the_source_marked_desired() -> None:
     single = _ord_multiproduct(_ord_product("CC(=O)OCC", yield_percent=85.0))
     assert single.yield_percent == 85.0
 
-    # Several marked desired: the source contradicts itself, so it has stated nothing this can
-    # read, and falling through to the measurement count would put the positional pick back. This
-    # branch was the one nothing held — mutating it to `return marked[0]` survived every test in
-    # the covering files, and it is the branch that keeps a wrong number out of a chemist's
-    # precedent, because a contradicted marking still *looks* like the source having chosen.
+    # Several marked desired: the source contradicts itself and states nothing readable, so falling
+    # through to the measurement count would reintroduce the positional pick.
     contradicted = _ord_multiproduct(
         _ord_product("CC=O", yield_percent=12.0, desired=True),
         _ord_product("CC(=O)OCC", yield_percent=85.0, desired=True),
@@ -272,18 +251,11 @@ def test_the_headline_yield_is_the_products_the_source_marked_desired() -> None:
 
 
 def test_a_multi_product_record_the_source_measured_once_keeps_that_measurement() -> None:
-    """The screen is *being measured*, not being measured by YIELD.
+    """A multi-product record measured once keeps that measurement, whatever kind it is.
 
-    `_headline_product`'s own rule is "exactly one product stating a measurement — the others are
-    by-products the source did not measure, so there is still only one candidate". Screening on
-    YIELD alone made that argument false for the record that states only a PURITY: two products,
-    one of them carrying 99.2% and no yield anywhere, and the transcription stored nothing at all —
-    `conditions.purity_percent` NULL and the body's `- purity:` bullet gone, for a number a chemist
-    had recorded.
-
-    The pair still describes one compound, which is the property the rule exists for: with two
-    products each measured a different way, no single product is the candidate and both figures
-    stay `None` rather than being assembled from two compounds.
+    The screen is "has a measurement", not "has a yield", so a purity-only record keeps its purity.
+    With two products measured different ways no single candidate exists, and both stay `None`
+    rather than being assembled from two compounds.
     """
     one_measured = _ord_multiproduct(
         _ord_product("CC=O"),
@@ -328,12 +300,10 @@ def test_ord_adapter_tolerates_camelcase_field_names() -> None:
 
 
 def test_ord_unresolvable_identifier_is_a_mapping_error() -> None:
-    """A compound no identifier can resolve *and* no name describes is an OrdFormatError (G4).
+    """A compound with neither a resolvable identifier nor a name is an `OrdFormatError`.
 
-    A name the reagent table cannot resolve — the Perera flow-Suzuki corpus's `2a, Boronic Acid` —
-    is no longer this case: it is carried verbatim and the reaction is citation-only
-    (`tests/test_ord_citation_tier.py`). What is left to refuse is a compound that offers neither a
-    structure nor anything a reader could be shown in place of one.
+    An unresolvable name is carried verbatim and makes the reaction citation-only
+    (`tests/test_ord_citation_tier.py`); only a compound offering nothing to show is refused.
     """
     payload = {
         "inputs": {
@@ -464,9 +434,7 @@ def test_non_contiguous_step_indices_are_rejected() -> None:
 def test_workup_reagent_satisfies_mass_balance() -> None:
     """A product element supplied only by a workup-step reagent does not fail the balance.
 
-    Chlorination where the chloride enters during a workup: the product's Cl comes from a
-    step reagent, not a reaction input, and must still balance (element subsumption folds in
-    step components).
+    Element subsumption folds in step components, so chloride entering during a workup balances.
     """
     reaction = OrdReaction(
         reaction_id="wk",
@@ -514,9 +482,7 @@ async def test_ord_recipe_flows_through_sync() -> None:
 def _warehouse_shaped(procedure: str) -> OrdReaction:
     """A reaction as a warehouse binding produces one: prose recorded, `steps` never mapped.
 
-    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from `_MAPPABLE_FIELDS`
-    deliberately, so this is the real shape of every warehouse-ingested reaction rather than a
-    contrived one.
+    The binding excludes `steps` from `_MAPPABLE_FIELDS`, so this is the real shape.
     """
     return OrdReaction(
         reaction_id="WH-1",
@@ -528,11 +494,9 @@ def _warehouse_shaped(procedure: str) -> OrdReaction:
 
 
 def test_a_recorded_procedure_reaches_the_note_when_the_source_maps_no_steps() -> None:
-    """The warehouse path's protocol must survive to the graph, not stop at the schema.
+    """A recorded procedure reaches the note when the source maps no steps.
 
-    Before this, `_procedure_block` returned `""` whenever `steps` was empty and nothing else read
-    `procedure_text`, so a warehouse-ingested reaction reached `expand_note` with no recipe at all —
-    measured at the time: 251 characters of procedure in, a 63-character body out.
+    The warehouse path's protocol must survive to `expand_note`, not stop at the schema.
     """
     procedure = (
         "Charge the aryl bromide (1.0 equiv) and boronic acid (1.2 equiv). Add Pd(dppf)Cl2 "
@@ -564,11 +528,10 @@ def test_segmented_steps_do_not_also_render_the_prose_they_were_cut_from() -> No
 
 
 def test_derived_steps_do_not_swallow_the_chemists_own_account() -> None:
-    """`ord_adapter` derives steps from structured fields; the prose is a *different*, richer text.
+    """Derived steps do not replace the chemist's own prose account.
 
-    Measured on the shipped export: 0.555 similarity, the steps reading `Add CCO` where the prose
-    reads "a catalytic amount of sulfuric acid over 30 min". Rendering steps alone would drop that
-    sentence — the same loss this module's warehouse test covers, one source over.
+    Steps derived from structured fields read `Add CCO` where the prose names the catalyst and
+    addition time; rendering steps alone would drop that.
     """
     payload = json.loads(_ORD_EXAMPLE.read_text())
     raw = RawEntry(entry_id="e1", created_at=datetime.now(UTC), payload=payload)
@@ -580,12 +543,10 @@ def test_derived_steps_do_not_swallow_the_chemists_own_account() -> None:
 
 
 def test_the_numbers_a_chemist_compares_reach_the_note_as_numbers() -> None:
-    """The setpoints and outcomes must survive ingestion as data, not only as sentences.
+    """Setpoints and outcomes survive ingestion as data, not only as sentences.
 
-    `OrdReaction` is never persisted — it exists transiently inside `read_corpus`, which re-reads
-    the whole ELN from the beginning of time, on a worker the chat pod does not import from. So
-    without this, anything comparing runs at turn time had to re-derive these numbers from the prose
-    the ingest had just finished rendering them into.
+    `OrdReaction` is transient, so without typed conditions a run comparison at turn time would have
+    to re-derive numbers from prose.
     """
     reaction = OrdReaction(
         reaction_id="R1",
@@ -622,13 +583,10 @@ def test_a_note_about_no_recorded_run_carries_no_conditions_block() -> None:
 
 
 def test_the_frontmatter_tells_three_outcomes_apart() -> None:
-    """Stated success, stated failure and "nobody said" are three facts, and the record keeps them.
+    """The frontmatter tells stated success, stated failure and "not stated" apart.
 
-    This used to be two: `outcome_class` defaulted to SUCCESS, so the renderer had to omit success
-    to avoid turning "the ELN did not say" into a claim that the run worked — which meant a run a
-    chemist *did* record as successful was indistinguishable in the frontmatter from one nobody had
-    assessed. `D-2026-08-26-silence-is-not-a-successful-run` gives silence its own value, so both
-    can now be written as what they are.
+    Silence has its own value, so a run recorded as successful is distinguishable from one nobody
+    assessed.
     """
 
     def _run(**extra: Any) -> ProcessConditions:
@@ -651,13 +609,10 @@ def test_the_frontmatter_tells_three_outcomes_apart() -> None:
 
 
 async def test_the_conditions_block_round_trips_through_the_stored_form() -> None:
-    """Structure that does not survive the store is structure nobody has.
+    """The conditions block round-trips through the stored form.
 
-    The claim is unchanged from when a record was a file — persistence that silently drops the
-    numbers leaves the comparison re-deriving them from prose — but the persistence is a row now
-    (D-2026-08-25), so the round trip goes through the store rather than through frontmatter.
-    Asserted against both backends, because the in-memory one is what every other test here uses
-    and a divergence would make those tests prove something the deployment does not do.
+    Asserted against both backends, because the in-memory one is what every other test here uses and
+    a divergence would make those tests prove something the deployment does not do.
     """
     reaction = OrdReaction(
         reaction_id="R4",
@@ -684,17 +639,11 @@ async def test_the_conditions_block_round_trips_through_the_stored_form() -> Non
 
 
 def test_a_new_outcome_class_member_fails_the_type_check_rather_than_the_sync() -> None:
-    """The mapping to frontmatter is exhaustive, and it is mypy that says so — not a comment.
+    """Every `OutcomeClass` member has a frontmatter spelling.
 
-    `_stated_outcome` used to be a `dict[OutcomeClass, Literal[...]]` whose comment claimed a fourth
-    member "fails to type-check here". mypy does not exhaustiveness-check a dict literal's keys, so
-    it would have type-checked clean and raised `KeyError` at runtime inside
-    `record_from_ord_reaction` — outside the `ElnMappingError` path that rejects one entry and
-    continues, aborting the whole sync over one row.
-
-    Asserted here as behaviour: every member the enum declares has a spelling, so adding one without
-    a spelling cannot be silent. The compile-time half is `assert_never`, verified by adding a
-    member and watching mypy name it.
+    mypy does not exhaustiveness-check dict keys, so the mapping uses `assert_never`; a missing
+    member would otherwise raise `KeyError` outside the per-entry rejection path and abort the sync.
+    This is the runtime half of that check.
     """
     for member in OutcomeClass:
         spelled = _stated_outcome(member)

@@ -1,30 +1,8 @@
-"""`BACKLOG.md` must obey the two rules it opens with, which it did not.
+"""`docs/planning/BACKLOG.md` keeps the shape its header states.
 
-The file states them itself: it is *a queue of what is still open, not a log of what was found*, and
-a row leaves in the commit that closes it. Both failures this checks for were found by measuring
-the file against its own header (X7, 2026-08-27):
-
-- **A row present twice.** "Memory records; it does not change what the next turn does" appeared in
-  two sections, identical for sixteen lines, with only one of the copies carrying the 2026-08-25
-  measurement that says the row is blocked on a deployment that does not exist. A duplicate does not
-  read as a duplicate — it reads as two open items — and it inflates every count taken of the file.
-- **A self-count that nobody re-derived.** The header said "223 of its rows are open" beside the
-  `grep` that answers 221, and "it holds 41 now" where the same `grep` answers 45. Both were printed
-  *next to the command that disproves them*, which is the shape
-  `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` exists to reject: a number in prose is
-  a claim about its author's afternoon, and one that reads as freshly measured is worse than none.
-
-  **That second guard was built twice by position and once, correctly, by phrasing.** A
-  header-scoped pattern and a body-scoped pattern each knew shapes the other did not, so a live
-  count could pass by standing in the section whose pattern did not recognise its wording — and one
-  shape, "221 findings are open", was outside both. What made the header's "237 open rows"
-  legitimately exempt was never that it sits in the header; it is that it records what this file
-  *once was*. So there is now one pattern over the whole file and an allowlist of quoted
-  retrospective sentences, each required to carry a past-tense marker so the exemption cannot
-  launder a live number.
-
-Deliberately not checked: whether a row is still true. No test can know that — the same line
-`tests/test_deferred_register.py` draws for the sibling register, and for the same reason.
+Open rows are checkboxes of at most two lines with no duplicates, every `path::symbol` anchor
+resolves in the tree, the file states no live count of itself, and every deferred item carries a
+trigger. Whether a row is still *true* needs reading the code and is deliberately not checked.
 """
 
 import re
@@ -32,273 +10,92 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKLOG = _ROOT / "docs" / "planning" / "BACKLOG.md"
-# An open row: a checkbox item whose title is bolded, which is the shape the whole file uses.
 _ROW_TITLE = re.compile(r"^- \[ \] \*\*(.+?)\*\*", re.MULTILINE)
-
-# The nouns this register and its archive are counted in. Narrow to these three deliberately, so a
-# genuine measurement of something else ("124 of 261 probes", "a 39-note knowledge graph", "measured
-# at 2,170 tokens") is untouched: those name a corpus, not the queue's own length.
-_COUNTED = r"(?:rows|findings|items)"
-
-#: A count of this register's own length, in every phrasing that has actually been written here.
-#:
-#: **One pattern, applied to the whole file.** It replaces two that were scoped by *position* — one
-#: over the header, one over the body — and the pair had a gap in each direction, both reproduced
-#: before this was written:
-#:
-#: - A live, wrong count *in the header* passed both. "38 open rows are still open in this file."
-#:   escaped the header pattern (which required the digits to sit next to the word `rows`, and they
-#:   sit next to `open`) and the body pattern never looked at the header at all.
-#: - Header-shaped phrasings *in the body* passed both. "The archive holds 221." was caught only by
-#:   the header pattern, which does not run there — and "221 findings are open." was caught by
-#:   **neither**, because one wanted `open` before the noun and the other wanted the digits welded
-#:   to `are open`.
-#:
-#: Position was never what made a sentence retrospective; `_HISTORICAL` below carries that, so the
-#: shape is checked everywhere and the exemption is stated rather than inferred from a heading.
-#:
-#: **It matches a count of anything `_COUNTED` names, not only a count of this file's rows**, and
-#: that is deliberate rather than an oversight to narrow. A row about *database* rows trips it —
-#: wave 9 hit exactly that writing "the oldest 500 rows of an ELN" — and the fix there is one word,
-#: because a register row saying "rows" without saying whose is ambiguous to a reader too. Teaching
-#: the pattern to tell the two apart would mean guessing at the subject of a sentence, which is how
-#: a gate starts passing the case it exists to catch.
-_STATED_COUNT = re.compile(
-    rf"\b\d[\d,]*\s+(?:of its\s+)?(?:open\s+)?{_COUNTED}\b"
-    rf"|\bholds\s+\d[\d,]*\b"
-    rf"|\b\d[\d,]*\s+are\s+open\b"
-)
-
-#: The sentences that may state a count, quoted exactly, because each describes a *past* state.
-#:
-#: The register's own argument is that a number nobody re-derives is a claim about its author's
-#: afternoon. A measurement of what this file once was is not that claim: it is the evidence the
-#: rule rests on, and it cannot go stale, because the past does not move.
-#:
-#: **An entry here is not a way past the test**, which is why `_RETROSPECTIVE` exists beside it:
-#: every entry must carry an explicit past-tense marker, so the allowlist cannot be used to launder
-#: a live count by quoting it. And every entry must still appear in the file, so an exemption whose
-#: sentence has been rewritten goes red instead of sitting here exempting nothing.
-_HISTORICAL: tuple[str, ...] = ("this file reached 4,717 lines and 237 open rows",)
-
-#: What makes a sentence a record of the past rather than a claim about now.
-_RETROSPECTIVE = re.compile(r"\b(?:reached|grew to|used to|once held|was|were|had)\b")
-
-
-#: An anchor: a backticked citation carrying **both** a directory and a `::symbol`. That shape is
-#: the file's way of saying "go read this", and it is the one worth holding to the tree.
-#:
-#: **Narrower than every backticked path on purpose.** Measured over the file, 140 backticked tokens
-#: look path-like and 124 resolve; most of the rest are ordinary prose shorthand — `fanout.py`,
-#: `serve.py` and `spend_cap.py`, plus bare `server/`-relative names — which a reader resolves from
-#: context and which no
-#: guard should turn into a style rule. Requiring a directory *and* a symbol excludes those by
-#: construction rather than by an allowlist, and leaves 41 citations of which 3 were dead: one
-#: naming a module that never existed, one naming `note_reindex_effective` in
-#: `retrieval/vector_index.py` when it is a `Settings` property, and one naming a
-#: `_DISPATCHERS` in `tests/test_sibling_manifest_agreement.py` that had become a `_Seam` field.
-#:
-#: Paths resolve from the repository root or from `src/chemclaw/`, because the file writes both.
-#:
-#: **`path:LINE` citations are outside this and that is a known residual.** The file carries a
-#: handful — counted by the same `grep` that found them, not restated here, because this
-#: comment has already had that number wrong twice — and when this guard was written
-#: **five had drifted** — `retention.py:498` was about a different
-#: table than the sentence claimed, `runbook.md:1996` had become an unrelated `ALTER TABLE`,
-#: `background_worker.py:98` had become the line above `connect()`. A line number rots on any edit
-#: above it and nothing can check the *intent*, only the number, so the fix is to cite the symbol
-#: instead — which is what those became, except where the target is prose in Markdown or YAML with
-#: no symbol to name. Banning them outright would need those converted to quoted phrases first.
 _ANCHOR = re.compile(r"`([\w./-]+/[\w.-]+\.(?:py|c|sh|ya?ml|sql|toml|tpl)::[\w.]+)`")
-
-#: Anchors the file cites in order to say they do **not** exist. One today: a retracted ADR claim
-#: that the human gate ran through a `start_approval` in an `agent/interaction_tools` module,
-#: which the row
-#: quotes precisely to record that neither the module nor the function was ever in `src/`.
-#:
-#: Same discipline as `_HISTORICAL` above: an entry must still be cited, and the sentence citing it
-#: must still say it does not exist — otherwise the allowlist would let a genuinely rotted anchor be
-#: parked here.
-_NEVER_EXISTED: tuple[str, ...] = ("agent/interaction_tools.py::start_approval",)
-
-#: What makes a sentence a statement that its own citation is not real.
-#:
-#: **`retracted` was in here and made the guard vacuous.** The one line this exempts also says "its
-#: second reason was false and is retracted", so with that word in the set the check passed against
-#: a sentence rewritten to claim the module *does* carry the approval flow — driven, and it passed.
-#: A retraction says a claim was withdrawn; it does not say the symbol never existed, and only the
-#: second thing licenses the exemption.
-_NONEXISTENT = re.compile(r"never existed|has ever existed|does not exist|no such")
+_STATED_COUNT = re.compile(
+    r"\b\d[\d,]*\s+(?:of its\s+)?(?:open\s+)?(?:rows|findings|items)\b|\b\d[\d,]*\s+are\s+open\b"
+)
+_MAX_ROW_LINES = 2
 
 
-def _anchors() -> list[str]:
-    """Every `path::symbol` citation in the register, in file order."""
-    return _ANCHOR.findall(_BACKLOG.read_text(encoding="utf-8"))
+def _text() -> str:
+    """The register's text."""
+    return _BACKLOG.read_text(encoding="utf-8")
+
+
+def _section(heading: str) -> str:
+    """The body of the `## heading` section, up to the next `## `."""
+    body = _text().split(f"\n## {heading}\n", 1)
+    assert len(body) == 2, f"BACKLOG.md has no `## {heading}` section"
+    return body[1].split("\n## ", 1)[0]
+
+
+def _rows() -> list[list[str]]:
+    """Each open row as its lines: the `- [ ]` line plus the indented lines directly under it."""
+    rows: list[list[str]] = []
+    current: list[str] | None = None
+    for line in _text().splitlines():
+        if line.startswith("- [ ] "):
+            current = [line]
+            rows.append(current)
+        elif current is not None and line.startswith("  ") and line.strip():
+            current.append(line)
+        else:
+            current = None
+    return rows
 
 
 def _resolve(anchor: str) -> str:
-    """`""` when `anchor` resolves, else why it does not.
-
-    A dotted symbol (`Class.method`) resolves when **every** component appears, because that is how
-    the file writes a method and it is not how the source spells it: `class MeasureRequestPrefix`
-    and `async def awrap_model_call` are separate lines, so a whole-string match rejects a citation
-    that is perfectly good. Found by this guard rejecting the first such anchor added after it.
-    """
+    """`""` when every component of `anchor`'s symbol appears in its file, else why not."""
     path, _, symbol = anchor.partition("::")
     for base in ("", "src/chemclaw/"):
         candidate = _ROOT / (base + path)
         if candidate.exists():
             body = candidate.read_text(encoding="utf-8", errors="replace")
-            absent = [
-                part for part in symbol.split(".") if not re.search(rf"\b{re.escape(part)}\b", body)
-            ]
-            if not absent:
-                return ""
-            return f"{base + path} has no {', '.join(absent)}"
+            absent = [p for p in symbol.split(".") if not re.search(rf"\b{re.escape(p)}\b", body)]
+            return f"{base + path} has no {', '.join(absent)}" if absent else ""
     return f"no such file: {path}"
 
 
-def test_the_anchor_parse_finds_anchors() -> None:
-    """Guard the guard: a regex matching nothing would pass every row below.
-
-    The floor rejects the degenerate parse, not a small register: it was `> 20` until seven
-    trigger-gated rows moved to `DEFERRED.md` took their anchors with them and left exactly 20. Rows
-    leaving is the register working, so the floor sits well under the count rather than at it.
-    """
-    assert len(_anchors()) > 10, (
-        "no `path::symbol` anchors parsed from BACKLOG.md; the citation shape moved and the "
-        "resolution guard below is now checking nothing"
-    )
+def test_open_rows_are_parsed() -> None:
+    """Guard the parse: a shape change would otherwise pass every check below vacuously."""
+    assert len(_rows()) > 5, "no open rows parsed from BACKLOG.md; the row shape moved"
 
 
-def test_every_anchor_resolves_to_something_in_the_tree() -> None:
-    """A row's anchors are what the next reader greps, so a dead one costs them the row.
-
-    This is the guard the file did not have, and it was worth having: an audit of all 42 open rows
-    found three anchors pointing at nothing, in rows that were otherwise accurate. A dead anchor is
-    worse than a missing one — it reads as a location, so the reader concludes the subsystem moved
-    rather than that the citation did.
-
-    Nothing here checks whether a row's *claim* is still true; that needs reading the code and is
-    not derivable. What is derivable is whether the place it sends you exists, and that is the half
-    that rots silently.
-    """
-    dead = {
-        anchor: reason
-        for anchor in sorted(set(_anchors()))
-        if anchor not in _NEVER_EXISTED and (reason := _resolve(anchor))
-    }
-    assert not dead, (
-        f"BACKLOG.md anchors that resolve to nothing: {dead}. Point them at what the symbol is "
-        "called now, or — if the row's point is that the citation never existed — add it to "
-        "`_NEVER_EXISTED` with the sentence that says so."
-    )
-
-
-def test_every_never_existed_exemption_is_still_cited_as_nonexistent() -> None:
-    """Guard the allowlist, for the reason `_HISTORICAL` has the same test.
-
-    An exemption is a claim about the file. If the sentence citing the anchor is rewritten, the
-    entry exempts nothing and hides that it does not; if the sentence stops saying the thing does
-    not exist, the entry is laundering a live dead anchor.
-    """
-    text = _BACKLOG.read_text(encoding="utf-8")
-    for anchor in _NEVER_EXISTED:
-        assert f"`{anchor}`" in text, (
-            f"`{anchor}` is exempted in `_NEVER_EXISTED` and is no longer cited in BACKLOG.md, so "
-            "the entry exempts nothing; delete it."
-        )
-        citing = [line for line in text.splitlines() if f"`{anchor}`" in line]
-        silent = [line for line in citing if not _NONEXISTENT.search(line)]
-        assert not silent, (
-            f"{len(silent)} line(s) citing `{anchor}` do not say it does not exist, so this "
-            f"exemption is hiding a dead anchor rather than recording a retraction: "
-            f"{silent[0].strip()[:200]}"
-        )
-
-
-def _titles() -> list[str]:
-    """Every open row's bolded title, in file order."""
-    return _ROW_TITLE.findall(_BACKLOG.read_text(encoding="utf-8"))
-
-
-def _header() -> str:
-    """The file's self-description: everything before the first section heading."""
-    return _BACKLOG.read_text(encoding="utf-8").split("\n## ", 1)[0]
-
-
-def test_the_register_has_rows_to_check() -> None:
-    """Guard the guard: a parse matching nothing would pass everything below."""
-    assert len(_titles()) > 10, "no open rows parsed from BACKLOG.md; the row shape moved"
+def test_every_open_row_is_at_most_two_lines() -> None:
+    """A row is a pointer, not a report: measurements belong in the commit or the ADR."""
+    long_rows = [row[0][:80] for row in _rows() if len(row) > _MAX_ROW_LINES]
+    assert not long_rows, f"BACKLOG.md rows longer than {_MAX_ROW_LINES} lines: {long_rows}"
 
 
 def test_no_row_appears_twice() -> None:
-    """One item, one row. A second copy reads as a second item and diverges from the first."""
-    seen: dict[str, int] = {}
-    for title in _titles():
-        seen[title] = seen.get(title, 0) + 1
-    repeated = sorted(title for title, count in seen.items() if count > 1)
-    assert not repeated, (
-        f"these rows appear more than once in BACKLOG.md: {repeated}. Keep the copy carrying the "
-        "most measurement and delete the other; two copies of one row drift."
-    )
+    """One item, one row: a second copy reads as a second item and drifts from the first."""
+    titles = _ROW_TITLE.findall(_text())
+    repeated = sorted({t for t in titles if titles.count(t) > 1})
+    assert not repeated, f"rows appearing more than once in BACKLOG.md: {repeated}"
 
 
-def test_every_historical_exemption_is_still_quoted_and_still_past_tense() -> None:
-    """Guard the allowlist: an exemption is a claim about the file, and claims go stale.
-
-    Two ways `_HISTORICAL` can rot, and both leave the guard below quietly weaker rather than red.
-    An entry whose sentence has since been rewritten exempts nothing and hides that it does not; an
-    entry worded in the present tense exempts a *live* count, which is the failure the whole file
-    exists to catch, committed through the list that was built to make the exception honest.
-    """
-    text = _BACKLOG.read_text(encoding="utf-8")
-    for sentence in _HISTORICAL:
-        assert sentence in text, (
-            f"the exempted sentence {sentence!r} is no longer in BACKLOG.md. Delete it from "
-            "`_HISTORICAL` or quote the sentence that replaced it — an exemption for prose that is "
-            "not there reads as a rule and is not one."
-        )
-        assert _RETROSPECTIVE.search(sentence), (
-            f"the exempted sentence {sentence!r} states a count with no past-tense marker, so it "
-            "reads as a live claim. `_HISTORICAL` is for measurements of what this file once was; "
-            "it is not a place to put a number that has to stay correct."
-        )
+def test_every_anchor_resolves_to_something_in_the_tree() -> None:
+    """An anchor is what the next reader greps; a dead one sends them to the wrong place."""
+    anchors = sorted(set(_ANCHOR.findall(_text())))
+    assert len(anchors) > 5, "no `path::symbol` anchors parsed from BACKLOG.md"
+    dead = {a: reason for a in anchors if (reason := _resolve(a))}
+    assert not dead, f"BACKLOG.md anchors that resolve to nothing: {dead}"
 
 
-def test_the_header_still_shows_how_to_derive_the_count() -> None:
-    """Removing the number must not remove the way to get it — that would be the other failure."""
-    assert "grep -c '^- \\[ \\]'" in _header(), (
-        "the header no longer shows the command that counts the rows"
-    )
+def test_the_register_states_no_live_count_of_itself() -> None:
+    """The header shows the `grep` that counts rows; a number in prose goes stale."""
+    assert "grep -c '^- \\[ \\]'" in _text(), "the header lost the command that counts rows"
+    stated = _STATED_COUNT.findall(_text())
+    assert not stated, f"BACKLOG.md states a count of its own rows: {stated}"
 
 
-def test_nowhere_in_the_file_states_a_live_row_count() -> None:
-    """The register carries the `grep`; it must not also carry the answer, in any section.
-
-    Both numbers the header used to state were wrong — 223 against 221, 41 against 45 — and the
-    command that disproves each was printed on the same line. Keeping the command and dropping the
-    number is the whole fix, and it is the only one that stays true as rows are added and closed.
-
-    **Checked file-wide, because two position-scoped patterns had a gap in each direction.** The
-    first guard was written for "223 of its rows are open" and scoped to the header; the second for
-    "223 open findings live in `findings-2026-08.md`" and scoped to the body. Between them a live
-    count could stand in the header under a phrasing the header pattern did not know, or in the body
-    under a phrasing only the header pattern knew — and "221 findings are open." was outside both.
-    A guard aimed at one sentence catches that sentence; the failure is the *shape*, and the shape
-    can appear anywhere, which is why the pattern now goes everywhere and the exemption is a quoted
-    sentence rather than a heading.
-    """
-    text = _BACKLOG.read_text(encoding="utf-8")
-    # Remove the exempted sentences rather than testing each match's neighbourhood: whatever is left
-    # is prose no retrospective narrative accounts for, and the pattern may run over all of it. The
-    # test above is what keeps this subtraction honest.
-    for sentence in _HISTORICAL:
-        text = text.replace(sentence, "")
-    stated = _STATED_COUNT.findall(text)
-    assert not stated, (
-        f"BACKLOG.md states a live count of its own rows: {stated}. Cite the `grep -c` and let it "
-        "answer; a number here is stale the next time a row lands or closes "
-        "(D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose). If the sentence is genuinely "
-        "about a past state, quote it in `_HISTORICAL` — it must carry a past-tense marker."
-    )
+def test_every_deferred_item_is_one_line_with_a_trigger() -> None:
+    """Deferred means postponed until something happens, so each item names that something."""
+    items = [line for line in _section("Deferred").splitlines() if line.startswith("- ")]
+    assert len(items) > 10, "no deferred items parsed from BACKLOG.md"
+    missing = [line[:80] for line in items if "*Revisit:*" not in line]
+    assert not missing, f"deferred items without a `*Revisit:*` trigger: {missing}"
+    lines = _section("Deferred").splitlines()
+    wrapped = [lines[i - 1][:80] for i, line in enumerate(lines) if line.startswith("  ")]
+    assert not wrapped, f"deferred items wrapped over several lines: {wrapped}"

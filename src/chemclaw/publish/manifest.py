@@ -1,23 +1,10 @@
 """The result-sink manifest: one validated declaration of where computed results are written.
 
-The third of this system's three attachment seams, and written to their template deliberately —
-a folder, a YAML file, `extra="forbid"`, discovered from a path list, enabled by a name list.
-`connectors/manifest.py` is the first (capability: work whose result is a value),
-`ingest/sources/manifest.py` the second (corpus: records to ingest, evidence to retrieve).
-
-**Why a sink is neither of those, and could not be declared as one.** A connector *produces*;
-`cli/validate_connectors.py` refuses a `write_`/`submit_`/`update_`-prefixed endpoint tool
-outright, because "the agent-facing surface is read/compute only". A data source *supplies*;
-`ingest/sources/README.md` states that "a source cannot acquire a write path by declaring one". A
-sink *consumes what this system produced*, which is a third thing, so it gets a third manifest
-rather than a hole cut in one of the other two.
-
-**The site's schema is not in here.** Unlike the warehouse ELN binding — where the whole point was
-that the site's tables are a manifest block, because a schema nobody can see yet cannot be written
-into Python — this seam ships its *own* schema (`schema/result-store/`). What the binding carries
-is how to reach the destination and who may write to it, not what the tables are called. A
-deployment that must land in pre-existing tables writes a driver, which is what the
-`module:callable` is for.
+The third attachment seam, on the same template as connectors and data sources (a folder, a YAML
+file, `extra="forbid"`, discovered from a path list, enabled by a name list). A connector
+produces and a source supplies; neither may write, so a sink, which consumes what this system
+produced, gets its own manifest. The binding says how to reach the destination and who may write
+to it; the schema ships in `schema/result-store/`, and pre-existing tables need a custom driver.
 """
 
 from typing import Any, Self
@@ -79,9 +66,8 @@ class ResultSinkManifest(BaseModel):
     def _config_does_not_shadow_the_name(self) -> Self:
         """Reject a `config:` key that would collide with an argument the registry supplies.
 
-        The builder passes `name=` alongside the config, so a manifest setting it there would raise
-        a `TypeError` from deep inside the driver construction naming neither the sink nor the key.
-        The same guard `DataSourceManifest` carries, for the same failure.
+        The builder passes `name=` alongside the config, so a collision would otherwise be an opaque
+        `TypeError` from inside driver construction.
         """
         for reserved in ("name", "tenant_id"):
             if reserved in self.config:

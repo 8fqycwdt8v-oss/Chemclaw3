@@ -1,38 +1,17 @@
 """`python -m chemclaw.cli.live_index` — bring the live lane's derived reaction indexes current.
 
-The four-repo lane's bring-up ingests the seeded corpus (`cli/live_data --backfill-only`) and, until
-this step, stopped there. Two derived indexes that a deployment keeps current on its own were never
-brought current on the lane, and the structure-search tools said so on every run (#520):
+Ingest writes only a reaction's record phase, so this runs the jobs a deployment runs on its own:
 
-* **Reaction labels.** Ingest writes only a reaction's *record* phase. The atom map, the named
-  reaction and the per-species roles come from `ReactionLabelWorkflow`, which a deployment fires
-  from the `reaction-labels` Schedule against `Chemclaw3-mcp`'s `rxnlabel` server. The lane applies
-  no Schedule and started no labeller, so every row stayed stale and `substrate_precedent`
-  answered "NOT ANSWERABLE YET: 4282 reaction(s) match … NONE of them have been labelled".
-* **Fingerprint generations.** A lane's database outlives `down`/`up`, so rows written under an
-  older fingerprint definition stay in it, and `similar_reactions` reported `index_partial` — "part
-  of the reaction index is stored under a SUPERSEDED fingerprint definition and was not compared".
-  A deployment carries rows across a definition bump and disposes of the shelved generation with
-  `make rekey-compounds APPLY=1 DISPOSE=1` (`094`'s header names the statement); the lane did
-  neither.
+* **Reaction labels**: one `ReactionLabelWorkflow` drain (started, or rejoined if running) against
+  `Chemclaw3-mcp`'s `rxnlabel`, instead of the `reaction-labels` Schedule — a Schedule would
+  persist in Temporal past the lane's `down`.
+* **Fingerprint generations**: the operator's re-key, then — only when every shelved row was
+  rebuilt — `rekey_compounds.settle_indexes`, the same disposal `make rekey-compounds APPLY=1
+  DISPOSE=1` runs. It connects as the schema owner, since the runtime role holds no `DELETE` on
+  the fingerprint tables.
 
-So this runs exactly those jobs, on the real broker and the real stores: one label drain (started,
-or rejoined if one is already running), the operator's re-key, and — only when the re-key rebuilt
-every shelved row — the disposal that lets `index_partial` read False again. **Bounded by one
-deadline** (`--timeout`): the drain keeps running on the broker past it, the re-key is
-interrupt-safe and idempotent (`memory.compound_rekey`), and a re-run converges on the same state,
-so a bring-up never blocks on a large corpus.
-
-**Why the drain is one run and not the Schedule.** The lane applies no Schedule at all — the ELN
-sync is also a one-shot (`live_data.backfill`) — because a Schedule persists in Temporal past the
-lane's `down`. Rows ingested after the drain finishes are labelled by the next bring-up, which runs
-this again.
-
-**The disposal is the operator's, called rather than restated.** `rekey_compounds.settle_indexes` is
-what `make rekey-compounds APPLY=1 DISPOSE=1` runs, guard included, so the lane and a deployment
-dispose under one rule (#526). The runtime role holds no `DELETE` on either fingerprint table
-(`infra/sql/grants/app_privileges.sql`), deliberately; the statement connects as the schema's owner
-(`core.migrate.migration_dsn`), which on the lane is the one principal it has.
+Bounded by one `--timeout`: the drain keeps running on the broker past it, the re-key is
+interrupt-safe and idempotent, and a re-run converges.
 """
 
 from __future__ import annotations
@@ -55,10 +34,8 @@ from chemclaw.durable.label_sync import LabelSyncOutcome, ReactionLabelWorkflow
 
 logger = logging.getLogger(__name__)
 
-#: A fixed id, so a second bring-up rejoins a drain that is still running instead of racing it —
-#: `live_data.backfill`'s argument: two drains over one stale set contend on the same rows and
-#: produce nothing the first would not. A finished run's id is free again, so the next bring-up
-#: starts a fresh one over whatever has gone stale since.
+#: A fixed id, so a second bring-up rejoins a running drain instead of racing it on the same rows.
+#: A finished run's id is free again.
 LABEL_DRAIN_ID = "reaction-labels-lane-drain"
 
 # Module-level indirection, so a test swaps the re-key for one over its own stores — the shape
@@ -95,9 +72,7 @@ async def start_label_drain(client: Client) -> DrainHandle:
 async def finish_label_drain(handle: DrainHandle, timeout_seconds: float) -> str:
     """Wait up to `timeout_seconds` for the drain and say what it did.
 
-    **A drain still running is a state, not an error** — the same reading `live_data.backfill`
-    gives the ELN drain. It keeps going on the broker, and the label coverage the precedent tools
-    report is the honest number for how far it got.
+    A drain still running is a state, not an error: it continues on the broker.
     """
     try:
         outcome = await asyncio.wait_for(handle.result(), timeout=max(timeout_seconds, 0.0))
@@ -128,10 +103,8 @@ async def rebuild_fingerprints(timeout_seconds: float) -> list[str]:
 async def bring_current(timeout_seconds: float, client: Client | None = None) -> IndexRun:
     """Start the label drain, rebuild the fingerprints meanwhile, then wait out the deadline.
 
-    The drain is started first because it is the long half and runs on the broker regardless; the
-    re-key runs in this process while the drain works, and whatever is left of the one deadline is
-    spent waiting on the drain. A step that raises is reported and marks the run failed without
-    stopping the other — the two indexes are independent, and half a fix is still a fix.
+    The re-key runs in this process while the drain runs on the broker. A step that raises marks the
+    run failed without stopping the other; the two indexes are independent.
     """
     deadline = time.monotonic() + timeout_seconds
     run = IndexRun()

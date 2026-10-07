@@ -1,17 +1,8 @@
 """The scratchpad's routing, its erasure key, and the two properties that bound a turn's writes.
 
-Routing and tool narrowing are ordinary wiring. What is not is *where* a write may point and *how*
-it is recorded, and both are asserted against something that runs rather than against a declaration.
-
-- Nothing writes to the store except through a *tool*, which is what answers the audit objection
-  `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` raised rather than merely arguing
-  it. A direct `store.aput` would bypass the audit row, the authorization gate, the dry-run refusal
-  and the repeat guard, all at once and silently: nothing fails, the memory is simply written with
-  no record that it was.
-- The deny-rules reach the middleware that enforces them. They did not, for as long as the only
-  test read the rule list back — so a write to any path at all succeeded while three docstrings
-  said otherwise. That one is driven through a compiled graph, which is the only place the answer
-  lives.
+- Nothing writes to the store except through a tool, so every write crosses the audit row, the
+  authorization gate, the dry-run refusal and the repeat guard.
+- The deny rules reach the middleware that enforces them, driven through a compiled graph.
 """
 
 import ast
@@ -46,11 +37,8 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
 #: A narrowing that narrows nothing — what these tests assert *around*.
 #:
-#: `scratchpad_backend` takes the narrowing as a required keyword so a mount cannot silently get
-#: none (`agent/skill_store.py` records the tier that shipped with exactly that gap). These tests
-#: are about which *routes* exist, so they state the permissive answer explicitly rather than
-#: inheriting it from a default that would not exist in production — which is what
-#: `SkillNarrowing.permissive()` is for.
+#: `scratchpad_backend` requires the narrowing as a keyword so a mount cannot silently get none;
+#: these route tests state the permissive answer explicitly.
 _ALL = SkillNarrowing.permissive()
 
 
@@ -61,11 +49,9 @@ def skills() -> CompositeBackend:
 
 
 def test_memories_need_both_a_store_and_an_actor(skills: CompositeBackend) -> None:
-    """Either condition alone leaves the route off, and neither is a preference.
+    """Memories need both a store and an actor.
 
-    Without a store the deployment has no `store` tables at all. Without an actor there is no
-    namespace that could be erased, so a memory written anyway would be one nobody can delete and
-    everybody shares — which is worse than not having the capability.
+    Without an actor there is no erasable namespace, so a memory would be undeletable and shared.
     """
     assert MEMORY_ROOT not in scratchpad_backend(skills, permits=_ALL).routes
     assert MEMORY_ROOT not in scratchpad_backend(skills, store=object(), permits=_ALL).routes
@@ -81,23 +67,12 @@ def test_memories_need_both_a_store_and_an_actor(skills: CompositeBackend) -> No
 
 
 def test_the_skills_routes_survive_being_wrapped(skills: CompositeBackend) -> None:
-    """The narrowing must not be dropped by the thing that extends it.
-
-    The skills middleware and the filesystem tools read the *same* backend object, so a wrapper that
-    rebuilt the routes instead of carrying them would leave the role gate applying to the listing
-    and not to the read.
-    """
+    """The skills routes survive being wrapped, so the role gate also applies to reads."""
     assert "/skills/" in scratchpad_backend(skills, permits=_ALL).routes
 
 
 def test_two_spellings_of_one_person_get_two_prefixes() -> None:
-    """`unverified:<id>` and `<id>` are the same chemist and must both be erasable.
-
-    `agent/leaver.py` holds the reason this repository has two spellings: a writer that cannot
-    authenticate its caller records the claim marked as a claim. The erasure sweep hashes each form,
-    so the two must not collapse into one prefix — and must not be equal, or hashing would be
-    hiding the distinction rather than preserving it.
-    """
+    """`unverified:<id>` and `<id>` get distinct prefixes, so erasure can reach both."""
     assert memory_prefix("alice-oid") != memory_prefix("unverified:alice-oid")
     assert memory_prefix("alice-oid") == memory_prefix("alice-oid"), "must be stable across calls"
     assert memory_namespace("alice-oid")[0] == "memories"
@@ -113,30 +88,19 @@ def test_the_prefix_is_the_namespace_joined_the_way_the_store_joins_it() -> None
 
 
 def test_the_shell_and_the_delete_verb_are_withheld() -> None:
-    """Two verbs upstream registers that this deployment does not offer.
+    """The shell (`execute`) and the `delete` verb are withheld.
 
-    `execute` would be a shell — deepagents 0.7 ships one concrete sandbox, which this repository
-    declines on egress grounds, and `LocalShellBackend` is documented as unrestricted. `delete` is
-    withheld on D-2026-08-12's argument: a turn that cannot rewrite a `SKILL.md` but can remove it
-    still decides what judgment the next turn is able to load.
-
-    Asserted as an exact set rather than two `not in`s, because the failure mode worth catching is
-    upstream *adding* a ninth verb that nothing here has answered for.
+    A turn that cannot rewrite a `SKILL.md` must not be able to remove one either. Asserted as an
+    exact set, so a verb added upstream fails here until answered for.
     """
     assert set(scratchpad_tools()) == {"ls", "read_file", "write_file", "edit_file", "glob", "grep"}
 
 
 def test_the_verb_list_is_computed_once() -> None:
-    """`agent/tool_framing.py` asks this per tool call, so it may not build a middleware per call.
+    """The verb list is computed once, since `agent/tool_framing.py` asks for it per tool call.
 
-    The value assertion above is what keeps the cache honest: a cache freezes whatever the first
-    call returned, so "computed once" and "computed correctly" have to be asserted together or the
-    pair proves only that a wrong answer is stable. Identity rather than equality, because two equal
-    tuples are exactly what a rebuild would produce.
-
-    `chemclaw_agent.subagent_tool_names` is cached on the same reasoning and for the same caller;
-    neither depends on connector discovery, so `tests/conftest.py` has nothing to clear between
-    tests.
+    Asserted by identity, alongside the value test above so the cache is not stably wrong.
+    `subagent_tool_names` is cached the same way; neither depends on connector discovery.
     """
     assert scratchpad_tools() is scratchpad_tools(), (
         "scratchpad_tools rebuilds a FilesystemMiddleware on every call, and "
@@ -145,11 +109,9 @@ def test_the_verb_list_is_computed_once() -> None:
 
 
 def test_writes_are_denied_outside_the_two_roots_that_are_meant_to_be_written() -> None:
-    """The deny rule closes the surface behind the allows, and must come last.
+    """Writes are denied outside the two writable roots, and the deny rule comes last.
 
-    `FilesystemPermission` is first-match-wins, so an ordering that put the blanket deny first would
-    refuse every write including the ones the scratchpad exists for — and the tests would still pass
-    if they only checked that a deny rule was present.
+    `FilesystemPermission` is first-match-wins, so a deny placed first would refuse every write.
     """
     rules = filesystem_permissions()
     assert [rule.mode for rule in rules] == ["allow", "allow", "deny"]
@@ -159,19 +121,10 @@ def test_writes_are_denied_outside_the_two_roots_that_are_meant_to_be_written() 
 
 
 def test_a_write_out_of_bounds_is_refused_by_the_graph_that_really_compiles() -> None:
-    """The deny rule must reach the middleware that enforces it, not merely exist.
+    """A write out of bounds is refused by the graph that really compiles.
 
-    **The rule list was checked and its arrival was not, and the arrival is where it broke.**
-    `create_deep_agent(permissions=…)` reaches enforcement only through the `FilesystemMiddleware`
-    instance upstream constructs with `_permissions=`; this repository supplies its own instance
-    under the same `.name` to withhold `execute`/`delete`, and `_apply_custom_middleware` replaces
-    upstream's *in place* — so the rules were dropped on the floor and a scripted
-    `write_file("/outside/evil.md")` answered "Updated file /outside/evil.md". The test above
-    asserted `[allow, allow, deny]` throughout and stayed green, which is the shape
-    `agent/loop_cap.py` names: a decision that is correct and connected to nothing.
-
-    So this drives the compiled graph. Both directions are asserted from one run, because a refusal
-    that also refused `/scratch/` would be a worse bug than the one being fixed.
+    This repository supplies its own `FilesystemMiddleware`, which replaces upstream's in place, so
+    the permissions must be carried onto it. Both directions are asserted from one run.
     """
     from chemclaw.agent.audit import NullAuditSink
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -211,25 +164,12 @@ def test_a_write_out_of_bounds_is_refused_by_the_graph_that_really_compiles() ->
 
 
 def test_no_first_party_module_writes_to_a_store_directly() -> None:
-    """The property that keeps a memory write auditable, enforced rather than described.
+    """No first-party module writes to a store directly.
 
-    Every write must arrive as a `write_file`/`edit_file` tool call, because that is what crosses
-    the `wrap_tool_call` chain — the audit row, the authorization gate, the dry-run refusal and the
-    repeat guard. A direct `store.aput` bypasses all four at once, and it would do so silently:
-    nothing fails, the memory is simply written with no record that it was.
-
-    This is the objection `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` raised
-    against adopting `BaseStore` at all. The design answers it by construction, and this asserts the
-    construction holds — an AST walk rather than a grep, so a call spelled across two lines or
-    hidden behind an alias is still caught.
-
-    **Exactly one module may, and the exemption is narrowed rather than the rule deleted.**
-    `agent/scratchpad.BoundedStoreBackend` evicts past `agent_memory_max_files`, which needs
-    `adelete`, and is the whole of `D-2026-09-12-a-bound-on-an-agent-writable-table-is-a-row-count`.
-    It does not weaken the property this test holds: an eviction *removes* what the cap says may not
-    stay, inside the same call the tool made, so nothing enters the store outside the chain. Naming
-    one file rather than relaxing the matcher is the `kg/record.py` idiom — one write path, and a
-    test that says which — and it is why a second module acquiring the verb turns this red.
+    Every write must arrive as a `write_file`/`edit_file` tool call to cross the tool-call chain.
+    An AST walk catches aliases and multi-line calls. The one exemption is
+    `agent/scratchpad.BoundedStoreBackend`, whose eviction runs inside the tool's own call; a
+    second module acquiring the verb fails.
     """
     allowed = {"agent/scratchpad.py"}
     offenders: list[str] = []
@@ -252,21 +192,11 @@ def test_no_first_party_module_writes_to_a_store_directly() -> None:
 
 
 def test_a_memory_write_is_gated_and_a_scratch_write_is_not() -> None:
-    """The claim in this module's docstring that was false: "refused on a dry run".
+    """A memory write is gated and a scratch write is not.
 
-    Both write gates ask `side_effecting_tools()`, which is built from the tool *registry* —
-    `core/tool_registry`, every connector's `state_changing` declaration, every template launcher.
-    `write_file` and `edit_file` are in none of those, because `FilesystemMiddleware` registers
-    them. So a `dry_run=true` turn under `harness_autonomy="plan_only"` could write a row into the
-    Postgres `store` that outlives the session, past both "nothing was started" and the plan gate.
-
-    The partition in `tests/test_authz.py` could not catch it: it iterates
-    `registered_tool_names()`, and a middleware-registered verb is not in the registry by
-    construction.
-
-    Asserted over the *pair*, because gating `write_file` by name would have been the wrong fix —
-    it would refuse the turn's own scratchpad, which is turn-local state and the thing
-    `D-2026-08-15-a-turn-needs-somewhere-to-put-intermediate-work` added on purpose.
+    `write_file`/`edit_file` are registered by middleware, not the tool registry, so
+    `side_effecting_tools()` must classify durable memory writes by path; gating the name would
+    refuse the turn's own scratchpad.
     """
     from chemclaw.agent.authz import side_effecting_call
     from chemclaw.agent.scratchpad import SCRATCH_ROOT
@@ -283,12 +213,7 @@ def test_a_memory_write_is_gated_and_a_scratch_write_is_not() -> None:
 
 
 def test_an_unreadable_path_argument_is_treated_as_durable() -> None:
-    """A gate that a malformed argument walks through is not a gate.
-
-    `file_path` absent, `None`, or a non-string cannot be a scratchpad write — those name a path
-    too — so the only safe reading is the durable one. Written because the opposite default is the
-    easy one to reach for, and it fails *open*.
-    """
+    """An absent, `None` or non-string path is treated as durable, so the gate fails closed."""
     from chemclaw.agent.authz import side_effecting_call
 
     for arguments in ({}, {"file_path": None}, {"file_path": 17}, {"file_path": ["/memories/x"]}):
@@ -296,12 +221,7 @@ def test_an_unreadable_path_argument_is_treated_as_durable() -> None:
 
 
 def test_write_todos_is_never_gated_by_either_write_gate() -> None:
-    """The deadlock the fix had to avoid, stated as a test rather than left to inference.
-
-    `write_todos` writes the plan. Under `harness_autonomy="plan_only"` a gate that refused it would
-    refuse the only call able to produce a plan for a human to approve, and the turn could never
-    make progress in either direction.
-    """
+    """`write_todos` is never gated, or `plan_only` could never produce a plan to approve."""
     from chemclaw.agent.authz import side_effecting_call
 
     assert not side_effecting_call(
@@ -310,33 +230,12 @@ def test_write_todos_is_never_gated_by_either_write_gate() -> None:
 
 
 def test_concurrent_first_turns_get_one_migrated_memory_store() -> None:
-    """The cold start the checkpointer was fixed for, repeated one module over.
+    """Concurrent first turns get one migrated memory store and one checkpoint pool.
 
-    `memory_store()` published `_store` *before* awaiting `setup()`, so a second turn arriving
-    inside that await got a store whose two tables do not exist — `relation "store" does not
-    exist`, the same failure and the same window as `checkpointer()`'s
-    (`tests/test_checkpointer_schema.py` runs the sibling of this test). It is not a rare
-    interleaving: `api/runner._turn_memory_store` is awaited once per turn and the shipped chart
-    runs two replicas.
-
-    **`setup()` is slowed here, which is what gives the test power rather than luck**, exactly as
-    in the checkpointer's version: what the defect needs is a second caller *inside* the first
-    one's await, so the await is widened to be observable instead of raced for.
-
-    Four assertions, and the last two are about a different global. One `setup()` and one store
-    identity are the store half. `_checkpoint_pool` has the same check-then-await-then-act around
-    `open()`, and this is the caller that made it a second *caller* — its docstring used to say it
-    had one, which held its lock around it. Unguarded, each concurrent caller builds and opens its
-    own pool, the last assignment wins, and the rest leak their connections for the life of the
-    process while a store is left holding one the module no longer knows about.
-
-    **`open()` is widened for the same reason `setup()` is, and here it is the only way to see the
-    defect at all.** Measured: with `wait=False` and `min_size=0`, `AsyncConnectionPool.open`
-    reaches no suspension point — an uncontended `asyncio.Lock` acquires without awaiting — so the
-    unguarded body is atomic *today*, by a property of a dependency's internals that nothing
-    promises and no first-party test would notice changing. Widening the await is what turns "this
-    happens not to interleave in psycopg-pool 3.2" into an assertion about this module's own
-    discipline.
+    Publishing `_store` before `setup()` finishes hands a second turn a store with no tables, and an
+    unguarded `_checkpoint_pool` open leaks pools. `setup()` and `open()` are slowed so a second
+    caller lands inside the first's await; without that, `open()` happens not to yield today and
+    the race would be invisible.
     """
     setups = {"started": 0, "done": 0}
     opens = {"count": 0}
@@ -392,11 +291,9 @@ def test_concurrent_first_turns_get_one_migrated_memory_store() -> None:
 
 
 def test_closing_the_checkpointer_drops_the_store_that_sits_on_its_pool() -> None:
-    """`close_memory_store` had no caller, which made the close order unenforceable.
+    """Closing the checkpointer drops the store that sits on its pool.
 
-    The store borrows the checkpointer's pool, so a shutdown that closed the pool and left `_store`
-    published would hand the next caller a store over closed connections. Ordering is the fix and
-    the caller is what makes it exist; this asserts the wiring rather than the docstring.
+    Otherwise the next caller would get a store over closed connections.
     """
 
     async def _run() -> AsyncPostgresStore | None:
@@ -408,30 +305,11 @@ def test_closing_the_checkpointer_drops_the_store_that_sits_on_its_pool() -> Non
 
 
 def test_the_store_table_list_is_derived_from_upstream_not_asserted_against_itself() -> None:
-    """`STORE_TABLES` is hand-written, and the checkpointer's twin of it is not. This is the parity.
+    """`STORE_TABLES` matches the tables upstream's store migrations create.
 
-    `CHECKPOINT_TABLES` has had a derived proof since the erasure sweep was written
-    (`tests/test_message_migration.py`): the tables `AsyncPostgresSaver.setup()` creates are read
-    off upstream's own migration list, so a LangGraph minor adding a fourth one turns that test red
-    rather than letting a departing person's turn state outlive their erasure. The store had no
-    such proof — its two names were typed out in `agent/scratchpad.py` and asserted nowhere against
-    what `AsyncPostgresStore.setup()` actually creates.
-
-    The consequence is the same one, one table over: a new store table would land in the database,
-    escape `agent/leaver.py`'s erasure sweep *and* `durable/retention.py`'s disposal register, and
-    every test in this repository would stay green. The privileges test would go red — for a
-    missing grant, which is a different question with a different reader.
-
-    `store_migrations`/`vector_migrations` are excluded by name for the reason
-    `checkpoint_migrations` is: a ledger of which statements have run holds nobody's memories.
-
-    **That exclusion currently removes nothing, and saying so is the point.** Upstream creates the
-    checkpointer's ledger inside `MIGRATIONS`, which is why the twin's subtraction is load-bearing;
-    the store's ledgers are created inside `setup()` itself, in an f-string this regex cannot see.
-    So the subtraction is insurance against upstream moving them, not a filter doing work today —
-    and the gap it leaves is real: a store table added the same way, outside the migration lists,
-    would still escape. That is a narrower hole than the one this test closes, and it is the reason
-    `make offline-run`-style verification against a live `setup()` would be the stronger check.
+    A new store table would otherwise escape the erasure sweep and the retention register. The
+    `*_migrations` ledgers are excluded by name, though today they are created inside `setup()`
+    where this regex cannot see them; a table added that way would also escape.
     """
     import re
 
@@ -452,21 +330,10 @@ def test_the_store_table_list_is_derived_from_upstream_not_asserted_against_itse
 
 
 def test_the_memory_store_is_bounded_per_namespace() -> None:
-    """The bound `store` did not have, driven against a real store rather than asserted.
+    """The memory store is bounded per namespace.
 
-    Before this, `durable/retention.py`'s disposal register said of `store` "**nothing bounds it**"
-    and was right: agent-writable, no size cap, no window, no clock. Driven, 2,000 writes of 5 kB
-    under one namespace left 2,000 rows and nothing evicted. The runaway is not a looping turn —
-    `harness_max_loop_iterations` x `agent_max_parallel_tool_calls` caps writes per *turn* — it is
-    accumulation across turns over a deployment's life.
-
-    Written through `BoundedStoreBackend.awrite`, which is the function the `write_file` tool
-    reaches, rather than through `store.aput`: the whole design property is that a memory write
-    arrives as a tool call, and a test that wrote around it would be proving the cap on a path
-    nothing uses.
-
-    The eviction order is asserted too, because a cap that kept an arbitrary subset would pass a
-    bare count: the least recently updated go, so the newest survive.
+    Written through `BoundedStoreBackend.awrite`, the function `write_file` reaches. The least
+    recently updated files are evicted, so the newest survive.
     """
     cap = 5
 
@@ -500,12 +367,9 @@ def test_the_memory_store_is_bounded_per_namespace() -> None:
 
 
 def test_evicting_a_memory_is_counted_and_logged() -> None:
-    """A cap that binds silently is a chemist losing a memory with nothing anywhere saying so.
+    """Evicting a memory is counted and logged with the file names.
 
-    Two channels because they have different readers: the counter is what an operator sees on a
-    scrape (is the cap binding at all, for anyone?), the WARNING names the files, which is the only
-    trace of *which* memory went. `ingest/rejections.py` logs its own eviction the same way and for
-    the same reason.
+    The counter shows whether the cap binds; the WARNING is the only trace of which memory went.
     """
     cap = 2
 
@@ -539,15 +403,9 @@ def test_evicting_a_memory_is_counted_and_logged() -> None:
 def test_the_memories_route_the_wiring_installs_is_the_bounded_one(
     skills: CompositeBackend,
 ) -> None:
-    """The cap has to be on the route the turn actually gets, not only on a class.
+    """The memories route `scratchpad_backend` installs is the bounded one.
 
-    **A vacuity, measured.** Both cap tests below construct their own `BoundedStoreBackend` and
-    write through it — which proves the class enforces a cap and says nothing about whether
-    `scratchpad_backend`, the one function `build_langgraph_agent` calls, installs that class.
-    Mutated to `StoreBackend(` — the cap absent in production, every memory namespace unbounded
-    again — `tests/test_scratchpad.py` passed 17 of 17, and six related files passed 145.
-
-    So this asserts the type of the route, which is the one thing the mutation changes.
+    The cap tests construct their own backend, so only this asserts the production wiring.
     """
     token = set_current_identity("wiring-probe", frozenset())
     try:
@@ -561,21 +419,11 @@ def test_the_memories_route_the_wiring_installs_is_the_bounded_one(
 
 
 def test_eviction_takes_the_least_recently_updated_even_far_past_the_cap() -> None:
-    """The policy this cap states, driven in the one case that used to invert it.
+    """Eviction takes the least recently updated even far past the cap.
 
-    **The defect.** `asearch` with no query answers most-recently-updated first, so reading
-    `cap + _EVICTION_PAGE` rows and taking the oldest of *that page* selects a middle band: the
-    newest of the surplus, never the tail. Driven on real Postgres with 89 files written
-    oldest-first and a cap of 5, one bounded write deleted **021-084** and kept **000-020** —
-    every one of the twenty-one least recently updated files retained, and the twenty-one most
-    recent of the surplus destroyed, which is the exact inverse of "least recently updated
-    evicted on write" as stated in the code, in `durable/retention.py`, in `.env.example` and in
-    the ADR.
-
-    The namespace is deliberately more than `_EVICTION_PAGE` past its cap, because that is the
-    case the old spelling could not see and the existing tests write fifteen files — always
-    inside one page. Written through `store.aput` while seeding, so eviction runs exactly once,
-    on the one write under test.
+    `asearch` returns newest first, so evicting the oldest of one page would delete a middle band.
+    The namespace is seeded more than `_EVICTION_PAGE` past its cap via `store.aput`, so eviction
+    runs once, on the write under test.
     """
     cap = 5
     seeded = scratchpad._EVICTION_PAGE + cap + 20
@@ -614,23 +462,11 @@ def test_eviction_takes_the_least_recently_updated_even_far_past_the_cap() -> No
 
 
 def test_a_memory_edit_that_would_duplicate_itself_is_refused() -> None:
-    """The one write a resumed turn can silently double, driven against the real store.
+    """A memory edit that would duplicate itself is refused.
 
-    `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` measured that a
-    tool killed mid-call is re-run on resume with its original arguments: the checkpoint holds no
-    result for it, only the `__pregel_tasks` `Send`. Nearly every side-effecting tool survives that
-    — deterministic workflow ids, deterministic note ids, upserts. A `/memories/` edit survives none
-    of it, because it is a read-modify-write and its store sits **outside** the checkpoint;
-    `/scratch/` is safe for exactly the inverse reason, its backend *is* the checkpoint, so a killed
-    tool left nothing to replay over.
-
-    Both arms, because a guard that refuses everything would pass the first alone:
-
-    - the insert-under-an-anchor shape — the replacement contains its own `old_string`, so a second
-      application adds a second copy. Measured before this, three applications inserted three
-      copies and reported one replacement each time, with no error and nothing versioning it.
-    - a plain substitution, which must still work, and whose second application upstream already
-      refuses loudly with "String not found".
+    A tool killed mid-call is re-run on resume, and a `/memories/` edit is a read-modify-write
+    outside the checkpoint. An insert-under-anchor edit (replacement contains `old_string`) is
+    refused; a plain substitution still works.
     """
 
     async def _run() -> tuple[str, str, str]:
@@ -693,18 +529,10 @@ def test_a_plain_memory_substitution_is_not_refused_by_that_guard() -> None:
 def test_the_migrate_role_creates_the_store_tables_it_is_about_to_grant_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`chemclaw.agent.store_setup` driven against a real database, not described.
+    """`chemclaw.agent.store_setup` creates the store tables before the grants run.
 
-    The ordering is asserted in `tests/test_database_privileges.py`; this is the half that says the
-    step does anything. It matters because the whole point is a *fresh* install — the tables do not
-    exist, `infra/sql/grants/app_privileges.sql` skips its `IF to_regclass(...) IS NOT NULL` grants,
-    and the runtime role cannot write until the next release. A step that ran and created nothing
-    would leave that exactly as it was and look like a fix in the diff.
-
-    Driven three ways, because two of them are the ways it breaks: it creates the tables, a second
-    run applies nothing (it runs on *every* install and upgrade, beside migrations that are tracked
-    and applied once), and it does nothing at all where the deployment keeps no store — a site that
-    has not enabled durable memory must not be handed two tables and a grant it cannot use.
+    Driven on a real database: it creates the tables, a second run applies nothing, and it does
+    nothing where the deployment keeps no store.
     """
     from chemclaw.agent.store_setup import create_store_tables
 
@@ -743,10 +571,7 @@ def test_the_migrate_role_creates_the_store_tables_it_is_about_to_grant_on(
 
 # ------------------------------------------------ a turn's own files: the per-write cap and expiry
 #
-# `D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`. Both halves are driven through the
-# graph that really compiles, for the reason `test_a_write_out_of_bounds_is_refused_by_the_graph_
-# that_really_compiles` gives: a caller's `write_file` reaches `StateBackend` as a channel write,
-# so a control tested on the backend alone could be connected to nothing.
+# Driven through the compiled graph, since `write_file` reaches `StateBackend` as a channel write.
 
 
 def _run_scripted(calls: list[Any], seed: dict[str, Any] | None = None) -> dict[str, Any]:

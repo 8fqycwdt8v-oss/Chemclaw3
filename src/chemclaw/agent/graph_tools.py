@@ -1,12 +1,8 @@
-"""Agent tools for the knowledge graph (plan steps 2.5, 2.6).
+"""Agent tools for the knowledge graph.
 
-Read tools (`find_notes`, `expand_note`) let the agent retrieve by graph traversal
-— the capability behind the `knowledge-graph-query` skill. The write tools route an
-agent-authored note straight into the graph, labelled with its provenance
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`):
-`record_knowledge_note` for new knowledge, `record_failure` for the case that had no path at all
-— knowledge the graph already holds turning out to be wrong. Graph building is file I/O, so
-it runs off the event loop.
+`find_notes` and `expand_note` read by graph traversal. `record_knowledge_note` writes new
+agent-authored knowledge directly, labelled with its provenance, and `record_failure` retires a
+note that turned out to be wrong. Graph building is file I/O, so it runs off the event loop.
 """
 
 import asyncio
@@ -103,9 +99,8 @@ class NeighborRef(NoteRef):
     and nothing read them.
     """
 
-    # Asserted by the expanded note *about* this neighbour, and by this neighbour about it. Sorted
-    # and deduplicated: an edge carries a tuple of `Relation`s (see `kg.graph._assemble_graph`), and
-    # what a reader needs here is which relations hold, not how many times each was written.
+    # Relations asserted by the expanded note about this neighbour, and by it about the note; sorted
+    # and deduplicated.
     relations_out: list[str] = Field(default_factory=list)
     relations_in: list[str] = Field(default_factory=list)
 
@@ -121,21 +116,9 @@ class NoteView(BaseModel):
 def _ref(note: Note) -> NoteRef:
     """One note as a reference, with its unconstrained frontmatter neutralised.
 
-    **The second retrieved-text channel on the same object.** `expand_note` frames the note *body*
-    and `gather_evidence` frames a chunk's content, and both leave the frontmatter beside them
-    alone — but `tags`, `source` and `compound_smiles` are the three fields `Note` does not
-    constrain (`id` and `type` are slug-validated, `calc_refs` and `artifact_refs` are checked), so
-    a delimiter smuggled into a tag reached the model **live**, in the same message as the envelope
-    it closes. Measured through `find_notes` and `expand_note`, on the note's own reference and on
-    every neighbour's.
-
-    That is a cross-user channel and one producer needs no role at all: `memory/campaign.py` sets a
-    campaign note's `tags` from the ELN `project` field, which is a string whoever created the entry
-    chose. Neutralised here rather than there, for `_framed_free_text`'s reason one package over —
-    the store keeps what was ingested and the model's edge is where the escaping belongs.
-
-    Defanged and not framed: a tag is a label rather than evidence, which is the split
-    `agent/research_tools.py` draws for a chunk's `source` and the same one it draws here.
+    `tags`, `source` and `compound_smiles` are free text (campaign tags come from an ELN field
+    anyone sets), and they sit beside framed bodies, so a delimiter in them could close an envelope.
+    They are defanged, not framed: a tag is a label, not evidence.
     """
     return NoteRef(
         id=note.id,
@@ -171,17 +154,8 @@ class NoteSearch(BaseModel):
     # True when no note contained every term and the matches are partial-coverage hits instead,
     # best coverage first — the same fallback `GraphRetriever` applies to the same corpus.
     widened: bool = False
-    # How many *current* notes the search actually looked at — the question a miss cannot answer
-    # without it. Measured, a zero-note corpus and a genuine miss over a real one returned the
-    # identical `{'matches': [], 'total_matches': 0, 'widened': False}`, so "we have no note on
-    # aspirin" and "there is no knowledge graph on this deployment" were the same sentence. The
-    # honest form already existed one module away: `gather_evidence` reports
-    # `sources_skipped={'graph': 'no notes found under <path>'}`.
-    #
-    # **`None` means "this search cannot say"**, not zero — the same distinction
-    # `retrieval.evidence.Hits.found` draws for the legs that push `LIMIT k` into an index. A query
-    # with no searchable term returns before the corpus is opened, and reporting 0 for it would
-    # assert an empty graph nobody looked at.
+    # How many current notes the search looked at, so a miss over a real corpus differs from an
+    # empty graph. `None` means the search cannot say (no searchable term), not zero.
     corpus_notes: int | None = None
 
     @computed_field  # type: ignore[prop-decorator]
@@ -189,14 +163,7 @@ class NoteSearch(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before saying the graph holds nothing on a topic.
 
-        `computed_field` rather than a bare property for the reason `FingerprintSearch.verdict`
-        states in full: a plain property is not serialized, so `model_dump()` would carry the empty
-        list and drop the sentence saying what it means.
-
-        The tool docstring already said the careful thing — "an empty result means not even one
-        term matched; it does not mean the topic is absent from the graph" — and a docstring is
-        read once when the tool is defined, while the payload is what sits in the context window
-        when the answer is written.
+        A `computed_field` so `model_dump()` carries it into the payload the answer is written from.
         """
         if self.corpus_notes is None:
             return (
@@ -234,56 +201,20 @@ class NoteSearch(BaseModel):
 def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
     """Search every current note under `notes_dir` for `terms`, ranked and capped.
 
-    The whole answer, not just the scored pairs: ranking and truncation are O(N) over the matches
-    too, and on a broad query the matches *are* the corpus — measured, leaving only those two steps
-    behind still cost 621 ms of loop stall at eight concurrent calls over 10 000 notes. A partial
-    offload is the shape of the defect, not the fix.
+    Synchronous so the caller can run the whole O(N) scan, ranking and truncation included, in a
+    thread; on the event loop it would stall every other turn on the pod. That buys latency, not
+    throughput (the scan holds the GIL).
 
-    **Synchronous on purpose, and it is the whole reason this function exists.** The load was
-    already offloaded and the O(N) scan over its result was not, so `term_coverage` — which
-    rebuilds each note's searchable text, `model_dump()`s its conditions and lowercases the body —
-    ran on the event loop that serves every other concurrent turn on the pod. Measured on a
-    10 000-note corpus with a 5 ms heartbeat: one `find_notes` stalled the loop for 151 ms and
-    eight concurrent ones for 836 ms, against an idle p50 of 0.18 ms. During that stall no SSE
-    token is flushed to any user on the pod, no `/healthz` is answered and no bearer token is
-    validated.
-
-    It buys latency and jitter, **not throughput**: the scan is pure Python holding the GIL, so a
-    thread pool runs eight of these no faster than one (measured elsewhere in this review at 0.91x
-    on four threads).
-
-    **There is a database to push it into, and this docstring used to deny there was one.** The
-    notes are indexed: `retrieval/vector_index.py` maintains `note_index` with a GIN-indexed
-    `tsvector` (`infra/sql/012_note_index.sql`) and serves `search_lexical` over it. What is true is
-    narrower, and it is two things rather than the one this said.
-
-    The index is *derived*, and only a deployment that reads it keeps it in step:
-    `settings.note_reindex_effective` schedules `NoteReindexWorkflow` exactly where `lexical` or
-    `vector` is in `CHEMCLAW_DATA_SOURCES`, and the shipped default is `graph,eln-json`. Pushing
-    this scan into Postgres would therefore answer `find_notes` on a graph-only deployment out of a
-    table nothing ever writes — a tool that reports "no note on that" about a corpus it never read,
-    which is the failure `NoteSearch.verdict` exists to make impossible.
-
-    And `search_lexical` is a *different* lexical rule, not a faster spelling of this one: stemmed
-    and stop-worded by a Postgres text-search configuration, against the substring rule
-    `term_coverage` applies here and in `GraphRetriever`. Measured on 2026-09-16 against live
-    PostgreSQL 16 over a two-note corpus, `couplings`, `coupled`, `dry` and `films` are hits for the
-    server and not for the substring rule, while `ester` is a hit for the substring rule (inside
-    `polyester`) and not for the server. Moving this reader alone re-opens D-2026-08-05 in its worst
-    direction — the model finds a note `gather_evidence` cannot then cite — so it moves with the
-    graph leg or not at all. `tests/test_note_search.py` pins both directions.
-
-    `load_notes`, not `build_graph`: this is a substring sweep over each note's own metadata and
-    body, and it never follows an edge. Assembling the graph made a cold call pay node and edge
-    insertion for a traversal it does not do, and made the sweep iterate dangling link targets —
-    nodes with no note behind them, skipped one line later. Both caches sit behind the same stat
-    fingerprint, so a warm call is unchanged.
+    It deliberately does not use the Postgres `note_index`: that index is only maintained where a
+    lexical or vector source is enabled, and its stemmed matching differs from the substring rule
+    `term_coverage` shares with `GraphRetriever`, so moving this reader alone would find notes
+    `gather_evidence` cannot cite. Uses `load_notes`, not `build_graph`, since it follows no edge.
 
     Args:
         notes_dir: The corpus root, resolved by the caller so this stays testable with a fixture.
         terms: The query's tokens, already normalised by `query_terms`.
-        today: The date `is_current` is judged against — passed in rather than read here so one
-            scan cannot straddle midnight.
+        today: The date `is_current` is judged against, passed in so one scan cannot straddle
+            midnight.
         cap: How many references the answer may carry, `graph_max_results` from the caller.
 
     Returns:
@@ -296,24 +227,18 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
             continue
-        # Counted *after* the currency filter, because that is the corpus this search can hit: a
-        # graph of a thousand expired notes answers every query with nothing, and reporting the
-        # thousand would call that a real miss.
+        # Counted after the currency filter: that is the corpus this search can hit.
         searched += 1
         coverage = term_coverage(note, terms)
         if coverage:
             scored.append((coverage, _ref(note)))
     complete = [pair for pair in scored if pair[0] == len(terms)]
     widened = not complete and bool(scored)
-    # Widened results rank by coverage (a note matching three of four terms beats one matching
-    # one), complete ones stay in id order — coverage is identical across them, and a stable
-    # order is what makes two identical queries return identical lists.
+    # Widened results rank by coverage; complete ones stay in id order, so identical queries return
+    # identical lists.
     chosen = sorted(scored, key=lambda pair: (-pair[0], pair[1].id)) if widened else complete
-    # A broad needle matches most of the corpus, and the whole hit list goes into the model's
-    # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
-    # `retrieval_top_k`) — and the cut is *declared* in the return value, because the log line
-    # this used to warn into is one no model reads, and a capped list with no marker reads as the
-    # whole corpus (D-066 #4).
+    # Bound the hit list like every other retrieval surface, and declare the cut in the result so a
+    # capped list never reads as the whole corpus.
     return NoteSearch(
         matches=[ref for _, ref in chosen[:cap]],
         total_matches=len(chosen),
@@ -343,9 +268,8 @@ async def find_notes(text: str) -> NoteSearch:
         one of three things: no searchable term, an empty graph, or a real miss. Only the last is
         evidence about the topic.
     """
-    # The same tokenizer and the same haystack every other note search uses
-    # (`chemclaw.kg.search`), so a note this tool finds is one `gather_evidence` can also cite.
-    # A bare `text.lower().split()` here made "the biaryl" require the literal word "the".
+    # Same tokenizer and haystack as `chemclaw.kg.search`, so a note found here is one
+    # `gather_evidence` can cite.
     terms = query_terms(text)
     if not terms:
         return NoteSearch()
@@ -359,11 +283,7 @@ async def find_notes(text: str) -> NoteSearch:
 def _edge_relations(graph: nx.DiGraph, source: str, target: str) -> list[str]:
     """The relation names asserted on the `source -> target` edge, sorted; empty if there is none.
 
-    Reads the `relations` attribute `chemclaw.kg.graph._assemble_graph` puts on every edge, which
-    until now no caller in this repository read at all — `graph.related` is the only other reader
-    and nothing calls it (see `kg/README.md`). A bare `[[wikilink]]` yields `cites`, which is
-    filtered out by `_neighbor_ref` rather than here: this function answers what the graph says,
-    and what is worth reporting is the caller's question.
+    Reports what the graph says; filtering `cites` is `_neighbor_ref`'s job.
     """
     if not graph.has_edge(source, target):
         return []
@@ -375,16 +295,9 @@ def _neighbor_ref(
 ) -> NeighborRef:
     """One neighbour of `anchor_id`, carrying the typed edges between the two.
 
-    `via` is the node the edges actually join when `note` stands in for it — a retired compound id
-    reported as the note that superseded it (`_current_compound`). The edge the author typed is to
-    the old id, and reading it there is what keeps a `computed-from` from becoming a bare neighbour.
-
-    `cites` is dropped from both directions deliberately. It is `relations.DEFAULT_RELATION` — what
-    every untyped `[[wikilink]]` in the corpus already means — so reporting it would put the word
-    "cites" on the majority of neighbours while saying nothing the neighbourhood itself does not
-    already say. What survives is the set of edges an author typed *on purpose*, which is the set
-    a reader has to weigh: a `contradicts` neighbour is not the same evidence as an `analogue-of`
-    one, and before this the two arrived indistinguishable.
+    `via` is the node the edges actually join when `note` stands in for it (a retired compound
+    reported as its successor). `cites` is dropped in both directions: it is what every untyped
+    wikilink means, so only deliberately typed edges are reported.
     """
     joined = via if via is not None else note.id
     return NeighborRef(
@@ -401,15 +314,10 @@ def _neighbor_ref(
 def _current_compound(graph: nx.DiGraph, note_id: str, today: date) -> Note | None:
     """The current compound note that replaced `note_id`, when `note_id` is a superseded compound.
 
-    **Compounds only, and that is the argument rather than a scope cut.** A compound note's id *is*
-    its identity — a hash of its standardized structure — so when a `STANDARDIZATION_VERSION` bump
-    moves it (`memory.compound_rekey`), the retired note is the same substance under an id that
-    went stale, and a citation to it means the substance: the current note is the answer. A retired
-    *claim* is a different claim, and a by-id lookup of one keeps returning it as written, with its
-    successor among its neighbours (KM-7), because the chemist asked about that claim.
+    Compounds only: a compound id is a hash of its structure, so a retired one is the same substance
+    under a stale id. A retired claim is a different claim and is returned as written.
 
     `None` when `note_id` names a current note, a non-compound, or nothing a supersede link reaches.
-    An id no note defines qualifies when a compound note declares that it supersedes it.
     """
     note = note_in(graph, note_id)
     if note is not None and (note.type != "compound" or note.is_current(today)):
@@ -419,12 +327,9 @@ def _current_compound(graph: nx.DiGraph, note_id: str, today: date) -> Note | No
 
 
 def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
-    """The note `note_id` names, or a `ChemclawError` saying why it could not be found.
+    """The note `note_id` names, or a `ChemclawError` saying it could not be found.
 
-    One message for both by-id lookups (`expand_note`, `record_failure`). It used to name the
-    PR-gate as the likely cause, because a citation to an indexed reaction whose note nobody had
-    merged read identically to a typo (D-018). That cause is gone — a reaction record is readable
-    the moment it is ingested — so the message no longer offers an explanation that is now wrong.
+    One message for both by-id lookups (`expand_note`, `record_failure`).
     """
     if note_id not in graph or graph.nodes[note_id].get("note") is None:
         raise ChemclawError(f"no note with id {note_id!r}")
@@ -456,22 +361,13 @@ def _notes_carrying(graph: nx.DiGraph, note_id: str) -> list[Note]:
 async def _expand_compound(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
     """Resolve a structure-derived compound id that no note was written under.
 
-    Found live: one turn called `expand_note` on thirteen `similar_molecules` ids and got "no note
-    with id" thirteen times. A hit's id is `core.chem.compound_id` of the structure — the note an
-    ingest *would* write — and none is written for a molecule indexed from an ELN run, while the
-    seed corpus files its compounds under slugs (`compound-4-bromoanisole`) the hash never equals
-    (`D-2026-07-31-two-spellings-of-one-molecule` left that open). Three answers, in order:
+    Similarity hits carry `core.chem.compound_id`, which may match no note. In order:
 
-    1. **A compound note filed under another id carries this structure** — it *is* the note, so it
-       is expanded as itself, neighbourhood and all.
-    2. **Other notes carry the structure** (a reaction, an observation) — the compound view is
-       rendered and they are its neighbours.
-    3. **Only the molecule index holds it** — the compound view alone, which is exactly what
-       `ingest.eln.compound.compound_note` would have written: the structure, its recognised name,
-       its synonyms, and nothing inferred.
+    1. A compound note filed under another id carries this structure — expand it as itself.
+    2. Other notes carry the structure — render the compound view with them as neighbours.
+    3. Only the molecule index holds it — render the compound view alone, inferring nothing.
 
-    The rendered view says it was not written, as system text outside the framed body, so it is not
-    mistaken for something a chemist recorded.
+    The view says, as system text outside the framed body, that no note was written.
     """
     carrying = await asyncio.to_thread(_notes_carrying, graph, note_id)
     for note in carrying:
@@ -498,36 +394,21 @@ async def _expand_compound(graph: nx.DiGraph, note_id: str, hops: int) -> NoteVi
 
 
 async def _expand_record(note_id: str) -> NoteView:
-    """Expand a `reaction-<id>` citation from the transcription store (D-2026-08-25).
+    """Expand a `reaction-<id>` citation from the transcription store.
 
-    The ELN half of `expand_note`. A record is data rather than a claim, so what comes back is the
-    transcription and an empty neighbourhood — not "we found nothing linked", but "a transcription
-    links to nothing by construction". What *is* asserted about these runs lives in the campaigns
-    and playbooks that cite them, and those are ordinary graph notes reached the ordinary way.
-
-    `created_by` is reported as `agent` because a program rendered the file, which is what that
-    field has always meant; it no longer implies anything is waiting for review.
-
-    **A withdrawn entry resolves and says so, rather than disappearing.** `read()` deliberately
-    keeps serving a retracted row while `eligible()` stops, because a row is the only readable form
-    of an ELN run and a citation to a withdrawn one must not become a dangling link — a chemist
-    reading a campaign note that cites it has to be told the run was withdrawn, not that the id is
-    unknown. The notice is prepended as *system* text, outside the framed source body, so it cannot
-    be mistaken for something the ELN said; `valid_to` carries the same fact in the structured half,
-    which is what makes a retracted record fail `is_current` everywhere else.
+    A record is data, not a claim, so it returns the transcription with an empty neighbourhood.
+    A withdrawn entry still resolves, with a system notice outside the framed body and `valid_to`
+    set, so a citation to it never dangles and never reads as current.
     """
-    # A qualified citation names the source it was found in, so exactly one row can answer; a bare
-    # one — every citation committed before that spelling existed — reads across sources and is
-    # refused when two hold the id (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+    # A qualified citation names its source; a bare one reads across sources and is refused when two
+    # hold the id.
     source, record_id = external_record_ref(note_id)
     record = await default_record_store().read(record_id, source)
     if record is None:
         raise ChemclawError(f"no reaction record with id {note_id!r}")
     body = frame_untrusted(record.body, note_id=note_id)
     if record.tier is RecordTier.CITATION_ONLY:
-        # The tier as *system* text, beside the withdrawal notice and for the same reason: the
-        # body says it too, but the body is the ELN's framed text, and a chemist must be able to
-        # tell what this system is saying about the record from what the source said in it.
+        # The tier as system text, so what this system says is distinct from the framed ELN body.
         notice = (
             "Citation-only record: the source gives no structure for at least one species in this "
             "ELN entry (named in the record as the source gave them). Cite it for what it states "
@@ -553,9 +434,8 @@ async def _expand_record(note_id: str) -> NoteView:
             source=record.source,
             confidence=None,
             valid_from=record.performed_at,
-            # The withdrawal in the structured half, where every other reader of a `NoteRef` already
-            # looks for "this stopped being current". Not a claim that the run expired — `valid_to`
-            # is the field a reader has, and `retracted_at` is why it is set.
+            # The withdrawal goes in `valid_to`, where every `NoteRef` reader looks for "no longer
+            # current".
             valid_to=record.retracted_at.date() if record.retracted_at else None,
         ),
         # Source text a chemist typed into an ELN, so it is framed as data for the same reason a
@@ -595,19 +475,11 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     Raises:
         ChemclawError: When `note_id` names no current note.
     """
-    # The exception *type*'s rationale is here rather than in the docstring above, because that
-    # docstring is the tool's schema description and is re-sent on every model call: a
-    # `ChemclawError` is this repository's always-safe "bad input" contract
-    # (`chemclaw.core.errors`), so `chemclaw.agent.tool_authz` surfaces the message to the model
-    # verbatim instead of an opaque generic failure. The model cannot act on any of that — it sees
-    # the message either way — and a Python reader of this file needs it.
+    # `ChemclawError` is the safe "bad input" contract, so `tool_authz` passes its message to the
+    # model verbatim. Kept out of the tool docstring, which is resent on every model call.
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-    # The graph first, the store second, and in that order deliberately: `reaction-` is a *prefix*,
-    # not a reservation, so a human-authored note under that name must still win. Store-first made
-    # every such note unreachable — silently, because the record lookup fails with its own message.
-    #
-    # **Whether the graph holds a *note*, not whether it holds the id** — `note_in` says why those
-    # differ, and this line testing membership instead was the defect it now prevents.
+    # Graph first, store second: `reaction-` is a prefix, not a reservation, so a human-authored
+    # note of that name wins. Test for a note, not mere id membership (see `note_in`).
     if note_in(graph, note_id) is None and resolves_outside_graph(note_id):
         return await _expand_record(note_id)
     # A compound id a standardization bump superseded resolves to the note that replaced it, and
@@ -635,10 +507,8 @@ def _expand_in_graph(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
     today = date.today()
-    # The anchor is an explicit by-id lookup, so it is returned even if expired; its neighbors are a
-    # discovery sweep, so non-current ones are dropped from the current-evidence view (KM-7) —
-    # except a retired compound, which stands for the compound note that superseded it, so a note
-    # citing a pre-bump compound id keeps its compound neighbour rather than silently losing it.
+    # The anchor is returned even if expired; non-current neighbours are dropped, except a retired
+    # compound, which stands for its successor.
     neighbors: dict[str, NeighborRef] = {}
     for nid in sorted(neighborhood(graph, note_id, hops=hops)):
         neighbor = note_in(graph, nid)
@@ -688,10 +558,8 @@ async def find_knowledge_gaps() -> GraphGaps:
     graph = await asyncio.to_thread(build_graph, directory)
     notes = await asyncio.to_thread(load_notes, directory)
     gaps = analyze(graph, notes)
-    # The two fields here that are not identifiers, for `_ref`'s reason: a tag is free text a note
-    # author (or an ELN entry) chose, and a dangling link is a `[[wikilink]]` target, whose pattern
-    # is `[^\[\]]+` — measured, both carried a live closing delimiter out of a note body. The
-    # other fields are note ids, note types and counts.
+    # Tags and dangling-link targets are free text, so they are defanged; the rest are ids, types
+    # and counts.
     return gaps.model_copy(
         update={
             "tags_without_distillation": defanged_payload(gaps.tags_without_distillation),
@@ -766,11 +634,10 @@ async def record_knowledge_note(
         valid_to=valid_to,
         created_by="agent",
     )
-    # A compound note the agent linked is written first (STO-7, and `record._build_write` says why
-    # the order is load-bearing now that a reader can see a half-written unit), so the agent can
-    # cite the molecule it is writing about without first checking whether that note exists.
+    # A linked compound note is written first (see `record._build_write`), so the agent can cite the
+    # molecule without checking whether its note exists.
     reference = await record_note(note, default_writer(), dependencies=compound_dependencies(note))
-    # Surface what landed on the turn's stream (gap RCH-4) — see `core.turn_signals`.
+    # Surface what landed on the turn's stream — see `core.turn_signals`.
     record_note_written(note.id, reference)
     return reference
 
@@ -824,9 +691,7 @@ async def record_failure(
     """
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     refuted = _require_note(graph, refutes)
-    # The reporter is the turn's authenticated user, not a parameter: attribution the model can
-    # fill in is attribution that can name someone who said nothing. It is the same `require_actor`
-    # rule every other user-triggered write here follows (F4-T3).
+    # The reporter is the authenticated user, never a model-supplied parameter.
     note = failure_note(
         refutes,
         what_happened,
@@ -834,27 +699,17 @@ async def record_failure(
         compound_smiles=compound_smiles,
         confidence=confidence,
     )
-    # An already-retired note is refused rather than quietly left alone. Re-closing it would
-    # extend its validity or append the marker twice, so it must not happen — but `held_until`
-    # came from a person, and dropping a date somebody supplied is the same silent-correction
-    # failure `close_refuted_note` refuses when the window ends before it starts. Say which date
-    # already holds, and let them decide.
+    # Refuse an already-retired note rather than re-close it or silently drop the person's
+    # `held_until`; say which date holds.
     if held_until is not None and refuted.valid_to is not None:
         raise ChemclawError(
             f"{refutes} was already retired on {refuted.valid_to.isoformat()}, so it cannot also "
             f"be retired on {held_until.isoformat()} — file the refutation without `held_until`, "
             "or correct the existing date first"
         )
-    # Both files ride in one write, in `record._build_write`'s order, so no reader ever sees the
-    # retirement citing a successor that does not exist yet. The sentence here used to say a
-    # reviewer signed off on the pair as one decision, which stopped being true when
-    # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the reviewer.
-    # `superseded`, NOT `dependencies`: a dependency is written only where the tree has no copy
-    # (`NoteFile.overwrite=False`), and the refuted note always exists there — `_require_note`
-    # just found it in the graph — so passing the retirement as a dependency silently dropped it
-    # every time, leaving the refuted claim with its validity window intact and still served as
-    # current evidence. `superseded` overwrites the
-    # note in place, which is what retiring it means.
+    # Both files ride in one write, in `record._build_write`'s order, so the retirement never cites
+    # a successor not yet written. Pass the retirement as `superseded`, not `dependencies`:
+    # dependencies are skipped when the file exists, and the refuted note always does.
     retirement = (
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []
     )

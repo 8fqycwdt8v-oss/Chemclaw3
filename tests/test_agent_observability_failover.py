@@ -1,14 +1,8 @@
-"""Provider failover was silent, and its whole operational value is knowing that it fired.
+"""Provider failover is logged and counted, because its value is knowing that it fired.
 
-The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. `RunnableWithFallbacks.ainvoke` catches the
-primary's exception and moves to the next runnable with **no log line, no metric and no callback for
-the attempt that failed** — so the primary internal endpoint dying and the fallback absorbing 100%
-of the fleet's traffic looked exactly like a healthy deployment.
-
-Nothing can be hooked on the failure, so the fix hooks the consequence: the fallback model is
-constructed with a callback handler attached, and the fallback is invoked only after the primary
-raised. One `on_chat_model_start` therefore *is* one failover, with no inference — which is the
-claim this file drives against a real `RunnableWithFallbacks` rather than asserting off the source.
+Decision: `D-2026-08-27-a-refusal-is-not-a-crash`. `RunnableWithFallbacks` offers no hook on the
+primary's failure, so the fallback model carries a callback handler: since the fallback is invoked
+only after the primary raised, one `on_chat_model_start` is one failover.
 """
 
 from typing import Any
@@ -43,9 +37,7 @@ def test_a_failover_is_counted_and_logged_when_the_fallback_is_actually_asked(
 ) -> None:
     """Driven through a real `RunnableWithFallbacks`, because the claim is about *its* behaviour.
 
-    A test that called `on_chat_model_start` directly would prove the handler works and say nothing
-    about whether upstream ever reaches it — which is precisely the question, since upstream offers
-    no hook on the failure itself.
+    Calling the handler directly would not show that upstream ever reaches it.
     """
     before = METRICS.value("chemclaw_model_fallbacks_total")
     primary = RunnableLambda(lambda _messages: (_ for _ in ()).throw(_endpoint_is_down()))

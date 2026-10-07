@@ -1,11 +1,9 @@
 """A development report asked for in a conversation lands there as a `document` artefact.
 
-What is pinned, against a real database: the activity writes the draft as revision 1 of the
-artefact `xb-` + sha256(workflow id)[:16], authored by the requester as the agent; a retry after a
-committed first attempt returns the same artefact and pushes nothing twice; a session deleted since
-it asked is skipped with nothing written. And through the real workflow on Temporal's time-skipping
-server: the job's result and its `job_completed` push carry `exhibit_id` beside `note_id`, the
-`exhibit` push arrives before the completion, and a request naming no session issues none of it.
+Against a real database: revision 1 of artefact `xb-` + sha256(workflow id)[:16], authored by
+the requester; a retry writes nothing twice; a deleted session is skipped. Through the workflow
+on Temporal: `exhibit_id` rides beside `note_id`, the `exhibit` push precedes completion, and a
+request naming no session issues none of it.
 """
 
 import hashlib
@@ -186,9 +184,8 @@ async def test_a_report_from_no_session_issues_none_of_it(
 def test_a_second_session_rejoining_the_run_is_not_handed_an_artefact_it_cannot_open() -> None:
     """The run is shared; the artefact is the origin's. Elsewhere the id is dropped, the note kept.
 
-    Read through `completed_job_status`, the decode both the agent's poll and the mid-turn resume
-    use, with the reading session bound the way a turn binds it — and with none, which is
-    `GET /jobs/{id}`. The origin's session id never leaves in any of the three.
+    Read through `completed_job_status` with the reading session bound, and with none; the origin's
+    session id never leaves.
     """
     from chemclaw.agent.durable_tools import completed_job_status
     from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
@@ -219,11 +216,9 @@ def test_a_second_session_rejoining_the_run_is_not_handed_an_artefact_it_cannot_
 async def test_a_requester_who_is_not_in_the_session_writes_nothing_there(
     durable_sessions: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The payload's session and requester are checked against each other before any write.
+    """A requester who is not the session's owner or an admitted member writes nothing there.
 
-    The owner and a member the owner admitted may have the report shown there; anybody else named
-    as the requester is skipped with a logged reason — the front door's own session rule, because a
-    workflow payload is not an authenticated request.
+    A workflow payload is not an authenticated request, so the session rule is re-checked.
     """
     from chemclaw.agent.session_members import session_member_store
 

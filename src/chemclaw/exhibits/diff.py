@@ -1,29 +1,19 @@
 """What changed between two revisions of an artefact, in the shape a protocol diff already has.
 
-**One output shape for two documents** (`protocols.diff.FieldChange`): `Chemclaw3_ui`'s
-`RevisionDiff` renders a design's diff, and an artefact's revision is the same kind of object — an
-edit somebody made to somebody else's draft — so it renders through the same component rather than
-a second one that drifts.
+The output is `protocols.diff.FieldChange`, so `Chemclaw3_ui` renders both with one component. Paths
+are per kind:
 
-The *paths* are per kind, because what a reader can point at differs:
+- `document`: **line hunks** (`"lines 12-14"`);
+- `table`: per **cell** (`"rows[3].yield"`), plus `"columns"` when the header changed;
+- `structures`: per **item field** (`"items[2].smiles"`, `"items[2].props.pka"`);
+- `chart`: per **point** (`"series[0].y[4]"`), plus axis and series names;
+- `geometry`: per **field, whole-valued** (`"xyz"`, `"source"`, `"structure_id"`, `"label"`),
+  since a re-optimised block moves every line;
+- anything else, or a change of kind: one `"spec"` row.
 
-- a `document` diffs by **line hunks** (`"lines 12-14"`), since a prose edit is a span of text and
-  a per-character diff of Markdown is unreadable;
-- a `table` diffs per **cell** (`"rows[3].yield"`), plus `"columns"` when the header changed;
-- a `structures` panel per **item field** (`"items[2].smiles"`, `"items[2].props.pka"`);
-- a `chart` per **point** (`"series[0].y[4]"`), plus the axis and series names;
-- a `geometry` per **field, whole-valued** (`"xyz"`, `"source"`, `"structure_id"`, `"label"`): a
-  coordinate block re-optimised moves every line, so a line hunk would be the whole block anyway;
-- anything else — a pinned result, a link, an html page, or a revision that changed kind — as one
-  `"spec"` row.
-
-**A diff compares stored specs, bindings and all** (`exhibit.raw_spec`), never resolved ones: a
-bound cell is the binding, so re-reading the artefact after its result was swept — which changes
-what the cell *resolves* to — is not a revision and shows no change, while binding a cell, pointing
-it elsewhere or detaching it to a literal is one (`rows[3].yield`, `series[0].y`, `rows_from`).
-
-Positional rather than keyed, unlike the protocol diff's arms: rows, items and points have no
-identifier of their own, and a chemist's edit is overwhelmingly a value in place.
+Stored specs are compared (`raw_spec`), never resolved ones: a swept result changing what a cell
+resolves to is not a revision, while binding, re-pointing or detaching a cell is. Positional rather
+than keyed: rows, items and points have no identifiers.
 """
 
 from __future__ import annotations
@@ -54,13 +44,11 @@ def diff_specs(
 ) -> ExhibitDiff:
     """Every change between two specs, in reading order.
 
-    CPU-bound and bounded (`exhibit_diff_max_lines`), but still not free: an async caller runs it
-    with `asyncio.to_thread` so a large table or document never stalls the event loop.
+    CPU-bound though bounded (`exhibit_diff_max_lines`); async callers run it in a thread.
 
     Args:
-        before: The older revision's spec, or `None` for revision 1 — which has no parent, so all
-            of it is one addition: a document's lines as an added hunk, any other kind as one added
-            `"spec"`.
+        before: The older revision's spec, or `None` for revision 1, which is all one addition: a
+            document's lines as an added hunk, any other kind as one added `"spec"`.
         after: The newer revision's spec.
         from_revision: The older revision's number, carried onto the diff.
         to_revision: The newer revision's number.
@@ -97,13 +85,9 @@ def diff_specs(
 def _document(before: str, after: str) -> list[FieldChange]:
     """One change per differing line hunk, numbered by the *new* document's lines (1-based).
 
-    **The line alignment is bounded, because its cost is not.** `SequenceMatcher` without autojunk
-    is cubic on a document of repeated lines — measured, 500 alternating lines against 500 took
-    0.47 s and 2,000 took 33 s — and a 200 kB spec is tens of thousands of lines. So the common head
-    and tail are stripped first (linear, and all an ordinary edit leaves to align), and a differing
-    middle longer than `exhibit_diff_max_lines` on either side is reported as **one** hunk spanning
-    it, which is true and merely coarser. Autojunk is not the bound: it only discards lines above
-    a frequency threshold and leaves the near-threshold worst case standing.
+    `SequenceMatcher` is cubic on repeated lines, so the common head and tail are stripped first
+    (linear), and a differing middle longer than `exhibit_diff_max_lines` on either side is reported
+    as one hunk spanning it — true, just coarser. Autojunk is not a bound on the worst case.
     """
     old, new = before.splitlines(), after.splitlines()
     head = 0
@@ -221,10 +205,9 @@ def _indexed(
 ) -> list[FieldChange]:
     """Members compared by position, field by field; a member present on one side is one change.
 
-    `order` is the reading order of a member's keys — a table's column order. Without it the keys
-    are read in sorted order, never in the order a dict happens to hold them: `jsonb` stores an
-    object's keys by length and then bytes, so the stored order is the database's, and a diff that
-    followed it would list one edit's changes differently on the two backends.
+    `order` is the reading order of a member's keys (a table's column order); without it keys are
+    sorted, never taken in stored order, because `jsonb` reorders keys and the two backends would
+    disagree.
     """
     changes: list[FieldChange] = []
     for index in range(max(len(before), len(after))):
@@ -260,9 +243,8 @@ def _fields(
 ) -> list[FieldChange]:
     """Every key of two objects that differs, a nested object descended one level (`props`).
 
-    `nested=False` reports a nested object as one whole value instead — a geometry's `source`,
-    whose calc key and name only mean something together. An empty `path` names a top-level key
-    bare (`"xyz"`, not `".xyz"`).
+    `nested=False` reports a nested object as one value (a geometry's `source`, whose fields only
+    mean something together). An empty `path` names a top-level key bare (`"xyz"`).
     """
     changes: list[FieldChange] = []
     present = set(before) | set(after)

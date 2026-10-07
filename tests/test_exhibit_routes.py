@@ -1,10 +1,8 @@
 """Artefacts over HTTP, through the production app: who may reach them, and every route's contract.
 
-Driven through `create_app` and `TestClient` because each property is a claim about a request — who
-it is, which session it names, what it is told — and the session gate is the app's. The artefact
-store is parametrized over both backends: the app runs on the in-memory session layer (so ownership
-and membership are the real routes' own), and the `postgres` arm swaps a real database in under the
-artefact routes only.
+Driven through `create_app` and `TestClient`, since the session gate is the app's. The store is
+parametrized over both backends: the app runs on the in-memory session layer, and the `postgres`
+arm swaps a real database in under the artefact routes only.
 """
 
 import asyncio
@@ -326,13 +324,12 @@ class _Recorder(ScriptedTurn):
 def test_a_turn_is_told_the_chemists_artefact_once_and_never_handed_the_listing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end through the front door: news rides on the turn's message, state does not.
+    """A turn is told about the chemist's artefact once and never handed the listing.
 
-    The chemist's words lead; the artefact they created is announced as theirs; the referenced
-    revision follows framed as data. The *listing* is absent — it is request-only state on the
-    instructions (`ExhibitListing`), and a turn input is persisted with the thread. The read mark
-    moves after the turn completes, so the second turn is not told the same thing again; and the
-    transcript keeps only the chemist's words.
+    The chemist's words lead, their new artefact is announced as theirs, and the referenced revision
+    follows framed as data. The listing is request-only state (`ExhibitListing`), since a turn input
+    is persisted with the thread. The read mark moves after the turn, and the transcript keeps only
+    the chemist's words.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     turn = _Recorder()
@@ -429,12 +426,10 @@ def test_exhibit_refs_while_artefacts_are_off_are_refused_not_dropped(
 def test_a_persons_write_is_recorded_with_who_and_which_request(
     app: Any, caplog: pytest.LogCaptureFixture, request: pytest.FixtureRequest
 ) -> None:
-    """A person's write is audited by its row and its event, as every human REST decision is.
+    """A person's write is recorded with who and which request.
 
-    The revision row names its author and the request's correlation id, and each write emits one
-    structured `exhibit.*` event naming the actor. No `AuditEvent`: that trail is the tool-call
-    middleware's (`api/routes/workflows.py` states the convention), so this is what an auditor
-    joins on.
+    The revision row names its author and correlation id, and each write emits one `exhibit.*` event
+    naming the actor. No `AuditEvent`: that trail belongs to the tool-call middleware.
     """
     session = _shared(app)
     caplog.set_level("INFO", logger="chemclaw.exhibits.telemetry")
@@ -478,10 +473,8 @@ def test_a_report_job_keeps_its_artefact_only_for_a_reader_of_its_origin(
 ) -> None:
     """`GET /jobs/{id}?session_id=` keeps `exhibit_id` for the origin's readers and only them.
 
-    The owner and a member reading the origin keep it, so a reloaded conversation can still offer
-    "Open report"; a stranger naming the origin, a reader naming another session, an unknown
-    session and no session at all get the same answer without it — never an error, so the
-    parameter says nothing about which sessions exist.
+    The owner and members keep it, so a reloaded conversation can offer "Open report"; everyone else
+    gets the same answer without it, never an error, so the parameter reveals nothing.
     """
     from chemclaw.agent.durable_tools import completed_job_status
     from chemclaw.durable.connector_job import ConnectorJobResult
@@ -525,13 +518,10 @@ def test_the_published_job_route_declares_its_reading_session(app: Any) -> None:
     assert "session_id" in named and named["session_id"]["required"] is False
 
 
-# --- wave 3: the `html` kind and bound values over HTTP -------------------------------------------
+# --- the `html` kind and bound values over HTTP ---
 #
-# `D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves` and
-# `D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`. The property this block
-# exists for above all is a negative one — **no route answers `text/html` for an artefact** — and
-# it is asserted by walking the routes the app serves rather than a list written here, so a new
-# export format or artefact route is covered the day it lands.
+# The key property is negative: no route answers `text/html` for an artefact. Asserted by walking
+# the routes the app serves, so a new export format or route is covered the day it lands.
 
 _PAGE = (
     "<!doctype html><style>.bar{width:100%}</style><h1>Screen</h1><p>THF gave 76.5 %.</p>"

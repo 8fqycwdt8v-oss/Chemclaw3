@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-07-31 · **Extends:** D-034 (durable trail), F10-G1 (hash chain)
 
+**Superseded-by:** [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md)
+
 ## Context
 
 A durable job can now be traced to the question that prompted it. D-157 gave `ConnectorJobWorkflow`

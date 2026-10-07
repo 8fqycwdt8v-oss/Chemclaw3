@@ -1,11 +1,9 @@
-"""The live lane's shell scripts, driven offline — each test is one defect a live run found.
+"""The live lane's shell scripts, driven offline.
 
-`infra/live/processes.sh`, `bootstrap.sh` and `e2e-full-stack/up.sh` are only ever exercised by a
-live bring-up, which CI does not do, so every defect in them has so far been found by the lane
-failing in front of somebody. These run the scripts' own functions (or the whole script, with the
-programs it would call stubbed on `PATH`) against a temporary directory, so the property each one
-was fixed for is held by something that runs on every push. Found together by one four-repo run on
-2026-09-27; each test's docstring names what that run saw.
+`infra/live/processes.sh`, `bootstrap.sh` and `e2e-full-stack/up.sh` otherwise run only in a live
+bring-up, which CI does not do. These run the scripts' own functions (or the whole script, with
+its programs stubbed on `PATH`) against a temporary directory, so each property is checked on
+every push.
 """
 
 from __future__ import annotations
@@ -66,9 +64,8 @@ def _bash(script: str, env: dict[str, str], cwd: Path | None = None) -> str:
 def prelude(tmp_path: Path) -> Path:
     """`processes.sh` up to its first function, runnable on its own in a scratch lane directory.
 
-    Everything above `mint_probe_token()` is the environment every verb inherits, which is where
-    both the harness posture and the persisted lane environment are decided. Copied beside a copy
-    of `siblings.sh`, because the script sources that relative to itself.
+    Everything above `mint_probe_token()` is the environment every verb inherits. Copied beside
+    `siblings.sh`, which the script sources relative to itself.
     """
     text = _PROCESSES.read_text(encoding="utf-8")
     head = text[: text.index("\nmint_probe_token() {")]
@@ -88,11 +85,10 @@ def _run_prelude(script: Path, tmp_path: Path, echo: str, **env: str) -> str:
 
 
 def test_the_dev_posture_lane_states_execute(prelude: Path, tmp_path: Path) -> None:
-    """Every durable job launched from a turn was refused in the dev lane.
+    """The dev-posture lane sets `execute`, so durable jobs launched from a turn are not refused.
 
-    The `execute` statement lived inside the enforced-identity branch, and since the code default
-    became harness-on + `plan_only` the dev posture inherited an approval gate with nobody to
-    approve: `PlanNotApprovedError` on every launch, 0 `job_records` rows across 12 storm turns.
+    Without it the dev posture inherits a `plan_only` approval gate with nobody to approve, and
+    every launch raises `PlanNotApprovedError`.
     """
     out = _run_prelude(prelude, tmp_path, 'echo "$CHEMCLAW_HARNESS_AUTONOMY"')
     assert out.strip() == "execute"
@@ -108,10 +104,9 @@ def test_the_dev_posture_lane_states_execute(prelude: Path, tmp_path: Path) -> N
 def test_a_later_invocation_comes_up_in_the_lane_environment_the_caller_can_override(
     prelude: Path, tmp_path: Path
 ) -> None:
-    """`processes.sh restart api` dropped mock-vendor, pyexec and the ELN/ORD sources.
+    """A later invocation (e.g. `restart api`) comes up in the persisted lane environment.
 
-    The four-repo lane's exports lived only in the shell that ran `up.sh`, and a restart runs in a
-    fresh one. The persisted file is read back with the caller winning, and a line that is not an
+    The persisted file is read back with the caller's own values winning, and a line that is not an
     export is never executed.
     """
     run = tmp_path / ".live/run"
@@ -223,12 +218,11 @@ def _shipped_queueing_bundles(*, opted_in: frozenset[str] = frozenset()) -> list
 
 
 def test_the_lane_starts_an_interactive_worker_for_every_bundle_that_queues_tools() -> None:
-    """The lane started none, so every queued `predict_pka`, xtb and prediction call hung.
+    """The lane starts an interactive worker for every bundle that queues tools.
 
-    Each waited out its inline wait on `connector-<name>-interactive`, with no poller, and became
-    a job nothing ran. The set is derived from the enabled manifests — checked here against a
-    reading of the YAML that does not go through the registry — and an opt-in bundle the lane
-    enables gets its worker too.
+    Without a poller on `connector-<name>-interactive`, every queued call waits out its inline wait
+    and becomes a job nothing runs. The set is derived from the enabled manifests, checked here
+    against a direct reading of the YAML.
     """
     expected = _shipped_queueing_bundles()
     assert expected, "no shipped bundle queues a tool; this test would pass on an empty loop"
@@ -249,10 +243,9 @@ def test_the_lane_runs_the_interactive_worker_the_chart_runs() -> None:
 
 
 def test_the_front_door_starts_only_after_every_worker_polls() -> None:
-    """Cold start: `worker-bo` had not polled yet and the front door died `bo (unpolled)`.
+    """The front door starts only after every worker is ready and polling the broker.
 
-    The front door used to start before the workers' readiness was even asked. Now each worker is
-    ready-checked and then asked of the broker, and only then is `api` started.
+    Otherwise the front door reports a bundle such as `bo` as unpolled on a cold start.
     """
     body = _function(_PROCESSES, "up")
     polled = body.index('wait_for_pollers "$python" "${workers[@]}"')
@@ -385,11 +378,10 @@ def test_every_variable_up_exports_is_persisted_for_a_later_restart() -> None:
 
 
 def test_the_gateway_and_its_key_are_never_persisted() -> None:
-    """`live.sh mode mock` came back on the paid gateway, and the key sat in `lane-env.sh`.
+    """The gateway settings and its key are never persisted to `lane-env.sh`.
 
-    `up.sh` wrote `CHEMCLAW_LLM_BASE_URL`, `_MODEL` and `_API_KEY` to the file `processes.sh`
-    reloads, so a restart from a shell naming no gateway was filled in from disk: $0.038 billed
-    after the switch "to mock", and a Keychain-only credential stored in plain text.
+    Otherwise a restart from a shell naming no gateway would reload the paid gateway from disk, and
+    the credential would sit in plain text.
     """
     gateway = {"CHEMCLAW_LLM_BASE_URL", "CHEMCLAW_LLM_MODEL", "CHEMCLAW_LLM_API_KEY"}
     assert gateway <= _listed("LANE_ENV_PER_INVOCATION")
@@ -555,7 +547,7 @@ def test_a_note_push_never_lands_in_the_developer_checkout(
 def test_a_clone_made_under_the_old_rule_is_re_pointed_with_its_notes(
     tmp_path: Path, source_repo: Path
 ) -> None:
-    """A lane bootstrapped before the fix still pushed to the checkout on every later run."""
+    """A lane clone made under the old remote rule is re-pointed, keeping its notes."""
     clone = tmp_path / ".live/knowledge-repo"
     clone.parent.mkdir(parents=True)
     _git("clone", "-q", str(source_repo), str(clone))
@@ -590,11 +582,10 @@ def _stub(directory: Path, name: str, body: str) -> None:
 def test_bootstrap_adopts_services_that_already_answer_instead_of_provisioning(
     tmp_path: Path, listening_port: int
 ) -> None:
-    """The native branch built pgvector and the Temporal CLI and made a cluster unconditionally.
+    """Bootstrap adopts Postgres and Temporal that already answer instead of provisioning them.
 
-    So a host already serving Postgres and Temporal on the configured ports died on a missing
-    `pg_config`, `go` or server headers it never needed. Every provisioning tool is stubbed to
-    record its call and fail; the run must succeed without calling one.
+    Every provisioning tool is stubbed to record its call and fail; the run must succeed without
+    calling one.
     """
     stubs, calls = tmp_path / "bin", tmp_path / "calls"
     stubs.mkdir()
@@ -636,12 +627,11 @@ def _backend_address(name: str, **env: str) -> str:
 
 
 def test_every_configured_backend_is_addressed_by_the_setting_its_client_reads() -> None:
-    """`rxnlabel` was never started, so no reaction was labelled past its record phase (#520).
+    """Every configured backend is started at the address its client reads.
 
-    The set is a literal (`CONFIGURED_BACKENDS`) because the fleet keeps both manifests where
-    nothing core reads can find them; what is derived is each one's address, from the
-    `<name>_server_url` / `<name>_server_token_env` pair the client module dials. Asked of the
-    settings independently here, and with a moved URL, so the port is not a transcription.
+    The set is a literal (`CONFIGURED_BACKENDS`) because those manifests are not discoverable by
+    core; each address is derived from the `<name>_server_url` / `<name>_server_token_env` pair,
+    read from settings independently and with a moved URL so the port is not a transcription.
     """
     from chemclaw.core.config import settings
 
@@ -687,11 +677,10 @@ def _start_backend(tmp_path: Path, name: str, *, served: bool = False, **env: st
 def test_the_labeller_starts_from_the_fleet_on_its_configured_port_with_both_token_halves(
     tmp_path: Path,
 ) -> None:
-    """The server the background worker dials comes up where the worker dials it, sharing one token.
+    """The labeller starts on the port the background worker dials, sharing one token.
 
-    The export is what the background worker inherits to *send*, and the same variable is what the
-    fleet's `app.py` reads to *verify* — so it is defaulted once, here, and a caller's own value
-    wins.
+    The same variable is what the worker sends and what the fleet's `app.py` verifies, so it is
+    defaulted once here and a caller's own value wins.
     """
     done = _start_backend(tmp_path, "rxnlabel")
     assert done.returncode == 0, done.stdout + done.stderr
@@ -769,11 +758,10 @@ def _index_corpus(
 def test_the_bring_up_runs_the_index_step_bounded_and_on_the_lanes_own_note_clone(
     tmp_path: Path,
 ) -> None:
-    """The step a deployment's Schedule and operator do, run once per `up` (#520).
+    """The bring-up runs the index step once per `up`, bounded, on the lane's own note clone.
 
-    Bounded by a timeout it passes on, and pointed at `.live/knowledge-repo`: the re-key writes a
-    moved compound's successor through the note writer, and an unset `note_repo_dir` is `.` — this
-    checkout. Its summary lines reach the bring-up log, so the operator sees both indexes' state.
+    It passes on a timeout and points at `.live/knowledge-repo`, because an unset `note_repo_dir` is
+    this checkout. Its summary lines reach the bring-up log.
     """
     done, calls = _index_corpus(tmp_path)
     assert done.returncode == 0, done.stdout + done.stderr

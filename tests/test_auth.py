@@ -1,8 +1,8 @@
-"""Front-door Entra OIDC validation (plan Phase F4-T1), proven offline with a local RSA key.
+"""Front-door Entra OIDC validation, proven offline with a local RSA key.
 
-A real token is signed with a locally-generated key and validated by the module with the JWKS lookup
-redirected to that key — so signature, audience, issuer, and claim extraction are all exercised
-without a tenant or network. The HTTP tests prove the 401 gate and the dev-mode stand-in.
+Tokens signed with a local key are validated with the JWKS lookup redirected to it, exercising
+signature, audience, issuer and claims without a tenant. The HTTP tests prove the 401 gate and the
+dev-mode stand-in.
 """
 
 import json
@@ -67,11 +67,8 @@ def _sign(key: Any, claims: dict[str, Any]) -> str:
 def _entra_env(monkeypatch: pytest.MonkeyPatch, rsa_key: Any) -> None:
     """Point the validator at the test audience/issuer and the local signing key (no network).
 
-    It used to pin `no_proxy` in both spellings as well, because `_client_for` wrote to the
-    *process* environment to take the tenant host out of an ambient proxy's reach and that
-    mutation outlived the test that caused it. `_HttpxJwkClient` carries `trust_env=False`
-    instead, so there is nothing left to restore —
-    `test_building_jwks_clients_concurrently_mutates_no_environment` is what keeps that true.
+    No proxy environment to restore: `_HttpxJwkClient` uses `trust_env=False`
+    (`test_building_jwks_clients_concurrently_mutates_no_environment`).
     """
     monkeypatch.setattr(settings, "entra_audience", _AUDIENCE)
     monkeypatch.setattr(settings, "entra_issuer", _ISSUER)
@@ -94,12 +91,9 @@ def test_group_claims_join_the_role_set_only_when_configured(
 ) -> None:
     """An AD security group is an entitlement, so it belongs in the one entitlement set.
 
-    Off by default: a deployment whose tenant assigns the AD group to an app role already receives
-    it as a `roles` value and must not also start matching raw group object-ids.
-
-    **Namespaced when it is on.** A tenant may emit `groups` as names rather than object-ids
-    (`groupMembershipClaims` accepts `sam_account_name`, `cloud_displayname`, …), so an unprefixed
-    group value *is* an app-role value — and this same set gates privileged tools and skills.
+    Off by default, since a tenant mapping groups to app roles already sends them as `roles`.
+    Prefixed when on, because a tenant may emit group names, which would otherwise be
+    indistinguishable from app roles that gate privileged tools.
     """
     claims = {"oid": "u-9", "roles": ["bench"], "groups": ["7f1c-group-oid"]}
     assert validate_token(_sign(rsa_key, claims)).roles == frozenset({"bench"})
@@ -112,11 +106,10 @@ def test_group_claims_join_the_role_set_only_when_configured(
 def test_a_group_named_like_a_privileged_role_does_not_become_one(
     rsa_key: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The escalation the prefix exists to stop, stated as a test rather than as a comment.
+    """A group named like a privileged role does not become one.
 
-    Turning on group claims to give a file share its read entitlement must not let anyone who can
-    get a directory group created — or who is already in one that happens to be named for an app
-    role — pass the write-tool and expensive-action gates.
+    Enabling group claims for a share entitlement must not let a directory group named for an app
+    role pass the write-tool and expensive-action gates.
     """
     monkeypatch.setattr(settings, "entra_group_claims_as_roles", True)
     claims = {"oid": "u-9", "roles": [], "groups": ["process-chemist"]}
@@ -139,10 +132,8 @@ def test_a_group_claim_overage_is_reported_rather_than_read_as_no_groups(
     with caplog.at_level("WARNING"):
         assert validate_token(token).roles == frozenset()
     assert "overage" in caplog.text
-    # **And counted.** The log line names who; the counter is what makes anyone look. This failure
-    # is silent from both sides — the chemist sees a gated share return nothing, the operator sees
-    # a WARNING on a pod's stdout — so the only thing that turns it into an event is a series an
-    # alert can read (`ChemclawGroupClaimOverage`).
+    # And counted: the failure is otherwise silent on both sides, so a series
+    # (`ChemclawGroupClaimOverage`) is what an alert reads.
     assert METRICS.value("chemclaw_group_claim_overage_total") == before + 1
 
 
@@ -290,9 +281,8 @@ class _FakeJwk:
 class _CountingJwksClient:
     """A `PyJWKClient` stand-in that counts fetches, so amplification is measurable, not argued.
 
-    Mirrors the real contract this module depends on: `get_signing_keys()` serves a cached set,
-    and `get_signing_key(kid)` is the call that re-fetches when the `kid` is absent. Each is
-    counted separately because the whole finding is about which one an anonymous caller can drive.
+    `get_signing_keys()` serves the cached set and `get_signing_key(kid)` re-fetches on a miss; each
+    is counted separately, since the question is which one an anonymous caller can drive.
     """
 
     def __init__(self, endpoint: str, *, timeout: float, cooldown_duration: float = 0) -> None:
@@ -364,9 +354,8 @@ def test_jwks_client_uses_the_configured_timeout(monkeypatch: pytest.MonkeyPatch
 def _proxy_recorder() -> Iterator[tuple[str, list[str]]]:
     """A loopback HTTP server standing in for an ambient proxy, recording every request line.
 
-    Records `CONNECT` as well as `GET` so the `https` arm is observed rather than inferred: a
-    proxied `https` fetch reaches a proxy as a tunnel request naming the host, and answering it 502
-    fails the fetch fast instead of leaving urllib mid-handshake against a plain HTTP server.
+    Records `CONNECT` as well as `GET` so the `https` arm is observed; answering 502 fails the fetch
+    fast.
     """
     received: list[str] = []
 
@@ -404,22 +393,10 @@ def test_the_jwks_fetch_does_not_follow_an_ambient_proxy(
 ) -> None:
     """The key set every bearer token is validated against must not come from a proxy.
 
-    `PyJWKClient.fetch_data` calls `urllib.request.urlopen`, which reads the process environment
-    for proxies and takes no `trust_env`. A proxy that could answer this fetch could serve a key
-    set of its own choosing, so this is the one destination in the tree where following the
-    environment is a trust decision rather than a routing one.
-
-    Driven, not asserted as the shape of a keyword argument. The **control arm** builds a bare
-    `PyJWKClient` for the same endpoint and requires the recorder to see the request — without it,
-    a recorder that was never wired up would make the real assertion pass for the wrong reason, and
-    it is also what proves the hazard is still live in the version of PyJWT installed today.
-
-    **The third assertion is the point of the rewrite.** This used to be closed by appending the
-    tenant host to `no_proxy`, which diverted the fetch by mutating the *process* environment —
-    every other `urlopen` caller in the process saw it, it raced on the validation thread pool, and
-    it needed a lock. `trust_env=False` is per request, so the environment the operator set must
-    come back untouched: the two spellings are asserted verbatim, including the one this test sets
-    and the absence of a spelling it did not.
+    A proxy answering this fetch could serve its own keys, so the fetch ignores proxy environment
+    (`trust_env=False`, per request). The control arm drives a bare `PyJWKClient` and requires the
+    recorder to see it, proving both the recorder works and the hazard is live upstream. The proxy
+    environment must come back untouched.
     """
     with _proxy_recorder() as (proxy_url, received):
         for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
@@ -460,21 +437,11 @@ def test_the_jwks_fetch_does_not_follow_an_ambient_proxy(
 def test_building_jwks_clients_concurrently_mutates_no_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The absence test for the side effect that used to need a lock.
+    """Building JWKS clients concurrently mutates no environment.
 
-    `_client_for` runs on the validation thread pool — `validate_token` is dispatched through
-    `asyncio.to_thread`, so two requests bearing tokens from two tenants genuinely build their
-    clients at the same moment. Its body used to be an unsynchronised read-modify-write of
-    `os.environ`: measured with the window widened, five concurrent writers of five distinct hosts
-    left **one** of the five in `no_proxy`, and the loser's key set was then fetched through the
-    ambient proxy.
-
-    The fix is not a better lock, it is that there is nothing process-global left to write, so this
-    asserts the *absence* rather than the repair — which is the shape that fails whoever re-adds
-    the mutation, where a race test would only fail once it raced. The second assertion is the
-    other half of deleting the lock: a check-then-insert may build a client twice, but every caller
-    must leave with the one that is stored, or two threads warm two key caches and the
-    unknown-`kid` refresh bound is per client rather than per endpoint.
+    `_client_for` runs on the validation thread pool, so process-global writes would race. This
+    asserts the absence of any mutation, and that every concurrent caller leaves with the one stored
+    client, so the unknown-`kid` refresh bound is per endpoint.
     """
     monkeypatch.setattr(auth, "_jwks_clients", {})
     before = dict(os.environ)
@@ -506,9 +473,7 @@ def test_building_jwks_clients_concurrently_mutates_no_environment(
 def _closed_loopback_url() -> str:
     """A loopback URL whose port has just been closed — a connection refusal, not a hang.
 
-    Bound and released rather than picked from thin air, so the port is one nothing else on this
-    machine is serving; an arbitrary number could be somebody's development server and the refusal
-    would silently become a response.
+    Bound and released, so no other local server can be listening on it.
     """
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -520,9 +485,7 @@ def _closed_loopback_url() -> str:
 def _jwks_server(status: int, body: str) -> Iterator[str]:
     """A real loopback HTTP server answering every GET with `status` and `body`.
 
-    Real HTTP rather than a patched transport, because the whole subject is httpx's error taxonomy:
-    a fake that raises the exception the test then asserts proves nothing about what the library
-    does with a 500 or with an HTML body.
+    Real HTTP, because the subject is httpx's own error taxonomy.
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -555,10 +518,8 @@ def _jwks_server(status: int, body: str) -> Iterator[str]:
 def test_a_fetched_key_set_is_returned_and_cached() -> None:
     """The happy path of the override, and the cache write that is not visible from outside it.
 
-    `get_jwk_set` consults `jwk_set_cache` *before* calling `fetch_data`, so the `put` the override
-    copies from upstream is what makes the second validation free. Without it every token would
-    cost an outbound request to the tenant with no functional symptom at all — which is why this
-    counts the server's fetches rather than trusting the code to have written the line.
+    `get_jwk_set` reads `jwk_set_cache` before `fetch_data`, so the override's `put` is what makes
+    the second validation free; counted at the server.
     """
     key_set = '{"keys": [{"kty": "oct", "kid": "kid-a", "use": "sig", "k": "c2VjcmV0"}]}'
     with _jwks_server(200, key_set) as url:
@@ -582,25 +543,12 @@ def test_a_fetched_key_set_is_returned_and_cached() -> None:
 def test_every_way_the_fetch_can_fail_is_a_503_and_not_a_401(
     name: str, status: int, body: str, expected: str
 ) -> None:
-    """The split, re-derived for httpx and driven over real HTTP.
+    """Every way the fetch can fail is a 503 and not a 401.
 
-    This is the assertion that had to be rewritten rather than inherited when the fetch moved off
-    urllib: httpx raises a different exception family, and a mapping that let one of these fall
-    through to `AuthError` would tell a chemist holding a perfectly good token that their
-    credential was rejected while the actual fault was ours. Every arm of
-    `_HttpxJwkClient.fetch_data` is exercised here except the transport one, which
-    `test_an_unreachable_identity_provider_is_not_reported_as_a_bad_token` drives against a closed
-    port.
-
-    A 404 is in the list because it is the misconfiguration a fresh deployment makes — a wrong
-    tenant id — and it is the case where "the IdP said no" is most easily mistaken for "the caller
-    is wrong". It is not: no credential the caller could present would help.
-
-    The 302 is the one case that is a *decision* rather than a translation: `urlopen` followed
-    redirects and httpx does not, so this pins which way round that was settled. Refused, because a
-    redirect moves the key set's origin out of the address `core/netguard.py` derived its allowlist
-    from — and refused *by name* and before `raise_for_status`, which httpx raises on a 3xx too,
-    so an operator reads "redirected" rather than a bare "answered 302".
+    A 401 would tell a chemist with a good token that their credential was rejected. A 404 is the
+    typical wrong-tenant misconfiguration. A 302 is refused by name, before `raise_for_status`: a
+    redirect would move the key set outside the origin `core/netguard.py` allows. The transport arm
+    is `test_an_unreachable_identity_provider_is_not_reported_as_a_bad_token`.
     """
     with _jwks_server(status, body) as url:
         with pytest.raises(auth.IdentityProviderUnavailable, match=expected):
@@ -610,14 +558,10 @@ def test_every_way_the_fetch_can_fail_is_a_503_and_not_a_401(
 def test_a_200_carrying_json_that_is_not_a_key_set_is_still_a_503(
     monkeypatch: pytest.MonkeyPatch, rsa_key: Any
 ) -> None:
-    """The half of the old workaround the httpx move did **not** delete, asserted as still needed.
+    """A 200 carrying JSON that is not a key set is still a 503.
 
-    Two shapes used to escape every handler in `api/auth.py` as HTTP 500s. One — an HTML error page
-    — died in PyJWT's `json.load`, and now dies in `fetch_data`'s own decode, which is why that arm
-    moved. The other dies in `PyJWKSet.from_dict` (`PyJWKSetError`, a `PyJWTError` that is neither
-    a `PyJWKClientError` nor an `InvalidTokenError`), and `from_dict` runs in `get_jwk_set` on data
-    that was fetched perfectly well — so moving the fetch did nothing for it and `_signing_key`
-    still needs its last arm. Deleting that arm fails this test with a 500-shaped crash.
+    It fails in `PyJWKSet.from_dict` (`PyJWKSetError`, neither a `PyJWKClientError` nor an
+    `InvalidTokenError`) after a successful fetch, so `_signing_key` needs its last arm.
     """
     with _jwks_server(200, '{"error": "tenant not found"}') as url:
         monkeypatch.setattr(settings, "entra_jwks_url", url)
@@ -632,10 +576,8 @@ def test_an_unknown_kid_is_an_auth_error_not_an_unhandled_crash(
 ) -> None:
     """A `kid` absent from the JWKS must raise `AuthError` (a 401), never escape as a 500.
 
-    `PyJWKClientError` is not a subclass of `jwt.InvalidTokenError`, so it used to slip past both
-    `validate_token`'s handler and `require_principal`'s — turning an anonymous, malformed-token
-    request into an unhandled exception. Remove the `PyJWKClientError` handler in
-    `auth._signing_key` and this fails with that error instead.
+    `PyJWKClientError` is not a `jwt.InvalidTokenError`, so `auth._signing_key` handles it
+    explicitly.
     """
     _install_counting_client(monkeypatch)
     with pytest.raises(AuthError, match="no signing key matches"):
@@ -647,14 +589,8 @@ def test_an_unreachable_identity_provider_is_not_reported_as_a_bad_token(
 ) -> None:
     """A JWKS outage raises `IdentityProviderUnavailable`, which the route turns into 503, not 401.
 
-    Answering 401 would tell a user with a valid token that their credential was rejected, and
-    would bury a dependency outage in a metric that reads as "someone is probing us".
-
-    Driven against a **closed loopback port** rather than a stand-in raising the exception the
-    assertion names, which would have proven only that `pytest.raises` works. The refusal is a real
-    `httpx.ConnectError`, so what is under test is the mapping in `_HttpxJwkClient.fetch_data` —
-    the arm that had to be re-derived when the fetch moved off urllib, because httpx raises a
-    different exception family and getting it wrong makes an outage read as a rejected user.
+    A 401 would reject a valid credential and hide an outage. Driven against a closed loopback port,
+    so the real `httpx.ConnectError` mapping in `_HttpxJwkClient.fetch_data` is under test.
     """
     monkeypatch.setattr(settings, "entra_jwks_url", _closed_loopback_url())
     monkeypatch.setattr(auth, "_jwks_clients", {})
@@ -674,12 +610,10 @@ def test_a_known_kid_costs_no_forced_refresh(monkeypatch: pytest.MonkeyPatch, rs
 def test_an_unknown_kid_flood_forces_at_most_one_refresh_per_cooldown(
     monkeypatch: pytest.MonkeyPatch, rsa_key: Any
 ) -> None:
-    """The amplification bound, measured: 50 anonymous unknown-`kid` tokens buy one refresh.
+    """The amplification bound: 50 anonymous unknown-`kid` tokens buy one refresh.
 
-    This is the defect's real shape. PyJWT re-fetches the tenant JWKS on *every* `kid` miss, and
-    the `kid` is chosen by an unauthenticated caller, so before the cooldown 50 credential-less
-    requests meant 50 outbound requests to the IdP — each one occupying a validation worker
-    thread. Set `entra_jwks_refresh_cooldown_seconds` to 0 and this fails with 50.
+    PyJWT re-fetches on every `kid` miss and the `kid` is caller-chosen, so the cooldown is what
+    stops unauthenticated requests from driving IdP fetches. At a cooldown of 0 this fails with 50.
     """
     client = _install_counting_client(monkeypatch)
     monkeypatch.setattr(settings, "entra_jwks_refresh_cooldown_seconds", 300.0)
@@ -756,11 +690,8 @@ def test_entra_required_exposed_boots_without_warning(
     assert not any("authorization gates OPEN" in r.message for r in caplog.records)
 
 
-# The gateway boot guard's own tests moved to `tests/test_llm_gateway_guard.py` with the guard
-# (`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`). They were here
-# because `create_app` was its only caller, which is exactly the defect that ADR closes: the
-# refusal now has to hold in the background worker and the mcp face as well, and a test that can
-# only reach it through `create_app` cannot say so.
+# The gateway boot guard's tests live in `tests/test_llm_gateway_guard.py`: the guard must hold in
+# every process, not only `create_app`.
 
 
 @contextmanager
@@ -769,9 +700,7 @@ def _counting_jwks_server(
 ) -> Iterator[tuple[str, list[str]]]:
     """`_jwks_server`, counting every request it answers and optionally slow to answer.
 
-    The subject of the tests below is how many fetches reach the tenant, so the count is taken where
-    the fetch lands rather than inferred from the client — a client that coalesced only in its own
-    bookkeeping would pass a count taken there.
+    Counted where the fetch lands, so client-side bookkeeping cannot fake coalescing.
     """
     hits: list[str] = []
     lock = threading.Lock()
@@ -816,9 +745,8 @@ def test_a_failed_fetch_is_remembered_rather_than_repeated_per_request(
 ) -> None:
     """During an IdP fault, a crowd of requests costs one fetch per backoff window, not one each.
 
-    A key set is cached only when it parses, so before this every request carrying any `kid` —
-    unauthenticated ones included — paid its own outbound fetch while the tenant was failing:
-    measured, 20 requests, 20 fetches, every one a 503. Each answer must still be the 503.
+    A key set is cached only when it parses, so failures are remembered separately; every answer is
+    still a 503.
     """
     monkeypatch.setattr(settings, "entra_jwks_failure_backoff_seconds", 60.0)
     with _counting_jwks_server(status, body) as (url, hits):
@@ -834,10 +762,8 @@ def test_a_remembered_failure_keeps_no_caller_s_frames_alive(
 ) -> None:
     """The memory holds a message, not the first failing request's stack.
 
-    It used to store the raised instance itself, whose traceback grows through every frame it
-    passes — `_signing_key`'s, holding the raw bearer token, among them — and kept it for as long
-    as the memory lasted. A local standing in for that token must not be reachable from the
-    remembered failure, nor from the one a later request is answered with.
+    A stored exception's traceback would keep frames alive, including `_signing_key`'s raw bearer
+    token; a local standing in for it must not be reachable from the remembered failure.
     """
     monkeypatch.setattr(settings, "entra_jwks_failure_backoff_seconds", 60.0)
     secret = "eyJ.a-bearer-token-stand-in"

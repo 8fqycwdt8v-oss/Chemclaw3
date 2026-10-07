@@ -1,15 +1,7 @@
-"""Postgres backend for the geometry store (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+"""Postgres backend for the geometry store (`infra/sql/047_structures.sql`).
 
-The same two-method `StructureStore` contract as `InMemoryStructureStore`, over the `structures`
-table (`infra/sql/047_structures.sql`), so a handle a chemist wrote down in March still resolves in
-August and so a geometry computed by one worker is reachable from another. That cross-process reach
-is the whole reason a durable backend exists at all: the conformer search runs on the `calc`
-bundle's queue and the follow-up optimization is launched from the chat service, so an in-process
-map would resolve nothing.
-
-A write is `ON CONFLICT DO NOTHING`, which is not an optimisation but the contract: the key is the
-content, so there is never anything to update, and a second calculation arriving at the same
-geometry must not disturb the row (or its `created_at`) that a first one wrote.
+Durable so a handle resolves across processes and over time. Writes are `ON CONFLICT DO NOTHING`:
+the key is the content.
 """
 
 import json
@@ -23,11 +15,8 @@ from chemclaw.core.config import settings
 from chemclaw.science.calc.models import Structure
 from chemclaw.science.calc.structures import StructureStore
 
-# `DO NOTHING`, not `DO UPDATE`: `structure_id` *is* the chemistry, so an existing row already
-# holds what this write carries. The one field the identity excludes and the payload keeps —
-# `origin`, the key of the calculation that produced the geometry — is deliberately left at the
-# first writer's value: a geometry reached twice by different routes was produced by whichever ran
-# first, and rewriting that would make the lineage depend on read order.
+# `DO NOTHING`: `structure_id` is the chemistry. `origin` (excluded from the identity) keeps the
+# first writer's value, so lineage does not depend on read order.
 _INSERT = """
     INSERT INTO structures (structure_id, structure)
     VALUES (%s, %s)
@@ -40,9 +29,7 @@ _SELECT = "SELECT structure FROM structures WHERE structure_id = %s"
 class PostgresStructureStore:
     """Durable `StructureStore` backed by Postgres.
 
-    Short-lived connections through `chemclaw.core.db.connection`, for the reason `PostgresStore`
-    gives: geometry traffic is coarse-grained against the calculations that produce it, and the
-    process-wide pool underneath removes the handshake where it matters.
+    Short-lived connections through `chemclaw.core.db.connection`'s pool.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -52,13 +39,8 @@ class PostgresStructureStore:
     async def put(self, structures: Sequence[Structure]) -> None:
         """Persist every geometry under its own content address, in one round trip.
 
-        `executemany` rather than a loop of `execute`, and one connection rather than one each: a
-        conformer search returns up to forty-seven geometries and this runs on the cache-hit path
-        as well as the miss, so a per-structure checkout would put forty-seven commits in front of
-        an answer that cost nothing to produce.
-
-        An empty sequence is a no-op rather than an empty statement, because most calculations
-        return no geometry at all and the common case should not touch the database.
+        One connection and `executemany`, since this also runs on the cache-hit path. An empty
+        sequence touches nothing.
         """
         if not structures:
             return
@@ -87,18 +69,8 @@ class PostgresStructureStore:
 
 
 def default_structure_store() -> StructureStore:
-    """Return the production geometry store.
+    """Return the production geometry store; tests monkeypatch it at the importing module.
 
-    The one place that names the production backend, mirroring `postgres_store.default_store` and
-    `postgres_artifacts.default_artifact_store` so a tool module does not have to know which one it
-    is; tests swap it at the importing module
-    (`monkeypatch.setattr(<module>, "default_structure_store", ...)`).
-
-    **No enable switch, deliberately**, where the artifact store has one. That switch exists
-    because an artifact is megabytes and a deployment may reasonably decline to keep them; a
-    geometry is kilobytes, and declining to keep it does not save storage — the same coordinates
-    are already inside the `calculation_results` payload that D-011 refuses to prune. What it would
-    do is make every `structure_id` this system reports unresolvable, which is the defect this
-    store was added to end.
+    No enable switch: disabling it would make every reported `structure_id` unresolvable.
     """
     return PostgresStructureStore()

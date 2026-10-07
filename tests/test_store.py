@@ -1,8 +1,7 @@
-"""Behavioral tests for the calculation store (plan Phase 1b, D-011).
+"""Behavioral tests for the calculation store.
 
-Proves the one property that matters: an identical calculation is computed once
-and then served from the store, while a calculator-version bump correctly misses
-and recomputes.
+An identical calculation is computed once and then served from the store, while a version or
+epoch bump misses and recomputes.
 """
 
 import asyncio
@@ -75,13 +74,10 @@ def test_version_bump_invalidates_key() -> None:
 
 
 def test_an_earlier_epoch_cannot_be_served_to_a_later_one() -> None:
-    """A ChemClaw-side fix must strand the rows it made wrong, not silently keep serving them.
+    """An earlier `CALCULATION_EPOCH` cannot be served to a later one.
 
-    `calc_version` names the *other* programs — a tblite build, an RDKit build, a pipeline tag —
-    so it does not move when our own code changes. Two changes that left rows on disk misleading:
-    a corrected linear-rotor term in `xtb_thermo` (every stored N2/CO2/alkyne entropy wrong) and
-    `SolubilityResult` gaining its applicability-domain flag (every stored row validating back with
-    `estimate=None`). `CALCULATION_EPOCH` is what makes both a miss.
+    `calc_version` names other programs' builds, so it does not move when this code's own fixes
+    change what a stored row means; the epoch does.
     """
     inputs = {"smiles": "CCO"}
     before = CalculationKey.build("solub", "esol@2004", inputs=inputs)
@@ -97,14 +93,10 @@ def test_an_earlier_epoch_cannot_be_served_to_a_later_one() -> None:
 
 
 def test_the_epoch_reaches_every_calculator_not_just_the_one_that_needed_it() -> None:
-    """Folded in by `build`, so no calculator has to remember to name it (D-011).
+    """`CalculationKey.build` folds the epoch into every key it derives.
 
-    The xTB family is the case that proves it: an `xtb.hess` version is entirely other people's
-    version numbers — a tblite build, an RDKit build — so such a row would otherwise outlive any
-    fix of ours. Since `D-2026-08-16-the-physics-leaves-the-cache-stays` those keys are built on
-    the calculation server, which is why `CALCULATION_EPOCH` is the one constant both repositories
-    must change in the same PR; what is checked here is that `build` still folds it in, for the
-    keys this repository does derive (`CalculationKey.build`, which folds in `CALCULATION_EPOCH`).
+    No calculator has to name it. Remote keys are built on the calculation server, whose epoch
+    composes with this one.
     """
     structure = Structure(
         elements=[1, 1], positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]], smiles="[H][H]"
@@ -170,13 +162,10 @@ def key_str_present(text: str) -> bool:
 
 
 def test_concurrent_misses_on_one_key_share_one_computation() -> None:
-    """The in-process half of the check-then-act race, closed with a single-flight ledger.
+    """Concurrent misses on one key in one process share one computation.
 
-    The measured shape this replaces: 8 concurrent misses on one key → 8 computes (CLAUDE.md's own
-    number), benign while a compute was milliseconds and not once a CREST search is 19 minutes of
-    CPU. The first miss computes; every concurrent second miss awaits the same future and reports
-    `was_cached=True`, because from its side the answer arrived with no computation started. The
-    cross-process half stays deferred with its own trigger (`docs/planning/DEFERRED.md`).
+    The first miss computes; concurrent misses await the same future and report `was_cached=True`.
+    The cross-process half is deferred (`docs/planning/BACKLOG.md`).
     """
     computes = 0
     release = asyncio.Event()
@@ -209,20 +198,12 @@ def test_concurrent_misses_on_one_key_share_one_computation() -> None:
 
 
 def test_a_second_event_loop_computes_rather_than_awaiting_the_first_loops_future() -> None:
-    """The ledger is per loop, because an `asyncio.Future` is.
+    """A second event loop computes rather than awaiting the first loop's future.
 
-    `cached_compute`'s docstring covers the cross-*process* case — "misses still each compute",
-    deferred with its own trigger — and said nothing about two loops in one process, which
-    `core/temporal_client.py`'s own docstring names as a shape that exists here ("an `asyncio.run`
-    in a thread, a test that starts its own"). Measured before this changed, that case was neither
-    raced nor deferred: the second caller found the first loop's future and awaiting it raised
-    `RuntimeError: Task ... attached to a different loop`, an error naming nothing a chemist could
-    act on, for a cache whose entire purpose is to not get in the way.
-
-    Deterministic rather than two racing threads: the first loop is held *inside* its computation
-    until the second loop has been all the way through `cached_compute` for the same key. The two
-    computations are separate callables, because a shared one would have the second loop wait on
-    the latch holding the first.
+    The single-flight ledger is per loop, because an `asyncio.Future` is bound to one. The first
+    loop is held inside its computation until the second has finished, so the test is
+    deterministic; the two computations are separate callables so neither waits on the other's
+    latch.
     """
     holding = threading.Event()
     release = threading.Event()
@@ -295,29 +276,12 @@ def test_a_failed_shared_computation_fails_every_waiter_and_clears_the_slot() ->
 
 
 def test_two_calculations_cannot_flatten_to_one_cache_key() -> None:
-    """`as_str()` is the `calculation_results` primary key, so its encoding has to be a bijection.
+    """Two calculations cannot flatten to one cache key.
 
-    It is `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`, and all four fields were free
-    text taken verbatim off the calculation server's `calculation_key` answer — which
-    `connectors/calc/remote.py` is right to do, since deriving a key on this side would build one
-    that matches nothing. The consequence is that the *identity* of every cached row was a string
-    this process never checked, and two distinct calculations flattened to one:
-
-        calc_type="a@b", calc_version="c"  ->  a@b@c:d:e
-        calc_type="a",   calc_version="b@c" ->  a@b@c:d:e
-
-    The second upserts over the first, and `cached_compute` then serves the wrong payload for a key
-    it believes it derived — with correct-looking provenance, into the RRHO arithmetic, the
-    calibration ledger and any note citing the `calc_ref`. The table is also the one the retention
-    sweep deliberately never prunes.
-
-    **Only the fields that create the ambiguity are constrained, and `calc_version` is deliberately
-    not one of them.** A real version carries both delimiters — `esol-delaney@2004` carries the
-    `@`, `cal-0.28733:-29.3116` carries the `:` — which is the measured fact
-    `connectors/calc/remote.py` records as the reason the key crosses the wire as four parts rather
-    than as one string. Barring `@` from `calc_type` fixes the left-hand parse; barring `:` from the
-    two hashes fixes the right-hand one; between them the middle is whatever is left, so the version
-    may contain anything.
+    `as_str()` is the primary key, `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`, built
+    from fields taken verbatim from the server. `@` is barred from `calc_type` and `:` from the two
+    hashes, which makes the encoding a bijection; `calc_version` may contain both, as real versions
+    do.
     """
     from pydantic import ValidationError
 
@@ -366,18 +330,11 @@ def test_an_empty_key_is_not_a_key() -> None:
 def test_a_crash_between_the_two_writes_costs_a_recompute_and_never_a_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The order of `put` and the publish is what decides which half a hard kill can lose.
+    """A crash between the two writes costs a recompute, never a publication.
 
-    Persist-then-publish is the intuitive order and loses publications with no trace, because D-011
-    is what makes the loss permanent: the row is in the cache, so every later call for that key is
-    a *hit* that returns above the publish and never reaches it again. Measured on the old order —
-    `computes=1 publishes=[]`, `chemclaw_results_queued_total` unmoved, indistinguishable from a
-    calculation nobody ran, and `publish backfill` the only recovery with no Schedule running it.
-
-    Reversed, the same kill leaves a queued row and no cache row: the retry recomputes (paid once)
-    and re-enqueues onto the outbox's `ON CONFLICT … DO NOTHING`. Driven with a `BaseException`
-    between the two, which is what a kill is from the caller's side — nothing in `cached_compute`
-    may treat it as a failed calculation either.
+    Publishing before persisting means a kill leaves a queued publication and no cache row, so the
+    retry recomputes and re-enqueues idempotently; the reverse order would turn every later call
+    into a hit that never publishes. Driven with a `BaseException` between the two.
     """
 
     async def _run() -> None:
@@ -415,12 +372,7 @@ def test_a_crash_between_the_two_writes_costs_a_recompute_and_never_a_publicatio
 
 
 def test_the_publish_is_offered_before_the_row_is_persisted() -> None:
-    """The same invariant read off the order of the two calls rather than off a crash.
-
-    Stated as an order because that is what the guarantee *is*: "persisted implies offered" is
-    checkable for the next writer that pairs a `put` with `publish_stored_result`, and it is false
-    the moment a `put` lands first.
-    """
+    """The publish is offered before the row is persisted: "persisted implies offered"."""
 
     async def _run() -> None:
         events: list[str] = []
@@ -453,20 +405,11 @@ def test_the_publish_is_offered_before_the_row_is_persisted() -> None:
 
 
 def test_a_value_postgres_cannot_store_is_refused_by_name_before_the_write() -> None:
-    """A payload the `jsonb` column would reject must fail here, naming the field.
+    """A value Postgres `jsonb` cannot store is refused by name before the write.
 
-    Measured before this (`cached_compute` against a migrated database): `{"max_gradient":
-    float("nan")}` passed `checked_payload`, and the refusal arrived from the driver as
-    `InvalidTextRepresentation: invalid input syntax for type json / DETAIL: Token "NaN" is
-    invalid` — raised out of `store.put` *inside* `cached_compute`, after the single-flight future
-    exists, so every concurrent waiter on that key failed with a message naming a JSON token and
-    neither the calculation nor the field. `Decimal` and `datetime` failed the same way one layer
-    earlier (`TypeError: Object of type Decimal is not JSON serializable`), and a string carrying a
-    NUL as `UntranslatableCharacter`.
-
-    Reachable rather than hypothetical: the fleet's `max_gradient` is
-    `float(np.max(np.abs(gradient)))`, a diverged SCF gives NaN, and `json.loads` — which is how a
-    calculation server's answer reaches this process — accepts the literal `NaN` by default.
+    NaN, `Decimal`, `datetime` and NUL would otherwise fail inside `cached_compute`, after the
+    single-flight future exists, with a driver message naming neither the calculation nor the field.
+    `json.loads` accepts `NaN`, so a diverged calculation can return one.
     """
     from datetime import UTC, datetime
     from decimal import Decimal
@@ -491,13 +434,10 @@ def test_a_value_postgres_cannot_store_is_refused_by_name_before_the_write() -> 
 
 
 def test_a_storable_payload_is_still_returned_unchanged() -> None:
-    """The guard above must not narrow what a calculator may legitimately return.
+    """A storable payload is returned unchanged: ordinary unicode and any finite float pass.
 
-    Ordinary unicode round-trips byte-identically through `jsonb` (measured:
-    `α-pinene · Δ 25 °C — ünïcode 中文 🧪`), and a float of any finite magnitude comes back as the
-    same double — `5e-324` and `1.797e308` included, though one over 1e16 comes back as an `int`,
-    which `tests/test_postgres_store.py` pins against the real column. Only NUL is refused among
-    strings, because Postgres `text` cannot hold one.
+    Only NUL is refused among strings; `tests/test_postgres_store.py` pins large floats against the
+    real column.
     """
     from chemclaw.science.calc.store import checked_payload
 
@@ -513,23 +453,10 @@ def test_a_storable_payload_is_still_returned_unchanged() -> None:
 
 
 def test_the_browse_does_not_serve_a_row_the_epoch_invalidated() -> None:
-    """`get` misses a superseded row; `find` used to hand it back beside its replacement.
+    """`find` does not serve a row the epoch invalidated.
 
-    Measured before this, on the reference store, with the epoch moved between two writes of one
-    molecule::
-
-        epoch 1 -> key thermo@xtb-6.7:a7d334ebee616d78:a075a6029c28d314
-        epoch 2 -> key thermo@xtb-6.7:a7d334ebee616d78:3ba6ef80c850abd1
-        find(smiles='CCO', calc_type='thermo') returned 2 rows:
-            3ba6ef80c850abd1 {'g': -40.222} | a075a6029c28d314 {'g': -40.111}
-
-    Indistinguishable in the result, because the epoch rides in `params_hash` — which is not a
-    filter and is not invertible — and `calc_version` not moving is the entire reason the epoch
-    exists. `find_calculations` then tells the model to use those values instead of recomputing and
-    to cite the `calc_ref` in a knowledge note, `calculation_results` is never pruned, and the
-    store's own docstring already said the invalidated half "cannot be separated" and that "serving
-    the wrong half is the failure this exists to stop". The lookup path stopped it; the browse did
-    not.
+    The epoch rides in `params_hash`, so superseded and current rows are otherwise indistinguishable
+    in a browse, and `find_calculations` tells the model to reuse and cite what it returns.
     """
     inputs = {"smiles": "CCO"}
 

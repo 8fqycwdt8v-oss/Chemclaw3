@@ -1,28 +1,12 @@
 """Turning a record into statements. Every value is bound; only fixed identifiers are written.
 
-The rule this module holds, borrowed verbatim from `ingest/eln/warehouse/sql.py` because it earned
-its place there: **the engine contributes structure, and everything else is a parameter.** The
-difference is that the inbound engine takes its identifiers from a site's binding while this one
-takes them from the schema *this repository ships* — so there is no path at all by which a value
-reaches the statement text. Table and column names here are literals in this file.
+Table and column names are literals from the schema this repository ships, so no value can reach
+statement text. Writes are upserts keyed on content hashes, so a redelivery converges.
 
-**Upserts, because a redelivery must converge.** The outbox retries, and every primary key in the
-shipped schema is a content hash, so writing the same record twice is a no-op rather than a
-duplicate.
-
-**This emits Postgres, and only Postgres.** `ON CONFLICT ... DO UPDATE` is a Postgres spelling;
-Snowflake and Oracle spell the same idea `MERGE`, and there is no `MERGE` emitter here. An earlier
-version of this paragraph named all three, which read as though the SQL driver already spoke them —
-it does not. What is portable today is the *schema*: `schema/result-store/` avoids arrays,
-sequences and expression indexes precisely so a site can create it on another engine, and adding
-that engine is then this module plus the driver's `information_schema` probe.
-Until someone asks for one, saying so plainly is better than a sentence that has to be tested to
-be disbelieved.
-
-The statements are built as text rather than through a query builder because there are a fixed
-number of them, shaped by the schema and not by the caller — a builder would add a dependency and
-an indirection to save nothing, and would make the exact string a test wants to assert harder to
-see rather than easier.
+This emits Postgres only (`ON CONFLICT ... DO UPDATE`); there is no `MERGE` emitter. The schema
+in `schema/result-store/` is portable (no arrays, sequences or expression indexes), so another
+engine is this module plus the driver's `information_schema` probe. Statements are plain text
+because there are a fixed few, shaped by the schema.
 """
 
 from collections.abc import Sequence
@@ -36,19 +20,14 @@ from chemclaw.publish.record import Publication, ResultRecord
 from chemclaw.publish.solvents import display_name
 
 # One statement per table, in dependency order: a row is never written before the rows it
-# references. Postgres and Snowflake both enforce that only if the site created the foreign keys,
-# but the order is what makes the write correct where they did.
-#
-# `(table, columns, conflict_key)` — `conflict_key` is the primary key an upsert converges on, and
-# an empty one means the table is append-only from this writer's side.
+# references. `(table, columns, conflict_key)`; an empty `conflict_key` means append-only.
 _Statement = tuple[str, tuple[str, ...], tuple[str, ...]]
 
 
 def _value_id(calc_ref: str, scope: str, ordinal: int | None, prop: str) -> str:
-    """The content address of one property fact — a hash, not a sequence.
+    """The content address of one property fact: a hash, not a sequence.
 
-    No sequences anywhere in this schema: they do not port to every target, and a derived key is
-    what makes re-publishing the same record converge instead of appending.
+    No sequences in this schema: they do not port, and a derived key makes re-publishing converge.
     """
     return f"pv_{stable_hash([calc_ref, scope, ordinal, prop])}"
 
@@ -58,9 +37,7 @@ def rows_for(
 ) -> dict[str, list[dict[str, Any]]]:
     """Every row one record contributes, keyed by table and in dependency order.
 
-    Returned as plain dicts rather than tuples so a driver that speaks JSON (an HTTP endpoint) and
-    one that speaks SQL can share the projection — the alternative is two row builders that agree
-    today and diverge on the next column.
+    Plain dicts so the JSON (HTTP) and SQL drivers share one row builder.
     """
     now = datetime.now(UTC)
     subject_id = record.subject_id
@@ -76,38 +53,23 @@ def rows_for(
             compounds.append(
                 {
                     "compound_id": member.compound_id,
-                    # **The structure the key was derived from, not the species that carried it.**
-                    # `compound_id` is a hash over the *standardized* SMILES, so every tautomer,
-                    # microstate and protonation state of one substance writes this same row —
-                    # and with the member's own SMILES in the value column, the upsert's
-                    # `DO UPDATE` left the row reading whichever species happened to publish last.
-                    # The two columns of one row named two different molecules.
-                    #
-                    # `standard_smiles` rather than the strict form: a record built outside
-                    # `project` (a backfill, a future producer) can carry a SMILES this cannot
-                    # parse, and losing a finished calculation to normalize a label would be the
-                    # wrong trade — the lenient helper returns the input unchanged, which is what
-                    # the row would have said anyway.
+                    # The standardized structure the key was derived from, not the species that
+                    # carried it, so every tautomer or protonation state upserting this row writes
+                    # the same value. `standard_smiles` is lenient (returns the input on parse
+                    # failure) so a label never costs a finished calculation.
                     "canonical_smiles": standard_smiles(member.smiles),
                     "first_seen_at": now,
                 }
             )
         if member.structure_id:
-            # The address, its compound and its electronic state — no coordinates, no atom count.
-            # Both were columns until `002_structure_loses_the_columns_no_writer_fills.sql`: this
-            # builder and the conformer one below are the table's only writers and neither has
-            # either fact, so both hardcoded `0` and `{}` and every published geometry was recorded
-            # as having no atoms. The coordinates ride in `calculation_payload`, whole.
+            # The address, its compound and its electronic state; the coordinates ride whole in
+            # `calculation_payload`.
             structures.append(
                 {
                     "structure_id": member.structure_id,
                     "compound_id": member.compound_id or None,
-                    # **Never fabricated.** These were `or 0` and `or 1` while no projector set
-                    # either, so every anion and every radical this writer published was recorded
-                    # as a neutral closed-shell singlet — and the values are not unknowable: they
-                    # are inside the `structure_id` hash and are in the payload wherever the
-                    # geometry itself is. Where the payload says nothing they stay `None`, which
-                    # reads as "not recorded" rather than as a state nobody computed.
+                    # Never fabricated: where the payload says nothing these stay `None` ("not
+                    # recorded"), never a neutral singlet.
                     "charge": member.charge,
                     "multiplicity": member.multiplicity,
                     "origin_calc_ref": "",
@@ -159,9 +121,8 @@ def rows_for(
                 "value_canonical": fact.value,
                 "value_bool": fact.value_bool,
                 "value_text": fact.value_text or None,
-                # What the calculator said, in `reported_unit`. Falls back to the canonical value
-                # for a fact built without one (a boolean, a coded string, or a `PropertyFact`
-                # constructed outside `project._fact`), where the two are the same number.
+                # What the calculator said, in `reported_unit`; falls back to the canonical value
+                # for a fact built without one, where the two are the same number.
                 "reported_value": (
                     fact.value if fact.reported_value is None else fact.reported_value
                 ),
@@ -245,15 +206,10 @@ def rows_for(
                 "payload": record.payload,
             }
         ],
-        # **One row even when the record names no publication**, which is the *normal* case: the
-        # cache hook and the backfill construct none, so every primitive — the overwhelming
-        # majority of the corpus — used to publish no publication row at all. The shipped DDL says
-        # a site's grants and row-level security attach to this table rather than to `calculation`,
-        # so following that advice hid every primitive, and the manifest's `tenant_id` (there so
-        # one shared results database can hold two deployments' output without their provenance
-        # merging) was unreachable for them. The tenant is a property of the *writer* and is the
-        # one field always knowable at write time; the actor is not, and stays empty rather than
-        # being guessed — a calculation's identity excludes who asked for it.
+        # One row even when the record names no publication (the normal case for primitives),
+        # because a site's grants and row-level security attach to this table. The tenant is a
+        # property of the writer and always known; the actor is not part of a calculation's identity
+        # and stays empty.
         "calculation_publication": [
             {
                 "calc_ref": record.calc_ref,
@@ -359,24 +315,13 @@ CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "calculation_flag": ("calc_ref", "ordinal"),
 }
 
-# The columns whose *absence* changes what a row asserts, per table — as opposed to the ones whose
+# The columns whose *absence* changes what a row asserts, per table, as opposed to those whose
 # absence merely records less.
 #
-# **The distinction the "write down to the schema you find" rule was missing.** That rule is right
-# and stays: a site may not grant DDL to the runtime principal, so this image can be ahead of the
-# store, and refusing every row over one new provenance column would turn a schema *lag* into a
-# total publish outage. But the omission filter could not tell a new metadata column from the ones
-# carrying the science. Measured against a `property_value` one migration behind, missing
-# `value_canonical` and `uncertainty`: the delivery **returned normally** and was booked
-# `delivered`, and the row it wrote said `uncertainty_kind='reported'` with no uncertainty and no
-# `value_canonical` — the column the DDL itself calls *"THE predicate column ... Every range filter
-# reads this and nothing else"*. So the store's headline query silently returns nothing for those
-# rows while they positively claim an error bar they do not carry.
-#
-# A missing column here is therefore the same class of fault as a missing *table* and gets the same
-# answer: `SinkRejectedError` naming `sink_schema`. Only the four fact tables are listed, because
-# they are the only ones where a column carries a measurement rather than a description of one; the
-# conflict key is included in each because an upsert that cannot be keyed is not an upsert.
+# The store may lag this image's schema, so missing metadata columns are written down to. But a
+# missing value, uncertainty or conflict-key column would produce a row that claims something
+# false, so it is refused like a missing table (`SinkRejectedError` naming `sink_schema`). Only
+# the four fact tables carry measurements.
 REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
     "property_value": frozenset(
         {
@@ -409,24 +354,11 @@ REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
 
 # Columns a *blank* incoming value must never overwrite.
 #
-# `structure` is content-addressed: `structure_id` is a hash of the geometry, so two rows with one
-# id agree about the science and can differ only in how much of the surrounding provenance the
-# writer happened to know. Two builders below emit these rows -- a subject member, which knows the
-# id and nothing else, and a conformer, which knows which calculation produced the geometry -- and
-# the plain `DO UPDATE SET col = EXCLUDED.col` let whichever arrived second win. A member row
-# landing after a conformer row therefore blanked a real `origin_calc_ref`.
-#
-# `DO NOTHING` would have been the wrong repair: it fixes that ordering and breaks the mirror one,
-# where the member row lands first and the real origin never gets written. What is actually wanted
-# is that a writer who does not know a fact cannot erase it from one who does, which is what this
-# says. A member row is not given `record.calc_ref` instead, because the geometry a calculation
-# *ran on* is its input -- claiming this calculation produced it would be a false provenance.
-# `charge` and `multiplicity` are here for the same reason and are the case that makes the rule
-# load-bearing rather than tidy: a subject member usually knows only the address, while a conformer
-# knows the state its search computed at, so a member row landing second would blank a real charge —
-# and a blanked charge is not a missing field but a *wrong* one, since 0/1 is a state a query
-# matches. Their blank is `NULL` rather than `0`/`1`, because a neutral closed-shell singlet is a
-# real answer that must be allowed to overwrite an unknown.
+# `structure` is content-addressed, so rows sharing an id agree on the science and differ only in
+# how much provenance the writer knew. A subject-member row knows only the address; a conformer row
+# knows its origin calculation and electronic state. Whichever arrives second must not erase what
+# the other knew, so a blank leaves the stored value alone. The blank for `charge` and
+# `multiplicity` is `NULL`, because 0/1 is a real state that must be allowed to overwrite unknown.
 PRESERVE_ON_BLANK: dict[str, tuple[str, ...]] = {
     "structure": (
         "origin_calc_ref",
@@ -464,10 +396,8 @@ TABLE_ORDER: tuple[str, ...] = (
 _BLANKS: dict[str, str] = {
     "origin_calc_ref": "''",
     "compound_id": "''",
-    # `NULLIF(x, NULL)` is `x` (the comparison is NULL, so the CASE takes its ELSE branch), and
-    # `NULLIF(NULL, NULL)` is NULL — so the generated `COALESCE(NULLIF(EXCLUDED.charge, NULL),
-    # structure.charge)` keeps a stated value and leaves the stored one alone when nothing was
-    # stated. Spelled through the same generator as the other two rather than special-cased.
+    # With a `NULL` blank, `COALESCE(NULLIF(EXCLUDED.charge, NULL), structure.charge)` keeps a
+    # stated value and leaves the stored one when nothing was stated.
     "charge": "NULL",
     "multiplicity": "NULL",
 }
@@ -476,8 +406,8 @@ _BLANKS: dict[str, str] = {
 def upsert_statement(table: str, columns: Sequence[str], placeholder: str = "%s") -> str:
     """The Postgres-flavoured upsert for one table over `columns`.
 
-    Identifiers are literals from `TABLE_ORDER` and the row builder above — never anything a caller
-    supplied — so the only thing interpolated is structure. Every value is bound.
+    Identifiers are literals from `TABLE_ORDER` and the row builder, never caller-supplied; every
+    value is bound.
     """
     keys = CONFLICT_KEYS[table]
     updatable = [column for column in columns if column not in keys]
@@ -489,10 +419,9 @@ def upsert_statement(table: str, columns: Sequence[str], placeholder: str = "%s"
         return f"{statement} ON CONFLICT ({', '.join(keys)}) DO NOTHING"
     preserve = PRESERVE_ON_BLANK.get(table, ())
     assignments = ", ".join(
-        # `NULLIF(…, '')` collapses the two ways "the writer did not know" arrives -- SQL NULL and
-        # the empty string/zero/`{}` the row builders use -- so either one leaves the stored value
-        # alone. Written per column rather than per table because only the content-addressed
-        # tables want it; everywhere else a later write is genuinely newer information.
+        # `NULLIF` collapses both forms of "the writer did not know" (SQL NULL and the builder's
+        # blank), so either leaves the stored value alone. Only the content-addressed tables want
+        # this.
         f"{column} = COALESCE(NULLIF(EXCLUDED.{column}, {_BLANKS[column]}), {table}.{column})"
         if column in preserve
         else f"{column} = EXCLUDED.{column}"

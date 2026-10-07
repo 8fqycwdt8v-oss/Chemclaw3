@@ -1,9 +1,7 @@
-"""The Markdown knowledge graph and the git-backed note writer behind it (plan Phase 2).
+"""Settings for the Markdown knowledge graph and the git-backed note writer behind it.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 import os
@@ -27,73 +25,41 @@ class KgSettings(BaseSettings):
     a note now lands on that branch instead of on `note/<id>` beside it.
     """
 
-    # Directory of note files the indexer reads; retrieval is graph traversal over their
-    # [[wikilinks]] (D-004).
+    # Directory of note files the indexer reads; retrieval traverses their [[wikilinks]].
     knowledge_dir: str = "knowledge"
-    # Upper bound on `expand_note`'s link-expansion depth (SEC-4). The tool takes `hops` from
-    # the model; an unbounded value would traverse the whole graph. 1–2 is typical; clamp to
-    # this so a large value is bounded rather than rejected.
+    # Upper bound on `expand_note`'s model-supplied `hops`; larger values are clamped, not rejected.
     graph_max_hops: int = Field(default=3, ge=1)
-    # Upper bound on how many notes `find_notes` returns. It is a substring sweep over every
-    # current note, so a broad needle (a single letter, a common element symbol) matches most of
-    # the corpus and an uncapped hit list would flood the model context — the same failure mode
-    # `fingerprint_max_top_k` bounds for substructure search. Hitting the cap logs a warning, so
-    # a truncated result is never silent (D-066 #4).
+    # Upper bound on `find_notes` results; a broad substring matches most of the corpus. Hitting the
+    # cap logs a warning, so truncation is never silent.
     graph_max_results: int = Field(default=50, ge=1)
-    # How many hub notes `find_knowledge_gaps` reports (`chemclaw.kg.analytics.analyze`). Same
-    # argument as the two caps above and it was the one that stayed a literal: a number that
-    # shapes a model-facing result is a knob, not a constant.
+    # How many hub notes `find_knowledge_gaps` reports (`chemclaw.kg.analytics.analyze`).
     graph_analytics_top_n: int = Field(default=5, ge=1)
-    # Where a recorded note lands and where it is pushed (plan steps 2.7, 2.8): the writer commits
-    # onto this branch in the clone below and pushes it to this remote. It refuses to run on any
-    # other branch, so these two names are the whole of "where knowledge goes".
+    # Branch and remote a note is committed onto and pushed to; the writer refuses any other branch.
     note_base_branch: str = "main"
     git_remote: str = "origin"
-    # The clone `GitNoteWriter` commits into. Its working tree is *written*, which is why
-    # `_require_dedicated_checkout` refuses a checkout this process itself runs from and refuses a
-    # linked worktree: committing under the running application is how a deployment loses a file
-    # nobody wrote. (The private-worktree machinery that once made a submission never touch this
-    # tree went with the PR gate — there is no second tree any more.) Point it at a dedicated clone
-    # of the knowledge repo in production; the "." default only suits a dev checkout.
+    # The clone `GitNoteWriter` commits into. Its tree is written, so `_require_dedicated_checkout`
+    # refuses the process's own checkout and linked worktrees. Use a dedicated clone in production;
+    # "." only suits dev.
     note_repo_dir: str = "."
-    # Who the writer's commits are by. Stated rather than left to git, because git's fallback is
-    # `user.*` config nobody provisions (not the chart, not `deploy/knowledge-sync.sh`) and then a
-    # guess from the hostname and uid — `root@<id>.(none)` in a container, which git refuses, so
-    # every note commit failed `Author identity unknown` as a non-retryable `GitWriteError` and the
-    # note was dropped. `GitNoteWriter` hands both to every git child as `GIT_AUTHOR_*` and
-    # `GIT_COMMITTER_*`, so they win over any config the clone happens to carry. A service identity
-    # rather than a person's, because nobody in particular wrote an agent note. `.invalid`
-    # (RFC 2606) is never deliverable, so the default claims no mailbox; set a real address if the
-    # notes remote's forge requires one.
+    # Identity for the writer's commits, passed to git as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`; git's
+    # own fallback fails in a container. A service identity; `.invalid` (RFC 2606) claims no
+    # mailbox.
     note_committer_name: str = Field(default="ChemClaw", min_length=1)
     note_committer_email: str = Field(default="chemclaw-notes@chemclaw.invalid", min_length=1)
-    # Publishing a QM result as a graph note is best-effort: bounded attempts + its own timeout
-    # so a persistent failure gives up instead of retrying forever.
+    # Publishing a result as a graph note is best-effort: bounded attempts and its own timeout.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
     note_write_max_attempts: int = Field(default=3, ge=1)
-    # Wall-clock bound on a single git command in the note writer. A hung fetch/push (dead
-    # remote, credential prompt) is killed after this, so it can never deadlock the process-wide
-    # write lock; the failed activity then retries.
+    # Wall-clock bound on one git command, so a hung fetch/push cannot hold the process-wide write
+    # lock; the activity then retries.
     git_command_timeout_seconds: float = Field(default=60.0, gt=0)
 
     @property
     def knowledge_path(self) -> Path:
-        """Where the notes actually live on disk: `note_repo_dir / knowledge_dir`.
+        """Where the notes live on disk: `note_repo_dir / knowledge_dir`.
 
-        The writer (`chemclaw.kg.git_writer.GitNoteWriter`) writes into `note_repo_dir` — a
-        dedicated clone in any real deployment, never the service's own checkout
-        (`_require_dedicated_checkout`) — so a reader that resolved `knowledge_dir` alone
-        (relative to the process CWD) would be looking at a different tree than the one
-        notes are written to, and would see nothing the agent had ever recorded. Every reader
-        (`chemclaw.kg.graph.load_notes`, the report retrievers, the note-index rebuild,
-        `chemclaw.kg.validate`,
-        the ELN sync, the memory-job synthesizers) resolves its default notes directory through
-        this property instead of `knowledge_dir` raw, so read and write always agree on one
-        location. `note_repo_dir`'s dev default (".") makes this identical to today's
-        CWD-relative `Path(knowledge_dir)` — no behavior change until a deployment points
-        `note_repo_dir` at a dedicated clone. An absolute `knowledge_dir` (as a test/demo may
-        set directly, bypassing `_knowledge_dir_is_relative`) still wins outright: `Path.
-        __truediv__` discards the left operand when the right is absolute.
+        Every reader resolves its notes directory through this property so reads see the same tree
+        the writer commits into. An absolute `knowledge_dir` still wins outright
+        (`Path.__truediv__`).
         """
         return Path(self.note_repo_dir) / self.knowledge_dir
 
@@ -101,10 +67,8 @@ class KgSettings(BaseSettings):
     def _knowledge_dir_is_relative(self) -> Self:
         """`knowledge_dir` must be relative to the note repo, never an absolute path.
 
-        The writer builds a note path as `Path(note_repo_dir) / knowledge_dir / …`. An absolute
-        `knowledge_dir` would make `Path.__truediv__` discard `note_repo_dir`, so the write
-        would land outside the repo — the containment check then fails the write, confusingly.
-        Reject it at startup where the message is clear instead.
+        An absolute value would make `Path.__truediv__` discard `note_repo_dir` and send writes
+        outside the repo; reject it at startup with a clear message.
         """
         if os.path.isabs(self.knowledge_dir):
             raise ValueError(

@@ -1,34 +1,16 @@
-"""Validate a canonical ORD reaction: parseable structures + mass balance (plan 4.4).
+"""Validate a canonical ORD reaction: parseable structures and element conservation.
 
-Two independent checks, both necessary before a reaction enters the graph or the
-fingerprint index (G4):
+1. **Structure** — every component SMILES parses in RDKit.
+2. **Mass balance** — element conservation only: a product may not contain an element no input
+   supplies. Exports carry no stoichiometric coefficients, so atom counts cannot be compared without
+   rejecting valid oligomerizations.
 
-1. **Structure** — every component SMILES parses in RDKit; an unparseable structure is a
-   corrupt record, not a reaction.
-2. **Mass balance** — element conservation only: a product cannot contain an ELEMENT that
-   no input supplies (you cannot create atoms). The ELN export carries no stoichiometric
-   coefficients (a dimerization lists A once for 2 A → A–A), so comparing per-molecule
-   atom *counts* is unsound and falsely rejects valid reactions; element-set subsumption
-   is the strongest check that stays a sound necessary condition.
+This is a soundness filter, not a check that a reaction is real: any fabrication built from the
+inputs' elements passes (`aniline + methanol >> paracetamol`). A transcription is trusted because a
+source system recorded it. Stronger checks need data the exports lack; see
+`docs/planning/BACKLOG.md`.
 
-   **What this therefore does not catch, stated plainly** because it reads stronger than it
-   is: any fabrication whose product is built from elements the inputs already supply.
-   `aniline + methanol >> paracetamol` validates. So does `methane >> eicosane`, and
-   `glucose >> cholesterol`. Only a product introducing a *new element* is rejected, so this is a
-   soundness filter and never a check that a reaction is real. That check used to be the reviewer's
-   at the PR-gate; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the reviewer and
-   nothing replaced them here — a transcription is trusted because a source system recorded it.
-
-   Two stronger checks were considered and neither is available on this data. Comparing
-   heavy-atom counts needs a ceiling on how many times an input may repeat in a product, and
-   without coefficients that ceiling is arbitrary — it would reject a genuine oligomerization
-   to catch an invented one. Checking that products cannot outweigh inputs is sound at any
-   stoichiometry, but measured across every shipped fixture **no outcome records a mass**, so
-   it would be a no-op wearing the appearance of a control. Both need the export to carry
-   something it does not; see `docs/planning/DEFERRED.md`.
-
-Returns a list of human-readable problems (empty = valid), so the sync can log exactly why
-an entry was rejected and the CLI can report them.
+Returns a list of human-readable problems (empty = valid).
 """
 
 import asyncio
@@ -57,17 +39,12 @@ def _elements(smiles_list: list[str]) -> tuple[set[str], list[str]]:
 def validate_ord(reaction: OrdReaction) -> list[str]:
     """Return the reaction's validation problems (empty list if it is valid).
 
-    Checks that every component SMILES parses and that no product contains an element
-    absent from all inputs. Atom *counts* are deliberately not compared: the export has
-    no stoichiometric coefficients, so a valid dimerization (2 A → A–A with A listed
-    once, the normal ELN convention) would fail a per-molecule count check. Provenance
-    and role consistency are already enforced by the schema, so this focuses on the
-    chemistry.
+    Checks that every component SMILES parses and that no product contains an element absent from
+    all inputs. Atom counts are not compared because the export has no stoichiometric coefficients.
     """
     problems: list[str] = []
-    # Species introduced by a procedure step (a mid-run reagent, a quench, a wash) can supply
-    # elements too, so they count on the input side of the balance — otherwise a product atom
-    # legitimately coming from a workup reagent would be falsely flagged.
+    # Species introduced by a procedure step (mid-run reagent, quench, wash) supply elements too, so
+    # they count as inputs.
     input_smiles = [c.smiles for c in (*reaction.inputs, *reaction.step_components())]
     input_elements, bad_inputs = _elements(input_smiles)
     output_elements, bad_outputs = _elements([c.smiles for c in reaction.outcomes])
@@ -77,10 +54,8 @@ def validate_ord(reaction: OrdReaction) -> list[str]:
     if bad_inputs or bad_outputs:
         return problems  # cannot check balance without valid structures
     if reaction.unstructured:
-        # A citation-only record: the structures it *does* give are checked above, and the balance
-        # is not checkable at all — a named-only input may supply any element, and a named-only
-        # product contains elements nobody can list. Comparing the structured subsets would report
-        # a false violation for the first and pass vacuously for the second, so neither is run.
+        # A citation-only record: the given structures are checked above, but the balance is
+        # uncheckable when a species has no structure, so it is not run.
         return problems
 
     for element in sorted(output_elements):
@@ -92,18 +67,8 @@ def validate_ord(reaction: OrdReaction) -> list[str]:
 def _validate_source(adapter: ElnAdapter, label: str) -> int:
     """Map + validate every entry an adapter offers; print problems, return their count.
 
-    **A source that offers nothing counts as one problem.** The counter used to be the only signal,
-    so an empty source produced a success line — "OK: 0 entr(ies) ... are valid" — whose own text
-    was the tell nobody reads in CI, and a directory that does not exist read identically because
-    an adapter yields nothing rather than raising. A typo'd `export_dir`, or an ORD export missing
-    from the image, therefore reported OK while the structure and mass-balance gate on everything
-    entering the graph and the fingerprint index had quietly stopped running.
-
-    Zero is not legitimate here, and `main`'s empty *enabled set* is now the same answer for a
-    related reason rather than the opposite one: neither state is a run of this gate, so neither
-    may exit 0. What differs is only the sentence an operator reads — this one names a source to go
-    and fix, that one names the enable list — because nothing available here distinguishes a
-    genuinely empty ELN from a mis-mounted one.
+    A source that offers nothing counts as one problem: an empty or mis-mounted export would
+    otherwise report OK while nothing was checked.
     """
     entries = asyncio.run(adapter.fetch_new_entries(datetime.min.replace(tzinfo=UTC)))
     if not entries:
@@ -113,11 +78,8 @@ def _validate_source(adapter: ElnAdapter, label: str) -> int:
         )
         return 1
     problems = 0
-    # The same page-wide regex budget an ingest runs under, so `make eln-validate` fails on a
-    # binding whose patterns cost more than a page may spend rather than passing a manifest that
-    # then wedges the sync activity. Found by `tests/test_warehouse_binding.py`'s derived guard over
-    # every module that maps entries in a loop — which is the whole reason that guard is derived
-    # rather than a list of the callers somebody remembered.
+    # The same page-wide regex budget an ingest runs under, so a binding whose patterns are too
+    # expensive fails here rather than wedging the sync.
     with pattern_budget():
         for raw in entries:
             try:
@@ -135,44 +97,23 @@ def _validate_source(adapter: ElnAdapter, label: str) -> int:
 
 
 def main() -> int:
-    """CLI: map and validate every entry from the *enabled* ingest sources (plan 4.4).
+    """CLI: map and validate every entry from the *enabled* ingest sources.
 
     Run as `python -m chemclaw.ingest.eln.validate`. Exits non-zero if any entry is unmappable or
-    fails structure/mass-balance validation — and equally if there was nothing to check at all,
-    from either end: no source enabled that declares an ingest half, or an attached source that
-    offered no entries. Exit 0 means this gate ran.
+    invalid, and also if nothing was checked (no enabled ingest source, or a source offering no
+    entries); exit 0 means the gate ran.
 
-    **It asks the registry which adapters are attached rather than naming two of them.** This used
-    to construct `JsonExportAdapter` and `OrdJsonAdapter` by name and validate those, which was
-    right while they were the only two — and became a gate looking somewhere other than where the
-    data comes in the moment an ELN could be attached through a manifest (D-120). A site whose ELN
-    arrives that way was outside the only check that maps and mass-balances entries before they
-    land, and this printed `OK` regardless: the shape `CLAUDE.md` records as "a README is not a
-    gate", in the one file whose entire job is being one.
-
-    The source's *name* is the label, so a failure names the manifest an operator has to go and fix
-    rather than a format. Sources are resolved one at a time through `make_data_source`, not by
-    zipping the names list against the halves list: two independently-built lists of the same length
-    mispair silently, which for a validator would attribute one source's rejections to another.
+    Asks the registry which adapters are attached, so a manifest-attached ELN is covered. Failures
+    are labelled with the source's name, and sources are resolved one at a time through
+    `make_data_source` so rejections are never attributed to the wrong source.
     """
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
 
     names = active_ingest_source_names()
     if not names:
-        # **The sentence and the exit code have to agree, and they did not.** This printed "This is
-        # not a pass: nothing was checked" and returned 0 — so the only channel a caller reads by
-        # machine said the opposite of the only channel a human reads, and CI is a machine. Both
-        # siblings that print that sentence exit 1 (`validate_kg` appends it as a problem,
-        # `validate_sinks` returns it as one).
-        #
-        # The argument for 0 was that a retrieve-only deployment is a configuration rather than a
-        # failure, which is true and is not what this branch measures. `active_manifests` raises on
-        # an *unknown* name, so a typo is already loud; what reaches here silently is a name that is
-        # known and declares no `ingest:` half — an operator who meant `graph,eln-json` and wrote
-        # `graph` gets this line and a green gate, with the structure and mass-balance check on
-        # everything entering the graph and the fingerprint index having quietly stopped running.
-        # That mistake costs the corpus; the other costs a deployment with no ELN one line in its
-        # pipeline, which is why the message says to remove the target.
+        # Exit 1 to match the message: a known source with no `ingest:` half (e.g. `graph` instead
+        # of `graph,eln-json`) would otherwise pass with the gate not running. A deployment with no
+        # ELN should remove this target.
         print(
             "No ingest sources are enabled (CHEMCLAW_DATA_SOURCES), so no ELN entries were "
             "validated. This is not a pass: nothing was checked. If this deployment has no ELN, "

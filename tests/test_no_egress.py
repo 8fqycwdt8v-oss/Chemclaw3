@@ -1,24 +1,9 @@
-"""No first-party module reaches an external host (the "no external sources" decision, D-089).
+"""No first-party module reaches an external host (D-089: this system takes no external sources).
 
-The PubChem literature retriever was built, reviewed, and then rejected on scope: **this system
-takes no external sources**. Deleting the module records that as of today; it does not stop the next
-connector. The reason a guard is warranted rather than a `docs/planning/DEFERRED.md` line is that
-the original decision *was* already written down — TOOL-6 sat in `docs/planning/DEFERRED.md` as
-"blocked on choosing a source", which reads as an invitation, and duly got built. Prose stated the
-constraint; nothing enforced it.
-
-**What "external" means here, precisely.** Not "no URLs" — the codebase legitimately holds the
-addresses of things it is deployed alongside: the LLM endpoint, Temporal, Postgres, the Entra
-token endpoint, the git remote for the knowledge repo. Those are
-*infrastructure the operator runs or contracts for*, configured per deployment and pointed at
-internal hosts. What is banned is a **hardcoded third-party data source** — a literature API, a
-structure lookup, a vendor catalogue — where the address of somebody else's service is baked into
-first-party code.
-
-So the check is on **defaults in source, not on the ability to make a request**: any `https://`
-host literal that is not on the infrastructure allowlist is a finding. A deployment that points
-`llm_base_url` at a public endpoint is the operator's call and outside this test's reach; a module
-that ships pointing at `pubchem.ncbi.nlm.nih.gov` is not.
+Infrastructure the operator runs (LLM endpoint, Temporal, Postgres, Entra, the knowledge git
+remote) is configured per deployment and allowed. What is banned is a hardcoded third-party data
+source baked into first-party code, so the check is on host literals in source, not on the
+ability to make a request.
 """
 
 import re
@@ -26,38 +11,23 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 
-# First-party packages. `tests/` is excluded deliberately: a test may legitimately name a host in a
-# docstring or a mocked-transport URL, and the constraint is about what the *shipped* code reaches.
-# One entry since D-148: every first-party module lives under `src/`, so this cannot fall behind
-# the way an eighteen-name list did. `infra/` carries SQL, not Python, and `rglob` finds nothing
-# there anyway.
+# First-party code only: tests may name hosts in docstrings or mocked transports, and the rule is
+# about what ships. Every first-party module lives under `src/`.
 _PACKAGES = ("src",)
 
-# Hosts the system is *deployed with* rather than reaching out to: infrastructure an operator runs
-# or contracts for, appearing only as a per-deployment configurable default.
-#
-# Exactly one, which is the useful fact this list records. Everything else the stack talks to — the
-# LLM endpoint, Temporal, Postgres, Tower, the git remote — carries no host default in source at
-# all; it is a required config value, so a deployment cannot accidentally inherit somebody's
-# address. Entra's login host is the exception because it genuinely is Microsoft's: the tenant is
-# substituted into it, and that identity provider is the architecture's choice (F4), not a default
-# that could point elsewhere.
+# Hosts the system is deployed with rather than reaching out to. Everything else the stack talks to
+# is a required config value with no host default in source; Entra's login host is the exception
+# because the tenant is substituted into Microsoft's host.
 _INFRASTRUCTURE_HOSTS = {
     "login.microsoftonline.com",
 }
 
-# Userinfo is skipped rather than captured. Written without the `(?:…@)?` group this read the
-# *credential* as the hostname: a docstring example `https://svc:token@llm.internal/v1` — added to
-# explain why the endpoint is digested before it reaches a durable column — made this gate fail on
-# a third-party "host" called `svc`. The host of a URL with userinfo is what follows the `@`.
+# Userinfo is skipped, not captured: the host of `https://svc:token@llm.internal/v1` is what
+# follows the `@`.
 _URL = re.compile(r"https?://(?:[^/@\s]*@)?([A-Za-z0-9.-]+)")
 
-# Our own in-cluster Services and loopback. A connector is a Chemclaw component we deploy, reached
-# at
-# `chemclaw-connector-<name>` (the Helm Service) or at a loopback port in dev, so its address is the
-# *most* internal kind of host there is — the opposite of the third-party data source this guard
-# exists to catch. A prefix rule rather than one exemption per bundle: adding a connector must not
-# require editing this test, or the guard becomes friction that gets weakened instead of respected.
+# Our own in-cluster Services (`chemclaw-connector-<name>`) and loopback. A prefix rule so adding a
+# connector does not require editing this test.
 _INTERNAL_PREFIXES = ("chemclaw-", "127.0.0.1", "localhost")
 
 
@@ -77,11 +47,10 @@ def _host_literals() -> dict[str, set[str]]:
 
 
 def test_no_module_hardcodes_a_third_party_data_source() -> None:
-    """No shipped module names an external data host — the enforceable form of the decision.
+    """No shipped module names an external data host.
 
-    Fails loudly with the file and host, so the finding is actionable rather than a puzzle. If a
-    genuinely new piece of *infrastructure* is adopted, it is added to `_INFRASTRUCTURE_HOSTS` in
-    the same commit that adopts it — which is exactly the review moment this test exists to force.
+    Fails with the file and host. Adopting new infrastructure means adding it to
+    `_INFRASTRUCTURE_HOSTS` in the same commit, which is the review moment this test forces.
     """
     offenders = _host_literals()
     assert not offenders, "first-party code names external hosts: " + "; ".join(
@@ -90,15 +59,11 @@ def test_no_module_hardcodes_a_third_party_data_source() -> None:
 
 
 def test_the_source_registry_offers_no_external_source() -> None:
-    """The data-source registry is the one place a source is attached, so it is checked by name.
+    """The data sources this repository ships are checked by name.
 
-    A host-literal scan cannot catch a source whose address arrives entirely from config. Discovery
-    is the chokepoint: nothing becomes a retrievable source without a `datasource.yaml` on disk.
-
-    Checked against what the *repo ships* rather than what a deployment enables. `data_sources_dir`
-    is a search path, so a cluster can mount an extra folder — that is the seam working as designed
-    (D-120), and it is a deployment's own decision to audit. What must not drift unnoticed is a new
-    external corpus arriving in this repository.
+    A host-literal scan cannot catch a source whose address comes from config, and nothing becomes a
+    retrievable source without a `datasource.yaml`. A deployment mounting extra source folders is
+    its own decision to audit; what must not drift unnoticed is a new external corpus arriving here.
     """
     from chemclaw.ingest.sources.registry import discovered
 
@@ -109,64 +74,33 @@ def test_the_source_registry_offers_no_external_source() -> None:
         "lexical",
         "eln-json",
         "eln-ord",
-        # A programme's committed work, read from a JSON extract on disk (F4). It is on this list
-        # rather than exempted from it, and it reaches nothing: the commitments half opens a file,
-        # which is the same posture `eln-json` has and the reason both are unremarkable here. What
-        # would need an argument is a commitments half that *called* a portfolio vendor's API —
-        # a new kind of external source, which is exactly what this assertion exists to make
-        # somebody argue for.
+        # A programme's committed work, read from a JSON extract on disk; it reaches no host.
         "commitments-json",
         # Reads a corpus baked into the image at build time (STO-14). Named here rather than
         # exempted: it is the one sanctioned escalation of D-089's scope, and it earns its place
         # by being *local* — the two tests below hold it to that.
         "vendored",
-        # The corporate ELN in a lakehouse: the source that reaches a remote host this repository
-        # does not control, and the reason this assertion is written by hand. It is sanctioned
-        # because it is *the deployment's own system* — an internal ELN behind the same identity
-        # boundary as everything else here — not a third-party corpus, which is what D-089 was
-        # about. Two things hold it there: the address and credentials arrive entirely from
-        # configuration (the test above forbids a host literal anywhere in first-party code), and
-        # the source ships disabled, so a cluster reaches a warehouse only by naming it in
-        # `CHEMCLAW_DATA_SOURCES`.
-        #
-        # **One manifest, not one per vendor.** A second SQL warehouse is the same argument with a
-        # different `connection.driver:`, so it would arrive here as another row saying nothing new
-        # — which is exactly what the deleted `eln-snowflake` row was. What this assertion is for is
-        # a new *kind* of external source, and that is what a reviewer should have to argue for.
+        # The corporate ELN in a lakehouse: a remote host, sanctioned because it is the deployment's
+        # own system rather than a third-party corpus. Its address and credentials come only from
+        # config and it ships disabled. A second SQL warehouse is a different `connection.driver:`,
+        # not a new row.
         "eln-databricks",
-        # The one third-party *corpus* in this list, and the only row here that needs an argument
-        # rather than a restatement of an existing one. D-089's subject is a runtime dependency on
-        # somebody else's service — a corpus fetched from a vendor at question time, whose
-        # availability, licensing and content sit outside the deployment. Pistachio here is not
-        # that: it is the site's own licensed copy, loaded into the site's own lakehouse by the
-        # site, reached with the same credential and through the same peer as `eln-databricks`, and
-        # adding no egress destination that connector does not already have. It is also
-        # retrieve-only with no ingest half at all, so a patent reaction is cited as precedent and
-        # never becomes a knowledge-graph note. Argued in full in
+        # The site's own licensed patent corpus in its own lakehouse, reached through the same
+        # connection as `eln-databricks`, so it adds no destination. Retrieve-only: a patent
+        # reaction is cited as precedent and never becomes a note. See
         # `docs/decisions/D-2026-08-25-a-lakehouse-arrives-on-two-seams-not-one.md`.
-        #
-        # It carries two bindings onto one table and this row covers both: a `vector:` index for
-        # embedding search, and a `corpus:` block drained into the reaction-label index
-        # (`D-2026-08-25-a-corpus-is-evidence-not-an-eln`). Neither adds a destination — they share
-        # the connection above — so the sanction is unchanged by the second one.
         "pistachio",
-        # A mounted SMB/CIFS file share, and *not* an escalation of D-089 at all: it reaches no
-        # host. The share is a read-only volume the platform mounts, so the code sees a POSIX path
-        # exactly as `eln-json` sees a drop directory — no client, no credential in this repository,
-        # no network peer, which is why the host-literal scan above needed no new allowance for it.
-        # It is the deployment's own file server, and it ships disabled.
+        # A mounted read-only SMB/CIFS share: the code sees a POSIX path, with no client, credential
+        # or network peer. Ships disabled.
         "sharedrive",
     }
 
 
 def test_the_vendored_source_cannot_make_a_request() -> None:
-    """The vendored dataset is a file on disk, and this is what makes that structural.
+    """The vendored dataset module may not import an HTTP client.
 
-    D-089's real subject is a *runtime* dependency on somebody else's service. A build-time dataset
-    has none — but "we intend to only read from disk" is prose, and prose is exactly what D-089
-    already learned does not hold (TOOL-6 sat in `docs/planning/DEFERRED.md` as an invitation and
-    duly got built). So the constraint is enforced: the module may not import an HTTP client, which
-    means it cannot acquire one by accident during a later edit either.
+    A build-time dataset has no runtime dependency on anyone's service; this makes that structural
+    so a later edit cannot acquire one by accident.
     """
     source = (_ROOT / "src" / "chemclaw" / "ingest" / "sources" / "vendored_dataset.py").read_text(
         encoding="utf-8"
@@ -183,9 +117,8 @@ def test_the_vendored_source_cannot_make_a_request() -> None:
 def test_the_vendored_dataset_declares_its_provenance() -> None:
     """A shipped corpus carries a licence, a version and a checksum, or it does not load.
 
-    The escalation D-089 permits is "reviewed once, in a pull request, by a person who can read
-    its licence". That review is only meaningful if the thing reviewed is identifiable later, so
-    the manifest fields are required by the schema rather than encouraged by a README.
+    The review that admits it is only meaningful if the reviewed thing is identifiable later, so the
+    schema requires these fields.
     """
     import json
 

@@ -1,47 +1,22 @@
 """The browser suite's scripted workflows: what the mock model does on the kind cluster's e2e lane.
 
-The UI repository's real-browser suite (`Chemclaw3_ui` `e2e/kind/`) runs whole workflows against the
-whole system on kind with the scripted mock as its model, and eight of its scenarios used to skip
-there because nothing in `cli/storm_behaviours.py` could drive them: proposing a plan, storing and
-honouring a preference, citing a record in the answer's text, launching a job that stays running
-long enough to cancel, and a turn that streams long enough for a second participant to queue behind
-it. Each is a model *decision* a fixed plan cannot make, so these behaviours read the request
-(`mock_llm.Conversation`) through a `script` — and each still declares its calls as templates, so
-`_validate` checks every tool and argument name against the live surface at startup and
-`_within_declared` holds every scripted pass to them.
+These behaviours read the request (`mock_llm.Conversation`) to make the decisions a fixed plan
+cannot, still declaring their calls so `_validate` and `_within_declared` hold them to the live
+surface. A green scenario proves plumbing, not model judgement. Selected by `[[e2e:<name>]]` in the
+newest marked user message (`--catalogue e2e`):
 
-**What a green scenario against this file proves, and what it does not.** It proves the plumbing:
-the plan card, the approval and the gate; the preference store, the system-message section and its
-delivery to the model; the citation chip over an id a real search returned; the durable launch, the
-registry and the cancel; the shared-session queue. It says nothing about whether a model would
-decide to do any of it — that is `CHEMCLAW_KIND_LLM=live`'s question, and the suite keeps its
-real-model prompts for it.
+* `[[e2e:plan]]` — propose a `write_todos` plan declaring `compute_reaction_energy`; on a later
+  turn, run it (N2 + 3 H2 -> 2 NH3) and report "ran" or "refused".
+* `[[e2e:remember]]` — `remember_preference` forbidding dichloromethane (DCM).
+* `[[e2e:conditions]]` — amide-coupling conditions echoing the standing preferences received, in the
+  first solvent none excludes.
+* `[[e2e:cite]]` — search (`gather_evidence` or `expand_note`, plus `find_notes`), then cite what
+  came back.
+* `[[e2e:long-job]]` — `start_optimization_campaign` on the `measured` objective; quote the job id.
+* `[[e2e:slow]]` — stream the answer over `SLOW_STREAM_SECONDS`.
+* `[[e2e:artefact]]` — `create_exhibit`, arguments streamed in `ARTEFACT_FRAGMENTS` pieces.
 
-Its own module, and its own catalogue name (`--catalogue e2e`, served as the storm's list plus this
-one), for the reason `cli/delegation_behaviours.py` gives: `tests/test_live_storm.py` requires every
-storm entry to be reached by a check in `cli/live_storm.py`, and these are reached by a browser.
-
-**The markers.** Each is `[[e2e:<name>]]` in the user message — namespaced, so no storm name can
-collide — and the newest marked user message decides (`MockLlm.select`), so an unmarked follow-up
-("Go ahead with the approved plan.") continues the behaviour and a new marker replaces it.
-
-* `[[e2e:plan]]` — on the marked turn, `write_todos` with one step declaring
-  `compute_reaction_energy`, then "nothing runs until you approve it"; on any later turn of the
-  conversation, `compute_reaction_energy` on a fixed N2 + 3 H2 -> 2 NH3, then "ran" or "refused".
-* `[[e2e:remember]]` — `remember_preference` forbidding dichloromethane (DCM), then a confirmation.
-* `[[e2e:conditions]]` — no tool; amide-coupling conditions opening with the standing-preferences
-  entries the system message carried (or saying none arrived), in the first solvent none excludes.
-* `[[e2e:cite]]` — `gather_evidence` on a reaction anchor (or `expand_note` on a `reaction-…` id the
-  message names) plus `find_notes`; then cites the first record and the first note that came back.
-* `[[e2e:long-job]]` — `start_optimization_campaign` on the `measured` objective, seeded from the
-  message; then quotes the job id the launcher returned.
-* `[[e2e:slow]]` — no tool; streams its answer over `SLOW_STREAM_SECONDS`.
-* `[[e2e:artefact]]` — `create_exhibit` with a `document`, its arguments streamed in
-  `ARTEFACT_FRAGMENTS` pieces so the turn stream carries `exhibit_draft` frames before the
-  `exhibit` event; then a one-line answer pointing at the artefact.
-
-`deploy/kind/README.md` carries the same list with what a browser test asserts on each, and what
-the UI suite should send.
+`deploy/kind/README.md` lists what a browser test asserts on each.
 """
 
 from __future__ import annotations
@@ -56,9 +31,8 @@ from chemclaw.core.ids import stable_hash
 
 PLAN = "e2e:plan"
 
-#: The reaction the plan proposes and then runs. A fixed `quick` payload on purpose: the scenario is
-#: about the gate, not the job, so after the first run anywhere it is a D-011 cache hit and the
-#: approved turn answers inside `compute_reaction_energy`'s inline wait.
+#: The reaction the plan proposes and then runs. Fixed on purpose: the scenario tests the gate,
+#: so after the first run it is a cache hit answered inside the tool's inline wait.
 PLAN_PAYLOAD: dict[str, object] = {
     "kind": "reaction",
     "reactants": ["N#N", "[H][H]", "[H][H]", "[H][H]"],
@@ -95,9 +69,8 @@ PLAN_REFUSED = (
 def _plan(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
     """Propose on the marked turn; execute on any later turn of the same behaviour.
 
-    Which turn this is comes from the thread, not from state: a `write_todos` made after the marked
-    message and before this turn's message means the plan was proposed already, so this turn is the
-    one an approval (or a decline) was given for.
+    Decided from the thread: a `write_todos` after the marked message means the plan was already
+    proposed, so this turn is the one an approval (or decline) was given for.
     """
     results = conversation.tool_results
     if "write_todos" not in conversation.called_since_marker(PLAN):
@@ -117,8 +90,8 @@ PREFERENCE_KEY = "forbidden_solvent_dcm"
 PREFERENCE_VALUE = "Never use dichloromethane (DCM) as a solvent: it is forbidden in this lab."
 
 #: Candidate solvents for the amide coupling, in order of preference, each with the spellings an
-#: entry excluding it would use. The first one the standing preferences do not name is chosen, so
-#: with no preference the answer recommends DCM — which is what makes a lost section visible.
+#: excluding entry would use. With no preference the answer recommends DCM, which makes a lost
+#: preferences section visible.
 _SOLVENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dichloromethane (DCM)", ("dichloromethane", "dcm", "ch2cl2")),
     ("DMF", ("dmf", "dimethylformamide")),
@@ -126,8 +99,7 @@ _SOLVENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("2-MeTHF", ("2-methf", "methyltetrahydrofuran")),
 )
 
-#: The opening words of the conditions answer in each case — exported for the tests and for the UI
-#: suite, which asserts on them to tell "the section reached the model" from "it did not".
+#: The opening words of the conditions answer in each case, exported for tests and the UI suite.
 PREFERENCES_RECEIVED = "Standing preferences received:"
 PREFERENCES_ABSENT = "No standing preferences reached me."
 
@@ -135,8 +107,8 @@ PREFERENCES_ABSENT = "No standing preferences reached me."
 def _standing_entries(system_text: str) -> list[str]:
     """The entry lines of the standing-preferences section in `system_text`, or none.
 
-    Found by the section's own heading constant, then every `- ` line that follows it, so this
-    reads what `agent/preferences.standing_preferences_section` rendered and nothing else.
+    Found by the section's own heading constant, so this reads exactly what
+    `agent/preferences.standing_preferences_section` rendered.
     """
     from chemclaw.agent.preferences import STANDING_PREFERENCES_HEAD
 
@@ -154,8 +126,8 @@ def _standing_entries(system_text: str) -> list[str]:
 def _conditions(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
     """Amide-coupling conditions that keep to the standing preferences this request carried.
 
-    Deterministic by construction: the solvent is the first candidate no entry names. And it says
-    what arrived, so a browser test can assert the plumbing rather than infer it from the solvent.
+    Deterministic: the solvent is the first candidate no entry names, and the answer says what
+    arrived so a test can assert the plumbing.
     """
     entries = _standing_entries(conversation.system_text)
     excluded = " ".join(entries).lower()
@@ -181,18 +153,13 @@ def _conditions(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
 
 CITE = "e2e:cite"
 
-#: The structural anchor when the message names none: benzoic acid + aniline to N-phenylbenzamide,
-#: the transformation of the mock's seeded `uspto-amide-coupling-1/2` records.
+#: The structural anchor when the message names none: benzoic acid + aniline to
+#: N-phenylbenzamide, the transformation of the mock's seeded `uspto-amide-coupling-1/2` records.
 #:
-#: **The anchor decides whether, not only which.** `find_similar_reactions` drops every hit below
-#: `fingerprint_similarity_threshold` (0.3), so an anchor the corpus does not hold returns nothing
-#: and leaves no `reaction-…` id to cite. This used to be benzoic acid + *benzylamine*, on the
-#: belief that the search had no threshold: measured on the kind cluster, its nearest seeded
-#: reaction scored 0.168, the fingerprint leg returned 0 chunks, and the answer cited a note alone.
-#: This anchor scores 0.387 against the seeded records (whose reaction keeps EDC and HOBt on the
-#: left, which is why it is not 1.0). `tests/test_mock_llm_e2e.py` recomputes both scores offline
-#: against that record's shape, so a change of anchor, threshold or fingerprint cannot quietly
-#: return the lane to citing nothing.
+#: The anchor decides whether anything is found: `find_similar_reactions` drops hits below
+#: `fingerprint_similarity_threshold` (0.3), and this one scores about 0.39 against the seeded
+#: records. `tests/test_mock_llm_e2e.py` recomputes the score offline, so a change of anchor,
+#: threshold or fingerprint cannot silently leave nothing to cite.
 CITE_ANCHOR = "O=C(O)c1ccccc1.Nc1ccccc1>>O=C(Nc1ccccc1)c1ccccc1"
 CITE_QUERY = "amide coupling"
 _CITE_TEMPLATES = [
@@ -203,9 +170,8 @@ _CITE_TEMPLATES = [
     ToolCall(tool="find_notes", arguments={"text": CITE_QUERY}),
 ]
 
-#: An ELN/ORD record id as `kg.note.note_id_for_reaction` mints it: `reaction-<source>.<id>` or a
-#: bare `reaction-<id>`. A digit or a `.` qualifier is required, as the UI's chip pattern requires,
-#: so "reaction-energy" in prose is not mistaken for a record.
+#: An ELN/ORD record id as `kg.note.note_id_for_reaction` mints it. A digit or `.` qualifier is
+#: required, as the UI's chip pattern requires, so "reaction-energy" is not taken for a record.
 _REACTION_ID = re.compile(
     r"\breaction-(?=[A-Za-z0-9_-]*(?:[0-9]|\.[A-Za-z0-9]))[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]"
 )
@@ -221,9 +187,8 @@ CITE_NOTHING = "The search returned no ELN or ORD record and no knowledge note t
 def _cite(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
     """Search the store first, then cite the record and the note that actually came back.
 
-    A `reaction-…` id in the message is looked up directly (`expand_note` resolves a record the
-    graph does not hold against the transcription store); otherwise the structure search runs on
-    the message's reaction SMILES, or on `CITE_ANCHOR`. Nothing is cited that no tool returned.
+    A `reaction-…` id in the message is looked up with `expand_note`; otherwise the structure search
+    runs on the message's reaction SMILES or `CITE_ANCHOR`. Nothing is cited that no tool returned.
     """
     asked = conversation.marked_text(CITE)
     results = conversation.tool_results
@@ -261,12 +226,9 @@ def _cite(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
 
 LONG_JOB = "e2e:long-job"
 
-#: A campaign on the `measured` objective suspends on a person after its seed batch
-#: (`connectors/bo/workflows._measure`) for `bo_measurement_deadline_days`, so it is *running* for
-#: as long as a test needs and costs nothing while it waits — unlike a conformer search, whose
-#: duration is the workstation's. `bo.start_optimization_campaign` is funded by the shipped
-#: `connector_jobs_awaiting_answer`, and a cancel reaches the wait
-#: (`ParentClosePolicy.REQUEST_CANCEL`).
+#: A campaign on the `measured` objective waits on a person after its seed batch for
+#: `bo_measurement_deadline_days`, so it stays running as long as a test needs at no cost, and a
+#: cancel reaches the wait (`ParentClosePolicy.REQUEST_CANCEL`).
 _CAMPAIGN_PROBLEM: dict[str, object] = {
     "parameters": [
         {"kind": "continuous", "name": "temperature_c", "lower": 20.0, "upper": 100.0},
@@ -291,11 +253,9 @@ def campaign_spec(seed: int) -> dict[str, object]:
 def campaign_seed(text: str) -> int:
     """A seed derived from the message that asked, so each distinct ask is a distinct job.
 
-    **Why the seed, and why from the message.** The workflow id is a hash of the payload (D-011), so
-    a fixed payload rejoins the first campaign ever launched — after a cancel, a fresh one; while it
-    runs, the same one, for every conversation. The mock sees no session id, so the message is the
-    only per-conversation input it has: put a run tag in it (the UI suite's `runTag()`) and every
-    run launches its own campaign, while the same message twice is deliberately the same job.
+    The workflow id hashes the payload, so a fixed payload would rejoin one campaign for every
+    conversation. The mock sees no session id, so the message (with the UI suite's `runTag()`) is
+    the per-run input; the same message twice is deliberately the same job.
     """
     return int(stable_hash(text), 16) % 2**31
 
@@ -338,8 +298,8 @@ def _long_job(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
 # ------------------------------------------------------------------------------- a slow turn
 
 SLOW = "e2e:slow"
-#: How long the slow turn streams. Long enough for a second participant to send, see their place in
-#: the queue and withdraw; short enough that the scenario's own timeouts are not the bound.
+#: How long the slow turn streams: long enough for a second participant to queue and withdraw,
+#: short enough that the scenario's timeouts are not the bound.
 SLOW_STREAM_SECONDS = 20.0
 SLOW_TEXT = " ".join(
     f"Part {n} of a deliberately slow answer, streamed a few words at a time." for n in range(1, 13)
@@ -350,8 +310,8 @@ SLOW_TEXT = " ".join(
 
 ARTEFACT = "e2e:artefact"
 ARTEFACT_TITLE = "Amide coupling plan"
-#: Long enough that its fragments arrive over a visible stretch of the stream, so the pane can be
-#: seen filling in rather than appearing whole — the property the `exhibit_draft` event exists for.
+#: Long enough that its fragments arrive over a visible stretch of the stream, so the pane fills in
+#: rather than appearing whole.
 ARTEFACT_MARKDOWN = "\n".join(
     [
         "# Amide coupling plan",
@@ -407,8 +367,7 @@ E2E_BEHAVIOURS: list[Behaviour] = [
             )
         ],
         text=ARTEFACT_ANSWER,
-        # Spread over the fragments (`think_seconds / fragments` between them), so a browser sees
-        # several throttled draft frames rather than one.
+        # Spread over the fragments, so a browser sees several throttled draft frames.
         think_seconds=1.0,
     ),
 ]

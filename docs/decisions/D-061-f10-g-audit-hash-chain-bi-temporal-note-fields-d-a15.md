@@ -1,5 +1,7 @@
 # D-061 — F10-G: audit hash-chain + bi-temporal note fields (D-A15)
 
+**Superseded-by:** [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) (in part)
+
 **Context.** D-034 left the audit hash-chain "for Phase 6"; `architektur.md` §10.4 proposed
 bi-temporal note fields but never schematized them. Both are low-complexity, GxP-relevant.
 

@@ -1,11 +1,7 @@
-"""What the front door could not tell you about itself.
+"""The front door's own observability: turn histograms, telemetry setup and per-turn correlation.
 
-The load test had to measure turn latency from the client, because the server exposed none: there
-were no histograms, `api/app.py` never called `configure_telemetry` (so `CHEMCLAW_OTEL_ENABLED`
-was inert at the one process a chemist talks to), and every turn on a pod shared a single
-correlation id — bound once inside `build_agent`, which caches one agent per profile for the
-process's whole life. The last one is not an observability gap but an audit-trail defect: two
-chemists' tool calls were indistinguishable in the audit record.
+Each turn gets its own correlation id; a process-wide one would make two chemists' tool calls
+indistinguishable in the audit record.
 """
 
 import asyncio
@@ -107,10 +103,8 @@ def test_a_failed_turn_is_still_timed() -> None:
 def test_the_histogram_renders_cumulative_buckets_with_a_sum_and_count() -> None:
     """Prometheus buckets are cumulative and the `+Inf` bucket must equal the count.
 
-    Driven through `chemclaw_turn_duration_seconds`, which is the unlabelled histogram: this
-    asserts the *rendering*, and the bare form is the one whose `_sum`/`_count` carry no brace
-    group. The labelled form has its own test below, because the two emit different lines and a
-    single test over one of them would leave the other unrendered by anything.
+    Driven through the unlabelled `chemclaw_turn_duration_seconds`; the labelled form emits
+    different lines and has its own test below.
     """
     metrics = Metrics()
     for seconds in (1.5, 4.0, 25.0):
@@ -128,12 +122,8 @@ def test_the_histogram_renders_cumulative_buckets_with_a_sum_and_count() -> None
 def test_a_labelled_histogram_renders_one_series_per_label_set() -> None:
     """The label pairs sit inside the same brace group as `le`, and `_sum`/`_count` carry them too.
 
-    `chemclaw_tool_duration_seconds` gained a `tool` label because the unlabelled version pooled an
-    xTB call through the calc connector and a `read_attachment` into one distribution — so "which
-    tool is slow", the question its own docstring says it exists to answer, had no answer. What
-    that costs is a rendering shape the bare form does not have: `le` must join the declared labels
-    inside one `{...}`, not sit in a second group, or every bucket line is a different series from
-    its own `_sum`.
+    `chemclaw_tool_duration_seconds` is labelled by `tool` so slow tools can be told apart; `le` in
+    a second brace group would make every bucket a different series from its own `_sum`.
     """
     metrics = Metrics()
     metrics.observe("chemclaw_tool_duration_seconds", 0.02, labels={"tool": "load_skill"})
@@ -179,13 +169,10 @@ async def test_token_spend_is_counted_not_only_budgeted() -> None:
 
 
 def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The metric and the ledger must be fed by the same turn, not merely both exist.
+    """The metric and the ledger are fed by the same real turn.
 
-    Asserting that `runner.py` contains a `record_turn_cost(...)` call would pass on a call placed
-    where it never runs — the same trap that made the tracing check unable to tell a context manager
-    *created* from one *entered*. So this drives a real turn through `run_turn` and reads what the
-    sink was handed: the tokens must match the metric's, and the row must carry the identity the
-    metric structurally cannot.
+    A source check would pass on a call that never runs, so this drives `run_turn` and reads the
+    sink: its tokens must match the metric's and the row must carry the actor.
     """
     from chemclaw.agent.turn_cost import TurnCost
 
@@ -228,10 +215,9 @@ def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.Monke
     assert cost.completed is True
     assert cost.duration_seconds > 0
 
-    # And a turn that never answered is billed too, marked as such. Booked from the `finally` and
-    # not from the success path, because a turn that broke — or that a client hung up on — spent
-    # real tokens, and a ledger holding only the tidy ones is wrong in the direction that hides a
-    # runaway. This is the assertion that fails if the call moves onto the answered path.
+    # A turn that never answered is billed too, marked as such. Booking happens in the `finally`
+    # because a broken or abandoned turn still spent tokens; this fails if the call moves onto the
+    # answered path.
     class _BrokenAgent(ScriptedTurn):
         """A turn whose model call raises before it says anything."""
 

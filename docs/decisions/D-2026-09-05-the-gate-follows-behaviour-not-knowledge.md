@@ -7,6 +7,8 @@ is a credibility budget), D-161 (an ungated tier, and the self-confirmation guar
 (provenance on the evidence sweep) · **Narrows** D-005: the PR-gate stops being the answer to
 "an agent wrote something" and becomes the answer to "an agent would change how the agent behaves".
 
+**Superseded-by:** [D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert](D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert.md) (in part)
+
 ## Context
 
 D-005 put a human in front of everything an agent writes. It was written when this system described

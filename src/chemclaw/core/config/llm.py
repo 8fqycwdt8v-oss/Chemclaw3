@@ -1,9 +1,7 @@
-"""The LLM gateway seam (plan Phase F0) plus everything that rides its transport.
+"""Settings for the LLM gateway and everything that rides its transport.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from typing import Literal, Self
@@ -22,319 +20,120 @@ class LlmSettings(BaseSettings):
     owns that link.
     """
 
-    # **Every model call goes to one OpenAI-compatible gateway, and which vendor sits behind it is
-    # the gateway's business rather than this codebase's**
-    # (`D-2026-09-04-a-gateway-is-the-only-provider`). There is no provider field: an `llm_provider`
-    # naming a second SDK is what let `llm_base_url` be silently ignored on one of the two paths,
-    # so a network-exposed pod configured with an internal gateway URL booted clean and sent every
-    # prompt to the public vendor API. A destination that cannot be overridden by a mode selector
-    # cannot be bypassed by one.
-    #
-    # The gateway is reached with **one generic API credential** (`llm_api_key`) — deliberately
-    # *not* per-user Entra: the raw inference call is not a user-scoped resource (see
-    # docs/archive/plans/foundation-plan.md §0). The TLS CA bundle, timeout and retry budget shape
-    # the transport so an internal endpoint with a private CA works from config alone.
-    # `llm_temperature`/`llm_max_tokens` are the default generation params threaded into the agent
-    # (F0.3).
-    #
-    # **The defaults name the mock gateway on this machine**, so a fresh checkout is valid with no
-    # credential and no endpoint — and the worst a misconfigured deployment can do is dial its own
-    # loopback and be refused, loudly, on the first turn. The previous default was the public
-    # Anthropic API, which failed *quietly* and in the exfiltrating direction. `make live-up` and
-    # `infra/live/` start `chemclaw.cli.mock_llm` on exactly this address
-    # (`cli/mock_llm.MOCK_PORT`); both are still validated as non-empty below, because an empty
-    # base URL would hand the request back to the OpenAI SDK's own hardcoded public host.
+    # Every model call goes to one OpenAI-compatible gateway; which vendor sits behind it is the
+    # gateway's business. There is no provider field, so nothing can bypass this destination. One
+    # generic API credential (`llm_api_key`), not per-user Entra: inference is not a user-scoped
+    # resource. The defaults name the local mock gateway (`cli/mock_llm.MOCK_PORT`), so a
+    # misconfigured deployment fails loudly on loopback; an empty base URL is refused because the
+    # OpenAI SDK would fall back to its public host.
     llm_base_url: str = "http://127.0.0.1:8820/v1"
     llm_model: str = "mock"
-    # Explicit opt-in to run with the gateway on **this host** — the dev mock, or a gateway
-    # sidecar in the same pod. Every process that makes model calls refuses to boot on a loopback
-    # `llm_base_url` unless this is set (`core/llm_gateway.refuse_unconfigured_llm_gateway`),
-    # because the shipped default *is* a loopback address and a deployment that never overrode it
-    # would meet that as a refused connection on a chemist's first question — or, in a durable
-    # activity, inside a retry loop with nobody watching.
-    #
-    # A flag rather than the bind this check used to read. `api/middleware` exempted a loopback
-    # `service_host`, which is a fact about the front door's socket: it said nothing about a
-    # background worker, which is the process the guard turned out not to reach at all. A stated
-    # posture asks one question in every process kind.
+    # Opt-in to a gateway on this host (dev mock or same-pod sidecar). Every model-calling process
+    # refuses to boot on a loopback `llm_base_url` without it
+    # (`core/llm_gateway.refuse_unconfigured_llm_gateway`), since the shipped default is loopback.
     llm_allow_loopback_gateway: bool = False
-    # A `SecretStr`, like every other credential on this object
-    # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`): its `repr` is `**********`, so the
-    # value cannot reach a log line, a `model_dump()` or a pydantic error message through a route
-    # `core/logging.py`'s exact-match redaction has not been taught about. That filter stays and is
-    # still the control; this is the type making the same guarantee where the filter is not looking.
-    # Read it with `.get_secret_value()` — and note that an f-string does *not*, so a formatted
-    # credential renders as asterisks and fails as a 401 rather than leaking.
+    # A `SecretStr`, so the value cannot reach logs, dumps or validation errors; read it with
+    # `.get_secret_value()` (an f-string renders asterisks).
     llm_api_key: SecretStr = SecretStr("")
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
 
-    # Ask an OpenAI-compatible endpoint to report token usage while streaming.
-    #
-    # **On by default because the alternative failed silently.** `ChatOpenAI` only default-enables
-    # this when no custom base URL and no custom HTTP client are configured, and Chemclaw sets
-    # both — so the endpoint was never asked, no usage chunk arrived, and every turn on the graph
-    # engine metered zero while the budget guard went on admitting the next one. A setting rather
-    # than a hardcoded `True` because upstream's caution is real: an endpoint that rejects
-    # `stream_options` needs a way out that is not a code change.
+    # Ask the endpoint to report token usage while streaming. `ChatOpenAI` skips this with a custom
+    # base URL or HTTP client, which would meter every turn at zero. A setting so an endpoint that
+    # rejects `stream_options` can turn it off.
     llm_stream_usage: bool = True
 
-    # **A second endpoint to try when the first one is down** (AG-12). Empty — the default — means
-    # no failover at all, so an existing deployment is unchanged and the whole mechanism is off
-    # until somebody has a second endpoint to name.
-    #
-    # This is the one gap in the audit's agentic-engine list whose failure is total rather than
-    # degraded: with a single endpoint, one outage fails *every* turn for the whole fleet once
-    # `llm_max_retries` is spent, and neither the admission control nor the budget guard helps —
-    # both assume the endpoint answers. Every other open row costs a worse answer; this one costs
-    # the product.
-    #
-    # Only the base URL is required. The model and the credential fall back to the primary's,
-    # because the common case is a second replica of the same internal deployment rather than a
-    # different vendor — and a config that forced all three would make the cheap case verbose.
+    # A second endpoint to try when the first is down; empty disables failover. Without it one
+    # outage fails every turn once `llm_max_retries` is spent. Model and credential default to the
+    # primary's, since the common case is a second replica.
     llm_fallback_base_url: str = ""
     llm_fallback_model: str = ""
-    # A `SecretStr` for the reason `llm_api_key` above states — and it was missing from
-    # `core/logging.py`'s `_SECRET_SETTINGS` entirely until 2026-08-26, so the fallback
-    # endpoint's key was the one credential in this file that no redaction covered at all.
+    # A `SecretStr` for the same reason as `llm_api_key`.
     llm_fallback_api_key: SecretStr = SecretStr("")
-    # Unset by default, and that default is load-bearing: current frontier models reject an
-    # explicit `temperature` outright — `400 invalid_request_error: temperature is deprecated for
-    # this model` — so a config that always sent one failed *every* turn on the then-default
-    # provider. No test caught it because every test injects a fake chat client, so the parameter
-    # never reached a real API.
-    # `None` means "send no temperature and let the model use its own default"; a deployment on a
-    # model that still accepts one sets it explicitly. Threaded into the agent by
-    # `build_langgraph_agent`, which omits the key entirely when this is None (F0.3).
+    # `None` sends no temperature: current frontier models reject an explicit one with a 400. Set it
+    # for a model that accepts it; `build_langgraph_agent` omits the key when None.
     llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
 
-    # How hard the model is asked to think before answering — the deployment's default, which a
-    # profile may override per agent (`AgentProfile.effort`).
-    #
-    # **Unconditionally usable, and that is a widening this collapse bought.** It used to be
-    # refused on the Anthropic path by two guards, because `ChatAnthropic` folded the same kwarg
-    # into `output_config={'effort': ...}` **plus** an injected `thinking={'type': 'adaptive'}` —
-    # extended thinking, a different feature with a `temperature` conflict and a claim on
-    # `llm_max_tokens`. There was no intersection to publish; there were two parameters wearing one
-    # name. With one client there is one meaning, so both guards are gone and `low | medium | high`
-    # is simply what the gateway is asked for.
-    #
-    # **`None` means the key is absent from the request**, not present-and-null — the rule this
-    # module records having broken every turn once, and it binds harder here than for
-    # `temperature`: a 400 from a rejected parameter is deliberately *not* failed over
-    # (`llm_provider._failover_exceptions`), so a parameter an endpoint dislikes fails every turn
-    # rather than degrading to the fallback. Unset is therefore the shipped default, and a
-    # deployment turns it on against an endpoint it has checked.
-    #
-    # `ChatOpenAI` is `extra="ignore"`, so a client that stopped accepting this kwarg — or a
-    # gateway that does not understand it — would drop it in silence rather than raise, which is
-    # why `tests/test_llm_effort.py` asserts the **request payload** rather than the attribute on
-    # the constructed object. An earlier version of this comment cited `tests/test_llm_provider.py`
-    # for an attribute assertion; that file contains no `effort`, and the assertion it described is
-    # the one that missed all of the above.
+    # The deployment's default reasoning effort; a profile may override it (`AgentProfile.effort`).
+    # `None` omits the key, and stays the default because a 400 for a rejected parameter is not
+    # failed over (`llm_provider._failover_exceptions`). `ChatOpenAI` ignores unknown kwargs
+    # silently, so `tests/test_llm_effort.py` asserts the request payload.
     llm_effort: Literal["low", "medium", "high"] | None = None
-    # **The model's context window, and until this existed no number anywhere in this tree was
-    # one.** `agent_context_token_budget` is 100,000 by fiat, and neither it nor the static prefix
-    # was ever compared to what the endpoint will actually accept: the whole handling of the ceiling
-    # was retrospective, in `classify_model_failure`, after the request had been assembled, sent and
-    # rejected.
-    #
-    # 0 means undeclared, which is the honest default for an endpoint whose window this repository
-    # cannot know. Set it, and the conversation budget becomes the smaller of the configured budget
-    # and `window - llm_max_tokens` — and this request's own measured prefix comes off whichever
-    # wins (`agent/context_budget.py::effective_trigger`). **Declaring it is no longer what makes
-    # the prefix count**, which is the correction worth reading here: that used to be true, no
-    # deployment declared a window, and the ~43,000-token prefix was therefore charged against
-    # nothing in every shipped configuration. It is charged unconditionally now, so this setting
-    # does the one job its name says — bound the budget by what the endpoint can actually hold —
-    # and is a *second* bound rather than the only real one.
-    #
-    # Per deployment rather than per `model_routes` entry, because the routes name *tasks* and the
-    # window is a property of the endpoint every task shares. A deployment that routes tasks across
-    # models with different windows should declare the smallest.
+    # The model's context window in tokens; 0 means undeclared. When set, the conversation budget is
+    # the smaller of `agent_context_token_budget` and `window - llm_max_tokens`, minus the measured
+    # prefix (`agent/context_budget.py::effective_trigger`). Per deployment: with mixed-window
+    # routes, declare the smallest.
     llm_context_window_tokens: int = Field(default=0, ge=0)
-    # **The BPE encoding the endpoint's meter uses, as far as this deployment can state it.**
-    # `agent/context_budget.py` counts the request prefix with it instead of chars/4: measured
-    # 2026-09-16 on the `default` profile, that estimator is 18% high on the system message and
-    # 0.05% low on the tool schemas, and the clamp in `estimator_ratio` means an over-estimate is
-    # never refunded — so the 1,161 tokens between the two counts were thread the policy cut for
-    # nothing.
-    #
-    # **A name rather than a model id, because the model is deliberately unknowable.** Every call
-    # goes to one OpenAI-compatible gateway (`D-2026-09-04-a-gateway-is-the-only-provider`) that
-    # does not say what it fronts, so `tiktoken.encoding_for_model` has nothing to be handed. A
-    # gateway fronting a non-OpenAI vendor therefore gets a closer approximation rather than the
-    # bill, which is why the measured calibration ratio stays in front of it.
-    #
-    # **It must resolve from a cache baked into the image** (`TIKTOKEN_CACHE_DIR`): production is
-    # air-gapped and `tiktoken` fetches its merge table over HTTPS on a miss. With no cache the
-    # budget says so once at INFO and counts with chars/4 as before, so this never fails a turn and
-    # never reaches the network. Set it to the empty string to keep the estimator deliberately.
+    # BPE encoding `agent/context_budget.py` counts the request prefix with, instead of chars/4. A
+    # name, not a model id, because the gateway does not say what it fronts. Must resolve from the
+    # cache baked into the image (`TIKTOKEN_CACHE_DIR`); without it the budget logs once at INFO and
+    # falls back to chars/4, never touching the network. Empty keeps the estimator deliberately.
     llm_token_encoding: str = "o200k_base"
-    # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
-    # cheap model can run high-throughput/secondary steps (verification, classification) while
-    # the frontier model drives the main reasoning turn — without a second provider or a second
-    # import site (`build_chat_model(task)` stays the one place a model is built). Model ids are
-    # whatever the gateway serves under that name; a task with no entry falls back to `llm_model`,
-    # so an empty map (the default) is exactly today's single-model behavior. ENV override is JSON,
-    # e.g. CHEMCLAW_MODEL_ROUTES='{"verifier": "internal-small", "agent": "internal-large"}'.
+    # Per-task model routing: task name → model id, so cheap models run secondary steps;
+    # `build_chat_model(task)` stays the one place a model is built. Unrouted tasks use `llm_model`.
+    # JSON in the env, e.g. CHEMCLAW_MODEL_ROUTES='{"verifier": "internal-small"}'.
     model_routes: dict[str, str] = Field(default_factory=dict)
-    # Answer verification & confidence routing (plan F10-B). When `verifier_enabled`, a drafted
-    # answer is checked for citation faithfulness by an LLM-as-judge on the cheap routed model
-    # (task `"verifier"`, F10-E): each factual claim is scored against the evidence it cites,
-    # and an aggregate `confidence` in [0,1] is returned. An answer scoring below
-    # `verifier_confidence_threshold` is flagged for human review (the confidence + the
-    # unsupported claims ride on the turn's `AnswerEvent`), reusing the existing D-032 hold — no
-    # new gate. When disabled (the default), the verifier falls back to the deterministic report
-    # citation check (`report.harness.verify_claims`) so there is no network dependency and no
-    # behavior change.
+    # Answer verification: an LLM judge (task `"verifier"`) scores each claim against the evidence
+    # it cites into a `confidence` in [0,1]; below `verifier_confidence_threshold` the answer is
+    # flagged for review on its `AnswerEvent`. When disabled, the deterministic citation check
+    # (`report.harness.verify_claims`) runs instead.
     verifier_enabled: bool = False
     verifier_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
-    # The judge call's own deadline. It is the one awaited call between the model's last token and
-    # the AnswerEvent with no timeout beneath it, so a stalled judge endpoint was billed to
-    # `service_turn_timeout_seconds` (600 s) — and a teardown landing in that stall is what rolled
-    # back finished turns. Half `llm_timeout_seconds`' default and far under the turn deadline: a
-    # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
-    # deterministic citation gate rather than holding the finished answer hostage.
+    # The judge call's deadline, far under the turn deadline; on expiry the verifier degrades to the
+    # deterministic citation gate rather than holding the finished answer.
     verifier_timeout_seconds: float = Field(default=30.0, gt=0)
-    # Ceiling on the evidence rendered into one judge prompt, in characters (~a quarter of it in
-    # tokens). The prompt used to embed every distinct tool output of the turn whole, so a 30-step
-    # turn with ~20 kB results built a ~600 kB prompt — a judge call costing more than the turn it
-    # graded, and past some length exceeding the judge model's own context, where the failure is
-    # hard. The newest outputs are kept (they are what the answer was written from) and the
-    # omitted ones are named to the judge so a claim resting on unrendered evidence is not marked
-    # unsupported; the deterministic citation gate still checks every output regardless. Sized
-    # like `gather_evidence_max_chars`, the same instrument one layer down.
+    # Ceiling on evidence characters rendered into one judge prompt. The newest outputs are kept and
+    # omitted ones are named to the judge; the deterministic citation gate still checks every
+    # output.
     verifier_evidence_max_chars: int = Field(default=60_000, ge=1)
-    # The review band around the threshold, inside which a verdict is re-rolled and decided by
-    # the median (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss). Measured, not chosen: the
-    # judge's roll-to-roll spread is a margin effect — 0.000 over 32 rolls on grounded answers,
-    # up to 0.167 deviation from the median exactly where the threshold lives — so the default is
-    # that measured 0.167 rounded up to 0.2 (`make live-verifier-margin`, 2026-08-27, artifact in
-    # docs/archive/). Re-fitting it on a deployment's own answers is the same command. `0`
-    # switches the band off and restores the single-roll verdict. The cost is
-    # `verifier_band_rerolls` extra judge calls only on answers that land inside the band, each
-    # under its own `verifier_timeout_seconds`.
+    # Band around the threshold inside which a verdict is re-rolled and decided by the median, sized
+    # to the judge's measured roll-to-roll spread at the margin (`make live-verifier-margin` refits
+    # it). 0 restores single-roll verdicts. Costs `verifier_band_rerolls` calls only inside the
+    # band.
     verifier_review_band: float = Field(default=0.2, ge=0, le=0.5)
-    # How many times a flagged answer is sent back to be answered again, in the same turn
-    # (`D-2026-09-15-a-flagged-answer-that-goes-out-flagged-is-a-verdict-nobody-acted-on`).
-    # `agent/verifier.py` has always *marked* an unsupported answer and nothing routed it back
-    # — `D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` concedes the gap
-    # in those words while declining upstream's `RubricMiddleware` on four other counts.
-    #
-    # **Counts only agent-initiated rounds.** The bound is a per-turn local in
-    # `api/runner.py`, so a chemist's own follow-up starts a fresh allowance while the model
-    # cannot buy itself one — the distinction `loop_cap`/`spend_cap` cannot express, because
-    # they count uniformly. Each revision is still a model call and is still counted by both,
-    # which is the conclusion D-2026-08-16 reached about revisions and a cap they could skip.
-    #
-    # 0 is off, on the convention `core/config/agent.py` states for numeric ceilings. **It ships
-    # on, at 2, and the gate below is what makes that mean anything.** The loop reads a *verdict*,
-    # so it is reachable only behind `verifier_enabled` or `answer_shape_gate_enabled` — with both
-    # off, as they were, every non-zero value here was a no-op. `answer_shape_gate_enabled` now
-    # ships on, which is the deliberate pairing: a deterministic gate that marks an answer, and a
-    # bounded loop that tries to re-ground what it marked rather than only labelling it.
-    # `verifier_enabled` stays off — it adds a judge model call to every answer and
-    # `require_verifier_capability()` fails pod startup where the gateway cannot enforce structured
-    # output, which is a deployment's decision rather than this one.
-    #
-    # The cost is real and is accepted rather than argued away: a flagged turn pays up to two extra
-    # model calls, and one that stays flagged through both opens a durable review request
-    # (`answer_review_escalation_enabled`). 0 restores the previous posture exactly, and the
-    # off-path is asserted as a complete no-op rather than assumed.
-    #
-    # **Bounded against the turn deadline** by the cross-field check in `core/config/__init__.py`:
-    # each round is a model round-trip *and* a judge call, so a setting whose judging alone fills
-    # `service_turn_timeout_seconds` buys rounds the chemist can never be shown.
+    # How many times a flagged answer is sent back to be answered again within the same turn. Counts
+    # only agent-initiated rounds (a per-turn local in `api/runner.py`), so a chemist's follow-up
+    # gets a fresh allowance; each round is still counted by `loop_cap`/`spend_cap`. Reachable only
+    # behind `verifier_enabled` or `answer_shape_gate_enabled`. 0 disables.
+    # `core/config/__init__.py` bounds it against the turn deadline.
     answer_review_max_rounds: int = Field(default=2, ge=0)
-    # Whether an answer that is *still* flagged when the rounds run out is put in front of a
-    # person, as a durable `review` wait (`durable/awaiting.py`) opened by `api/runner.py`.
-    # Bounded rounds that end in silence are the gap this closes: the rounds were spent, the
-    # exhaustion counter moved, and the chemist got an answer marked for review that nobody was
-    # ever asked to look at — the bounded half of Paperclip's `maxReviewRounds` without the
-    # escalation that gives the bound its meaning.
-    #
-    # **On by default, unlike its neighbours above, because it has no trigger of its own.** It
-    # fires only where `answer_review_max_rounds` is non-zero *and* a check flagged the answer
-    # *and* the rounds bought nothing, so a deployment that turned the loop on has already decided
-    # the mark is worth acting on; an escalation that reaches nobody is what makes that spend buy
-    # nothing at all. Turned off, an exhausted answer ships marked and the only record is
-    # `chemclaw_answer_review_exhausted_total`, which is where this started.
-    #
-    # It opens a wait and changes nothing else: the answer still ships, and a wait that cannot be
-    # opened is logged and skipped rather than failing the turn
+    # Whether an answer still flagged after the review rounds opens a durable `review` wait
+    # (`durable/awaiting.py`) so a person looks at it. Fires only when rounds are enabled and bought
+    # nothing. The answer still ships; a wait that cannot be opened is logged and skipped
     # (`api/runner.py::_escalate_exhausted_review`).
     answer_review_escalation_enabled: bool = True
     verifier_band_rerolls: int = Field(default=2, ge=1)
-    # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
-    # one stalled extraction costs one row of the comparison and never the turn — the same
-    # degrade-per-item rule the verifier applies to the whole answer, one level down. Larger than
-    # the verifier's 30 s because the input is a whole procedure rather than a drafted answer, and
-    # far under `service_turn_timeout_seconds` so a slow endpoint cannot hold a finished turn.
-    #
-    # The model itself is routed through `model_routes` under the task key `"protocol-digest"`, so
-    # a deployment can point condensation at a cheap model without a second provider or a second
-    # import site. No enable flag: it ships on, and the deterministic degrade below every failure
-    # is what makes that honest with no credential present.
+    # Deadline for one protocol condensation call (`agent.condense`), per map unit so a stall costs
+    # one comparison row, not the turn. Routed via `model_routes["protocol-digest"]`; always on,
+    # with a deterministic degrade.
     protocol_digest_timeout_seconds: float = Field(default=45.0, gt=0)
-    # The ungrounded-parameter scan over a drafted answer: shapes a chemist would read as
-    # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
-    # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.
-    #
-    # **On by default, and the over-firing is accepted rather than denied.** It is a *shape*
-    # heuristic, not proof of grounding: it both misses (an invented number in a shape it does not
-    # know) and over-fires (a chemist's own figure quoted back — four such answers are pinned in
-    # `tests/test_verifier.py`, deliberately, so the rate cannot drift unnoticed). An answer marked
-    # for review that did not need it still costs trust in every mark after it. What changed is
-    # what a mark leads to: with `answer_review_max_rounds` shipping at 2, a mark sends the answer
-    # back to be re-grounded and, failing that, to a person — so an over-fire now costs a model
-    # call and possibly a review request, where before it cost only a label the chemist had to
-    # learn to discount. That trade is why this gate rather than `verifier_enabled` is the one
-    # turned on: it is deterministic and costs no model call of its own.
-    #
-    # The measured case for having it at all: a capability-boundary instruction cut invented
-    # parameter classes from 9 to 1 across the six worst live probes, and a stronger model still
-    # produced a complete branded HPLC method table *while writing* "not a validated method".
-    # Prompting is necessary and demonstrably not sufficient.
+    # Scan a drafted answer for ungrounded specification shapes (flow rate, gradient table,
+    # wavelength, column brand, ICH limit, polymorph form…) that no tool in the turn produced, and
+    # mark it for review. A shape heuristic that both misses and over-fires (pinned in
+    # `tests/test_verifier.py`); on by default because it is deterministic and costs no model call,
+    # and prompting alone does not stop invented parameters.
     answer_shape_gate_enabled: bool = True
-    # Embedding provider (plan F10-A). Selects how a note/query is embedded: `hash` is a
-    # deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
-    # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's
-    # `/embeddings` route (`embedding_model`), reusing the LLM base_url/credential/TLS
-    # transport. `embedding_dim` must match both the model's output width and the
-    # `note_index.embedding` column (`vector(N)` in infra/sql/012) — changing it is a new
-    # migration, like the fingerprint bit width.
+    # `hash` is an offline feature-hash for dev/CI (token overlap, not semantic);
+    # `openai_compatible` calls the gateway's `/embeddings` with `embedding_model`. `embedding_dim`
+    # must match the model and the `note_index.embedding` column (`vector(N)`); changing it is a new
+    # migration.
     embedding_provider: Literal["hash", "openai_compatible"] = "hash"
     embedding_model: str = ""
     embedding_dim: int = Field(default=1536, gt=0)
-    # How many embedded texts to keep in memory (STO-12). Every retrieval embeds its query, and
-    # the same query recurs constantly, so under `openai_compatible` each repeat was a network
-    # round trip on the interactive path. Entries are keyed by provider+model+dim as well as the
-    # text, so a config change can never serve the previous model's vectors. 0 disables the cache.
+    # In-memory embedding cache entries, keyed by provider+model+dim and text, so a config change
+    # never serves stale vectors. 0 disables.
     embedding_cache_size: int = Field(default=2048, ge=0)
-    # The most texts one provider request may carry. A reindex used to post the *entire* changed
-    # set as a single request — a first run over a large corpus exceeded typical batch/token
-    # ceilings, and because the failure was all-or-nothing under retry, the retry re-sent the
-    # same oversized payload. Chunking bounds the request; order is preserved across chunks.
+    # Most texts per embedding request; a reindex is chunked, preserving order.
     embedding_batch_size: int = Field(default=256, ge=1)
 
     @model_validator(mode="after")
     def _gateway_is_addressed(self) -> Self:
         """The gateway needs an address and a model name, or the client cannot be built.
 
-        **Unconditional, where this used to be scoped to one value of a provider field.** That
-        scoping is what let the other value ignore `llm_base_url` entirely: a deployment could set
-        a gateway URL, pass every validator, and have the client resolve to the public vendor host
-        anyway. With one client there is one destination, so the check that guards it applies to
-        every configuration there is.
-
-        Both fields default to the local mock gateway, so this fires only on a deployment that
-        explicitly blanks one — which is the case that matters, because an empty `base_url` is not
-        "no destination", it is the OpenAI SDK's own hardcoded public host. Checked at startup so a
-        half-configured endpoint fails here with a clear message rather than as an opaque
-        connection/404 error on the first model call.
+        Unconditional, so there is one destination for every configuration. Fires only when a field
+        is explicitly blanked; an empty `base_url` would be the OpenAI SDK's public host.
         """
         required = (("llm_base_url", self.llm_base_url), ("llm_model", self.llm_model))
         missing = [name for name, value in required if not value]
@@ -349,18 +148,8 @@ class LlmSettings(BaseSettings):
     def _embedding_provider_config(self) -> Self:
         """`openai_compatible` embeddings need a model name — the endpoint is already required.
 
-        The embedding path reuses the LLM transport, so a half-configured pair has to be rejected
-        at startup instead of surfacing as an opaque connection error on the first note-index or
-        query embedding deep in the retrieval path. `embedding_model` is the whole check:
-        it has no default, because no gateway serves embeddings under a name this repository
-        can guess.
-
-        **`llm_base_url` is deliberately not re-checked here, and saying so is the point.** It was,
-        with a docstring claiming the re-check caught a deployment that blanked it — and the branch
-        could never run: `_gateway_is_addressed` above is unconditional and declared first, so
-        pydantic raises on an empty base URL before this validator is reached, whatever the
-        embedding provider is. The test that covered it passed on the *other* validator's message.
-        Nothing is weakened by the removal; the surviving check is strictly the wider one.
+        `embedding_model` has no default because no gateway serves embeddings under a guessable
+        name. `llm_base_url` is already enforced by `_gateway_is_addressed`, which runs first.
         """
         if self.embedding_provider == "openai_compatible" and not self.embedding_model:
             raise ValueError(

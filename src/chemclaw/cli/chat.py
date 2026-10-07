@@ -1,30 +1,9 @@
 """Terminal CLI for driving the Chemclaw agent locally — the testing front door.
 
-Why this exists: the production ingress is Teams/Copilot Studio with native Entra-ID SSO
-(architektur.md §7), so day-to-day there is no way to actually *talk* to the wired agent from a
-checkout. This CLI is that seam for development and testing: it builds the same
-`build_langgraph_agent` the production host builds, opens the MCP capability subprocesses for the
-session, and runs a turn-taking chat (or a single scripted question) against a live model.
-
-Identity is the one thing that differs from production. Entra-ID auth (F4, D-043) is a front-door
-OIDC flow — it validates a browser-obtained token — and this is a terminal tool with no such token
-to resolve a real principal from. Rather than pretend, the CLI runs only in explicit **admin mode**
-(`--admin`): it bypasses **authentication** and stamps the ambient identity
-(`chemclaw.core.identity_context`, the same seam the front door stamps per turn) with the configured
-admin actor (`settings.cli_admin_actor`) and the roles in `settings.cli_admin_roles`, which is empty
-by default.
-
-**It does not bypass authorization.** Under `entra_required` the tool gate and the expensive-trigger
-gate still apply, and an admin holding no privileged role is refused every expensive job and every
-knowledge write — measured, 3 of 20 tools and 5 of 5 expensive actions refused on the shipped
-config. That is the intended posture; a deployment wanting a full-access local seam populates
-`cli_admin_roles` deliberately. The roles used to be derived from `skill_role_gates`, a *visibility*
-map, so one overlapping role name silently made this terminal fully privileged.
-
-`resolve_identity` is the seam where a non-admin branch could resolve identity
-from some other token source in the future; today that branch fails loudly rather than silently
-running unauthenticated. Requiring the flag keeps "no authentication" a conscious choice, not a
-default — the deployed posture, in a dev tool.
+Builds the front door's graph, opens the MCP connectors, and runs a chat (or one `-m` question)
+against a live model. With no OIDC token to validate, it runs only with `--admin`, which bypasses
+authentication and stamps `settings.cli_admin_actor` with `settings.cli_admin_roles` (empty by
+default) as the ambient identity. Authorization still applies.
 
 Run: `make chat`, `uv run chemclaw --admin`, or one-shot `uv run chemclaw --admin -m "…"`.
 """
@@ -56,61 +35,32 @@ from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_t
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 
-# The two REPL lines that are operator commands rather than questions — the terminal's counterpart
-# to `GET /sessions/{id}/plan` and `POST /sessions/{id}/plan/decision`.
+# Operator commands, not questions: the terminal's `GET /sessions/{id}/plan` and `POST
+# /sessions/{id}/plan/decision`.
 _PLAN_COMMANDS = {"/plan", "/approve"}
 
-# The terminal's counterpart to `GET /workflows/{name}` and `POST /workflows/{name}/approval`, and
-# it exists for the reason those two are routes rather than tools: a workflow must not be able to
-# approve itself, so the approval is typed by a person on whatever surface that person is using.
-#
-# **Without this the CLI had no approver at all.** A composed workflow is keyed `(owner, name)` and
-# the owner is the ambient actor — `resolve_identity`'s `cli_admin_actor` here, the request
-# principal's oid at the front door. Those agree once identity is enforced and are three different
-# strings in a dev deployment (`admin@localhost`, `dev-user`, `service-account`), so a workflow
-# composed at this prompt was invisible to the HTTP route and its job steps could never be
-# released. Driven before this command existed: compose here, `GET /workflows/{name}` answers 404.
+# The terminal's `GET /workflows/{name}` and `POST /workflows/{name}/approval`: a workflow must not
+# approve itself, so a person types the approval. A workflow is keyed `(owner, name)` on the ambient
+# actor, which in a dev deployment differs between the CLI and the front door, so the CLI needs its
+# own approver.
 _WORKFLOW_COMMANDS = {"/workflows", "/approve-workflow", "/forget-workflow"}
 
-# The session id every CLI run uses. A fixed name, not a fresh uuid: it is the checkpointer's
-# `thread_id`, so under `session_store=postgres` it makes a terminal session resumable across
-# invocations, which is the CLI's actual use — and the CLI is single-user admin by construction
-# (`resolve_identity`), so there is no one to collide with. The resumability is
-# `checkpointer.process_checkpointer`'s to deliver; until that function existed this comment
-# described a property nothing provided.
+# The session id every CLI run uses: fixed, so it is a stable checkpointer `thread_id` and a
+# terminal session resumes across invocations under `session_store=postgres`
+# (`checkpointer.process_checkpointer`). Single-user admin, so nothing collides.
 _CLI_SESSION_ID = "cli"
 
-# What a one-shot `-m` run exits with when the answer it printed is incomplete. Distinct from `1`,
-# which `main` already means "this never started" by — a script has to be able to tell "no answer"
-# from "an answer you must not treat as the whole one", and exit 0 said neither.
+# Exit status of a one-shot `-m` run whose printed answer is incomplete; `1` means it never started.
 _DEGRADED_EXIT = 2
 
 
 class CliTurn(NamedTuple):
     """One CLI turn: the answer, and the sentence saying what is missing from it.
 
-    **This used to be a bare `str`, which is the whole defect.** Driven on a real compiled graph
-    with a real cap, `converse` returned — and the CLI printed on stdout, with exit code 0 — the
-    interim sentence of a turn that had been stopped mid-work:
-
-        === CLI, LOOP-CAPPED (cap=2) ===  stdout: 'Still checking; one more source.'
-        === CLI, COMPLETE   (cap=20) ===  stdout: 'FINAL: pKa 3.49, confirmed against ELN batch 12.'
-
-    and at a cap of 1 whose first turn said nothing, a bare newline and exit 0. Nothing in the
-    shape of either told a reader, or a script, which they had.
-
-    The signal was already in hand: `converse` calls `ainvoke`, so it holds the final state, and
-    `durable/template_activities.py` reads `loop_capped(result)` off exactly that.
-    `agent/loop_cap.py`'s own docstring reasons about this file — "a surface marks it partial
-    (`chemclaw.api.runner` does this off `loop_hit_cap`)" — and gave it no reader.
-
-    **What was not missing is a log line**, and saying so is the point: `enforce_loop_cap` logs
-    `WARNING the model loop hit its N-iteration cap`, so stderr was never empty. It arrived among
-    fifteen connector warnings, said nothing about the answer printed after it, and left a piped
-    run's only machine-readable channel — the exit code — saying success. A log line about the loop
-    is not a notice about the answer.
-
-    `notice` is empty for a whole turn, which is what keeps a clean run's output byte-identical.
+    `converse` holds the final state, from which a capped or empty turn is detectable; without a
+    notice a loop-capped turn's interim sentence would print as the answer with exit 0. A log line
+    about the loop is not a notice about the answer. `notice` is empty for a whole turn, so a clean
+    run's output is unchanged.
     """
 
     answer: str
@@ -120,14 +70,9 @@ class CliTurn(NamedTuple):
 def turn_notice(state: Mapping[str, Any], answer: str) -> str:
     """One line naming what is missing from `answer`, or `""` when nothing is.
 
-    The three endings a *returned* state can carry, in the order `api/runner._settle_outcome`
-    ranks them — both caps before the empty answer, because a capped turn does deliver the partial
-    answer it managed and ranking the empty case first would make either cap unreachable on a turn
-    that produced nothing.
-
-    Deliberately not shared with `durable.template_activities.AgentStepResult.notice`: that one is
-    spliced into prose a later template step reads, this one is a terminal line for a person, and
-    `cli` importing `durable` would pull Temporal into the terminal front door to save a sentence.
+    Ranked as `api/runner._settle_outcome` ranks them: both caps before the empty answer. Not shared
+    with `durable.template_activities.AgentStepResult.notice`, which is prose for a later step, and
+    importing `durable` would pull Temporal into the CLI.
     """
     if loop_capped(state):
         return "incomplete: the turn reached its model-call cap before it finished"
@@ -141,18 +86,9 @@ def turn_notice(state: Mapping[str, Any], answer: str) -> str:
 def resolve_identity(*, admin: bool, actor: str | None) -> tuple[str, frozenset[str]]:
     """Resolve the caller's audit actor and ambient roles — the CLI's identity seam.
 
-    Returns `(actor, roles)`, stamped as the ambient identity for the whole CLI session so audit
-    attribution, the authorization gate, and role-scoped skill visibility all see it (F4). This CLI
-    has no browser OIDC token to validate, so it runs only in admin mode.
-
-    The roles come from `settings.cli_admin_roles` — empty by default, so `--admin` confers identity
-    and no entitlement. They used to be the union of `settings.skill_role_gates`'s values, which
-    coupled skill *visibility* to tool *authorization* through nothing but a shared role name.
-
-    Args:
-        admin: Run in admin testing mode, bypassing Entra *authentication* (this CLI has no token
-            to check). Authorization still applies.
-        actor: Override the audit actor label; defaults to `settings.cli_admin_actor`.
+    Returns `(actor, roles)`, stamped for the whole session. Refuses unless `admin`; roles come from
+    `settings.cli_admin_roles`, so `--admin` confers identity, not entitlement. `actor` overrides
+    `settings.cli_admin_actor`.
     """
     if not admin:
         raise SystemExit(
@@ -169,30 +105,15 @@ def _build_cli_agent(
 ) -> Any:
     """Compile the graph for a CLI session from parsed args, the actor, and the open connectors.
 
-    `actor` is only the build-time audit fallback (used if a code path runs outside the ambient
-    identity `_run` stamps for the session, e.g. a background task); the ambient identity is what
-    audit/authz/skill-scoping actually read at call time.
-
-    **There is no credential preflight here any more, and saying so is the point.** D-037's eager
-    check raised on a missing `ANTHROPIC_API_KEY` at construction; with one OpenAI-compatible
-    gateway (`D-2026-09-04-a-gateway-is-the-only-provider`) an empty `CHEMCLAW_LLM_API_KEY` is a
-    legitimate configuration — many internal gateways ignore the bearer, which is what
-    `_KEYLESS_PLACEHOLDER` exists for — so there is nothing to preflight and a claim that there is
-    would be a control that reads as one and is not. A gateway that *does* want a credential
-    answers 401 on the first turn, and `_repl` keeps the session alive across it. What still fails
-    at construction is a *misconfiguration*: a blanked `CHEMCLAW_LLM_BASE_URL` is refused by
-    `LlmSettings`, and `main` below turns that into one sentence and an exit code.
-
-    **Takes the connectors, because a graph binds its tools at construction.** MAF appended them
-    per `agent.run`, so the agent could be built before they were open; a compiled graph cannot.
-    That is why `_run` now opens the connectors first and builds second — the ordering is the
-    engine's, and it applies here exactly as it does to a front-door turn.
+    `actor` is only the build-time audit fallback; audit, authz and skill scoping read the ambient
+    identity `_run` stamps. No credential preflight: an empty `CHEMCLAW_LLM_API_KEY` is legitimate
+    for keyless gateways, a gateway that wants one answers 401 on the first turn, and `_repl`
+    survives it. A blank `CHEMCLAW_LLM_BASE_URL` is refused by `LlmSettings` and reported by `main`.
+    Takes the connectors because a graph binds its tools at construction.
     """
-    # `--audit-postgres` now only *forces* the durable sink; omitting it no longer means log-only,
-    # because `agents.audit.default_audit_sink` already gives a Postgres-configured deployment the
-    # durable trail. The flag remains for the CLI's real case: an operator pointed at a database
-    # for the calculation cache who wants the audit chain written too, without switching
-    # `session_store` for a terminal session.
+    # `--audit-postgres` forces the durable sink; without it `default_audit_sink` still gives a
+    # Postgres-configured deployment the durable trail. The flag serves an operator who wants the
+    # audit chain written without switching `session_store`.
     sink: AuditSink | None = PostgresAuditSink() if args.audit_postgres else None
     return build_langgraph_agent(
         actor=actor, audit_sink=sink, connectors=list(connectors), checkpointer=saver
@@ -207,50 +128,20 @@ async def converse(
 ) -> CliTurn:
     """Run one turn on the graph under `session_id` and return its answer **and its notice**.
 
-    Reusing one `session_id` across successive calls is what makes the CLI a multi-turn
-    conversation: it is the checkpointer's `thread_id`, so each turn continues the thread the last
-    one left. Which store that is, and how long it lasts, is `checkpointer.process_checkpointer`'s
-    decision — and until that function existed this sentence was false, because the graph was built
-    with no checkpointer at all and every turn started empty.
-
-    `earlier` is the operator's previous prompts in this REPL, oldest first; see the comment on the
-    stamp below for why the CLI's window is the process rather than a stored transcript.
-
-    **The `session=` parameter is gone, and so is the reason it was mandatory.** Under MAF the
-    harness middleware raised "ToolApprovalMiddleware requires an AgentSession" on a session-less
-    `agent.run`, so the CLI could not take a single turn under the configuration the shipped Helm
-    chart sets (D-152). A thread id is a string in a config dict; there is nothing to be absent.
+    `session_id` is the checkpointer's `thread_id`, so reusing it continues the conversation; the
+    store is `checkpointer.process_checkpointer`'s choice. `earlier` is the operator's previous
+    prompts in this REPL, oldest first.
     """
-    # The chemist's own words, stamped for the turn. This path invokes the graph directly rather
-    # than through `api.runner`, so it is the second and last place a real user message enters the
-    # system — and `protocols` refuses a `basis="stated"` quote it cannot check against one
-    # (`core.turn_text`). Reset in a `finally` so a failed turn does not leak one prompt into the
-    # next.
-    #
-    # **`earlier` is what keeps this consistent with the front door**, which reads the thread's
-    # user turns out of the session transcript so a constraint stated two turns ago is still
-    # quotable. This CLI writes no transcript — it drives the graph, and `_record_transcript` is
-    # the runner's — so its thread memory for this purpose is the process it is running in: the
-    # REPL passes what has been typed into it. The bound is `core.turn_text`'s in both cases, so
-    # what counts as the chemist's own words is the same on either surface; only how far back each
-    # can see differs, and this one sees less.
+    # Stamp the chemist's own words for the turn, so `protocols` can check a `basis="stated"` quote
+    # (`core.turn_text`); reset in a `finally`. The CLI writes no transcript, so `earlier` (this
+    # process's prompts) stands in for the thread's user turns the front door reads; the bound is
+    # `core.turn_text`'s on both surfaces.
     token = set_current_user_texts([*earlier, prompt])
     try:
-        # **The cap ambients, which this path opened none of.** Both caps are attached by the
-        # harness middleware whatever the driver does, so a CLI turn was never uncapped — but
-        # without a watch the loop cap falls back to the per-branch channel snapshot, so a `task`
-        # fan-out here gave every branch the whole iteration allowance (measured at 193 model calls
-        # against a cap of 25 at width 8). The notice this function returns is read off the state
-        # `ainvoke` gave back, so it is unaffected either way.
-        #
-        # **Two consequences worth naming rather than discovering.** The repeat guard is one of
-        # these ambients, so an identical tool call is now *refused* at this prompt as it is at the
-        # front door — driven, six identical `ls` calls in one turn produce four refusals where
-        # this path executed all six. That is the guard working, and it is a behaviour change on
-        # this surface. And the ledger is passed but nothing fills it here: `set_turn_usage` is
-        # written by `api/graph_stream.py` and by a template step's `_StepMeter`, neither of which
-        # is this path, so the spend cap still reads the channel alone and an off-stream call is
-        # still counted by nothing. The fan-out half is what this closes.
+        # The cap ambients, as every turn driver opens them: without the watch a `task` fan-out
+        # would give every branch the whole iteration allowance. The repeat guard is among them, so
+        # identical tool calls are refused here as at the front door. Nothing fills the token ledger
+        # on this path, so the spend cap reads the channel alone.
         with turn_caps(TurnUsage(), closing=f"CLI session {session_id}"):
             result = await agent.ainvoke(
                 turn_input(prompt),
@@ -258,9 +149,8 @@ async def converse(
             )
     finally:
         reset_current_user_texts(token)
-    # Read off the state this call *returned*, which is the only place either cap's flag lives —
-    # both channels are untracked, so `get_state()` answers `False` for a turn that was capped
-    # (`agent/spend_cap.spend_capped` says so in its own `Args`).
+    # Read off the returned state, the only place either cap's flag lives: both channels are
+    # untracked, so `get_state()` would answer `False`.
     answer = answer_text(result)
     return CliTurn(answer, turn_notice(result, answer))
 
@@ -268,31 +158,20 @@ async def converse(
 async def _run(args: argparse.Namespace) -> int:
     """Resolve identity, build the agent, open its MCP subprocesses, and dispatch.
 
-    Returns the process's exit status, which is `_DEGRADED_EXIT` when a one-shot `-m` run printed
-    an answer it had to mark incomplete. The exit code is the only channel a piped run has, and it
-    said success for a turn stopped halfway through its work.
-
-    Identity is stamped ambient (`chemclaw.core.identity_context`) for the whole session — a CLI
-    run is
-    one actor throughout, unlike the multi-user front door, which stamps it per turn (F2/F4) —
-    and reset on exit. The connectors are connected once for the whole CLI session and torn down on
-    exit, which is sound here for the same reason it is not in the front door: a CLI run is
-    single-user and single-threaded, so one connection cannot be shared across identities. An
-    unreachable connector is skipped with a warning rather than aborting the session — the same
-    degrade-loudly posture the front door takes.
+    Returns the exit status: `_DEGRADED_EXIT` when a one-shot `-m` run printed an answer marked
+    incomplete, since the exit code is a piped run's only channel. Identity is stamped once for the
+    whole session and reset on exit. Connectors are opened once for the session (safe here: one
+    user, one thread); an unreachable one is skipped with a warning.
     """
     actor, roles = resolve_identity(admin=args.admin, actor=args.actor)
     identity_token = set_current_identity(actor, roles)
     try:
         async with contextlib.AsyncExitStack() as stack:
-            # Opened *before* the graph is built, because the graph binds its tools at
-            # construction — see `_build_cli_agent`. The default profile's connectors, matching the
-            # default agent; per-profile CLI selection waits for the front door to grow it
-            # (plan Stage D).
+            # Opened before the graph is built, which binds its tools at construction. The default
+            # profile's connectors, matching the default agent.
             connectors, unreachable = await open_connector_specs(stack, connector_specs())
-            # To stderr, with the answers on stdout: a piped `--message` run stays parseable while
-            # a person at a terminal still learns the answer was assembled without those tools.
-            # The docstring above has always claimed this warning; until REV-6 it was not emitted.
+            # To stderr, answers on stdout: a piped `--message` run stays parseable while a person
+            # still learns tools were missing.
             for name in unreachable:
                 print(
                     f"warning: connector {name!r} is unreachable; its tools are unavailable",
@@ -302,9 +181,7 @@ async def _run(args: argparse.Namespace) -> int:
             agent = _build_cli_agent(args, actor, connectors, saver)
             if args.message is not None:
                 turn = await converse(agent, args.message)
-                # The answer on stdout and the notice on stderr, so a piped run stays parseable
-                # while a person still learns what it is — the same split this function already
-                # makes for an unreachable connector, two lines up.
+                # Answer on stdout, notice on stderr, as for an unreachable connector above.
                 print(turn.answer.strip())
                 if turn.notice:
                     print(f"warning: {turn.notice}", file=sys.stderr)
@@ -319,61 +196,21 @@ async def _run(args: argparse.Namespace) -> int:
 async def _repl(agent: Any, actor: str, saver: Any) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
-    Prompts/errors go to stderr so a redirected stdout carries only the answers.
-
-    `saver` is the checkpointer the graph was built on, threaded through so `/plan` reads the store
-    the turns actually wrote to. Passing it rather than letting `session_plan` resolve one is the
-    whole fix: resolving gives the *configured* checkpointer, which under `session_store=memory` is
-    not the one the graph holds and under either setting was not the one an unwired graph wrote to.
-
-    All three arguments are required. `actor` in particular must never default: it flows into
-    `plan_approval_store().record(...)`, whose entire purpose is that the record names the
-    identity that approved, and a default that would write an anonymous approval is not a safe
-    fallback but one that must never be taken.
-
-    Two lines are commands rather than questions, `/plan` and `/approve`, and they exist because
-    the plan gate is now enforced rather than merely recorded (D-167). Under `harness_enabled` with
-    `plan_only` autonomy a state-changing tool needs a human approval for the plan it belongs to,
-    and the front door's approval is an HTTP route — deliberately not an agent tool, so the model
-    cannot approve its own candidate (D-005). So it gets the same two operations the route pair
-    offers, and for the same reason they are typed by the person rather than callable by the model.
-
-    **What this used to claim, and does not now.** The sentence here said a terminal with no way to
-    answer "would have left the CLI unable to write anything at all under the shipped Helm
-    configuration". That is false, and measurably so: `enforce_plan_approval` returns early when
-    `get_current_session_id()` is empty, and nothing in this module sets one — the only setters are
-    the front door's middleware and runner, a template activity, and the durable interceptor. So
-    the gate has never applied to this REPL, `/plan` and `/approve` write `plan_approvals` rows no
-    execution path here reads, and a state-changing tool typed at this prompt runs without them.
-    That is not a hole — `plan_gate` argues the session-less skip deliberately — but it is not what
-    this docstring said, and D-2026-09-13 making the harness the default turned a harmless
-    overstatement into one a reader would act on.
-
-    **The sentence that replaced it was wrong in its own way, and this is the correction.** It said
-    these calls "still cross `enforce_tool_authz` and `authorize_trigger`, which is what governs
-    them". They do cross both, and measured against a role-less authenticated actor those two reach
-    6 of the 15 side-effecting tools in the registry — three by `DEFAULT_WRITE_TOOL_GATES` and three
-    by `expensive_actions()`. Nine, `remember_preference` and `run_composed_workflow` among them,
-    are refused by neither. What actually governs a write typed at this prompt is who has the
-    terminal: `resolve_identity` makes this surface single-user admin, running with the process's
-    own credentials. That is a defensible posture and it is not the same claim.
+    Prompts and errors go to stderr, answers to stdout. `saver` is the graph's own checkpointer, so
+    `/plan` reads what the turns wrote; `actor` is recorded as approver and must never default. The
+    plan gate skips session-less calls and this REPL sets no session id, so `/plan` and `/approve`
+    record decisions nothing here enforces; this surface is single-user admin running with the
+    process's credentials.
     """
-    # **Every operator command is named here, because there is no `/help`.** `/approve-workflow`
-    # is a two-step ritual — read the procedure, then type back the fingerprint it prints — and an
-    # operator who does not know it exists cannot discover it from a prompt that lists two of five.
+    # Every operator command is named, since there is no `/help`.
     print(
         "Chemclaw CLI — type a question, or: /plan · /approve · /workflows · "
         "/approve-workflow <name> [<fingerprint>] · /forget-workflow <name> · exit",
         file=sys.stderr,
     )
-    # What the operator has typed at this prompt, in order — this CLI's stand-in for the session
-    # transcript the front door reads back. The operator commands are not in it — those named in
-    # the banner above, and a count is deliberately not repeated here, because the one that was
-    # said "two" over five. They are instructions to the terminal rather than words said to the
-    # agent, and a `basis="stated"` slot quoting `'/approve'` would attribute a UI action to a
-    # chemist. Kept
-    # whole rather than trimmed here, because the window belongs to `core.turn_text` and a second
-    # copy of a bound is a bound that can disagree with itself.
+    # What the operator typed, in order — the CLI's stand-in for the transcript the front door reads
+    # back. Operator commands are excluded: they are instructions to the terminal, not words said to
+    # the agent. Kept whole; the window is `core.turn_text`'s.
     said: list[str] = []
     while True:
         try:
@@ -393,13 +230,11 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
                 print(await _workflow_command(prompt, actor), file=sys.stderr)
                 continue
             turn = await converse(agent, prompt, earlier=said)
-            # Recorded only once the turn answered, which is the front door's rule rather than a
-            # convenience: `api.runner._record_transcript` writes nothing for a turn that produced
-            # no answer, so a failed turn leaves no quotable words there either.
+            # Recorded only once the turn answered, as the front door records nothing for an
+            # unanswered turn.
             said.append(prompt)
-            # Before the answer, for the reason `api/runner` yields `CapabilityDegradedEvent`
-            # before it: a reader who stops at the answer must already have read the notice. No
-            # exit code here — a REPL's status is the session's, not the turn's.
+            # Before the answer, so a reader who stops at the answer has read the notice. No exit
+            # code: a REPL's status is the session's.
             if turn.notice:
                 print(f"warning: {turn.notice}", file=sys.stderr)
             print(turn.answer.strip())
@@ -408,52 +243,13 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
 
 
 async def _workflow_command(prompt: str, actor: str) -> str:
-    """Run `/workflows` or `/approve-workflow <name>`, returning the line to show the operator.
+    """Run `/workflows`, `/approve-workflow <name> [<fingerprint>]` or `/forget-workflow <name>`.
 
-    **The CLI's half of an approval that only a person may give.** A composed workflow's durable
-    `job` steps do not run until somebody approves that exact document
-    (`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`), and the approval is
-    deliberately not an agent tool — a workflow must not approve itself, which is `decide_plan`'s
-    rule one seam over. The front door serves that for an HTTP caller; this serves it for a
-    terminal, exactly as `/approve` is the terminal's counterpart to
-    `POST /sessions/{id}/plan/decision`.
-
-    **It is not a convenience, it is the only approver this surface had.** A workflow is keyed
-    `(owner, name)` on the ambient actor, which is `cli_admin_actor` here and the request
-    principal's oid at the front door. Those are the same person's oid once identity is enforced
-    and three different strings in a dev deployment — so a workflow composed at this prompt was
-    invisible to the HTTP route, and its job steps could never be released. Driven before this
-    existed: compose here, then `GET /workflows/{name}` answers 404.
-
-    **`/approve-workflow` is read-then-approve, in two typed lines, and the second binds to what
-    the first showed.** It used to approve the document as it stands *now*, argued from "the person
-    reading it and the person approving it are the same terminal" — which is how `/approve` binds to
-    a plan and is false here. The **agent** also acts in this terminal, under this same owner,
-    between the two commands: driven, one turn re-composed `triage` between `/workflows` and
-    `/approve-workflow triage`, and the chemist who read `rank_species(${inputs.smiles})` authorised
-    `sample_conformers("something-else-entirely")`. So the fingerprint the HTTP route requires is
-    required here too, and typing it is the act of having read what it names.
-
-    **And what the first line prints is the procedure, not its step ids**, which is the same
-    correction `GET /workflows/{name}` needed: `D-2026-09-12-an-approval-that-names-no-tool-
-    authorizes-every-tool` one layer over. Before it, the only screen this surface had was
-    `/workflows` — counts and ids — so a person could authorise real compute without the call ever
-    having been displayed. `/workflows` still prints counts and ids, deliberately: it is how you
-    choose one, the way `WorkflowSummaryOut` is, and the approval screen is the other command.
-
-    `/forget-workflow <name>` is the other half of the cap: at `MAX_PER_OWNER` the only way to make
-    room was to re-compose over a name, which destroys the document anyway and leaves a row whose
-    name lies about its contents.
-
-    Args:
-        prompt: The typed line — `/workflows`, `/approve-workflow <name> [<fingerprint>]`, or
-            `/forget-workflow <name>`.
-        actor: This session's ambient actor. Required and never defaulted, for the reason
-            `_plan_command`'s `actor` is: it is recorded as *who approved*, and an anonymous
-            approval is not a safe fallback but one that must never be written.
-
-    Returns:
-        The lines to print on stderr.
+    The terminal's approver for composed workflows (keyed on the ambient actor, which differs
+    between surfaces in a dev deployment). Approval is read-then-approve: the first call prints
+    every step's call and arguments plus a fingerprint, and the second must type it back, since the
+    agent can re-compose the workflow in between. `actor` is recorded as approver and never
+    defaulted. Returns the lines to print on stderr.
     """
     from chemclaw.durable.template_job import template_fingerprint
     from chemclaw.templates.composed import (
@@ -464,10 +260,8 @@ async def _workflow_command(prompt: str, actor: str) -> str:
     )
 
     store = default_composed_store()
-    # Split on whitespace rather than on the first space twice over: `/approve-workflow x <fp> junk`
-    # used to arrive as a fingerprint of `"<fp> junk"` and be reported as *"the workflow changed
-    # since it was shown"*, diagnosing a change that never happened. A third word is a typo, and
-    # saying so is the honest answer.
+    # Split on whitespace so a stray third word is reported as a typo rather than read as part of
+    # the fingerprint.
     command, *words = prompt.split()
     command = command.lower()
     name = words[0] if words else ""
@@ -478,10 +272,8 @@ async def _workflow_command(prompt: str, actor: str) -> str:
         rows = await store.list_for(actor)
         if not rows:
             return "(no composed workflows)"
-        # Clamped here as well as in the store, and announced: `list_for` fetches one past
-        # `MAX_PER_OWNER` so a caller can tell a full page from a clamped one, and a listing that
-        # printed the spare row would report a clamped set as a complete one. That is the defect
-        # `GET /workflows` reports with `truncated`; a terminal reports it by saying so.
+        # `list_for` fetches one past `MAX_PER_OWNER`; drop the spare row and say the list was
+        # clamped.
         lines = []
         for row in rows[:MAX_PER_OWNER]:
             jobs = job_steps(row.document)
@@ -512,9 +304,8 @@ async def _workflow_command(prompt: str, actor: str) -> str:
     fingerprint = template_fingerprint(workflow.document)
     jobs = job_steps(workflow.document)
     if not posted:
-        # The read half. Every step is rendered, not just the ones that launch jobs: what an
-        # approval authorises is the *procedure*, and a reader shown only its job steps cannot see
-        # what feeds their arguments.
+        # Every step is rendered, not just job steps: an approval covers the procedure, including
+        # what feeds the jobs' arguments.
         return "\n".join(
             [
                 f"{name!r} — {workflow.summary or '(no summary)'}",
@@ -530,8 +321,8 @@ async def _workflow_command(prompt: str, actor: str) -> str:
             ]
         )
     if posted != fingerprint:
-        # The 409 this surface did not have. A workflow that changed between being shown and being
-        # approved is a different procedure, and the person typed the old one's hash.
+        # The workflow changed since it was shown, so the typed fingerprint names a different
+        # procedure.
         return (
             f"{name!r} changed since it was shown — you typed {posted!r} and it is now "
             f"{fingerprint!r}. Read it again with `/approve-workflow {name}` before approving."
@@ -548,9 +339,8 @@ async def _workflow_command(prompt: str, actor: str) -> str:
 def _workflow_steps(document: Any) -> list[str]:
     """One line per step, naming what it calls and with what.
 
-    Through `composed.step_call`, the same reading `api/routes/workflows._step_out` renders the
-    HTTP approval screen from — one definition, so the two surfaces of one approval cannot come to
-    show a person different things.
+    Through `composed.step_call`, as the HTTP approval screen (`api/routes/workflows._step_out`) is,
+    so both surfaces show the same thing.
 
     Args:
         document: The resolved template being approved.
@@ -571,65 +361,42 @@ def _workflow_steps(document: Any) -> list[str]:
 async def _plan_command(prompt: str, actor: str, saver: Any) -> str:
     """Run `/plan` or `/approve` against the session, returning the line to show the operator.
 
-    **`saver` has no default**, and that is the fix rather than a style choice: `session_plan`
-    resolves the *configured* checkpointer when handed `None`, which under `session_store=memory`
-    is not the store this session's turns wrote to. A default here would leave the defect reachable
-    by omission — `/plan` answering "(no plan yet)" for a session that has one, and `/approve`
-    recording against the empty-plan constant every deployment shares.
-
-    `/approve` binds to the plan as it stands *now*, exactly as
-    `POST /sessions/{id}/plan/decision` does — there is no hash to mistype here, but there is also
-    no window in which a plan could change between being shown and being approved, because the
-    person reading it and the person approving it are the same terminal.
-
-    **Both commands read the plan the same way the route does** — `plan_state.session_plan` off
-    the checkpointer, hashed by `plan_gate.plan_identity` — which is what keeps the two front doors
-    from drifting. They used to ask two different questions: `/approve` guarded on `todo_titles`
-    and recorded against `current_plan_hash`, and those disagreed about the `awaiting-job:`
-    bookkeeping rows, so a session whose list held nothing else passed the guard and recorded an
-    approval against the empty-plan constant — an identity every deployment shares, which the gate
-    then refuses. It told the person their plan was approved when nothing had been.
+    `saver` has no default: `session_plan` with `None` resolves the configured checkpointer, which
+    under `session_store=memory` is not the store this session wrote to. `/approve` binds to the
+    plan as it stands now, like `POST /sessions/{id}/plan/decision`. Both commands read the plan as
+    the route does (`plan_state.session_plan`, hashed by `plan_gate.plan_identity`), so the two
+    front doors agree on what is approved.
     """
     from chemclaw.agent.plan_approval_store import plan_approval_store
     from chemclaw.agent.plan_gate import plan_identity
     from chemclaw.agent.plan_scope import declared_scope
     from chemclaw.agent.plan_state import session_plan
 
-    # `or []`: `session_plan` answers `None` when the plan could not be *read* at all, which for
-    # this command is the same screen as a session that has proposed nothing — the gate is what
-    # must tell the two apart, not the display.
+    # `session_plan` answers `None` for an unreadable plan; for display that is the same as no plan,
+    # and the gate tells them apart.
     steps = await session_plan(_CLI_SESSION_ID, saver=saver) or []
     plan = [str(step["content"]) for step in steps]
     scope = declared_scope(steps)
-    # The steps, not `plan`: the identity covers each step's declaration as well as its text
-    # (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), so hashing
-    # the text alone would record a decision against a plan identity the gate never asks about.
+    # Hash the steps, not the text: the identity covers each step's declared tools, which is what
+    # the gate asks about.
     plan_hash = plan_identity(steps)
     if prompt.lower() == "/plan":
         lines = plan or ["(no plan yet)"]
         if plan_hash is None:
             return "\n".join([*lines, "[no approvable plan]"])
         decision = await plan_approval_store().decision(_CLI_SESSION_ID, plan_hash)
-        # The store's verdict is already the effective one — a spent approval reports as not
-        # approved — so this line says what the gate would do, not merely what was once recorded.
+        # The store's verdict is already effective (a spent approval reads as not approved).
         verdict = "approved" if decision and decision.approved else "not approved"
-        # The declared tools are shown beside the steps, because approving is approving *them*
-        # too: the gate refuses a state-changing tool no step declared
-        # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`), so a person who
-        # only saw the prose would be saying yes to a bound they could not read.
+        # The declared tools are shown beside the steps: approving the plan approves them, and the
+        # gate refuses any state-changing tool no step declared.
         declares = ", ".join(sorted(scope)) or "no state-changing tools"
         return "\n".join([*lines, f"[declares: {declares}]", f"[{plan_hash} — {verdict}]"])
     if plan_hash is None:
         return "there is no plan to approve yet; ask a question first"
-    # `actor`, not `settings.cli_admin_actor`. The session runs under whatever `--actor` resolved
-    # to, and every other identity consumer in this module reads that — so hardcoding the default
-    # made the durable approval record, which is the artifact of the "agent proposes, human decides"
-    # line, name an identity that took no action and disagree with the audit rows for its own
-    # session.
+    # `actor`, not `settings.cli_admin_actor`: the approval record must name the identity this
+    # session runs under, as the audit rows do.
     await plan_approval_store().record(_CLI_SESSION_ID, plan_hash, actor, True, scope)
-    # Recording is the whole grant. It used to also call `grant_execute` to flip MAF's session
-    # mode — a second piece of state saying the same thing on a different lifetime, which is what
-    # let a displayed mode outlive the approval it came from.
+    # Recording is the whole grant.
     return f"approved {plan_hash}; the session may now execute"
 
 
@@ -674,26 +441,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint (`chemclaw` console script / `python -m chemclaw.cli.chat`).
 
-    **Startup failures are a message and an exit code, which is what the rest of this package
-    already does.** A configuration failure — a blanked `CHEMCLAW_LLM_BASE_URL`, an unreachable
-    checkpointer DSN — used to arrive under nine frames of asyncio and graph construction, because
-    this function caught nothing and returned `None`, so the console script exited on a traceback
-    rather than on a status. That is the single most likely first run of the only interactive
-    entrypoint this system has, and the trace leaks the internal call chain to an operator who can
-    act on exactly one sentence of it.
-
-    The width is the three families a *startup* can fail with and nothing wider: a misconfiguration
-    (`ChemclawError`), a refused precondition (`RuntimeError`), and an unreachable dependency such
-    as the checkpointer DSN (`ConnectionError`). A bare `except` here would swallow the programming
-    errors this file wants to see raised. Failures *inside* a turn
-    are already handled one level down, in `_repl`, which keeps the session alive across them.
+    Startup failures become one sentence and an exit code rather than a traceback. Only the three
+    families a startup can fail with are caught: misconfiguration (`ChemclawError`), a refused
+    precondition (`RuntimeError`), and an unreachable dependency (`ConnectionError`); anything wider
+    would hide programming errors. Failures inside a turn are handled in `_repl`.
     """
     configure_logging()
     try:
-        # Inside the `try`, so an unconfigured gateway is one sentence and an exit code like every
-        # other startup failure here — it raises `RuntimeError`, which is already one of the three
-        # families this function translates. This is the terminal front door: it builds the same
-        # graph `create_app` builds, so it is one of the process kinds the guard has to reach.
+        # Inside the `try`, so an unconfigured gateway (`RuntimeError`) is reported like any startup
+        # failure. The CLI builds the same graph `create_app` does, so the guard must reach it.
         refuse_unconfigured_llm_gateway()
         return asyncio.run(_run(_parse_args(argv)))
     except (ChemclawError, ConnectionError, RuntimeError) as exc:

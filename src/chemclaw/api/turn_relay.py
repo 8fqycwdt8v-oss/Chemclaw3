@@ -1,28 +1,10 @@
 """A running turn, followed and stopped from a replica that does not hold it.
 
-`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`. A turn's pump lives in
-the process that started it (`api/detach.DetachableTurn`), so `GET /sessions/{id}/turn/stream` and
-`POST /sessions/{id}/turn/stop` used to work only on that process and answer 404 on every other —
-measured with two front-door processes on one database: a turn started on A was neither followable
-nor stoppable from B, and ran on to its answer. The BFF reaches the front door through the Service,
-so on a two-replica deployment that was half of every reattach and half of every Stop.
-
-So the routes now ask whoever holds the turn, through rows (`agent/turn_remotes.TurnRemotes`):
-
-- **The holding process** runs `TurnRelay.run` for its lifetime. Each poll it reads the requests
-  addressed to the turns it holds and answers them with the same in-process calls its own routes
-  make: a follow attaches an ordinary `DetachableTurn.watch` view — so the watcher cap, the lag
-  cut-off, the unload-stop resume and the "is the sender watching" read all count a remote view
-  exactly as a local one — and relays that view's frames into rows; a stop calls `stop()` or
-  `defer_stop()` as the local route would. It polls only while it holds a turn: an idle replica
-  issues nothing.
-- **The asking replica** writes the request, waits for the holder's answer, and either streams the
-  relayed frames (`follow`) or reports the outcome (`stop`). Whether the caller may do either is
-  decided on the asking side, before anything is written, by the same session gate and the same
-  sender-or-owner rule the local routes apply.
-
-Nothing here is durable work in D-002's sense: a request is a lease on a conversation that is
-already in flight, refreshed while somebody is waiting on it, and gone with its session.
+The turn's pump lives in its starting process, so other replicas go through rows
+(`agent/turn_remotes.TurnRemotes`). The asking replica authorizes first, writes a request and waits;
+the holder (`TurnRelay.run`, polling only while it holds a turn) answers with the same calls its
+routes make — an ordinary `DetachableTurn.watch` view whose frames it relays into rows, or
+`stop()`/`defer_stop()`. A request is a lease, not durable work.
 """
 
 import asyncio
@@ -42,9 +24,8 @@ from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
-#: How many frames one relayed view may hold unwritten before it is cut off as lagged — the same
-#: bound a local reader's buffer has, for the same reason: the only way to reach it is a consumer
-#: (here, the database) that has stopped taking frames, and it is the turn that must be protected.
+#: How many frames one relayed view may hold unwritten before it is cut off as lagged — the
+#: same bound as a local reader's buffer, protecting the turn from a stalled consumer.
 _RELAY_BACKLOG = 1024
 
 
@@ -84,8 +65,8 @@ class TurnRelay:
     async def run(self) -> None:
         """Answer other replicas' requests for this process's turns, every poll, until cancelled.
 
-        A failed poll is logged and retried on the next one: a database blip delays a remote Stop
-        by one interval, and must not end the loop that serves every later one.
+        A failed poll is logged and retried next interval, so a database blip delays one remote Stop
+        rather than ending the loop.
         """
         while True:
             try:
@@ -116,10 +97,9 @@ class TurnRelay:
             return
         requests = await self._store.pending(list(held))
         live = {request.id for request in requests}
-        # A view whose request is gone was withdrawn by its asker or lapsed with it: stop relaying.
-        # **Only for a turn still held here.** A turn that just ended is no longer asked about, so
-        # its requests are absent from `live` too — and cancelling its relay then would drop the
-        # answer and the end marker it is about to write. Its view ends on its own.
+        # A view whose request is gone was withdrawn or lapsed: stop relaying — but only for a turn
+        # still held here, since a just-ended turn's relay is about to write its answer and end
+        # marker.
         for request_id, (turn_key, task) in list(self._relays.items()):
             if turn_key in held and request_id not in live:
                 task.cancel()
@@ -187,8 +167,7 @@ class TurnRelay:
         except BaseException:
             watch.close()
             raise
-        # The sender reattaching from another replica cancels a pending unload stop exactly as a
-        # local reattach does (`DetachableTurn.resume` checks who).
+        # The sender reattaching remotely cancels a pending unload stop as a local reattach does.
         turn.resume(request.actor)
         task = asyncio.get_running_loop().create_task(
             self._relay(request.id, watch), name=f"turn-relay:{request.session_id}"
@@ -289,9 +268,9 @@ class TurnRelay:
                     return request_id, Answer(*answer)
                 current = await self._store.holding(session_id)
                 if current is None or current.holder != holding.holder:
-                    # The turn ended. Read the answer once more: a stop's teardown releases the
-                    # claim *before* the holder can write `stopped`, so a `stopping` here is a stop
-                    # that landed — only a request the holder never answered means "not running".
+                    # The turn ended; read the answer once more, since a stop's teardown releases
+                    # the claim before the holder writes `stopped`. Only an unanswered request means
+                    # "not running".
                     last = await self._store.refresh(request_id, lease)
                     if last is None or last[0] == "asked":
                         return request_id, Answer(None, "")
@@ -352,11 +331,9 @@ class TurnRelay:
     ) -> AsyncGenerator[dict[str, str], None]:
         """The relayed frames of one followed turn, polled from rows until the holder ends them.
 
-        **A view whose holder died ends without a final event**, after one quiet lease in which the
-        turn's claim was found gone: that is what a local view of a turn whose process died gets
-        too (its socket closes), and the reattach that follows answers `410 turn_interrupted`
-        once the session's turn is settled as interrupted — the account the rest of the system
-        already gives. A request that vanished (its session deleted) ends the same way.
+        If the holder dies (its claim gone for one quiet lease) or the request vanishes, the view
+        ends without a final event, as a local view does when its process dies; the reattach that
+        follows answers `410 turn_interrupted`.
         """
         lease = settings.service_turn_relay_lease_seconds
         quiet_since = time.monotonic()

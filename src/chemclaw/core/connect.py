@@ -1,36 +1,16 @@
 """Attaching a database this system does not own: resolve its driver, read its credentials.
 
-Three seams in this tree reach a database that belongs to somebody else — the warehouse ELN and
-the reaction corpora inbound (`ingest/eln/warehouse/`), the result store outbound
-(`publish/`), and the external vector store (`retrieval/vectors/`). All three attach the same way,
-because the same two problems come up every time:
+Shared by the warehouse ELN and corpora (`ingest/eln/warehouse/`), the result store (`publish/`) and
+the external vector store (`retrieval/vectors/`). Drivers are `module:callable` references resolved
+on first use, so an unused client is never imported. Keys ending in `_env` name an environment
+variable that is read at connect time and registered for log redaction, so manifests carry no
+secrets and rotation needs no deploy.
 
-**Late-binding the driver.** A `module:callable` reference is resolved the first time a connection
-is actually needed rather than at import, so a process that never queries a warehouse never imports
-its client, and a repository with no vendor package installed still runs its whole test suite
-against a fake named by a test's own manifest.
-
-**Naming credentials rather than carrying them.** A key ending in `_env` holds the *name* of an
-environment variable; the value is read at connect time and the name is registered with the
-log-redaction inventory first. So a rotated secret is picked up by the next connection rather than
-the next deploy, a missing one fails with a message naming the variable instead of an
-authentication error from inside a client, and the manifest is safe to keep in a repository.
-
-**The driver's signature is the schema, and that is the whole generality claim.** There is no model
-here enumerating `host`, `account`, `warehouse`, `role` or any other vendor's words. Everything in
-a `connection:` block except `driver:` is passed to the callable as a keyword argument, so
-attaching a database this repository has never heard of is one driver module plus one manifest —
-no field added to a shared model, no branch in an engine, no core edit. That rule was learned the
-expensive way: the first connection model was Snowflake-shaped, the second driver had to redefine
-three of its fields to mean something else and *refuse* two more that had no analogue, and
-`publish/connect.py` declined to reuse it at all rather than make one model mean two things
-(`D-2026-08-26-the-driver-s-signature-is-the-schema`).
-
-**Why the error type is a parameter.** Temporal matches `non_retryable_error_types` by exact class
-name, so which exception a failed attachment raises is a retry contract rather than a taxonomy
-preference: a binding naming a driver that is not installed must fail the ingest seam as
-`BindingError` and the publish seam as `SinkConnectionError`, because those are the names each
-side's activity lists. A shared error class here would quietly make one of them retryable.
+The driver's signature is the schema (D-2026-08-26-the-driver-s-signature-is-the-schema): every key
+of a `connection:` block except `driver:` is passed as a keyword argument, so a new database is one
+driver plus one manifest. The error type is a parameter because Temporal matches
+`non_retryable_error_types` by class name, and each seam lists its own (`BindingError`,
+`SinkConnectionError`).
 """
 
 import importlib
@@ -45,40 +25,25 @@ from chemclaw.core.logging import register_secret_env
 
 logger = logging.getLogger(__name__)
 
-# The suffix marking a key as naming an environment variable rather than carrying a value. Generic
-# rather than a fixed list of credential names, because every driver has its own: psycopg wants a
-# password, a lakehouse a token, a vector database an API key, the next one something else. What
-# they share is that the secret is *named* here, never written.
+# Suffix marking a key as naming an environment variable rather than carrying a value; generic
+# because every driver names its secret differently.
 ENV_SUFFIX = "_env"
 
-# What an environment variable name looks like. Not a security boundary — an author determined to
-# paste a secret still can — but it catches the realistic mistake, which is filling in
-# `password_env: hunter2` because the field sits where a password goes in every other tool.
+# What an environment variable name looks like. Not a security boundary; it catches a secret pasted
+# where its name belongs (`password_env: hunter2`).
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
-# A relation, column or schema name, optionally qualified (`eln_prod.reactions.v_reaction`). A
-# connection block contributes exactly two kinds of thing to whatever it reaches — a bound
-# parameter, or an identifier of this shape — and this is the check for the second kind. `$` is
-# legal inside a warehouse identifier and appears in generated views; it is not legal first.
+# A relation, column or schema name, optionally dotted. A connection block contributes only bound
+# parameters and identifiers of this shape. `$` is legal inside a warehouse identifier, not first.
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)*$")
 
 
 def check_env_name(key: str, value: str, *, error: type[Exception]) -> None:
     """Raise unless `value` looks like the name of an environment variable.
 
-    Called both when a manifest loads (so a typo fails at startup) and again when the connection is
-    opened (so a block that reached the resolver by another route is checked once regardless).
-
-    **Blank is refused, not skipped**, and that is the half this check was missing. `token_env:`
-    with nothing after it is YAML `None` and `token_env: ""` is the empty string; every caller
-    normalises both to `""`, and while `""` was accepted the key stopped naming anything at all —
-    `connect_options` dropped the keyword and handed the driver a block with no credential in it.
-    Which failure that becomes is decided by the driver rather than by the manifest: a client whose
-    credential has a default (`api_key: str = ""`) attaches **anonymously**, and one whose
-    credential is required raises a bare `TypeError`, which `durable/publish` does not list as
-    non-retryable, so a permanently broken manifest is retried by every job that touches it. The
-    key is present because its author meant to supply a credential, so an empty one is a
-    misconfiguration to report, never an omission to infer.
+    Called when a manifest loads and again when the connection opens. Blank is refused: an empty
+    name would drop the credential keyword, and the driver would then attach anonymously or raise a
+    retryable `TypeError`.
     """
     if not value:
         raise error(
@@ -96,24 +61,10 @@ def check_env_name(key: str, value: str, *, error: type[Exception]) -> None:
 def check_identifier(value: str, what: str, *, error: type[Exception]) -> str:
     """Raise unless `value` is a bare or dotted SQL identifier safe to interpolate. Returns it.
 
-    Here beside `check_env_name` because this module owns *what a connection block may contribute*,
-    and it owned only the credential half of that rule until a `schema:` proved the other half was
-    missing: `publish/drivers/postgres.py` interpolated it into libpq's `options`, libpq splits that
-    on whitespace, and the last `-c` wins — so `schema: "public -c statement_timeout=0"` disabled
-    the statement timeout whose range the same constructor had checked three lines earlier. A
-    binding's identifiers were already checked by exactly this pattern; the one field that reached a
-    *process argument* rather than a statement was not, and a second spelling of "is this an
-    identifier" is how the two would have drifted.
-
-    `error` is a parameter for the reason the rest of this module's are: Temporal matches
-    `non_retryable_error_types` by class name, so a refusal has to arrive under the name the calling
-    seam's activity lists.
+    Used for identifiers that reach a statement or a process argument (e.g. libpq `options`, where
+    whitespace would smuggle extra `-c` flags). `error` is the caller's non-retryable class.
     """
-    # `fullmatch` rather than `match`: with a trailing `$` anchor, `match` also accepts one
-    # trailing newline, so a function name ending in one passed and reached the statement text.
-    # Nothing could follow that newline — the rest of the value would have to match as well — so
-    # this was hygiene rather than a hole. But a checker whose whole job is "the value is exactly
-    # this shape" should not rest on which of two anchor semantics it happened to get.
+    # `fullmatch`, because `match` with a `$` anchor also accepts one trailing newline.
     if not _IDENTIFIER.fullmatch(value):
         raise error(
             f"{what} {value!r} is not a plain SQL identifier; a binding may only name relations "
@@ -145,15 +96,9 @@ def resolve_driver(reference: str, *, error: type[Exception], what: str = "drive
     return driver
 
 
-#: The annotations `option_type_mismatch` is willing to judge, and what a YAML scalar may be for
-#: each. Deliberately only the four scalars: a union, an `Optional`, a container or a bare
-#: parameter is a shape a one-line check cannot get right, and a checker that guesses at those
-#: would refuse correct manifests, which is worse than the hole it closes.
-#:
-#: `bool` accepts only `bool`. That is stricter than Python and it is the whole point — `0` and
-#: `1` read as a flag by a human and arrive as `int`, and accepting them would mean accepting the
-#: coercion that hides the defect this exists for. `int` refuses `bool` for the mirror reason:
-#: `True` is an `int` in Python and is never an integer anybody wrote down.
+#: The annotations `option_type_mismatch` judges, and the YAML scalar types each accepts. Only the
+#: four scalars: unions, optionals and containers are passed over rather than guessed at. `bool`
+#: accepts only `bool` (not `0`/`1`), and `int` refuses `bool`.
 _ACCEPTED_SCALARS: dict[type, tuple[type, ...]] = {
     bool: (bool,),
     int: (int,),
@@ -165,12 +110,9 @@ _ACCEPTED_SCALARS: dict[type, tuple[type, ...]] = {
 def _evaluated_parameters(target: Any) -> Mapping[str, inspect.Parameter] | None:
     """`target`'s parameters with string annotations evaluated, or `None` if it has no signature.
 
-    **Evaluated, because a module under `from __future__ import annotations` stores every
-    annotation as a string**, and `_ACCEPTED_SCALARS` is keyed by the type: `"bool"` missed it, so
-    in such a module the check passed everything — measured, `snapshot: "false"` against a
-    `snapshot: bool` factory was admitted, re-arming the sweep this check exists to stop. An
-    annotation that cannot be evaluated (a name imported only under `TYPE_CHECKING`) falls back to
-    the unevaluated signature, where that parameter is passed over as before rather than guessed at.
+    Evaluated because `from __future__ import annotations` stores annotations as strings, which
+    `_ACCEPTED_SCALARS` would never match. An unevaluable annotation (a `TYPE_CHECKING` import)
+    falls back to the raw signature and that parameter is skipped.
     """
     try:
         return inspect.signature(target, eval_str=True).parameters
@@ -185,24 +127,10 @@ def _evaluated_parameters(target: Any) -> Mapping[str, inspect.Parameter] | None
 def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
     """Empty if every option's value fits the parameter's annotation; a message naming the first.
 
-    **The half of "the callable's signature is the schema" that was never read.**
-    `signature_mismatch` binds names with empty strings — its own docstring says "values are
-    irrelevant here" — which is right for a `connection:` block, where the values are addresses and
-    secrets and the question is only whether the driver takes the keyword. It is wrong for a
-    `config:` block, whose values are *behaviour*.
-
-    Measured on the shipped `commitments-json` source
-    (`D-2026-09-16-a-truthy-string-is-not-the-flag-somebody-wrote`): `snapshot: "false"` in a
-    manifest parses as the string `'false'`, which is truthy, so the flag that licenses a
-    **destructive** sweep is armed by writing the word that turns it off. `snapshot: false` and
-    `snapshot: 0` behave; `"false"` and `"no"` invert. Nothing in either validator or the build path
-    could see it, because both asked what the callable *accepts* and never what it was *given*.
-
-    Only the four scalar annotations in `_ACCEPTED_SCALARS` are judged, and anything else — a
-    union, a container, an unannotated parameter, a string annotation this function will not
-    evaluate — is passed over rather than guessed at. A checker that refuses a correct manifest is
-    worse than this hole, and the hole is specific: every wrong spelling of a `bool` is *silently*
-    the opposite of what was written, which is not true of the other three.
+    `signature_mismatch` checks only names, which suffices for a `connection:` block; a `config:`
+    block's values are behaviour. A quoted `"false"` for a `bool` parameter is a truthy string that
+    silently inverts the flag. Only `_ACCEPTED_SCALARS` annotations are judged; anything else is
+    passed over.
 
     Args:
         target: The callable the options will be passed to.
@@ -222,8 +150,8 @@ def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
         if parameter is None:
             continue  # `signature_mismatch` owns the unknown-key case, and names it better.
         accepted = _ACCEPTED_SCALARS.get(parameter.annotation)
-        # `bool` is a subclass of `int`, so `isinstance` alone would let `True` through an `int`
-        # or `float` parameter — the coercion `_ACCEPTED_SCALARS` says it refuses.
+        # `bool` is a subclass of `int`, so `isinstance` alone would let `True` through an `int` or
+        # `float` parameter — the coercion `_ACCEPTED_SCALARS` says it refuses.
         if accepted is None:
             continue
         if isinstance(value, accepted) and (bool in accepted or not isinstance(value, bool)):
@@ -243,26 +171,10 @@ def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
 def signature_mismatch(driver: Any, connection: Mapping[str, Any]) -> str:
     """Empty if `driver` accepts this block's keys; a message naming what it will not take if not.
 
-    The offline half of "the driver's signature is the schema", shared by the two manifest
-    validators (`make datasource-validate`, `make sink-validate`) because the rule they are checking
-    is one rule — and specifically because the `_env` stripping is part of it: a block writes
-    `access_token_env` and the driver is built with `access_token`, so a checker that forgot that
-    would reject every correct binding that names a secret.
-
-    Values are irrelevant here and are bound as empty strings: this asks what the callable
-    *accepts*, with nothing connected and no credential read.
-
-    **A driver whose signature cannot be read is "nothing to say", not a failure**, and the two
-    steps are separated because they fail with different exception types. `inspect.signature`
-    raises `ValueError` — not `TypeError` — for a callable with no introspectable signature, which
-    is the ordinary shape of a C `connect`: `sqlite3.connect` and `duckdb.connect` both raise it,
-    and a DuckDB export is one of the databases the module docstring's generality claim names. One
-    `except TypeError` around both steps let that `ValueError` out of here unnamed — past
-    `open_connection`'s `error` parameter, which exists precisely so a broken binding fails the
-    ingest seam as `BindingError` and the publish seam as `SinkConnectionError`, and out of `make
-    datasource-validate` / `make sink-validate` as a traceback naming neither the manifest nor the
-    driver. Returning empty says only what is true: this check is an offline convenience, and a
-    driver that genuinely refuses a keyword still refuses it at construction.
+    Shared by `make datasource-validate` and `make sink-validate`; `*_env` keys are checked by their
+    stem. Values are bound as empty strings: nothing connects and no credential is read. A driver
+    with no introspectable signature (`inspect.signature` raises `ValueError` for C callables like
+    `sqlite3.connect`) yields "nothing to say", not an unnamed exception.
     """
     options = {
         key[: -len(ENV_SUFFIX)] if key.endswith(ENV_SUFFIX) else key: ""
@@ -285,14 +197,9 @@ def connect_options(
 ) -> dict[str, Any]:
     """The keyword arguments a driver is built with: addresses from the block, secrets from env.
 
-    Every `*_env` key becomes its stem, read from the environment. Each variable is registered with
-    the log-redaction inventory *before* it is read, so a driver that echoes its own configuration
-    into a traceback cannot put a credential in a log.
-
-    An empty variable is treated as absent: an unset secret and one set to the empty string are the
-    same failure, and letting the second through would reach the database as an anonymous login.
-    An empty *name* is the same failure one level up and raises for the same reason — see
-    `check_env_name`, which owns that rule so the manifest validators refuse it at load too.
+    Every `*_env` key becomes its stem, read from the environment after registering the name for log
+    redaction. An empty variable is treated as absent, never as an anonymous login; an empty name
+    raises (see `check_env_name`).
     """
     options: dict[str, Any] = {}
     for key, value in connection.items():
@@ -321,28 +228,21 @@ def open_connection(
 ) -> Any:
     """Build whatever `connection['driver']` names, from the rest of the block.
 
-    Returns the driver's own object rather than a narrowed type: what each seam needs of it — a
-    `Warehouse`, a `ResultSink`, a `VectorStore` — is that seam's contract to check. This function
-    owns the resolution and the credentials, nothing else.
+    Returns the driver's own object; each seam checks its own contract. This function owns only
+    resolution and credentials.
     """
     reference = str(connection.get("driver") or "")
     if not reference:
         raise error(f"a {what} block must name a `driver:`")
     driver = resolve_driver(reference, error=error, what=f"{what} driver")
     options = connect_options(connection, error=error, what=what)
-    # **The same signature check the validators run, run again here.** `make datasource-validate`
-    # sees only the manifests this repository ships; a deployment mounts its own directory, which no
-    # CI run ever bound. Without this the mismatch surfaces as a bare `TypeError` from the
-    # constructor — and `TypeError` is not in `durable/publish`'s non-retryable list, so a
-    # permanently broken manifest would be *retried* by every job that touches it. The model this
-    # block replaced failed such a key as a `ValidationError` (a `ValueError`), which was retried by
-    # nothing; keeping that property is what makes "the driver's signature is the schema" a
-    # like-for-like trade rather than a loosening.
+    # Re-run the validators' signature check: a deployment's own manifests were never validated in
+    # CI, and the constructor's `TypeError` would be retried by every job instead of failing as
+    # `error`.
     if mismatch := signature_mismatch(driver, connection):
         raise error(f"{what} driver {reference!r} {mismatch}")
-    # Logged at the level a deployment reads to answer "which database did this pod attach to".
-    # `_is_address` decides what may be named: a resolved secret sits in `options` under its stem
-    # (`access_token`), so filtering has to be by key rather than by where the value came from.
+    # Log which database this pod attached to. Resolved secrets sit in `options` under their stem,
+    # so `_is_address` filters by key.
     logger.info(
         "opening %s via %s (%s)",
         what,
@@ -355,8 +255,7 @@ def open_connection(
 def _is_address(key: str) -> bool:
     """Whether a resolved option is safe to name in a log line.
 
-    An allow-list of the words this tree's own drivers use for *where* a database is, rather than a
-    deny-list of credential words: a driver naming its secret keyword something unexpected would
-    slip through a deny-list, and the log line is a convenience rather than a record.
+    An allow-list of address words, since a deny-list of credential words would miss an unusual
+    secret keyword.
     """
     return key in {"host", "port", "database", "catalog", "schema", "server_hostname", "url"}

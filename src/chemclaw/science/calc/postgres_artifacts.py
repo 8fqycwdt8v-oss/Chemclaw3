@@ -1,21 +1,8 @@
 """Postgres backend for the artifact store (D-124).
 
-Implements the same `ArtifactStore` interface as `InMemoryArtifactStore`, backed by the
-`artifact_blobs` + `calculation_artifacts` tables (`infra/sql/019_artifact_store.sql`), so a
-calculation's by-products survive process restarts and are shared across workers.
-
-Storage is `BYTEA`, not an object store. The artifacts this system actually produces are kilobytes
-to a few megabytes — a 76-atom Turbomole `hessian` is single-digit MB of text and roughly a fifth
-of that once deflated — and Postgres is the only durable store the deployment already has. An
-S3-compatible bucket would add an infrastructure dependency, a fourth secret to the three-secret
-model, and a bucket-endpoint host literal that muddies `tests/test_no_egress.py`; a shared
-filesystem CAS would need an RWX volume no OpenShift storage class guarantees, since the service
-and the workers are separate pods. The `ArtifactStore` Protocol is the seam that lets a DFT-scale
-deployment add one later without touching a caller.
-
-A write is two statements: the blob is inserted by content address (a no-op when some other
-calculation already stored those exact bytes) and the link row is upserted. Like `PostgresStore`,
-connections are short-lived and borrowed through `chemclaw.core.db.connection`.
+`BYTEA` over `artifact_blobs` + `calculation_artifacts` (`infra/sql/019_artifact_store.sql`):
+artifacts are at most a few megabytes and Postgres is the durable store already present. A write
+inserts the blob by content address and upserts the link.
 """
 
 import logging
@@ -33,9 +20,8 @@ from chemclaw.science.calc.artifacts import (
 
 logger = logging.getLogger(__name__)
 
-# The blob is keyed by its content address, so a second calculation producing identical bytes
-# stores nothing and simply links to what is there. `DO NOTHING` rather than `DO UPDATE`: the
-# content address *is* the content, so there is never anything to update.
+# Keyed by content address, so identical bytes are stored once; `DO NOTHING` because the address
+# *is* the content.
 _INSERT_BLOB = """
     INSERT INTO artifact_blobs (content_hash, codec, byte_size, stored_bytes, data)
     VALUES (%s, %s, %s, %s, %s)
@@ -74,9 +60,7 @@ _SELECT_LINKS = """
 class PostgresArtifactStore:
     """Durable `ArtifactStore` backed by Postgres.
 
-    Opens a short-lived connection per call for the same reason `PostgresStore` does: artifact
-    traffic is coarse-grained relative to the calculations that generate it, and the process-wide
-    pool underneath `chemclaw.core.db.connection` already removes the handshake where it matters.
+    A short-lived connection per call, borrowed through the process-wide pool.
     """
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -94,9 +78,8 @@ class PostgresArtifactStore:
     ) -> ArtifactRef | None:
         """Store `data` under `(calc_key, name)`; return its ref, or `None` if it was not stored.
 
-        Refuses — returning `None`, never raising — when the store is disabled or the payload
-        exceeds `artifact_max_bytes`. That is the whole of the "an artifact is optional" contract
-        on the write side.
+        Returns `None`, never raising, when the store is disabled or the payload exceeds
+        `artifact_max_bytes`.
         """
         if not settings.artifact_store_enabled or too_large(len(data)):
             return None
@@ -154,9 +137,6 @@ class PostgresArtifactStore:
 def default_artifact_store() -> ArtifactStore:
     """Return the production artifact store.
 
-    The one place that names the production backend, mirroring
-    `chemclaw.science.calc.postgres_store.default_store`
-    so a calculator module does not have to know which one it is. Tests swap it at the importing
-    module (`monkeypatch.setattr(<module>, "default_artifact_store", ...)`).
+    The one place that names the production backend; tests monkeypatch it at the importing module.
     """
     return PostgresArtifactStore()

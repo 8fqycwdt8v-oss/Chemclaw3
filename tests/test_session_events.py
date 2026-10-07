@@ -1,8 +1,7 @@
 """The job→session push-back channel: tailer logic (unit) + Postgres round-trip (skips offline).
 
-The tailer's loop is proven with an injected `claim` (no database), so its ordering and
-consume-once behavior are verified deterministically; the DB claim — including its concurrent
-no-double-claim guarantee — is proven against a real database when one is present (F3-T2, COR-4).
+The tailer runs with an injected `claim` for deterministic ordering and consume-once; the DB
+claim, including no double claim under concurrency, runs against a real database.
 """
 
 import asyncio
@@ -109,9 +108,7 @@ async def test_concurrent_claims_never_double_deliver() -> None:
 async def test_kind_scoped_claim_leaves_other_kinds_unconsumed() -> None:
     """A `kinds`-scoped claim consumes only matching rows.
 
-    The claim is destructive, so a kind-selective consumer must filter in the claim itself or it
-    would silently destroy other consumers' events (the front door claims only `job_completed`
-    this way).
+    The claim is destructive, so a selective consumer must filter inside the claim.
     """
     await migrated_db_or_skip()
     session_id = "sess-f3t2-kinds"
@@ -130,16 +127,10 @@ async def test_kind_scoped_claim_leaves_other_kinds_unconsumed() -> None:
 async def test_tailer_releases_its_connection_between_polls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live tailer must not hold a connection while it sleeps between polls.
+    """A live tailer does not hold a pooled connection while it sleeps between polls.
 
-    It used to, deliberately: without a pool, per-poll connecting meant a fresh handshake per
-    stream per interval. With a pool the trade inverts — `service_max_event_streams_per_user` is
-    5, so 50 chemists is 250 streams, and 250 connections pinned for the lifetime of open browser
-    tabs would starve the turns that actually need them.
-
-    Proven by starving the pool down to a single connection: the tailer is running, and a
-    concurrent writer must still be able to borrow it. Holding across polls makes this raise
-    `ConnectionError` on the pool timeout.
+    Many open streams would otherwise pin connections that turns need. With the pool starved to one
+    connection, a concurrent writer must still be able to borrow it.
     """
     monkeypatch.setattr(settings, "pg_pool_min_size", 1)
     monkeypatch.setattr(settings, "pg_pool_max_size", 1)
@@ -164,10 +155,7 @@ async def test_tailer_releases_its_connection_between_polls(
 async def test_duplicate_dedupe_key_inserts_once() -> None:
     """A retried insert with the same dedupe key is a no-op — one notification, not two.
 
-    This is the at-least-once activity retry scenario: the first insert committed but the worker
-    died before acking, so Temporal re-runs the activity with the identical input. The unique
-    index on `dedupe_key` must absorb the retry; a distinct key (a genuinely different event)
-    still appends.
+    Temporal may re-run a committed but unacked activity; a distinct key still appends.
     """
     await migrated_db_or_skip()
     session_id = "sess-f3t2-dedupe"
@@ -197,12 +185,7 @@ async def test_null_dedupe_key_keeps_plain_append() -> None:
 
 
 def test_dedupe_key_derivation_is_stable_and_event_specific() -> None:
-    """The workflow-side key is retry-stable but distinguishes runs, kinds, and payloads.
-
-    Same inputs → same key (an activity retry must land on the unique index); a different run of
-    the same workflow id, a different kind, or a different payload (one drift alert per metric in
-    one run) → different keys, so genuinely distinct events never dedupe each other.
-    """
+    """The dedupe key is retry-stable but distinguishes runs, kinds and payloads."""
     from chemclaw.durable.notify import _dedupe_key
 
     base = _dedupe_key("wf-1", "run-1", "job_completed", {"job_id": "j", "energy": -1.5})
@@ -215,12 +198,9 @@ def test_dedupe_key_derivation_is_stable_and_event_specific() -> None:
 def test_a_claim_whose_delivery_never_completed_is_restored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The at-most-once window shrinks to the transport: an undelivered claim goes back.
+    """A claim whose delivery never completed is restored for the next poll.
 
-    The claim used to be destructive across the whole claim-commit-to-SSE-write gap, so a client
-    dropping in it silently destroyed the one signal that a chemist's long search had finished.
-    A stream torn down while suspended at the yield now restores the row on a task of its own,
-    and the next poll — this tailer's or another's — delivers it again. A fully consumed stream
+    A stream torn down at the yield restores the row on its own task; a fully consumed stream
     restores nothing.
     """
     from chemclaw.agent import session_events as module

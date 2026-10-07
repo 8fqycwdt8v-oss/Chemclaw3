@@ -1,19 +1,8 @@
 """A refused tool call, a crashed one and an abandoned one are three events, not one.
 
-The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. Measured before it: a dry-run refusal and a
-repeat-guard trip both produced `outcome='error'` and a log line reading `tool X failed after N
-ms: <prose>` — `agent/audit.py` interpolated `%s` on the exception *instance*, so the class was gone
-from the log while `bounded_repr`'s repr kept it in the row. The database was strictly more
-diagnostic than the log, inverting that module's own opening rule that the log is the floor.
-
-The span half was measured the same way: clean `UNSET`, raised `ERROR`, `CancelledError` `UNSET`,
-**returned error `UNSET`** — and CLAUDE.md records that an MCP tool never raises, so essentially
-every connector-tool failure in production was a span an operator filtering `status=ERROR` could not
-see.
-
-Everything here drives the real middleware against the real metrics registry and a real in-memory
-OTel exporter. A refusal that is classified correctly and counted wrongly is exactly the failure
-this file exists to catch, so nothing is asserted through a double.
+Decision: `D-2026-08-27-a-refusal-is-not-a-crash`. Refusals get their own outcome, log class and
+counter; a returned MCP error marks the span `ERROR` (an MCP tool never raises). Everything drives
+the real middleware against the real metrics registry and an in-memory OTel exporter.
 """
 
 import asyncio
@@ -63,22 +52,14 @@ def _drive(
 ) -> tuple[_Sink, BaseException | None]:
     """Run one tool call through the audit middleware; return its sink and whatever escaped.
 
-    The handler raises `raises` if given, otherwise returns `returns` — which covers the three ways
-    a tool ends that the trail must tell apart, plus the cancellation case a caller drives by
-    passing `asyncio.CancelledError()`.
-
-    The escaping exception is **returned rather than left to `pytest.raises`** because both halves
-    are claims: the row is written *and* the exception reaches the caller unchanged. Catching it
-    here lets one test assert `raised is refusal` — object identity, so a middleware that re-raised
-    a re-wrapped copy would fail — while still reading the sink the call filled on its way out.
+    The handler raises `raises` if given, otherwise returns `returns`. The escaping exception is
+    returned so a test can assert both the row and that the same exception object reached the
+    caller.
     """
     sink = _Sink()
     middleware = make_audit_middleware(correlation_id="cid-1", actor="alice@corp", sink=sink)
-    # A registered tool, because that is what the graph passes for a name it holds — and
-    # `metric_tool_name` reads `.name` off it to decide whether the label is safe to mint.
-    # A registered tool, because that is what the graph passes for a name it holds — and
-    # `metric_tool_name` reads `.name` off it to decide whether the label is safe to mint.
-    # `registered=False` is the `ToolNode` shape for a name the model invented.
+    # A registered tool is what the graph passes for a name it holds; `metric_tool_name` reads its
+    # `.name`. `registered=False` is the `ToolNode` shape for a name the model invented.
     tool = SimpleNamespace(name=name, metadata={}) if registered else None
     request = tool_request(name, {"q": "x"}, tool=tool)
     if todos is not None or batch_todos is not None:
@@ -119,9 +100,7 @@ def _drive(
 def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], Any]]:
     """A real tracer provider exporting into a list, with tracing switched on.
 
-    The same arrangement `tests/test_tracing.py` uses and for the same reason: the property under
-    test is what a *collector* would receive, and a mock that records calls would assert this module
-    invoked an API rather than that the span said what it should.
+    The property under test is what a collector would receive, not that an API was called.
     """
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -140,9 +119,8 @@ def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], Any]]:
 def test_each_gate_classifies_as_its_own_reason_and_a_bug_classifies_as_none() -> None:
     """The five reasons `chemclaw_tool_refusals_total` declares, and the negative case.
 
-    Order is the classification: four of the five types are `AuthorizationError` subclasses, so a
-    scan that tested the base first would report every refusal as `authz`. The negative case is the
-    point of the whole exercise — a `KeyError` in a parser must not become a governance decision.
+    Order matters: four types subclass `AuthorizationError`, so testing the base first would call
+    every refusal `authz`. A `KeyError` in a parser must not become a governance decision.
     """
     assert refusal_reason(DryRunRefusal("no")) == "dry_run"
     assert refusal_reason(UndeclaredWriteRefusal("no")) == "undeclared_write"
@@ -157,12 +135,7 @@ def test_each_gate_classifies_as_its_own_reason_and_a_bug_classifies_as_none() -
 def test_a_refusal_is_recorded_as_refused_and_counted_by_its_reason(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The row says `refused`, the log names the class, and the reason counter moves.
-
-    All three, because each was its own half-measure: the outcome is what an auditor reads, the
-    class is what a log query filters on, and the counter is what a dashboard shows without anybody
-    reading either.
-    """
+    """The row says `refused`, the log names the class, and the reason counter moves."""
     before = METRICS.value("chemclaw_tool_refusals_total")
     refusal = DryRunRefusal("DRY RUN — record_note changes stored data, so it was not called.")
 
@@ -200,16 +173,9 @@ def test_a_genuine_failure_stays_an_error_and_moves_no_refusal_counter(
 def test_a_name_the_graph_does_not_hold_cannot_mint_a_series() -> None:
     """A hallucinated tool name is one bucket, not one time series per string.
 
-    `ToolNode` invokes this chain for a name the graph does not hold — that is deliberate, so an
-    interceptor can short-circuit an unregistered call — so the name on `request.tool_call` is the
-    *model's* string, and putting it on a metric label makes `/metrics` grow by one series per
-    thing a model invents. Measured on a compiled graph before the clamp: a single hallucinated
-    call created a `chemclaw_tool_calls_total` series **and** a full fourteen-bucket histogram, and
-    driven directly the label accepted 230 characters of arbitrary text. Model output is
-    attacker-influenceable here — it is why this tree carries `frame_untrusted` — so an injected
-    document could grow the registry until the pod died.
-
-    The audit *row* still carries what the model asked for; only the label is refused.
+    `ToolNode` invokes this chain for unregistered names, so the label would be the model's string,
+    and model output is attacker-influenceable: an injected document could grow `/metrics` without
+    bound. The audit row still carries the name the model asked for.
     """
     hallucinated = "totally_made_up_tool_'; DROP TABLE audit_events; --" + "X" * 200
     sink, _ = _drive(hallucinated, returns="ok", registered=False)
@@ -225,9 +191,7 @@ def test_a_name_the_graph_does_not_hold_cannot_mint_a_series() -> None:
 def test_every_call_is_counted_by_tool_and_outcome_and_timed_under_its_own_name() -> None:
     """`chemclaw_tool_calls_total{tool,outcome}` and the per-tool latency label.
 
-    One distribution used to pool a minutes-long xTB call through the calc connector with a
-    sub-millisecond `read_attachment`, so "why is this turn slow" could not be attributed to a
-    tool — the question the histogram's own docstring says it exists to answer.
+    Per tool, so a slow turn can be attributed to the tool that made it slow.
     """
     before = METRICS.observations("chemclaw_tool_duration_seconds")[0]
 
@@ -240,35 +204,22 @@ def test_every_call_is_counted_by_tool_and_outcome_and_timed_under_its_own_name(
 
 
 def test_the_row_names_the_plan_step_the_call_served() -> None:
-    """`audit_events.plan_step` — the join `job_records` had and the trail did not.
+    """`audit_events.plan_step` — the same join `job_records` has.
 
-    Read off the request through the same `plan_link_for_call` a job is stamped with, because the
-    ambient link `stamp_plan_link` binds is *reset* by the time the row is written: that middleware
-    is innermost and resets in a `finally` while this one is outermost. Measured before the fix —
-    `get_current_plan_link()` read `("", "")` at this point.
-
-    This case is a batch with **no** rewrite in it, which is the fallback half of that reading. The
-    case with one is next door, and it is the one the state-only read got wrong.
+    Read off the request through `plan_link_for_call`, because the ambient link is reset by the
+    innermost middleware before this outermost one writes. This case is a batch with no plan rewrite
+    in it.
     """
     sink, _ = _drive("compute_xtb_energy", todos=_TODOS)
     assert sink.events[0].plan_step == "run the conformer search"
 
 
 def test_the_row_names_the_step_the_batch_marks_not_the_one_it_just_finished() -> None:
-    """The off-by-one this row carried, and the reason the two records could not agree.
+    """The row names the step a batch marks in progress, not the one it just finished.
 
-    The canonical harness batch is "tick step N completed, mark N+1 in_progress, call the tool" —
-    one assistant message, `TodoListMiddleware`'s own pattern — and `request.state["todos"]` is the
-    snapshot `ToolNode` took *before* it. `agent/plan_link.py` has worked around that from the day
-    it was written; this row read the state directly, so measured on that batch it stamped
-    `'run the conformer search'` — the step that had just **finished** — while
-    `job_records.plan_step` for the job the same call launched said `'compute the pKa'`. The
-    docstring beside it claimed "a tool call and the job it launched cannot disagree about which
-    step they served", and `chemclaw explain` rendered the previous step for every ordinary call of
-    every plan.
-
-    The two readings are now one function (`plan_link.plan_link_for_call`), and this asserts them
-    against each other rather than restating either.
+    In the "tick step N, mark N+1, call the tool" batch, `request.state["todos"]` is the snapshot
+    from before the batch, so reading state directly names step N. The audit row and `job_records`
+    must use the same `plan_link.plan_link_for_call`; this asserts them against each other.
     """
     after_the_tick = [
         {"content": "run the conformer search", "status": "completed"},
@@ -302,9 +253,8 @@ def test_a_call_outside_a_plan_stamps_the_empty_step_rather_than_a_guess() -> No
 def test_the_row_is_dated_when_the_call_started_not_when_the_sink_flushed() -> None:
     """`ts` is stamped in the middleware, so a batching sink cannot re-date the trail.
 
-    `record` buffers and returns, `ts` defaulted to `now()` at INSERT and `id` is a `BIGSERIAL`
-    assigned at the same moment — so under load both the timestamps and the ordering
-    `chemclaw explain` reconstructs a turn from belonged to the flusher.
+    Otherwise both the timestamps and the order `chemclaw explain` reconstructs would be the
+    flush's.
     """
     before = datetime.now(UTC)
     sink, _ = _drive("find_notes")
@@ -314,12 +264,10 @@ def test_the_row_is_dated_when_the_call_started_not_when_the_sink_flushed() -> N
 def test_a_returned_failure_marks_the_span_error_where_it_used_to_say_nothing(
     spans: Callable[[], Any],
 ) -> None:
-    """The T1 fix, and the case that covers most production tool failures.
+    """A returned failure marks the span `ERROR` — the case covering most production tool failures.
 
-    An MCP tool never raises: `langchain_mcp_adapters` converts an `isError=True` result inside
-    `StructuredTool.ainvoke` and it comes back as a *return*. So the `with start_span(...)` block
-    exited cleanly and OpenTelemetry had nothing to set a status from — measured `UNSET` while the
-    audit row said `error`, two artifacts about one event that disagreed.
+    An MCP tool never raises (`isError=True` comes back as a return), so without this the span
+    stayed `UNSET` while the audit row said `error`.
     """
     from langchain_core.messages import ToolMessage
     from opentelemetry.trace import StatusCode
@@ -340,9 +288,7 @@ def test_a_returned_failure_marks_the_span_error_where_it_used_to_say_nothing(
 def test_a_cancelled_call_marks_the_span_too(spans: Callable[[], Any]) -> None:
     """`use_span` catches `Exception`, and a teardown delivers a `BaseException`.
 
-    So a tool interrupted by a client disconnect or the turn deadline left an `UNSET` span while
-    the trail recorded a `cancelled` row on a shielded write — the same disagreement as above,
-    reached through the one exception family OpenTelemetry's own helper does not see.
+    So a cancelled call must mark its span explicitly to agree with the `cancelled` audit row.
     """
     from opentelemetry.trace import StatusCode
 
@@ -370,9 +316,8 @@ def test_a_refusal_is_distinguishable_on_the_span_without_flooding_the_error_vie
 ) -> None:
     """A refusal raises, so OpenTelemetry marks it — the `outcome` attribute is what separates it.
 
-    Nothing here sets `ERROR` for a refusal deliberately: a policy decision is not a fault, and an
-    error view full of them is an error view nobody reads. What makes the distinction available is
-    the attribute, beside `chemclaw_tool_refusals_total{reason}`.
+    A policy decision is not a fault; the attribute, beside `chemclaw_tool_refusals_total{reason}`,
+    lets a view separate the two.
     """
     _drive("record_note", raises=UndeclaredWriteRefusal("not given to this agent"))
 

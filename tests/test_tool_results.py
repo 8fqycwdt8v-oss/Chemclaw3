@@ -1,16 +1,9 @@
-"""What a tool returned, reachable — the store, the producer's refusal, and the two read routes.
+"""What a tool returned, reachable: the store, the producer's refusal, and the two read routes.
 
-Everything chemical a tool computes used to reach the browser as `ToolResultEvent.preview`: 200
-characters, cut at whatever byte the budget lands on, explicitly not JSON. So a hazard screen with
-severities and citations arrived as prose the model wrote about it, and the frontend could not fix
-that because the data never crossed the wire. This covers the three pieces that change it — the
-content-addressed store, the producer that names a result on the trace event, and the routes that
-read a stored result and a cited note back.
-
-The Postgres-backed tests follow `tests/test_postgres_artifacts.py`'s pattern exactly:
-`migrated_db_or_skip()` skips cleanly with no database (this sandbox) and runs for real in CI, each
-test is a sync `def` wrapping an inner `async def _run()` driven by `asyncio.run`, and each uses its
-own session id so it is independent of anything else sharing the schema.
+A tool's structured result must reach the browser as data, not only as a 200-character preview.
+Covered: the content-addressed store, the producer that names a result on the trace event, and
+the routes that read a stored result and a cited note back. Postgres-backed tests skip without a
+database, wrap an inner `async def _run()` in `asyncio.run`, and use their own session ids.
 """
 
 import asyncio
@@ -49,9 +42,8 @@ _SCREEN = (
 def _returned(trace: runner_trace.ToolCallTrace, call_id: str, tool: str, text: str) -> Any:
     """The `tool_result` event `tool` produces on `trace`, with its call announced first.
 
-    Both halves are the trace's own surface — the graph driver calls exactly these two methods with
-    a call and a result it has already assembled (`chemclaw.api.graph_stream`) — so what a test
-    drives here is what a turn drives.
+    These are the two methods `chemclaw.api.graph_stream` calls, so the test drives what a turn
+    does.
     """
     trace.issued(call_id, tool, "{}")
     return asyncio.run(trace.returned(call_id, text))
@@ -111,25 +103,17 @@ async def test_an_identical_result_stores_one_blob_and_keeps_one_link() -> None:
             links = await cur.fetchone()
     assert blobs is not None and blobs[0] == 1
     assert links is not None and links[0] == 1
-    # And the label the dedup cost is **empty**, not the last writer's. The row is one row for
-    # two turns, so no correlation id belongs to it; `SET correlation_id = EXCLUDED
-    # .correlation_id` made the fetch route answer with the right bytes under the wrong turn's
-    # id, which is the near-miss pairing this whole surface refuses on the read side.
+    # The label is empty, not the last writer's: the row serves two turns, so no single correlation
+    # id belongs to it.
     assert links[1] == ""
 
 
 async def test_a_result_two_calls_produced_names_neither_of_them() -> None:
-    """The label is dropped rather than guessed, and the bytes are still exactly right.
+    """A result two calls produced names neither of them; the bytes are still exactly right.
 
-    This is not a corner case. `include_detailed_errors` is off (`agent/tool_authz.py` says why),
-    so *every* unexpected tool exception in the system returns the same byte string "Error:
-    Function failed." — one blob per session covering every failed call it ever makes. A fetch of
-    it under one arbitrary tool name and one arbitrary correlation id would be a mispairing served
-    with full confidence, and `StoredToolResult.correlation_id` is documented as "the join a
-    reviewer asks for".
-
-    Asserted through `load_tool_result` rather than on the row, because what matters is what a
-    *reviewer* is handed: unknown where it is unknown, and the result text where it is not.
+    Identical failure texts are common, so one blob can cover many calls, and labelling it with one
+    arbitrary tool and correlation id would be a confident mispairing. Asserted through
+    `load_tool_result`, which is what a reviewer is handed.
     """
     await migrated_db_or_skip()
     failure = "Error: Function failed."
@@ -159,12 +143,9 @@ async def test_a_result_two_calls_produced_names_neither_of_them() -> None:
 
 
 async def test_the_same_call_written_twice_keeps_the_labels_it_agrees_with() -> None:
-    """The other half of the rule: only *disagreement* costs the labels.
+    """The same call written twice keeps the labels it agrees with.
 
-    A turn that re-runs the same tool with the same arguments — a retry after a transient failure,
-    the repeat guard letting one through — writes the same bytes under the same tool and the same
-    correlation id. There is nothing ambiguous about that row, and emptying it would throw away a
-    join that is correct, which is the opposite error.
+    Only disagreement costs the labels; a retry of the same tool in the same turn is unambiguous.
     """
     await migrated_db_or_skip()
     for _ in range(2):
@@ -178,11 +159,11 @@ async def test_the_same_call_written_twice_keeps_the_labels_it_agrees_with() -> 
 
 
 async def test_a_ref_from_another_session_is_a_miss() -> None:
-    """The read joins the link, and that join is the second half of the ownership story.
+    """A ref from another session is a miss.
 
-    `resolve_session` proves the caller owns the conversation; this proves the conversation owns
-    the bytes. Without it a ref — which is only the SHA-256 of a result, so anyone able to
-    reproduce the text can compute it — would read as a bearer token for any session.
+    `resolve_session` proves the caller owns the conversation; this join proves the conversation
+    owns the bytes. A ref is just the SHA-256 of the text, so without it a ref would act as a bearer
+    token.
     """
     await migrated_db_or_skip()
     ref = await store_tool_result(
@@ -195,16 +176,10 @@ async def test_a_ref_from_another_session_is_a_miss() -> None:
 def test_a_write_that_fails_costs_the_turn_nothing(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Storing must never fail a turn: the sink answers `""` and logs, it does not raise.
+    """A write that fails costs the turn nothing: the sink answers `""` and logs, it does not raise.
 
-    Driven against a DSN pointing at nothing, which is the real shape of the failure — a database
-    that has gone away mid-turn — rather than a patched exception that would prove only that the
-    `except` clause is spelled correctly. Runs everywhere, including with no Postgres: an
-    unreachable server is exactly the state under test.
-
-    The counter is asserted alongside the log line because the write is per *tool call*: a run of
-    these is a log flood and one aggregate number, and the number is the half an operator alerts
-    on.
+    Driven against a DSN pointing at nothing, the real shape of the failure. The counter is asserted
+    too, since it is what an operator alerts on.
     """
     monkeypatch.setattr(settings, "postgres_dsn", "postgresql://127.0.0.1:1/nowhere")
 
@@ -255,10 +230,7 @@ def test_a_small_result_rides_along_and_a_large_one_does_not(
 ) -> None:
     """Under the inline cap the text is on the event; over it, the ref is the only way to it.
 
-    The preview/ref split is a rule about *large* results, and it was applied to every result: a
-    300-byte ICH limit paid a second round trip to be rendered as anything but prose. What is under
-    test is the boundary rather than the shortcut — that the cap is what decides, so this can never
-    quietly become the path a 40-chunk evidence sweep takes to a browser.
+    The test is the boundary: the cap decides, so a large result never rides inline.
     """
     trace = runner_trace.ToolCallTrace()
     small = _returned(trace, "s1", "screen_hazards", _SCREEN)
@@ -301,10 +273,8 @@ def test_setting_the_inline_cap_to_zero_puts_nothing_on_the_event(
 def test_the_trace_names_the_values_a_result_returned() -> None:
     """`values` carries the tool's own key for each number, beside the bare `numbers` list.
 
-    The two are not redundant: `numbers` feeds a grounding check that wants every figure and no
-    names, and `values` feeds a surface that wants names and refuses to guess them. A payload that
-    is not JSON keeps the first and loses the second, which is the honest report — the figures are
-    known and their names are not.
+    `numbers` feeds a grounding check that wants every figure; `values` feeds a surface that needs
+    names and refuses to guess them, so a non-JSON payload keeps only `numbers`.
     """
     trace = runner_trace.ToolCallTrace()
     event = _returned(trace, "p1", "predict_pka", '{"pka": 4.76, "sd": 1.6}')
@@ -322,15 +292,10 @@ def test_the_trace_names_the_values_a_result_returned() -> None:
 def test_an_oversize_result_is_refused_whole_and_says_so(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Over the cap the result is not stored at all — and never trimmed — and the refusal is logged.
+    """An oversize result is refused whole, never trimmed, and the refusal is logged.
 
-    Trimming would be the worse failure: half a `ScreenResult` is still valid JSON and renders as a
-    complete hazard screen with flags missing, which is the "silent truncation reads as
-    completeness" problem `_capped_numbers` exists to avoid, made worse by the payload looking
-    whole.
-
-    The sink must not be called at all — a refusal that still wrote the bytes would keep the cost
-    the cap exists to bound.
+    Half a JSON result can still parse and render as a complete one with entries missing. The sink
+    is not called at all.
     """
     monkeypatch.setattr(settings, "stream_max_result_bytes", 64)
     called: list[str] = []
@@ -458,14 +423,10 @@ def test_a_cited_note_resolves_to_the_view_the_agent_tool_returns(
 
 
 def test_the_note_route_reaches_the_real_expand_note(client: TestClient) -> None:
-    """The same two calls again with nothing patched, because a stub cannot disagree with itself.
+    """The note route reaches the real `expand_note`, with nothing patched.
 
-    Both tests above replace `expand_note`, which makes exactly one thing unobservable: whether
-    `front_door.expand_note` still resolves to a coroutine this route can call with this signature.
-    That is the failure a rename or an added required argument would cause, and it is the failure
-    the stubs would sail straight through — the lesson `tasks/lessons.md` records from an outage
-    two monkeypatches hid. So this drives the shipped knowledge graph: a note that is on disk
-    answers 200, and one that is not answers 404.
+    The tests above stub `expand_note`, so only this shows the route still matches its signature. A
+    note on disk answers 200, one that is not answers 404.
     """
     note_id = sorted(p.stem for p in (settings.knowledge_path / "compound").glob("*.md"))[0]
 
@@ -498,16 +459,11 @@ def test_an_unmerged_note_is_a_404_carrying_its_reason(
 def test_a_fetched_result_is_revalidatable_and_never_publicly_cacheable(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The header the frontend asked for was `public, max-age=31536000, immutable`; both are wrong.
+    """A fetched result is revalidatable and never publicly cacheable.
 
-    `public` is the hazard half. This resource belongs to one session and one owner, the URL encodes
-    no principal, and `resolve_session` is the only thing between it and anybody who can reach the
-    service — so a shared cache holding one owner's result and serving it on that URL is the
-    ownership gate removed by a response header. The route must never emit it.
-
-    `immutable` is the wrong half. The ref addresses the *bytes*, so `text` cannot change; `tool`
-    and `correlation_id` can, and the test two above this one
-    (`test_a_result_two_calls_produced_names_neither_of_them`) is what proves they do.
+    `public` would let a shared cache serve one owner's result to anyone on that URL, bypassing the
+    ownership gate. `immutable` is wrong because the `tool` and `correlation_id` labels can change
+    under the same ref.
     """
     session_id = client.post("/sessions").json()["session_id"]
 
@@ -528,13 +484,10 @@ def test_a_fetched_result_is_revalidatable_and_never_publicly_cacheable(
 def test_the_validator_covers_the_labels_the_ref_does_not_address(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The one change that happens under a stable tool-result URL must change the ETag.
+    """The ETag covers the labels the ref does not address.
 
-    `_UPSERT_LINK` collapses a disagreeing `tool` or `correlation_id` to `''` when a second call in
-    one session returns the same text, so a client's cached copy names a call the store has since
-    withdrawn. A validator derived from the ref — the obvious cheap one, since the ref is already in
-    the URL — would say "unchanged" across exactly that. This drives the route before and after the
-    collapse on identical bytes and requires two different validators.
+    `_UPSERT_LINK` can blank the labels when a second call returns the same text, so a ref-derived
+    validator would say "unchanged" across that change. Driven before and after the collapse.
     """
     session_id = client.post("/sessions").json()["session_id"]
     ref = content_address(_SCREEN)
@@ -571,12 +524,9 @@ def test_the_validator_covers_the_labels_the_ref_does_not_address(
 def test_a_caller_holding_the_current_result_gets_a_bodyless_304(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """What the revalidation actually buys: no second copy of a result over the wire.
+    """A caller holding the current result gets a bodyless 304.
 
-    A stored result runs to `stream_max_result_bytes`, and re-sending it on every render was the
-    cost the frontend's caching was trying to avoid. `no-cache` keeps the client's copy and turns
-    the repeat into a conditional request; this is the half that has to answer 304 for that to be
-    worth anything.
+    `no-cache` turns a repeat render into a conditional request, which pays off only if it can 304.
     """
     session_id = client.post("/sessions").json()["session_id"]
     ref = content_address(_SCREEN)
@@ -603,17 +553,11 @@ def test_a_caller_holding_the_current_result_gets_a_bodyless_304(
 def test_a_note_is_revalidatable_and_its_validator_follows_an_edit(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A note id is stable across edits, so `immutable` here would pin a superseded body forever.
+    """A note is revalidatable and its validator follows an edit.
 
-    The knowledge graph is Markdown in Git and a PR-gate merge rewrites a note's body under the same
-    id; the neighbourhood is other notes' business entirely; and `Note.is_current` is evaluated
-    against `date.today()`, so a neighbour leaves the view on the day its `valid_to` passes with
-    nothing written at all. Nothing about this URL is content-addressed — which is the premise the
-    caching request rested on — so the route revalidates.
-
-    `private` even though the note has no owner: the route is `CurrentUser`-gated, and a shared
-    cache serving a stored copy would answer callers who presented no credential and sit in nobody's
-    rate budget.
+    A note id is stable across edits, its neighbourhood changes independently, and `Note.is_current`
+    depends on today's date, so nothing here is content-addressed. `private`, because the route is
+    `CurrentUser`-gated and a shared cache would serve unauthenticated callers.
     """
     bodies = [
         "<retrieved-note>mp 12 C</retrieved-note>",
@@ -652,12 +596,10 @@ def test_a_note_is_revalidatable_and_its_validator_follows_an_edit(
 def test_the_hops_argument_still_selects_the_view_it_names(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A conditional GET must not collapse two different views onto one validator.
+    """The `hops` argument still selects the view it names.
 
-    `hops` widens the neighbourhood and is a query parameter, so `/notes/x` and `/notes/x?hops=2`
-    are different cache entries in a client that keys on the whole URL — but a server that stamped
-    one validator on both would 304 a two-hop request holding a one-hop validator, and the caller
-    would render the narrow view believing it was the wide one.
+    One validator for `/notes/x` and `/notes/x?hops=2` would let a two-hop request 304 against a
+    one-hop copy.
     """
 
     async def _expand(note_id: str, hops: int = 1) -> NoteView:
@@ -686,12 +628,10 @@ def test_the_hops_argument_still_selects_the_view_it_names(
 def test_a_note_that_does_not_resolve_is_not_given_a_caching_policy(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The commonest 404 here is a citation to a note still awaiting its PR-gate review.
+    """A note that does not resolve is given no caching policy.
 
-    That note does not exist *yet*, which is the whole point. Stamping the shared policy on that
-    answer would be harmless under `no-cache` and a live hazard the day somebody adds a freshness
-    lifetime: the miss would outlive the merge that fixes it. A caching policy belongs to a
-    representation, and a 404 is not one.
+    The note may exist later, and a cached miss could outlive it; a caching policy belongs to a
+    representation, which a 404 is not.
     """
 
     async def _expand(_note_id: str, _hops: int = 1) -> NoteView:
@@ -728,9 +668,8 @@ _SCREEN_RESULT: dict[str, Any] = {
 def _turn(result: object, *, call_id: str = "t1", tool: str = "screen_hazards") -> list[Any]:
     """One tool call and its result, in the messages a turn actually produces.
 
-    A `ToolMessage` is where a non-string return value becomes text, so the coercion is inside the
-    constructor rather than in front of it — which is the point: the producer and the transcript
-    have to be looking at the same bytes, and a test that stringified first would never find out.
+    The `ToolMessage` constructor coerces a non-string return to text, so the producer and the
+    transcript see the same bytes; stringifying first would hide a difference.
     """
     return [
         AIMessage(
@@ -754,10 +693,8 @@ def _turn(result: object, *, call_id: str = "t1", tool: str = "screen_hazards") 
 def _reloaded(messages: list[Any]) -> list[Any]:
     """`messages` after the round trip a reload puts them through.
 
-    `PostgresHistoryProvider` writes `message_to_dict()` into a JSONB column and rebuilds it with
-    `messages_from_dict`, so this is the transformation between "what the turn produced" and "what
-    `_transcript` reads". Doing it for real is what makes the identity below a property of the
-    serialization rather than of this file.
+    `PostgresHistoryProvider` stores `message_to_dict()` and rebuilds with `messages_from_dict`;
+    doing it for real makes the identity below a property of the serialization.
     """
     return list(messages_from_dict([message_to_dict(message) for message in messages]))
 
@@ -768,22 +705,11 @@ def _stored_turn(result: str, *, call_id: str = "t1", tool: str = "screen_hazard
 
 
 def test_the_transcript_names_a_result_by_the_same_ref_the_stream_named_it_by() -> None:
-    """The whole pairing argument, driven through both real paths rather than asserted about them.
+    """The transcript names a result by the same ref the stream named it by.
 
-    A reload had no way to resolve a past turn's results: `result_ref` reached a surface on the SSE
-    stream only, so a chemist coming back to a conversation saw *that* `screen_hazards` ran and
-    400 characters of prose about what it found, while the full text sat in `tool_result_blobs`.
-
-    The join is content addressing and nothing else. The producer hashes the result text; the
-    transcript hashes the result text it reads out of the stored message; **both reach it through
-    `schemas.message_text`**, so they are the same bytes by construction rather than by two
-    implementations happening to agree. Nothing pairs on `(session, tool, correlation_id,
-    created_at)` — which could not tell two calls of one tool in one turn apart anyway — so there
-    is no near-miss pairing available to get wrong.
-
-    Driven from a `dict` the tool never stringified, and through the real producer call
-    (`graph_stream` hands `trace.returned` exactly this text), because the one event that could
-    break the identity is a change to how a message's content becomes a string.
+    Producer and transcript both hash the result text obtained through `schemas.message_text`, so
+    they agree by construction; nothing pairs on session/tool/time, which could not distinguish two
+    calls of one tool. Driven from an unstringified `dict` through the real producer call.
     """
     stored: dict[str, str] = {}
 
@@ -809,16 +735,11 @@ def test_the_transcript_names_a_result_by_the_same_ref_the_stream_named_it_by() 
 
 
 def test_a_result_the_store_cannot_serve_is_advertised_as_unfetchable() -> None:
-    """The retention case, and the reason the ref is *checked* rather than merely computed.
+    """A result the store cannot serve is advertised as unfetchable.
 
-    A ref in a transcript outlives the blob it names the moment the TTL sweep runs, and it is also
-    computable for results the store never took (off, over the cap, a failed write). Advertising a
-    derivable address in either case would hand a client a link that 404s and no way to know in
-    advance — so the transcript reports only refs the store can currently serve, and `""` keeps
-    exactly the meaning it has on the live stream: there is nothing to fetch.
-
-    What the client still has is the 400-character `result`, which is why this is a degradation of
-    the rendering and never a loss of the transcript.
+    A transcript ref outlives its blob after the TTL sweep and is computable for results never
+    stored, so only refs the store can serve are reported; `""` means nothing to fetch, and the
+    preview `result` remains.
     """
     [message] = [m for m in _transcript(_stored_turn(_SCREEN), fetchable=()) if m.tool_calls]
     [call] = message.tool_calls
@@ -828,13 +749,10 @@ def test_a_result_the_store_cannot_serve_is_advertised_as_unfetchable() -> None:
 
 
 def test_an_unanswered_call_stays_distinguishable_from_an_unfetchable_one() -> None:
-    """Three states, and the pair that must not collapse into each other.
+    """An unanswered call stays distinguishable from an unfetchable one.
 
-    `result is None` means the call has no result at all — it ran and nobody knows how it ended.
-    `result` set with an empty `result_ref` means it returned and only the preview survives. A
-    surface that conflated them would tell a chemist a tool produced nothing when it produced
-    something the store no longer holds, which is the more reassuring of the two claims and the
-    wrong one.
+    `result is None` means no result is known; `result` with an empty `result_ref` means it returned
+    and only the preview survives.
     """
     orphan = _reloaded(
         [
@@ -858,12 +776,10 @@ def test_an_unanswered_call_stays_distinguishable_from_an_unfetchable_one() -> N
 def test_the_transcript_route_carries_the_ref_the_store_reports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end on the route a client actually reloads through.
+    """The transcript route carries the ref the store reports, end to end.
 
-    `GET /sessions/{id}/messages` is the rehydration path, and it is where the ref had to arrive: a
-    projection that can produce one is worth nothing if the route never asks for it. The app is
-    built here rather than taken from the `client` fixture because the stored history has to be
-    replaced on `app.state.history`, which is the seam the route reads its transcript through.
+    `GET /sessions/{id}/messages` is the reload path. The app is built here so `app.state.history`
+    can be replaced.
     """
     app = create_app()
     client = TestClient(app)
@@ -891,9 +807,7 @@ def test_the_transcript_route_carries_the_ref_the_store_reports(
 async def test_the_refs_a_session_can_fetch_are_its_own() -> None:
     """`fetchable_refs` is scoped by the link row's session, like every other read of this store.
 
-    Otherwise the transcript would advertise a ref that `load_tool_result` then refuses — the same
-    ownership boundary applied twice, and it must give the same answer both times or a surface
-    renders a link that cannot resolve.
+    Otherwise the transcript would advertise a ref `load_tool_result` then refuses.
     """
     await migrated_db_or_skip()
     mine = await store_tool_result(
@@ -910,12 +824,10 @@ async def test_the_refs_a_session_can_fetch_are_its_own() -> None:
 def test_a_store_that_cannot_be_read_costs_the_transcript_only_its_refs(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reading fails the same way writing does: an empty answer, a count, and no raised error.
+    """A store that cannot be read costs the transcript only its refs.
 
-    A chemist reloading a conversation must still get every message and every tool call when the
-    blob store is unreachable; what they lose is the link to a full result, which is a rendering.
-    Driven against a DSN pointing at nothing rather than a patched exception, for the reason the
-    write-side test states — that is the real shape of the failure.
+    Every message and tool call still loads; only the links to full results are lost. Driven against
+    a DSN pointing at nothing.
     """
     monkeypatch.setattr(settings, "postgres_dsn", "postgresql://127.0.0.1:1/nowhere")
 
@@ -941,23 +853,11 @@ def test_the_off_switch_asks_the_database_nothing(monkeypatch: pytest.MonkeyPatc
 
 
 def test_every_entry_point_coerces_a_result_to_text_before_it_can_be_addressed() -> None:
-    """Why there is no "a stored dict 500s the reload" test here — measured, not assumed.
+    """Every entry point coerces a result to text before it can be addressed.
 
-    There used to be one, and it pinned a real defect: a stored row carrying `"result": {…}`
-    reached `content_address`, which calls `.encode`, and raised `AttributeError` — an uncaught
-    exception on `GET /sessions/{id}/messages`, which is the route a chemist reloads a *whole*
-    conversation through. Losing the conversation because one result card cannot be addressed is
-    the wrong trade by a wide margin.
-
-    On this engine that row cannot exist. Measured across all three ways a `ToolMessage` is made —
-    the constructor, `messages_from_dict` rebuilding a stored row, and `message_migration
-    .to_langchain` converting a row the previous framework wrote — every one coerces a non-string
-    content to `str` before anything reads it. So the guard belongs where the coercion is, and a
-    test asserting "does not 500" would pass for a reason unrelated to its name.
-
-    What is pinned instead is the coercion itself, at each entry, because *that* is the property
-    the ref identity rests on: if one of them stopped coercing, the defect above comes back
-    somewhere this file no longer looks.
+    `content_address` calls `.encode`, so a stored non-string result would fail the reload route.
+    The constructor, `messages_from_dict` and `message_migration.to_langchain` all coerce content to
+    `str` first, so the coercion is pinned at each entry rather than a "does not 500" test.
     """
     payload: dict[str, list[str]] = {"flags": [], "screened": []}
     constructed = ToolMessage(content=cast(str, payload), tool_call_id="t1")

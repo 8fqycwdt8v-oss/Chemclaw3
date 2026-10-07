@@ -1,21 +1,9 @@
 """One bad note must cost one note, not the whole derived index.
 
-`reindex_notes` builds the dense vector and the lexical `tsvector` for every note, and both are
-written in the same `INSERT`. That makes it the single point at which *both* index-backed retrieval
-legs can be frozen at once — and it had two ways to freeze them, neither of which any test could
-see, because the failures are silent and the job's own return value is a count of what succeeded.
-
-- **A transient parse failure was a deletion.** `keep` came from the *parsed* note set while
-  `_parse_notes` skips an unparseable file by design (its own comment names the case: "an rsync
-  that lands a renamed note before removing the old one"). So a half-landed sync retired every note
-  it briefly could not read, and repairing them cost one embedding call each.
-- **One oversized note took the corpus with it.** Every changed note was embedded in a single
-  `embed_texts` call and upserted afterwards, so a note the endpoint refuses left *zero* notes
-  indexed — including the short ones beside it — and the hourly job then reported success forever
-  while both legs served whatever the index last held.
-
-Both tests below drive the real `reindex_notes` against `InMemoryNoteIndex`, and both fail on the
-code they were written against.
+`reindex_notes` writes both the vector and the lexical legs, and its return value counts only
+successes, so two silent failures are pinned: a note that briefly fails to parse is kept rather
+than retired, and a note the embedder refuses costs only its own batch. Both drive the real
+`reindex_notes` against `InMemoryNoteIndex`.
 """
 
 import asyncio
@@ -44,9 +32,7 @@ def test_a_note_that_stops_parsing_is_kept_in_the_index_rather_than_retired(
 ) -> None:
     """Breaking 40 of 100 notes' frontmatter must retire none of them.
 
-    The rows are still the best answer available for those notes: their text has not changed, their
-    vectors are still valid, and the file will parse again as soon as the sync finishes. Retiring
-    them trades a recoverable, invisible degradation for an unrecoverable, equally invisible one.
+    Their rows are still valid and the files will parse again once a sync finishes.
     """
     index = InMemoryNoteIndex()
     _corpus(tmp_path, 100)
@@ -69,16 +55,10 @@ def test_a_note_that_stops_parsing_is_kept_in_the_index_rather_than_retired(
 def test_a_readme_is_not_reported_as_a_note_that_did_not_parse(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The alarm above fired on the shipped corpus, permanently, on a committed README.
+    """A README is not reported as a note that did not parse, while a broken note still is.
 
-    `note_file_fingerprints` keys **every** `*.md` under the tree by its stem, so subtracting the
-    parsed note ids from it counts a file that was never a note. `knowledge/README.md` is exactly
-    that file and it is committed, so every scheduled re-index warned that one note had dropped out
-    of both derived legs — which is the alarm that exists to say a real one had. A standing false
-    positive makes a real one indistinguishable from the baseline.
-
-    Both halves are asserted here: the README is silent, and a note whose frontmatter is genuinely
-    broken still says so.
+    `note_file_fingerprints` keys every `*.md`, so `knowledge/README.md` was a standing false
+    positive that made a real alarm indistinguishable from the baseline.
     """
     index = InMemoryNoteIndex()
     _corpus(tmp_path, 3)
@@ -105,12 +85,9 @@ def test_a_readme_is_not_reported_as_a_note_that_did_not_parse(
 def test_a_note_the_embedder_refuses_costs_its_own_batch_and_no_more(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The notes in the batches that already landed stay landed.
+    """The notes in batches that already landed stay landed; the blast radius is one batch.
 
-    Before batching, the single `embed_texts` call meant a refusal anywhere left nothing indexed at
-    all. The contract now is weaker than "the bad note is skipped" and that is deliberate: this
-    function does not decide which notes an endpoint should accept. What it guarantees is that the
-    blast radius is one batch, so a pass makes progress and the next one retries only what is
+    This does not decide which notes an endpoint should accept; the next pass retries what is
     missing.
     """
     index = InMemoryNoteIndex()

@@ -4,6 +4,8 @@
 D-120 (a data source becomes a manifest), D-018 (discovery is not enablement), D-089 (no external
 data sources), D-005 (the PR-gate is the one write path)
 
+**Superseded-by:** [D-2026-08-26-the-driver-s-signature-is-the-schema](D-2026-08-26-the-driver-s-signature-is-the-schema.md) (in part)
+
 ## Context
 
 The final ELN integration will be a Snowflake database carrying reaction SMILES, protocol text,

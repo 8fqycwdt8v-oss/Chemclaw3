@@ -1,23 +1,10 @@
-"""Knowledge-graph validation, usable as a CLI in CI (plan step 2.4).
+"""Knowledge-graph validation, usable as a CLI in CI.
 
-Checks a notes directory for the failure modes that would corrupt the graph:
-unparseable/invalid notes, duplicate ids, links to unknown notes, and note types or
-relations outside the declared vocabulary. Run as
-`python -m chemclaw.kg.validate [notes_dir]`; it exits non-zero if any problem is found, so it
-fails CI on a corpus somebody broke by hand.
-
-**It is not a gate on what the agent writes, and has not been since
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`.** An agent-authored note is committed
-directly, so this never runs between the writing of one and its readability. What it still catches
-is a *human's* edit to the corpus — a moved file, a broken wikilink, a type nobody registered — and
-a systematic breakage the writer introduces, on the next CI run rather than at the moment of the
-write.
-
-**What it no longer checks at all is the hazard content of a procedure.** D-080's per-note gate
-screened an agent-authored `## Procedure` and refused it if the flags its structures raised were
-not documented. Safety became an ordinary MCP capability
-(`D-2026-08-15-safety-is-a-tool-not-a-gate`), so the screen that gate called no longer lives in
-this repository.
+Checks a notes directory for unparseable or invalid notes, duplicate ids, filename and directory
+mismatches, links to unknown notes, and note types or relations outside the declared vocabulary. Run
+as `python -m chemclaw.kg.validate [notes_dir]`; exits non-zero on any problem. Agent notes are
+committed directly, so this catches hand edits and systematic writer breakage on the next CI run,
+not at write time.
 """
 
 import sys
@@ -49,23 +36,15 @@ def validate(notes_dir: Path) -> list[str]:
 def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
     """The problems in `notes_dir`, plus the parseable notes the scan already read.
 
-    The notes come back so a caller that needs both — `cli.validate_kg`, which runs the citation
-    checks over the same corpus — parses the tree once instead of twice. `notes_in` used to be
-    that second parse: the CLI called `validate` and then `notes_in`, each with its own
-    `read_note` loop over every file, doubling the gate's cost for no additional information.
+    Returning the notes lets `cli.validate_kg` run its citation checks without a second parse.
     """
     problems: list[str] = []
-    # Notes with the file each came from, so every message can name a path without a lookup that
-    # can miss. It used to be a dict keyed by id, which the duplicate-id branch deliberately does
-    # not populate twice — so the two registry checks fell back to a literal `Path('?')` for
-    # exactly the notes a reader would most want located.
+    # Notes paired with their file, so every message names a path, including for duplicate ids.
     located: list[tuple[Note, Path]] = []
     id_to_path: dict[str, Path] = {}
 
-    # The same scan the indexer uses (`chemclaw.kg.graph.scan_notes_dir`), and deliberately not the
-    # same *loop*: `load_notes` skips an unparseable note so one bad file cannot block a query,
-    # while this must report it. Resilient indexer, strict validator, one definition of which files
-    # are in scope.
+    # Same file scan as the indexer, but a strict loop: this reports unparseable notes that
+    # `load_notes` skips.
     for path, _ in scan_notes_dir(notes_dir):
         try:
             note = read_note(path)
@@ -78,23 +57,17 @@ def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
             problems.append(f"duplicate id {note.id!r} in {path} and {id_to_path[note.id]}")
         else:
             id_to_path[note.id] = path
-        # The filename *is* an index key, not decoration. `chemclaw.kg.graph.note_file_fingerprints`
-        # reads a note's id back out of `path.stem` — it hashes the bytes, it never parses — and
-        # `reindex_notes` looks that map up by the id in the frontmatter. When the two disagree the
-        # note is missing from both sides of the diff, which used to read as "unchanged" and left it
-        # out of the retrieval index entirely and silently. That half is fixed there; this is the
-        # half that catches a mismatch in CI, because the right name is knowable here.
+        # The filename is an index key: `note_file_fingerprints` reads the id from `path.stem`, so a
+        # mismatch would drop the note from the retrieval index diff.
         if path.stem != note.id:
             problems.append(
                 f"note {note.id!r} is in {path}, whose filename says {path.stem!r} — "
                 f"the file must be named {note.id + '.md'!r} "
                 "(the note index keys on the filename and would skip this note)"
             )
-        # The directory is an index key exactly as the filename is: the writer derives a note's
-        # path from its *type* (`record._note_file` -> `note_relative_path`), so a note filed
-        # under the wrong type directory means the next write for the same id creates a second
-        # file claiming it — and `_parse_notes`' first-in-path-order rule then keeps the mis-filed
-        # one and silently drops the note just written.
+        # The directory is an index key too: the writer derives the path from the type, so a
+        # misfiled note would make the next write create a second file for the id, and the graph
+        # keeps the first in path order.
         expected = note_relative_path(note.type, note.id)
         try:
             actual = path.relative_to(notes_dir).as_posix()
@@ -112,18 +85,9 @@ def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
         f"note {source!r} links to unknown note {target!r}"
         for source, target in dangling_links(notes)
     )
-    # Whole-corpus vocabulary checks (gap KNW-6, STO-8). Both are checked here rather than in the
-    # `Note` schema, and what that placement buys has changed with the gate's deletion. It used to
-    # be "the agent may propose a new type and a human sees it at the gate". There is no gate, so
-    # what it buys now is that a genuinely new type is a *corpus*-level decision — CI names it,
-    # once, over the whole tree — rather than a per-note refusal that would make the agent's write
-    # fail on a vocabulary a deployment may legitimately be extending. A typo is caught the same
-    # way, on the next run, rather than never.
-    #
-    # The vocabulary is core's own set **plus what the enabled bundles declare**: `bo-candidate` is
-    # minted by a connector, so a deployment's vocabulary is a property of which bundles it runs,
-    # not of this package alone. Both accessors resolve that union; the message names both places a
-    # reader can add a name.
+    # Whole-corpus vocabulary checks, here rather than in the schema so an extended vocabulary is a
+    # corpus-level decision rather than a per-write refusal. The vocabulary is core's plus what the
+    # enabled bundles declare; the message names both places to add a name.
     problems.extend(
         _registry_problems(
             ((note, path, note.type) for note, path in located),
@@ -152,12 +116,9 @@ def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
 def _signature_problems(located: list[tuple[Note, Path]]) -> list[str]:
     """Flag every typed edge whose endpoints contradict the relation's declared direction.
 
-    Only edges whose relation appears in `RELATION_SIGNATURES` are checked, and a target end is
-    checked only when the target resolves to a note in this corpus — a dangling or external target
-    is another check's finding, and reporting it twice under two names would send a reader two
-    ways. The failure this closes: the corpus held `product-of` edges pointing both ways at once,
-    so `related(graph, x, "product-of")` mixed "reactions that produced x" with "compounds x
-    produced" and no caller could tell which reading a row was.
+    Only relations in `RELATION_SIGNATURES` are checked, and a target end only when it resolves to a
+    note in this corpus; dangling and external targets are other checks' findings. Without this,
+    `related(graph, x, "product-of")` would mix both directions.
     """
     type_by_id = {note.id: note.type for note, _ in located}
     problems: list[str] = []
@@ -186,10 +147,8 @@ def _signature_problems(located: list[tuple[Note, Path]]) -> list[str]:
 def _malformed_targets(located: list[tuple[Note, Path]]) -> list[str]:
     """Flag every link whose target is not a legal note slug.
 
-    `split_link` returns whatever text follows the colon, so `[[a:b:c]]` yields target `b:c` and
-    `[[:x]]` yields `:x` — names the indexer will happily mint graph nodes under while the `Note`
-    schema would refuse them as an id. They were caught only incidentally, as dangling links,
-    which told the author "unknown note" instead of "that is not a note id".
+    `split_link` returns whatever follows the colon (`[[a:b:c]]` gives `b:c`), which the indexer
+    would mint as a node; the author is told it is not a note id rather than "unknown note".
     """
     problems: list[str] = []
     for note, path in located:
@@ -209,17 +168,8 @@ def _malformed_targets(located: list[tuple[Note, Path]]) -> list[str]:
 def external_citations(notes: list[Note]) -> list[tuple[str, str]]:
     """Every `(source id, target id)` link pointing into an external id namespace.
 
-    Since D-2026-08-25 an ELN transcription is a row in `reaction_records` rather than a file in
-    `knowledge/`, so `dangling_links` deliberately does not report `[[reaction-<id>]]` as broken —
-    it cannot see the store. That leaves the citations campaigns and playbooks are built from
-    unchecked by anything, which is how a typo'd run id would merge. This is the other half: the
-    links a *store* has to answer for.
-
-    A target that is defined *in the corpus* is not external, whatever its prefix: `reaction-` is
-    a namespace, not a reservation (`agent.graph_tools.expand_note` says a human-authored note
-    under that name must still win), and `reaction` is a `KNOWN_NOTE_TYPES` entry. Without the
-    subtraction, a correct corpus whose reaction notes were named `reaction-*` failed
-    `make kg-validate` for citing notes sitting in the same list.
+    `dangling_links` does not report these (it cannot see the store), so this lists the ones a store
+    must answer for. A target defined in the corpus is not external whatever its prefix.
     """
     defined = {note.id for note in notes}
     return sorted(
@@ -234,9 +184,7 @@ def external_citations(notes: list[Note]) -> list[tuple[str, str]]:
 class RecordExistence(Protocol):
     """The one question this check asks of the ELN transcription tier.
 
-    Declared here rather than imported, for the reason `retrieval.retrievers.ReactionMetadata`
-    gives: `ingest` depends on `kg`, so importing the store back would invert the layering for a
-    one-method need. The caller supplies it — `cli.validate_kg`, which is allowed to see both.
+    Declared here because `ingest` depends on `kg`; `cli.validate_kg` supplies the store.
     """
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
@@ -249,9 +197,7 @@ async def unresolved_citations(
 ) -> list[str]:
     """Report the external citations whose record `records` does not hold.
 
-    Raises whatever the store raises when the database is unreachable — the caller decides what an
-    unrunnable check means, because a validator that silently passes when it could not look is a
-    claim that a control exists.
+    Raises when the store is unreachable: a check that could not look must not pass silently.
     """
     wanted = [external_record_id(target) for _, target in citations]
     known = await records.known(wanted)
@@ -266,13 +212,8 @@ async def unresolved_citations(
 def calc_citations(notes: list[Note]) -> list[tuple[str, str]]:
     """Every `(source id, calculation key)` a note's `calc_refs` cites.
 
-    The calculation half of what `external_citations` does for reaction ids. `_calc_ref_shape`
-    checks the *form* of a key at parse time and concedes in its own comment that existence "is a
-    question only a database can answer" — and until this pair of functions, nothing asked it.
-    A transposed digit in a hash merged silently, and no reader downstream could tell: the note
-    cites a key no calculation ever produced, so every reader of `calc_refs` — the model's
-    `chemclaw.agent.graph_tools.NoteRef`, `GET /notes/{id}`, a chemist following the citation by
-    hand — is handed an id that resolves to nothing.
+    The schema checks only a key's shape; this feeds the existence check, so a mistyped key that no
+    calculation produced is caught instead of handed to every reader.
     """
     return sorted((note.id, ref) for note in notes for ref in note.calc_refs)
 
@@ -281,9 +222,7 @@ def calc_citations(notes: list[Note]) -> list[tuple[str, str]]:
 class CalculationExistence(Protocol):
     """The one question this check asks of the calculation cache.
 
-    Declared here rather than imported for the reason `RecordExistence` gives: `science.calc`
-    must not be a `kg` dependency for a one-method need. `cli.validate_kg`, which is allowed to
-    see both layers, supplies the store.
+    Declared here so `science.calc` is not a `kg` dependency; `cli.validate_kg` supplies the store.
     """
 
     async def known(self, keys: Sequence[str]) -> set[str]:
@@ -296,8 +235,7 @@ async def unresolved_calc_refs(
 ) -> list[str]:
     """Report the `calc_refs` whose calculation `store` does not hold.
 
-    Raises on an unreachable database exactly as `unresolved_citations` does, and for the same
-    reason: the caller decides what an unrunnable check means.
+    Raises on an unreachable database, as `unresolved_citations` does.
     """
     known = await store.known([key for _, key in citations])
     return [
@@ -316,9 +254,7 @@ def _registry_problems(
 ) -> list[str]:
     """Flag every `(note, path, value)` whose value is outside `registry`.
 
-    One function for the note-type check and the relation check, which were the same comprehension
-    written twice with two words swapped — and were therefore two places to fix when the message,
-    the sentinel path or the "add it to the registry" hint needed changing.
+    Shared by the note-type and relation checks.
     """
     return [
         f"note {note.id!r} in {path} uses unknown {label} {value!r} "
@@ -331,12 +267,9 @@ def _registry_problems(
 def main() -> int:
     """CLI entry point: validate the notes dir; print problems; return exit code.
 
-    A `ChemclawError` is reported as a problem rather than raised. `validate` resolves the effective
-    vocabulary through `known_note_types()`, which asks the connector registry what the enabled
-    bundles declare — so a deployment whose `CHEMCLAW_CONNECTORS_ENABLED` names a bundle it does not
-    ship makes *this* gate die, with a traceback, about connectors. That is a real misconfiguration
-    and must still fail; it must not fail looking like a crash in the graph validator. Every sibling
-    validator prints its configuration errors, and this one now does too.
+    A `ChemclawError` (e.g. an enabled connector bundle that does not exist, surfaced while
+    resolving the vocabulary) is printed as a problem and fails the run, rather than crashing with a
+    traceback.
     """
     notes_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else settings.knowledge_path
     if not notes_dir.exists():

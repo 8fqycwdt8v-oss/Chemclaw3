@@ -1,28 +1,14 @@
 """The figures an agent-written artefact states that no tool in its session returned (unchecked).
 
-The answer's own grounding check (`core/quantities`, read by `evals.live` and by
-`ToolResultEvent.numbers`) asks of a prose answer whether each figure is a rounding of something a
-tool returned. An artefact is part of the answer, so the agent's revisions are asked the same thing,
-by the same rule (`ungrounded`, `is_rounding_of`'s batch form), and the figures that fail are stored
-on the revision and shown beside it.
+The same rule the answer's own grounding check uses (`core/quantities`: `ungrounded`,
+`is_rounding_of`), applied to agent revisions; failing figures are stored on the revision and shown
+beside it. The word is "unchecked", not "wrong": such a figure may be the chemist's own, arithmetic,
+or something the scan cannot see.
 
-**The wording is "unchecked", everywhere, and that is a measurement rather than a courtesy.**
-`evals/live.py::_verified_numbers` measured the inverse signal at precision zero, and a figure no
-tool returned may be the chemist's own, arithmetic over tool values, or a value the scan could not
-see. What the flag says is that nobody can point at the tool output it came from.
-
-**The evidence is the session's stored tool results** (`tool_result_blobs` through
-`tool_result_links`), which is the one place every result of every turn of the session is kept in
-full — the turn trace holds only the current turn's, and only in the front door's process. The
-figures the **chemist** introduced in a revision of the same artefact count as grounded too: an
-agent revision that carries the chemist's edit forward is not transcribing it. *Introduced* — a
-figure their revision has and its parent did not — because a person's revision carries every figure
-it did not touch, and counting those would let one unrelated edit vouch for everything the agent
-wrote before it.
-
-**`None` means "not checked"**, which is different from `[]` ("checked, nothing unaccounted for"):
-with the in-memory session store or the result store switched off there is no evidence to read, and
-flagging every figure would be a claim this module cannot make.
+The evidence is the session's stored tool results (`tool_result_blobs` via `tool_result_links`),
+plus figures a chemist introduced in a revision of the same artefact — introduced, i.e. absent from
+that revision's parent, so an unrelated edit does not vouch for everything carried along. `None`
+means not checked (no stored evidence available), distinct from `[]`.
 """
 
 from __future__ import annotations
@@ -48,13 +34,9 @@ from chemclaw.exhibits.models import (
     TableSpec,
 )
 
-# Newest first, so a figure transcribed from this turn's result is found on the first batch and the
-# scan stops; only a figure that really is unaccounted for reads the whole session.
-#
-# **Only evidence is evidence** (`exhibits.evidence`): a result the model wrote and a tool handed
-# back — `read_exhibit`, a helper's report, a scratchpad file — would ground every figure the agent
-# wrote the moment it read its own work. Filtered by the link's tool rather than by not storing the
-# result, because the stored text is also what the chemist's transcript opens.
+# Newest first, so a figure from this turn's result is found in the first batch. Only evidence
+# counts (`exhibits.evidence`), filtered by the link's tool, so the agent reading its own work back
+# cannot ground its figures.
 _SESSION_RESULTS = """
 SELECT b.data
 FROM tool_result_links l
@@ -67,13 +49,10 @@ ORDER BY l.created_at DESC
 def stated_figures(spec: Spec) -> list[str]:
     """Every figure a spec states as a value, as written, deduplicated in first-seen order.
 
-    Values, not names: a table's cells, a structure's property values, a chart's points, a
-    geometry's energy, a document's prose and an html page's text (`html_text`). Literal values
-    only — a `$bind` is the tool's own value, so a spec is read as stored, bindings unresolved.
-    Titles, column labels, units, structure labels and SMILES are names, and a "Compound 12" or a
-    ring-closure digit is not a figure anybody transcribed. A geometry's coordinates are not
-    figures either: they are a structure, read by a viewer rather than quoted, and three per atom
-    would bury the one figure a chemist does quote.
+    Values only: table cells, structure property values, chart points, a geometry's energy, document
+    prose and html text (`html_text`). Literal values only; a `$bind` is the tool's own value, so
+    the spec is read as stored. Names (titles, labels, units, SMILES) and geometry coordinates are
+    not figures.
     """
     seen: dict[str, None] = {}
     for figure in _figures(spec):
@@ -137,13 +116,9 @@ class _TextOf(HTMLParser):
 def html_text(page: str) -> str:
     """The text a reader of `page` sees — the grounding scan's input for `html`.
 
-    The standard library's tolerant parser rather than a dependency: this needs character data and
-    nothing else, and a malformed page still yields what text it has. What it reads is what a
-    reader sees as text: paragraphs, table cells, and an inline SVG's `<text>` labels, which are
-    character data like any other. **Not `<script>` or `<style>`** — code and layout, where a
-    number is a loop bound or a width far more often than a figure — and **not attributes**, so an
-    SVG's coordinates are never read as figures. The cost is stated in the decision record: a
-    chart a script draws from a JS array goes unchecked.
+    The standard library's tolerant parser: character data only, including inline SVG `<text>`, and
+    a malformed page still yields its text. Not `<script>`, `<style>` or attributes, where numbers
+    are code and layout; a chart drawn by a script from a JS array therefore goes unchecked.
     """
     parser = _TextOf()
     parser.feed(page)
@@ -154,8 +129,7 @@ def html_text(page: str) -> str:
 def _of_value(value: Number | str | Binding | None) -> Iterator[str]:
     """A literal number as the numeral it is written as; a text cell's figures by the prose rule.
 
-    A binding states no figure of its own: its value is the tool result's, verbatim, so it is
-    grounded by construction and never reaches the scan.
+    A binding states no figure of its own: its value is the tool result's, grounded by construction.
     """
     if value is None or isinstance(value, Binding):
         return
@@ -168,9 +142,8 @@ def _of_value(value: Number | str | Binding | None) -> Iterator[str]:
 def introduced_figures(mine: Spec, parent: Spec | None) -> list[str]:
     """The figures a person's revision states that its parent did not — what they introduced.
 
-    Computed once, when the revision is written, and recorded on it (`store.chemist_figures`):
-    deriving it again for every person's revision on every agent write was linear in the history.
-    CPU work over a whole spec, so a caller on the event loop runs it in a thread.
+    Computed once at write time and recorded (`store.chemist_figures`). CPU work over a whole spec,
+    so event-loop callers run it in a thread.
     """
     before = set(stated_figures(parent)) if parent is not None else set()
     return [figure for figure in stated_figures(mine) if figure not in before]
@@ -189,8 +162,7 @@ async def unverified_figures(
 
     Returns:
         At most `exhibit_max_unverified_figures` figures, in the order the spec states them; `[]`
-        when every figure is accounted for; `None` when there is no stored evidence to check
-        against (see the module docstring).
+        when every figure is accounted for; `None` when there is no stored evidence to check.
     """
     remaining = stated_figures(spec)
     if not remaining:
@@ -201,9 +173,7 @@ async def unverified_figures(
     if human:
         remaining = await asyncio.to_thread(ungrounded, remaining, human)
     async with db.connection(settings.postgres_dsn) as conn:
-        # A server-side cursor, so a batch is what crosses the wire: a client-side one would fetch
-        # every stored result of the session before the first comparison, and the early stop would
-        # save the regex and nothing else.
+        # A server-side cursor, so only a batch crosses the wire and the early stop saves the fetch.
         async with conn.cursor(name="exhibit_grounding") as cur:
             await cur.execute(_SESSION_RESULTS, (session_id, *evidence_params()))
             while remaining:

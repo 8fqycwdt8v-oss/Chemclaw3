@@ -1,15 +1,9 @@
 """An effect: what this system changes in a system it does not own, and whether it can be undone.
 
-**The audit that produced this work claimed all three attachment seams refuse a write path. That was
-too strong, and the correction is the finding.** `ConnectorManifest` has routed mutation through
-`jobs:` since D-029 — "which core authorizes, dry-run-gates and attributes" — so a job could always
-write. What nothing said was whether a job writes *this* deployment's database or somebody else's
-system of record, and nothing declared reversibility, so every job was gated identically whether it
-could be undone or not.
-
-These tests hold the four things the declaration adds: it cannot be declared un-gated, it must say
-how it can be undone and say it consistently, an irreversible one waits for a human, and the ledger
-records the attempt *before* it is made.
+Jobs could always write through `jobs:`; the declaration says whether a job reaches somebody
+else's system of record and how it is undone. Held here: it cannot be declared un-gated, its
+reversal is stated consistently, an irreversible one waits for a human, and the ledger records
+the attempt before it is made.
 """
 
 import inspect
@@ -99,13 +93,10 @@ def _bundle(*jobs: JobSpec) -> ConnectorManifest:
 
 
 def test_a_named_compensation_has_to_be_a_job_this_bundle_declares() -> None:
-    """The half of the claim `EffectSpec` could not check, because a job cannot see its siblings.
+    """A named compensation must be a job this bundle declares.
 
-    Nothing *runs* a compensation, and that is a decision rather than an omission: naming one tells
-    an operator which job undoes this one, and launching it is their call through the ordinary
-    launcher. Which is precisely why the name has to resolve — the field's whole value is that
-    somebody can act on it, so a manifest could otherwise declare a reversibility naming a job that
-    does not exist, and the empty-string case is already refused for exactly that reason.
+    Nothing runs a compensation automatically; the name tells an operator which job undoes this one,
+    so it has to resolve.
     """
     with pytest.raises(ValidationError, match="names compensation"):
         _bundle(_job(system="the LIMS", reversal="compensating", compensation="retract_it"))
@@ -119,11 +110,10 @@ def test_a_named_compensation_has_to_be_a_job_this_bundle_declares() -> None:
 
 
 async def test_the_ledger_records_the_attempt_before_it_is_made() -> None:
-    """A row in `attempting` after a crash is the honest state, not a bug in the ledger.
+    """The ledger records the attempt before it is made.
 
-    This system may have filed the deviation and lost the acknowledgement. A ledger that recorded
-    only successes would answer "nothing happened" for exactly the case an operator most needs to
-    investigate — which is why `unsettled` has an index of its own.
+    A row left `attempting` after a crash is the honest state: the change may have landed with the
+    acknowledgement lost, which is the case an operator most needs to see.
     """
     await migrated_db_or_skip()
     async with await connect(settings.postgres_dsn) as conn:
@@ -202,12 +192,10 @@ async def test_the_external_reference_survives_a_failure() -> None:
 
 
 def test_an_irreversible_effect_waits_for_a_human_and_refuses_on_expiry() -> None:
-    """The per-call approval, which is the question D-2026-08-15 left open in as many words.
+    """An irreversible effect waits for a human and refuses on expiry.
 
-    Asserted over the workflow source rather than by running it: the property is which branch the
-    run takes before it acts, and a live assertion would need a broker, a bundle worker and a
-    fake external system. What matters and is checkable here is that the refusal is unconditional —
-    anything other than an explicit approval attempts nothing.
+    Asserted over the workflow source, since running it needs a broker and an external system. The
+    refusal is unconditional: anything but an explicit approval attempts nothing.
     """
     source = (SRC / "durable" / "connector_job.py").read_text(encoding="utf-8")
     assert 'if job.effect_reversal != "irreversible":' in source
@@ -221,12 +209,10 @@ def test_an_irreversible_effect_waits_for_a_human_and_refuses_on_expiry() -> Non
 
 
 def test_no_job_in_this_repository_declares_an_effect() -> None:
-    """The seam ships with no caller, and saying so is the point.
+    """No job in this repository declares an effect.
 
-    Every job here writes this system's own stores — a calculation cached, a note proposed, a row
-    recorded. Declaring an effect on one of them would be a false claim about what it reaches, and
-    a shipped example would be a capability nobody asked for on the surface of every deployment.
-    The declaration is for a site that has a system to reach.
+    Every job here writes this system's own stores; the declaration is for a site with an external
+    system to reach.
     """
     manifests = list(SRC.rglob("connector.yaml"))
     assert manifests, "no connector manifests found — this test would assert nothing"
@@ -249,17 +235,11 @@ async def _clear(effect_id: str) -> None:
 
 
 async def test_a_failure_after_the_change_landed_cannot_rewrite_the_applied_row() -> None:
-    """The one write that must not be believed: `failed` over an effect that already applied.
+    """A failure after the change landed cannot rewrite the `applied` row.
 
-    `ConnectorJobWorkflow` settles `applied` and then runs `_finish` **inside the same `try`**,
-    whose `except BaseException` settles `failed`. So a `ValidationError` out of the note write, or
-    the documented cancellation path, arrived at the ledger as "this did not happen" about a
-    deviation standing in somebody's QMS — and an operator reading the only record of what this
-    system changed outside itself would file it a second time. `unsettled()` could not surface it
-    either, because that reads `attempting`.
-
-    Asserted as the *second* settle being refused rather than as the first succeeding, because the
-    first always worked; it was the overwrite that lied.
+    The workflow settles `applied` and then runs `_finish` in the same `try`, whose handler settles
+    `failed`; that overwrite would tell an operator a standing change never happened. Asserted as
+    the second settle being refused.
     """
     await migrated_db_or_skip()
     effect_id = "eff-applied-then-failed"
@@ -321,15 +301,9 @@ async def test_a_settle_without_a_handle_does_not_erase_the_one_already_recorded
 
 
 async def test_an_applied_effect_can_still_be_compensated() -> None:
-    """The one transition out of `applied` that must survive the overwrite guard.
+    """An applied effect can still be compensated.
 
-    `reversal: compensating` means "undone by another declared job", and applied → compensated is
-    the *only* path by which that state is ever reached — so a guard that blocks every write over
-    `applied` leaves the ledger claiming a change is standing after it has been rolled back. That is
-    the same lie the guard exists to prevent, told the other way round.
-
-    The existing compensation test asserts `failed` → `compensated`, which the guard always allowed;
-    it passes whether or not this path works, which is why it could not catch this.
+    applied → compensated is the only path to that state, so the overwrite guard must allow it.
     """
     await migrated_db_or_skip()
     effect_id = "eff-applied-then-compensated"
@@ -365,17 +339,11 @@ async def test_an_applied_effect_can_still_be_compensated() -> None:
 
 
 def test_an_irreversible_effect_without_a_named_approver_refuses_to_run() -> None:
-    """The producer side of the separation-of-duties control, which had no test at all.
+    """An irreversible effect without a named approver refuses to run.
 
-    `grep -rn "effect_approv" tests/` returned nothing: the config setting, the launch-site read and
-    the fail-closed refusal all shipped unexercised, and only the third layer — `_may_answer`'s kind
-    check — was covered. A security control claimed in an ADR with nothing checking its producer is
-    this repository's own `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`
-    shape, which is exactly what the audit that produced the control was about.
-
-    Asserted through the manifest and the job input rather than by driving a broker: what matters is
-    that an irreversible job cannot reach the approval wait carrying an empty `asked_of`, because
-    that is the branch `_may_answer` opens to everyone.
+    The producer side of the separation-of-duties control: an irreversible job must not reach the
+    approval wait with an empty `asked_of`, the branch `_may_answer` opens to everyone. Asserted
+    through the manifest and the job input rather than a broker.
     """
     # An irreversible effect must carry a named approver into the workflow, or the launch is not
     # capable of raising a routed approval.
@@ -409,11 +377,10 @@ def test_an_irreversible_effect_without_a_named_approver_refuses_to_run() -> Non
 
 
 def test_the_launch_site_reads_the_approver_from_configuration() -> None:
-    """The read must happen outside workflow code, and it must actually happen.
+    """The launch site reads the approver from configuration, outside workflow code.
 
-    In the workflow it would change the scheduled child on replay; absent entirely, every
-    irreversible job refuses to run and the control reads as broken rather than unconfigured. This
-    pins the source rather than the value, because the value is a deployment's.
+    In the workflow it would change the scheduled child on replay. Pins the source, since the value
+    is a deployment's.
     """
     source = inspect.getsource(connector_jobs)
     assert "effect_approver=settings.effect_approval_role" in source, (
@@ -423,13 +390,10 @@ def test_the_launch_site_reads_the_approver_from_configuration() -> None:
 
 
 def test_an_unrouted_irreversible_approval_is_refused_rather_than_opened() -> None:
-    """`asked_of=""` is `_may_answer`'s "anyone authenticated" branch, including the requester.
+    """An unrouted irreversible approval is refused rather than opened to anyone.
 
-    That is how the seam shipped: `_approve_effect` raised every approval with no routing, so the
-    person who launched an irreversible change could approve it themselves. The refusal is
-    unconditional — dev as well as under Entra — because a workflow may not read `settings`, and
-    because there is no version of "nobody in particular signs off an unrecoverable change" that is
-    right.
+    `asked_of=""` would let the requester approve their own irreversible change. Unconditional in
+    every mode, because a workflow may not read `settings`.
     """
     source = inspect.getsource(connector_job)
     approve = source[source.index("async def _approve_effect") :]
@@ -443,24 +407,11 @@ def test_an_unrouted_irreversible_approval_is_refused_rather_than_opened() -> No
 
 
 def test_the_ledger_publishes_no_reader_nothing_in_this_repository_names() -> None:
-    """Every public name here is reached from somewhere; two were reached from nowhere at all.
+    """Every public name in the effect ledger is named somewhere in this repository.
 
-    `effects_for_session` had **zero** callers — no `src/`, no `tests/`, no route, no CLI — while
-    its docstring called itself "the evidence pack's read"; `operations/evidence_pack.assemble` has
-    always issued its own `SELECT ... FROM effects WHERE session_id = %s` instead, and
-    `infra/sql/078_effects_session_index.sql` justifies its index for both readers. `Unsettled`,
-    the model carrying the operator-facing `meaning` sentence, had no reader either. Both are the
-    `map_to_hpc_identity` shape D-2026-08-15 deleted 254 lines for and the `audit_events.agent`
-    shape D-2026-08-26 wrote an absence test for: a surface that is described but not served, which
-    reads as a control that exists.
-
-    The rule is deliberately "named anywhere in this repository" rather than "called from `src/`".
-    `get_effect` and `unsettled` are reached only from this file, and that is a different thing:
-    they are the store's own accessors, exercised as the read-back of the write path under test,
-    and deleting them would put raw SQL in a test instead of removing a claim. What no rule here can
-    check is the one gap the module docstring now states plainly — `unsettled` is served by no
-    operator surface — because "a name nothing reaches" and "a name only a person could reach" are
-    not distinguishable from inside the tree.
+    A described but unserved reader reads as a control that exists. "Named anywhere" rather than
+    "called from `src/`": `get_effect` and `unsettled` are the store's own accessors, exercised as
+    the write path's read-back.
     """
     import ast
 
@@ -496,24 +447,11 @@ def test_the_ledger_publishes_no_reader_nothing_in_this_repository_names() -> No
 
 
 def test_no_operator_surface_serves_the_unsettled_set_without_saying_so() -> None:
-    """The module docstring's "served by no route, CLI or tool" is a claim; this is the check.
+    """No operator surface serves the unsettled set while the module says none does.
 
-    `get_effect` and `unsettled` were reported as 22 lines of operator query with no way to run
-    them, and the fork offered was expose-or-delete. Neither was taken, and that is the decision
-    (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`): they are the write path's
-    read-back under test, and `effects_unsettled_idx` is *partial* on `state = 'attempting'`, so it
-    holds in-flight rows only and a never-pruned table does not pay for it.
-
-    What a decision to leave something absent needs is the thing `map_to_hpc_identity` and
-    `audit_events.agent` both lacked — something that fails when the sentence stops being true. The
-    absence tests this repository writes fail when a deleted claim is *re-added*; this one is the
-    mirror image, because here the prose asserts an absence that a future route would quietly
-    falsify. Serving the set is welcome; serving it while the module still says nothing does is
-    what this refuses.
-
-    Scoped to the surfaces the sentence names — the front door, the terminal entrypoints and the
-    agent's tool modules — and read as *identifiers*, so this file's own prose does not count as a
-    caller.
+    The module docstring claims an absence; this fails when a route, CLI or tool falsifies it
+    without the prose changing. Scoped to the surfaces that sentence names, read as identifiers so
+    prose does not count as a caller.
     """
     import ast
 
@@ -547,15 +485,10 @@ def test_no_operator_surface_serves_the_unsettled_set_without_saying_so() -> Non
 async def test_an_effect_is_built_from_the_columns_by_name_and_keeps_its_iso_stamps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reversing `_COLUMNS` must change nothing, and the two timestamps must stay ISO strings.
+    """An effect is built from the columns by name and keeps its ISO timestamps.
 
-    Fourteen positional subscripts used to restate this SELECT's order in Python, nine of them
-    adjacent `TEXT` columns — `requested_by`, `session_id`, `correlation_id`, `approved_by`,
-    `state`, `external_ref`, `detail` among them — so an edit to `_COLUMNS` renamed every value
-    silently. The stamps are asserted beside it because they are the one thing a row factory does
-    *not* do: `attempted_at` and `settled_at` are `TIMESTAMPTZ` and this model has always exposed
-    them as `datetime.isoformat()`, which is now a `BeforeValidator` rather than a line in a
-    hand-written builder — and a SQL-side `::text` would have spelled them differently.
+    Reversing `_COLUMNS` must change nothing; the `TIMESTAMPTZ` stamps are exposed as
+    `datetime.isoformat()` strings through a `BeforeValidator`.
     """
     from chemclaw.durable import effect_ledger
 

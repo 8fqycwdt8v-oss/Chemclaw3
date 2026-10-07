@@ -1,9 +1,7 @@
-"""The evaluation & metric layer (plan Phase 2b, F10-F2).
+"""Settings for the evaluation and metric layer.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from pydantic import Field, SecretStr
@@ -18,180 +16,84 @@ class EvalSettings(BaseSettings):
     retrieval-quality gate all live here.
     """
 
-    # A metric is a pure function; the green-chemistry limits are dimensionless (kg waste or
-    # input per kg product) and process-dependent — these defaults are lenient gate values, tune
-    # them per chemistry. Versioned eval case-set. Its own directory, not under `knowledge_dir`:
-    # an eval case is a structured evaluation payload (output/reference), not a relational note,
-    # so it neither uses the note schema nor passes through kg-validate.
+    # Versioned eval case-set. Not under `knowledge_dir`: a case is an evaluation payload, not a
+    # note. The green-chemistry limits below are dimensionless (kg waste or input per kg product)
+    # and lenient; tune them per chemistry.
     eval_case_dir: str = "data/evals/cases"
     eval_efactor_max: float = 50.0
     eval_pmi_max: float = 50.0
-    # Absolute error (in the prediction's own unit, e.g. log S) still counted as an accurate
-    # prediction against a held-out reference.
+    # Absolute error (in the prediction's own unit, e.g. log S) still counted as accurate.
     eval_prediction_tolerance: float = 1.0
-    # Noise floor for the per-task tool-utility A/B (plan step 2b.4): a metric delta within +/-
-    # this magnitude counts as "no effect", so tool augmentation is only credited (or blamed)
-    # for changes above measurement noise. One global scalar — a comparison does not know which
-    # metric produced its scores, so set it to the noisiest metric's floor (per-metric floors
-    # need a per-metric parameter first). The default is a small floating-point floor so runs
-    # differing only by rounding register as "no effect" (a 0.0 default made *every*
-    # non-exact-tie helped/hurt, defeating the band); raise it to the actual measurement noise
-    # of the metric a given case-set exercises.
+    # Noise floor for the per-task tool-utility A/B: a delta within +/- this counts as "no effect".
+    # One global scalar, so set it to the noisiest metric's floor; the default only absorbs float
+    # rounding.
     eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
-    # What a cached token costs relative to an input token, for `turn_cost_ratio`. These are a
-    # provider's price list rather than a property of this system, which is exactly why they are
-    # settings: a re-pricing must not require a code change, and a deployment on a different
-    # provider must not inherit Anthropic's ratios. The defaults are Anthropic's published
-    # multipliers — a cache read is a tenth of an input token, a cache write a quarter more than
-    # one — and they are the reason the metric scores *billed* tokens rather than tokens sent.
-    # Scoring what was sent would book a new cache breakpoint as a regression, since it moves the
-    # two counts in opposite directions.
+    # Price of a cached token relative to an input token, for `turn_cost_ratio`; a provider's price
+    # list, so configurable. Defaults are Anthropic's (read 0.1, write 1.25). The metric scores
+    # billed tokens so a new cache breakpoint does not read as a regression.
     eval_cache_read_weight: float = Field(default=0.1, ge=0.0)
     eval_cache_write_weight: float = Field(default=1.25, ge=0.0)
-    # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
-    # case-set on a cadence and alerts when an aggregate metric moves further than a *relative*
-    # band (`eval_drift_epsilon` × the baseline value) from the Git-committed baseline
-    # (`data/evals/baseline.json`). Relative, so one knob is scale-appropriate across metrics of
-    # different magnitudes (an `f1` in [0, 1] vs an `e_factor` near 35); 0.05 = a 5%
-    # proportional move. Off by default; enabling it adds the Schedule (D-035).
+    # Eval drift detection: a `background-jobs` workflow re-runs the committed case-set and alerts
+    # when an aggregate metric moves more than `eval_drift_epsilon` x baseline from
+    # `data/evals/baseline.json`. Relative, so one knob fits metrics of different scale. Off by
+    # default; enabling adds the Schedule.
     eval_drift_enabled: bool = False
     eval_drift_schedule_minutes: int = Field(default=1440, ge=1)
     eval_drift_epsilon: float = Field(default=0.05, ge=0)
-    # The drift-check activity's own timeout (not borrowed from the memory job's): five pinned
-    # cases score in well under this, but a dedicated knob keeps the two jobs' timeouts
-    # independent.
+    # The drift-check activity's own timeout.
     eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
     eval_baseline_path: str = "data/evals/baseline.json"
-    # Live probes (AG-13): questions asked of a *running* system over the HTTP/SSE front door,
-    # against a real model. Their own directory, not `eval_case_dir`: a probe is an input to a
-    # conversation that has not happened yet, while an eval case is output already produced —
-    # the two are scored by different machinery and must not be loaded by one another's reader.
+    # Live probes: questions asked of a running system over the HTTP/SSE front door against a real
+    # model. Separate from `eval_case_dir` because a probe is an input, a case is a produced output.
     live_probe_dir: str = "data/evals/probes"
-    # Where the front door is, for the probe runner. Separate from `service_host`/`service_port`
-    # (which bind a server) because the runner is a *client* and is routinely pointed at a
-    # deployment it did not start.
+    # Front-door URL for the probe runner, a client often pointed at a deployment it did not start.
     live_probe_base_url: str = "http://127.0.0.1:8000"
-    # The bearer the probe runner presents. Empty against a dev-posture front door, which reads no
-    # Authorization header at all; set when the lane runs with `entra_required=true`, where every
-    # probe is otherwise a 401 before a single turn starts.
-    #
-    # A token rather than a tenant/client/secret triple, because the runner is not an OAuth client
-    # and should not become one: whoever starts the lane already has to mint an identity with the
-    # roles the probes need (the expensive-job probes need a privileged one), so the only thing
-    # this needs to know is the result. `infra/live/processes.sh` mints it and exports this.
-    #
-    # A `SecretStr` and a member of `_SECRET_SETTINGS`, like every other credential on this object.
-    # It was neither until 2026-08-27 — the one credential covered by no mechanism on any
-    # configuration source — and the identity it carries is a *privileged* one, written into
-    # `live_probe_transcript_dir` on disk by design.
+    # Bearer the probe runner presents; empty against a dev-posture front door, required under
+    # `entra_required`. A token rather than OAuth client credentials: `infra/live/processes.sh`
+    # mints it. Privileged, hence a `SecretStr` in `_SECRET_SETTINGS`.
     live_probe_token: SecretStr = SecretStr("")
-    # One turn's ceiling. Generous: a probe that triggers an inline calculation legitimately
-    # waits, and cutting it short would record a system timeout as a model failure.
+    # One turn's ceiling; generous so an inline calculation is not recorded as a model failure.
     live_probe_timeout_seconds: float = Field(default=300.0, gt=0)
-    # Concurrent probes in flight. Bounded because every probe shares one front door, one
-    # Postgres and one upstream model account; the point of the run is the system's behaviour,
-    # not its rate limit.
+    # Concurrent probes; they share one front door, Postgres and model account.
     live_probe_concurrency: int = Field(default=4, ge=1)
-    # Where transcripts land. Every probe writes one file: the full event stream is the evidence
-    # a finding cites, and a finding whose reproduction is not on disk is prose.
-    live_probe_transcript_dir: str = "tasks/live-test/transcripts"
-    # The judge that grades an answer against its probe's `direction` is routed, not named here.
-    # `model_routes["live-probe-judge"]` picks it, the way the verifier and the protocol condenser
-    # are picked — this was a `live_probe_judge_model` setting defaulting to a vendor model id,
-    # which is a site's model name checked into this repository and is exactly what `model_routes`
-    # exists so that nobody has to do (`D-2026-09-04-a-gateway-is-the-only-provider`). Deliberately
-    # a different, stronger model than the agent under test: grading is where model quality buys
-    # the most, and it is one call per probe against the agent's many — so `evals/live_judge.py`
-    # says at WARNING when the route is unset and the judge is therefore sharing the agent's model.
-    # The judge's own output ceiling. It must clear a verdict plus a reason plus a claims array
-    # comfortably: at 1024 the reply was truncated mid-JSON on long answers and the parse failure
-    # was recorded as a verdict of `unserved`, mislabelling 65 of 190 probes in the first run.
+    # Where transcripts land (gitignored); each probe writes one, the evidence a finding cites.
+    live_probe_transcript_dir: str = ".live/transcripts"
+    # The judge model is routed by `model_routes["live-probe-judge"]`, ideally stronger than the
+    # agent; `evals/live_judge.py` warns when unset. This is its output ceiling, which must fit a
+    # verdict, a reason and a claims array without truncating the JSON.
     live_probe_judge_max_tokens: int = Field(default=4096, gt=0)
-    # How much of each tool result the judge is shown. A result small enough to ride the stream
-    # whole (`stream_inline_result_bytes`) is shown up to this many characters instead of the
-    # 200-character browser preview, which is what made a judge call two citations `screen_hazards`
-    # had returned "fabricated" (probe pl-16, 2026-09-27: both sat past character 200 of a result
-    # the model read whole). Sized to the inline cap so a small result is never cut; 0 restores the
-    # previews alone.
+    # Characters of each tool result shown to the judge, for results small enough to ride the stream
+    # whole (`stream_inline_result_bytes`), instead of the 200-character preview. 0 shows previews
+    # only.
     live_probe_judge_result_chars: int = Field(default=4096, ge=0)
-    # The M12 re-validation suites (plan gate, durable-launcher ordering, team routing). Their own
-    # directory *under* the corpus, not beside it: `load_probes` globs one level, so a subdirectory
-    # is invisible to `make live-probes` — which is the point. These probes are scripted
-    # conversations and routing keys scored by their own suites, and folding them into the
-    # 190-question corpus would change what that run measures without changing what it reports.
+    # The M12 re-validation suites (plan gate, durable-launcher ordering, team routing). A
+    # subdirectory of the corpus so `load_probes` (one level) does not fold them into `make
+    # live-probes`.
     live_m12_probe_dir: str = "data/evals/probes/m12"
-    # How long `make live-jobs` waits for a launched workflow to reach a terminal state before it
-    # judges it. The launcher's own inline wait (`inline_wait_seconds`) is a *turn's* patience and
-    # hands back a bare workflow id when it runs out — correctly — so a smoke that described the
-    # workflow the moment the launch returned read RUNNING on a first launch that took 20.2 s and
-    # failed a job that went on to complete (3/5, then 5/5 on the rerun). This is the smoke's own
-    # bound, separate from the turn's: long enough for a cold worker's first quick-level xTB job,
-    # short enough that a job that is genuinely stuck is reported as stuck rather than waited out.
+    # How long `make live-jobs` waits for a launched workflow to finish before judging it; separate
+    # from a turn's `inline_wait_seconds`. Covers a cold worker's first quick xTB job.
     live_jobs_terminal_wait_seconds: float = Field(default=180.0, gt=0)
-    # How long the delegation runner waits for a turn's `turn_costs` row before calling it a hole.
-    #
-    # It exists because that write is deliberately **off** the turn's hot path:
-    # `agent/turn_cost.record_turn_cost` is synchronous by contract and runs the insert as its own
-    # task, so the row is eventually consistent with the stream having closed. A single read after
-    # the answer therefore races the flush — and the delegation experiment's whole subject is cost,
-    # so recording a booked turn as unbilled would drop a repeat for a reason that has nothing to do
-    # with delegation. `evals/delegation_run.billed_by_session_when_booked` polls ten times inside
-    # this bound and derives its interval from it, so this is the one number and there is no second
-    # one beside it.
-    #
-    # Ten seconds because the write is one INSERT on a connection the pool already holds; a row
-    # still absent after that is genuinely absent, and the honest answer is then a named hole rather
-    # than a longer wait.
+    # How long the delegation runner waits for a turn's `turn_costs` row, which is written off the
+    # hot path and is eventually consistent. `evals/delegation_run.billed_by_session_when_booked`
+    # polls within this bound; a row absent after it is reported as a hole.
     eval_delegation_ledger_wait_seconds: float = Field(default=10.0, ge=0)
-    # The vendored external benchmark `make live-benchmark` scores. A directory rather than a file
-    # so `dataset.json` — the licence, the checksum and where a human obtained it — sits beside the
-    # questions, the discipline the sibling fleet holds every corpus to.
-    #
-    # A setting for the same reason the three above are: the one thing a benchmark run legitimately
-    # varies is which corpus it asks, and a refreshed or trimmed subset checked out elsewhere is an
-    # operator's argument rather than an edit to `cli/live_benchmark`. It was a module constant
-    # while every sibling corpus path was configurable, which is a difference nothing argued for.
+    # The vendored benchmark `make live-benchmark` scores; a directory so `dataset.json` (licence,
+    # checksum, provenance) sits beside the questions.
     benchmark_dir: str = "data/evals/benchmarks/chembench"
-    # Where an archived probe run is published so it can be diffed against the next one (AG-13,
-    # `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment` left this half open).
-    #
-    # **A URL rather than a switch, and it points at localhost.** Phoenix is a container an
-    # operator runs beside the eval lane, not a dependency of this system: the publisher is a
-    # client, so the only thing this repo needs to know is where that process is. The default is
-    # the eval lane's own — nothing is published anywhere until somebody runs `make phoenix-up`
-    # and then the CLI, which is the same posture `live_probe_base_url` takes toward the front
-    # door it points at.
+    # Where an archived probe run is published for diffing. Phoenix is a container an operator runs
+    # beside the eval lane (`make phoenix-up`), not a dependency; nothing is published until then.
     phoenix_base_url: str = "http://127.0.0.1:6006"
-    # The dataset an archived run is published *into*. One name across runs on purpose: Phoenix
-    # versions a dataset when its examples change and hangs every experiment off it, so
-    # re-publishing the same probe set under the same name is what makes two runs comparable.
-    # A second name would produce two datasets that cannot be diffed, which is the whole ask.
+    # Phoenix dataset an archived run is published into; one name across runs so runs are
+    # comparable.
     phoenix_dataset_name: str = "chemclaw-live-probes"
-    # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores
-    # `GraphRetriever` over this fixed corpus fixture (a small versioned set of notes, NOT the
-    # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
-    # the "did we surface the expected evidence?" recall metric gates against — the seam that
-    # catches a substring-filter or evidence-cap change quietly dropping recall.
+    # Retrieval-quality gate: a gold query→source set scores `GraphRetriever` over this fixed corpus
+    # (not the live `knowledge_dir`, so the score is reproducible).
     eval_retrieval_corpus_dir: str = "data/evals/retrieval_corpus"
-    # **0.75 was blind to the smallest regression that exists, on nearly half the case set.**
-    # A case with a 4-note gold set scores exactly 0.75 when one of those notes is lost, so it
-    # passed a floor of 0.75 — and four of the nine gated cases have four gold notes. The floor has
-    # to sit strictly above `max((n-1)/n)` over the gated gold sets or it cannot see one lost note.
-    #
-    # 0.80 is the lowest round value above that bound at n=4: it keeps the most tolerance the
-    # invariant allows while still failing on a single lost note in every gated case, and leaves
-    # `retrieval-cross-coupling-literal-miss` failing at 0.50 as it is designed to.
-    #
-    # `tests/test_retrieval_eval.py` asserts the *inequality* against the loaded cases rather than
-    # restating this number, so a future case with a 5-note gold set (needing > 0.80) fails loudly
-    # instead of silently reopening the blind spot.
+    # Recall floor for the retrieval gate. Must sit strictly above `max((n-1)/n)` over the gated
+    # gold sets so one lost note fails; `tests/test_retrieval_eval.py` asserts that inequality.
     retrieval_recall_min: float = Field(default=0.80, ge=0.0, le=1.0)
-    # Autonomy gates (F9-T3). These score a *scripted* transcript, so they measure the harness's
-    # plumbing — that a plan is produced, that work is closed before answering, that the A/B
-    # arithmetic holds — and never the model's judgment, which needs the live endpoint AG-13 is
-    # waiting on. `eval_plan_quality_min` is deliberately below 1.0: a plan that names an extra
-    # reasonable step is not a regression, while dropping a required one is. `eval_runaway_max` is
-    # 0.0 because the pinned turns are scripted to finish; any runaway among them is a plumbing
-    # break, not a hard case.
+    # Autonomy gates over scripted transcripts: they test harness plumbing, not model judgment. Plan
+    # quality is below 1.0 because an extra reasonable step is not a regression; runaway is 0.0
+    # because the scripted turns always finish.
     eval_plan_quality_min: float = Field(default=0.8, ge=0.0, le=1.0)
     eval_runaway_max: float = Field(default=0.0, ge=0.0, le=1.0)

@@ -1,8 +1,8 @@
-"""Classification metrics (plan F10-F1): precision/recall/F1 over predicted vs expected id sets.
+"""Classification metrics: precision/recall/F1 over predicted vs expected id sets.
 
-Exercises the shared pure computation (including the degenerate empty-set conventions) and the three
-registered metrics end-to-end through an `EvalCase`, so they compute the right number and reject a
-case with no ground truth.
+Exercises the shared pure computation (including the empty-set conventions) and the three
+registered metrics end to end through an `EvalCase`, including refusal of a case with no ground
+truth.
 """
 
 import math

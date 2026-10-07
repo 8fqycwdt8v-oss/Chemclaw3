@@ -1,16 +1,12 @@
 """Where artefacts and their revisions live — a header row and an append-only history under it.
 
-Shaped as `protocols.store` is and for the same reasons: a `Protocol` with an in-memory and a
-Postgres implementation, so the tools and routes are testable with no database while the store that
-serves the front door is exercised against a real one; the header is a mutable projection and the
-revisions are append-only; and **a write whose base revision is not the head is refused**
-(`StaleRevision`) rather than allowed to discard the revision it did not see. That last property is
-the one the artefact exists for: the agent drafts, the chemist corrects, and neither may overwrite
-the other without having read it.
+Shaped like `protocols.store`: a `Protocol` with in-memory and Postgres implementations, a mutable
+header projection over append-only revisions, and a write whose base revision is not the head is
+refused (`StaleRevision`), so neither the agent nor the chemist overwrites a revision they have not
+read.
 
-**Every read is scoped to a session.** An artefact belongs to one conversation, and an id from
-another session answers exactly as an unknown one does — `None`, never "it exists but is not
-yours" — so neither a tool nor a route can be used as an oracle for which ids exist.
+Every read is scoped to a session: an id from another session answers exactly as an unknown one
+(`None`), so no tool or route is an existence oracle.
 """
 
 from __future__ import annotations
@@ -70,13 +66,9 @@ class ExhibitStore(Protocol):
         """Store revision 1 of a new artefact, refusing at the session's cap.
 
         `chemist_figures` is what a person's revision introduced (`grounding.introduced_figures`),
-        recorded so that an agent revision reads a set rather than re-deriving it from every
-        person's revision (`chemist_figures` below); `None` for an agent's.
-
-        `exhibit_id` is for a writer that must be idempotent across retries — a durable activity
-        deriving the id from its workflow — and makes the call a create-or-return: when this
-        session already holds that id, its revision 1 comes back and nothing is written. Every
-        other writer leaves it `None` and gets a fresh random id.
+        recorded at write time; `None` for an agent's. `exhibit_id` makes the call a
+        create-or-return for an idempotent writer (a durable activity); others leave it `None` and
+        get a fresh random id.
 
         Raises:
             ExhibitLimit: the session already holds `exhibit_max_per_session` artefacts.
@@ -128,10 +120,8 @@ class ExhibitStore(Protocol):
     async def chemist_figures(self, session_id: str, exhibit_id: str) -> list[str]:
         """Every figure a person introduced into `exhibit_id`, each once, as recorded at write time.
 
-        The grounding check runs on every agent revision and counts these as accounted for. Read
-        as recorded rather than re-derived: deriving them parsed every person's revision and its
-        parent on each agent write — measured 1.27 s for 100 revisions of a 2,000-row table, on
-        the event loop, and linear in the history up to `exhibit_max_revisions`.
+        The grounding check counts these as accounted for on every agent revision; reading the
+        recorded sets avoids re-parsing the whole history on the event loop.
         """
         ...
 
@@ -401,9 +391,8 @@ class InMemoryExhibitStore:
     async def listing_for(self, actor: str, limit: int) -> list[ExhibitHeader]:
         """Empty: this backend has no registry of who owns or joined a session.
 
-        The precedent is `GET /sessions` under the in-memory session store, which answers `[]` for
-        the same reason — reporting what this process happens to hold would answer a question about
-        the deployment with an eviction-dependent guess.
+        Like `GET /sessions` under the in-memory session store, rather than an eviction-dependent
+        guess.
         """
         return []
 
@@ -427,8 +416,7 @@ def _require_mintable(exhibit_id: str) -> None:
 def _same_session(exhibit_id: str, session_id: str, existing: ExhibitView | None) -> ExhibitView:
     """The existing revision 1 a create-or-return hands back, or a refusal when it is not ours.
 
-    `None` means the id is held by another session: a deterministic id colliding across sessions
-    is not a retry, and handing back somebody else's artefact would be a leak.
+    `None` means another session holds the id; returning its artefact would be a leak.
     """
     if existing is None:
         raise InvalidExhibit(f"{exhibit_id} belongs to another conversation")
@@ -466,9 +454,8 @@ VALUES
      %(spec)s, %(byte_size)s, %(unverified)s, %(chemist)s, %(correlation_id)s, now())
 """
 
-# The header row is locked for the whole append, so two writers on one artefact serialise and the
-# second reads the head the first wrote — and is refused by the `parent_revision` comparison rather
-# than by the primary key. The protocol store measured the race this closes; this copies the cure.
+# The header row is locked for the whole append, so concurrent writers serialise and the second is
+# refused by the `parent_revision` check rather than the primary key.
 _LOCK_HEAD = (
     "SELECT head_revision, kind FROM session_exhibits "
     "WHERE exhibit_id = %s AND session_id = %s FOR UPDATE"
@@ -519,10 +506,9 @@ WHERE r.exhibit_id = %s AND e.session_id = %s
 ORDER BY r.revision
 """
 
-# Every row that can say what a person introduced, oldest first: one carrying recorded figures (any
-# author — a fork's revision 1 carries the union of its source's, `fork_exhibits`), and a person's
-# revision written before migration 119, which recorded none and is derived from its spec and its
-# parent's (`_figures_of`). The two specs are read only for those legacy rows.
+# Every row that can say what a person introduced, oldest first: rows with recorded figures (any
+# author; a fork's revision 1 carries its source's union), and a person's revision from before
+# migration 119, which recorded none and is derived from its spec and its parent's (`_figures_of`).
 _SELECT_FIGURE_ROWS = """
 SELECT r.chemist_figures,
        CASE WHEN r.chemist_figures IS NULL THEN r.spec END,
@@ -543,12 +529,9 @@ async def _figures_of(
 ) -> list[str]:
     """The figures people introduced into `exhibit_id`, each once, in the order first introduced.
 
-    Recorded figures are read as they are. A person's revision from before migration 119 has none
-    recorded, and is derived the way it was before the column existed — its figures not in its
-    parent's — off the event loop: that set of rows is closed (nothing writes NULL for a person any
-    more), so the derivation's cost is bounded by the history an upgrade inherited and does not
-    grow. Counting those as introducing nothing instead flagged the chemist's own figures as
-    unchecked on the first agent revision after the upgrade.
+    Recorded figures are read as is. A person's revision from before migration 119 has none recorded
+    and is derived off the event loop (its figures not in its parent's); that set of rows is closed,
+    so the cost does not grow.
     """
     await cur.execute(_SELECT_FIGURE_ROWS, (exhibit_id, session_id))
     rows = await cur.fetchall()
@@ -598,9 +581,8 @@ class PostgresExhibitStore:
     async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
         """Borrow a connection on the *session layer's* database.
 
-        `session_store_dsn`, else `postgres_dsn` — the resolver `agent.session_store` uses — because
-        an artefact is session state: `delete_session` removes it inside the same transaction as
-        the transcript, which only works if both live in one database.
+        `session_store_dsn`, else `postgres_dsn`, as `agent.session_store` resolves it:
+        `delete_session` removes artefacts in the same transaction as the transcript.
         """
         async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
             yield conn
@@ -621,9 +603,8 @@ class PostgresExhibitStore:
     ) -> ExhibitView:
         """Store revision 1 of a new artefact, refusing at the session's cap.
 
-        A caller-chosen id is looked up first; a retry that raced the attempt it repeats past that
-        look-up lands on the header's primary key instead, and the backstop below turns that into
-        the same create-or-return answer.
+        A caller-chosen id is looked up first; a racing retry that gets past the lookup hits the
+        primary key, and the backstop below turns that into the same create-or-return.
         """
         if exhibit_id is not None:
             _require_mintable(exhibit_id)
@@ -884,18 +865,13 @@ def _header(row: Sequence[Any]) -> ExhibitHeader:
     )
 
 
-# A fork's artefacts: each head revision as revision 1 of a new artefact in the child, named after
-# the revision it came from. `unnest` pairs every parent id with the id minted for it, so the two
-# statements copy exactly the same set and a header never exists without its revision.
+# A fork's artefacts: each head revision as revision 1 of a new artefact in the child. `unnest`
+# pairs every parent id with its new id, so both statements copy the same set.
 #
-# **Shifted, not copied, in time** — `session_fork._COPY_MESSAGES`' argument one table over:
-# `retention_session_exhibits_days` ages an artefact by `updated_at`, so a verbatim copy of a
-# year-old conversation's artefacts would be swept with the fork's first retention pass. One
-# interval, so the newest lands at now and the listing keeps its order. `created_at` stays the
-# parent's: when the artefact was started is a fact the fork has no business rewriting.
-#
-# The read mark carries over as "seen" only if the agent had seen the head it copies, so a chemist's
-# edit the parent's agent was never told of is told to the fork's.
+# Timestamps are shifted, not copied (as `session_fork._COPY_MESSAGES` does), so retention, which
+# ages by `updated_at`, does not sweep a fork's artefacts at once; one interval keeps the order.
+# `created_at` stays the parent's. The read mark carries over only if the agent had seen the copied
+# head.
 _FORK_SHIFT = "now() - (SELECT max(updated_at) FROM session_exhibits WHERE session_id = %(parent)s)"
 _FORK_HEADERS = f"""
 INSERT INTO session_exhibits
@@ -925,15 +901,10 @@ _PARENT_IDS = "SELECT exhibit_id FROM session_exhibits WHERE session_id = %s ORD
 async def fork_exhibits(cur: psycopg.AsyncCursor[TupleRow], parent_id: str, child_id: str) -> int:
     """Copy `parent_id`'s artefacts into `child_id` on the caller's transaction; return how many.
 
-    Head revision only, as revision 1 of a new id with `change_note` "forked from <xid> r<n>": a
-    fork is a branch of the conversation, and the artefact's history is the parent's record of how
-    the parent got there — the child starts from where it stands, and the note says from where. The
-    revision's own author is kept (who wrote the words), as `session_fork` keeps each message's,
-    and it records the union of the figures people introduced across the whole source history.
-
-    On a cursor rather than a connection of its own because the fork is one transaction across
-    every table it copies (`agent/session_fork.fork_session`), and an artefact copy that could
-    commit without the transcript, or fail after it, is the half-fork that module refuses.
+    Head revision only, as revision 1 of a new id with `change_note` "forked from <xid> r<n>"; the
+    revision's author is kept, and it records the union of figures people introduced across the
+    source's history. On the caller's cursor because a fork is one transaction across every table
+    (`agent/session_fork.fork_session`).
     """
     await cur.execute(_PARENT_IDS, (parent_id,))
     old = [str(row[0]) for row in await cur.fetchall()]
@@ -941,9 +912,7 @@ async def fork_exhibits(cur: psycopg.AsyncCursor[TupleRow], parent_id: str, chil
         return 0
     names: dict[str, Any] = {"parent": parent_id, "child": child_id, "old": old}
     names["new"] = [new_exhibit_id() for _ in old]
-    # The revision a fork copies is the head alone, so it carries the union of every figure people
-    # introduced across the source's history — otherwise the child's first agent revision would
-    # flag the chemist's own figures from every revision the fork did not copy.
+    # The union across the source's history, since only the head is copied.
     names["figures"] = [json_column(await _figures_of(cur, parent_id, xid)) for xid in old]
     await cur.execute(_FORK_HEADERS, names)
     await cur.execute(_FORK_REVISIONS, names)
@@ -956,8 +925,8 @@ _IN_MEMORY = InMemoryExhibitStore()
 def default_exhibit_store() -> ExhibitStore:
     """The store this deployment uses — Postgres where sessions are durable, memory otherwise.
 
-    The switch the session store, the design store and the audit sink read. Module-level in memory
-    for the reason `default_design_store` gives: a store that forgot between two calls is not one.
+    The same switch the session store, design store and audit sink read. The in-memory instance is
+    module-level so it persists between calls.
     """
     if settings.session_store == "postgres":
         return PostgresExhibitStore()

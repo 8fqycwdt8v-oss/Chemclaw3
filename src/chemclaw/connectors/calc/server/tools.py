@@ -1,34 +1,18 @@
 """The `calc` connector's MCP tool surface: cache, compose, and read the ledger.
 
-After `D-2026-08-16-the-physics-leaves-the-cache-stays` not one of these tools computes
-anything. How many there are is the manifest's answer, not this paragraph's — `connector.yaml`
-declares the surface and `validate_connectors` holds the declaration against what this module
-serves, in both directions, so a count written here would be a second answer that goes stale on
-its own. It said "Fifteen", which was wrong then and is the wrong kind of sentence at any number.
-The physics is in `Chemclaw3-mcp`'s `servers/calc`, exposed as individually-keyed primitives; what
-happens here is the three things that stayed:
+None of these tools computes physics; that is `Chemclaw3-mcp`'s `servers/calc`, exposed as keyed
+primitives. `connector.yaml` declares the surface and `validate_connectors` holds it against this
+module. What happens here:
 
-- **The D-011 cache.** Every compute tool goes through `connectors/calc/remote.py::cached_remote` —
-  ask the server for the key, look it up, cross the wire only on a miss. A persisted result is still
-  never recomputed; the miss path just got longer.
-- **Composition.** Both `compute_thermochemistry` and `predict_logd` are assembled here from parts
-  that *are* keyed (`connectors/calc/compose.py`), which is what keeps their warm path warm — but
-  for two different reasons, and this paragraph used to give only the first.
-  `compute_thermochemistry` is **not shipped by the server at all**, because its key would name the
-  geometry its own refinement loop settles on. `predict_logd` **is** served — the fleet's
-  `servers/calc/tool-surface.json` records it — and is the one tool there that answers
-  `calculation_key` with nothing, because its expensive half is a *cached* pKa and the rest is a
-  Crippen sum. This repository never calls it, for that reason and not for the other one
-  (`connectors/calc/remote.py::remote_key`, which has said so all along).
-- **The calibration ledger and the store's read side.** `report_measurement`, `calculator_trust`,
-  `calculator_outliers`, `find_calculations`, `list_artifacts`, `fetch_artifact` — none of which the
-  server can answer, because it holds no state at all.
+- **The D-011 cache.** Every compute tool goes through `remote.py::cached_remote`: key, lookup,
+  cross the wire only on a miss.
+- **Composition.** `compute_thermochemistry` (whose key would name its own output, so the server
+  does not ship it) and `predict_logd` (a cached pKa plus a local Crippen sum) are assembled here
+  from keyed parts (`connectors/calc/compose.py`).
+- **The calibration ledger and the store's read side**, which a stateless server cannot answer.
 
 `default_store` names the production backend and is the seam tests swap for an in-memory store.
-
-**The agent-facing surface did not move.** Every signature, docstring and return type below is what
-it was before the split, because profiles, eval probes and skills name these tools by string. What
-changed is one layer down.
+Tool names and signatures are a contract: profiles, eval probes and skills name them by string.
 """
 
 import asyncio
@@ -102,16 +86,9 @@ def default_store() -> ResultStore:
 def _version_of(payload: ResultPayload, tool: str) -> str:
     """The `calc_version` a result was computed under, read off the payload rather than derived.
 
-    Every result the server returns is stamped with its own version, and a stored row keeps that
-    stamp — so on a cache hit this is still the version that produced the number, not the version
-    that is current. That is exactly what the calibration ledger wants: `predictions` records what
-    was predicted *by what*, and a row logged under today's version for a value computed under
-    yesterday's would put two incomparable calculators into one bias figure (REV-12).
-
-    Raises rather than defaulting, because the failure it would otherwise cause is silent: an empty
-    or missing version degenerates the ledger's unique index `(calc_type, calc_version, input_hash)`
-    to `(calc_type, input_hash)`, and one calculator version's prediction quietly overwrites
-    another's.
+    On a cache hit this is the version that produced the number, which is what the ledger must
+    record. Raises rather than defaulting: an empty version collapses the ledger's unique index
+    `(calc_type, calc_version, input_hash)` and lets one version's prediction overwrite another's.
     """
     version = payload.get("calc_version")
     if not isinstance(version, str) or not version:
@@ -122,12 +99,8 @@ def _version_of(payload: ResultPayload, tool: str) -> str:
     return version
 
 
-# Which properties this ledger scores, and the unit each is stored in. Above its readers
-# rather than beside `_calibrated()` because `report_measurement` needs the unit to check
-# a chemist's reported value against it, and a constant used at line 174 and defined at
-# line 515 resolves fine and reads as an accident. The tool half is typed `CalibratedTool`, so a
-# row naming a tool `remote_version` does not declare is a type error rather than a name put on
-# the wire unchecked — see that type for why the declaration lives on the dispatcher.
+# Which properties the ledger scores, the tool that answers each, and the unit it is stored in.
+# Typed `CalibratedTool`, so a row naming a tool `remote_version` does not accept is a type error.
 _CALIBRATED: dict[str, tuple[CalibratedTool, str]] = {
     "solubility": ("predict_solubility", "log S"),
     "pka": ("predict_pka", "pKa"),
@@ -142,33 +115,19 @@ async def _log_prediction(
     uncertainty: float | None,
     unit: str,
 ) -> None:
-    """Record a prediction for later reconciliation against a measurement (gap IDEA-2).
+    """Record a prediction for later reconciliation against a measurement.
 
-    Hooked at the *tool* layer rather than inside the calculators, because this is the boundary
-    where a prediction becomes advice a chemist acts on — a cache hit deep in a workflow does not
-    need re-logging, and the ledger is keyed on the input, not on how often it was read.
-
-    The subject key is the canonical SMILES, so a measurement of the same molecule meets its
-    prediction without a second naming scheme.
-
-    **Its `input_hash` is not the calculation cache's, and this sentence used to say it was.**
-    Measured on `CCO`: the ledger hashes the bare string, `stable_hash("CCO")` → `f29e20f4…`; the
-    cache hashes the mapping a molecule-keyed calculator keys on,
-    `science.calc.store.molecule_hash("CCO")` → `stable_hash({"smiles": "CCO"})` → `a7d334eb…`.
-    Nothing joins the two tables on that column, so the divergence costs nothing today — what it
-    costs is the next reader who believes a `predictions` row can be reached from a
-    `calculation_results` `input_hash`, and writes the join.
-    `science/calc/calibration.py`'s module docstring carries the same false claim and is another
-    file's to correct.
+    Hooked at the tool layer, where a prediction becomes advice a chemist acts on. The subject key
+    is the canonical SMILES so a measurement of the same molecule meets its prediction. Its
+    `input_hash` is `stable_hash(smiles)`, not the calculation cache's `molecule_hash`; the two
+    tables do not join on that column.
     """
     canonical = canonical_smiles(smiles)
     await record_prediction(
         PredictionRecord(
             calc_type=calc_type,
-            # Without this the unique index `(calc_type, calc_version, input_hash)` degenerated to
-            # `(calc_type, input_hash)`, because every row carried the default `""` — so upgrading a
-            # calculator silently overwrote the previous version's prediction and `calculator_trust`
-            # reported a bias averaged across versions that were never comparable (REV-12).
+            # Required for the unique index `(calc_type, calc_version, input_hash)`: without it a
+            # calculator upgrade overwrites the previous version's prediction.
             calc_version=calc_version,
             input_hash=stable_hash(canonical),
             subject=canonical,
@@ -215,49 +174,31 @@ async def report_measurement(
         the mean. If it says the measurement was **not** recorded, report exactly that: it was not
         kept, and repeating the call will not help.
     """
-    # **Why `unit` is refused rather than defaulted, kept out of the docstring above deliberately.**
-    # That docstring is this tool's schema description and is re-sent on every model call, so a
-    # paragraph the model cannot act on is paid for on every turn. Omitting the unit used to stamp
-    # the value with the ledger's own unit regardless, so a chemist saying "0.5 mg/mL" had `0.5`
-    # recorded as **log S** — for MW 300 the truth is -2.78, and the trust ledger then reported
-    # that calculator as biased by 3.3 log units, a factor of ~2000, on one row. Worse than the
-    # empty string it replaced, because an empty unit at least marked the row as unstated.
+    # `unit` is refused rather than defaulted (explained here, not in the docstring, which is
+    # re-sent on every model call): defaulting would record "0.5 mg/mL" as log S = 0.5 and skew the
+    # trust ledger.
     canonical = canonical_smiles(smiles)
-    # **The name this measurement is filed under, normalised once and used for every later use of
-    # it.** `property_name` is a model-supplied string, and normalising it for the lookup while
-    # storing the raw spelling put the row outside the ledger just as surely as skipping the
-    # lookup did: predictions are logged as `pka` by `_log_prediction`, so a measurement stored as
-    # `PKA` reconciles nothing, `calculator_trust("pka")` never sees it, and `calculator_trust`
-    # refuses `"PKA"` outright — the measurement is accepted, reported as recorded, and readable by
-    # nobody. Only the unit half of that was fixed the first time.
+    # Normalised once and used for every later step, lookup and storage alike: predictions are
+    # logged under lowercase names, so a measurement stored under another spelling would reconcile
+    # nothing.
     ledger_property = property_name.strip().lower()
-    # The ledger's own unit for this property, and the check that the reported value is in it.
-    # Before this the column existed, `record_observation` took the argument, and no caller ever
-    # passed one — so every measurement this system has ever stored carried an empty unit and a
-    # chemist reporting 0.5 mg/mL was indistinguishable from one reporting log S = 0.5
-    # (D-2026-08-29-a-quantity-without-a-unit-is-a-number).
+    # The ledger's own unit for this property, against which the reported value is checked.
     calibrated = _CALIBRATED.get(ledger_property)
     ledger_unit = calibrated[1] if calibrated else ""
     if ledger_unit and not unit.strip():
-        # Refuse rather than assume. The assumption is invisible in the data afterwards, and it is
-        # wrong exactly when a chemist reports in the unit they measure in rather than the one this
-        # ledger happens to store.
+        # Refuse rather than assume: an assumed unit is invisible in the data afterwards.
         raise ValueError(
             f"{property_name!r} is calibrated in {ledger_unit!r}: state the unit the measurement "
             f"was reported in (say {ledger_unit!r} if that is what the chemist gave), because a "
             "value recorded under the wrong unit cannot be found again."
         )
     if ledger_unit:
-        # Raises `UnitError` (a `ValueError`) on a mismatch, which the server's error sanitiser
-        # passes through verbatim — so the chemist is told what unit the ledger holds rather than
-        # being told the measurement was recorded.
+        # Raises `UnitError` (a `ValueError`), which reaches the chemist verbatim naming the
+        # ledger's unit.
         measured_value = reconcile(measured_value, unit, ledger_unit)
-    # **The one place a second measurement can be distinguished from a correction.** The row
-    # identity is `(property, input_hash, source)` since `infra/sql/093`, and every value this tool
-    # wrote used to carry the constant `"chemist-reported"` — so keying on the source would have
-    # been a control that never fires: two chemists reporting one compound still collapse to one
-    # row unless somebody names them apart. The default keeps that spelling so rows written before
-    # this parameter existed stay one source rather than becoming an unnamed second one.
+    # Row identity is `(property, input_hash, source)`, so the source is what tells a second
+    # measurement from a correction. The default keeps the historical spelling so older rows stay
+    # one source.
     ledger_source = source.strip() or "chemist-reported"
     input_hash = stable_hash(canonical)
     matched = await record_observation(
@@ -269,9 +210,8 @@ async def report_measurement(
         unit=ledger_unit,
     )
     if matched is None:
-        # Not a failure to report as an error — the deployment turned the ledger off on purpose —
-        # but emphatically not "Recorded" either. `calibration_enabled` is False by *default*, so
-        # this was the answer every unconfigured deployment gave while storing nothing at all.
+        # Not an error (the ledger is off on purpose, and off by default), but must not say
+        # "Recorded".
         return (
             f"NOT recorded. The calibration ledger is disabled in this deployment, so the "
             f"measurement for {canonical} was not stored and nothing will be scored against it. "
@@ -283,10 +223,8 @@ async def report_measurement(
     )
     if matched:
         return f"Recorded; it reconciled {matched} prediction(s) for {canonical}. {standing}"
-    # This branch used to say "Recorded" and be wrong: the write was a bare UPDATE against
-    # `predictions`, so a measurement nothing had predicted matched no row and was discarded
-    # (DARK-9). It is now stored on its own, and the next prediction of the same thing scores
-    # against it — which is worth saying, because it is the reason reporting it was not wasted.
+    # A measurement nothing has predicted yet is still stored; the next prediction scores against
+    # it.
     return (
         f"Recorded for {canonical}. Nothing had predicted {ledger_property} for it yet, so no "
         f"prediction was scored — the measurement is kept and the next prediction of it will be "
@@ -299,16 +237,10 @@ def _measurements_on_file(
 ) -> str:
     """What the ledger now holds for this property of this molecule, in one sentence.
 
-    **The sentence exists because the write is destructive in exactly one direction and silent
-    about it.** A value reported under a source already on file replaces that source's earlier
-    number; one under a new source joins it, and every prediction is then scored against the mean.
-    Neither is visible in "Recorded" — before `infra/sql/093` the destructive case was the *only*
-    case, and the tool answered "Recorded; it reconciled 1 prediction(s)" identically whether it
-    had stored a second lab's measurement or deleted the first lab's.
-
-    So both are said out loud: the single-source reply names the mechanism that would overwrite it,
-    and the multi-source reply gives the spread beside the mean, because two labs 0.85 log units
-    apart average to a number neither measured.
+    The write is silently destructive in one direction: a value under an existing source replaces
+    it, one under a new source joins it and predictions score against the mean. So the single-source
+    reply names what would overwrite it, and the multi-source reply gives the spread beside the
+    mean.
     """
     if consensus is None:  # pragma: no cover - the write above just stored a row
         return ""
@@ -358,15 +290,12 @@ class CalculationRecord(BaseModel):
     calc_type: str
     calc_version: str
     result: dict[str, Any]
-    # True when `result` is empty because the stored payload was over `calc_find_max_result_chars`,
-    # as opposed to a calculation that genuinely stored nothing. Ask for that one calculation
-    # directly to see it.
+    # True when `result` is empty because the payload exceeded `calc_find_max_result_chars`, not
+    # because nothing was stored. Ask for that calculation directly to see it.
     result_omitted: bool = False
-    # False only for a row written before migration 090, which records nothing about which
-    # `CALCULATION_EPOCH` produced it — so it may be one a later ChemClaw-side correction
-    # invalidated, and the browse cannot tell. A row a *recorded* epoch supersedes is not returned
-    # at all (`science/calc/store.py::_matches`); this flag is the residue that cannot be
-    # classified, because `params_hash` is a digest and a store cannot re-derive its own history.
+    # False only for a row written before epochs were recorded, so it may be one a later correction
+    # invalidated. Rows a recorded epoch supersedes are not returned at all
+    # (`science/calc/store.py::_matches`).
     epoch_recorded: bool = True
     provenance: str
     computed_at: datetime | None = None
@@ -391,16 +320,13 @@ class CalculationSearch(BaseModel):
     """
 
     hits: list[CalculationRecord] = Field(default_factory=list)
-    # Every stored calculation matching the query, not just the ones on this page — so a full page
-    # says how much it is a page *of*. Includes rows `rows_unreadable` counts, because it answers
-    # "what else is on file" rather than "what did this page parse".
+    # Every stored calculation matching the query, not just this page, including unreadable rows.
     total_matched: int = 0
     # True when `total_matched` exceeds the page: the hits are the newest, never all of them.
     hits_truncated: bool = False
-    # Rows this page matched and could not hand back, because their stored payload is not a result
-    # (`science/calc/postgres_store.py::_readable_row` logs one and drops it). Zero is the ordinary
-    # case. Carried because a dropped row makes the page shorter in exactly the way a *complete*
-    # page is short, and the difference is a corrupted cache row an operator has to go and delete.
+    # Rows matched but not returned because their stored payload is not a result
+    # (`science/calc/postgres_store.py::_readable_row`). Usually zero; otherwise a corrupted cache
+    # row an operator must delete.
     rows_unreadable: int = 0
 
     @computed_field  # type: ignore[prop-decorator]
@@ -408,11 +334,8 @@ class CalculationSearch(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before reporting what the store holds.
 
-        A `computed_field` and not a bare property, for `FingerprintSearch.verdict`'s reason: a
-        property is not serialized, so the sentence qualifying the page would never leave this
-        process. The hazard it guards is the one this tool is least able to afford — an incomplete
-        listing read as "nothing else exists", and then quoted to a chemist as the reason not to
-        look further.
+        A `computed_field` so it is serialized: an incomplete listing must not be read as "nothing
+        else exists".
         """
         if not self.hits and not self.rows_unreadable:
             return (
@@ -514,9 +437,8 @@ async def find_calculations(
 def _timestamp(value: str) -> datetime | None:
     """Parse an ISO-8601 date or timestamp, or None for an empty string.
 
-    A malformed date raises rather than being dropped: silently ignoring "last Tuesday" would
-    answer a question about a window with results from outside it, which reads as an authoritative
-    "nothing else exists" — the failure mode this tool is least able to afford.
+    A malformed date raises rather than being dropped, so a windowed query never silently answers
+    from outside its window.
     """
     if not value:
         return None
@@ -526,14 +448,9 @@ def _timestamp(value: str) -> datetime | None:
 def _record(stored: StoredResult) -> CalculationRecord:
     """Flatten one stored result into the agent-facing record, bounded.
 
-    Two reductions, in the order that matters. Geometries become addresses first, because that is
-    lossless for a reader — a `structure_id` is what the *next* calculation takes, where the
-    coordinates were something no tool accepted — and on the shapes that motivated the bound it is
-    most of the reduction. Only what is still over the ceiling afterwards is dropped, whole, with
-    `result_omitted` set.
-
-    The ceiling is measured on the rendered JSON rather than on the parsed object, because
-    characters are what the bound is about: this payload is going into a model's context.
+    Geometries become addresses first (lossless for a reader, and most of the reduction); only what
+    is still over the ceiling is dropped whole, with `result_omitted` set. The ceiling is measured
+    on the rendered JSON, since characters are what reach the model.
     """
     projected = without_geometry(stored.result)
     rendered = len(json.dumps(projected, default=str))
@@ -687,19 +604,16 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
     if data is None:  # evicted between the listing and the read
         raise ValueError(f"artifact {artifact_ref!r} is no longer stored")
     try:
-        # Decoding is the test, rather than a table of readable media types: the store accepts any
-        # producer-given name and `media_type_for` falls back to opaque bytes for one it does not
-        # know, so a type-based rule would refuse perfectly readable output from any tool added
-        # later. What actually matters is whether the bytes are text, and this asks them.
+        # Decoding is the test rather than a media-type table, since the store accepts any
+        # producer-given name and unknown types fall back to opaque bytes.
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(
             f"{artifact_ref!r} is binary ({ref.media_type}, {ref.byte_size} bytes), not text. "
             "It is stored to seed a further calculation, not to be read."
         ) from exc
-    # `max(1, ...)` because a negative argument would otherwise slice from the *end*
-    # (`text[:-5]` is all but the last five characters) and report itself as truncated — a
-    # near-complete read dressed as a bounded one, which is the reading this tool least affords.
+    # `max(1, ...)`: a negative limit would slice from the end and report a near-complete read as
+    # truncated.
     limit = max(
         1, min(max_chars or settings.calc_artifact_max_chars, settings.calc_artifact_max_chars)
     )
@@ -713,33 +627,18 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
     )
 
 
-# The calculators whose predictions are logged to the ledger, and how to read them back: the
-# version that is current *now* and the unit its values are in.
-#
-# A table rather than a conditional. `calculator_trust` used to be
-# `solubility = property_name == "solubility"` followed by two ternaries, so every name that was
-# not "solubility" was answered as though it were pKa — an unknown property got a confident report
-# about the wrong calculator, in the wrong unit, and the model had no way to tell. Adding a
-# calibrated calculator is now one row, and asking about an uncalibrated one is an error that
-# names what does exist.
+# A table rather than a conditional, so an uncalibrated property is an error naming the calibrated
+# ones rather than a report about the wrong calculator.
 
 
 async def _calibrated(property_name: str) -> tuple[str, str]:
     """The current version and unit for a calibrated property, or raise naming the alternatives.
 
-    **The version comes from the server, and that is the single most load-bearing line in this
-    module.** It used to be derived here, from `xtb --version` and seven calibration settings this
-    process can no longer see. `binary_version()` answered the literal string `"absent"` rather than
-    raising when a binary was missing, so a locally-derived version would be *well-formed*, match
-    **zero** rows in a ledger keyed exactly on `(calc_type, calc_version, input_hash)` (D-139, no
-    pooling), and `calculator_trust("pka")` would report a confident `UNCALIBRATED` — the state that
-    machinery exists to distinguish, reached by a route it never anticipated, with every historical
-    residual unreachable at the same moment. Nothing would look broken.
-    `tests/test_calc_remote.py` asserts statically that no derivation has crept back.
-
-    The *current* version, not a pooled figure: the chemist is asking how far to trust the
-    calculator that is about to answer them, and a v1 that ran high averaged with a v2 that ran low
-    reads as well-calibrated while neither is (REV-12).
+    The version comes from the server, never derived here: the ledger is keyed exactly on
+    `(calc_type, calc_version, input_hash)`, and a locally derived version would be well-formed,
+    match nothing, and report a confident `UNCALIBRATED`. `tests/test_calc_remote.py` asserts no
+    derivation exists. The current version, not a pooled figure, because the chemist is asking about
+    the calculator about to answer them.
     """
     entry = _CALIBRATED.get(property_name)
     if entry is None:
@@ -825,9 +724,7 @@ class OutlierReport(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before concluding anything from the length of this list.
 
-        `computed_field` rather than a plain property for the reason `Calibration.verdict` and
-        `FingerprintSearch.verdict` are: a bare property is not serialized, so the sentence would
-        never reach the model that writes the answer.
+        A `computed_field` so it is serialized and reaches the model.
         """
         if not self.enabled:
             return (
@@ -912,9 +809,8 @@ async def calculator_outliers(
 async def _only_matching(residuals: list[Residual], query: str) -> list[Residual]:
     """Keep the residuals whose subject contains `query`, matched off the event loop.
 
-    Bounded by `substructure_match_timeout_seconds` for the same reason the fingerprint index's
-    scan is: the ledger is small, but a short adversarial recursive SMARTS matches for minutes
-    regardless of corpus size, and this coroutine shares its loop with every other request.
+    Bounded by `substructure_match_timeout_seconds`: an adversarial recursive SMARTS can match for
+    minutes regardless of corpus size, and this loop is shared with every other request.
     """
     pattern = substructure_pattern(query)
 
@@ -942,14 +838,9 @@ async def _only_matching(residuals: list[Residual], query: str) -> list[Residual
 async def _starting_geometry(smiles: str, structure_id: str) -> Structure:
     """The geometry a calculation starts from: a named one, or a fresh embedding.
 
-    The tool-path twin of `connectors/calc/activities._subject`, and separate from it for the
-    reason the two modules are separate at all — an activity resolves inside a durable retry and a
-    tool resolves inside a turn. What they share is the rule, and the rule is short enough that one
-    home would cost an import from `activities` into the MCP server for four lines.
-
-    Refuses a handle for a different molecule, canonically compared, because a `structure_id`
-    addresses a geometry rather than a compound: nothing about the id says which molecule it is of,
-    while `smiles` is what the answer is reported and cited under.
+    The tool-path twin of `connectors/calc/activities._subject`. Refuses a handle for a different
+    molecule (canonically compared), because a `structure_id` does not say which molecule it is of,
+    while `smiles` is what the answer is reported under.
     """
     if not structure_id:
         return await compose.embed(smiles)
@@ -1075,15 +966,9 @@ async def compute_electronic_properties(
         with hydrogens following them — `describe_sites` on `chem` maps those indices to positions a
         chemist can read, and is free.
     """
-    # Two routes to one answer, and which one runs is decided by whether a geometry was named.
-    #
-    # The SMILES route stays byte-identical rather than being folded into the other, and that is
-    # deliberate: `compute_electronic_properties` keys on the geometry the *server* embeds, and
-    # routing it through `compute_properties_at` would key on the geometry embedded here. The two
-    # agree today — both are `structure_from_smiles(smiles, optimize=True)` for every molecule this
-    # tool accepts — but "agree today" is not a property a cache may rest on, and forking it would
-    # orphan every `xtb.properties` row on disk for no gain the named-geometry route does not
-    # already deliver.
+    # The SMILES route stays separate from the named-geometry route: it keys on the geometry the
+    # server embeds, and folding it into `compute_properties_at` would orphan every cached
+    # `xtb.properties` row.
     if not structure_id:
         payload, _ = await cached_remote(
             default_store(),
@@ -1223,19 +1108,14 @@ async def predict_site_reactivity(
         of atoms the ranking was drawn from. Atom indices match the heavy atoms of the
         canonical SMILES, with hydrogens following them.
     """
-    # Two routes to one answer, exactly as `compute_electronic_properties` above. The SMILES route
-    # stays byte-identical rather than being folded into the other: it keys on the geometry the
-    # *server* embeds, and routing it through `compute_fukui_at` would key on the geometry embedded
-    # here. Forking it would orphan every `xtb.fukui` row on disk for no gain the named-geometry
-    # route does not already deliver.
+    # As in `compute_electronic_properties`: the SMILES route stays separate so existing `xtb.fukui`
+    # rows, keyed on the server's embedding, stay reachable.
     if structure_id:
         structure = await _starting_geometry(smiles, structure_id)
         payload, _ = await cached_remote(
             default_store(),
             "compute_fukui_at",
-            # `mode` and `top_n` are withheld here for the same reason as below — the server keys
-            # `xtb.fukui` without them and `ranked_for` re-sorts locally, so one row serves every
-            # mode and every slice of one geometry.
+            # `mode` and `top_n` withheld, as below.
             {"structure": structure.model_dump(mode="json")},
         )
         result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
@@ -1244,14 +1124,9 @@ async def predict_site_reactivity(
     payload, _ = await cached_remote(
         default_store(),
         "predict_site_reactivity",
-        # Neither `mode` nor `top_n` is sent, and both omissions matter. The three single points do
-        # not depend on the mode — the server keys them without it (measured: all three modes on
-        # phenol derive one key) and re-ranks on the way out, which a cache *hit* here would never
-        # reach. So the row is stored in whatever order the server's default produces and
-        # `ranked_for` re-ranks it locally; sending `mode` would only make the stored ordering look
-        # authoritative. `top_n` is left off for the same reason in the other direction: the row
-        # holds every atom, so asking for more sites re-slices a cached result instead of running
-        # three more single points.
+        # Neither `mode` nor `top_n` is sent: the server keys `xtb.fukui` without them and the row
+        # holds every atom, so `ranked_for` re-ranks and re-slices locally and one row serves every
+        # mode and size.
         {"smiles": smiles},
     )
     result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
@@ -1292,15 +1167,9 @@ async def optimize_geometry(
         The converged energy, how much the relaxation lowered it, how far the atoms
         moved, and the id of the resulting geometry.
     """
-    # Embed and relax as two calls rather than through the server's own one-shot
-    # `optimize_geometry`, and the reason is a collision found by measurement rather than by
-    # reading. That tool and `relax_structure` derive the **same** key —
-    # `xtb.opt@…:389b625b3220108a:56dca3aa944bd3da` for `CCO` on both — while returning different
-    # payloads: a summary without coordinates, and the full result with them. Caching either under
-    # that one key poisons the other, and the failure is a
-    # validation error on a *hit* deep inside a reaction job. One key, one payload shape: the full
-    # result is stored, and the summary is derived from it here, where dropping the geometry costs
-    # nothing.
+    # Embed and relax as two calls rather than the server's `optimize_geometry`: that tool and
+    # `relax_structure` derive the same key while returning different payloads, so caching either
+    # poisons the other. The full result is stored and the summary derived here.
     relaxed, _ = await compose.relax(
         default_store(), await _starting_geometry(smiles, structure_id), solvent
     )
@@ -1349,10 +1218,8 @@ async def compute_thermochemistry(
         Frequencies with IR intensities, whether the geometry is a minimum, and the
         thermochemistry with the uncertainty to quote alongside it.
     """
-    # Composed rather than called: remote optimise, remote Hessian, local RRHO. The key of a
-    # thermochemistry would have to name the geometry the refinement loop settles on, which is an
-    # output, so it has no cache row of its own and never had one — its economy is entirely the two
-    # nested entries, and a single remote call would swallow both.
+    # Composed: remote optimise, remote Hessian, local RRHO. A thermochemistry key would name its
+    # own output, so its cache economy is entirely the two nested entries.
     structure = await _starting_geometry(smiles, structure_id)
     thermo = ThermoSettings(
         symmetry_number=symmetry_number,
@@ -1424,11 +1291,7 @@ async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
         logD at the given pH, plus the LogP and pKa it was derived from and the pKa model's
         uncertainty (state it — this is not an exact value).
     """
-    # The expensive half is a *cached* pKa on the server's own key; the rest is a Crippen sum and
-    # one Henderson-Hasselbalch term, both pure RDKit and both local. Shipping the composite whole
-    # would have made every repeat a full recompute of the most expensive tool in the set —
-    # measured, pyridine 20.603 s cold against 0.005 s warm — which is a D-011 violation reached by
-    # moving code rather than by changing a rule. `predict_logd` has no cache row of its own here
-    # and never had one, so `logd_from_pka` is called on the pKa the cache just served.
+    # The expensive half is a cached pKa on the server's own key; the Crippen sum and the
+    # Henderson-Hasselbalch term are local, so a repeat never recomputes.
     payload, _ = await cached_remote(default_store(), "predict_pka", {"smiles": smiles})
     return logd_from_pka(PkaResult.model_validate(payload), ph)

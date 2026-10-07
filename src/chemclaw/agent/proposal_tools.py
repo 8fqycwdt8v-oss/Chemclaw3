@@ -1,30 +1,9 @@
 """The agent's one way to suggest a change to its own behaviour — a proposal, never a skill.
 
-**Standing, stated first because it is what this file is about.** `propose_skill` writes a row in
-`behaviour_proposals` and nothing else. It does not write a `SKILL.md`, it does not reach either
-skills tier, and nothing in any later prompt contains what it wrote until a *person* accepts it
-through `POST /proposals/...`. `agent/skill_backend.SkillsReadOnlyRefusal` is untouched: a turn
-still reads both tiers and writes neither.
-
-That is the same separation `agent/pending_tools.py` draws and for the same reason — a model must
-never be able to authorize its own work. The asymmetry there is a tool that *asks* beside a route
-that *answers*; here it is a tool that *proposes* beside a route that *decides*.
-
-**Why the agent gets to propose at all**, given that
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` refuses it a skill outright: because
-the refusal was about the *write*, not about the *suggestion*,
-and the tier this proposal lands in when accepted is one person's own
-(`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`). Before this tool the agent's
-only channel was prose in an answer, which a chemist had to notice, copy and post. That is a worse
-control than it looks: what a person approves should be a document they were shown, and a
-copy-paste is where a document changes without anybody deciding it did.
-
-**State-changing, and for the gate rather than the row.** `propose_skill` is in
-`authz.STATE_CHANGING_TOOLS`. Writing a row is the small reason; the real one is that a turn
-proposing a change to what the agent does is something the plan gate should see. It also takes the
-tool out of every helper's surface by arithmetic — `side_effecting_tools()` is subtracted on both
-halves — which is correct and is the `ask_clarifying_question` argument exactly: a helper proposing
-behaviour changes from a context the chemist cannot see is worse than a helper that cannot.
+`propose_skill` writes a row in `behaviour_proposals` and nothing else; a person accepts it through
+`POST /proposals/...`, so a model never authorizes its own work, and no turn writes a skill
+(`agent/skill_backend.SkillsReadOnlyRefusal`). It is in `authz.STATE_CHANGING_TOOLS` so the plan
+gate sees a turn proposing a behaviour change, and so it is subtracted from every helper's surface.
 """
 
 from __future__ import annotations
@@ -76,16 +55,9 @@ async def propose_skill(name: str, body: str, rationale: str) -> str:
     declared = _validated(name, body)
     store = default_proposal_store()
     digest = content_hash(body)
-    # What was there *before* this call, so the answer can tell the model whether it has just
-    # proposed something or repeated itself. The store knows — it books the distinction on
-    # `chemclaw_behaviour_proposals_total` — but `propose` returns the standing row either way, so
-    # the two are indistinguishable from the result alone.
-    #
-    # **The test is the standing row's *state*, not its hash.** `store.one` looks the row up *by*
-    # `digest`, so a hash comparison could only ever distinguish "absent" from "present" — which
-    # read a superseded row as a repeat and told the chemist's model its proposal was waiting for
-    # a decision that `GET /proposals?state=open` does not list. `propose` revives such a body, so
-    # the only arrival that is genuinely not a proposal is one that met an **open** row.
+    # The row before this call, so the answer can say whether this proposed something or repeated
+    # itself. Tested by the row's state, not its hash: only an open row makes this a repeat, since
+    # `propose` revives a superseded body.
     before = await store.one(actor, "skill", declared, digest)
     repeated = before is not None and before.state == "open"
     outcome = await store.propose(
@@ -107,28 +79,9 @@ async def propose_skill(name: str, body: str, rationale: str) -> str:
 def _validated(name: str, body: str) -> str:
     """The name this body declares, checked against `name` and against the tier's own bounds.
 
-    **Validated here rather than at acceptance, because a proposal a person accepts must be a
-    document that can actually be written.** `POST /skills/mine` refuses a malformed `SKILL.md`, so
-    a proposal that skipped this check would be reviewed, accepted, and then fail at the write —
-    which is the worst place to discover it, since the person has already decided and the failure
-    looks like the system losing their decision.
-
-    **So it calls `validated_skill`, and hand-copying three of its four checks left exactly that
-    hole open.** This used to re-implement the length bound, the frontmatter parse and the name
-    charset, and omit the fourth arm — that the name is not one the deployment already ships.
-    `validated_skill`'s own docstring names `propose_skill` as one of its four callers, and it was
-    not one. Measured: `propose_skill(name="protocol-generation", …)` recorded an `open` proposal
-    and told the chemist it was waiting for them, while `POST /proposals/skill/protocol-generation`
-    answered **409** and `store.decide` was never reached. The proposal could not be accepted and
-    the only exit was declining one they wanted. Fail-closed, so nothing was written — a DRY defect
-    whose cost is a decision the system cannot carry out.
-
-    What this adds that `validated_skill` cannot is the one check the *route* cannot make either:
-    that the frontmatter's name and the tool's `name` argument agree. Two sources of one name can
-    disagree, and the one a reader believes is whichever the code happens to consult — the reason
-    `agent/profile_discovery.py` refuses a `name:` key beside a filename. Here the model writes
-    both, so a mismatch is a model error worth surfacing rather than a precedence rule worth
-    inventing.
+    Validated at proposal time through `validated_skill` (the same checks `POST /skills/mine`
+    makes), so an accepted proposal can always be written. It adds the check only this tool can
+    make: the frontmatter's name and the `name` argument agree.
 
     Raises:
         ChemclawError: Worded for the model, naming what is wrong and what to send instead.
@@ -152,30 +105,17 @@ def _validated(name: str, body: str) -> str:
     try:
         return validated_skill(body, expected_name=name.strip())
     except SkillRefused as refused:
-        # `SkillRefused` is a `ChemclawError`, so this re-raise changes nothing a caller sees; it is
-        # here so the tool's contract stays "one exception type, worded for the model" rather than
-        # depending on a subclass relationship a reader has to go and check.
+        # Re-raised as `ChemclawError` so the tool's contract is one exception type, worded for the
+        # model.
         raise ChemclawError(str(refused)) from refused
 
 
 def _what_became_of_it(name: str, outcome: Proposal, *, proposed_now: bool) -> str:
-    """What to tell the model, which is three different things and was one.
+    """What to tell the model: proposed, already open, or already decided.
 
-    **A proposer can learn what became of its proposal**, and that is a requirement rather than a
-    courtesy: without it the only strategy available to a model is to propose again, which is the
-    behaviour this queue's idempotence exists to make harmless and its counters exist to make
-    visible. Three answers, because the three situations call for different next moves:
-
-    - *proposed* — say so in the answer, so the chemist knows there is something to look at.
-    - *already open* — it is already waiting; repeating it adds nothing and the model should stop.
-    - *already decided* — a person answered. Proposing the same text cannot reopen it, and the
-      model is told the verdict and the reason so it can respond to the reason rather than retry.
-
-    **There is no fourth answer for a revived proposal, and that is the point.** A body that a
-    newer version had superseded is put back in the queue by `propose`, so it *is* waiting for a
-    chemist again and the first answer is the true one. Telling the model about the supersede in
-    between would describe queue mechanics it cannot act on, where "I proposed this and it is
-    waiting" is what its next sentence to the chemist needs.
+    Each calls for a different next move: mention it to the chemist; stop repeating it; or respond
+    to the decision's reason rather than retry. A revived (previously superseded) proposal is
+    waiting again, so it reads as proposed.
     """
     if outcome.decided:
         return (

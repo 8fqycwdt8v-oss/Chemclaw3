@@ -1,14 +1,8 @@
-"""Skills were entirely uninstrumented, and the gate's own refusals were silent.
+"""Skill offers, reads and refusals are logged and counted.
 
-The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. `agent/skill_backend.py` and
-`agent/skill_access.py` between them contained **zero** `logger.` calls and **zero** metric calls,
-so
-"the agent is not following the procedure" — a top-three support question — could not be answered
-at its first step: *was the skill even offered, and did the model read it?*
-
-The role gate lives on the backend because that is the enforcement point (deepagents publishes skill
-*paths* into the system prompt, so filtering the listing alone leaves every hidden skill one guessed
-path away). An enforcement point whose refusals are silent is a control nobody can audit.
+Decision: `D-2026-08-27-a-refusal-is-not-a-crash`. "Was the skill offered, and did the model read
+it?" must be answerable. The role gate lives on the backend because deepagents publishes skill
+paths into the prompt, and an enforcement point whose refusals are silent cannot be audited.
 """
 
 import logging
@@ -40,10 +34,7 @@ def test_a_skill_body_the_model_reads_is_named_in_the_log(
 ) -> None:
     """The second half of "was the skill even offered" — did the model actually read it.
 
-    INFO because *which procedure the model opened* is the fact the support question turns on and
-    it is reconstructible from nowhere else. The reason this docstring used to give — "a skill is
-    read at most once per turn, not once per model call" — was a bound nothing enforces: `read` is
-    a model-callable tool and a skill directory holds as many documents as its author put in it.
+    INFO, because which procedure the model opened is reconstructible from nowhere else.
     """
     backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
 
@@ -58,11 +49,10 @@ def test_a_skill_body_the_model_reads_is_named_in_the_log(
 def test_a_refused_read_is_counted_and_warned_where_it_used_to_be_silent(
     tree: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The gate holds, and now says so.
+    """A refused read is counted and warned.
 
-    The message to the *model* still refuses to say whether the skill exists — distinguishing a
-    gated skill from a typo would turn the gate into an enumeration oracle — so the operator-facing
-    record names the path rather than claiming a skill by that name is there.
+    The message to the model still does not say whether the skill exists (no enumeration oracle), so
+    the operator record names the path rather than claiming a skill is there.
     """
     before = METRICS.value("chemclaw_skill_reads_denied_total")
     backend = NarrowedSkillsBackend(str(tree), lambda name: name != "restricted-procedure")
@@ -90,9 +80,8 @@ def test_the_build_records_which_skills_this_profile_offers(
 ) -> None:
     """The first half of the question: what the three predicates left, per profile.
 
-    DEBUG because a graph is compiled per turn (M7) and per subagent, so at INFO this would be the
-    loudest line in the process — and the question it answers is asked while debugging one session
-    rather than while watching a fleet.
+    DEBUG, because a graph is compiled per turn and per subagent; the line serves debugging one
+    session.
     """
     monkeypatch.setattr("chemclaw.agent.langgraph_agent._skill_dirs", lambda: [str(tree)])
     profile = AgentProfile(name="property-lookup", instructions="look things up")
@@ -107,16 +96,10 @@ def test_the_build_records_which_skills_this_profile_offers(
 def test_a_model_authored_path_is_bounded_before_it_reaches_a_log_line(
     tree: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """`file_path` is the model's own tool argument, and nothing before this caps its length.
+    """`file_path` is the model's own tool argument, so it is bounded before it reaches a log line.
 
-    So a megabyte-long or newline-laden path was written verbatim — at WARNING on the refusal and
-    at INFO on the success — which is a model-authored string with unbounded reach into a log
-    stack. This tree already has one answer for that (`audit.bounded_repr`, over
-    `agent_audit_max_arg_chars`), and it reprs, so an embedded newline can no longer split one
-    refusal record into two lines.
-
-    Driven on the *refusal* branch because that is the one an attacker reaches without a permitted
-    skill: the path need not exist for the gate to log it.
+    Uses `audit.bounded_repr` over `agent_audit_max_arg_chars`, which also escapes newlines. Driven
+    on the refusal branch, which an attacker reaches without a permitted skill.
     """
     absurd = "/" + "A" * 5000 + "\ninjected-second-line: pretending to be a record\n/SKILL.md"
     backend = NarrowedSkillsBackend(str(tree), lambda _name: False)
@@ -133,12 +116,9 @@ def test_a_model_authored_path_is_bounded_before_it_reaches_a_log_line(
 
 
 def test_a_skill_the_model_reads_is_counted_by_name(tree: Path) -> None:
-    """The signal nothing persisted: which skill a turn actually used.
+    """Which skill a turn actually used is counted by name.
 
-    Before `chemclaw_skill_loads_total`, the only skill series in the whole registry counted
-    *denials*, so a skill could not be ranked, promoted or retired on evidence — "is this skill
-    ever used" was answerable from an INFO line on a live pod and from nowhere else. That is the
-    measurement any distiller or promotion threshold has to stand on.
+    `chemclaw_skill_loads_total` is the evidence for ranking, promoting or retiring a skill.
     """
     before = METRICS.value("chemclaw_skill_loads_total")
     backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
@@ -164,14 +144,11 @@ def test_a_refused_read_is_not_counted_as_a_load(tree: Path) -> None:
 
 
 def test_a_name_no_directory_backs_mints_no_series(tree: Path) -> None:
-    """The label's clamp against an invented name, driven rather than argued.
+    """A name no skill directory backs mints no series.
 
-    `skill` is the first segment of a path the *model* wrote, and `permits` only ever narrows — so
-    in a deployment configuring none of the three gates it returns True for any string. Counting
-    beside the ask would therefore mint a series per invented name.
-
-    This is the case a resolved-path check already handles, and it is **not** the whole clamp —
-    see the two tests below for the ones it could not see.
+    `skill` is the first segment of a model-written path, and `permits` returns True for anything
+    when no gate is configured, so the label must be clamped. The tests below cover the cases a
+    resolved-path check cannot see.
     """
     before = METRICS.value("chemclaw_skill_loads_total")
     backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
@@ -183,14 +160,10 @@ def test_a_name_no_directory_backs_mints_no_series(tree: Path) -> None:
 
 
 def test_a_file_beside_the_tree_is_not_a_skill(tree: Path) -> None:
-    """The clamp's real hole, and the one "the path resolved" cannot close.
+    """A file beside the tree is not a skill.
 
-    `skills/README.md` exists on the shipped tree, `ls("/")` lists it to the model, and it resolves
-    — so the first version of this counter booked a skill named `README.md`. Resolving proves the
-    first segment is inside `root_dir`; it does not prove the first segment is a *skill*, and the
-    difference is the whole value of a series that exists to rank, promote and retire skills. Any
-    future top-level document lands the same way, which is why this asserts the property rather
-    than the one filename.
+    `skills/README.md` resolves inside `root_dir` but is not a skill directory; any top-level
+    document would be the same, so the property is asserted rather than the one filename.
     """
     (tree / "README.md").write_text("what this tree holds\n", encoding="utf-8")
     before = METRICS.value("chemclaw_skill_loads_total")
@@ -207,11 +180,9 @@ def test_a_file_beside_the_tree_is_not_a_skill(tree: Path) -> None:
 
 
 def test_a_read_that_asks_for_no_lines_is_not_a_load(tree: Path) -> None:
-    """`limit=0` returns empty content with **no error**, so "it resolved" over-counts.
+    """A read that asks for no lines is not a load.
 
-    Upstream clamps the limit and answers `no_lines_requested=True` rather than refusing, so a
-    model-controllable argument would otherwise book a load of zero bytes under a docstring saying
-    the count is taken on the bytes.
+    `limit=0` returns empty content with no error, so "it resolved" would over-count.
     """
     before = METRICS.value("chemclaw_skill_loads_total")
     backend = NarrowedSkillsBackend(str(tree), lambda _name: True)

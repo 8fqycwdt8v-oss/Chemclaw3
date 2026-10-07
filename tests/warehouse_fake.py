@@ -1,13 +1,8 @@
 """A `Warehouse` that serves canned rows and records what it was asked — the offline test seam.
 
-The whole point of `chemclaw.ingest.eln.warehouse.driver` being Protocols with no vendor import is
-that this file can exist: every behaviour of the binding engine — the watermark predicate, the
-child-table fan-out, unit conversion, vocabulary mapping, attribute bounding, similarity ordering —
-is asserted here with no tenant, no credentials and no vendor client installed.
-
-It records `executed` so a test can assert the *exact statement* the engine would send. That matters
-more than it looks: a bug in the cursor predicate does not surface as an exception, it surfaces as
-an ELN that silently stops re-ingesting amended runs.
+Lets the binding engine be tested with no tenant, credentials or vendor client. It records
+`executed` so a test can assert the exact statement sent: a cursor-predicate bug does not raise,
+it silently stops re-ingesting amended runs.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -20,18 +15,9 @@ from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
 class FakeVectorDialect:
     """A `VectorDialect` serving all three metrics, so `sql.py` can be tested for being neutral.
 
-    A dialect belongs to a driver (D-2026-08-25), and the fake stands in for a driver — so it brings
-    its own rather than borrowing a shipped one. That is the opposite of what this file used to do,
-    and the reason it changed is worth stating: while there was exactly one real driver, borrowing
-    its dialect meant the engine tests pinned a string something actually sends. With the vendor
-    vocabulary now the *driver's* (`D-2026-08-26-the-driver-s-signature-is-the-schema`), borrowing
-    one would instead pin one vendor's spelling into every test of a module whose whole claim is
-    that it has none — and it would make a metric no single vendor serves untestable here.
-
-    So the names below are deliberately not any vendor's, and what they prove is what `sql.py`
-    contributes: the driver's function name reaches the statement, and its sort direction with it.
-    The real spellings are pinned against the real dialect in `tests/test_databricks_warehouse.py`,
-    and the two meet end to end in `test_warehouse_retriever.py`.
+    The names are deliberately not any vendor's: they prove the driver's function name and sort
+    direction reach the statement. Real spellings are pinned in `tests/test_databricks_warehouse.py`
+    and meet end to end in `test_warehouse_retriever.py`.
     """
 
     _METRICS: dict[str, tuple[str, str]] = {
@@ -75,9 +61,7 @@ class FakeCursor:
 class FakeWarehouse:
     """A `Warehouse` whose answers are keyed by the relation a statement names.
 
-    Keyed by relation rather than by call order so a test reads as "this table holds these rows"
-    rather than "the third query returns this" — the engine is free to reorder its child-table
-    queries without invalidating every test that ever touched it.
+    Keyed by relation rather than call order, so the engine may reorder its child-table queries.
     """
 
     def __init__(
@@ -100,18 +84,16 @@ class FakeWarehouse:
     def vector_dialect(self) -> Any:
         """`FakeVectorDialect`, so what the engine contributes is asserted without a vendor's words.
 
-        The fake stands in for a driver, and the driver is where a dialect lives (D-2026-08-25).
-        A test that wants the no-dialect case sets this to `None` on the instance; one that wants a
-        real vendor's spelling sets a real dialect.
+        A test sets this to `None` for the no-dialect case, or to a real dialect for a vendor's
+        spelling.
         """
         return self._vector_dialect
 
     def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         """The rows of whichever primed relation this statement reads from.
 
-        Ignores the statement's WHERE, ORDER BY and LIMIT: most tests here assert *what statement
-        the engine emitted*, and answering them from a canned table keeps the row fixtures readable.
-        `WatermarkWarehouse` is the counterpart for the tests where those clauses are the subject.
+        Ignores WHERE, ORDER BY and LIMIT; `WatermarkWarehouse` honours them where they are the
+        subject.
         """
         for relation, rows in self.tables.items():
             if f" {relation} " in sql or sql.endswith(f" {relation}"):
@@ -127,16 +109,9 @@ class FakeWarehouse:
 class WatermarkWarehouse(FakeWarehouse):
     """A `FakeWarehouse` whose entry relation honours the statement's WHERE, ORDER BY and LIMIT.
 
-    Needed because the plain fake answers every statement with the whole primed table, so the one
-    failure mode that the paging contract exists to prevent — a cursor that does not advance past
-    the page the warehouse keeps returning — cannot be reproduced against it. A sync that has
-    wedged permanently and a sync with nothing to do look identical from the outside, and every
-    existing test here saw the second one.
-
-    It applies the *semantics* of those clauses rather than parsing them: the exact clause text is
-    already pinned by `test_the_cursor_filters_on_the_later_of_created_and_modified`, so restating
-    it as a parser here would only be a second place for the two to disagree. `params` is
-    `[since, limit]` — the engine binds both, which is itself asserted next door.
+    Without it, a cursor that never advances past a repeated page cannot be reproduced. It applies
+    the clauses' semantics rather than parsing them (the text is pinned by
+    `test_the_cursor_filters_on_the_later_of_created_and_modified`). `params` is `[since, limit]`.
     """
 
     def __init__(
@@ -159,10 +134,8 @@ class WatermarkWarehouse(FakeWarehouse):
     def _watermark(self, row: dict[str, Any]) -> Any:
         """The value the entry statement filters and orders on.
 
-        `COALESCE(modified, created)`, and — when the binding names a retraction column —
-        `GREATEST` of that and the withdrawal, which is what `sql.watermark_expression` builds.
-        Mirrored as semantics rather than parsed, for the reason this class's docstring gives; the
-        clause text itself is pinned next door.
+        `COALESCE(modified, created)`, and with a retraction column the `GREATEST` of that and the
+        withdrawal — mirroring `sql.watermark_expression`.
         """
         window = (
             row[self._modified_at]
@@ -176,20 +149,16 @@ class WatermarkWarehouse(FakeWarehouse):
     def _rank(self, row: dict[str, Any]) -> tuple[Any, str]:
         """The total order the statement asks for: the watermark, then the entry key.
 
-        The key is the tiebreaker the page's `LIMIT` needs to be meaningful. Without it the
-        warehouse is free to return the rows of one watermark value in any order, so a page cut out
-        of a tie is a different subset each time and no cursor of any shape could resume it.
+        The key tiebreaker makes a page cut out of a watermark tie deterministic, so a cursor can
+        resume it.
         """
         return self._watermark(row), str(row.get(self._key, ""))
 
     def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         """Rows at or after the bound cursor, in `(watermark, key)` order, cut to the bound limit.
 
-        Two shapes of parameter list, matching the two the engine builds: `[since, limit]` for a
-        page starting at the cursor, and `[block, block, after_key, limit]` for one continuing
-        *inside* a watermark block that a page could not hold — which is the only way a source
-        whose watermark is a DATE, or a bulk reload that stamped one instant on every row, can ever
-        be got past.
+        `[since, limit]` starts a page at the cursor; `[block, block, after_key, limit]` continues
+        inside a watermark block a page could not hold (e.g. a DATE watermark or a bulk reload).
         """
         rows = super().respond(sql, params)
         if f" {self._entry_relation} " not in sql:
@@ -217,9 +186,8 @@ NEXT: FakeWarehouse | None = None
 def open_fake(**options: Any) -> FakeWarehouse:
     """A binding's `connection.driver`: hand back the warehouse this test primed.
 
-    Records the connect options it was called with, so a test can assert that credentials were read
-    from the environment variables the binding named — the one part of `connect` that has real
-    behaviour and would otherwise need a live warehouse to observe.
+    Records the connect options, so a test can assert credentials were read from the named
+    environment variables.
     """
     if NEXT is None:
         raise AssertionError("call tests.warehouse_fake.prime() before building a half")
@@ -244,16 +212,9 @@ def prime_warehouse(warehouse: FakeWarehouse) -> FakeWarehouse:
 class KeysetWarehouse(FakeWarehouse):
     """A `FakeWarehouse` whose corpus relation honours the statement's keyset WHERE and LIMIT.
 
-    The counterpart of `WatermarkWarehouse` for the other paging contract. The plain fake answers
-    every statement with the whole primed table, which makes the one failure a keyset drain exists
-    to prevent — a cursor that does not advance past the page the warehouse keeps returning —
-    impossible to reproduce: a wedged drain and a finished one look identical from outside.
-
-    Applies the *semantics* of `WHERE cursor > ? ORDER BY cursor ASC LIMIT ?` rather than parsing
-    the clause, for the reason its sibling gives: the exact text is pinned by the statement test, so
-    a parser here would only be a second place for the two to disagree. `params` is `[after, limit]`
-    on a resumed page and `[limit]` on the first one — which is itself the contract
-    `corpus_statement` documents.
+    The keyset counterpart of `WatermarkWarehouse`: applies the semantics of
+    `WHERE cursor > ? ORDER BY cursor ASC LIMIT ?` without parsing it. `params` is `[after, limit]`
+    on a resumed page and `[limit]` on the first.
     """
 
     def __init__(
@@ -267,10 +228,8 @@ class KeysetWarehouse(FakeWarehouse):
     def _rank(self, row: dict[str, Any]) -> tuple[int, str]:
         """The order the warehouse walks: NULL first, then the cursor value as text.
 
-        NULLs first because that is what an ASC sort does on Spark, which is the engine the first
-        real corpus (Pistachio on Databricks) is drained from — so a row with no cursor value lands
-        on *page one*, where it decides what the next page resumes after. Ranking them last here
-        would put the one row that can break a keyset resume where no bounded test ever reaches it.
+        NULLs first, as Spark's ASC sort does, so a row with no cursor value lands on page one where
+        it decides what the next page resumes after.
         """
         value = row.get(self._cursor)
         return (0, "") if value is None else (1, str(value))

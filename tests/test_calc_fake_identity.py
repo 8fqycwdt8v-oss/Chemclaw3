@@ -1,30 +1,10 @@
 """`tests/calc_server_fake.py`'s cache-key table, held against the server it stands in for.
 
-Every D-011 assertion in `tests/test_calc_*.py` — "a persisted result is never recomputed", "the
-composite reached the entry that conformer's own address names" — is evidence about
-`calc_server_fake._KEYED`, a hand-written mirror of `Chemclaw3-mcp`'s
-servers/calc/src/chemclaw_mcp_calc/engine/identity.py (unbackticked deliberately: it is that
-repository's path, and `tests/test_docstring_paths.py` resolves every backticked pointer against
-this one). That file's docstring says the two
-properties in it "were measured against the running server", which is a claim about a commit in a
-repository this one does not build, and nothing re-measured it. A fake whose key table has drifted
-makes those tests pass on a design that fails in production: the two ways it can be wrong are a
-`calc_type` that no longer aliases the tools the composites rely on sharing a row, and an argument
-that entered (or left) the key, which is a cache hit where production recomputes or the reverse.
-
-**So this re-measures it, in the sibling's own interpreter**, exactly as
-`tests/test_context_floor.py::test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound`
-holds that repository's tool schemas to account — and it reuses that file's `_sibling_python`, so
-where the checkout lives has one definition. What crosses the process boundary is JSON.
-
-**What is compared is behaviour, never values.** The fake's `calc_version` is a fixture string and
-its `input_hash` is its own arithmetic, so identical keys are neither expected nor wanted. What
-must agree is the matrix: which `calc_type` each tool answers under, and *which arguments change
-the key* — because those two are the whole of "did this hit the cache".
-
-**A skip is not a pass.** With no sibling checkout this test skips with the reason in the message,
-because a check that quietly narrows to what it can reach is worse than one that says what it did
-not look at.
+Every D-011 assertion in `tests/test_calc_*.py` is evidence about `calc_server_fake._KEYED`, a
+mirror of `Chemclaw3-mcp`'s `engine/identity.py`. This re-measures it in the sibling's own
+interpreter (via `_sibling_python`, as `tests/test_context_floor.py` does), exchanging JSON. What
+is compared is behaviour, not values: which `calc_type` each tool answers under, and which
+arguments change the key. Without a sibling checkout it skips with the reason.
 """
 
 from __future__ import annotations
@@ -40,10 +20,8 @@ from tests.siblings import SIBLING_SKIP
 from tests.test_context_floor import _sibling_python
 
 #: The program run inside the sibling checkout's interpreter. It derives one identity per compute
-#: tool from a fixed argument set, then re-derives it once per argument with that argument changed,
-#: and reports which arguments moved the key. Written here rather than committed there for the
-#: reason `_SIBLING_DUMP` gives: this is *this* repository's measurement of a contract it depends
-#: on, and the sibling owes the fleet a derivation rather than a table in this shape.
+#: tool from a fixed argument set, then re-derives it with each argument changed in turn, and
+#: reports which arguments moved the key.
 _KEY_PROBE = """
 import json, sys
 from chemclaw_mcp_calc.engine.identity import COMPUTE_TOOLS, calculation_identity
@@ -116,22 +94,10 @@ _VARIATIONS: dict[str, Any] = {
     "value": 1.9,
 }
 
-#: The tools whose identity the sibling refuses to derive when the binary behind them is absent, by
-#: design — "the probe refuses precisely where the calculation would", because a well-formed key
-#: naming a program the pod lacks is worse than no key: it is a cache address for a row that can
-#: never be computed.
-#:
-#: **Two binaries, not one, and this set said `crest` for both.** It named only the CREST searches,
-#: and the sibling since extended the same rule to the two tools that need the `xtb` *binary* —
-#: `tblite` exposes no atomic multipoles, no polarisability and no potential grid, so there is no
-#: in-process fallback for them. Measured on a checkout with neither binary, the sibling refused
-#: four and this bound admitted two. That is this repository holding a stale claim about another
-#: repository's behaviour, which is the hazard `Chemclaw3-mcp`'s own sibling-agreement note names:
-#: nothing here can see that server's merge schedule.
-#:
-#: A bound rather than a list of expected refusals: a refusal from any *other* tool is a real
-#: divergence and fails below, and where a checkout does have the binaries these four are measured
-#: like everything else.
+#: Tools whose identity the sibling refuses to derive when the binary behind them (`crest` or `xtb`)
+#: is absent, by design: a key naming a program the pod lacks addresses a row that can never be
+#: computed. A bound, not an expected list: any other refusal fails below, and where the binaries
+#: exist these are measured like everything else.
 _REFUSED_WITHOUT_A_BINARY = frozenset(
     {
         # `crest`
@@ -143,13 +109,9 @@ _REFUSED_WITHOUT_A_BINARY = frozenset(
     }
 )
 
-#: Arguments the server will not let a probe vary independently of the subject, with the reason.
-#: `charge` is folded into the *structure* on that side (it embeds the molecule and refuses a
-#: declared charge that disagrees with the formal one), so "does charge change the key" cannot be
-#: asked without changing the molecule too; the fake puts it in `params` instead, which produces
-#: the same hit/miss behaviour and is what `calc_server_fake`'s own docstring already records.
-#: `atoms` names a *bond* to drive, so a second pair is a different constraint rather than a
-#: different value of the same one.
+#: Arguments the server will not let a probe vary independently of the subject. `charge` is folded
+#: into the structure there (the fake puts it in `params`, with the same hit/miss behaviour), and
+#: `atoms` names the bond to drive, so a second pair is a different constraint.
 _NOT_INDEPENDENTLY_VARIABLE = {("compute_xtb_energy", "charge"), ("scan_point", "atoms")}
 
 
@@ -192,17 +154,14 @@ def _sibling_identities() -> tuple[dict[str, Any], str]:
 def test_the_fake_keys_calculations_the_way_the_server_keys_them() -> None:
     """`_KEYED` names the same `calc_type` and the same keyed arguments the server derives.
 
-    Three ways this can be wrong, and each is a class of test in `tests/test_calc_*.py` that would
-    stay green while production behaved differently:
+    Three ways this can be wrong while the calc tests stay green:
 
-    - a tool the fake keys and the server does not (or the reverse) — a cache row that exists on
-      one side only;
-    - a `calc_type` that differs — the aliasing `compute_properties_at`/`compute_electronic_
-      properties` and `compute_fukui_at`/`predict_site_reactivity` rely on, which is what makes
-      "relax a conformer, then ask for its properties" reach the entry the conformer's own address
-      names;
-    - an argument in one key table and not the other — a hit where production recomputes, or a
-      recompute where production would have served a stale row.
+    - a tool keyed on one side only;
+    - a different `calc_type`, breaking the aliasing (`compute_properties_at` /
+      `compute_electronic_properties`, `compute_fukui_at` / `predict_site_reactivity`) that lets a
+      relaxed conformer's properties reach its own entry;
+    - an argument in one key table and not the other — a hit where production recomputes, or the
+      reverse.
     """
     answers, reason = _sibling_identities()
     if not answers:

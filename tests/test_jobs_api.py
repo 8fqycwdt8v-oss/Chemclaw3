@@ -1,17 +1,8 @@
-"""A durable job a user can find, and a failure they can act on (the product floor).
+"""A durable job a user can find, and a failure they can act on.
 
-Two gaps, both invisible from inside the system and obvious from outside it.
-
-**There was no job surface at all.** Status and result were reachable *only* as an agent tool
-inside a turn, so a chemist could not list what was running, could not fetch a result once the
-session was gone, and could not stop a runaway run. `job_records` held the result the whole time
-(D-157) — nothing exposed it.
-
-**Every turn failure was one opaque string.** `runner.py` caught `Exception` and returned "an
-internal error", so a surface could not tell a connector being down from an LLM timeout from a
-database outage from a malformed tool argument. It could therefore offer no next step, and "try
-again" was as likely to be wrong as right — and the message named the *session*, which the user
-already has, rather than the correlation id the audit trail is actually keyed on.
+The jobs routes list, fetch and cancel runs from `job_records` outside any turn. A turn failure is
+classified (connector down, LLM timeout, database outage, malformed argument, ...) so a surface
+can offer the right next step, and it quotes the correlation id the audit trail is keyed on.
 """
 
 import asyncio
@@ -105,12 +96,10 @@ def test_an_unknown_job_is_a_404(client: TestClient, monkeypatch: pytest.MonkeyP
 
 
 def test_cancelling_needs_an_operator_role(plain_user_client: TestClient) -> None:
-    """The design finding: a running job has no single owner, so "cancel mine" cannot exist.
+    """Cancelling needs an operator role.
 
-    `job_workflow_id` hashes `[connector, job, payload]` and deliberately excludes the requester,
-    so two chemists asking for the identical campaign rejoin one run (D-011). Cancelling it cancels
-    it for everyone who joined, and the first requester is not more entitled to that than the
-    second — so an owner-scope check here would read as ownership and not be it.
+    A running job has no single owner: `job_workflow_id` excludes the requester, so identical
+    requests rejoin one run, and cancelling it cancels it for everyone.
     """
     assert plain_user_client.delete("/jobs/job-1").status_code == 403
 
@@ -132,17 +121,11 @@ def test_an_operator_can_cancel(client: TestClient, monkeypatch: pytest.MonkeyPa
 
 
 def test_profiles_are_discoverable(client: TestClient) -> None:
-    """`POST /sessions` 400s an unknown profile and nothing listed the known ones.
+    """Profiles are discoverable.
 
-    So a surface had to hardcode names that live in files it cannot see, and a deployment adding a
-    profile had no way to make it reachable.
-
-    **Asserting a *name*, because the shape assertion passed while the route was empty.** This test
-    used to check only `isinstance(names, list)` and `names == sorted(names)`, both of which are
-    true of `[]` — and `[]` is exactly what the route returned in every deployment, because it
-    called `load_profiles()`, which reports only what it newly registered, after the lifespan had
-    already registered everything. `default` is the one name that must always be there: it is a
-    profile a caller may pass, it is registered without a file, and no discovery order can drop it.
+    `POST /sessions` 400s an unknown profile, so the known ones must be listable. Asserted by name:
+    `default` is registered without a file and must always appear, which a shape-only check of `[]`
+    would miss.
     """
     names = client.get("/profiles").json()
     assert isinstance(names, list)
@@ -213,11 +196,10 @@ def _gateway_400(message: str) -> Any:
     ],
 )
 def test_an_oversize_request_is_a_context_length_failure_not_an_internal_one(message: str) -> None:
-    """The one failure whose remedy is the chemist's was reported as `internal, do not retry`.
+    """An oversize request is a context-length failure, not an internal one.
 
-    Driven through the shapes the turn actually receives: the SDK's `BadRequestError`, and
-    `langchain_openai`'s re-raise of it as `OpenAIContextOverflowError` — which is the exception
-    the live lane's traceback ends on, and which is what `_classify` is really handed.
+    Driven with the shapes the turn receives: the SDK's `BadRequestError`, and `langchain_openai`'s
+    `OpenAIContextOverflowError` re-raise, which is what `_classify` is handed.
     """
     from langchain_openai.chat_models.base import OpenAIContextOverflowError
 
@@ -236,12 +218,10 @@ def test_an_oversize_request_is_a_context_length_failure_not_an_internal_one(mes
 
 
 def test_a_provider_stall_is_worded_as_one_and_not_as_an_internal_error() -> None:
-    """A gateway that goes quiet mid-stream is the provider's fault, and the sentence says so.
+    """A provider stall is worded as one, not as an internal error.
 
-    Live re-verification 2026-10-02 (D9): `langchain_openai` raised `StreamChunkTimeoutError` after
-    120 s without a chunk, `_classify` already called it `llm_timeout` and retryable, and the
-    chemist read "could not be completed due to an internal error" beside both. Driven with the
-    exception the lane's traceback ended on, because that is what `_classify` is really handed.
+    `StreamChunkTimeoutError` is classified `llm_timeout` and retryable, and the sentence must say
+    so.
     """
     from langchain_openai.chat_models._client_utils import StreamChunkTimeoutError
 
@@ -295,12 +275,10 @@ def _provider_failures() -> list[Exception]:
 
 
 def test_a_model_gateway_failure_is_the_provider_retryable_not_an_internal_error() -> None:
-    """A gateway that answered 500 reached the chemist as "an internal error", not retryable.
+    """A model gateway failure is the provider's, retryable, not an internal error.
 
-    Measured on the kind cluster with the scripted mock's `f-http-500`: the SDK retried three
-    times, `model.call_failed … (transport: OpenAIAPIError)` was logged, and two lines later the
-    turn ended `internal`. `classify_model_failure` already knew it was the provider; `_classify`
-    only asked it about `context_length`.
+    `classify_model_failure` already identifies the provider; `_classify` must use it beyond
+    `context_length`.
     """
     from chemclaw.api.runner import failure_event
 
@@ -327,12 +305,9 @@ def test_a_request_the_provider_refused_as_wrong_is_not_called_transient() -> No
 
 
 def test_a_refused_credential_is_llm_auth_not_internal_and_not_retryable() -> None:
-    """A 401 or 403 from the gateway is a credential an operator fixes: `llm_auth`, final.
+    """A refused credential is `llm_auth`, not internal and not retryable.
 
-    Reproduced against a stub gateway answering 401 and 403 through a real `ChatOpenAI`: the turn
-    reported `internal` beside `model.call_failed … (error: OpenAIAuthenticationError)`, so the code
-    a chemist quoted could not tell a rotated key from a code fault. Not retryable, because asking
-    again sends the same key, and the sentence says who can fix it rather than "internal error".
+    A 401 or 403 from the gateway is a key an operator fixes; retrying sends the same key.
     """
     import httpx2
     import openai
@@ -377,11 +352,10 @@ def test_only_an_unclassified_failure_is_called_an_internal_error() -> None:
 
 
 def test_a_streamed_overflow_the_client_library_recognised_is_context_length_too() -> None:
-    """`OpenAIAPIContextOverflowError` is an `APIError` and **not** a `BadRequestError`.
+    """A streamed overflow the client library recognised is context-length too.
 
-    The message test is gated on `BadRequestError`, so the streamed half of the same failure fell
-    through to `internal` even after the non-streamed half was classified. The client library's
-    own `ContextOverflowError` type is the signal both share.
+    `OpenAIAPIContextOverflowError` is an `APIError`, not a `BadRequestError`; the client library's
+    `ContextOverflowError` type is what both halves share.
     """
     import httpx2
     from langchain_openai.chat_models.base import OpenAIAPIContextOverflowError
@@ -399,11 +373,9 @@ def test_a_bad_request_that_is_not_about_length_stays_internal() -> None:
 
 
 def test_the_error_carries_the_key_the_audit_trail_is_keyed_on() -> None:
-    """The old message named the session — the id the user already has.
+    """The error carries the correlation id the audit trail is keyed on.
 
-    The correlation id is what `audit_events` is keyed on
-    (D-2026-07-31-the-audit-chain-is-versioned), so quoting it in a bug report is what lets an
-    operator find the turn. A random per-turn hex string, so nothing sensitive travels with it.
+    Quoting it in a report lets an operator find the turn; it is a random per-turn hex string.
     """
     event = ErrorEvent(
         message="boom", code="storage_unavailable", retryable=True, correlation_id="c-1"
@@ -423,12 +395,10 @@ def _run(awaitable: Any) -> Any:
 
 
 def test_a_reload_recovers_what_the_agent_did_not_only_what_it_said() -> None:
-    """The live stream carries fourteen event types; a reload got `role` and `text`.
+    """A reload recovers what the agent did, not only what it said.
 
-    So everything the agent *did* vanished on refresh and a UI could not render history at parity
-    with the live view — the largest single blocker for the frontend repo. The tool calls were
-    never missing from storage: a MAF message already holds `function_call`/`function_result`
-    contents, and the route was flattening them away.
+    The stored messages hold the tool calls and results; the route must not flatten them to role and
+    text, or history cannot render at parity with the live stream.
     """
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 

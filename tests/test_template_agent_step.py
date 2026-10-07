@@ -1,29 +1,10 @@
 """The `agent` step's surface: ungated by the plan gate, and read-only unless the file says so.
 
-A template is not plan-gated, and that is a decision rather than an omission: a template *is* the
-pre-approved plan — a human-authored, git-committed, reviewed YAML file that nothing at run time can
-produce — so asking an `agent` step to get its plan approved would be asking for approval of a plan
-nobody wrote, in a session that does not exist. What the plan gate also did was bound what a model
-improvising inside one step could reach, and that half is kept by narrowing the step's surface
-instead: every side-effecting tool the step did not declare is removed from the agent before it is
-built.
-
-**The tests here are about the half that is easy to get wrong.** The narrowing is a subtraction
-applied to a profile, and the profile used to be resolved *twice* — the raw name to
-`connector_specs`, a modified copy to the builder. Narrowing only the builder's copy looks correct
-in every in-process assertion and leaves the entire connector surface bound, including
-`compute_xtb_energy`, which `connectors/calc/connector.yaml` classifies `state_changing` and which
-is the exact tool `agent/authz.side_effecting_tools`'s own docstring names as the one a set built
-from in-process names would have missed. So the headline test drives the real activity, the real
-graph and the real `connector_specs`, and asserts on the connector half.
-
-**The second group is about the half that was not there at all.** An `agent` step is a model turn,
-and every instrument the chat path points at a model turn was absent from this one: the ambient
-session (so every audit row a template wrote booked `session_id=""`), the token counters, and the
-`turn_costs` ledger. Measured before the fix on this very activity, with a scripted model reporting
-120 tokens per call: `chemclaw_tokens_total` 0.0 before and 0.0 after. Those tests drive the real
-activity too, for the same reason as the first group — the defect was that the *caller* did none of
-it, so a test of the arithmetic would have passed throughout.
+A template is itself the reviewed, pre-approved plan, so an `agent` step is not plan-gated;
+instead every side-effecting tool the step did not declare is removed before the agent is built.
+The narrowing must reach the connector specs as well as the builder's profile, so the headline
+test drives the real activity, graph and `connector_specs`. A second group checks an `agent` step
+is instrumented like a chat turn: ambient session, token counters and the `turn_costs` ledger.
 """
 
 import asyncio
@@ -96,9 +77,7 @@ class _Recorder:
 def _stand_in(name: str, calls: list[str]) -> Any:
     """One connector tool as `open_connector_specs` produces them: an ordinary LangChain tool.
 
-    It records its own name when its **body** runs, which is the assertion that matters. "The model
-    was not offered the tool" is not the claim under test — the claim is that the write did not
-    happen, and only the body can testify to that.
+    It records its name when its body runs, since the claim is that the write did not happen.
     """
 
     @tool_decorator(name_or_callable=name, description=f"stand-in for {name}")
@@ -112,10 +91,8 @@ def _stand_in(name: str, calls: list[str]) -> Any:
 def _scripted(script: list[Any] | ScriptedChatModel) -> ScriptedChatModel:
     """The step's model: the shared fake's script shorthand, or ready-made messages.
 
-    `ScriptedChatModel`'s shorthand (a string, or a `{"name", "args"}` mapping) has nowhere to put
-    `usage_metadata`, and the metering tests below are *about* the usage a provider reports — so a
-    script written as `AIMessage`s is handed to the fake's own `messages` iterator instead. One
-    function, so every test in this file drives the same model whichever shape it wrote.
+    The shorthand cannot carry `usage_metadata`, which the metering tests need, so `AIMessage`
+    scripts go to the fake's `messages` iterator instead.
     """
     if isinstance(script, ScriptedChatModel):
         # Already a model: a test that needs the provider itself to misbehave (a mid-turn outage)
@@ -149,20 +126,16 @@ def _drive(
 ) -> _Step:
     """Run the real `run_agent_step` against a scripted model, and report what happened.
 
-    Only three things are substituted, and none is on the path under test:
+    Three substitutions, none on the path under test:
 
-    - `chemclaw.agent.llm_provider.build_chat_model`, the seam to patch precisely because doing
-      so runs the *production* wiring rather than a hand-assembled stand-in;
-    - `open_connector_specs`, because no MCP server is running here — an unreachable connector
-      contributes no tools at all, so a live-registry run would prove nothing about the connector
-      half either way. The stand-in builds one tool per name each spec's allow-list *actually
-      carries*, which is what makes this a test of the narrowing rather than of the transport;
-    - the turn-cost sink, so the ledger row is observable without a database. `record_turn_cost`
-      writes from a task it deliberately does not await (`agent/turn_cost.py` explains why), so
-      the run yields once afterwards to let that task reach a recorder that never blocks.
+    - `llm_provider.build_chat_model`, so the production wiring runs;
+    - `open_connector_specs`, since no MCP server runs here; the stand-in builds one tool per name
+      each spec's allow-list actually carries, which makes this a test of the narrowing;
+    - the turn-cost sink, so the ledger row is observable; `record_turn_cost` writes from an
+      unawaited task, so the run yields once afterwards.
 
-    Returns the step's answer, the tool bodies that ran, the audit events, every tool name the
-    specs handed to `open_connector_specs` advertised, and the cost rows booked.
+    Returns the step's answer, the tool bodies that ran, the audit events, every tool name the specs
+    advertised, and the cost rows booked.
     """
     from chemclaw.durable import template_activities
 
@@ -243,25 +216,14 @@ def _step(**overrides: Any) -> AgentStepInput:
 def test_an_undeclared_write_never_runs_and_the_step_still_answers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole decision, driven end to end through the real activity and the real graph.
+    """An undeclared write never runs, and the step still answers.
 
-    Four claims, and the third is the one that needed the double resolution fixed:
-
-    1. the write's **body never ran** — not that it was hidden from the model, that it did not
-       happen;
-    2. the attempt is an audit row with `outcome="refused"` **saying why it was refused**. The
-       outcome alone proves less than it looks, and that was the whole argument for asserting the
-       `detail` beside it: `ToolNode` *returns* its invalid-name message from inside the wrapper
-       chain, so `returned_failure` books a row either way, and with the refusal middleware deleted
-       this row reads "compute_xtb_energy is not a valid tool, try one of
-       [list_attachments, read_attachment, …]" — the library's guess at a typo, with the agent's
-       whole remaining inventory in the field an auditor reads as what happened. So the `detail` is
-       asserted, not just the outcome;
-    3. the connector specs the step opened never advertised it, which is the half that stayed wide
-       open while the profile was resolved twice;
-    4. the turn **still answers**. A refusal that ended the run would have turned a narrowing into
-       an outage, and the model is handed the refusal as this call's result rather than as an error
-       worth retrying.
+    1. the write's body never ran;
+    2. the attempt is an audit row with `outcome="refused"` and a `detail` saying why, since
+       `ToolNode`'s invalid-name message would also book a failure row, listing the agent's
+       inventory;
+    3. the connector specs the step opened never advertised it;
+    4. the turn still answers, with the refusal as the call's result rather than a retryable error.
     """
     run = _drive(
         monkeypatch,
@@ -282,14 +244,10 @@ def test_an_undeclared_write_never_runs_and_the_step_still_answers(
 
 
 def test_the_model_reads_a_refusal_rather_than_a_retryable_error() -> None:
-    """What the *model* is handed, which is the only thing the refusal middleware changes.
+    """The model reads a refusal rather than a retryable error.
 
-    Structure already stops the call; this is about the signal that comes back. LangGraph's own
-    answer to an unbound name is `ToolMessage(status="error")` carrying "is not a valid tool, try
-    one of [...]" — `is_error` on the wire, an explicit invitation to retry, and the agent's whole
-    inventory in the transcript — for a tool that was withheld deliberately rather than mistyped.
-    `_refusal_message` records why `status="error"` is the wrong signal for a decision; this pins
-    that an undeclared write gets the right one.
+    LangGraph's answer to an unbound name is `ToolMessage(status="error")` inviting a retry and
+    listing the inventory; a deliberately withheld tool gets `_refusal_message`'s refusal instead.
     """
     from chemclaw.agent.audit import NullAuditSink
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -313,11 +271,10 @@ def test_the_model_reads_a_refusal_rather_than_a_retryable_error() -> None:
 
 
 def test_a_declared_write_is_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other direction, or the narrowing would be a ban rather than a declaration.
+    """A declared write is reachable, so the narrowing is a declaration rather than a ban.
 
-    Same step, same tool, same script — the only difference is one line in the template — so this
-    also pins that the connector *spec* is what carries the difference: the tool is offered here and
-    absent above, from the same registry.
+    Only one template line differs from the test above, which pins that the connector spec carries
+    the difference.
     """
     run = _drive(
         monkeypatch,
@@ -354,11 +311,9 @@ def test_a_read_tool_stays_reachable_without_any_declaration(
 
 
 def _metered_script() -> list[AIMessage]:
-    """A two-call turn — a tool call then an answer — each reporting the usage a provider reports.
+    """A two-call turn, a tool call then an answer, each reporting provider usage.
 
-    Two calls rather than one, because the sum is the thing: a metering that read only the final
-    message would pass every single-call test and silently under-report every real step, which
-    makes tool calls (the reason an `agent` step exists) free.
+    Two calls, because metering only the final message would make tool calls free.
     """
     return [
         AIMessage(
@@ -373,17 +328,10 @@ def _metered_script() -> list[AIMessage]:
 def test_the_audit_row_names_the_session_the_run_was_launched_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every audit row a template ever wrote booked an empty session id.
+    """The audit row names the session the run was launched from.
 
-    `set_current_session_id` is what `agent/audit.py` reads (`get_current_session_id() or ""`), and
-    the chat path stamps it on every turn. The step activities stamped the *actor* and never the
-    session — the id was in `TemplateRunInput` and used only for the completion push-back — so the
-    trail could answer "who" and "which run" and could not answer "which conversation". Measured on
-    this activity before the fix: `session_id=''`.
-
-    Asserted on a tool row rather than on a synthetic one, because that is the row an auditor reads,
-    and it is written from inside the graph — so it also pins that the stamp survives the whole
-    depth of the call, not just the activity's own frame.
+    `agent/audit.py` reads `get_current_session_id()`, so the step must stamp it. Asserted on a tool
+    row written from inside the graph, so the stamp is shown to survive the whole call depth.
     """
     run = _drive(monkeypatch, _step(), _metered_script())
 
@@ -394,17 +342,10 @@ def test_the_audit_row_names_the_session_the_run_was_launched_from(
 def test_the_steps_tokens_reach_the_counters_the_deployment_bills_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bypass itself: a template's spend was invisible to every token counter there is.
+    """The step's tokens reach the counters the deployment bills from.
 
-    Measured before the fix, driving this same activity with this same script:
-    `chemclaw_tokens_total` read 0.0 before and 0.0 after, and so did the four split counters. A
-    template was therefore a way to spend model tokens that no dashboard, no alert and no cost
-    review would ever see.
-
-    Asserted as a *delta* rather than an absolute, because `METRICS` is a process-wide registry
-    that other tests in the same session also write to. The split counters are checked beside the
-    total because they are priced separately (`agent/turn_usage.py`), and a metering that published
-    one number four times would satisfy a total-only assertion.
+    Asserted as a delta, since `METRICS` is process-wide. The split counters are checked beside the
+    total because they are priced separately.
     """
     before = {name: METRICS.value(name) for name in _SPEND_COUNTERS}
     _drive(monkeypatch, _step(), _metered_script())
@@ -420,11 +361,9 @@ def test_the_steps_tokens_reach_the_counters_the_deployment_bills_from(
 
 
 class _ProviderOutage(ScriptedChatModel):
-    """A model that serves `paid` calls and then fails, counting what the provider actually billed.
+    """A model that serves `paid` calls and then fails, counting what the provider billed.
 
-    The call count is kept provider-side because a failing turn has no message list to read: the
-    whole defect being guarded is that spend was totalled from `result["messages"]`, which does not
-    exist when `ainvoke` raises.
+    Counted provider-side because a failing turn has no `result["messages"]` to read.
     """
 
     served: int = 0
@@ -450,14 +389,10 @@ class _ProviderOutage(ScriptedChatModel):
 def test_a_step_whose_provider_fails_still_books_the_calls_it_already_paid_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A step that broke after two model calls still spent them.
+    """A step whose provider fails still books the calls it already paid for.
 
-    Measured before the fix: a provider error after two paid calls wrote `turn_costs (0, 0)` and
-    moved `chemclaw_tokens_total` by 0.0, because the sum was taken from `result["messages"]` after
-    `ainvoke` returned — and an exception skips that. The `finally` then booked an all-zero row,
-    which is worse than no row: it asserts the step cost nothing. The runaway case is the same
-    defect and is the one the metering was added to make visible, so the accumulation had to move
-    to a callback that fires as each call ends.
+    Spend accumulates in a callback as each call ends, so an exception after two paid calls does not
+    book an all-zero row.
     """
     # Two *tool-call* turns, so the graph still wants a third model call when the provider dies:
     # a script ending in an answer would finish the turn and never reach the outage.
@@ -482,11 +417,10 @@ def test_a_step_whose_provider_fails_still_books_the_calls_it_already_paid_for(
 def test_a_successful_step_books_each_model_call_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guard on the other side: the callback must replace the post-hoc sum, not join it.
+    """A successful step books each model call exactly once.
 
-    Keeping both accumulation paths is the obvious way to make the failure test pass, and it
-    double-bills every successful step — 480 for a two-call turn. Asserted as `calls x per-call
-    usage` so neither a doubled nor a dropped call satisfies it.
+    The callback replaces the post-hoc sum rather than joining it; asserted as `calls x per-call
+    usage`, so neither doubling nor dropping passes.
     """
     before = METRICS.value("chemclaw_tokens_total")
     run = _drive(monkeypatch, _step(), _metered_script())
@@ -500,17 +434,11 @@ def test_a_successful_step_books_each_model_call_exactly_once(
 def test_the_step_writes_a_cost_row_attributed_to_the_requester(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other instrument, and the one the counters cannot replace.
+    """The step writes a cost row attributed to the requester.
 
-    `chemclaw_tokens_total` is labelled `profile` and capped at 64 label series by construction, so
-    it can say what the deployment spends and never what one chemist spent — that is what
-    `turn_costs` is for (`agent/turn_cost.py`). A template step wrote no row at all, so a procedure
-    launched from a conversation was spend with no owner.
-
-    The row's key is the run's correlation id **plus the step id**: `turn_costs` upserts on the
-    correlation id, and every step of a run shares the run's, so a bare run id would make a
-    multi-`agent`-step template overwrite its own earlier steps and report the last one's spend as
-    the whole run's.
+    `chemclaw_tokens_total` is labelled by profile only, so per-person spend lives in `turn_costs`.
+    The row key is the run's correlation id plus the step id, since `turn_costs` upserts on it and
+    every step of a run shares the run's id.
     """
     run = _drive(monkeypatch, _step(), _metered_script())
 
@@ -528,12 +456,10 @@ def test_the_step_writes_a_cost_row_attributed_to_the_requester(
 
 
 def test_the_resolved_step_profile_holds_no_write_it_was_not_given() -> None:
-    """The subtraction itself, over the live registry rather than a fixture.
+    """The resolved step profile holds no write it was not given, over the live registry.
 
-    Asserted against `side_effecting_tools()` — the same set the dry-run guard and the plan gate
-    decide with — because a second classification is the second source of truth this tree forbids,
-    and it would be wrong in the same direction each time: only a bundle's own manifest knows that
-    `compute_xtb_energy` spends compute while `resolve_compound` is a lookup.
+    Asserted against `side_effecting_tools()`, the set the dry-run guard and plan gate use, since
+    only a bundle's manifest knows which of its tools spend compute.
     """
     profile = step_profile(None, [])
 
@@ -578,15 +504,11 @@ def test_the_shipped_hazard_briefing_step_declares_no_writes() -> None:
 
 
 def test_the_sequencer_hands_the_step_its_declared_writes() -> None:
-    """The one link the activity-level tests cannot see: what the workflow actually sends.
+    """The sequencer hands the step its declared writes.
 
-    Every test above builds an `AgentStepInput` by hand, so a `_run_step` that dropped
-    `write_tools` on the floor would leave all of them green while every real run silently ran
-    read-only — the failure mode that is invisible from either end alone.
-
-    Substituting the module's `workflow` handle rather than driving a server, the same way
-    `tests/test_templates.py` does for the retry policies: the real workflow API refuses to run
-    outside a workflow event loop, and the function under test is the real, unmodified `_run_step`.
+    The tests above build `AgentStepInput` by hand, so only this shows `_run_step` passes
+    `write_tools`. The module's `workflow` handle is substituted, since the real API refuses to run
+    outside a workflow event loop.
     """
     import types
     from datetime import timedelta
@@ -617,21 +539,11 @@ def test_the_sequencer_hands_the_step_its_declared_writes() -> None:
 
 
 def test_every_dispatched_step_carries_a_heartbeat_timeout() -> None:
-    """A step that never says anything is indistinguishable from a worker that died.
+    """Every dispatched step carries a heartbeat timeout.
 
-    Both dispatched activities now beat while they wait (`durable/heartbeat.beating`), and a beat
-    nobody is listening for is not a liveness signal — Temporal only reacts to one if the activity
-    was scheduled with a `heartbeat_timeout`. There was none on any step, so `start_to_close` was
-    the sole signal: a worker evicted one minute into a 900 s `agent` step left the run waiting out
-    the whole remaining budget before retrying an attempt that had been dead the entire time.
-
-    Both kinds in one test, because the failure mode is a step kind arriving without the option —
-    which is exactly how the activities themselves once shipped unregistered
-    (`test_every_template_step_activity_is_registered_on_a_worker`).
-
-    Substituting the module's `workflow` handle rather than driving a server, like its sibling
-    above: the real workflow API refuses to run outside a workflow event loop, and the function
-    under test is the real, unmodified `_run_step`.
+    Temporal reacts to heartbeats only with a `heartbeat_timeout`; without one a dead worker is
+    noticed only when `start_to_close` lapses. Both step kinds in one test, since the failure mode
+    is a kind arriving without it. The `workflow` handle is substituted as in the test above.
     """
     import types
     from datetime import timedelta
@@ -675,15 +587,12 @@ def test_every_dispatched_step_carries_a_heartbeat_timeout() -> None:
 # --- and the beat the option is listening for ----------------------------------------------------
 
 
-# A `safety` endpoint tool the manifest classifies `read_only`, so it survives an `agent` step's
-# narrowing with nothing declared and passes a `tool` step's authorization as itself. The stand-in
-# below borrows the name because what is under test is the *wrapper around the wait*, not which
-# tool is waiting.
+# A `safety` endpoint tool classified `read_only`, so it survives an `agent` step's narrowing and
+# passes a `tool` step's authorization. The stand-in borrows the name; the subject is the wrapper
+# around the wait.
 _SLOW_TOOL = "screen_hazards"
-# What the two activities are given as their heartbeat timeout while this test drives them.
-# `durable/heartbeat.beating` derives its beat interval from this value — a quarter of it, floored
-# at one second — so four is the smallest number that still exercises the shipped arithmetic rather
-# than a special case: four seconds in, a beat at one.
+# The heartbeat timeout the two activities get here. `beating` beats at a quarter of it, floored at
+# one second, so four is the smallest value exercising the shipped arithmetic.
 _TEST_HEARTBEAT_TIMEOUT_SECONDS = 4
 # How long the driven work waits to be heartbeat for before giving up and answering anyway. It
 # bounds only the *failing* run: a healthy step is released by the beat itself, so a pass costs one
@@ -704,13 +613,10 @@ class _Beats:
         self._first.set()
 
     async def wait(self) -> None:
-        """Block until this activity has been heartbeat for, or until the deadline lapses.
+        """Block until this activity has heartbeat, or until the deadline lapses.
 
-        Waiting *for the beat* rather than sleeping a fixed span is what makes this both quick and
-        not a race: the healthy run ends the instant the timer fires, and the broken one is not
-        losing a bet against a sleep on a loaded machine. The deadline is suppressed rather than
-        raised so the failure is the assertion below — nothing beat — rather than a `TimeoutError`
-        surfacing out of the middle of somebody else's activity.
+        Waiting for the beat rather than sleeping is quick and race-free; the deadline is suppressed
+        so the failure is the assertion below, not a `TimeoutError` inside the activity.
         """
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._first.wait(), _BEAT_DEADLINE_SECONDS)
@@ -719,14 +625,9 @@ class _Beats:
 def _beats_of(monkeypatch: pytest.MonkeyPatch, activity: Any, payload: Any) -> _Beats:
     """Run one real template step activity, in an activity context, over one slow tool.
 
-    The slowness is the point and it is put where a real step's slowness is: in the tool. Both
-    activities wrap their whole wait in `beating`, so a tool that does not return until it has been
-    heartbeat for is enough to observe the timer from outside — and `ActivityEnvironment` is what
-    makes `activity.heartbeat` legal here at all, since it raises outside an activity context.
-
-    Everything substituted is what `_drive` substitutes and for the same reasons (no MCP server, no
-    provider credential, no database), plus the heartbeat timeout, so a beat is one second away
-    rather than fifteen.
+    The tool does not return until a heartbeat arrives, so the timer is observable from outside;
+    `ActivityEnvironment` makes `activity.heartbeat` legal. Substitutions are `_drive`'s plus the
+    heartbeat timeout.
     """
     from chemclaw.core.config import settings
     from chemclaw.durable import template_activities
@@ -785,21 +686,11 @@ def _beats_of(monkeypatch: pytest.MonkeyPatch, activity: Any, payload: Any) -> _
 def test_every_dispatched_step_actually_heartbeats(
     monkeypatch: pytest.MonkeyPatch, activity_name: str, payload: Any
 ) -> None:
-    """The half an audit deleted while the whole suite stayed green.
+    """Every dispatched step actually heartbeats.
 
-    `test_every_dispatched_step_carries_a_heartbeat_timeout` pins that the *workflow* schedules both
-    steps with a `heartbeat_timeout`, and nothing else asserted that anything ever beats. So
-    removing the `beating(...)` wrapper from both activities — the whole liveness mechanism — left
-    every test in this file and its sibling passing. A heartbeat timeout is not a safety net on its
-    own: it is a **deadline**, and the two changes together are what make a missing beat fatal
-    rather than merely undetected. With 60 s configured and no beat, Temporal now kills any step
-    that runs longer than a minute, which is every step worth dispatching to a worker.
-
-    So this drives the real activities and watches for the beat itself, through
-    `ActivityEnvironment.on_heartbeat` — the environment's own recording, not a spy on our wrapper,
-    so it is `activity.heartbeat` actually being called that is observed and not our own idea of it.
-    Both kinds, for the same reason the option test takes both: the failure mode is a step kind
-    arriving without it.
+    A `heartbeat_timeout` is a deadline, so a step that never beats would be killed after it.
+    Observed through `ActivityEnvironment.on_heartbeat`, the environment's own record, for both step
+    kinds.
     """
     from chemclaw.durable import template_activities
 
@@ -841,12 +732,10 @@ def _problems(write_tools: list[str], profile: str | None = None) -> list[str]:
 
 
 def test_declaring_a_read_tool_as_a_write_is_a_problem() -> None:
-    """The check that keeps the list from drifting into a general allow-list.
+    """Declaring a read tool as a write is a problem.
 
-    A read tool is reachable with no declaration at all, so naming one grants nothing — and
-    accepting it would let the list grow into an allow-list for the whole surface wearing a
-    write-list's name, which is how a narrowing gets widened by people writing what looks like
-    documentation.
+    A read tool needs no declaration, and accepting it would let the write list grow into a general
+    allow-list.
     """
     (problem,) = _problems(["screen_hazards"])
 
@@ -862,12 +751,10 @@ def test_declaring_a_tool_that_does_not_exist_is_a_problem() -> None:
 
 
 def test_declaring_a_write_the_step_profile_does_not_advertise_is_a_problem() -> None:
-    """A step cannot gain a tool its profile never had, and the file must say so out loud.
+    """Declaring a write the step profile does not advertise is a problem.
 
-    `step_profile` intersects the declaration with the profile's advertised surface — attenuation
-    only, the rule `agent/profiles.py` states — so a write outside it is accepted by YAML and
-    silently nothing at run time. `property-lookup` is a shipped profile that advertises no
-    knowledge-graph write.
+    `step_profile` intersects with the profile's surface, so such a write would silently do nothing.
+    `property-lookup` advertises no knowledge-graph write.
     """
     (problem,) = _problems(["record_knowledge_note"], profile="property-lookup")
 
@@ -876,11 +763,9 @@ def test_declaring_a_write_the_step_profile_does_not_advertise_is_a_problem() ->
 
 
 def test_declaring_a_real_write_the_profile_advertises_is_no_problem() -> None:
-    """The gate has to let the correct declaration through, or it is not a gate.
+    """Declaring a real write the profile advertises is no problem.
 
-    Both halves, because a check that rejects everything passes every failure test above while
-    making the feature unusable: an in-process write on the default profile, and a connector
-    endpoint tool the `property-lookup` profile does advertise.
+    An in-process write on the default profile, and a connector tool `property-lookup` advertises.
     """
     assert _problems(["record_knowledge_note"]) == []
     assert _problems([_CONNECTOR_WRITE], profile="property-lookup") == []
@@ -889,16 +774,10 @@ def test_declaring_a_real_write_the_profile_advertises_is_no_problem() -> None:
 def test_the_cli_gate_checks_a_step_profile_against_the_profiles_that_exist(
     tmp_path: Path,
 ) -> None:
-    """The same rule as the test above, asked of `make template-validate` rather than the function.
+    """`make template-validate` checks a step profile against the profiles that exist.
 
-    The rule was unreachable from the entry point for as long as it has existed. `main` resolved
-    `_Surface` — which snapshots `registered_profile_names()` — *before* anything loaded the
-    profile files, so the six shipped profiles read as unknown: a template naming one was rejected
-    with "names unknown profile 'property-lookup'; known: ['default']", and `_write_tool_problems`
-    fell back to the whole tool surface, where no declaration can ever be outside the profile.
-    Every test above passed over it because each calls `load_profiles()` itself first, which is
-    precisely what the CLI did not do — so this one drives the module the way the Makefile does,
-    in a subprocess, and reads the process's own output.
+    `main` must load the profile files before snapshotting `registered_profile_names()`. Driven in a
+    subprocess as the Makefile does, since the tests above load profiles themselves.
     """
     (tmp_path / "profile-probe.yaml").write_text(
         "summary: Probe.\n"
@@ -929,20 +808,16 @@ def test_the_cli_gate_checks_a_step_profile_against_the_profiles_that_exist(
 
 # --- a capped step is not a finished one ---------------------------------------------------------
 #
-# Both caps end a turn by *returning* from `before_model`, which runs after the tool node — so a
-# capped step's last message is a `ToolMessage` and the step returns like any other. Nothing here
-# asked, and the two consequences met in one row: `answer_text` handed back the tool's own body as
-# the step's answer (which every later step of the template then interpolates as
-# `${steps.<id>.result}`), and `turn_costs` booked `outcome="answered"` for a truncated runaway.
+# Both caps end a turn by returning from `before_model`, after the tool node, so a capped step's
+# last message is a `ToolMessage`. The step must answer with its own last text, not the tool body,
+# and book a capped outcome rather than `answered`.
 
 
 def _looping(turns: int, usage: dict[str, Any] | None = None) -> list[AIMessage]:
-    """`turns` assistant messages that each say something *and* ask for another tool call.
+    """`turns` assistant messages that each say something and ask for another tool call.
 
-    Prose beside the call because that is what makes the first assertion sharp: the turn has an
-    assistant text to fall back to, so returning the tool body instead is a choice rather than the
-    only thing available. `ls` is the tool for the reason `tests/test_spend_cap.py` gives — it is
-    registered on every agent by `FilesystemMiddleware`, so driving the loop needs no connector.
+    Prose on each turn means returning the tool body would be a choice, not the only option. `ls` is
+    registered by `FilesystemMiddleware` on every agent, so no connector is needed.
     """
     return [
         AIMessage(
@@ -957,11 +832,8 @@ def _looping(turns: int, usage: dict[str, Any] | None = None) -> list[AIMessage]
 def _quiet_looping(turns: int) -> list[AIMessage]:
     """One assistant turn that says something, then `turns - 1` tool calls carrying no text.
 
-    The shape `_looping` cannot express and a real provider produces constantly: a tool-calling
-    turn whose whole message *is* the call, with `content=""`. Because `_looping` puts prose on
-    every turn, "the last `AIMessage`" and "the last assistant text" name the same message there —
-    so a reader that takes the former passes it while answering `''` on every thread that looks
-    like this one. Here the two differ, and only the text the turn actually produced is a pass.
+    Here "the last `AIMessage`" and "the last assistant text" differ, as they do with real
+    providers.
     """
     said = AIMessage(
         content="Here is what I found so far: CCO is ethanol.",
@@ -980,12 +852,9 @@ def _quiet_looping(turns: int) -> list[AIMessage]:
 def test_a_capped_step_answers_with_the_last_text_rather_than_the_last_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cap that fires after some silent tool calls still hands back the prose the turn managed.
+    """A capped step answers with the last text rather than the last message.
 
-    The regression this pins: taking the last `AIMessage` unconditionally makes the answer the
-    content-less message that issued the final tool call, so the chemist and every later
-    `${steps.<id>.result}` get `''` — the partial answer the cap exists to preserve, thrown away by
-    the fix that stopped the tool body being returned in its place.
+    The last `AIMessage` may be a content-less tool call, which would hand back `''`.
     """
     monkeypatch.setattr(settings, "harness_max_loop_iterations", 3)
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
@@ -997,12 +866,9 @@ def test_a_capped_step_answers_with_the_last_text_rather_than_the_last_message(
 
 
 def test_a_turn_that_said_nothing_does_not_answer_with_the_previous_turn_s_answer() -> None:
-    """The walk back for prose stops at this turn's own user message.
+    """A turn that said nothing does not answer with the previous turn's answer.
 
-    `result["messages"]` is the whole checkpointed thread, so an unbounded search for the last
-    non-empty assistant message would reach across the turn boundary and hand a follow-up question
-    the answer to the question before it — a stale answer worn as a current one, which is worse than
-    the empty string a caller already settles.
+    `result["messages"]` is the whole thread, so the walk back stops at this turn's user message.
     """
     thread = [
         HumanMessage(content="what is CCO?"),
@@ -1019,13 +885,7 @@ def test_a_turn_that_said_nothing_does_not_answer_with_the_previous_turn_s_answe
 def test_a_loop_capped_step_answers_with_prose_and_is_booked_as_capped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A step stopped by the iteration cap returns its own last text, and says it was capped.
-
-    Measured before the fix on this activity at a cap of 3: the step's answer was `'No files
-    found'` — the `ls` body — booked with `outcome='answered'`, so a truncated runaway was
-    indistinguishable in the ledger from a step that finished its work and handed the rest of the
-    template a tool payload as prose.
-    """
+    """A loop-capped step answers with its own prose and is booked as capped."""
     monkeypatch.setattr(settings, "harness_max_loop_iterations", 3)
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
 
@@ -1057,21 +917,11 @@ def test_a_spend_capped_step_is_booked_as_capped_rather_than_answered(
     assert "No files found" not in step.answer
 
 
-# --- the degradation an `agent` step used to swallow ---------------------------------------------
+# --- degradation an `agent` step must report ------------------------------------------------------
 #
-# The theme these four pin: a step that ran with its capability bundles dark, or that was stopped by
-# one of its two caps, returned a `str` **byte-identical in shape** to a complete one. Measured on
-# this activity against one scripted model, before the fix:
-#
-#     COMPLETE (cap=20, unreachable=[])            'FINAL: five hazard flags; two are severe.'
-#     CONNECTORS UNREACHABLE (['eln','calc'])      'FINAL: five hazard flags; two are severe.'
-#     LOOP-CAPPED (cap=2)                          'Interim: three hazard flags so far; ...'
-#
-# — and `run_summary` had no degradation to state, so the run's `job_records` row read "template
-# 'hazard-briefing' completed 1 step(s)" in all three. The fact was never missing: `unreachable`
-# came back from `open_connector_specs` and was discarded into `_`, and `loop_capped`/`spend_capped`
-# were read into `turn_costs.outcome` alone — a cost ledger neither the next step nor the artifact
-# a chemist signs can see.
+# A step that ran with connector bundles unreachable, or was stopped by a cap, would otherwise
+# return a string shaped exactly like a complete one, and the run's summary would read as clean.
+# `unreachable` from `open_connector_specs` and the cap flags must reach the step's result.
 
 
 def test_a_clean_step_carries_no_notice(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1094,11 +944,9 @@ def test_a_clean_step_carries_no_notice(monkeypatch: pytest.MonkeyPatch) -> None
 def test_a_step_whose_bundles_were_dark_says_so_where_the_next_step_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dark connector reaches the value the template passes on, not just a discarded local.
+    """A step whose bundles were unreachable says so where the next step reads.
 
-    `api/runner.py` yields `CapabilityDegradedEvent` off this same tuple *before* the answer, and
-    the `tool` step names the same list in its own failure — this path threw it away, so the one
-    surface with no event stream to warn on was the one producing the artifact a chemist signs.
+    A template has no event stream to warn on, so the notice must ride on the value passed on.
     """
     monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
@@ -1137,15 +985,11 @@ def test_a_capped_step_hands_on_a_marked_partial_rather_than_a_bare_one(
 
 
 def test_the_runs_record_states_which_step_ran_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The durable half: a listing and a stored row that stop reading as a clean run.
+    """The run's record states which step ran degraded.
 
-    `find_past_jobs` and `get_durable_job_status` render `summary` and nothing else about a
-    completed run, so the degradation has to be *in* it; `result["degraded"]` is beside it so a
-    reader that wants the fact machine-readably need not parse prose. Both, deliberately — the
-    chemist reads the text and the auditor queries the row.
-
-    `state` stays `completed` and that is argued in `run_summary`: the run did run to its end, and
-    `job_records.state` is a two-value discriminator owned by `infra/sql/061_job_record_state.sql`.
+    `find_past_jobs` and `get_durable_job_status` render only `summary`, so the degradation is in
+    it, and `result["degraded"]` carries it machine-readably. `state` stays `completed`: the run did
+    run to its end.
     """
     monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
     monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
@@ -1197,18 +1041,11 @@ def _template_run() -> Any:
 
 
 def test_the_step_still_admits_the_answer_an_old_worker_returns() -> None:
-    """The rollout claim `run_agent_step`'s `| str` makes, asserted rather than believed.
+    """The step still admits the bare-string answer an old worker returns.
 
-    Both workers poll `background-jobs`, so during a deploy a new-code workflow can schedule this
-    activity onto an old-code worker that answers a bare string. Without the union the pydantic
-    data converter refuses it and the run fails — for the whole rollout, on a workflow whose own
-    ceiling (`template_run_timeout_seconds`) is 45,330 seconds. Checked on the annotation because
-    that is what the converter reads, and through the converter's own adapter because a hint that
-    *looks* permissive and decodes differently is the failure this is about.
-
-    The sequencer's other half — that a bare string still becomes the step's result — is driven end
-    to end against a real workflow environment by `tests/test_templates.py`, whose `run_agent_step`
-    stand-in returns exactly that.
+    During a rollout a new workflow may schedule this activity on an old worker; without the `| str`
+    union the pydantic converter would fail the run. Checked through the converter's own adapter.
+    `tests/test_templates.py` drives the sequencer half end to end.
     """
     from pydantic import TypeAdapter
     from temporalio.contrib.pydantic import pydantic_data_converter
@@ -1227,21 +1064,9 @@ def test_the_step_still_admits_the_answer_an_old_worker_returns() -> None:
 
 # --- the prompt a step is handed is bounded, because nothing else on this path bounds it ---------
 #
-# `bound_tool_results` is an entry of `tool_call_middleware`. A template `tool` step runs through
-# `invoke_governed`, which folds `tool_governance_middleware` — the same chain minus the three
-# entries that exist to serve a model, deliberately, because a `tool` step has no model. That is
-# right for the step and silently wrong for the *next* one: its prompt interpolates the unbounded
-# result through `${steps.<id>.result}`, and there is a model there.
-#
-# Measured over the shipped ceiling before the fix, one payload through both paths:
-#
-#     raw step result            :   245,688 chars
-#     chat-turn cap (config)     :    60,000 chars   agent_max_tool_result_chars
-#     template agent-step prompt :   245,700 chars   uncut
-#
-# And unreclaimable afterwards: the step's graph gets `agent/compaction.py` like any turn, but both
-# of its edits are for *history* — clearing tool results, dropping old turns — and a step is one
-# `HumanMessage` with no history. So it ticks `chemclaw_context_unreducible_total` and goes whole.
+# A `tool` step runs through `invoke_governed` without `bound_tool_results`, so the next step's
+# prompt can interpolate an unbounded `${steps.<id>.result}`. Compaction cannot reclaim it either:
+# a step is one `HumanMessage` with no history.
 
 
 #: What the step's model was asked to answer, one entry per model call.
@@ -1251,18 +1076,10 @@ _SEEN: list[list[Any]] = []
 def _model_prompt(monkeypatch: pytest.MonkeyPatch, prompt: str) -> str:
     """Drive the real activity on `prompt` and return the human text the model actually received.
 
-    **The model's own hooks are recorded, rather than `bounded_prompt` asserted on directly**,
-    because the question is what the *model* was sent: between the cut and the provider sit
-    `turn_input`, the graph's prompt assembly and `create_agent`'s model node, and a unit test on
-    the arithmetic alone would pass with the call site deleted.
-
-    Both hooks, because which one LangChain calls is its decision and not this test's —
-    `graph.ainvoke` does not stream, so a capture on `_stream` alone recorded nothing at all, which
-    is the failure this pair exists to have already had.
-
-    Patched on the class rather than on a subclass: `ScriptedChatModel` is a pydantic model, and
-    mypy's pydantic plugin regenerates `__init__` from the fields for any subclass — so a capturing
-    subclass cannot be constructed with the script shorthand every other test in this file uses.
+    Recorded at the model, since `turn_input`, prompt assembly and the model node sit between the
+    cut and the provider. Both `_generate` and `_stream` are patched, since which one runs is
+    LangChain's choice. Patched on the class: a pydantic subclass could not take the script
+    shorthand.
     """
     _SEEN.clear()
     for hook in ("_generate", "_stream"):
@@ -1288,11 +1105,10 @@ def _model_prompt(monkeypatch: pytest.MonkeyPatch, prompt: str) -> str:
 def test_an_oversized_step_prompt_reaches_the_model_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The headline: a step result too large to read does not reach the step's model whole.
+    """An oversized step prompt reaches the model bounded.
 
-    The ceiling is `agent_max_tool_result_chars` rather than a second setting, and that is the
-    argument rather than the convenience — it is this system's one answer to "how much text may
-    reach a model in one blob", and a prompt is a blob.
+    The ceiling is `agent_max_tool_result_chars`, the one answer to how much text may reach a model
+    in one blob.
     """
     ask = "Report the tautomer resolution of CCO."
     close = "Close by naming which downstream numbers this changes."
@@ -1314,13 +1130,9 @@ def test_an_oversized_step_prompt_reaches_the_model_bounded(
 def test_the_cut_tells_the_step_something_it_can_actually_do(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The remedy is the step's, not a tool caller's — the wrong advice is worse than none.
+    """The cut tells the step something it can actually do.
 
-    Every other sentence in `_notice` is true of any cut. The last one assumes the model *asked*
-    for this text and can therefore ask for less, which holds for a tool result and for a `task`
-    report and is false here: the prompt was interpolated by a `${steps.<id>.result}` reference in
-    a file this model cannot see and did not write. Telling it to narrow its question sends it to
-    re-fetch what the step was already handed.
+    The step's model did not ask for this text, so advice to narrow its question would be wrong.
     """
     prompt = "Brief me.\n\n" + ("x" * settings.agent_max_tool_result_chars) + "\n\nBe brief."
 
@@ -1337,11 +1149,9 @@ def test_the_cut_tells_the_step_something_it_can_actually_do(
 def test_a_prompt_inside_the_ceiling_is_handed_over_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The control arm: the bound is not a rewrite that happens to every step.
+    """A prompt inside the ceiling is handed over untouched.
 
-    Without this the two above are satisfied by cutting unconditionally, which would put a notice
-    about removed characters on every template prompt in the catalogue — all nine of which are far
-    inside the ceiling.
+    Otherwise the tests above would pass with unconditional cutting.
     """
     sent = _model_prompt(monkeypatch, "brief me on CCO")
 
@@ -1352,12 +1162,9 @@ def test_a_prompt_inside_the_ceiling_is_handed_over_untouched(
 def test_the_counter_names_the_template_whose_prompt_was_cut(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cut that nothing counts is the invisible kind this repository keeps finding.
+    """The counter names the template whose prompt was cut.
 
-    Labelled by *template* and not by tool, because the two cuts have different remedies: a
-    truncated tool result is a tool answering too broadly and is fixed in that tool's own ceiling;
-    a truncated template prompt is a step interpolating more than a model can read and is fixed in
-    the template — a narrower step, or a field path instead of the whole result.
+    Labelled by template rather than tool, because a truncated prompt is fixed in the template.
     """
     seen: list[tuple[str, dict[str, str] | None]] = []
     monkeypatch.setattr(

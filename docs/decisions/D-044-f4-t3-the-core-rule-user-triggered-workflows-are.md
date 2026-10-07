@@ -1,5 +1,7 @@
 # D-044 — F4-T3: the core rule — user-triggered workflows are user-specific via `require_actor`
 
+**Superseded-by:** [D-060](D-060-f10-c-per-tool-authorization-middleware-supersedes-d.md) (in part)
+
 **Context.** The mandate is "every backend workflow is user-specific via Entra (required,
 authorizing, reject-if-absent)." Taken literally that means a required `requested_by` oid on every
 workflow input. But two facts shape the honest implementation: (1) only two workflows have a **live

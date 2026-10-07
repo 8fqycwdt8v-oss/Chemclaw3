@@ -1,8 +1,7 @@
 """Behavioral tests for the artifact store (D-124).
 
-Proves the properties the design rests on: bytes survive the calculation that produced them, two
-runs that produced identical bytes store one copy, an artifact too large to keep is skipped rather
-than raised, and a cache hit does not re-store what is already there.
+Bytes survive the calculation that produced them, identical bytes are stored once, an artifact too
+large to keep is skipped rather than raised, and a cache hit does not re-store.
 """
 
 import asyncio
@@ -194,11 +193,8 @@ def _offloading() -> tuple[Any, InMemoryStore, InMemoryArtifactStore]:
 async def test_the_matrix_does_not_land_in_the_row_it_can_never_be_pruned_from() -> None:
     """The whole point: `calculation_results` keeps an address, the artifact store keeps the bytes.
 
-    `durable/retention.py` refuses to prune `calculation_results` because D-011 says a persisted
-    result is never recomputed. A megabyte-scale matrix stored inline is therefore a row nothing can
-    ever reclaim, in the one table with no reclaim path — which is exactly what
-    `durable/artifact_eviction.py` and D-124 exist to prevent. So the assertion is on what the
-    *underlying* row contains, not on what the caller gets back.
+    `calculation_results` is never pruned (D-011), so an inline matrix could never be reclaimed. The
+    assertion is on the underlying row, not on what the caller gets back.
     """
     store, results, blobs = _offloading()
     await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
@@ -225,10 +221,8 @@ async def test_a_hit_comes_back_byte_identical_to_what_was_stored() -> None:
 async def test_an_evicted_matrix_is_a_miss_to_recompute_from_and_never_an_error() -> None:
     """The trade D-124 makes: a cold matrix is reclaimed, and the next caller pays a recompute.
 
-    Every reason a blob is absent is ordinary — the store disabled, the sweep reclaimed it, a
-    database restored without its artifact table. Raising here would turn a routine eviction into a
-    failed calculation; returning the row without its matrix would be worse still, because the
-    caller would validate a payload with no arrays in it.
+    An absent blob is ordinary (store disabled, swept, or not restored), so it is a miss, never an
+    error or a row returned without its arrays.
     """
     store, results, blobs = _offloading()
     await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
@@ -241,10 +235,8 @@ async def test_an_evicted_matrix_is_a_miss_to_recompute_from_and_never_an_error(
 async def test_a_row_is_never_written_addressing_an_artifact_that_did_not_land() -> None:
     """Ordering is the design, not an implementation detail.
 
-    A row whose `hessian_artifact` points at nothing would be served as a hit forever and rejected
-    on every read — strictly worse than not caching, because it converts one recomputation into a
-    permanent one. So the blobs go first and the row is written only once they are retrievable.
-    Losing a by-product costs a future recomputation and never the calculation in hand.
+    Blobs go first and the row is written only once they are retrievable; a row pointing at nothing
+    would be a permanent miss served as a hit.
     """
 
     class _Refusing(InMemoryArtifactStore):

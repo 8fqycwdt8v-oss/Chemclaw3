@@ -1,42 +1,18 @@
 """The Databricks SQL driver — one of the modules in this package that knows a vendor exists.
 
-Alone in a file and imported by nothing: `connection.driver` in a binding names it,
-`chemclaw.core.connect` resolves that string when a connection is first opened, and a repository
-with no Databricks client installed runs the whole test suite against a fake.
+Imported by nothing directly: a binding's `connection.driver` names it and `chemclaw.core.connect`
+resolves it at first connect, so the suite runs without the client. The constructor signature is the
+connection block's schema, in Databricks' own terms
+(D-2026-08-26-the-driver-s-signature-is-the-schema).
 
-**Its constructor signature is the connection block's schema** — `server_hostname`,
-`access_token_env`, `warehouse_id`, `catalog`, `schema` — in Databricks' own words rather than in a
-seam vocabulary translated per vendor. That is the rule
-`D-2026-08-26-the-driver-s-signature-is-the-schema` settled: the model this driver used to be built
-through named an `account`, a `warehouse` and a `role`, so this file had to redefine three of those
-to mean something else and *refuse* two more that have no analogue here. Attaching the next
-database — a Postgres, a DuckDB file, a ClickHouse, a vector database — is now a module beside this
-one with its own keywords, and nothing shared to widen.
+The ingest statements `sql.py` builds run unchanged. The similarity search differs in two places:
+the function is `vector_cosine_similarity` over `ARRAY<FLOAT>`, and there is no array parameter, so
+the query vector is bound as one JSON string and parsed with `from_json(?, 'ARRAY<FLOAT>')`, keeping
+it a bound value rather than statement text. Only `cosine` is offered.
 
-**What this driver serves, and what it does not.** The ingest half needs nothing special — the
-statements `sql.py` builds for it are `SELECT *`, `COALESCE`, `>= ?`, `ORDER BY … ASC`, `LIMIT ?`
-and `IN (…)`, which Databricks SQL runs unchanged. The similarity search is where dialects differ,
-and this one differs in *two* places rather than one:
-
-* the function is `vector_cosine_similarity`, lower case and taking `ARRAY<FLOAT>`; and
-* there is no `VECTOR` type and no array *parameter*. Native parameters are scalars, so a 1536-float
-  query vector cannot be bound as a list at all. It is bound as one JSON string and parsed
-  server-side with `from_json(?, 'ARRAY<FLOAT>')` — which keeps the vector a bound *value* rather
-  than statement text, the invariant `sql.py`'s own docstring is built on. `ARRAY<FLOAT>` and not
-  `ARRAY<DOUBLE>`, because `vector_cosine_similarity` accepts only the first.
-
-Only `cosine` is offered. Databricks' names for L2 and inner product are not verified here, and a
-dialect that guesses one would emit a statement the server rejects on the first query rather than a
-message naming the metric.
-
-**No host literal.** The workspace hostname arrives from the binding's named environment variable
-and goes straight to the client, which builds its own URL — `tests/test_no_egress.py` refuses an
-external host in first-party code on purpose, because the address of a data source belongs in
-configuration where attaching one is a reviewable decision.
-
-**Sync client, async seam.** The vendor client blocks, so every call crosses `asyncio.to_thread`: a
-retriever runs inside a `gather`, and a blocking driver call on the event loop stalls every other
-leg of the fan-out for the length of a warehouse query.
+No host literal: the hostname comes from the binding's environment variable. The client is
+synchronous, so every call crosses `asyncio.to_thread` to keep a retriever from stalling the
+fan-out.
 """
 
 import asyncio
@@ -59,8 +35,8 @@ _WAREHOUSE_PATH = "/sql/1.0/warehouses/{warehouse}"
 def _client() -> Any:
     """The Databricks SQL client module, or a directive error saying it is not installed.
 
-    A `BindingError` because that is what it is: a binding named this driver on a deployment whose
-    image does not carry the client. Not transient, so retrying only delays the message.
+    A `BindingError`: a binding named this driver on an image without the client, which retrying
+    will not fix.
     """
     try:
         from databricks import sql as databricks_sql
@@ -89,9 +65,8 @@ class DatabricksVectorDialect:
     def query_vector(self, placeholder: str, vector: Sequence[float], dim: int) -> tuple[str, Any]:
         """Bind the vector as one JSON scalar and let the server parse it into `ARRAY<FLOAT>`.
 
-        `dim` is unused: `from_json` takes the width from the document, and there is no cast to
-        declare it to. A width mismatch against the stored column is then the server's
-        `VECTOR_DIMENSION_MISMATCH`, which names both widths — a better message than a truncation.
+        `dim` is unused: `from_json` takes the width from the document, and a mismatch surfaces as
+        the server's `VECTOR_DIMENSION_MISMATCH`, naming both widths.
         """
         return f"from_json({placeholder}, 'ARRAY<FLOAT>')", json.dumps(list(vector))
 
@@ -102,10 +77,9 @@ class _DatabricksCursor:
     def __init__(self, cursor: Any, client: Any, on_session_lost: Callable[[], None]) -> None:
         """Wrap a client cursor, keeping the client module for its error types.
 
-        `on_session_lost` is the warehouse's own eviction: the transient arm below decides that the
-        session is gone, and deciding that while leaving the handle cached is what turned an
-        overnight warehouse auto-stop into a permanent outage. The two are one decision, so they
-        are made in one place.
+        `on_session_lost` lets the transient-error arm evict the dead session in the same decision
+        that classifies the error; keeping a dead handle cached would make an expired session a
+        permanent outage.
         """
         self._cursor = cursor
         self._client = client
@@ -118,20 +92,14 @@ class _DatabricksCursor:
             # and a dict as named ones. `sql.py` builds positional statements.
             await asyncio.to_thread(self._cursor.execute, sql, list(params))
         except self._client.OperationalError as exc:
-            # Network, session or timeout. Transient by nature, so `ConnectionError` — which
-            # Temporal retries — exactly as `chemclaw.core.db` splits the same two cases. And the
-            # handle goes with it: a retry against the same dead session is not a retry.
+            # Network, session or timeout: transient, so `ConnectionError` (which Temporal retries),
+            # as `chemclaw.core.db` does. The session is dropped too, so the retry reconnects.
             self._on_session_lost()
             raise ConnectionError(f"warehouse unreachable: {exc}") from exc
         except self._client.Error as exc:
-            # A relation or column the binding names and the warehouse does not have. Identical on
-            # every retry, so non-retryable.
-            #
-            # **The driver's text stays in the log and out of the exception.** A
-            # `WarehouseQueryError` raised inside a durable job reaches the session, and the
-            # client's message quotes the failing statement — so the site's table names, its column
-            # names and the shape of the query the binding built would land in a chemist's
-            # transcript and in the model's context. The full text is one `logger.exception` away.
+            # A relation or column the binding names and the warehouse lacks: identical on every
+            # retry, so non-retryable. The driver's text, which quotes the statement and the site's
+            # schema, goes to the log only, never into the exception a chemist or the model sees.
             logger.exception("warehouse rejected a statement")
             raise WarehouseQueryError(
                 "the warehouse rejected the query; the statement and the warehouse's own message "
@@ -141,9 +109,8 @@ class _DatabricksCursor:
     async def fetchall(self) -> list[dict[str, Any]]:
         """Every row of the last statement, each keyed by column name.
 
-        `Row.asDict()` rather than `dict(row)`: the connector returns a tuple-like `Row`, so `dict`
-        over one raises rather than keying by column — the kind of difference that would otherwise
-        surface as an empty result rather than as an error.
+        `Row.asDict()`, since `dict(row)` over the connector's tuple-like `Row` does not key by
+        column.
         """
         rows = await asyncio.to_thread(self._cursor.fetchall)
         return [row.asDict() for row in rows]
@@ -153,9 +120,8 @@ class DatabricksWarehouse:
     """A `Warehouse` backed by the Databricks SQL connector.
 
     Built by `chemclaw.core.connect.open_connection` from the binding's `connection:` block, whose
-    keys are the parameters below — `*_env` for the ones that name an environment variable holding a
-    secret, the rest written directly. Nothing translates between a seam vocabulary and this one,
-    which is the point: the words here are the words the Databricks documentation uses.
+    keys are the parameters below (`*_env` names an environment variable holding a secret). The
+    words are Databricks' own.
     """
 
     def __init__(
@@ -189,20 +155,15 @@ class DatabricksWarehouse:
                 "in force to the reader"
             )
         if warehouse_id.startswith("/"):
-            # One field used to take either form and branch on this prefix. Two fields do not get
-            # to be lenient about it: interpolating a path into the template would build
-            # `/sql/1.0/warehouses//sql/1.0/warehouses/<id>`, which fails at connect time with a
-            # message about the *workspace* rather than about the binding.
+            # Strict about the form: interpolating a path into the template would build a doubled
+            # path that fails at connect time with a misleading workspace error.
             raise BindingError(
                 f"`warehouse_id` is the bare id the SQL warehouse page shows, not a path; "
                 f"{warehouse_id!r} looks like an `http_path:` — name it in that field instead"
             )
         if not 1 <= query_timeout_seconds <= 3600:
-            # The one thing standing between a runaway scan and a shared warehouse's bill, so `0`
-            # is the worst possible value: Spark reads it as *no* timeout, the exact opposite of
-            # what the field is for. Bounded here rather than in the binding model because it is
-            # this driver's keyword — the model no longer knows any driver's vocabulary — and the
-            # session parameter it becomes is this vendor's too.
+            # The only bound on a runaway scan of a shared warehouse, and `0` means "no timeout" to
+            # Spark, so it is refused. Checked here because it is this driver's keyword.
             raise BindingError(
                 "`query_timeout_seconds` must be between 1 and 3600; "
                 f"got {query_timeout_seconds}, and 0 means no timeout at all to a SQL warehouse"
@@ -213,25 +174,19 @@ class DatabricksWarehouse:
             "http_path": http_path or _WAREHOUSE_PATH.format(warehouse=warehouse_id),
         }
         if user_agent_entry:
-            # Not a credential — the token carries the identity — but the connector forwards it to
-            # the server as the session's user agent entry, which is what an operator greps for in
-            # the query history when asking who ran a statement.
+            # Not a credential: forwarded as the session's user agent entry, which operators search
+            # for in the query history.
             self._options["_user_agent_entry"] = user_agent_entry
         if catalog:
             self._options["catalog"] = catalog
         if schema:
             self._options["schema"] = schema
-        # Bound on the session rather than re-applied per cursor: a runaway scan on a shared
-        # warehouse costs real money and the binding's timeout is the only thing that stops one, but
-        # a `SET` before every statement would double the round trips to say it once.
+        # Bound on the session once rather than a `SET` before every statement.
         self._options["session_configuration"] = {"statement_timeout": str(query_timeout_seconds)}
         self._connection: Any | None = None
-        # `open_warehouse` caches one `DatabricksWarehouse` per `connection:` block for the life of
-        # the process specifically so concurrent callers share one live session — without this lock,
-        # two overlapping `_connect()` calls both observe `self._connection is None` and both open a
-        # real session, silently orphaning one (this driver has no `close`, so it lives until its
-        # server-side idle timeout: the exact session-exhaustion failure the process-level cache
-        # exists to prevent, reintroduced one layer lower).
+        # Concurrent callers share one cached instance (`open_warehouse`); without this lock two
+        # overlapping `_connect()` calls would each open a session and orphan one until its
+        # server-side idle timeout.
         self._connect_lock = asyncio.Lock()
 
     @property
@@ -247,9 +202,8 @@ class DatabricksWarehouse:
     async def _connect(self) -> Any:
         """Open the connection once, or raise `ConnectionError` so the caller can retry.
 
-        Locked end to end: a second coroutine arriving while the first is mid-connect must await
-        the *same* attempt rather than racing it, or the check-then-act on `self._connection` opens
-        two sessions and orphans one (see `self._connect_lock`'s docstring above).
+        Locked end to end, so a second coroutine awaits the same attempt rather than opening a
+        second session.
         """
         async with self._connect_lock:
             if self._connection is None:
@@ -263,21 +217,10 @@ class DatabricksWarehouse:
     def _session_lost(self) -> None:
         """Forget the open session, so the next call opens a new one.
 
-        **The one thing this driver was missing.** `_connect` memoizes and nothing ever cleared it,
-        while a Databricks SQL session is emphatically not permanent: it expires, and the warehouse
-        behind it can be stopped or scaled to zero overnight. Every statement afterwards failed
-        against the same dead handle for the life of the pod — in the retriever, where an
-        `except Exception` backstop turned it into an empty result, so the ELN simply stopped
-        answering while the pod read healthy; in a sync activity, on every attempt and every
-        Temporal retry. That backstop is gone and the failure reaches `fanout._sweep`, which is
-        what makes a dead session visible rather than merely survivable — but the reconnect below
-        is still what stops it recurring.
-
-        The seam has no lifecycle hook to close a connection from (`driver.Warehouse` says why it
-        has no `close`), and it does not need one: what has to be dropped is the *session*, not the
-        configured warehouse, and the trigger is a failure this driver already recognises. One
-        reconnect on the next call is the whole cost, and `ConnectionError` already tells Temporal
-        to come back.
+        A Databricks SQL session expires, and the warehouse may stop or scale to zero; without this
+        every later statement would fail against the same dead handle for the pod's life. The
+        trigger is a transient failure this driver already recognises, and the cost is one
+        reconnect; `ConnectionError` tells Temporal to retry.
         """
         self._connection = None
 
@@ -285,11 +228,9 @@ class DatabricksWarehouse:
     async def cursor(self) -> AsyncIterator[_DatabricksCursor]:
         """A cursor for one statement, closed on exit whatever happened inside.
 
-        Opening the cursor is inside the translation too, and it was the gap that made the rest of
-        it moot: `connection.cursor()` on an expired session raises the client's own `Error` from
-        *outside* `_DatabricksCursor.execute`, so it was neither the retryable `ConnectionError`
-        nor the reportable `WarehouseQueryError` — it escaped as a vendor class no caller in this
-        tree knows, and the retriever's backstop turned it into an empty result.
+        Opening the cursor is inside the error translation too: on an expired session
+        `connection.cursor()` itself raises the client's `Error`, which must become
+        `ConnectionError` or `WarehouseQueryError` like any other failure.
         """
         connection = await self._connect()
         client = _client()

@@ -1,17 +1,9 @@
 """The HTTP surface an expert tailors a design on, driven through the real app.
 
-The two claims worth the round trip. **A concurrent edit is a 409 carrying a machine-readable
-code**, because the caller's next move is to re-read and re-apply rather than to retry — a
-last-write-wins store would lose one of two chemists editing one plate, silently. And **a blocking
-check does not refuse a human edit**, which is the one place this surface deliberately differs from
-`draft_experiment_protocol`: a chemist editing towards a working protocol passes through invalid
-intermediate states and can see the verdict, and a model cannot.
-
-Authentication is not re-asserted per route here — `tests/test_route_auth_coverage.py` walks every
-`APIRoute` the app declares and requires `require_principal` in its dependency tree, so these are
-covered the moment they are registered. What this file pins instead is that they *are*
-registered as gatable routes and are not on that file's probe allowlist, which is the only way they
-could slip out of that sweep.
+A concurrent edit is a 409 with a machine-readable code, since the caller should re-read and
+re-apply rather than retry or silently lose an edit. A blocking check does not refuse a human
+edit: a chemist passes through invalid intermediate states and can see the verdict. Authentication
+is `tests/test_route_auth_coverage.py`'s sweep; this file pins that these routes are inside it.
 """
 
 import asyncio
@@ -130,12 +122,10 @@ def test_the_listing_reports_the_header_row_of_each_design(
 def test_the_listing_says_it_is_a_page_when_it_is_one(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """`designs` was the response's only key, and the route has always bounded it.
+    """The listing says it is a page when it is one.
 
-    Driven: 60 designs stored, `GET /protocols?limit=20` served 20, and a client had nothing to
-    read that would have told it forty more existed — so the newest twenty rendered as the corpus.
-    `GET /sessions` in this same package carries a `X-Next-Cursor` for exactly that reason; the
-    sibling listing route carried nothing at all.
+    The route bounds the listing, so the response must tell a client more designs exist, as
+    `GET /sessions` does with `X-Next-Cursor`.
     """
     for index in range(60):
         asyncio.run(store.append(f"design-page-{index:02d}", _design(), [], author_kind="agent"))
@@ -345,12 +335,9 @@ def test_correcting_the_ask_is_stored_as_a_request_and_graded_as_one(
 ) -> None:
     """The `kind` and the check stage come from the document, not from which route was called.
 
-    This route is the artefact a chemist corrects *before* the expensive work, so a design holding
-    only the ask reaches it — and hard-coding `kind="protocol"` recorded the correction as a
-    protocol revision, flipped a design with no procedure in it to `draft`, and reported
-    `is_a_protocol` and `evidence_present` as blockers on the normal path. A blocker that fires
-    where nothing is wrong is a blocker a reader learns to ignore, which is the property the one
-    real blocker depends on.
+    A design holding only the ask is corrected here before the expensive work, so it must be stored
+    as a request and graded as one; blockers firing where nothing is wrong teach readers to ignore
+    them.
     """
     ask = _design(arms=0, cited=False)
     _seed(store, ask, status="requested")
@@ -424,11 +411,9 @@ def test_editing_a_design_that_has_a_procedure_is_stored_and_graded_as_a_protoco
 def test_drafting_a_procedure_onto_a_requested_design_advances_it(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """A chemist who writes the procedure themselves moves the design, exactly as an agent would.
+    """A chemist drafting a procedure onto a requested design advances it, as an agent would.
 
-    The `requested` → `draft` transition belongs to the *document*, so it has to happen on the human
-    path too — and it is the transition the hard-coded `kind="protocol"` used to fire on an edit
-    that added no procedure at all.
+    The `requested` → `draft` transition belongs to the document.
     """
     _seed(store, _design(arms=0, cited=False), status="requested")
 
@@ -476,10 +461,8 @@ def test_the_reason_the_ui_makes_mandatory_is_actually_recorded(
 ) -> None:
     """The reason the UI makes mandatory reaches the record.
 
-    `Chemclaw3_ui` disables every status button until a reason is typed and confirms the move is
-    "recorded against you with the reason you wrote" — and `set_status` took no `reason` at all, so
-    a field validated to 2,000 characters was dropped on the way to a 204. The test above sent one
-    and asserted only the status, which is how it stayed invisible.
+    `Chemclaw3_ui` requires a reason and tells the chemist it is recorded against them, so
+    `set_status` must store it.
     """
     _seed(store, _design(), status="draft")
     client.post(
@@ -528,13 +511,10 @@ def test_reading_a_design_carries_who_signed_off_on_which_revision(
 def test_a_sign_off_against_a_stale_revision_is_a_409(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """The approver names the revision they read, and a colleague's save refuses the sign-off.
+    """A sign-off against a stale revision is a 409.
 
-    Without it `set_status` stamped whatever `head_revision` had become by the time it ran, so a
-    chemist who opened revision 1, thought about it, and clicked Approve while somebody saved
-    revision 2 signed a document they had never seen — and the status-event table, which exists to
-    say *which* document was signed, recorded revision 2 with their name on it. This is the same
-    control, the same status and the same machine-readable code as an edit against a stale parent.
+    The approver names the revision they read, so a colleague's later save cannot make the status
+    event record a document they never saw. Same status and code as an edit against a stale parent.
     """
     _seed(store, _design(), status="draft")
     _seed(store, _design(arms=2), status="draft", parent_revision=1)
@@ -569,12 +549,10 @@ def test_a_sign_off_against_a_stale_revision_is_a_409(
 def test_a_sign_off_against_a_status_somebody_else_moved_is_its_own_409(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """A colleague's decision refuses the sign-off, under a code that says *which* thing moved.
+    """A sign-off against a status somebody else moved is its own 409.
 
-    `expected_revision` is a compare-and-set on the document and says nothing about the decision,
-    so alice abandoning revision 1 and bob approving revision 1 both answered 204 and the header
-    read `approved`. The code is deliberately not `revision_conflict`: the document did not change,
-    so telling a browser it did would send the chemist to a diff that shows nothing.
+    `expected_revision` covers the document, not the decision. The code is not `revision_conflict`,
+    because the document did not change and a diff would show nothing.
     """
     _seed(store, _design(), status="draft")
     abandoned = client.post(
@@ -610,17 +588,11 @@ def test_a_sign_off_against_a_status_somebody_else_moved_is_its_own_409(
 def test_the_body_the_shipped_ui_sends_is_accepted(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """The exact JSON `Chemclaw3_ui`'s sign-off panel sends, field for field.
+    """The exact JSON `Chemclaw3_ui`'s sign-off panel sends is accepted.
 
-    `StatusIn` is `extra="forbid"` and the client has always sent `expected_status`, so before that
-    field existed here **every sign-off from the shipped panel was a 422** — measured 2026-09-04
-    against the client's `main`, where `src/api/client.ts::setProtocolStatus` posts `status`,
-    `expected_revision`, `expected_status` and `reason`. Nothing in this file failed, because every
-    test above writes the body the *server* expects, which is the one shape a server-side test
-    cannot check on its own.
-
-    Written as the client's literal body rather than as a parametrised case, so a field the panel
-    adds later fails here rather than in somebody's browser.
+    `StatusIn` is `extra="forbid"`, and tests written from the server's own model cannot catch a
+    field the client sends (`src/api/client.ts::setProtocolStatus`). The client's literal body is
+    used so a new client field fails here.
     """
     _seed(store, _design(), status="draft")
     response = client.post(
@@ -717,26 +689,19 @@ def test_the_diff_route_takes_both_endpoints_explicitly(
     ).json()
     assert (body["from_revision"], body["to_revision"]) == (2, 3)
     assert all(change["kind"] == "added" for change in body["changes"])
-    # The added arm's *identity*, and nothing else: `control`, `note` and `replicate_of` are empty
-    # on a new arm, and an appearing path whose value is empty is not a change anybody made. Those
-    # three rows read `'' -> ''` and a miner asking how often a chemist sets an arm note counted
-    # them as changes that never happened.
+    # The added arm's identity and nothing else: an appearing path whose value is empty (`control`,
+    # `note`, `replicate_of`) is not a change anybody made.
     assert {change["path"] for change in body["changes"]} == {"arms.A3.arm_id"}
 
 
 def test_both_routes_run_the_diff_off_the_event_loop(
     client: TestClient, store: InMemoryDesignStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`diff_designs` is bounded work, not small work, and this process has one loop.
+    """Both routes run the diff off the event loop.
 
-    Ordering only the paths that differ took a chemist's edit at every declared count ceiling from
-    1.67 s to 0.18 s, but two ceiling-sized revisions sharing no identifier genuinely differ in
-    208,213 paths and cost 3.2 s to compare and order — real work, and `service_uvicorn_workers` is
-    refused above 1, so inline it is every other chemist's SSE stream and both kubelet probes.
-
-    The assertion is the thread the call actually ran on rather than a wall clock, which would be
-    flaky and would not tell "fast" from "off the loop": `asyncio.get_running_loop` answers only on
-    the loop's own thread. It fails if either `asyncio.to_thread` hop is removed.
+    Two ceiling-sized revisions can take seconds to diff, and the service runs one worker, so inline
+    work would stall every SSE stream and the kubelet probes. Asserted on the thread the call ran on
+    (`asyncio.get_running_loop` answers only on the loop thread), not a wall clock.
     """
     on_the_loop: list[bool] = []
     # Taken from the module that owns it rather than off `routes`: the route imports the name, and
@@ -784,12 +749,10 @@ def test_the_diff_route_404s_on_a_revision_that_does_not_exist(
 
 
 def test_every_route_here_is_inside_the_apps_authentication_sweep() -> None:
-    """Not a second copy of `test_route_auth_coverage`.
+    """Every route here is inside the app's authentication sweep.
 
-    That file already requires `require_principal` in every `APIRoute`'s dependency tree. What is
-    asserted here is the two ways these could fall *outside* that sweep and look gated anyway:
-    being registered as something other than an `APIRoute` (a `Mount` or a bare `Route` carries no
-    dependency tree to inspect), or appearing on the probe allowlist that sweep waives.
+    Not a copy of `test_route_auth_coverage`: this asserts the routes are `APIRoute`s (a `Mount` or
+    bare `Route` has no dependency tree to inspect) and are not on the sweep's probe allowlist.
     """
     registered = {
         (route.path, method)
@@ -807,11 +770,10 @@ def test_every_route_here_is_inside_the_apps_authentication_sweep() -> None:
 def test_the_run_sheet_comes_back_as_a_downloadable_csv(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """The one route here whose consumer is a file reader rather than a document renderer.
+    """The run sheet comes back as a downloadable CSV.
 
-    Both halves of the header matter: `text/csv` is what makes a browser hand it to a spreadsheet
-    instead of rendering it, and the filename is what makes a sheet saved to a laptop matchable
-    back to the revision it was taken from.
+    `text/csv` makes a browser hand it to a spreadsheet, and the filename ties a saved sheet back to
+    its revision.
     """
     _seed(store, _design(arms=2))
 
@@ -849,13 +811,10 @@ def test_an_older_revision_sheets_that_revision_and_says_so_in_the_filename(
 def test_a_design_id_cannot_write_its_own_response_headers(
     client: TestClient, store: InMemoryDesignStore
 ) -> None:
-    """The path parameter reaches a response header, and it is an arbitrary string.
+    """A design id cannot write its own response headers.
 
-    `design_id_for` mints `design-<12 hex>`, but nothing between the URL and the header enforces
-    that — and "the store 404s an unknown id" bounds *which* ids resolve, not which characters a
-    resolving one holds, because `POST /protocols/{id}/revisions` files a design under whatever the
-    path said. So a stored id carrying a CRLF is reachable, and a filename built out of it verbatim
-    is a response-splitting site.
+    The path parameter reaches `Content-Disposition`, and `POST /protocols/{id}/revisions` files a
+    design under whatever id the path says, so a stored id containing CRLF is reachable.
     """
     hostile = 'design-x"\r\nX-Injected: yes'
     asyncio.run(store.append(hostile, _design(), [], author_kind="agent"))
@@ -866,11 +825,8 @@ def test_a_design_id_cannot_write_its_own_response_headers(
     escaped = quote(hostile, safe="")
     disposition = client.get(f"/protocols/{escaped}/run-sheet.csv").headers["content-disposition"]
 
-    # **The delimiters, not the injected name.** Its letters survive as filename characters, which
-    # is the point of sanitising rather than rejecting — an id is not the chemist's to get right.
-    # And `"x-injected" not in response.headers` would pass either way: ASGI carries headers as a
-    # list of pairs, so the CRLF never splits in-process and an assertion about the split outcome
-    # is vacuous here. What a real server splits on is the character, so that is what is asserted.
+    # The delimiters, not the injected name: the id is sanitised rather than rejected, and ASGI
+    # never splits headers in-process, so asserting on the split outcome would be vacuous.
     assert "\r" not in disposition and "\n" not in disposition and disposition.count('"') == 2
 
 
@@ -882,22 +838,11 @@ def test_a_run_sheet_of_a_design_that_does_not_exist_is_a_404(client: TestClient
 def test_a_human_edit_is_graded_against_the_corpus_the_agent_was_graded_against(
     client: TestClient, store: InMemoryDesignStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The verdict a chemist's typo fix must not silently overwrite.
+    """A human edit is graded against the same corpus the agent was graded against.
 
-    `post_revision`'s own docstring says the checks are re-run here "rather than trusted from the
-    caller", so that "an edit that breaks the charge table has to say so with the same verdict the
-    draft got, or the two halves of the surface would grade the same document differently depending
-    on who wrote it". It shipped calling `run_checks` with neither `failures=` nor `precedent=`,
-    while both agent call sites pass them — measured, the agent reported "the corpus records 1
-    failure(s) bearing on this design" where the route reported "no recorded failure bears on this
-    design", and the chemist's edit republished the clean bill.
-
-    **Driven, because the call-site scan beside this cannot see it.** That guard asserts the
-    keyword *names* appear, which is cause (e) in `tasks/lessons.md` — the assertion this whole
-    programme keeps re-committing. Restoring the defect as `failures=[], precedent=[]` keeps both
-    keywords and left 190 tests green, this file included. The lookups are stubbed rather than
-    driven off a real corpus on purpose: what is asserted is the *wiring* — that whatever the
-    corpus says reaches the verdict — and a fixture that built a corpus would prove the fixture.
+    `post_revision` re-runs the checks, and must pass `failures=` and `precedent=` from the real
+    lookups or a chemist's typo fix republishes a clean verdict. Driven with stubbed lookups because
+    the wiring is the property: a keyword scan passes with `failures=[]`.
     """
 
     async def _one_failure(design: object) -> list[RecordedFailure]:

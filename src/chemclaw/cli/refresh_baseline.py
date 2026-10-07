@@ -1,26 +1,11 @@
-"""Regenerate `data/evals/baseline.json` from a real scoring run (REV-5, D-136).
+"""Regenerate `data/evals/baseline.json` from a real scoring run.
 
-`chemclaw.evals.baseline.save_baseline` existed with **no caller anywhere in the repository**, so
-the
-committed baseline was hand-maintained. That is how it came to be missing `retrieval_recall` and
-`retrieval_precision` — the two metrics that actually run a retriever, and the only ones whose
-drift would show a retrieval regression. `detect_drift` iterates the *baseline*, not the run, so
-their absence gave them not a weak signal but no signal at all: collapsing both to 0.0 produced no
-alert.
+Generated rather than hand-edited so the baseline always pins every metric the case set scores —
+`detect_drift` iterates the baseline, so a missing metric gets no drift signal at all. Run it after
+a deliberate, reviewed score change, never to turn a red drift check green.
 
-A generator rather than a hand-edited file, because the failure mode was drift between what the
-case-set scores and what the baseline pins, and only a generator makes those the same thing by
-construction. Run it after a deliberate, reviewed change in scores — never to make a red drift
-check go green, which would be pinning the regression as the new normal.
-
-**The version is a flag, for the reason the harness already gives for its own.** It used to be a
-second *positional* defaulting to "unversioned", so `make eval-baseline` — which passed neither
-argument — wrote a baseline stamped "unversioned" while `make eval-baseline-check` asked for
-`$(EVAL_CASE_SET_VERSION)`. The check then refused to compare them, correctly, and the generated
-baseline failed the very check it was generated for. Nobody saw it because regenerating is rare;
-adding a case is what makes you do it. A positional cannot be skipped, so passing the version meant
-also restating the case directory and silently defeating its `CHEMCLAW_EVAL_CASE_DIR` override —
-which is exactly why `evals.harness` made its version an option too.
+The case-set version is an option (not a positional) so `make eval-baseline` stamps the same
+version `make eval-baseline-check` asks for, and the case-directory override still applies.
 """
 
 import argparse

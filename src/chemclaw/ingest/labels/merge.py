@@ -1,14 +1,8 @@
 """Fold a labeller's answer into a stored row, filling what is missing and keeping what is not.
 
-This module is the whole of "the database will not have all these labels in the beginning, so the
-agent should be able to identify all". A source's `labels:` policy says what it *carries*; it never
-says what to skip. Pistachio ships NameRxn names for part of its corpus and not for the rest, an
-ELN ships none, and both are the same case here: a group is derived for any row where the value is
-absent, whatever the policy claims about the source's intent.
-
-`override` is the one thing that reaches past a present value, and it exists for a specific shape:
-an ELN's roles are a free-text column somebody typed, so `species-roles` from such a source is a
-five-value guess the refined vocabulary must not inherit as though a model had produced it.
+A source's `labels:` policy says what it carries, never what to skip: a group is derived for any row
+where the value is absent. `override` is the one thing that replaces a present value, for sources
+whose values are untrustworthy (e.g. an ELN's free-text species roles).
 """
 
 from chemclaw.ingest.labels.labeller import ReactionNaming, ReactionRepresentation
@@ -25,11 +19,8 @@ def merge(
 ) -> ReactionLabel:
     """The row as it should be stored after this pass: derived where derivable, kept where present.
 
-    A `None` half means the server did not answer for this reaction — it could not parse it, or the
-    batch came back short. That is not an error and not a reason to drop the other half: a reaction
-    the atom mapper choked on may still be named, and vice versa. Both absent still returns a row,
-    which the caller stamps; the alternative is a reaction the drain re-reads on every pass forever
-    because nothing can ever be derived from it.
+    A `None` half means the server did not answer for it; the other half is still merged. With both
+    absent a row is still returned for the caller to stamp, so it is not re-read forever.
     """
     return stored.model_copy(
         update={
@@ -45,9 +36,8 @@ def _named(
 ) -> dict[str, object]:
     """The five naming fields, as a group: whatever produced one produced all of them.
 
-    A source-supplied name keeps `method='source'` — which is worth recording, because "Pistachio
-    said Buchwald-Hartwig" and "our SMIRKS matched Buchwald-Hartwig" are different evidence and a
-    chemist reading a frequency table is entitled to know which they are looking at.
+    A source-supplied name keeps `method='source'`, so a source's classification is distinguishable
+    from our SMIRKS match.
     """
     has_value = stored.named_reaction is not None or stored.rxno_id is not None
     if not policy.derives(LabelGroup.NAMED_REACTION, has_value):
@@ -79,14 +69,9 @@ def _species(
 ) -> list[SpeciesLabel]:
     """Per-species roles and features, positionally against the list that was sent.
 
-    The positional contract is the labeller client's, and it holds because the client sends the
-    species explicitly rather than letting the server parse them out of the reaction SMILES: a
-    stored species' `ordinal` comes from `OrdReaction.compounds()` and the record SMILES groups the
-    agents together, so the two orders differ on every reaction with a solvent.
-
-    A short or absent answer falls back to `species_role_from` — the coarse map from what the
-    source recorded. That is a floor rather than a guess: it never invents a ligand, and it keeps
-    `UNKNOWN` meaning "a labeller looked and could not decide" rather than "nothing has looked".
+    The client sends species in `OrdReaction.compounds()` order, so positions match stored ordinals.
+    A short or absent answer falls back to `species_role_from`, the coarse map of what the source
+    recorded: it never invents a ligand, and keeps `UNKNOWN` meaning "a labeller could not decide".
     """
     roles = policy.derives(
         LabelGroup.SPECIES_ROLES, any(s.derived_role is not None for s in stored.species)
@@ -113,10 +98,8 @@ def _species(
 def _role(value: str) -> SpeciesRole:
     """The server's role string as a member, or `UNKNOWN` for one this vocabulary does not have.
 
-    Lenient rather than strict because the server is versioned separately: a labeller that learns a
-    new role before this repository does must degrade to "could not decide" for those species, not
-    fail the whole batch. The version string is what makes that visible — the rows carry a labeller
-    version this build does not fully understand, and re-running after an upgrade re-derives them.
+    Lenient because the server is versioned separately; the row's labeller version records it, and
+    re-running after an upgrade re-derives it.
     """
     try:
         return SpeciesRole(value)

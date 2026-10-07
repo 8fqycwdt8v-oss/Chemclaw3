@@ -1,8 +1,6 @@
 """A chemist's own skills: read by their turns, written by no turn, and visible to them.
 
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` §3 grants this tier its exemption from
-review on conditions it states as requirements rather than preferences, and these are those
-conditions driven rather than restated.
+The tier is exempt from review on conditions stated as requirements; these tests drive them.
 """
 
 import asyncio
@@ -44,9 +42,8 @@ def store() -> InMemoryStore:
 def _backend(store: Any, actor: str = "alice-oid") -> PermittedStoreBackend:
     """One chemist's tier as a backend, permitting every name.
 
-    The tests that use this are about the read/write split rather than about the narrowing, so the
-    predicate is stated permissive rather than defaulted — `permits` is required precisely because a
-    default is how the personal tier shipped with no backend gate at all.
+    `permits` is required, not defaulted, so it is stated permissive here for tests about the
+    read/write split.
     """
     return local_skills_backend(store, actor, lambda _name: True)
 
@@ -65,11 +62,10 @@ def _mounted(store: Any, actor: str) -> Any:
 
 
 def test_a_chemists_own_skill_reaches_their_turn(store: InMemoryStore) -> None:
-    """The tier's whole purpose, driven through the mount rather than the store.
+    """A chemist's own skill reaches their turn, driven through the mount rather than the store.
 
-    Through `scratchpad_backend` because that is where the two conditions are decided — a store and
-    a turn with an actor — and a test that read the store directly would prove the rows exist
-    without proving a turn can reach them.
+    `scratchpad_backend` is where the store and the turn's actor meet, so reading the store directly
+    would not prove a turn can reach the rows.
     """
     asyncio.run(save_local_skill(store, "alice-oid", "my-workup", _BODY))
 
@@ -82,11 +78,10 @@ def test_a_chemists_own_skill_reaches_their_turn(store: InMemoryStore) -> None:
 
 
 def test_one_chemists_skill_never_reaches_anothers_turn(store: InMemoryStore) -> None:
-    """Never a source of shared truth — and structural, not a predicate that could be unconfigured.
+    """One chemist's skill never reaches another's turn, structurally.
 
-    The namespace closes over the turn's own actor, so bob's turn is not *refused* alice's skill;
-    it is mounted on a namespace that does not contain it. That is a stronger property than a gate,
-    and it is why this tier applies none of the shared tree's four narrowings.
+    The namespace closes over the turn's own actor, so bob's turn is mounted on a namespace that
+    does not contain alice's skill; there is no gate to misconfigure.
     """
     asyncio.run(save_local_skill(store, "alice-oid", "my-workup", _BODY))
 
@@ -97,12 +92,10 @@ def test_one_chemists_skill_never_reaches_anothers_turn(store: InMemoryStore) ->
 
 
 def test_no_turn_may_write_its_owners_skills(store: InMemoryStore) -> None:
-    """`SkillsReadOnlyRefusal` is unchanged, stated against the other base class.
+    """No turn may write its owner's skills: `SkillsReadOnlyRefusal` holds for `StoreBackend` too.
 
-    The shared tree gets this from `NarrowedSkillsBackend`, a `FilesystemBackend`; this tier is
-    stored, so the same refusal has to hold against `StoreBackend` or the invariant would be true
-    of one tier and false of the other — which is worse than false of both, because the prose says
-    "no agent path writes a skill" without qualification.
+    The shared tree gets the refusal from a `FilesystemBackend`; this stored tier must hold it as
+    well or "no agent path writes a skill" would be true of only one tier.
     """
     backend = _backend(store)
 
@@ -117,16 +110,11 @@ def test_no_turn_may_write_its_owners_skills(store: InMemoryStore) -> None:
 
 
 def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(store: InMemoryStore) -> None:
-    """Derived from the surface, not from a written list, because the write half grows.
+    """Every method this tier exposes is either a read or a refusal, derived from the surface.
 
-    deepagents 0.7 added `delete` to the protocol and the shared tree inherited a working one until
-    a *derived* test caught it — a hand-written list is a list of what upstream declared the week it
-    was written. So the probes and the refusals must together cover every public method, and an
-    upstream addition has to be triaged into one or the other before this file passes.
-
-    `StoreBackend` as well as `BackendProtocol`: what a turn can reach is what
-    `PermittedStoreBackend` *inherits*, and a method upstream adds to the concrete class alone would
-    be invisible to a protocol-only derivation.
+    An upstream addition must be triaged into one half before this passes; a hand-written list would
+    miss it. Derived from `StoreBackend` as well as `BackendProtocol`, since `PermittedStoreBackend`
+    inherits methods the protocol may not declare.
     """
     from deepagents.backends import StoreBackend
     from deepagents.backends.protocol import BackendProtocol
@@ -166,11 +154,8 @@ def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(store: InM
         "upstream added a method and it needs triaging before this file means anything"
     )
 
-    # **Every read probe is invoked**, which this test shipped without doing — it built ten lambdas,
-    # spent them as a set of *names* and called none of them. A read half that is only a key list
-    # classifies the surface and proves nothing about it, so a verb that upstream turned into a
-    # write would have sat in `reads` and passed: the `unclassified` assertion is satisfied by the
-    # name being *somewhere*, and only calling it says which half is true.
+    # Every read probe is invoked: classifying a name proves nothing, and only calling it shows that
+    # a verb in `reads` has not become a write.
     for name, call in reads.items():
         try:
             outcome = call()
@@ -193,12 +178,10 @@ def test_every_method_this_tier_exposes_is_either_a_read_or_a_refusal(store: InM
 
 
 def test_the_tier_is_advertised_only_when_it_is_mounted(store: InMemoryStore) -> None:
-    """A source naming a path with no route would publish an empty tier on every turn.
+    """The tier is advertised only when it is mounted.
 
-    The middleware derives its sources from the backend's own routes for exactly this reason: the
-    tier is mounted on two conditions `_skills_middleware` cannot see, and an advertised `/mine`
-    with no route resolves to the composite's default `StateBackend` — an empty directory the model
-    is told about every turn.
+    An advertised `/mine` with no route resolves to the composite's default `StateBackend`, an empty
+    directory the model would be told about every turn; the middleware derives sources from routes.
     """
     with_store = _mounted(store, "alice-oid")
     without_store = _mounted(None, "alice-oid")
@@ -225,17 +208,10 @@ def test_the_two_store_tiers_do_not_share_a_namespace() -> None:
 
 
 def test_a_departing_chemists_own_skills_are_erased_with_their_memories() -> None:
-    """The sweep's prefix list holds both tiers, built by the functions each writer writes under.
+    """A departing chemist's own skills are erased with their memories.
 
-    `store` has no actor column — the reason
-    `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` gives for rejecting `BaseStore`
-    — so a completeness check derived from column names passes while a departing person's rows
-    remain. The namespace is the answer to that, and this is where the answer is spent: a sweep
-    that built only the memory prefixes would leave behind the one kind of row this system lets a
-    person author about themselves.
-
-    Asserted through `store_prefixes`, the function `erase_actor` actually calls, so this cannot
-    pass by the symbol merely being imported.
+    `store` has no actor column, so a column-derived completeness check cannot see these rows; the
+    namespace is how they are found. Asserted through `store_prefixes`, which `erase_actor` calls.
     """
     from chemclaw.agent.leaver import store_prefixes
 
@@ -289,17 +265,11 @@ def test_the_size_bound_is_larger_than_anything_this_repository_ships() -> None:
 def test_the_listing_answers_for_a_tier_larger_than_one_page(
     store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The licence condition, driven past the page size the un-paged spelling inherited.
+    """The listing answers for a tier larger than one page.
 
-    `store.asearch(namespace)` with no `limit` is `BaseStore`'s default of **10**, not "everything".
-    Measured before this was paged: twelve saved skills listed ten, while the mount — which walks
-    the namespace itself — carried twelve. So a chemist was shown a confidently short answer to
-    "what is acting on my turns", and the two beyond the page could not be deleted through the only
-    route that deletes.
-
-    Driven well past a page so the loop runs more than once rather than merely not truncating at
-    ten, and asserted against the *mount* as well as the listing, because agreement between the two
-    is the property the licence actually needs.
+    `store.asearch(namespace)` without `limit` returns 10, so an unpaged listing would show a short
+    answer and hide skills from the only route that deletes them. Driven past several pages and
+    asserted against the mount as well, since the two must agree.
     """
     # The row cap lives in the writer now, and this test is about the *listing* rather than about
     # the cap — so it is lifted deliberately here instead of the corpus being shrunk to fit, which
@@ -319,11 +289,10 @@ def test_the_listing_answers_for_a_tier_larger_than_one_page(
 
 
 def test_the_label_carries_no_identity() -> None:
-    """The mount path appears in the system prompt of every turn and in every log line quoting one.
+    """The mount path carries no identity.
 
-    The namespace carries the actor digest because it must; the *path* must not, since it is per
-    actor by construction and a digest there would be a stable identifier for a person in the
-    prompt.
+    It appears in every turn's system prompt and logs; the namespace carries the actor digest, but a
+    digest in the path would be a stable identifier for a person in the prompt.
     """
     assert LOCAL_SKILLS_ROOT == f"/{LOCAL_SKILLS_LABEL}/"
     assert local_skills_namespace("alice-oid")[1] not in LOCAL_SKILLS_ROOT
@@ -332,16 +301,10 @@ def test_the_label_carries_no_identity() -> None:
 def test_a_write_outside_the_tool_chain_is_not_a_write_without_a_record(
     store: InMemoryStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The concern `test_no_first_party_module_writes_to_a_store_directly` is actually about.
+    """A write through the skills route leaves a record, so it is not a silent store write.
 
-    That guard's stated mechanism — the audit row, the authz gate, the dry-run refusal and the
-    repeat guard a `write_file` tool call crosses — has no subject here: this write comes from an
-    HTTP route a person calls, and three of the four controls need a turn to mean anything. But its
-    stated *reason* does apply, and in its own words: a direct write "would do so silently: nothing
-    fails, the memory is simply written with no record that it was."
-
-    So both halves of this tier's lifecycle leave one, and this is what makes "not silent" a
-    property rather than a sentence.
+    The route is called by a person, not a turn, so the tool-chain controls do not apply, but a
+    direct store write must still not happen without a record. Both lifecycle halves are checked.
     """
     import logging as _logging
 
@@ -357,17 +320,12 @@ def test_a_write_outside_the_tool_chain_is_not_a_write_without_a_record(
 
 
 def test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims(store: InMemoryStore) -> None:
-    """The collision order is a decision, and this is where it is decided rather than inherited.
+    """A reviewed skill wins a name a personal one also claims.
 
-    Upstream resolves a name collision **last-source-wins**, so whichever tree is last in `sources`
-    silently displaces the other. `POST /skills/mine` refuses the collision it can see — a personal
-    skill taking a shipped name — but it cannot refuse the one that arrives the other way round, a
-    skill added to `skills/` months after somebody saved theirs. Of the two silences, reviewed
-    judgment winning is the safer, and the person can still see their own document through the route
-    that lists it.
-
-    Asserted on the *order of the sources the middleware is given*, because that is the whole
-    mechanism: an `append` puts `/mine` last and reverses the outcome with no other line changing.
+    Upstream resolves collisions last-source-wins. `POST /skills/mine` refuses a collision it can
+    see, but not a shipped skill added later; reviewed judgment winning is the safer silence.
+    Asserted on the order of sources the middleware is given, since an `append` would reverse the
+    outcome.
     """
     from chemclaw.agent.langgraph_agent import (
         _labelled,
@@ -389,19 +347,10 @@ def test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims(store: InMemory
     )
     assert len(paths) > 1, "only one source, so this asserts nothing about precedence"
 
-    # And the outcome itself, because the order is only the mechanism. A personal skill claiming a
-    # shipped name is saved past the route that would have refused it — which is the case with no
-    # route to refuse at, a name that entered `skills/` after somebody saved theirs.
-    #
-    # **The contested name is taken from what the shared tier actually *serves*, not from
-    # `shipped_skill_names()`, and that is the difference between this test and a weaker one.**
-    # `shipped_skill_names` is the *discovered* set; the listing is that set after four narrowings.
-    # A name that is discovered and not listed has no reviewed copy left for the personal one to
-    # lose to, so asserting on it measures the narrowing rather than the precedence this test is
-    # named for. `sorted(shipped_skill_names())[0]` was such a name from the day
-    # `SkillManifest.requires` landed — `analytical-readiness` needs `system_suitability_report`,
-    # which a default deployment does not bind — and the assertion below failed for a reason that
-    # was nothing to do with source order. Nothing is saved yet, so every entry here is shared.
+    # The outcome itself, since the order is only the mechanism. The contested name is taken from
+    # what the shared tier actually serves, not `shipped_skill_names()`: a discovered name narrowed
+    # out of the listing has no reviewed copy to win, so it would measure the narrowing, not
+    # precedence. Nothing is saved yet, so every entry here is shared.
     listed = middleware.before_agent({}, None, None)["skills_metadata"]
     contested = sorted(skill["name"] for skill in listed)[0]
     assert contested in shipped_skill_names(), (
@@ -424,14 +373,11 @@ def test_a_reviewed_skill_wins_a_name_a_personal_one_also_claims(store: InMemory
 
 
 def test_the_outer_permission_rules_deny_a_write_under_this_root_too() -> None:
-    """Refused twice, deliberately, the way `/skills/` is.
+    """The outer permission rules also deny a write under this root.
 
-    `ReadOnlyStoreBackend` refuses the write itself on every call; these rules are the outer half,
-    evaluated before any filesystem operation reaches a backend. Two layers because a security
-    property that arrives as somebody else's default can leave the same way — and this root is
-    covered by *absence*, which is the shape most likely to change without anybody noticing: the
-    allows name `/scratch/**` and `/memories/**` and the blanket deny closes everything else, so a
-    future allow added for one root could widen this one by the order it was inserted in.
+    `ReadOnlyStoreBackend` refuses every write; these rules are the outer layer, evaluated before
+    any backend. This root is covered by absence (only `/scratch/**` and `/memories/**` are
+    allowed), so a future allow could widen it unnoticed.
     """
     from chemclaw.agent.scratchpad import MEMORY_ROOT, SCRATCH_ROOT, filesystem_permissions
 
@@ -452,19 +398,11 @@ def test_the_outer_permission_rules_deny_a_write_under_this_root_too() -> None:
 
 
 def test_a_local_skill_load_is_counted_and_carries_no_persons_words(store: InMemoryStore) -> None:
-    """The tier's usage signal, and the reason it is not the labelled counter beside it.
+    """A local skill load is counted on a bare counter that carries no person's words.
 
-    **`chemclaw_skill_loads_total` does not cover this tier**, and the ADR shipped saying it did —
-    in both directions at once, since it also warned that a local skill's *name* therefore reaches
-    the exposition. Measured: a shipped skill and a personal one read through the same mount in one
-    process left the labelled series at 1 for the shipped one and no series at all for the other,
-    because that counter lives on `NarrowedSkillsBackend` and this tier is a `StoreBackend`. So the
-    coverage claim was false and the privacy warning was a warning about nothing.
-
-    Both halves are answered by one bare counter. It is bare rather than labelled because a local
-    skill's name is a person's own words, clamped by nothing, and a label would mint a series per
-    private project name in a shared exposition — and an operator's question here is whether the
-    tier is used at all, not by whom.
+    `chemclaw_skill_loads_total` lives on `NarrowedSkillsBackend` and does not see this tier. A
+    local skill's name is a person's own words, so a label would mint a series per private name; the
+    operator's question is only whether the tier is used.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -496,13 +434,10 @@ def test_a_local_skill_load_is_counted_and_carries_no_persons_words(store: InMem
 
 
 async def test_a_name_that_could_never_have_been_written_reads_as_absent() -> None:
-    r"""A path parameter carries any byte, and the shipped backend raised on one of them.
+    r"""A name that could never have been written reads as absent (404), not a 500.
 
-    `GET /skills/mine/{name}` and its `DELETE` take the name straight off the URL. Measured against
-    the real `AsyncPostgresStore`, `a\\x00b` raised `psycopg.DataError: PostgreSQL text fields
-    cannot contain NUL (0x00) bytes` out of both readers — a **500** for a name the writer refuses
-    and that therefore cannot exist, where 404 is the answer and is what the in-memory store already
-    gave. Both stores are driven, because the defect was exactly that the two disagreed.
+    The route takes the name off the URL, and Postgres rejects a NUL byte in a text field. Both the
+    in-memory and Postgres stores are driven, since they must agree.
     """
     from chemclaw.agent.skill_store import storable_name
 
@@ -518,24 +453,12 @@ async def test_a_name_that_could_never_have_been_written_reads_as_absent() -> No
 def test_a_directory_whose_manifest_is_broken_still_occupies_its_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A reviewed tree's directory name is taken even when its `SKILL.md` declares nothing.
+    """A reviewed directory whose `SKILL.md` declares nothing still occupies its name.
 
-    **An undocumented interaction between two fixes, fail-closed, and now a decision rather than a
-    side effect.** `skill_manifest._declared_pair` keys an unreadable manifest by its *directory*
-    (the frontmatter is the thing that could not be read, so its `tools:` declaration cannot be
-    trusted), and `langgraph_agent.shipped_skill_names` is `frozenset(declared_tools(...))` — so
-    that directory name reaches the set both `POST /skills/mine` and `propose_skill` refuse against.
-    `propose_skill` newly routes through `validated_skill`, which is what brought the second caller
-    in. Driven: a tree holding one skill with `name: '   '` is keyed `'empty-name'`, and a chemist
-    naming their own skill `empty-name` is told it "is the name of a skill this deployment already
-    ships" — about a skill that ships nothing.
-
-    **Kept, and the docstring changed to say so.** `make skill-validate` requires a directory and
-    its frontmatter `name` to agree, so the directory is the name that tree will occupy the moment
-    the file is fixed; leaving it free lets a personal skill shadow, or be shadowed by, a shipped
-    skill one typo away from working. The cost is one confusing message on a corpus CI would
-    already have failed. `shipped_skill_names` says "occupy" rather than "declare" for exactly this
-    reason, and this is the test that makes the word true.
+    `skill_manifest._declared_pair` keys an unreadable manifest by its directory, and
+    `shipped_skill_names` includes it, so `POST /skills/mine` and `propose_skill` refuse that name.
+    Kept deliberately: `skill-validate` requires directory and `name` to agree, so this is the name
+    the skill will hold once fixed, and leaving it free would let a personal skill shadow it.
     """
     from chemclaw.agent.langgraph_agent import shipped_skill_names
     from chemclaw.agent.skill_manifest import _declared_tools

@@ -1,28 +1,17 @@
 """Cut a parsed document into retrievable pieces without losing where each piece came from.
 
-A note is retrieved whole (`retrieval/vector_index.py` embeds one vector per note) because a note
-is already one claim. A 60-page report is not: embedding it whole produces a vector that is close
-to everything and useful for nothing, and citing it tells a chemist to go read 60 pages.
-
-So documents are chunked — and the only thing that makes a chunk *checkable* is the coordinate the
-parser already put in the text. `[page 3]`, `[slide 7]`, `[sheet Yields]` are the source document's
-own numbering, and this module's job is to carry them through the cut rather than let them dissolve
-into a stream of characters. A chunk therefore never spans two coordinates: it would have to claim
-one of them, and a citation to the wrong page is worse than a citation to none.
+A whole long document embeds to a vector close to everything and cites too broadly, so documents are
+chunked. The parser's coordinates (`[page 3]`, `[slide 7]`, `[sheet Yields]`) are carried through
+the cut, and a chunk never spans two coordinates, because a citation to the wrong page is worse than
+none.
 """
 
 import re
 from dataclasses import dataclass
 
-# A structural label as `chemclaw.ingest.documents.parse` writes it: `[page 3]`, `[slide 7]`,
-# `[sheet Yields]`, alone on the first line of a block.
-#
-# **Anchored to the three words the parsers actually emit.** It used to accept any bracketed line
-# under 80 characters, on the claim that prose in square brackets "cannot be mistaken for one" —
-# but length is not a vocabulary. A paragraph opening `[Figure 2: yield vs time]` was adopted as
-# the chunk's coordinate and *stripped from the body*, so the citation named a figure the chunk did
-# not come from and the caption text became unsearchable. A document cannot forge a coordinate it
-# was never given.
+# A structural label as `chemclaw.ingest.documents.parse` writes it, alone on the first line of a
+# block. Anchored to the three words the parsers emit, so document text like `[Figure 2: yield vs
+# time]` is never adopted as a coordinate and stripped from the body.
 _LABEL = re.compile(r"^\[(page|slide|sheet) ([^\]\n]{1,80})\]\n")
 
 
@@ -59,9 +48,8 @@ def _blocks(text: str) -> list[tuple[str, str]]:
 def _hard_split(line: str, size: int) -> list[str]:
     """Cut one oversized line into `size`-character pieces.
 
-    A share holds CSV exports whose single row is longer than any sensible chunk. Splitting mid-line
-    loses nothing a line break would have preserved, and the alternative — one chunk of 200 kB — is
-    an embedding call that would be refused and a citation nobody can read.
+    For CSV-like rows longer than any sensible chunk, which would otherwise be refused by the
+    embedder.
     """
     return [line[start : start + size] for start in range(0, len(line), size)]
 
@@ -69,9 +57,8 @@ def _hard_split(line: str, size: int) -> list[str]:
 def _split_block(body: str, size: int, overlap: int) -> list[str]:
     """Pack a block's lines into pieces of at most roughly `size`, each repeating `overlap` chars.
 
-    Line-aligned, because a table row or a bullet cut in half reads as corrupted data rather than
-    as a truncation. The overlap is what stops a sentence that straddles a boundary from being
-    findable in neither piece.
+    Line-aligned so a table row is never cut in half; the overlap keeps a sentence straddling a
+    boundary findable.
     """
     if len(body) <= size:
         return [body]

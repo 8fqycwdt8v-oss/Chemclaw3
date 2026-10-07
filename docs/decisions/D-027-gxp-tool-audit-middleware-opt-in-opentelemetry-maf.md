@@ -1,5 +1,7 @@
 # D-027 — GxP tool-audit middleware + opt-in OpenTelemetry (MAF out-of-the-box)
 
+**Superseded-by:** [D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks](D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks.md) (in part)
+
 **Context.** With the logging floor in place (D-026), the two natural next tiers from the MAF
 feature analysis were: a per-tool audit trail (a GxP "who ran what, with which inputs, did it
 succeed" record and the first thing needed to debug an agent turn), and distributed tracing.

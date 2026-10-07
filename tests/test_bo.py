@@ -1,8 +1,7 @@
-"""Behavioral tests for the BoFire-backed BO layer (plan Phase 1d).
+"""Behavioral tests for the BoFire-backed BO layer.
 
-Proves the engine converges on a known objective (the CHECKMATE 1d spike), that
-our neutral types validate inputs, and that the campaign honors direction. Real
-BoFire runs; kept small so it stays fast.
+The engine converges on a known objective, the neutral types validate inputs, and the campaign
+honours direction. Real BoFire, kept small so it stays fast.
 """
 
 import asyncio
@@ -110,17 +109,10 @@ _NOT_FINITE = r"\nvalue\n  Input should be a finite number \[type=finite_number"
     ],
 )
 def test_observation_rejects_non_finite_value(bad: float, fires: str) -> None:
-    """A NaN/inf objective value is rejected at the boundary, *by the value field* (G4).
+    """A NaN/inf objective value is rejected at the boundary, *by the value field*.
 
-    NaN compares false in both directions, so it would silently win `best_of`
-    and poison the campaign result instead of failing the bad evaluation.
-
-    `match=` is what makes this an assertion about which field refused. Driven: dropping
-    `allow_inf_nan=False` from `Observation.value` while giving `params` a `min_length=3` so the
-    one-key dict every row passes in is refused instead. That leaves all **3** rows green under a
-    bare `pytest.raises(ValueError)` —
-    a construction that raises for any reason satisfies it — and turns all **3** red under
-    `match=`, each naming the constraint that no longer exists.
+    NaN compares false both ways, so it would silently win `best_of`. `match=` asserts which field
+    refused; a bare `pytest.raises(ValueError)` is satisfied by any validation failure.
     """
     with pytest.raises(ValueError, match=fires):
         Observation(params={"x1": 0.0}, value=bad)
@@ -176,13 +168,11 @@ def test_problem_validation() -> None:
 
 
 def test_a_model_guided_proposal_carries_the_surrogate_belief_a_seed_cannot() -> None:
-    """F8-T1: BoFire returns `<objective>_pred`/`_sd` from ask() and the adapter dropped both.
+    """A model-guided proposal carries the surrogate belief a seed cannot.
 
-    Run against real BoFire rather than a stubbed frame, because the whole claim is about what
-    BoFire actually puts in that dataframe — a stub would pin our guess at its column names and
-    keep passing if they changed. The contrast is the assertion: a `RandomStrategy` seed has no
-    model behind it and must report `None` rather than a fabricated zero, while a SOBO proposal
-    must carry a real, positive spread.
+    BoFire returns `<objective>_pred`/`_sd` from `ask()`. Run against real BoFire, because the claim
+    is about its column names. A `RandomStrategy` seed reports `None`, not zero; a SOBO proposal
+    carries a positive spread.
     """
     problem = OptimizationProblem(
         parameters=_PARAMS, objectives=[Objective(name="y", direction="minimize")]
@@ -205,10 +195,8 @@ def test_a_model_guided_proposal_carries_the_surrogate_belief_a_seed_cannot() ->
 def test_the_surrogate_belief_survives_evaluation_into_the_history() -> None:
     """The sd is recorded against the point it justified, or it never reaches a note.
 
-    Recovering it in the adapter is only half the fix: `_evaluate` builds the `Observation` that
-    outlives the `Candidate`, so dropping it there loses it just as completely. Seed points keep
-    `None` — they had no surrogate — which is what lets the note tell a model recommendation from
-    a lucky first guess.
+    `_evaluate` builds the `Observation` that outlives the `Candidate`, so it must carry the sd too.
+    Seed points keep `None`, which separates a model recommendation from a lucky first guess.
     """
     problem = OptimizationProblem(
         parameters=_PARAMS, objectives=[Objective(name="y", direction="minimize")]
@@ -226,13 +214,9 @@ def test_the_surrogate_belief_survives_evaluation_into_the_history() -> None:
 class _RaisingStrategy:
     """A fake BoFire strategy whose `tell`/`ask` always raise one chosen error.
 
-    Standing in for BoFire here — genuinely forcing botorch/gpytorch into a numerically
-    degenerate fit is not reproducible on demand (duplicate and near-duplicate observations
-    were tried directly against the real strategy in developing this test and every one of
-    them was absorbed by gpytorch's own jitter/noise regularization). This tests the one
-    thing `chemclaw.science.bo.engine` owns: that each of the library's known failure classes,
-    however it is raised, is translated to `SurrogateFitError` before it leaves the module —
-    never that BoFire raises them under any particular input.
+    A degenerate GP fit cannot be forced on demand (gpytorch's jitter absorbs duplicates), so this
+    tests what `chemclaw.science.bo.engine` owns: each known library failure class is translated to
+    `SurrogateFitError` before leaving the module.
     """
 
     def __init__(self, error: Exception) -> None:
@@ -266,9 +250,7 @@ def test_propose_candidates_translates_every_known_surrogate_failure(
 ) -> None:
     """Every library exception the fit/acquisition step can raise becomes `SurrogateFitError`.
 
-    Mirrors `_fractional_design`'s existing precedent for the classical path: the caller must
-    never see BoFire's/botorch's own exception type, so a chemist's or a Temporal retry policy's
-    `except` clause has one name to match regardless of which numerical failure occurred inside.
+    So a caller's `except` clause (or a Temporal retry policy) has one name to match.
     """
     problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     observations = [
@@ -285,10 +267,8 @@ def test_initial_candidates_also_translates_surrogate_failures(
 ) -> None:
     """The seeding path shares the same boundary as the model-guided one.
 
-    `initial_candidates` uses a `RandomStrategy` rather than SOBO, so in real use it has no GP to
-    fail — but the translation is written around the exception types, not around which strategy
-    raised them, so a future caller of this path (or a config that changes what seeds a campaign)
-    is covered without a second boundary to remember.
+    `initial_candidates` has no GP, but the translation is written around exception types, so a
+    future change to seeding is covered.
     """
     problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     monkeypatch.setattr(
@@ -303,9 +283,7 @@ def test_propose_candidates_does_not_swallow_unrelated_errors(
 ) -> None:
     """The translation is scoped to the known failure classes, not a blanket `except Exception`.
 
-    A programming bug inside the fit (a `KeyError`, a `TypeError`) must still surface as itself —
-    swallowing it into `SurrogateFitError` would misdiagnose a code defect as bad chemistry data
-    and make it non-retryable for the wrong reason.
+    A programming bug must surface as itself, not be misdiagnosed as bad data.
     """
     problem = OptimizationProblem(parameters=_PARAMS, objectives=[Objective(name="y")])
     observations = [
@@ -323,27 +301,11 @@ def test_propose_candidates_does_not_swallow_unrelated_errors(
 
 
 def test_the_in_process_campaign_loop_has_no_definition_under_src() -> None:
-    """The loop and the library problem live in `tests/`, and re-adding one needs a caller with it.
+    """The in-process campaign loop has no definition under `src/`.
 
-    `science/bo/campaign.py` shipped for months with **zero** `src/` callers — no manifest named it,
-    no entrypoint reached it, and its own docstring conceded the durable `BoCampaignWorkflow` was
-    the version that runs. It was not harmless: a session measured a 16-second event-loop stall
-    inside `optimize` and threaded two BoFire calls to fix it, on a path no process can enter, and
-    the fix's measurement paragraph then read as evidence that the function was live.
-    `objectives.molecule_library_problem` was the same shape with a smaller radius, and worse in
-    one way — three pieces of live prose argued a rule by citing it, so the warrant for a real
-    invariant resolved to unreachable code.
-
-    Both moved to `tests/bo_harness.py` on 2026-09-07 rather than being deleted: they drive the
-    production engine, and
-    `D-2026-08-27-a-bound-that-multiplies-and-a-record-that-survives-the-cancel` kept `optimize`
-    precisely because inlining it into three suites is worse duplication. One
-    definition, in the tree whose callers are real, answers that objection
-    (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`).
-
-    This is the absence test the pattern asks for. Nothing else would notice the module coming
-    back — it would import cleanly, type-check, and be exercised by whatever test came with it,
-    which is exactly how it survived the last two dead-code sweeps.
+    `optimize` and `molecule_library_problem` had no production caller, so they live in
+    `tests/bo_harness.py` (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`). Nothing else
+    would notice them returning to `src/`; they would import, type-check and be tested.
     """
     import ast
 

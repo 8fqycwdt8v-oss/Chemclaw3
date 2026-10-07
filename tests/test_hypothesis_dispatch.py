@@ -1,8 +1,7 @@
 """Refusing to run a discriminating check unless every argument is grounded.
 
-The subject of these tests is a policy, not an algorithm: *nothing a model writes becomes a tool
-argument*. So most of them are refusals, and each one names the specific way a check could
-otherwise have reached a calculator with a value nobody checked.
+The policy: nothing a model writes becomes a tool argument. Most tests are refusals, each naming a
+way a check could otherwise reach a calculator with an unchecked value.
 """
 
 import inspect
@@ -66,11 +65,10 @@ def test_a_tool_that_is_not_about_one_compound_refuses() -> None:
 
 
 def test_a_structure_argument_that_is_not_a_string_refuses() -> None:
-    """`screen_hazards` takes a *list* of SMILES, and a keys-only check would have passed it.
+    """A structure argument that is not a string refuses.
 
-    That is exactly why this module adds a type to the three terms `ToolArguments` carries: for a
-    template the argument's type is unknown until substitution, but a check's subject is a SMILES
-    and is known now.
+    `screen_hazards` takes a list of SMILES; a check's subject is a SMILES string, so the type is
+    checked as well as the keys.
     """
     refusal = refuse_unless_dispatchable(
         "screen_hazards", _contract(required={"smiles"}, kind="array")
@@ -80,12 +78,10 @@ def test_a_structure_argument_that_is_not_a_string_refuses() -> None:
 
 
 def test_an_unreadable_contract_refuses_rather_than_passing() -> None:
-    """The opposite polarity to `core/connect.signature_mismatch`, and deliberately.
+    """An unreadable contract refuses rather than passing.
 
-    That function returns "nothing to say" for a callable it cannot introspect because a driver
-    refuses a bad keyword at construction. A calculator does not refuse — it computes, and the
-    number comes back looking like an answer. Where the fallback is a plausible number,
-    permissiveness is the defect.
+    Unlike a driver, a calculator does not refuse a bad argument; it returns a plausible number, so
+    permissiveness is the defect here.
     """
     refusal = refuse_unless_dispatchable("mystery", ToolContract(readable=False))
     assert refusal is not None
@@ -99,11 +95,9 @@ def test_an_absent_tool_refuses_and_says_so() -> None:
 
 
 def test_a_tool_that_is_not_on_the_surface_refuses() -> None:
-    """A name nothing serves, which is also what an empty name reduces to.
+    """A tool that is not on the surface refuses, which is also what an empty name reduces to.
 
-    There is no separate `no-tool-named` code any more: the one production caller returns `no-call`
-    before reaching here when the check named nothing, so a second code for the same condition was
-    a vocabulary entry nothing could ever emit.
+    The production caller returns `no-call` earlier when the check named nothing.
     """
     refusal = refuse_unless_dispatchable("compute_moon_phase", None)
     assert refusal is not None
@@ -111,12 +105,11 @@ def test_a_tool_that_is_not_on_the_surface_refuses() -> None:
 
 
 def test_a_tool_whose_default_is_wrong_for_the_molecule_refuses() -> None:
-    """Arity is necessary and not sufficient, which is the finding that cost the most here.
+    """A tool whose default is wrong for the molecule refuses.
 
-    `compute_thermochemistry` passes every signature test: one required argument, the structure.
-    Its `symmetry_number` defaults to 1 — "no symmetry" — which is false for any symmetric molecule
-    and moves the entropy, and therefore the free energy, by `R·ln(sigma)` with nothing in the
-    result saying so. A purely computed allowlist would have shipped that number.
+    Arity is not sufficient: `compute_thermochemistry`'s `symmetry_number` defaults to 1, which is
+    false for symmetric molecules and shifts the free energy by `R·ln(sigma)` with no sign in the
+    result.
     """
     refusal = refuse_unless_dispatchable(
         "compute_thermochemistry", _contract(required={"smiles"}, accepted={"symmetry_number"})
@@ -180,13 +173,9 @@ def test_the_call_is_the_structure_and_nothing_else() -> None:
 # ------------------------------------------------------------------ the ratchet
 
 
-#: Every tool in this tree that a check may be dispatched onto today. Pinned rather than counted:
-#: the set is what a deployment's chemists can have computed for them automatically, so it moves by
-#: a deliberate edit and a reviewer sees which name moved.
-#:
-#: **A tool gaining a required argument drops out of this set on its own**, which is the property
-#: the whole design rests on and the reason this test exists: the failure lands here, in a diff,
-#: rather than in a chemist's result.
+#: Every tool a check may be dispatched onto today. Pinned rather than counted, so a change is a
+#: reviewed diff. A tool gaining a required argument drops out of this set by itself, and the
+#: failure lands here rather than in a chemist's result.
 _DISPATCHABLE = {
     "compute_atomic_descriptors",
     "compute_electronic_properties",
@@ -217,14 +206,10 @@ def _local_contract(signature: inspect.Signature) -> ToolContract:
     )
 
 
-#: Bundles whose servers this repository declares and does not hold, so no signature here can be
-#: introspected for them. **`_DISPATCHABLE` is therefore a pin on the locally-readable tools and
-#: not on the live surface** — `run_computable_check` assembles its surface from `open_connector_
-#: specs` and judges each tool from the schema its session advertises, which covers these too.
-#: Named rather than left implicit for `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`'s
-#: reason: a ratchet whose blind spot is undeclared measures a smaller system than a turn runs and
-#: nothing says so. A *new* bundle joining this set turns the assertion below red, which is the
-#: moment to read its tools' defaults.
+#: Bundles whose servers live elsewhere, so no local signature can be introspected. `_DISPATCHABLE`
+#: pins the locally readable tools, not the live surface, which `run_computable_check` judges from
+#: each session's advertised schema. A new bundle joining this set turns the assertion below red,
+#: which is the moment to read its tools' defaults.
 _SERVED_ELSEWHERE = {"chem", "rxnpredict", "safety"}
 
 
@@ -244,13 +229,10 @@ def test_the_dispatchable_set_is_exactly_what_is_pinned() -> None:
 
 
 def test_the_tool_ratchets_blind_spot_is_declared() -> None:
-    """What `_DISPATCHABLE` is a pin on, asserted rather than assumed.
+    """The tool ratchet's blind spot is declared.
 
-    The set above is derived from `resolvable_signatures()`, which needs a *local*
-    `connectors.<name>.server.tools` module. Every other enabled bundle's endpoint tools are on the
-    live surface a check is dispatched against and invisible to that derivation — measured, three
-    bundles and 21 declared tools. Their defaults are read by nobody here, so a new one is a
-    decision rather than an accident.
+    `resolvable_signatures()` needs a local `connectors.<name>.server.tools` module, so other
+    enabled bundles' tools are invisible to it; their set is asserted so a new one is a decision.
     """
     from chemclaw.connectors.registry import enabled, server_tools_module
 
@@ -311,12 +293,9 @@ def _job_fields(job_name: str) -> dict[str, tuple[bool, Any]]:
     return {name: (f.is_required(), f.default) for name, f in model.model_fields.items()}
 
 
-#: Jobs a tournament may launch on its own, derived from each job's declared params model. The
-#: three that are absent are absent for one reason, and it is the reason this module exists:
-#: `scan_coordinate` and `profile_rotation` need **atom indices**, `survey_bond_strengths` a
-#: cleavage list, and a model asked for any of those produces them plausibly and wrongly. They
-#: become dispatchable when something *enumerates* them — which is the repo's standing rule that
-#: enumeration and calculation are separate tools and the order is not optional.
+#: Jobs a tournament may launch on its own, derived from each job's params model. Jobs needing atom
+#: indices or a cleavage list are absent: a model produces those plausibly and wrongly, and they
+#: become dispatchable only when something enumerates them.
 _DISPATCHABLE_JOBS = {
     "compare_solvents",
     "compute_ensemble_property",
@@ -500,12 +479,10 @@ def test_the_solvent_screen_grounds_into_a_call_the_job_accepts() -> None:
 
 
 def test_a_sweep_wider_than_the_budget_refuses_rather_than_trimming() -> None:
-    """The check cap counts checks; this is what stops one check spending the whole budget.
+    """A sweep wider than the budget refuses rather than trimming.
 
-    Refusing rather than trimming is the load-bearing half: `_job_line` reports the swept values
-    beside the answer, so a silently shortened axis would make the report of what ran untrue —
-    the exact failure the grounding rules exist to prevent, arriving through the one argument the
-    model is allowed to choose.
+    The swept values are reported beside the answer, so a silently shortened axis would make that
+    report untrue.
     """
     from chemclaw.hypotheses.dispatch import Sweep, ground_job_params
 
@@ -541,12 +518,10 @@ def test_a_sweep_exactly_at_the_budget_is_allowed() -> None:
 
 
 def test_a_job_naming_no_subject_refuses() -> None:
-    """The guard that keeps the set to calculations about a molecule in the record.
+    """A job naming no subject refuses.
 
-    Measured before it existed: `republish_calculations` has no required field at all, so "every
-    required field is grounded" was vacuously true and a model naming that string would have had
-    the tournament start a corpus-wide push to an external result sink. That is not a check that
-    is narrowly wrong — it is a different kind of act, and no argument-level rule catches it.
+    A job with no required field (e.g. `republish_calculations`) is vacuously "grounded" and would
+    be a different kind of act, not a check about a molecule.
     """
     from chemclaw.hypotheses.dispatch import ground_job_params
 
@@ -557,11 +532,9 @@ def test_a_job_naming_no_subject_refuses() -> None:
 
 
 def test_every_job_any_enabled_connector_declares_is_either_pinned_or_refused() -> None:
-    """The ratchet the per-bundle one is not: `find_job` searches every enabled connector.
+    """Every job any enabled connector declares is either pinned or refused.
 
-    `_DISPATCHABLE_JOBS` is derived from the `calc` bundle, while the production lookup is
-    repo-wide — so a job in any *other* bundle whose required fields all default became
-    tournament-launchable with nothing turning red. This asserts the repo-wide set equals the
+    `find_job` searches every enabled connector, so the repo-wide dispatchable set must equal the
     pinned one.
     """
     from chemclaw.connectors.registry import enabled
@@ -607,12 +580,10 @@ def test_every_job_any_enabled_connector_declares_is_either_pinned_or_refused() 
 def test_a_key_the_job_does_not_declare_refuses_rather_than_being_dropped(
     kwargs: dict[str, Any], code: str
 ) -> None:
-    """These params models do not set `extra="forbid"`, so an undeclared key vanishes silently.
+    """A key the job does not declare refuses rather than being dropped.
 
-    Measured before this guard: a `solvents` axis handed to `sample_conformers` was dropped by
-    pydantic, the plain gas-phase search ran, and the grounded call still reported three solvents
-    compared. An argument the dispatcher discards is the same hidden assumption as one it invents,
-    and the discarded one is worse because the report keeps claiming it.
+    These params models do not forbid extras, so pydantic would silently drop the key while the
+    report still claimed it.
     """
     from chemclaw.hypotheses.dispatch import ground_job_params
 
@@ -629,9 +600,7 @@ def test_a_key_the_job_does_not_declare_refuses_rather_than_being_dropped(
 
 
 #: Every shipped template that requires `smiles` and nothing else, computes, and holds no write
-#: tool — not every shipped template, and no count is written here because the one that was went
-#: stale. Pinned so a template that gains a second required input, or an agent step holding a
-#: write tool, drops out loudly rather than by nobody noticing.
+#: tool. Pinned, so a template gaining a second required input or a write step drops out visibly.
 _DISPATCHABLE_TEMPLATES = {
     "bond-strength-survey",
     "conformer-refinement",
@@ -645,13 +614,10 @@ _DISPATCHABLE_TEMPLATES = {
 
 
 def test_the_dispatchable_template_set_is_exactly_what_is_pinned() -> None:
-    """Derived from the shipped catalogue, so it tracks the templates rather than a list.
+    """The dispatchable template set is exactly what is pinned, derived from the shipped catalogue.
 
-    This is the set that answers a question about structures *nobody wrote down* — four of the
-    shipped templates chain an enumerator into a calculation, which is the one thing neither the
-    tool half nor the job half can express. The set here is wider than those four because a
-    procedure over a molecule's own conformers is grounded the same way; what it excludes is a
-    template that computes nothing, one that acts, and one a deployment turned off.
+    Templates chaining an enumerator into a calculation answer questions about structures nobody
+    wrote down. Excluded: templates that compute nothing, that act, or that a deployment turned off.
     """
     from chemclaw.agent.authz import STATE_CHANGING_TOOLS
     from chemclaw.hypotheses.dispatch import ground_template_inputs
@@ -690,12 +656,9 @@ def test_a_template_requiring_more_than_a_structure_refuses() -> None:
 
 
 def test_a_template_whose_step_can_act_refuses() -> None:
-    """A check computes a number; a procedure that also acts is not a tournament's to start.
+    """A template whose step can act refuses.
 
-    No shipped template declares `write_tools` today, which is exactly why the guard is here: a
-    template is otherwise dispatchable by omission, and `AgentStep` says in as many words that a
-    template is not plan-gated because it *is* the pre-approved plan — approved for a person to
-    run, which is not the same as approved for a tournament to start unattended.
+    A template is pre-approved for a person to run, not for a tournament to start unattended.
     """
     from chemclaw.hypotheses.dispatch import ground_template_inputs
 
@@ -706,13 +669,11 @@ def test_a_template_whose_step_can_act_refuses() -> None:
 
 
 def test_only_the_structure_is_supplied_and_the_rest_is_disclosed() -> None:
-    """Every optional input stays unset, so the template's own measured defaults apply.
+    """Only the structure is supplied, and the unset inputs are disclosed.
 
-    `tautomer-resolution` pins `level: thorough` on a measured finding — acetylacetone ranks 99.9%
-    keto from one embedding per tautomer and is ~80% enol in reality. Supplying inputs here would
-    be the check overriding a default it has no basis to change; the unset ones are named in the
-    outcome instead, because a gas-phase answer is a different question from the same calculation
-    in water and neither is visible in the number.
+    The template's own measured defaults apply (e.g. `tautomer-resolution` pins `level: thorough`).
+    The unset inputs are named in the outcome, since a gas-phase answer is a different question from
+    the same calculation in water.
     """
     from chemclaw.hypotheses.dispatch import defaulted_inputs, ground_template_inputs
 
@@ -724,12 +685,10 @@ def test_only_the_structure_is_supplied_and_the_rest_is_disclosed() -> None:
 
 
 def test_a_call_naming_two_targets_is_visible_to_the_dispatcher() -> None:
-    """Refused by the dispatcher, which means the model's answer has to survive validation first.
+    """A call naming two targets is refused by the dispatcher, after validation.
 
-    A `model_validator` that raised was the first attempt and lost the check: these calls are a
-    model's structured output, the JSON schema cannot express mutual exclusion, and a
-    `ValidationError` in `derive_check` is non-retryable bad data — so the hypothesis ended up with
-    no outcome and no reason at all, which is worse than the ambiguity.
+    A `model_validator` raising would make `derive_check` fail with non-retryable bad data, leaving
+    the hypothesis with no outcome or reason; the JSON schema cannot express mutual exclusion.
     """
     from chemclaw.hypotheses.models import CheckCall
 
@@ -742,12 +701,9 @@ def test_a_call_naming_two_targets_is_visible_to_the_dispatcher() -> None:
 
 
 def test_a_template_that_runs_no_calculation_refuses() -> None:
-    """A check owes its reader a computed observation, not a narration.
+    """A template that runs no calculation refuses.
 
-    Two shipped templates are a lookup and a report with no durable job at all. Dispatched, each
-    would spend a calculation slot and hand the verdict stage model prose to read as though a
-    calculator had produced it — the same confusion between "a number" and "a plausible sentence"
-    that the whole dispatcher is built against.
+    A lookup or report would hand the verdict stage prose to read as a computed observation.
     """
     from chemclaw.hypotheses.dispatch import ground_template_inputs
 

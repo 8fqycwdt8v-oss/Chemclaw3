@@ -1,11 +1,8 @@
 """The derived species vocabulary, and the one coupling it cannot check for itself.
 
-`chemclaw.science.labels.vocabulary` names the *recorded* roles as plain strings, because
-`science/` may import `chemclaw.core` and nothing else (`tests/test_layering.py`) and `Role` lives
-in `ingest/`. That is a deliberate, documented duplication with exactly one hazard: a sixth `Role`
-member landing without a mapping, which `species_role_from`'s lenient fallback would then turn into
-`UNKNOWN` for every species of that role, silently. This file is where that hazard is closed — the
-same idiom `tests/test_upstream_surface.py` uses for the shapes upstream never promised.
+`chemclaw.science.labels.vocabulary` names recorded roles as plain strings because `science/` may
+import only `chemclaw.core` and `Role` lives in `ingest/`. The hazard is a new `Role` member with no
+mapping, which `species_role_from` would silently turn into `UNKNOWN`; this file closes it.
 """
 
 import pytest
@@ -61,11 +58,10 @@ def test_a_policy_may_not_override_a_group_it_does_not_provide() -> None:
 
 
 def test_the_merge_rule_has_one_expression() -> None:
-    """`provides` is never a skip: a group the source declares is still derived where it is empty.
+    """The merge rule has one expression: `provides` is never a skip.
 
-    This is the whole of "the database will not have all these labels in the beginning" — Pistachio
-    ships NameRxn names for part of its corpus, not all of it, and the rows it left empty must be
-    filled rather than trusted as answered.
+    A group the source declares is still derived where the row is empty, since sources ship labels
+    for only part of their corpus.
     """
     policy = LabelPolicy(provides=frozenset({LabelGroup.NAMED_REACTION}))
     assert policy.derives(LabelGroup.NAMED_REACTION, has_value=False) is True

@@ -4,6 +4,8 @@
 `D-2026-08-16-the-physics-leaves-the-cache-stays` (primitives move, composites are decomposed) and
 `D-2026-08-21-a-geometry-is-an-address-not-a-payload` (a geometry crosses as a handle).
 
+**Superseded-by:** [D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire](D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire.md) (in part)
+
 ## Context
 
 Almost every question a chemist asks about a flexible molecule takes more than one calculation, and

@@ -1,13 +1,8 @@
-"""The shape a prescriptive design is allowed to take, at the boundary where it is refused.
+"""The shape a prescriptive design may take, at the boundary where it is refused.
 
-Every assertion here is about a validator that *rejects* something, because the models are what
-stand between a model's JSON and the store: a `stated` slot with no quote, a continuous factor whose
-level carries no number, two arms with one id. A model that accepted those would push the failure
-into the checks, the renderer or Postgres, each of which reports it worse.
-
-`design_id_for` is the fourth: an id derived from the ask rather than minted at random is what makes
-a restructured request revise a design instead of forking one, so its stability is behaviour and not
-an implementation detail.
+Validators reject a `stated` slot with no quote, a continuous level with no number and duplicate
+arm ids before the checks, renderer or Postgres see them. `design_id_for` is derived from the ask,
+so a restructured request revises a design rather than forking one.
 """
 
 import pytest
@@ -237,13 +232,10 @@ def test_a_design_refuses_a_field_it_does_not_declare() -> None:
 
 
 def test_a_replicate_that_runs_different_conditions_is_refused() -> None:
-    """`replicate_of` naming a *real* arm with other conditions defeated two readers at once.
+    """A replicate that runs different conditions is refused.
 
-    `arms_are_distinct` skips every arm carrying `replicate_of` and `coverage_is_stated` counts
-    none of them towards the grid, so two mislabelled arms turned a full 2-level grid into
-    "reduced design: 2 of 4" while the run sheet told a chemist A2 was a repeat of A1. Averaging a
-    replicate pair is how an assay's noise is estimated; averaging two different conditions reports
-    that noise as the answer.
+    `arms_are_distinct` and `coverage_is_stated` skip replicates, so a mislabelled one would shrink
+    the reported grid and present different conditions as assay noise.
     """
     factor = Factor(
         name="solvent",

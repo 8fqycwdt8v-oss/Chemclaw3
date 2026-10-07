@@ -1,24 +1,13 @@
 """Discover data-source manifests, and build only the halves the calling process actually uses.
 
-One place turns folders on disk into attached corpora, mirroring `connectors/registry.py` down to
-the two idioms it combines: **filesystem discovery** for the sources themselves (a source is a
-folder with a `datasource.yaml`, exactly as a connector is a folder with a `connector.yaml`) and a
-**config enable-token** (`data_sources`) for which of the discovered sources a deployment turns on.
-Discovery is not enablement — the repo ships every source, a deployment runs the subset it has
-validated (D-018: registry membership is the enable switch, never a second boolean).
+Mirrors `connectors/registry.py`: filesystem discovery (a folder with a `datasource.yaml`) plus a
+config enable-token (`data_sources`). Discovery is not enablement; the repo ships every source and a
+deployment enables a subset.
 
-**The property this module exists to hold: a half is imported only where it is used.** The two
-consumers want disjoint halves — `gather_evidence` fans out over `active_retrieve_sources()` in the
-chat process, the durable ELN sync ingests `active_ingest_source_names()` in a worker — and neither
-should pay for the other. The old `DATA_SOURCES` dict of factories could not offer that, because
-naming an adapter inside a lambda still imports it at module scope: asking for the retrieve sources
-(one source, `graph`, under the default config) loaded all five ELN ingest modules, `drfp`, and 836
-modules in total.
-
-Here the manifest answers "does this source have an ingest half?" as *data*, so the filter runs
-before any import and a half's callable is resolved only when it is about to be used.
-`tests/test_datasource_isolation.py` asserts it in a subprocess, because by the time any test runs
-in the shared session `sys.modules` already holds what every other test imported.
+The property this module holds: a half is imported only where it is used. The chat process
+(`active_retrieve_sources`) and the ELN sync worker (`active_ingest_source_names`) want disjoint
+halves, so filtering runs on manifest data before any import. `tests/test_datasource_isolation.py`
+checks this in a subprocess.
 """
 
 import logging
@@ -46,25 +35,17 @@ MANIFEST_FILENAME = "datasource.yaml"
 class DataSourceError(ChemclawError):
     """A data-source folder is malformed, or an enabled source does not exist.
 
-    A `ChemclawError` (so a `ValueError`) for the same reason `ConnectorError` is one: this is a
-    configuration error surfaced at startup, so a single `except ValueError` at an entry point
-    catches every "this deployment is misconfigured" failure regardless of which seam raised it.
-    Also registered in `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class name, since
-    Temporal matches non-retryable types by exact name, not isinstance.
+    A `ChemclawError` (so a `ValueError`), so one `except ValueError` at an entry point catches
+    every misconfiguration. Also listed by class name in `durable.publish._BAD_DATA_TYPES`, since
+    Temporal matches non-retryable types by exact name.
     """
 
 
 def _source_dirs(dirs: tuple[str, ...]) -> list[Path]:
     """Every data-source folder found across `dirs`, sorted by name.
 
-    The directories are an argument rather than a read of `settings.data_sources_dirs`, because
-    they are the input `_discovered_in` is cached on (see there).
-
-    Sorted rather than filesystem order so retrieval fan-out order is identical on every machine.
-    Earlier dirs win on a name collision, so a deployment can mount a folder that overrides a
-    repo-shipped source — the mechanism that replaced the typed `data_source_specs` list: a second
-    JSON-ELN drop with its own `export_dir` is a manifest in a mounted dir, not a new config
-    variant plus a new branch in core.
+    Sorted so retrieval fan-out order is identical everywhere. Earlier dirs win on a name collision,
+    so a deployment can mount a folder that overrides a shipped source.
     """
     found: dict[str, Path] = {}
     for directory in dirs:
@@ -95,26 +76,18 @@ def _read_manifest(path: Path) -> DataSourceManifest:
 
 @cache
 def _discovered_in(dirs: tuple[str, ...]) -> dict[str, DataSourceManifest]:
-    """Every data source found under `dirs`, by name — manifests only, nothing imported.
+    """Every data source found under `dirs`, by name: manifests only, nothing imported.
 
-    Cached because discovery is filesystem I/O over a fixed layout and both consumers call it per
-    operation. The cache holds *manifests*, never built halves: a built half may close over
-    per-call config (a monkeypatched `knowledge_dir` in tests, a rotated export dir), so sources
-    are constructed fresh on every call exactly as the old factories did.
-
-    **Keyed on the directories because they are the input.** This was `@cache` on a zero-argument
-    `discovered()` reading `settings.data_sources_dirs` itself, so the key omitted the only thing
-    the answer depends on and a single test pointing the registry at its own `tmp_path` manifests
-    poisoned the rest of the session. See `chemclaw.connectors.registry._discovered_in`.
+    Cached on the directory tuple, the only input. Only manifests are cached; halves are built fresh
+    per call because they may close over per-call config.
     """
     return {path.name: _read_manifest(path) for path in _source_dirs(dirs)}
 
 
 def discovered() -> dict[str, DataSourceManifest]:
-    """Every data source found on disk, by name — manifests only, nothing imported.
+    """Every data source found on disk, by name: manifests only, nothing imported.
 
-    The settings read is here rather than inside the cache, so a `data_sources_dir` changed
-    mid-process is seen on the next call instead of being answered from the old directory's entry.
+    Settings are read outside the cache, so a changed `data_sources_dir` is a new key.
     """
     return _discovered_in(tuple(settings.data_sources_dirs))
 
@@ -122,34 +95,20 @@ def discovered() -> dict[str, DataSourceManifest]:
 def forget_discovered() -> None:
     """Drop the cache so the next `discovered()` re-reads data-source manifests from disk.
 
-    **The one case a directory-keyed cache cannot see on its own**: new manifests written into a
-    directory this registry has *already* discovered. The key is the directory tuple, so it is
-    unchanged and the entry still answers. Repointing `data_sources_dir` needs no clearing at all,
-    because that is a different key.
-
-    A named function rather than `discovered.cache_clear`, which is what this was for a few hours.
-    An attribute assigned onto a function object is invisible to `mypy`: the definition needed a
-    `# type: ignore[attr-defined]` and **every one of the 35 call sites became an error**, so the
-    suppression at the definition bought silence in one place and noise in thirty-five. The tree
-    already had the right idiom for a test-isolation reset — `forget_reachability`,
-    `forget_vector_store`, `forget_open_warehouses` — and this is it.
+    Needed only when new manifests appear in an already discovered directory; repointing the
+    directory is a different cache key.
     """
     _discovered_in.cache_clear()
 
 
 def resolve_half(reference: str) -> Callable[..., Any]:
-    """Import `module:callable` and return it — the one place this seam imports a half.
+    """Import `module:callable` and return it: the one place this seam imports a half.
 
-    Deliberately *not* cached: `importlib.import_module` already memoizes on `sys.modules`, and a
-    second cache here would only obscure which process resolved what, which is exactly the
-    property `tests/test_datasource_isolation.py` measures.
+    Not cached: `sys.modules` already memoizes, and the isolation test measures which process
+    imported what.
     """
-    # `getattr` on a module is `Any`, and the `callable()` guard `resolve_driver` applies is the
-    # only check that can be made here — what a half must satisfy is `IngestHalf`/`RetrieveHalf`,
-    # which are runtime-checkable protocols on the *built* object, not on the factory.
-    # `_build_half`'s caller gets that check for free the moment it assigns the result into
-    # `SourceSpec`. The package allow-list `resolve_driver` enforces is the doctrinal half: this
-    # reference is imported in whichever process holds the source, and a manifest is data.
+    # Only callability can be checked here; the half's protocol is checked on the built object.
+    # `resolve_driver` also enforces the package allow-list, since a manifest is data.
     factory: Callable[..., Any] = resolve_driver(reference, DataSourceError, "data source half")
     return factory
 
@@ -157,14 +116,9 @@ def resolve_half(reference: str) -> Callable[..., Any]:
 def _build_half(manifest: DataSourceManifest, reference: str, **extra: Any) -> Any:
     """Construct a half from its `module:callable`, the manifest `config`, and `extra` kwargs.
 
-    **Two checks, and the second is not the first with values filled in.** The `except TypeError`
-    below catches a config *key* the callable will not take. `option_type_mismatch` catches a key it
-    takes and a *value* it will silently misread — measured, `snapshot: "false"` arms the
-    destructive sweep, because every non-empty string is truthy and nothing between the YAML and
-    the constructor coerces anything
-    (`D-2026-09-16-a-truthy-string-is-not-the-flag-somebody-wrote`). `extra` is this repository's
-    own keywords rather than a manifest's, so it is not judged: a defect there is a code defect and
-    fails in review.
+    Two checks: `except TypeError` catches a config key the callable does not take, and
+    `option_type_mismatch` catches a value it would misread (e.g. the string `"false"` is truthy).
+    `extra` is this repository's own keywords and is not checked.
     """
     factory = resolve_half(reference)
     mismatch = option_type_mismatch(factory, manifest.config)
@@ -176,9 +130,8 @@ def _build_half(manifest: DataSourceManifest, reference: str, **extra: Any) -> A
     try:
         return factory(**manifest.config, **extra)
     except TypeError as exc:
-        # A config key the callable does not accept. Re-raised as a configuration error naming both
-        # sides, because a bare TypeError from inside a constructor gives the operator no way to
-        # tell a mistyped manifest key from a broken adapter.
+        # A config key the callable does not accept, re-raised naming both sides so a mistyped key
+        # is distinguishable from a broken adapter.
         raise DataSourceError(
             f"data source {manifest.name!r}: {reference} rejected config "
             f"{sorted(manifest.config)}{' + ' + str(sorted(extra)) if extra else ''}: {exc}"
@@ -188,30 +141,11 @@ def _build_half(manifest: DataSourceManifest, reference: str, **extra: Any) -> A
 def _build_ingest_half(manifest: DataSourceManifest) -> Any:
     """Build the ingest half and wrap it in the seam's normalisation.
 
-    **The one construction point for both production readers**, which is what makes this the place
-    the rule belongs. `map_to_ord` has six callers and no shared downstream: the durable sync
-    reaches it through `make_data_source`, and `durable.memory_jobs.read_corpus` — the miner that
-    builds the optimization-campaign note, and the one that runs no validator — reaches it through
-    `active_ingest_sources`. Both resolve here, so a normalisation applied here is applied to both,
-    and to any adapter a deployment attaches without a line of code in this repository.
-
-    Today that normalisation is exactly one rule (`DatedIngest`); the wrapper exists rather than an
-    inline two-liner because the alternative is putting the rule in one of the two callers, where
-    the other silently does not get it. That is the shape of the defect it is fixing.
-
-    The import is lazy to match this module's discipline rather than to fix anything: measured,
-    `sources.base` already imports `ingest.eln.adapter` for the protocol, so `ingest.eln.ord` and
-    rdkit are in the registry's closure before this line and a module-scope import here would cost
-    nothing today. It is written lazily anyway because that dependency is an accident of where a
-    Protocol happens to live, and this file's stated property should not rest on it.
-
-    **An ingest half is told which source it is, exactly as a retrieve half is**, and for the
-    reason stated there: a half that guesses its own name collapses two instances of one engine
-    into one identity. Here the identity is the rejection ledger's `source` — `ingest_rejections`
-    is keyed `(source, entry_id)` and its eviction cap is per source, so two ORD drop directories
-    filing under one hardcoded name would share a bucket and mis-attribute each other's refusals.
-    Passed to *every* ingest half rather than to the ones that need it, so "an ingest half knows
-    its own name" is part of the contract and not a rule the next adapter can fall outside of.
+    The one construction point for both production readers (the durable sync via `make_data_source`
+    and the memory jobs via `active_ingest_sources`), so the normalisation (`DatedIngest`) applies
+    to both and to any attached adapter. The import is lazy to keep this module's import discipline.
+    Every ingest half is told its source name, which keys the rejection ledger, so two instances of
+    one engine stay separate.
     """
     from chemclaw.ingest.eln.adapter import DatedIngest
 
@@ -221,24 +155,11 @@ def _build_ingest_half(manifest: DataSourceManifest) -> Any:
 def _build_retrieve_half(manifest: DataSourceManifest) -> Any:
     """Build the retrieve half, telling it which source it is.
 
-    **A retrieve half's name is the manifest's, never the half's own guess.** `SourceRetriever.name`
-    is how the rest of the system identifies a corpus: the document index partitions on it, its
-    sweep deletes by it, `gather_evidence` cites with it, and `retrieval_source_weights` is keyed on
-    it. Nothing used to supply it, so the three *parameterised* halves — the ones where one engine
-    serves many instances — each answered with a literal default. Two mounted shares therefore both
-    called themselves `sharedrive`: `share_sources()` collapsed them to one entry, only the last was
-    ever crawled, and its sweep deleted the other's rows. That is precisely the failure
-    `infra/sql/037`'s `(source, path)` key exists to prevent, reached by handing that key the same
-    `source` twice — the key was right and the value fed to it was not.
-
-    So the name is passed, not defaulted, and it is passed to *every* retrieve half rather than only
-    to the ones that need it. A conditional pass is a rule the next half added can fall outside of;
-    an unconditional one makes "a retrieve half is told which source it is" part of the contract,
-    enforced the moment a bundle is enabled — a half that does not accept it fails at startup, and
-    at `make datasource-validate`, naming the source.
-
-    The folder name is safe to be that identity because `_source_dirs` dedupes on it, so two enabled
-    sources cannot share one name however many directories are mounted.
+    A retrieve half's name is the manifest's: the document index partitions on it, its sweep deletes
+    by it, citations and `retrieval_source_weights` use it. A defaulted name would let two instances
+    of one engine (e.g. two mounted shares) collapse and delete each other's rows. Passed to every
+    retrieve half, so a half that does not accept it fails at startup. Folder names are unique
+    across mounted directories.
     """
     return _build_half(manifest, manifest.retrieve or "", name=manifest.name)
 
@@ -246,10 +167,8 @@ def _build_retrieve_half(manifest: DataSourceManifest) -> Any:
 def _build_commitments_half(manifest: DataSourceManifest) -> Any:
     """Build the commitments half, telling it which source it is.
 
-    Named for the same reason a retrieve half is: `commitments` is keyed on `(source, external_id)`
-    precisely because two portfolio systems may both call something `PRJ-14`, and a half that
-    guessed its own source would let a parameterised engine serving two exports collapse them —
-    which is the `sharedrive` failure that argument was written about, one seam over.
+    `commitments` is keyed on `(source, external_id)`, so two portfolio exports must not share a
+    name.
     """
     return _build_half(manifest, manifest.commitments or "", name=manifest.name)
 
@@ -257,10 +176,8 @@ def _build_commitments_half(manifest: DataSourceManifest) -> Any:
 def make_data_source(name: str) -> DataSource:
     """Build the fully-formed `DataSource` for `name` (every declared half), or raise.
 
-    Used by the string-keyed Temporal boundary (`sync_eln_entries(source=name)`), which rebuilds a
-    source from just its name so in-flight workflow histories stay byte-identical across a deploy.
-    This is the one entry point that resolves *all* declared halves, because its caller asked for
-    the whole source by name rather than for a particular capability.
+    Used at the string-keyed Temporal boundary (`sync_eln_entries(source=name)`), which rebuilds a
+    source from its name so workflow histories stay stable across deploys.
     """
     manifest = discovered().get(name)
     if manifest is None:
@@ -277,9 +194,7 @@ def make_data_source(name: str) -> DataSource:
 def active_manifests() -> list[DataSourceManifest]:
     """The manifests of the enabled sources, in config order, importing nothing.
 
-    An enabled name that no folder declares is a loud error rather than a silently missing corpus —
-    the failure this seam is most exposed to, since a retrieval that quietly returns nothing looks
-    exactly like a corpus with no matches.
+    An enabled name no folder declares is an error, not a silently empty corpus.
     """
     manifests = discovered()
     active = []
@@ -307,19 +222,15 @@ def active_ingest_sources() -> list[IngestHalf]:
 def active_ingest_source_names() -> list[str]:
     """The names of the enabled sources declaring an ingest half (config order kept).
 
-    Answered from manifests alone, so the durable ELN sync enumerates what it must sync without
-    constructing a single adapter. It keys one high-water cursor per name, so two ingest sources
-    advance independently and neither's furthest cursor can skip the other's lagging entries.
+    From manifests alone. The ELN sync keys one cursor per name, so sources advance independently.
     """
     return [manifest.name for manifest in active_manifests() if manifest.ingest is not None]
 
 
 def active_retrieve_sources() -> list[RetrieveHalf]:
-    """The retrieve halves of the enabled sources — an ingest-only source is never imported.
+    """The retrieve halves of the enabled sources; an ingest-only source is never imported.
 
-    This is the call that made the old registry's shape a production concern rather than a tidiness
-    one: it runs in the chat process on the `gather_evidence` path, and under the default config it
-    wants exactly one source.
+    Runs in the chat process on the `gather_evidence` path.
     """
     return [
         _build_retrieve_half(manifest)
@@ -331,10 +242,8 @@ def active_retrieve_sources() -> list[RetrieveHalf]:
 def active_retrieve_corpora() -> dict[str, str]:
     """Each enabled retrieve source's name mapped to the corpus it reads.
 
-    Names rather than halves, so the fusion can be told which of its lists read one body of
-    evidence without every retriever growing a field it would not otherwise have. A source that
-    declares no `corpus:` is its own corpus — the ordinary case, and the one that leaves the
-    single-stage fusion exactly as it was.
+    Lets fusion tell which result lists read one body of evidence. A source without `corpus:` is its
+    own corpus.
     """
     return {
         manifest.name: manifest.corpus or manifest.name
@@ -346,8 +255,6 @@ def active_retrieve_corpora() -> dict[str, str]:
 def active_commitment_sources() -> list[str]:
     """The names of enabled sources holding committed work, importing nothing.
 
-    Names rather than halves, the shape `active_ingest_source_names` takes and for the same reason:
-    the durable sync enumerates what it must mirror without constructing a single adapter, and keys
-    one cursor per name so two portfolio exports advance independently.
+    Names, so the sync enumerates sources without building adapters and keys one cursor per name.
     """
     return [manifest.name for manifest in active_manifests() if manifest.commitments is not None]

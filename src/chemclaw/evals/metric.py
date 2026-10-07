@@ -1,18 +1,12 @@
-"""Metric interface + registry — the evaluation layer's core (plan step 2b.1).
+"""Metric interface + registry — the evaluation layer's core.
 
-(Singular `metric` = the interface and `@metric` registry. The concrete scored metrics live
-in the sibling `chemclaw.evals.metrics` — plural. Import the registry from here, the functions
-there.)
+(Singular `metric` holds the interface and `@metric` registry; the concrete metrics live in the
+plural `chemclaw.evals.metrics`.)
 
-Why this layer exists: the Checkmates gate *code* quality, but scientific *output*
-quality needs its own measurable gate (docs/archive/research-review.md F7-F9). A metric is a
-**pure function** from an evaluation case to a `MetricResult` — value plus provenance
-and an optional pass/fail against a config threshold (never a hardcoded one, G3).
-
-The registry is the extension seam for plan step 2b.5: every later capability phase
-registers >=1 scientific metric with `@metric(name, direction)`, and a regression in a registered
-metric is treated like a failing test. Registration happens on import, so
-`evals/__init__.py` imports the seed-metric module to populate the registry.
+Scientific output quality needs its own measurable gate. A metric is a pure function from an
+evaluation case to a `MetricResult` — value, provenance and an optional pass/fail against a config
+threshold, never a hardcoded one. Capabilities register metrics with `@metric(name, direction)`;
+registration happens on import, so `evals/__init__.py` imports the seed-metric module.
 """
 
 from collections.abc import Callable
@@ -74,20 +68,14 @@ class EvalCase(BaseModel):
     metrics: list[str] = Field(min_length=1)
     output: dict[str, Any] = Field(default_factory=dict)
     reference: dict[str, Any] | None = None
-    # Whether this case's gated metrics are *supposed* to pass. Two cases in the shipped set exist
-    # precisely to demonstrate a gate firing — a solvent-heavy step that must exceed the PMI limit,
-    # a query whose literal match must miss — and without this field their failure is
-    # indistinguishable from a regression. That is why `make eval` could never gate on a science
-    # regression despite `ci.yml` calling it "the scientific quality gates": the only way to keep a
-    # demonstration case from failing the command was for the command never to fail at all.
-    #
-    # Declared per case rather than inferred, and defaulting to True, so a *new* case is gated
-    # unless someone deliberately says otherwise.
+    # Whether this case's gated metrics are *supposed* to pass. Some cases exist to demonstrate a
+    # gate firing, and this lets `make eval --strict` tell those from regressions. Defaults to True,
+    # so a new case is gated unless someone says otherwise.
     expect_pass: bool = True
 
 
 class MetricError(ChemclawError):
-    """A metric could not be computed for a case (missing/invalid inputs, G4)."""
+    """A metric could not be computed for a case (missing/invalid inputs)."""
 
 
 # A metric is a pure function: it reads a case and returns its scored result.
@@ -105,26 +93,16 @@ def register(
 ) -> None:
     """Register a metric under `name` with the way it improves; a duplicate name is a bug.
 
-    `direction` is required rather than defaulted: a default would silently give every new metric
-    one orientation, and a run-to-run comparison would then report half of them backwards.
+    `direction` is required: a default would mis-sign half of all run-to-run comparisons.
 
-    `live` says whether scoring this metric *executes product code*. Most metrics here are
-    arithmetic over literals a case file commits (`output`/`reference`), so nothing a release
-    changes can move them — only editing a case or the formula can. Two run a real retriever. That
-    is a property of the metric and it was written nowhere, so the drift gate's summary read as
-    thirteen watched quantities when it was two: `evals.baseline.render_comparison` says which are
-    which because of this flag. Defaults to False, so a pinned metric — the ordinary kind — needs
-    no argument and a live one is a deliberate claim.
+    `live` says whether scoring executes product code. Most metrics are arithmetic over literals a
+    case file commits, which no release can move; `evals.baseline.render_comparison` reports live
+    and pinned rows separately. Defaults to False, so live is a deliberate claim.
 
-    `gated` says whether this metric compares its value against a config threshold and returns a
-    verdict. **It is declared here because it is a property of the metric and the only other place
-    it could be read from is a run's own results** — which is what
-    `EvalReport.gates_no_demonstration_can_fire` used to do, and why a gate whose every case was
-    deleted became invisible rather than unfireable
-    (`D-2026-09-14-a-gate-with-no-case-is-absent-not-satisfied`). Declared and *checked*: a run
-    that scores a metric whose verdicts disagree with this flag fails
-    `tests/test_evals.py::test_every_scored_metrics_gatedness_is_the_one_it_declares`, so this is
-    not a second declaration nobody reconciles.
+    `gated` says whether the metric compares against a config threshold and returns a verdict.
+    Declared here so the demonstration check can read it from the registry rather than from a run's
+    results; `tests/test_evals.py::test_every_scored_metrics_gatedness_is_the_one_it_declares`
+    checks it against actual verdicts.
     """
     if name in _REGISTRY:
         raise ValueError(f"metric {name!r} already registered")
@@ -151,16 +129,14 @@ def metric(
 def is_live(name: str) -> bool:
     """Whether scoring `name` runs product code rather than reading a case file's literals.
 
-    An unregistered name answers False rather than raising, because the one caller is a *report*
-    over a committed baseline, which may outlive a metric this build no longer has (see
-    `evals.baseline._known_direction`). A metric that cannot be scored at all is certainly not
-    scoring anything live, and a raise there would replace a labelled row with no report.
+    An unregistered name answers False rather than raising: the caller reports on a committed
+    baseline that may outlive a metric.
     """
     return name in _LIVE
 
 
 def get_metric(name: str) -> Metric:
-    """Resolve a registered metric, or raise with the known names (G4)."""
+    """Resolve a registered metric, or raise with the known names."""
     fn = _REGISTRY.get(name)
     if fn is None:
         raise ValueError(f"unknown metric {name!r}; known: {sorted(_REGISTRY)}")
@@ -168,11 +144,10 @@ def get_metric(name: str) -> Metric:
 
 
 def direction_of(name: str) -> Direction:
-    """Resolve which way `name` improves, or raise with the known names (G4).
+    """Resolve which way `name` improves, or raise with the known names.
 
-    Raising beats returning a default: a caller asking about an unregistered metric is comparing
-    against something this build cannot score, and answering it with a guess would turn a missing
-    metric into a confidently mis-signed verdict.
+    Raising beats a default: guessing would turn a missing metric into a confidently mis-signed
+    verdict.
     """
     direction = _DIRECTIONS.get(name)
     if direction is None:
@@ -183,10 +158,8 @@ def direction_of(name: str) -> Direction:
 def gated_names() -> set[str]:
     """Every metric that returns a verdict rather than only a number.
 
-    The set a demonstration case is owed against. Read from the registry rather than from a run's
-    results, because those two differ in exactly the case that matters: a metric no case scores at
-    all has no results, so a check derived from results sees no gate and reports nothing. Driven —
-    moving both `runaway_rate` cases out of `data/evals/cases/` left `make eval-strict` at exit 0.
+    The set a demonstration case is owed against, read from the registry so a metric no case scores
+    is still seen.
     """
     return set(_GATED)
 
@@ -194,9 +167,6 @@ def gated_names() -> set[str]:
 def registered_names() -> list[str]:
     """The names of all registered metrics, sorted — the registry's one public read surface.
 
-    Read by the suites that assert a metric is registered at all, and by nothing in `src/`: the
-    reports and the gate check this docstring used to name resolve metrics through `get_metric`,
-    whose own error message re-derives the same list from `_REGISTRY`. Kept as the public spelling
-    of that read rather than having four test files reach into the private dict.
+    Used by tests that assert a metric is registered, so they need not reach into the private dict.
     """
     return sorted(_REGISTRY)

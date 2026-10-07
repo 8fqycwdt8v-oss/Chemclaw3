@@ -802,7 +802,7 @@ Every workflow sits at the **repository root** (`.github/workflows/`).
 applies this repository's chart, and `deploy/jenkins/Jenkinsfile.release` rolls the four
 repositories out together from one release descriptor — see
 [`deploy/jenkins/README.md`](jenkins/README.md). Those pipelines are written and **not yet run
-against a real cluster**; that is the `docs/planning/DEFERRED.md` row "Push-to-registry +
+against a real cluster**; that is the `docs/planning/BACKLOG.md` row "Push-to-registry +
 `helm upgrade` rollout, run". Migrations run as the pre-deploy Job (`templates/migrate-job.yaml`),
 never inside an app container.
 

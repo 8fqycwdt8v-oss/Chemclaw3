@@ -5,7 +5,7 @@ development requirements set, against the tree as it stands. Every verdict is gr
 a tool name, a `file.py:line`, a manifest, a schema field — not in observed behaviour. The 190-probe
 live run (`docs/archive/live-user-stories-2026-08.md`) is cited only as corroboration.
 
-The per-section audits, with a row for every story and its evidence, are in `tasks/story-audit-*.md`.
+The per-section audits, with a row for every story and its evidence, were `tasks/story-audit-*.md`; they are in git history (removed 2026-10-07).
 
 **Why the distinction between kinds of "missing" carries the whole document.** A missing *table* is a
 week; a missing *model* is a research programme; a missing *entity* is a schema migration across the

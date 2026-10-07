@@ -1,11 +1,8 @@
-"""Stored MAF messages convert to LangChain ones, or say why not (M6, D-2026-08-10).
+"""Stored MAF messages convert to LangChain ones, or say why not.
 
-Rewriting `session_messages` is the one irreversible step in the migration, so the function that
-decides what each row *becomes* is tested against the payloads MAF actually wrote — frozen in
-`tests/legacy_rows.py` and verified byte-for-byte against its real constructors when they were
-captured. What the converter must agree with is the *table*, and a table full of historical bytes
-outlives the library that produced them; a fixture that could only be rebuilt by re-installing that
-library could not.
+Rewriting `session_messages` is irreversible, so the converter is tested against the payloads MAF
+actually wrote, frozen in `tests/legacy_rows.py` and verified byte-for-byte against the real
+constructors when captured, so the fixture outlives the library.
 """
 
 import asyncio
@@ -169,10 +166,8 @@ def test_a_tool_message_holding_no_result_is_refused() -> None:
 
 # --- the rehearsal, against a real table ---------------------------------------------------------
 #
-# The plan names this as the mitigation for the migration's one irreversible step, and it is a
-# different test from everything above: those prove the conversion is right about a payload, this
-# proves the *pass* is right about a table. The rows are the legacy literals inserted directly,
-# because nothing writes that shape any more — see `_seeded`.
+# The tests above prove the conversion of a payload; these prove the pass over a table. Rows are
+# inserted as legacy literals, since nothing writes that shape any more.
 
 
 def _run(coro: Any) -> Any:
@@ -182,9 +177,8 @@ def _run(coro: Any) -> Any:
 async def _seeded(session_id: str) -> None:
     """A migrated database holding one realistic MAF-shaped exchange.
 
-    Written by raw insert, not through the provider, and that is not a shortcut: the provider
-    writes *LangChain* shape now, so a fixture that went through it could not produce the rows this
-    migration exists to convert. Legacy rows are precisely the rows nothing writes any more.
+    Written by raw insert, because the provider now writes LangChain shape and could not produce the
+    rows this migration converts.
     """
     await migrated_db_or_skip()
     legacy = [
@@ -210,9 +204,8 @@ async def _seeded(session_id: str) -> None:
 def test_a_real_stored_conversation_converts_whole() -> None:
     """Every row a real turn wrote converts, and the exchange survives readable.
 
-    The pairing is what is actually at risk: a conversion that dropped `tool_call_id` would leave a
-    transcript no provider accepts as a continuation, and nothing about a per-row conversion makes
-    that visible one row at a time.
+    The pairing is what is at risk: a dropped `tool_call_id` leaves a transcript no provider accepts
+    as a continuation, invisible one row at a time.
     """
     session_id = "sess-m6-rehearsal"
     _run(_seeded(session_id))
@@ -241,11 +234,9 @@ def test_a_real_stored_conversation_converts_whole() -> None:
 
 
 def test_a_second_pass_converts_nothing() -> None:
-    """Resumability: the pass selects only rows still stamped `maf`, so re-running is a no-op.
+    """A second pass converts nothing: only rows still stamped `maf` are selected.
 
-    That is what makes an interrupted conversion safe to simply run again — and it is worth an
-    assertion rather than an argument, because "idempotent" is the sort of claim that is true until
-    someone adds an `OR message_shape IS NULL`.
+    That is what makes an interrupted conversion safe to rerun.
     """
     _run(_seeded("sess-m6-idempotent"))
     _run(convert_stored_messages())
@@ -254,18 +245,13 @@ def test_a_second_pass_converts_nothing() -> None:
 
 
 def test_two_overlapping_passes_cannot_overwrite_the_preserved_original() -> None:
-    """The row-level guard, driven the way two passes actually collide.
+    """Two overlapping passes cannot overwrite the preserved original.
 
-    `test_a_second_pass_converts_nothing` proves the *selection* skips converted rows, which is
-    resumability. It cannot prove this: two passes that both read before either commits each hold a
-    row id they believe is unconverted, so the selection has already happened for both. Only the
-    `AND message_shape = 'maf'` predicate on the UPDATE decides what happens next.
-
-    Without it the loser writes the winner's already-converted payload into `message_original` —
-    the column whose whole purpose is to hold the pre-conversion bytes — and the documented
-    rollback then restores a LangChain document stamped `maf`, a row that lies about its own shape
-    with the original gone. Reachable because this pass takes no advisory lock while two things now
-    start it: `make db-migrate` and the chart's post-upgrade Job.
+    Two passes that read before either commits both hold an id they believe unconverted, so only the
+    UPDATE's `AND message_shape = 'maf'` predicate decides. Without it the loser writes converted
+    bytes into `message_original`, and rollback restores a LangChain document stamped `maf`.
+    Reachable because the pass takes no advisory lock and both `make db-migrate` and the
+    post-upgrade Job run it.
     """
     session_id = "sess-m6-overlap"
     _run(_seeded(session_id))
@@ -307,11 +293,10 @@ def test_two_overlapping_passes_cannot_overwrite_the_preserved_original() -> Non
 
 
 def test_a_row_the_converter_refuses_is_left_exactly_as_it_was() -> None:
-    """A refusal must not consume the row, or the evidence is gone and the pass cannot resume.
+    """A row the converter refuses is left exactly as it was.
 
-    Aborting the whole pass instead was the alternative, and it is worse: one unreadable message
-    would block every row after it. Reporting the id and moving on is what lets an operator look at
-    the row while the rest of the table converts.
+    Consuming it would destroy the evidence and break resumption; aborting the pass would block
+    every later row. The id is reported and the rest of the table converts.
     """
     session_id = "sess-m6-refused"
     _run(_seeded(session_id))
@@ -325,21 +310,12 @@ def test_a_row_the_converter_refuses_is_left_exactly_as_it_was() -> None:
 
 
 def test_the_conversion_preserves_the_original_and_the_rollback_is_one_statement() -> None:
-    """The promise `043_session_message_shape.sql`:20 makes, held by the row rather than by prose.
+    """Conversion preserves the original, and rollback is one statement.
 
-    That comment argues that "an unversioned rewrite destroys the evidence" and that keeping the
-    original readable "is what makes this step reversible in practice". The stamp it added cannot do
-    that — it says which shape a row holds *now* — and the UPDATE overwrote `message` in the same
-    statement that set it. Measured before the fix, on a live database: the previous release's
-    strict reader raised `UnconvertibleMessage: stored message has unknown role ''` on every
-    converted row, the forgiving read path returned a degraded render that had lost `tool_call_id`
-    and every `tool_calls` entry, `chemclaw.cli.explain` printed each speaker as `unknown`, and no
-    row anywhere still held a MAF payload.
-
-    So the assertion is not "a column exists". It is that the previous release, reading
-    `message_original`, gets back exactly the messages it wrote — the `ToolMessage` with its id, the
-    `AIMessage` with its call, neither degraded — and that the documented recovery restores the row
-    byte-for-byte.
+    The shape stamp says what a row holds now; reversibility needs the original bytes. Asserted that
+    the previous release, reading `message_original`, gets back exactly the messages it wrote (the
+    `ToolMessage` with its id, the `AIMessage` with its call) and that the documented recovery
+    restores the row byte-for-byte.
     """
     session_id = "sess-m6-preserved"
     _run(_seeded(session_id))
@@ -392,12 +368,10 @@ def test_the_conversion_preserves_the_original_and_the_rollback_is_one_statement
 
 
 def test_an_unconverted_row_still_reads_through_the_reader_the_previous_release_had() -> None:
-    """The other side of the split hook: a release may roll out before anything is converted.
+    """An unconverted row still reads through the previous release's strict reader.
 
-    Moving the pass to `post-upgrade` means a failed rollout converts nothing, so both images have
-    to be able to serve a table that is entirely `maf`. `to_langchain` is that reader — the strict
-    one, which is the point: an unconverted row is not merely renderable, it converts cleanly, so
-    nothing about deferring the pass costs a chemist anything.
+    The pass runs post-upgrade, so a failed rollout converts nothing and both images must serve an
+    all-`maf` table; `to_langchain` converts such rows cleanly.
     """
     session_id = "sess-m6-unconverted"
     _run(_seeded(session_id))
@@ -469,15 +443,11 @@ async def _shape_of(row_id: int) -> list[tuple[int, str]]:
 
 
 def test_turn_state_survives_a_new_process_over_the_same_database() -> None:
-    """The durable half of the rebuild: a checkpointed thread outlives the graph that wrote it.
+    """A checkpointed thread outlives the graph that wrote it.
 
-    Two separately-built agents over one `thread_id`, with the process's saver dropped in between —
-    the closest thing to a pod restart a test can stage. What is asserted is that the second agent
-    sees the first turn's messages, which is the whole reason D-2026-08-10 moves turn state here.
-
-    One `asyncio.run` for the whole test, not one per step: the checkpointer pool is bound to the
-    loop it was opened in, so closing it from a second loop raises. Production has one loop per
-    process, so a test that spans several is testing a shape nothing runs.
+    Two separately built agents over one `thread_id`, with the saver dropped in between, approximate
+    a pod restart; the second agent must see the first turn's messages. One `asyncio.run` for the
+    whole test, because the checkpointer pool is bound to the loop it was opened in.
     """
 
     async def _scenario() -> list[str]:
@@ -509,12 +479,10 @@ def test_turn_state_survives_a_new_process_over_the_same_database() -> None:
 
 
 def test_erasure_reaches_turn_state_not_just_the_transcript() -> None:
-    """A departing person's checkpointed conversation goes with their transcript.
+    """A departing person's checkpointed conversation is erased with their transcript.
 
-    The gap this closes: `_ERASE` deleted `session_messages` and left `checkpoints`,
-    `checkpoint_blobs` and `checkpoint_writes` holding the same conversation as graph state — so the
-    sweep would report success while the turn state stayed readable. Asserted end to end, because
-    the failure mode is precisely an erasure that *looks* like it worked.
+    `checkpoints`, `checkpoint_blobs` and `checkpoint_writes` hold the same conversation as graph
+    state. Asserted end to end, since the failure is an erasure that looks like it worked.
     """
     actor, session_id = "leaver@example.com", "sess-m6-erasure"
 
@@ -563,15 +531,11 @@ async def _checkpoint_rows(thread_id: str) -> int:
 
 
 def test_erasure_still_works_where_the_checkpointer_has_never_run() -> None:
-    """The state every current deployment is in: the checkpointer's tables do not exist.
+    """Erasure still works where the checkpointer has never run and its tables do not exist.
 
-    Erasure must not become the one operation such a deployment cannot perform. The first attempt
-    at this guard put `WHERE to_regclass('checkpoints') IS NOT NULL` inside the statement, which
-    does nothing — Postgres resolves `DELETE FROM checkpoints` at parse time, so the whole erasure
-    failed with `relation "checkpoints" does not exist`. That is why the check is a separate query,
-    and why this test exists rather than a comment saying the guard works.
-
-    Driven through a schema of its own so the absence is real rather than arranged.
+    Postgres resolves `DELETE FROM checkpoints` at parse time, so the existence check must be a
+    separate query, not a `WHERE to_regclass(...)` inside the statement. Driven in a schema of its
+    own so the absence is real.
     """
 
     async def _scenario() -> dict[str, int]:
@@ -597,17 +561,11 @@ def test_erasure_still_works_where_the_checkpointer_has_never_run() -> None:
 
 
 def test_a_row_answering_parallel_calls_is_refused_rather_than_truncated() -> None:
-    """The destructive case: one stored `tool` row holds one result per parallel call.
+    """A row answering parallel calls is refused rather than truncated.
 
-    A `ToolMessage` answers exactly one call, so converting such a row can only keep one — and
-    keeping the first silently destroyed the rest, in the pass this module's own docstring calls
-    the irreversible step. The second-order damage is worse than the loss: the assistant message
-    still carries all three calls, so the converted thread acquires unanswered `tool_use` blocks
-    that a provider rejects outright — the poison pill `agent/message_pairing.py` exists to keep
-    out of a conversation.
-
-    Refusing costs nothing visible. The row keeps its `maf` stamp and `session_store
-    .message_from_row` still reads it, so the conversation renders exactly as it did.
+    A `ToolMessage` answers one call, so converting a multi-result row would discard results and
+    leave unanswered `tool_use` blocks a provider rejects. The refused row keeps its `maf` stamp and
+    still renders through `session_store.message_from_row`.
     """
     row = legacy_message(
         "tool",
@@ -624,14 +582,11 @@ def test_a_row_answering_parallel_calls_is_refused_rather_than_truncated() -> No
 
 
 def test_a_malformed_langchain_row_degrades_instead_of_failing_the_transcript() -> None:
-    """The guarded branch was the rare one: only the MAF conversion sat inside the `try`.
+    """A malformed LangChain row degrades instead of failing the whole transcript.
 
-    Since M6 every row this system writes is stamped `langchain`, so the unguarded branch is the
-    one nearly every read takes. `messages_from_dict` refuses a type it does not know — asserted
-    below rather than assumed, because the whole defect is what that refusal does next — and the
-    one caller of `get_messages` is `GET /sessions/{id}/messages`, which has no handler. One bad
-    row therefore answered the *entire* transcript with a 500, which is the outcome this
-    function's own docstring has always promised it would not produce.
+    Almost every row is stamped `langchain`, `messages_from_dict` refuses unknown types (asserted
+    below), and `GET /sessions/{id}/messages` has no handler, so the LangChain branch must be
+    guarded too or one bad row is a 500 for the whole transcript.
     """
     row = {"type": "not-a-message-type", "data": {"content": "the pKa of phenol is 9.95"}}
 
@@ -642,12 +597,10 @@ def test_a_malformed_langchain_row_degrades_instead_of_failing_the_transcript() 
 
 
 def test_a_refused_row_is_attributed_to_whoever_spoke_it() -> None:
-    """The fallback said `AIMessage` for every shape, so a chemist's question became agent speech.
+    """A refused row is attributed to whoever spoke it.
 
-    Worse than a blank bubble, because nothing about it looks wrong: the transcript shows the
-    system stating what it was asked. The row names its speaker even when its contents cannot be
-    converted, so both stored vocabularies are read — MAF's `role`, LangChain's `type` — and only
-    a payload that names neither falls back to the model's own voice.
+    Both stored vocabularies are read (MAF's `role`, LangChain's `type`), so a chemist's question is
+    never rendered as agent speech; only a payload naming neither falls back to the model's voice.
     """
     asked = legacy_message(
         "user",
@@ -669,13 +622,10 @@ def test_a_refused_row_is_attributed_to_whoever_spoke_it() -> None:
 
 
 def test_a_contents_list_holding_a_non_dict_degrades_rather_than_raising() -> None:
-    """The refusal handler named one exception type and this row raises a different one.
+    """A `contents` list holding a non-dict degrades rather than raising.
 
-    `_reject_unknown_content` skips non-dict parts, so a `contents` element that is not a mapping
-    reaches the text join and raises `AttributeError` from inside the converter — past a handler
-    watching for `UnconvertibleMessage`, and out through the transcript route. Asserted on the
-    converter first, so the test proves the payload really is one that raises rather than trusting
-    that it is.
+    `_reject_unknown_content` skips non-dict parts, so the text join raises `AttributeError`, not
+    `UnconvertibleMessage`. Asserted on the converter first, so the payload is proven to raise.
     """
     row: dict[str, Any] = {
         "type": "message",
@@ -706,12 +656,7 @@ def test_an_unknown_content_type_is_refused_as_both_the_docstring_and_the_ddl_pr
 
 
 def test_streamed_call_arguments_are_parsed_rather_than_discarded() -> None:
-    """Both forms are in the table, and only the decoded one was read.
-
-    A call assembled from streamed fragments stores its `arguments` as a JSON *string*, so every
-    streamed call in the archive converted to `args: {}` — losing exactly what a reviewer asks
-    a tool call about, permanently.
-    """
+    """Streamed call arguments, stored as a JSON string, are parsed rather than discarded."""
     streamed = legacy_message(
         "assistant",
         {
@@ -746,18 +691,11 @@ def test_streamed_call_arguments_are_parsed_rather_than_discarded() -> None:
 
 
 def test_the_erased_table_list_is_derived_from_upstream_not_asserted_against_itself() -> None:
-    """`CHECKPOINT_TABLES` says its test "has to prove the list is complete". This is that proof.
+    """`CHECKPOINT_TABLES` is complete, derived from upstream rather than asserted against itself.
 
-    The erasure test next door sums `report.erased[t] for t in CHECKPOINT_TABLES` against a baseline
-    counted over **the same constant** — so both sides move together and a fourth
-    conversation-bearing table would be missed by the sweep with the test still green. A departing
-    person's turn state surviving an erasure that reports success is the one outcome a right-to-be-
-    forgotten path must never produce, and it would have been invisible.
-
-    The truth is derivable: `AsyncPostgresSaver.setup()` runs `base.MIGRATIONS`, so the tables it
-    creates are what a thread's state can live in. `checkpoint_migrations` is excluded by name and
-    with a reason — it records which of those statements have run and holds no conversation — so a
-    *new* table joining the set fails here instead of silently outliving a data-subject request.
+    The erasure test counts against the same constant, so a missing table would pass it.
+    `AsyncPostgresSaver.setup()` runs `base.MIGRATIONS`, so the tables it creates are where thread
+    state can live; `checkpoint_migrations` is excluded by name because it holds no conversation.
     """
     import re
 
@@ -777,18 +715,11 @@ def test_the_erased_table_list_is_derived_from_upstream_not_asserted_against_its
 
 
 def test_a_pass_reports_the_rows_it_converted_not_the_rows_it_attempted() -> None:
-    """Two overlapping passes must report three conversions over three rows, not six.
+    """A pass reports rows it converted, not rows it attempted.
 
-    The pass counted `len(updates)` — how many rows it *tried* — while the `AND message_shape =
-    'maf'` predicate on the UPDATE means a row a peer converted first matches nothing. Measured
-    over three convertible rows: `3 + 3 = 6` reported against three rows actually converted.
-
-    Reachable in the configuration this module's own docstring names, which is why it is worth a
-    test rather than an argument: this pass takes no advisory lock, and two things can start it
-    (`make db-migrate` and the chart's post-upgrade Job). The data was never wrong — the predicate
-    is what makes that true — but `converted 6 stored message(s)` over a table of three is a report
-    an operator cannot reconcile against the only check available to them, `SELECT count(*) …
-    WHERE message_shape`.
+    A row a peer converted first matches nothing under the UPDATE predicate, so counting attempts
+    would over-report under overlapping passes and disagree with
+    `SELECT count(*) ... WHERE message_shape`, the operator's only check.
     """
     _run(_seeded("sess-m6-double-count"))
 
@@ -803,10 +734,9 @@ def test_a_pass_reports_the_rows_it_converted_not_the_rows_it_attempted() -> Non
             return int(row[0])
 
     async def _both() -> tuple[int, int]:
-        # Counted over the whole table rather than one session, because the pass converts the
-        # whole table — the same reason `test_a_real_stored_conversation_converts_whole` asserts
-        # its shapes per session. A refused row keeps its `maf` stamp, so the drop in MAF-shaped
-        # rows is exactly what the two passes converted between them.
+        # Counted over the whole table because the pass converts the whole table; a refused row
+        # keeps its `maf` stamp, so the drop in MAF-shaped rows is exactly what the two passes
+        # converted.
         before = await _still_maf()
         first, second = await asyncio.gather(convert_stored_messages(), convert_stored_messages())
         return first.converted + second.converted, before - await _still_maf()

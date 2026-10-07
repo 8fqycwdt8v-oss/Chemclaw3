@@ -1,9 +1,8 @@
-"""The shared Postgres connect helper fails clearly and safely (admin-troubleshooting, P0).
+"""The shared Postgres connect helper fails clearly and safely.
 
-Proves the two behaviors an admin depends on when the database is down: the DSN password is
-never echoed, and an unreachable host raises a `ConnectionError` (retryable infra fault, not
-a non-retryable `ChemclawError`) whose message names the host and the underlying cause. No
-live database is needed — the psycopg connect is monkeypatched to fail.
+The DSN password is never echoed, and an unreachable host raises a retryable `ConnectionError`
+(not a `ChemclawError`) naming the host and cause. psycopg's connect is monkeypatched; no
+database needed.
 """
 
 import ast
@@ -57,11 +56,9 @@ def test_redact_unparseable_dsn_yields_placeholder() -> None:
 def test_dsn_options_survive_alongside_a_statement_timeout() -> None:
     """A DSN's own libpq `options` is kept when we add our statement timeout, not overwritten.
 
-    psycopg merges a keyword argument *over* the connection string, so assigning `options=`
-    silently dropped whatever the DSN carried — and only on connections that asked for a timeout,
-    since `None` is dropped rather than merged. That made an operator's `search_path` (the shape
-    the test-schema isolation depends on), `application_name`, or `work_mem` vanish on some call
-    sites and survive on others.
+    psycopg merges a keyword argument over the connection string, so assigning `options=` would drop
+    the DSN's `search_path` (which test-schema isolation depends on), `application_name` or
+    `work_mem` on some call sites only.
     """
     dsn = "postgresql://h/db?options=-c%20search_path%3Dchemclaw_test,public"
     merged = db._merged_options(dsn, 30.0)
@@ -86,25 +83,12 @@ def test_no_statement_timeout_still_carries_the_plan_mode_and_the_dsn_options() 
 
 
 def test_the_checkpointer_pool_is_not_given_the_plan_mode_and_the_reason_is_structural() -> None:
-    """The one pool deliberately outside `_FORCE_CUSTOM_PLAN`, pinned so the exclusion is a choice.
+    """The checkpointer pool is deliberately outside `_FORCE_CUSTOM_PLAN`, pinned so it is a choice.
 
-    `agent/checkpointer.py` builds its own `AsyncConnectionPool` and passes no `options`, so it
-    never sees the plan mode. That exclusion used to be justified by "its statements are
-    primary-key lookups"; LangGraph's own SQL carries `(%s::text IS NULL OR checkpoint_id < %s)`
-    and two `= ANY(%s)` clauses, which is exactly the family `_FORCE_CUSTOM_PLAN` exists for.
-
-    What actually makes it safe is *where* that OR sits — behind `thread_id = %s AND
-    checkpoint_ns = %s`, so the generic plan puts both equalities in the `Index Cond` of an
-    `Index Scan Backward using checkpoints_pkey` and the OR filters one thread's checkpoints.
-    Measured at 200k rows over 2,000 threads: ~0.4 ms either way.
-
-    **Parsed, not partitioned, because the first version of this test asserted nothing.** It read
-    `source.partition("AsyncConnectionPool(")` and then `.partition(")")`, which stops at the `)`
-    of `conninfo=_session_dsn()` — 39 characters of a 34,000-character file. Adding
-    `options=_FORCE_CUSTOM_PLAN` to the pool passed it; only the *second* assertion, a bare
-    substring scan for `plan_cache_mode`, caught the literal spelling the mutation check happened
-    to use. That scan is gone too: it made a comment naming the exclusion fail the test that exists
-    to explain the exclusion.
+    LangGraph's SQL has the OR and `= ANY` shapes the plan mode targets, but behind
+    `thread_id = %s AND checkpoint_ns = %s`, so the generic plan is a primary-key index scan over
+    one thread. Parsed with `ast` rather than sliced as text, so the check covers the whole call and
+    a comment naming the exclusion cannot fail it.
     """
     from chemclaw.agent import checkpointer
 
@@ -156,12 +140,9 @@ def test_unparseable_dsn_still_gets_our_timeout() -> None:
 def test_every_pooled_connection_refuses_generic_plans() -> None:
     """The plan mode is on every connection this module hands out, whatever else it carries.
 
-    Pinned because the defect it prevents is invisible from the application: psycopg auto-prepares
-    on the fifth execution, Postgres may then switch that statement to a generic plan, and for a
-    parameterised `ORDER BY embedding <=> $1` the generic plan is a sequential scan — measured at
-    9 ms -> 1,280 ms on 100k chunks, permanent for that connection. Nothing in the suite runs one
-    statement eleven times on one pooled connection, so only this assertion stands between the
-    setting and its silent removal.
+    psycopg auto-prepares on the fifth execution and Postgres may switch to a generic plan, which
+    for a parameterised `ORDER BY embedding <=> $1` is a sequential scan, permanently for that
+    connection. Nothing else in the suite would notice the setting's removal.
     """
     for dsn, timeout in (
         ("postgresql://h/db", None),
@@ -227,10 +208,9 @@ async def test_connection_defaults_the_statement_timeout_onto_the_connect(
 ) -> None:
     """A caller that names no timeout still connects with `pg_statement_timeout_seconds`.
 
-    The offline half of the live proof in `test_db_pool.py`: it pins the libpq `options` string the
-    connect receives, so it runs in the sandbox where no Postgres answers. Resolution happens per
-    call rather than as a default argument, which is why monkeypatching the setting reaches it —
-    a value frozen at import time would be wrong in every test that redirects the configuration.
+    The offline half of the live proof in `test_db_pool.py`, pinning the libpq `options` the connect
+    receives. Resolved per call, not as a default argument, so monkeypatching the setting reaches
+    it.
     """
     monkeypatch.setattr(settings, "pg_statement_timeout_seconds", 12.0)
     seen: list[object] = []
@@ -264,12 +244,9 @@ async def test_connection_defaults_the_statement_timeout_onto_the_connect(
 _UNBOUNDED_BY_DESIGN = {
     "chemclaw/core/migrate.py",
     "chemclaw/core/grants.py",
-    # `agent/checkpointer._setup_once`, added in wave 6 for the same three reasons as the two
-    # above, which is why it belongs in the set rather than in an exemption: it is a schema
-    # migration (upstream's `setup()`, three of whose statements are `CREATE INDEX CONCURRENTLY`),
-    # it takes an advisory lock so two pods starting together do not collide, and the lock is held
-    # *across* that migration — so the connection cannot come from the saver's own pool, which is
-    # what `setup()` runs on, or a small pool deadlocks immediately.
+    # `agent/checkpointer._setup_once` belongs here for the same reasons: a schema migration
+    # (upstream's `setup()`, with `CREATE INDEX CONCURRENTLY`) under an advisory lock held across
+    # it, so it cannot use the saver's own pool without deadlocking a small one.
     "chemclaw/agent/checkpointer.py",
 }
 _DEFINITION_SITE = "chemclaw/core/db.py"
@@ -278,12 +255,10 @@ _DEFINITION_SITE = "chemclaw/core/db.py"
 def _modules_calling_db_connect() -> set[str]:
     """Every module under `src/chemclaw` that calls `chemclaw.core.db.connect`, by repo path.
 
-    Resolved through the imports rather than by matching the name, because `connect` is also
-    `chemclaw.core.temporal_client.connect` — which a dozen modules import and which has nothing to
-    do with Postgres. Both binding forms are followed: `from chemclaw.core.db import connect [as x]`
-    and `from chemclaw.core import db` + `db.connect(...)`. `core/db.py` itself is skipped: it
-    *defines* `connect` and calls it from `connection()`, which is the delegation rather than a
-    bypass of it, and it binds the name by `def` rather than by an import this walk could follow.
+    Resolved through imports, not the name (`chemclaw.core.temporal_client.connect` exists too).
+    Follows both `from chemclaw.core.db import connect [as x]` and `db.connect(...)`. `core/db.py`
+    is
+    skipped: it defines `connect`.
     """
     root = Path(__file__).resolve().parents[1] / "src"
     found: set[str] = set()
@@ -316,19 +291,10 @@ def _modules_calling_db_connect() -> set[str]:
 def test_only_the_migration_paths_open_an_unbounded_postgres_connection() -> None:
     """`connect()` is the escape hatch from the default bound, so its callers are enumerable.
 
-    Defaulting the timeout in `connection()` closes the hole a forgotten keyword opened, and leaves
-    exactly one way to reopen it: reach past `connection()` to `connect()`, which still defaults to
-    no bound because a migration's index build legitimately runs long. **The members are listed in
-    `_UNBOUNDED_BY_DESIGN` with a reason each, and their number is not written here** — it said
-    "two modules" and a third joined it legitimately one wave later. What they share is the
-    property, not the count: each runs a schema migration under an advisory lock held across it, on
-    a connection nobody else can be handed. A member without that property is a store quietly
-    running unbounded again, which is the defect this whole change exists to make impossible rather
-    than merely unlikely — so it is pinned here instead of trusted to review.
-
-    Two call sites moved off `connect()` to get here: `cli/live_jobs` and `cli/live_storm` each read
-    one scalar from the live database through it, which wanted no dedicated connection and no
-    unbounded query — only the shortest way to a connection at the time it was written.
+    It defaults to no statement timeout because a migration's index build runs long. Every caller
+    must be in `_UNBOUNDED_BY_DESIGN` with its reason; what they share is running a schema migration
+    under an advisory lock on a connection nobody else is handed. Any other caller is a store
+    running unbounded.
     """
     assert _modules_calling_db_connect() == _UNBOUNDED_BY_DESIGN
 
@@ -336,9 +302,7 @@ def test_only_the_migration_paths_open_an_unbounded_postgres_connection() -> Non
 async def test_pooling_resets_its_state_even_when_the_block_raises() -> None:
     """`pooling()` must not leave the process believing it still has a pool after a crash.
 
-    A stuck flag would send every later `connection()` at a pool dictionary that has been
-    cleared, so the failure mode of a failed startup would be a permanently broken process
-    rather than a restart.
+    A stuck flag would make a failed startup a permanently broken process instead of a restart.
     """
     with pytest.raises(RuntimeError):
         async with db.pooling():
@@ -362,25 +326,12 @@ _RACE_SEEDED_POOLS = 40
 def test_reading_this_process_pools_while_another_thread_builds_them_does_not_raise() -> None:
     """`_POOLS` is walked from several threads at once, so every walk must be under the lock.
 
-    The dict is cross-thread by construction: a pool is keyed on the loop that owns it, and a
-    second loop in a worker thread is the ordinary case rather than an exotic one —
-    `evals/retrieval._run_sync` starts one per live metric call, and `durable/eval_drift` runs
-    `run_eval` in a thread *inside* the background worker's `pooling()`. Both readers of the
-    registry evict the pools whose loop has ended before answering, and that eviction is a
-    Python-level iteration, which the interpreter may switch threads in the middle of. Measured
-    before the lock, three churn threads against three readers raised
-    `RuntimeError: dictionary changed size during iteration` 364 times in two seconds.
-
-    Where it lands is why this is not a metrics-only defect. On `/metrics` the bound gauge raises
-    and the pool series silently vanish. But the same eviction opens `_pool_for`, which is on the
-    request path, and a `RuntimeError` there is not a psycopg error: `_failure_kind` returns `None`,
-    so neither the `ConnectionError` handler nor `_database_unavailable` recognises it and the route
-    500s.
-
-    Driven with real threads, real loops, the real module dict and the real `_pool_for`, because the
-    defect *is* the interpreter switching threads mid-comprehension — a test that walks its own copy
-    of the registry would pass against the code that crashes. `setswitchinterval` only raises the
-    rate at which the switch is offered; it creates nothing.
+    Pools are keyed on their loop, and second loops in worker threads are ordinary
+    (`evals/retrieval._run_sync`, `durable/eval_drift`). Evicting ended loops' pools iterates the
+    dict, so an unlocked walk can raise `dictionary changed size during iteration` — on `/metrics`
+    silently, and in `_pool_for` on the request path as an unrecognised 500. Driven with real
+    threads, loops and the module dict; `setswitchinterval` only raises how often a switch is
+    offered.
     """
     dsn = "postgresql://chemclaw@localhost/nothing-is-connected-to"
     seed_loop = asyncio.new_event_loop()
@@ -433,11 +384,8 @@ def test_reading_this_process_pools_while_another_thread_builds_them_does_not_ra
 def test_every_walk_of_the_pool_registry_is_under_the_registry_lock() -> None:
     """The lock is only worth having if no reader of `_POOLS` is left outside it.
 
-    The race above is a probabilistic witness — it fails loudly on the code that shipped, but a
-    seventh call site added later would be caught by it only if a scrape happened to be inside that
-    exact comprehension. So the invariant is also asserted statically: every function in `db.py`
-    whose body names `_POOLS` or `_FOREIGN_POOLS` must also enter `_POOL_REGISTRY_LOCK`. This is the
-    cheap half, and it is the half that fails on the *next* one rather than the one already found.
+    The race above is probabilistic; this static half fails on the next unlocked call site: every
+    function in `db.py` naming `_POOLS` or `_FOREIGN_POOLS` must enter `_POOL_REGISTRY_LOCK`.
     """
     module = ast.parse(Path("src/chemclaw/core/db.py").read_text(encoding="utf-8"))
     unguarded: list[str] = []

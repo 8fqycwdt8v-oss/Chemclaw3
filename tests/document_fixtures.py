@@ -1,12 +1,7 @@
 """The document fixtures every parsing test builds on — one writer per format.
 
-Every fixture is **built by the format's own writer**, never a checked-in blob. A committed binary
-would make a test assert something about a file someone once produced; building the document here
-means the assertion is about our parsing, and stays honest if a library changes.
-
-Shared rather than per-file because two suites need them now — the format tests
-(`test_document_formats.py`) and the mounted-share tests (`test_document_share.py`) — and a second
-copy would be a second set of documents to keep in step with the parsers.
+Every fixture is built by the format's own writer, never a checked-in blob, so assertions are
+about our parsing. Shared by the format tests and the mounted-share tests.
 """
 
 import io
@@ -74,10 +69,8 @@ def _blank_pdf_bytes(pages: int = 2) -> bytes:
 def _text_pdf_bytes(pages: list[str]) -> bytes:
     """A PDF carrying one line of real, extractable text per page.
 
-    Assembled by hand rather than with a renderer: `pypdf` writes PDFs but cannot *typeset*, and
-    pulling in reportlab purely to generate fixtures would add a dependency the shipped code never
-    uses. This is the smallest structure that produces a genuine text layer — catalog, page tree,
-    one content stream per page holding a `BT … Tj ET` text object, and a correct xref table.
+    Assembled by hand (`pypdf` cannot typeset, and reportlab would be a test-only dependency):
+    catalog, page tree, one `BT … Tj ET` content stream per page, and a correct xref table.
     """
     objects: list[bytes] = [
         b"<</Type/Catalog/Pages 2 0 R>>",
@@ -115,10 +108,8 @@ def _text_pdf_bytes(pages: list[str]) -> bytes:
 def _with_truncated_member(container: bytes, suffix: str) -> bytes:
     """A structurally valid OOXML file whose named part is cut in half.
 
-    What an interrupted network copy leaves on a share: the zip directory is intact, so the file
-    opens, and the damage is only found when the part is actually parsed. That distinction is the
-    whole point — `openpyxl` in `read_only` mode and `python-pptx` both parse lazily, well after the
-    constructor a guard would naturally sit on.
+    What an interrupted copy leaves: the zip directory is intact, so the file opens, and the damage
+    surfaces only when the part is parsed — lazily, after the constructor.
     """
     import zipfile
 
@@ -145,17 +136,9 @@ def _unbalanced_quote_csv_bytes(field_chars: int = 200_000) -> bytes:
 def _highly_compressible_xlsx_bytes(rows: int = 20_000) -> bytes:
     """A workbook that is small on disk and large in memory — the ratio, not the size, is the point.
 
-    Every size limit upstream of the parser bounds *compressed* bytes, and OOXML is a zip. Repeated
-    identical rows compress to almost nothing, so this passes `max_file_bytes` and
-    `attachment_max_bytes` comfortably while expanding by a couple of orders of magnitude.
-
-    **The row count is chosen against the two properties its caller asserts, not for size.** The
-    test refuses the workbook against a `document_max_expanded_bytes` of 1 MB and measures
-    `ratio > 20`. Building 200,000 rows through openpyxl cost 5.5 s of the suite for margin nobody
-    used — measured: 35.7 MB expanded, ratio 22.8. 20,000 rows costs 0.43 s and gives 3.5 MB
-    expanded at ratio 21.8: still 3.5× the cap and clear of the ratio floor. 10,000 would also pass
-    (1.75 MB, ratio 21.0) and is not taken, because 5,000 measures 19.9 — one step below the
-    assertion — and a fixture one step from failing is a fixture that fails on an openpyxl release.
+    Size limits bound compressed bytes, and repeated rows compress to almost nothing. 20,000 rows
+    expands to about 3.5 MB at ratio ~22: well past the test's 1 MB cap and clear of its `ratio >
+    20` floor (5,000 rows falls below it).
     """
     book = Workbook()
     sheet = book.active

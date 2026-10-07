@@ -1,10 +1,8 @@
-"""Plate arithmetic — the part of a design that is wrong silently when it is wrong.
+"""Plate arithmetic, the part of a design that is wrong silently when it is wrong.
 
-Two things here are traps rather than formalities. `chr(ord("A") + row)` is the obvious row label
-and it produces bracket characters past Z, which are legal strings and illegal wells — a 1536-well
-plate has 32 rows, so this is reachable rather than theoretical. And `place` randomises the **run
-order** while leaving the positions row-major; a reader who assumed the opposite would pipette from
-a lookup table that does not exist, so the contract is asserted in both halves.
+Row labels must go past Z correctly (a 1536-well plate has 32 rows; `chr(ord("A") + row)` yields
+bracket characters). `place` randomises the run order and leaves positions row-major; both halves
+of that contract are asserted.
 """
 
 import pytest
@@ -149,11 +147,10 @@ def test_a_randomized_run_order_is_a_permutation_of_one_to_n() -> None:
 
 
 def test_randomizing_shuffles_the_run_order_and_never_the_positions() -> None:
-    """The documented contract, and the half a reader would otherwise assume the other way round.
+    """Randomising shuffles the run order and never the positions.
 
-    Randomising positions buys protection against an edge effect a plate map already makes visible,
-    at the cost of pipetting from a lookup table; randomising the run order is what stops a drift
-    over the session from reading as a factor effect.
+    Run-order randomisation stops session drift reading as a factor effect; position randomisation
+    would force pipetting from a lookup table.
     """
     arms = _arms(12)
     ordered = place(arms, plate_format=24)

@@ -1,8 +1,7 @@
-"""Server-backed test for the durable development-report workflow (plan 5b.5/5b.6).
+"""Server-backed tests for the durable development-report workflow.
 
-Runs the real `DevelopmentReportWorkflow` on Temporal's time-skipping server (CI; skips
-offline), proving the durable path drafts a sectioned, cited report and PR-gates it, with
-retrievers and submitter swapped via the module factories (no database or git).
+Runs the real `DevelopmentReportWorkflow` on Temporal's time-skipping server (skips offline),
+with retrievers and the writer swapped via the module factories.
 """
 
 import asyncio
@@ -62,13 +61,9 @@ class _FailingRetriever:
 def test_default_retrievers_uses_the_configured_source_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`default_retrievers` must honor `settings.data_sources`, not a hardcoded `GraphRetriever`.
+    """`default_retrievers` honours `settings.data_sources`, not a hardcoded `GraphRetriever`.
 
-    A report section's query is prose exactly like a conversational turn's, so it needs the
-    same source registry `chemclaw.agent.research_tools.gather_evidence` fans out over — a
-    deployment
-    that turns on hybrid (vector/lexical) retrieval must not have to remember to also flip it
-    here (D-018). No Temporal/Postgres needed: this is a direct call, not a workflow run.
+    A report section's query needs the same source registry as `gather_evidence`.
     """
     sentinel = _FakeRetriever()
     monkeypatch.setattr(report_workflow, "active_retrieve_sources", lambda: [sentinel])
@@ -169,16 +164,8 @@ def test_background_worker_registers_report_workflow() -> None:
 def test_a_report_run_is_not_shared_across_entitlements() -> None:
     """Two chemists with different roles must not share one report run.
 
-    `_report_id` keyed on title+sections only, which was sound while a report read the same corpus
-    for everyone — and stopped being sound the moment `retrieve_section` began reading
-    entitlement-gated sources as the requester. Alice holding the share role launches a report and
-    the gated documents land in the draft; Bob asks for the same title and sections, gets the same
-    id back from `WorkflowAlreadyStartedError`, and `job_status()` applies no actor check at all
-    (`find_past_jobs` explicitly hands people other chemists' job ids for exactly that call). Bob
-    collects a report built from a corpus his AD group excludes him from.
-
-    So this is access control living in an id, not idempotency. Two chemists with the *same*
-    entitlement still share a run, which is where the idempotency argument was true all along.
+    Sections read entitlement-gated sources as the requester and `job_status()` has no actor check,
+    so the run id carries the entitlement. Chemists with the same entitlement still share a run.
     """
     sections = [ReportSection(heading="Scope", query="what is known", memory_layer="evidence")]
 
@@ -199,14 +186,10 @@ def test_a_report_run_is_not_shared_across_entitlements() -> None:
 
 
 def test_re_asking_for_a_report_rejoins_the_run_when_the_model_rephrases_it() -> None:
-    """The idempotency this tool advertises has to survive its actual caller, which is an LLM.
+    """Re-asking for a report rejoins the run when the model rephrases it.
 
-    `_report_id` was byte-exact over model-written text, so "re-requesting the same title and
-    sections returns the existing job" held only for a byte-identical request. Measured before the
-    fix, against one base request: sections swapped -> different id, title re-cased -> different,
-    a heading re-cased -> different, a trailing space on a query -> different. Every one of those
-    starts a second unbounded multi-section research run, which is the cost
-    `CORE_EXPENSIVE_ACTIONS` gates this tool to avoid.
+    The caller is an LLM, so reordering sections, re-casing or trailing spaces must not start a
+    second expensive run.
     """
     base = ReportRequest(
         title="Route X",
@@ -231,12 +214,10 @@ def test_re_asking_for_a_report_rejoins_the_run_when_the_model_rephrases_it() ->
 
 
 def test_canonicalising_a_report_id_does_not_reach_the_entitlement_key() -> None:
-    """The canonicalisation must stop at the free text, or it undoes the test above it.
+    """Canonicalisation stops at the free text and never folds the requester or roles.
 
-    Folding case over `requested_by` or the roles would merge two spellings of a principal or a
-    role name into one run — which is exactly the cross-user merge that putting them in the id
-    prevents. `memory_layer` is a closed set and is left exact for the same reason: a fold there
-    could only ever collapse two layers, never rescue a typo.
+    Folding those would merge two principals into one run; `memory_layer` is a closed set and
+    stays exact too.
     """
     sections = [ReportSection(heading="Scope", query="what is known", memory_layer="evidence")]
 
@@ -262,22 +243,11 @@ def test_canonicalising_a_report_id_does_not_reach_the_entitlement_key() -> None
 
 
 async def test_a_report_carries_its_requester_into_retrieval() -> None:
-    """The gap: a gated source contributed nothing to a report, and the draft said so nowhere.
+    """A report carries its requester into retrieval.
 
-    `retrieve_section` runs in an activity, where no identity contextvar is set unless something
-    puts one there. `ShareDocumentRetriever._entitled()` reads the ambient actor's roles and — quite
-    correctly — declines when there is no actor, returning `[]` without ever reaching the index.
-    `gather_section` only concatenates, so that outcome is indistinguishable from a source with no
-    matches, and `retrieval_failed` stays False. The chemist received a draft that read as a
-    complete sweep of every internal source while an entitlement-gated share had been skipped in
-    silence.
-
-    `ReportRequest` was the one user-launched durable job input with no actor field at all
-    (`ConnectorJobInput.requested_by` and `TemplateRunInput.requested_by` are both `min_length=1`),
-    and `request_development_report` called `require_actor()` and threw the result away.
-
-    Asserted at the activity, because that is the only place the identity has to be true — a value
-    that reaches the workflow and stops there is exactly the defect.
+    Activities have no ambient identity, and a gated retriever declines silently without one, so
+    the draft would read as a complete sweep. Asserted at the activity, the only place the identity
+    has to be true.
     """
     seen: list[tuple[str, frozenset[str]]] = []
 
@@ -298,28 +268,14 @@ async def test_a_report_carries_its_requester_into_retrieval() -> None:
             )
         )
 
-    # The *actor* crosses into the activity (so a gated source is not silently skipped for lack of
-    # any identity, and the run is attributed), but the *roles* do NOT: a workflow payload is
-    # relayed data, not a verified claim, and binding `requested_roles` from it would let anyone who
-    # can enqueue this workflow read entitlement-gated sources as any role (security review). Roles
-    # bind to the empty set — fail-closed — so an entitlement-gated share now stays skipped for a
-    # defensible reason rather than a forgeable one. Restoring role-scoped durable retrieval needs a
-    # signed payload (a Temporal codec), a separate decision.
+    # The actor crosses into the activity but the roles do not: a workflow payload is relayed data,
+    # not a verified claim, so roles bind to the empty set (fail closed). Role-scoped durable
+    # retrieval would need a signed payload.
     assert seen == [("alice@corp", frozenset())]
 
 
 async def test_a_section_with_no_requester_stamps_no_identity() -> None:
-    """Absent means absent — the fan-out payload must not acquire a synthetic actor.
-
-    The counterweight to the test above: stamping a requester's roles widens what the run can read,
-    so it must happen only when there *is* a requester.
-
-    Scoped to `SectionRequest`, not `ReportRequest`, and the distinction matters. An earlier version
-    of this test claimed to cover "a scheduled report" — there is no scheduled-report launcher, and
-    `require_actor()` never returns `""`, so that branch was unreachable and the test proved nothing
-    about production. `ReportRequest.requested_by` is now `min_length=1`. What remains true is that
-    the activity must not invent an identity when handed a payload without one.
-    """
+    """A section with no requester stamps no identity; the activity must not invent one."""
     seen: list[str] = []
 
     async def _record(section: ReportSection, retrievers: object) -> SynthesizedSection:
@@ -343,22 +299,11 @@ async def test_a_section_with_no_requester_stamps_no_identity() -> None:
 def test_a_dropped_fan_out_child_still_appears_in_the_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A gap is shown, never silently missing — whatever exception the child happened to raise.
+    """A dropped fan-out child still appears in the draft as a gap.
 
-    `ReportSectionWorkflow` degrades gracefully for the *one* failure it catches, `ActivityError`.
-    Every other way a child can end — its `execution_timeout` at `fan_out_child_timeout_seconds`,
-    a cancellation, a failure raised outside the `execute_activity` call — is dropped by `fan_out`,
-    which is its documented contract ("a child that fails after its retries is logged and
-    omitted") and returns a *shorter* list. The assembled draft then omitted the section entirely
-    while the summary said "Drafted 'X' with N section(s)" for the smaller N — so a chemist reads a
-    report whose missing section is indistinguishable from one nobody asked for.
-
-    (That sentence named "a reviewer at the PR-gate" until D-2026-09-05 deleted the gate, which
-    makes the defect *worse* rather than milder: the report is readable the moment it is written,
-    so there is no review step between the omission and the person acting on it.)
-
-    Driven by handing the workflow exactly what `fan_out` hands it — a short list — because that is
-    the whole input the reconciliation has to work from.
+    `fan_out` omits a child that ends in anything other than a caught `ActivityError` and returns a
+    shorter list; the draft must show the missing section rather than read as complete. Driven by
+    handing the workflow that short list.
     """
     requested = [
         ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
@@ -408,10 +353,8 @@ def test_a_dropped_fan_out_child_still_appears_in_the_draft(
 async def test_forged_payload_roles_do_not_reach_the_gate() -> None:
     """A privileged role named in the workflow payload does not satisfy authorization.
 
-    The core of the durable privilege-escalation finding: `authz._has_required_role` reads the
-    ambient roles contextvar, and the report/template/interceptor binders used to fill it from an
-    untrusted payload field. Anyone able to enqueue the workflow could then claim any role. Binding
-    is now empty regardless of the payload.
+    Binders leave the ambient roles empty regardless of the payload, so enqueueing a workflow cannot
+    claim a role.
     """
     from chemclaw.core.identity_context import get_current_roles
 
@@ -436,24 +379,11 @@ async def test_forged_payload_roles_do_not_reach_the_gate() -> None:
 
 
 def test_a_report_run_carries_the_turn_that_asked_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The correlation id reaches both activity boundaries a report is read through.
+    """The correlation id reaches both activity boundaries and the outbound report message.
 
-    `ReportRequest` and `SectionRequest` carried `requested_by` and no correlation id, so
-    `retrieve_section`'s log lines and the PR-gated draft `propose_report` opens both booked an
-    empty one — a durable run a chemist launched from a turn, joinable to the person but not to the
-    question. `durable/interceptor.py` binds the three ids from an activity's *own* arguments, by
-    field name off a model and by parameter name off the signature, so what this asserts is the
-    whole wiring: the id is on the payload the fan-out hands each child, and on the argument list
-    `propose_report` is invoked with.
-
-    Asserted through `activity_context` rather than by reading the fields, because the field being
-    present is not the property — the property is that the worker's ambient context ends up holding
-    it, and that is the function the interceptor uses to decide.
-
-    The outbound copy is the third boundary and is asserted here rather than in a test of its own,
-    because it is the same claim about the same run: a `report` message that reached a chemist's
-    channel without the id would be joinable to the person and not to the question, which is the
-    defect this test was written for.
+    `durable/interceptor.py` binds ids from an activity's own arguments, so this asserts the id is
+    on each child's payload and on the writer's arguments, read through `activity_context`, which is
+    what the interceptor uses.
     """
     launched: list[SectionRequest] = []
 
@@ -506,12 +436,7 @@ def test_a_report_run_carries_the_turn_that_asked_for_it(monkeypatch: pytest.Mon
 
 
 def test_a_report_launched_outside_a_turn_stays_unjoined() -> None:
-    """Absent means absent: no correlation id is invented for a run that has no turn.
-
-    The counterweight, and the reason `request_development_report` spells `or ""` rather than
-    minting one — an unjoined run that carries a fabricated id looks joined to every reader of the
-    log, which is worse than the empty field it replaced.
-    """
+    """A report launched outside a turn stays unjoined; a fabricated id would look joined."""
     request = SectionRequest(
         section=ReportSection(heading="Scope", query="what is known", memory_layer="evidence")
     )
@@ -519,19 +444,10 @@ def test_a_report_launched_outside_a_turn_stays_unjoined() -> None:
 
 
 def test_the_old_activity_name_is_still_registered_and_still_writes() -> None:
-    """A rename that drops the old Temporal name orphans every in-flight history.
+    """The old activity name is still registered and still writes.
 
-    `propose_report` proposed nothing — `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
-    removed the gate and the queue behind it — but the string is what a running
-    `DevelopmentReportWorkflow` history has *already scheduled*. A worker that no longer offers it
-    fails the activity with `NotFoundError` and the workflow retries it forever, so the rename is
-    two releases: this one offers both names and schedules the new one, and a later one deletes the
-    alias after `background-jobs` has drained
-    (`D-2026-09-14-an-activity-name-is-a-wire-name-so-it-is-renamed-in-two-releases`).
-
-    Both halves asserted, because each fails differently: the old name missing from the worker's
-    activity set is the orphaned history, and the old name present but not writing is a replayed
-    task that reports success and records nothing.
+    In-flight histories have already scheduled `propose_report`; dropping it would retry them
+    forever, so a rename takes two releases. Both registration and the write are asserted.
     """
     from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES
     from chemclaw.durable.registry import temporal_name

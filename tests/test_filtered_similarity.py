@@ -1,14 +1,8 @@
-"""A structural hit you cannot qualify is a structural hit you cannot use (D-170).
+"""Filters narrow structural reaction similarity, applied before truncation.
 
-`FingerprintReactionRetriever` ignored `filters` entirely, so "similar reactions, but only the
-ones on this campaign" had no answer: the retriever handed back the ten nearest neighbours
-whatever they were, and every other retriever in the same sweep had already narrowed itself.
-
-The part worth pinning is *where* the filter is applied. The fingerprint index stores bits and a
-label and knows nothing about notes, so the filter can only run after the neighbours come back —
-and running it on the returned page would mean one unwanted neighbour costs a wanted one. It has
-to search deeper first. That property is invisible in a small fixture unless a test builds a
-corpus where the wanted hits sit below the page boundary, which is what this one does.
+The fingerprint index knows nothing about notes, so the filter runs after neighbours come back;
+filtering the returned page would let an unwanted neighbour cost a wanted one, so the retriever
+searches deeper first. The fixture puts the wanted hits below the page boundary to show it.
 """
 
 import pytest
@@ -52,11 +46,10 @@ async def _indexed(reactions: dict[str, str]) -> InMemoryFingerprintStore:
 
 
 async def test_an_unfiltered_search_is_unchanged_including_the_unstored_record() -> None:
-    """No filter means no corpus read and no drop — the D-018 pending-note citation survives.
+    """An unfiltered search is unchanged, including a hit whose record is not stored yet.
 
-    That citation is deliberate: the fingerprint index is written at ingestion while the note is
-    merged separately, so a hit whose note is still in review yields a reference `kg-validate`
-    flags on the report PR. Narrowing must not quietly delete a behaviour nobody asked to change.
+    The fingerprint index is written at ingestion separately from the record, so such a hit still
+    yields a citation.
     """
     store = await _indexed({"r1": _QUERY})
     retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
@@ -84,11 +77,9 @@ async def test_a_type_filter_drops_a_hit_whose_record_is_not_that_type() -> None
 
 
 async def test_a_filtered_hit_whose_record_is_missing_is_dropped() -> None:
-    """The one place the pending-note citation does not apply, and deliberately.
+    """A filtered hit whose record is missing is dropped.
 
-    A filter says "only notes that are X". A note nobody can read cannot be *shown* to be X, so
-    serving it would answer a narrowed question with an unnarrowed hit — the same rule an undated
-    note fails a date window under.
+    A record nobody can read cannot be shown to match the filter.
     """
     store = await _indexed({"r1": _QUERY})
     retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
@@ -98,12 +89,10 @@ async def test_a_filtered_hit_whose_record_is_missing_is_dropped() -> None:
 async def test_the_filter_is_applied_before_truncation_not_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The property the whole design turns on, and the one a small fixture would never reveal.
+    """The filter is applied before truncation, not after.
 
-    Twelve indexed reactions, a two-hit page, and the only tagged reaction sits *outside* the two
-    nearest neighbours. Filtering the returned page would find nothing at all; searching deeper
-    first and then narrowing finds it. As the index gets better at surfacing near-duplicates, the
-    naive order returns *fewer* results, which is exactly backwards.
+    Twelve reactions, a two-hit page, and the only tagged reaction outside the two nearest:
+    filtering the page finds nothing, searching deeper then narrowing finds it.
     """
     # Near-identical esterifications, so all twelve crowd the top of the ranking together.
     reactions = {f"r{i}": f"CCO.CC(=O)O>>CCOC(C)=O.O.{'[Na+].[Cl-].' * i}O" for i in range(12)}

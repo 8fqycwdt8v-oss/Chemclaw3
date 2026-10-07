@@ -1,13 +1,8 @@
 """Every deterministic verdict `checks.py` produces, each proven in both directions.
 
-**A check that can only pass is not a check**, so every one below is exercised against a design it
-lets through *and* a design it stops. That is the property the whole module is for: `checks.py`
-exists rather than a paragraph in a `SKILL.md` precisely because a prompt asking for evidence can be
-ignored on the turn where the model already has an answer it likes.
-
-`coverage_is_stated` is the one exception and it is asserted as such: it is a `note` that never
-fails, so what is proven there is that both of its branches are reached and that neither is a
-refusal — an assertion that fails whoever quietly promotes it to a blocker.
+A check that can only pass is not a check, so each is exercised against a design it passes and
+one it stops. `coverage_is_stated` is a `note` that never fails; both its branches are reached and
+neither is a refusal.
 """
 
 import pytest
@@ -122,13 +117,10 @@ def test_components_resolve_blocks_a_structure_rdkit_cannot_read() -> None:
 
 
 def test_components_resolve_reports_an_unresolved_name_as_a_failed_warning() -> None:
-    """A name with no structure is a finding a chemist fixes in one word, not a refusal.
+    """An unresolved component name is a failed warning, not a refusal.
 
-    **Failed, not passing, and the old name of this test was the defect.** `render_markdown` and
-    `summarise` both list only failed checks, so a passing warning put "checked and fine" in front
-    of a reader about a species nobody resolved — the sentence never reached the page.
-    `_unreadable`'s docstring describes that exact failure as fixed; it was live in four other
-    branches of this file.
+    `render_markdown` and `summarise` list only failed checks, so a passing warning would hide the
+    unresolved species from the reader.
     """
     design = _design(
         request=_request(components=[RequestedComponent(name_as_written="the new ligand")])
@@ -175,10 +167,9 @@ def test_charge_is_consistent_passes_a_table_whose_equivalents_agree() -> None:
     assert verdict.passed and verdict.severity == "blocker"
 
 
-#: `(label, limiting mmol, the line's equivalents, the mmol a chemist writes, does it pass)`.
-#: Four scales and five loadings, each verdict the one a chemist would give reading the table. This
-#: is the sweep `_agreement_tolerance` cites, and it exists because that function's previous rule
-#: was argued from one worked example whose arithmetic was wrong.
+#: `(label, limiting mmol, the line's equivalents, the mmol a chemist writes, does it pass)`: four
+#: scales and five loadings, each with the verdict a chemist would give. `_agreement_tolerance`
+#: cites this sweep.
 _AGREEMENT_SWEEP: list[tuple[str, float, float, float, bool]] = [
     ("catalyst 5 mol% of 1.37 mmol, two decimals", 1.37, 0.05, 0.07, True),
     ("the same catalyst with one digit too many", 1.37, 0.05, 0.10, False),
@@ -201,12 +192,8 @@ _AGREEMENT_SWEEP: list[tuple[str, float, float, float, bool]] = [
 def test_the_agreement_tolerance_over_the_scales_a_bench_uses() -> None:
     """Every row of the sweep gets the verdict a chemist would give.
 
-    **Row two is the one this test was written for.** `_agreement_tolerance` used to read the
-    written precision back out of the figure with `Decimal(repr(…))`, and a float carries no
-    trailing zero — so a catalyst written `0.10` against an implied `0.0685` got half a unit in the
-    *first* decimal as slack, and a 46% error passed a blocker. The function's own docstring
-    asserted that same line fails by six times the slack. One worked example is not a sweep, which
-    is why this is one.
+    A float carries no trailing zero, so the tolerance cannot be read back from the written figure's
+    precision; row two (`0.10` against an implied `0.0685`) must fail.
     """
     wrong = []
     for label, reference_mmol, equivalents, written_mmol, expected in _AGREEMENT_SWEEP:
@@ -310,11 +297,9 @@ def test_charge_is_consistent_tolerates_a_rounded_amount_inside_two_percent() ->
 
 
 def test_charge_is_consistent_warns_when_the_limiting_reagent_has_no_amount() -> None:
-    """No amount means no equivalents can become a weight — a warning, not a refusal.
+    """No limiting-reagent amount is a failed warning, not a refusal.
 
-    A **failed** warning: this branch returns before the disagreement scan, so a table whose lines
-    contradict each other is reported as checked-and-fine, and a passing verdict is one no
-    rendering path shows.
+    This branch skips the disagreement scan, so passing would present an unchecked table as checked.
     """
     verdict = charge_is_consistent(
         _design(base={"charge": [ChargeLine(component="a", limiting=True).model_dump()]})
@@ -428,14 +413,11 @@ def test_factor_levels_declared_exempts_a_control_arm() -> None:
 
 
 def test_factor_levels_declared_blocks_a_control_arm_naming_a_factor_nothing_declares() -> None:
-    """The exemption is from the factor *space*, never from the factor *vocabulary*.
+    """A control arm naming an undeclared factor is blocked.
 
-    `render`'s run sheet builds its columns from `design.factors`, so a level filed under a name no
-    factor declares is stored in the document and read by nothing: a negative control carrying
-    `no_catalyst="omitted"` rendered byte for byte like the arm beside it apart from the
-    `*(negative)*` tag, and the instruction that makes it a control appeared nowhere on the page
-    the chemist runs from. That is the failure `render.py`'s own comments describe for the
-    atmosphere and pressure columns.
+    The exemption is from the factor space, never the factor vocabulary: the run sheet's columns
+    come from `design.factors`, so a level under an undeclared name never reaches the page the
+    chemist runs from.
     """
     design = _design(
         factors=_two_factors(),
@@ -684,13 +666,10 @@ def test_evidence_present_counts_every_grounding_kind_as_precedent(kind: str) ->
 
 
 def test_a_citation_that_names_nothing_to_open_does_not_count() -> None:
-    """Two sentences are not two citations, and the blocker is what proves it.
+    """A citation that names nothing to open does not count.
 
-    The one that matters: a grounding kind with no `ref` and a `tool` kind with no `tool` name are
-    both prose a model can write about work it did not do. Before this they cleared the blocker
-    between them — measured — which made the ADR's central claim ("use the record and the tools is
-    a property of the code") false on the only turn it has to hold, the one where the model has an
-    answer it likes.
+    A grounding kind with no `ref`, or a `tool` kind with no tool name, is prose a model can write
+    about work it did not do, so it must not clear the evidence blocker.
     """
     verdict = evidence_present(
         _design(
@@ -833,11 +812,10 @@ def test_quantities_are_plausible_flags_a_zero_equivalents_line() -> None:
 
 
 def test_a_kilo_lab_charge_is_not_a_unit_mistake_when_the_scale_says_so() -> None:
-    """The bench bands described a discovery chemist and called a 20 kg campaign an error.
+    """A kilo-lab charge is not a unit mistake when the scale says so.
 
-    `data/evals/probes/process-chemistry.yaml`'s opening probe is 20 kg in a 250 L reactor. Every
-    charge on it cleared 1 kg and 20 L, so this warning fired on correct input — which is the one
-    kind of warning that teaches a chemist to stop reading the two checks beside it.
+    Bench-only bands would warn on correct process-scale input (e.g. 20 kg in a 250 L reactor),
+    which teaches chemists to ignore the neighbouring checks.
     """
     charge = [
         ChargeLine(component="aryl bromide", limiting=True, mass_mg=20_000_000.0).model_dump(),
@@ -920,13 +898,9 @@ def test_coverage_is_stated_reports_a_reduced_design_and_asks_what_is_confounded
         arms=[ProtocolArm(arm_id="A1", levels={"ligand": "XPhos", "base": "K3PO4"})],
     )
     verdict = coverage_is_stated(design)
-    # **Passing, and the sentence reaches the page anyway.** This check had no `_fail` in any
-    # branch, and the first fix for that made it fail — which was the wrong half. A fractional
-    # factorial is a deliberate, textbook design that `generate_screening_design` emits, and
-    # nothing in `ExperimentDesign` records the confounding statement this asks for, so every
-    # correct reduced plate would have carried a failed check it could not clear. The half that
-    # was right is in `render_markdown`, which now lists every `note` rather than failed checks
-    # only: the sentence reaches the reader, and the check stays a check a reader believes.
+    # Passing, and the sentence still reaches the page: a fractional factorial is a deliberate
+    # design and nothing records its confounding statement, so failing would be uncloseable.
+    # `render_markdown` lists every `note`, not only failed checks.
     assert verdict.severity == "note" and verdict.passed
     assert "reduced design: 1 of 4" in verdict.detail
     assert "confounded" in verdict.detail
@@ -967,22 +941,15 @@ def test_coverage_is_stated_counts_neither_controls_nor_replicates_as_coverage()
 
 
 def _check_ids() -> tuple[str, ...]:
-    """Every check id `_CHECKS` declares, in its declared order.
-
-    Read off `_CHECKS` rather than through a public `check_ids()`, which was a function whose only
-    caller was this file — its docstring named "a UI legend" as the other one, and the UI is
-    `Chemclaw3_ui`, which cannot import a Python function. `_CHECKS` is the declaration itself.
-    """
+    """Every check id `_CHECKS` declares, in its declared order, read off the declaration itself."""
     return tuple(check.__name__ for check in _CHECKS)
 
 
 def test_check_ids_matches_what_run_checks_actually_produces() -> None:
-    """Both directions: no id is declared that nothing produces, and none is produced undeclared.
+    """Declared check ids equal what `run_checks` produces, at both stages.
 
-    A stored verdict is read row by row against the declared set, so a check renamed on one side
-    only would leave a row nothing explains — or a declared id nothing ever fills. Asserted at both
-    stages, because a stage that quietly dropped a check would show a shorter list to a chemist who
-    has no way to tell that from a check that passed.
+    Stored verdicts are read against the declared set, and a silently dropped check would look like
+    a shorter list to a chemist who cannot tell it from a pass.
     """
     designs = (_design(), _protocol(), _design(evidence=_cited(), request=_request(mode="screen")))
     stages: tuple[CheckStage, ...] = ("request", "protocol")
@@ -1098,13 +1065,10 @@ def test_an_ordinary_structured_ask_produces_no_blocker_at_the_request_stage() -
 
 
 def test_naming_the_solvent_you_want_replaced_is_not_a_contradiction() -> None:
-    """The commonest process-chemistry ask there is, which used to be permanently unstorable.
+    """Naming the solvent you want replaced is not a contradiction.
 
-    A chemist getting out of DMF names DMF as the incumbent and forbids it in one sentence. Reading
-    the *ask's* own components as species the design uses made that a `blocker` — "the design uses
-    reagents the request forbids: DMF" — over a design whose solvent is 2-MeTHF, and
-    `draft_experiment_protocol` raises on any blocker, so there was no way to state both the
-    incumbent and the exclusion.
+    A chemist moving off DMF names it as the incumbent and forbids it. Only the design's own species
+    are checked against the forbidden list, not the ask's components.
     """
     ask = _design(
         request=_request(
@@ -1133,12 +1097,10 @@ def test_a_design_that_actually_runs_in_the_forbidden_solvent_is_still_refused()
 
 
 def test_a_rounded_catalyst_line_is_not_a_blocker() -> None:
-    """The tolerance has to allow the rounding a chemist actually writes.
+    """A rounded catalyst line is not a blocker.
 
-    250 mg of a 182 g/mol aryl halide is 1.37 mmol and 5 mol% Pd is 0.0685 mmol, which a chemist
-    writes `0.07`. A flat 2% of the line's own figure made that a *blocker* — and a blocker refuses
-    the draft outright. Swept across the usual scales and loadings, 4 of 18 correct tables were
-    refused, every one a normal catalyst or ligand line at a non-round limiting scale.
+    5 mol% of 1.37 mmol is 0.0685 mmol, which a chemist writes `0.07`; the tolerance must allow the
+    rounding chemists actually write.
     """
     design = _design(
         base={
@@ -1191,11 +1153,10 @@ def test_a_charge_table_that_really_disagrees_is_still_a_blocker() -> None:
 
 
 def test_a_screen_that_misses_half_its_grid_does_not_report_a_full_one() -> None:
-    """Counting arms compared a number to a product of level counts.
+    """A screen that misses half its grid does not report a full one.
 
-    Four arms covering two of four declared combinations reported "full grid: 4 of 4 combinations",
-    and `render_markdown` prints that sentence to the chemist. A declared level that is never run is
-    exactly what this check exists to make somebody say out loud.
+    Coverage compares the combinations run against the declared grid, not an arm count against a
+    product of level counts.
     """
     solvent = Factor(
         name="solvent",
@@ -1273,12 +1234,10 @@ def _charge(*lines: dict[str, object]) -> ExperimentDesign:
 
 
 def test_limiting_is_limiting_names_the_line_that_actually_runs_out_first() -> None:
-    """A self-consistent table can name the wrong reference, and every yield doubles.
+    """`limiting_is_limiting` names the line that actually runs out first.
 
-    `charge_is_consistent` says the reference sits at 1.0 equivalents and that the amounts agree
-    with the equivalents. Neither says the reference is the *minimum*, so acid at 1.0 eq / 1.0 mmol
-    marked limiting beside an amine at 0.5 eq / 0.5 mmol passes with no blockers while the amine
-    caps the reaction at half the scale.
+    `charge_is_consistent` cannot see that the marked reference is not the minimum, which caps the
+    reaction and inflates every yield.
     """
     verdict = limiting_is_limiting(
         _charge(
@@ -1297,11 +1256,9 @@ def test_limiting_is_limiting_names_the_line_that_actually_runs_out_first() -> N
 
 
 def test_limiting_is_limiting_says_so_when_it_weighed_nothing() -> None:
-    """`role` defaults to `UNKNOWN`, so on an unlabelled table this check compares nothing.
+    """`limiting_is_limiting` says so when it compared nothing.
 
-    It reported that as "'acid' is the smallest stoichiometric charge" — a claim about a comparison
-    that never happened, over the very table above with its roles left at the default. A passing
-    verdict has to say what it looked at, or a chemist reads a clearance that was never granted.
+    `role` defaults to `UNKNOWN`, and a passing verdict must say what it looked at.
     """
     verdict = limiting_is_limiting(
         _charge(
@@ -1359,11 +1316,10 @@ def test_limiting_is_limiting_ignores_a_sub_stoichiometric_catalyst() -> None:
 
 
 def test_no_documented_failure_passes_when_the_corpus_knows_nothing_against_the_design() -> None:
-    """The ordinary case, and the one a caller that never looked also produces.
+    """No documented failure passes when the corpus knows nothing against the design.
 
-    Those two are indistinguishable here by construction, which `run_checks` states rather than
-    hides: the check decides over what it is handed, and whether anybody asked the corpus is the
-    caller's honesty to keep.
+    Indistinguishable from a caller that never looked, by construction; asking the corpus is the
+    caller's duty.
     """
     verdict = no_documented_failure(_protocol(), ())
     assert verdict.passed and verdict.severity == "note"
@@ -1371,12 +1327,10 @@ def test_no_documented_failure_passes_when_the_corpus_knows_nothing_against_the_
 
 
 def test_no_documented_failure_names_what_the_corpus_already_recorded() -> None:
-    """The gap the audit called the most concrete in the system.
+    """`no_documented_failure` names the note the corpus already recorded.
 
-    `forbidden_absent` tests what the chemist *typed*; nothing tested what the corpus *knows*, so a
-    design could cite a playbook and repeat a documented failure sitting in the same graph. The
-    refusal has to name the note, because "something failed before" a chemist cannot open is not
-    evidence.
+    `forbidden_absent` tests what the chemist typed; this tests what the corpus knows, and the
+    refusal must name a note the chemist can open.
     """
     failures = [RecordedFailure(id="failure-abc123", summary="the catalyst died above 60 C")]
     verdict = no_documented_failure(_protocol(), failures)
@@ -1386,13 +1340,10 @@ def test_no_documented_failure_names_what_the_corpus_already_recorded() -> None:
 
 
 def test_a_recorded_failure_is_a_note_rather_than_a_blocker() -> None:
-    """Evidence, not a verdict — and blocking would teach people to stop citing their evidence.
+    """A recorded failure is a note rather than a blocker.
 
-    A single failed run is not a refutation of a general rule (`failure_note` carries a
-    `confidence` for exactly that), the same reagent appears in unrelated routes, and re-running
-    something that failed in order to characterise it is ordinary work. Asserted through
-    `blockers()` because the severity field alone would not catch a future change that kept the
-    label and raised the consequence.
+    One failed run does not refute a general rule, and blocking would discourage citing evidence.
+    Asserted through `blockers()`, so raising the consequence under the same label fails.
     """
     failures = [RecordedFailure(id="failure-abc123", summary="it did not hold")]
     checks = run_checks(_protocol(), failures=failures)
@@ -1417,12 +1368,7 @@ def test_many_failures_are_summarised_rather_than_listed_entire() -> None:
 
 
 def test_the_failure_check_runs_at_the_request_stage_too() -> None:
-    """A structured ask already names reagents and can already cite evidence.
-
-    So a failure bearing on it is knowable before there is a procedure, which is the moment it is
-    cheapest to act on — and this is the only protocol-stage check that is not deferred, which is a
-    deliberate exception rather than an oversight.
-    """
+    """The failure check runs at the request stage too, where acting on it is cheapest."""
     failures = [RecordedFailure(id="failure-abc123", summary="it did not hold")]
     checks = run_checks(_design(), stage="request", failures=failures)
     verdict = {check.check_id: check for check in checks}["no_documented_failure"]
@@ -1434,12 +1380,10 @@ def test_the_failure_check_runs_at_the_request_stage_too() -> None:
 
 
 def test_precedent_consulted_is_silent_when_nothing_is_offered() -> None:
-    """The passing text says nothing was *offered*, not that no precedent exists.
+    """`precedent_consulted` says nothing was offered, not that no precedent exists.
 
-    Three different things produce an empty list — nobody looked, the index is empty or
-    mid-rebuild, the record genuinely holds nothing like this — and `FingerprintSearch` exists
-    because a chemist told "no precedent" over an unindexed corpus is worse than one told nothing.
-    A check cannot re-derive that from a list, so it must not claim the negative.
+    An empty list can mean nobody looked, the index is empty, or the record holds nothing similar;
+    the check cannot tell which.
     """
     verdict = precedent_consulted(_protocol(), ())
 
@@ -1463,12 +1407,10 @@ def test_precedent_consulted_names_the_runs_the_design_did_not_cite() -> None:
 
 
 def test_uncited_precedent_is_a_note_rather_than_a_blocker() -> None:
-    """A Tanimoto neighbour can share a scaffold and nothing else.
+    """Uncited precedent is a note rather than a blocker.
 
-    The chemist may have read it and judged it inapplicable, and a deliberate re-run under changed
-    conditions is ordinary work — so blocking on it would teach people to cite noise. Asserted
-    through `blockers()`, because the severity field alone would not catch a future change that
-    kept the label and raised the consequence.
+    A Tanimoto neighbour may share only a scaffold, and a deliberate re-run is ordinary. Asserted
+    through `blockers()`.
     """
     hits = [UncitedPrecedent(id="ord-9f2", similarity=0.88)]
 
@@ -1494,12 +1436,10 @@ def test_many_precedents_are_summarised_rather_than_listed_entire() -> None:
 
 
 def test_the_precedent_check_never_writes_into_evidence() -> None:
-    """The whole reason this is advisory: a citation is a claim, a hit is a thing that exists.
+    """The precedent check never writes into `evidence`.
 
-    Writing a hit into `evidence` would forge the first out of the second and leave
-    `evidence_present` passing on a design nobody grounded — a check satisfying itself, which is
-    worse than the gap it closes. Asserted over the design object, because "advisory" is a property
-    of what is *not* mutated and no assertion about the returned check could see it.
+    A hit is not a citation; writing it would let `evidence_present` pass on a design nobody
+    grounded. Asserted over the design object, since advisory means not mutated.
     """
     design = _protocol()
     before = list(design.evidence)
@@ -1510,25 +1450,11 @@ def test_the_precedent_check_never_writes_into_evidence() -> None:
 
 
 def test_every_run_checks_caller_supplies_the_corpus_the_corpus_checks_need() -> None:
-    """A caller that skips the lookup publishes a clean bill the corpus never gave.
+    """Every `run_checks` caller supplies the corpus inputs the corpus checks need.
 
-    `run_checks`' own docstring says that in as many words, and the route added in the same merge
-    was such a caller: `api/routes/protocols.post_revision` passed neither `failures=` nor
-    `precedent=`. Measured on one document, the two shapes side by side —
-
-        no_documented_failure  agent: FAIL "the corpus records 1 failure(s) bearing on this design"
-                               route: PASS "no recorded failure bears on this design"
-        precedent_consulted    agent: FAIL "the record holds 1 similar run(s) ... does not cite"
-                               route: PASS "no uncited precedent was offered for this design"
-
-    — so a chemist fixing a typo on a flagged design republished it clean and overwrote the
-    verdict. `post_revision`'s docstring exists to refuse exactly that ("the two halves of the
-    surface would grade the same document differently depending on who wrote it").
-
-    Read off the source rather than driven, because the two call shapes differ only in arguments a
-    unit test would have to supply itself — asserting on a corpus this test built would prove the
-    fixture, not the wiring. The keyword names are what the defect was, so they are what is
-    asserted; `supplied` in `run_checks` is the single place that says which those are.
+    A caller omitting `failures=` or `precedent=` publishes a clean verdict the corpus never gave,
+    so the route and the agent tool would grade one document differently. Read off the source
+    because the keyword wiring is the property; `supplied` in `run_checks` names those keywords.
     """
     import ast
     from pathlib import Path
@@ -1558,16 +1484,9 @@ def test_every_run_checks_caller_supplies_the_corpus_the_corpus_checks_need() ->
 
 
 def test_the_precedent_check_runs_at_the_request_stage_too() -> None:
-    """The second half of `_REQUEST_STAGE`, which nothing drove.
+    """`precedent_consulted` runs at the request stage too.
 
-    `test_the_failure_check_runs_at_the_request_stage_too` holds `no_documented_failure`; nothing
-    held `precedent_consulted`. Driven: cutting `_REQUEST_STAGE` back to
-    `{"components_resolve", "no_documented_failure"}` left all 190 tests across the three protocol
-    files green while the precedent check silently stopped running on `structure_experiment_request`
-    — the stage `_REQUEST_STAGE`'s own comment calls "the moment it is cheapest to read".
-
-    A `note`, not a blocker, for the reason `precedent_consulted` is always a note: an offer the
-    chemist may decline is not a reason to refuse an ask.
+    It is a `note`: an offer the chemist may decline is not a reason to refuse an ask.
     """
     design = ExperimentDesign(request=_request(reaction_smiles="CCO.CC(=O)O>>CCOC(C)=O"))
     precedent = [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="a near-identical run")]

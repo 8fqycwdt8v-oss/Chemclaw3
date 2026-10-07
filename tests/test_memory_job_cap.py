@@ -1,15 +1,9 @@
-"""What one synthesis run may propose is bounded, and the bound does not lose the tail (D-161).
+"""What one synthesis run may propose is bounded, and the bound does not lose the tail.
 
-The three memory jobs rescan the whole corpus daily with no cursor and had no ceiling on what a
-single run could propose. In practice they stay quiet, on three accidents rather than any rule: an
-id anchored on a cluster's smallest member reuses its branch, a byte-identical note produces no
-diff and no push, and force-push-with-lease updates in place. Nothing *bounded* them, so a large
-corpus import would have opened a PR per cluster on the first night.
-
-The interesting half is what a plain cap would have done instead. The builders are deterministic
-over the corpus, so `notes[:cap]` proposes the same first N every night and the rest are proposed
-never — trading a visible flood for silently lost knowledge. These tests pin the rotation that
-makes the cap a delay rather than a deletion.
+The memory jobs rescan the whole corpus with no cursor, so a large import could propose a note per
+cluster in one run. The builders are deterministic, so `notes[:cap]` would propose the same first
+N every run and the rest never; these tests pin the rotation that makes the cap a delay rather
+than a deletion.
 """
 
 from datetime import UTC, datetime

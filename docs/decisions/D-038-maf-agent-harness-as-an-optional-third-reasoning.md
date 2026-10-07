@@ -1,5 +1,7 @@
 # D-038 — MAF Agent Harness as an optional third reasoning backbone
 
+**Superseded-by:** [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
+
 The reasoning layer (§1) had two building blocks — plain `Agent` and (planned) MAF graph
 workflows. The installed `agent-framework-core` 1.11 ships a third, the **Agent Harness**
 (`create_harness_agent`): a self-managed todo list (`TodoProvider`) + explicit plan/execute

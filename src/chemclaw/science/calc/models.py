@@ -1,34 +1,8 @@
 """The shapes a calculation is stored, reconstructed and carried in — and nothing else.
 
-The physics left this repository in `D-2026-08-16-the-physics-leaves-the-cache-stays`: the engines
-live in `Chemclaw3-mcp`'s `servers/calc`, exposed as individually-keyed primitives. What stayed is
-the D-011 cache, the calibration ledger and the orchestration — and a cache cannot keep what it
-cannot reconstruct. **These models are the reconstruction**, and they are also the Temporal wire
-types the five durable jobs return, whose field-for-field shape is pinned by workflow histories
-already in flight.
-
-**Why one module rather than twenty stripped ones.** The files these came from were named for the
-*programs that ran them* — `xtb_engine`, `xtb_cli`, `crest_cli`, `anc`, `xtb_opt` — and none of
-those programs runs here any more. Keeping twenty files whose names describe a physics stack this
-process does not have would leave the tree's own map pointing at a system that no longer exists,
-which is the exact failure `tests/test_docstring_paths.py` was built for. What is left is one
-responsibility, stated once: *the shape of a calculation's answer, and the geometry it is about.*
-So it is one module, and its sections follow the ladder a calculation climbs — structure, single
-point, optimization, second derivatives, and the composites built over them. The request-side
-shapes went with the engines: five `*Input` models outlived their callers by ten days and were
-deleted unreferenced, which is why nothing here describes a call being made.
-
-**Nothing here derives a `calc_version`, and nothing here computes.** A model whose construction
-needed tblite, crest or an embedding is not a model, it is an engine, and the whole point of the
-split is that this process has neither. The one exception that is not one: `Structure.structure_id`
-is a hash of coordinates the caller already holds, which is why an identity derived here and one
-derived on the server agree byte for byte (measured, ADR table).
-
-**Server payloads carry more than these models declare**, and that is deliberate. Every result the
-server returns is stamped with its own `calc_version` and `calc_key`; pydantic ignores both on
-validation, so the agent-facing surface is unchanged by the split while the stored row keeps the
-provenance. The one place the extra field is *read* is `_log_prediction`, which needs the version
-the calculation actually ran under and now takes it off the payload instead of deriving it.
+What the D-011 cache reconstructs and the durable jobs return over the Temporal wire, so field
+shapes are pinned by in-flight histories; ordered structure → single point → optimization → Hessian
+→ composites. Nothing here computes or derives a `calc_version`.
 """
 
 from typing import Literal
@@ -40,9 +14,8 @@ from rdkit import Chem
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.uncertainty import Estimate
 
-# Which attack a Fukui ranking is for. f-minus (electron loss) ranks the sites an electron-deficient
-# *electrophile* attacks; f-plus (gain) the sites a *nucleophile* attacks; f-zero their average, for
-# radicals.
+# Which attack a Fukui ranking is for: f-minus ranks sites an electrophile attacks, f-plus sites a
+# nucleophile attacks, f-zero (their average) radicals.
 FukuiMode = Literal["electrophilic", "nucleophilic", "radical"]
 # Which index each mode ranks by — the whole of what `mode` decides, which is why it is not part of
 # a Fukui calculation's cache key on either side of the wire.
@@ -57,35 +30,19 @@ _MODE_FIELD: dict[FukuiMode, str] = {
 EnsembleSearch = Literal["conformers", "tautomers", "protomers", "deprotomers"]
 CrestEffort = Literal["quick", "normal", "extensive"]
 
-# How far the ladder is climbed per species of a reaction. `quick` optimizes and differences
-# electronic energies; `standard` adds a Hessian and gives enthalpies and free energies; `thorough`
-# first searches conformational space, works from the lowest member, and adds the conformational
-# entropy that a single-conformer free energy is missing.
+# How far the ladder is climbed per species: `quick` optimizes and differences electronic
+# energies; `standard` adds a Hessian (enthalpies, free energies); `thorough` first searches
+# conformers, works from the lowest, and adds conformational entropy.
 ReactionLevel = Literal["quick", "standard", "thorough"]
 
-# Which standard state a free energy — and the entropy under it — is quoted at.
-#
-# **A free energy without its standard state is not a quantity a chemist can use**, and the two
-# conventions here differ by RT ln(RT c0/P0) = 1.894 kcal/mol per mole of species at 298.15 K,
-# which is a factor of 24.47 in K for every mole a reaction creates or destroys. The gas-phase
-# convention is 1 atm; the one a chemist means by "ΔG in THF" is 1 mol/L. The term cancels exactly
-# when Δn = 0, which is why a tautomer or stereoisomer ranking never showed the difference and a
-# dissociation, an association or a BDFE is wrong by a factor of 24.47 per unit of Δn without it.
+# Which standard state a free energy — and the entropy under it — is quoted at: 1 atm (gas) or
+# 1 mol/L (solution). They differ by RT ln(RT c0/P0) = 1.894 kcal/mol per mole of species at
+# 298.15 K, which cancels only when Δn = 0.
 StandardState = Literal["gas-1atm", "solution-1M"]
 
-# Decimal places coordinates are rounded to before a `Structure` is hashed. 4 decimals = 0.1 pm,
-# far below any chemical significance, so run-to-run float noise cannot fork the cache.
-#
-# **A constant rather than a setting, deliberately.** It was `settings.xtb_geometry_decimals`, an
-# ordinary ENV-overridable field advertised in `.env.example` — and these are the bytes that cross
-# the wire, so it is what the *server* derives `input_hash` from. An operator who changed it was
-# not re-addressing a local cache, which is what its comment claimed: they were making every
-# relaxation, Hessian, scan point and CREST search in that deployment miss forever, silently, and
-# diverge from every other deployment against the same server. Nothing raises on a key that does
-# not match; the calculation simply runs again, every time.
-#
-# Changing this value is therefore a cross-repository change that has to land on both sides at
-# once, which is exactly the kind of decision a deployment must not be able to take alone.
+# Decimal places coordinates are rounded to before a `Structure` is hashed (0.1 pm), so float noise
+# cannot fork the cache. A constant, not a setting: the server derives `input_hash` from these
+# bytes, so changing it makes every calculation miss and must land in both repositories at once.
 _GEOMETRY_DECIMALS = 4
 
 
@@ -121,11 +78,8 @@ class Structure(BaseModel):
     def _normalize_and_validate(self) -> "Structure":
         """Round coordinates, then reject a structure that is not physically consistent.
 
-        Three ways a structure can be wrong are caught here rather than by a converged SCF that
-        means nothing (gate G4): mismatched array lengths, a coordinate row that is not 3D, and an
-        electron count that cannot produce the declared multiplicity. Kept on this side of the wire
-        as well as the server's, because a `Structure` is built here — by the thermochemistry
-        refinement loop's displacement — and not only received.
+        Catches mismatched arrays, non-3D rows, and electron counts incompatible with the
+        multiplicity.
         """
         if len(self.positions) != len(self.elements):
             raise ValueError(f"{len(self.positions)} positions for {len(self.elements)} elements")
@@ -139,9 +93,8 @@ class Structure(BaseModel):
         unpaired = self.multiplicity - 1
         electrons = sum(self.elements) - self.charge
         if electrons < unpaired or (electrons - unpaired) % 2:
-            # The default (closed-shell) case gets the specific message, because it is the one a
-            # caller hits by accident — from a radical SMILES or a wrong charge — and the fix is to
-            # declare the multiplicity, not to fix the atoms.
+            # The closed-shell default gets the specific message: it is hit by accident (radical
+            # SMILES, wrong charge), and the fix is to declare the multiplicity.
             if self.multiplicity == 1:
                 raise ValueError(
                     f"open-shell species ({electrons} electrons at charge {self.charge}) "
@@ -157,10 +110,8 @@ class Structure(BaseModel):
     def structure_id(self) -> str:
         """Content address: `st_` + a stable hash of the chemistry, not the provenance.
 
-        Deliberately excludes `smiles` and `origin`: two identical geometries are the same structure
-        whether one was embedded from a SMILES and the other optimized, and that is exactly the
-        identity that lets a downstream task hit the cache regardless of which route produced its
-        input.
+        Excludes `smiles` and `origin`, so identical geometries from different routes share cache
+        entries.
         """
         payload = {
             "elements": self.elements,
@@ -208,9 +159,8 @@ class PkaResult(BaseModel):
     pka: float
     deprotonation_energy_kcal: float
     uncertainty: float
-    # "acid" = an O-H/S-H proton came off; "base" = the pKa of the protonated form (pKaH), which is
-    # what is tabulated for amines and what an extraction pH is set against. Each has its own
-    # calibration, fitted separately.
+    # "acid" = an O-H/S-H proton came off; "base" = the pKa of the protonated form (pKaH). Each has
+    # its own calibration.
     site: Literal["acid", "base"] = "acid"
 
 
@@ -452,18 +402,8 @@ class SiteReactivityResult(BaseModel):
     def ranked_for(self, mode: FukuiMode) -> "SiteReactivityResult":
         """Re-rank this result for `mode` without recomputing anything.
 
-        **This is not a convenience, it is a correctness fix, and the split is what made it one.**
-        The three single points behind a Fukui ranking do not depend on the mode — it only chooses
-        the sort — so the server keys them without it, verified over the wire: `electrophilic`,
-        `nucleophilic` and `radical` on phenol all derive
-        `xtb.fukui@…:3aaf5b0543327fb5:b41312b0cdc59ab7`, one key. The server re-ranks on the way
-        out, so a *remote* call is always right. A **cache hit here never reaches the server**, so
-        without this the second mode asked for would be served the first mode's ordering carrying
-        the first mode's `mode` and `ranked_by` labels — a confidently wrong regiochemistry answer,
-        with nothing raising anywhere.
-
-        Every site carries all three indices, so this costs a sort and no calculation, which is also
-        why asking a second mode was always advertised as free.
+        The server keys Fukui results without the mode, so a cache hit must be re-ranked here or it
+        would carry the first mode's ordering.
         """
         if self.mode == mode:
             return self
@@ -513,9 +453,8 @@ class OptimizationResult(BaseModel):
     # Largest absolute gradient component (Hartree/Angstrom) at the final geometry, over the free
     # atoms. `None` only for GFN-FF (see the class docstring).
     max_gradient: float | None
-    # Root-mean-square coordinate displacement, in Angstrom. Not Kabsch-aligned: the forces of a
-    # molecule sum to zero, so an optimization introduces no net translation and this is a movement
-    # measure, not a superposition.
+    # RMS coordinate displacement in Angstrom. Not Kabsch-aligned: an optimization introduces no net
+    # translation.
     displacement_rms_angstrom: float
     frozen_atoms: list[int]
 
@@ -592,20 +531,15 @@ class HessianPayload(BaseModel):
     solvent: str | None
     atom_count: int
     electronic_energy_hartree: float
-    # Largest absolute gradient component (Hartree/Angstrom) at the geometry that was
-    # differentiated. `None` = not reported by the backend that ran, which is a different claim
-    # from "zero" and must stay distinguishable from it.
+    # Largest absolute gradient component (Hartree/Angstrom) at the differentiated geometry. `None`
+    # = not reported, distinct from zero.
     max_gradient_hartree_per_angstrom: float | None = None
     hessian_npy: str
     dipole_derivatives_npy: str | None = None
     ir_intensities: list[float] | None = None
-    #: The wavenumber the server paired with each entry of `ir_intensities`, same order and
-    #: length, including the external modes it projected out (which it writes as zeros).
-    #:
-    #: Optional because a row cached before `Chemclaw3-mcp` began sending it has none, and
-    #: because the in-process backend populates `dipole_derivatives_npy` instead. Present, it
-    #: is what lets `thermo._align_intensities` pair by wavenumber rather than by position —
-    #: see that function for why counting is not sufficient.
+    #: The wavenumber paired with each entry of `ir_intensities`, same order and length, including
+    #: projected-out external modes (as zeros). Optional for older cached rows and the in-process
+    #: backend; when present, `thermo._align_intensities` pairs by wavenumber rather than position.
     ir_wavenumbers_cm: list[float] | None = None
 
 
@@ -618,11 +552,8 @@ class VibrationalMode(BaseModel):
     """
 
     wavenumber_cm: float
-    # `None` when the intensities could not be paired with the modes — see
-    # `ThermochemistryResult.spectrum_unavailable`. It is the absence of a number, not a zero: a
-    # band reported at 0.00 km/mol is a claim that it does not absorb, and a whole spectrum of those
-    # is the silent failure `thermo.thermochemistry_from_hessian` already refuses to produce for a
-    # Hessian carrying no intensity data at all.
+    # `None` when intensities could not be paired with the modes (see
+    # `ThermochemistryResult.spectrum_unavailable`) — absent, not zero.
     ir_intensity_km_per_mol: float | None
 
 
@@ -662,44 +593,26 @@ class ThermochemistryResult(BaseModel):
     method: str
     solvent: str | None
     temperature_k: float
-    # The pressure the translational partition function was evaluated at — 1 atm in the gas phase,
-    # and the 1 mol/L reference pressure (c0·R·T, ~24.8 bar at 298.15 K) in solution. Reported as
-    # the pressure actually used rather than as the configured gas-phase knob, because a solution
-    # entropy quoted beside 101325 Pa is a number labelled with a state it was not computed in.
+    # The pressure the translational partition function was evaluated at: 1 atm in the gas phase,
+    # c0·R·T (~24.8 bar at 298.15 K) in solution — the pressure actually used.
     pressure_pa: float
-    # ...and the same fact in the words a chemist reads. Derived from the medium the Hessian was
-    # taken in, never from a caller's preference: the electronic energy came out of an ALPB SCF, so
-    # the phase is a property of the calculation.
+    # The same fact in a chemist's words, derived from the medium the Hessian was taken in.
     standard_state: StandardState = "gas-1atm"
     symmetry_number: int
 
-    # False when the geometry carries an imaginary mode **or** when it is known not to be a
-    # stationary point. Never `True` on evidence this result does not have: an unassessed
-    # stationarity (`is_stationary=None`) leaves the verdict to the frequencies alone, which is what
-    # it always was.
+    # False when the geometry has an imaginary mode **or** is known not to be stationary. With
+    # stationarity unassessed (`is_stationary=None`) the frequencies alone decide.
     is_minimum: bool
     imaginary_frequencies_cm: list[float]
-    # Whether the geometry the Hessian was taken at is a stationary point, and the number that
-    # decided it. `None` = not assessed, because the backend that ran reported no gradient — a
-    # different claim from "it is stationary", and the reason this is a tri-state rather than a
-    # bool. The threshold is `xtb_stationary_gradient_tolerance`.
+    # Whether the Hessian's geometry is a stationary point (`xtb_stationary_gradient_tolerance`).
+    # `None` = not assessed (no gradient reported), distinct from stationary.
     is_stationary: bool | None = None
     max_gradient_hartree_per_angstrom: float | None = None
-    # Every normal mode, ordered by wavenumber. A caller with a context budget may truncate this to
-    # the bands that matter (`strongest_bands`); `mode_count` is then the honest statement of how
-    # many there were — the same truncation contract `SiteReactivityResult` uses for atoms.
+    # Every normal mode, ordered by wavenumber. A caller may truncate (`strongest_bands`);
+    # `mode_count` then states how many there were.
     modes: list[VibrationalMode]
-    # Why this result carries wavenumbers but no intensities, or `None` when it carries both.
-    #
-    # **A spectrum can fail on its own, and it used to take the free energy with it.** Pairing the
-    # server's intensities to this projection's modes needs both sides to agree on how many modes
-    # are external, and they judge that by different criteria — so inside a ~2.3-degree window
-    # around linearity the pairing is unsafe, and `thermo._align_intensities` raised out of the
-    # whole calculation. Driven on a CO2 Hessian bent to 179 degrees: no G, H, S or `is_minimum`,
-    # where every one of those numbers was correct — not one term of the partition function reads an
-    # intensity. So the refusal moved to the field it is about. When this is set, every
-    # `VibrationalMode.ir_intensity_km_per_mol` is `None` and `strongest_bands` has nothing to rank
-    # by.
+    # Why this result carries wavenumbers but no intensities, or `None` when it carries both. When
+    # set, every mode's intensity is `None`; the thermochemistry is unaffected.
     spectrum_unavailable: str | None = None
     mode_count: int
     # The five lowest modes, always from the *full* set. RRHO is weakest here, so this is where
@@ -718,23 +631,14 @@ class ThermochemistryResult(BaseModel):
 
     uncertainty_kcal: float
     conformer_treatment: Literal["single"] = "single"
-    # Cartesian direction of the most negative mode (Angstrom per unit displacement), present only
-    # when the geometry is not a minimum. It is what the structure wants to do, so it is also what
-    # the refinement loop displaces along to escape.
+    # Cartesian direction of the most negative mode (Angstrom per unit displacement), only when the
+    # geometry is not a minimum; the refinement loop displaces along it.
     imaginary_displacement: list[list[float]] | None = None
 
     def strongest_bands(self, limit: int) -> list[VibrationalMode]:
         """The `limit` most intense bands, plus every imaginary mode, by wavenumber.
 
-        What a computed IR spectrum is compared against: a measured spectrum shows the bands that
-        absorb, and the weak modes between them carry no information for that comparison. Imaginary
-        modes are never dropped — they are the reason to distrust the whole result, and they have
-        no intensity to rank by.
-
-        With `spectrum_unavailable` set there is no intensity to rank by *anywhere*, so an unknown
-        intensity sorts below every real one and what survives is the first `limit` real modes by
-        wavenumber. That is an arbitrary slice and it is not pretending otherwise: the field says
-        why, and a caller comparing against a measured spectrum has to read it.
+        With `spectrum_unavailable` set this is an arbitrary slice of the first real modes.
         """
         real = [index for index, mode in enumerate(self.modes) if mode.wavenumber_cm > 0]
         real.sort(key=lambda index: self.modes[index].ir_intensity_km_per_mol or -1.0, reverse=True)
@@ -793,9 +697,8 @@ class Interconversion(BaseModel):
     temperature_k: float
     rate_per_second: float
     half_life_seconds: float
-    # The half-life at the barrier plus and minus the method's uncertainty. Named for what they
-    # are to a chemist — the shortest and longest lifetime consistent with this calculation —
-    # rather than for the sign of the shift that produced them.
+    # The half-lives at the barrier plus and minus the method's uncertainty: the shortest and
+    # longest lifetime consistent with this calculation.
     half_life_seconds_fastest: float
     half_life_seconds_slowest: float
     uncertainty_kcal: float
@@ -817,11 +720,9 @@ class Torsion(BaseModel):
     """
 
     torsion_id: str
-    # **Empty for a rotor whose rotating end carries only hydrogens**, because `enumerate_torsions`
-    # cannot name a dihedral through one: it would need a hydrogen index, and that means something
-    # only inside a particular explicit-H numbering. `compose._rotor_dihedral` builds it in the
-    # structure's own numbering — or refuses, when the rotor is a symmetric top whose barrier is
-    # already inside the quasi-RRHO free-rotor treatment of the low modes.
+    # Empty for a rotor whose rotating end carries only hydrogens: naming that dihedral needs a
+    # hydrogen index. `compose._rotor_dihedral` builds it in the structure's own numbering, or
+    # refuses for a symmetric top (already covered by the quasi-RRHO free-rotor treatment).
     atoms: list[int] = Field(min_length=0, max_length=4)
     bond: list[int] = Field(min_length=2, max_length=2)
     label: str
@@ -844,10 +745,8 @@ class Rotamer(BaseModel):
     structure_id: str
     relative_kcal: float
     population: float
-    # How many times this rotamer occurs in a full turn. The profile is scanned over one period, so
-    # a well found there stands for `symmetry_order` copies of itself — and a population that
-    # ignores that is wrong in the same way, and by the same arithmetic, as an ensemble population
-    # that ignores conformer degeneracy (measured on n-butane: 73% against the correct 59.2%).
+    # How many times this rotamer occurs in a full turn: the profile spans one period, so a well
+    # stands for `symmetry_order` copies, which populations must weight.
     degeneracy: int = Field(default=1, ge=1)
     # Free energy relative to the lowest rotamer, above `level="quick"`. `None` says the ranking is
     # electronic, which is a different claim and one a reader must not have to infer.
@@ -864,21 +763,15 @@ class RotationBarrier(BaseModel):
     the time.
     """
 
-    # **`from_rotamer == to_rotamer` is a real and important case, not a bug.** A torsion with one
-    # populated form per period rotates into its own symmetry image over the pass between them —
-    # which is exactly what an amide or a hindered biaryl with a single minimum does, and is the
-    # barrier variable-temperature NMR measures. Reported with equal forward and reverse energies,
-    # because by symmetry it is the same well on both sides.
+    # `from_rotamer == to_rotamer` is a real case: a torsion with one form per period rotates into
+    # its own symmetry image (an amide, a hindered biaryl). Forward and reverse energies are equal.
     from_rotamer: int
     to_rotamer: int
     at_degrees: float
     forward_kcal: float
     reverse_kcal: float
-    # `E` when the barrier is electronic, `G` when a Hessian was taken at the pass and its one
-    # imaginary mode dropped — the standard transition-state treatment, applied to a geometry that
-    # is a constrained maximum rather than an optimized saddle. Named on the barrier rather than on
-    # the profile because a run can produce both: a pass with two imaginary modes falls back to `E`
-    # and says so in the warnings.
+    # `E` for an electronic barrier, `G` when a Hessian at the pass had its one imaginary mode
+    # dropped. A pass with two imaginary modes falls back to `E` and says so in the warnings.
     basis: Literal["E", "G"] = "E"
     # Rate and lifetime at the profile's temperature, with the band the method's uncertainty
     # implies. Absent only when the arithmetic could not be done.
@@ -901,9 +794,7 @@ class RotationProfile(BaseModel):
     solvent: str | None
     temperature_k: float
     level: ReactionLevel
-    # The bond this profile is about, in the form a reader can check it by: the handle, the atoms,
-    # and the label a chemist recognises. Carried on the result rather than only on the request,
-    # because the answer has to say which bond it is about.
+    # The bond this profile is about: handle, atoms, and the label a chemist recognises.
     torsion_id: str
     atoms: list[int]
     label: str
@@ -916,10 +807,8 @@ class RotationProfile(BaseModel):
     # wells, or one whose wells left their basins. Zero would be a claim of free rotation.
     highest_barrier_kcal: float | None = None
     uncertainty_kcal: float
-    # What the profile itself says about how far to trust it: a step that may have driven over a
-    # maximum, a point that relaxed into another basin, a well that would not settle. The three
-    # pathologies `skills/conformational-analysis` asks a human to spot by eye — checked here,
-    # because a check nobody runs is a check that does not exist.
+    # The profile's own trust warnings: a step that may have driven over a maximum, a point that
+    # relaxed into another basin, a well that would not settle.
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -934,10 +823,8 @@ class EnsembleMember(BaseModel):
     """
 
     energy_hartree: float
-    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
-    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
-    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
-    # door already carries the same constraint for the same reason.
+    # `ge=1`: `boltzmann_populations` divides by the sum of weights, so all-zero degeneracies must
+    # be refused at the boundary.
     degeneracy: int = Field(default=1, ge=1)
     structure: Structure
 
@@ -1004,11 +891,8 @@ class ConformerEnsemble(BaseModel):
     # Free energy of the ensemble relative to its lowest member, in kcal/mol: the -T*S_conf
     # correction to add to a single-conformer free energy.
     ensemble_correction_kcal: float
-    # Which approximation produced the populations above. **Additive and defaulted**, because this
-    # model crosses the Temporal wire and histories are in flight: a result decoded from an older
-    # one carries the value it always had. `free-energy-weighted-top-n` is what a refined ensemble
-    # reports — a different treatment rather than a better one, and a reader must not have to infer
-    # which ran (D-101).
+    # Which approximation produced the populations. Defaulted because this crosses the Temporal wire
+    # and older histories lack it.
     treatment: Literal["lowest-plus-conformational-entropy", "free-energy-weighted-top-n"] = (
         "lowest-plus-conformational-entropy"
     )
@@ -1023,14 +907,8 @@ class ConformerEnsemble(BaseModel):
     def lowest_structure_id(self) -> str:
         """The address of the lowest-energy member, hoisted so nobody has to index into a list.
 
-        **A `computed_field`, so it survives `model_dump` and reaches the model and the template
-        resolver** (D-2026-08-21). The lowest conformer is what every downstream single-structure
-        question wants — relax it, take its Hessian, run DFT on it — and reaching it through
-        `conformers[0].structure.structure_id` would need list indexing in the one place this
-        system deliberately refuses to grow an expression language (`templates/resolve.py`).
-
-        Derived rather than stored: `conformers` is built lowest-first by `ensemble_from_members`,
-        and a second copy of that fact is a second thing that can disagree with it.
+        A `computed_field` so it survives `model_dump` and reaches the template resolver, which has
+        no list indexing. Derived from `conformers`, which is built lowest-first.
         """
         return self.conformers[0].structure.structure_id
 
@@ -1059,9 +937,8 @@ class MicrostatePka(BaseModel):
     """
 
     smiles: str
-    # Which equilibrium was computed. "acid" is HA -> A- + H+ and reports that molecule's own pKa;
-    # "base" is BH+ -> B + H+ and reports the *conjugate acid's* pKa (pKaH), which is what is
-    # tabulated for amines and what an extraction pH is set against.
+    # Which equilibrium was computed: "acid" (HA -> A- + H+) reports the molecule's pKa; "base"
+    # (BH+ -> B + H+) reports the conjugate acid's pKa (pKaH).
     branch: Literal["acid", "base"]
     pka: float
     uncertainty: float
@@ -1077,10 +954,8 @@ class MicrostatePka(BaseModel):
     # The evidence, in full: what was sampled on each side of the equilibrium.
     neutral: ConformerEnsemble
     ionised: ConformerEnsemble
-    # How many distinct ionised microstates the search found, and how many of them are within RT of
-    # the best. The second number is why this is a macrostate calculation: two sites within RT both
-    # carry population, and treating either alone as "the" conjugate base is wrong by up to
-    # RT ln 2 — half a pKa unit at 298 K.
+    # Distinct ionised microstates found, and how many lie within RT of the best. Sites within RT
+    # both carry population; treating one alone is wrong by up to RT ln 2.
     microstates_found: int
     microstates_within_rt: int
     warnings: list[str] = Field(default_factory=list)
@@ -1136,14 +1011,10 @@ class EnsembleProperty(BaseModel):
     sampled: Literal[True] = True
     value: WeightedValue | None = None
     per_atom: list[WeightedAtom] = Field(default_factory=list)
-    # The population fraction the averaged members account for, from the ensemble's own weighting.
-    # Below 1.0 the average is over a *truncation* of the ensemble, and saying so is what stops
-    # "the Boltzmann-averaged dipole" meaning "the dipole of the five conformers we could afford".
+    # The population fraction the averaged members account for; below 1.0 the average is over a
+    # truncated ensemble.
     population_covered: float = 1.0
-    # **`population_covered` records the truncation; this is what *says* it.** The field above
-    # shipped without one, so the cheap composite disclosed its partial coverage only to a reader
-    # who thought to divide, while `RefinedEnsemble` — the expensive one — warned. Same rule, both
-    # of them now.
+    # States the truncation `population_covered` records.
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -1153,10 +1024,8 @@ class RefinedConformer(BaseModel):
     structure: Structure
     relative_kcal: float
     population: float
-    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
-    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
-    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
-    # door already carries the same constraint for the same reason.
+    # `ge=1`: `boltzmann_populations` divides by the sum of weights, so all-zero degeneracies must
+    # be refused at the boundary.
     degeneracy: int = Field(default=1, ge=1)
     gibbs_free_energy_hartree: float
     electronic_energy_hartree: float
@@ -1186,14 +1055,9 @@ class RefinedEnsemble(BaseModel):
     total_found: int
     refined_count: int
     refined_population_covered: float
-    # **Named for the subset, because that is what they describe.** `ConformerEnsemble` carries
-    # fields with the first of these names and they mean something else: `ensemble_from_members`
-    # computes them over *all* members and deliberately refuses to truncate them, arguing that
-    # doing so "would turn 'here are the 10 that matter out of 47' into a quietly wrong claim that
-    # there were 10". Here the populations are renormalised over the refined top N, so the entropy
-    # is over N states and the correction is systematically too small. Shipping that under the
-    # ensemble-wide name put two meanings one model apart; `refined_` says which one this is, and
-    # `refined_population_covered` beside it says how much of the ensemble that N accounts for.
+    # Named `refined_` because these are over the renormalised top N, unlike the ensemble-wide
+    # fields of `ConformerEnsemble`; the entropy over N states is systematically too small, and
+    # `refined_population_covered` says how much of the ensemble N accounts for.
     refined_conformational_entropy_cal_per_mol_k: float
     refined_ensemble_correction_kcal: float
     sampled: Literal[True] = True
@@ -1255,9 +1119,9 @@ class SpeciesDistribution(BaseModel):
         return max(self.species, key=lambda candidate: candidate.population)
 
 
-#: Why one item of a screen has no answer. `refused`: the calculation service refused the input or
-#: could not compute it — a property of the item. `time_budget`: the service's inline wall clock
-#: stopped it — a property of the pod's load at that moment, which the same item may pass when idle.
+#: Why one item of a screen has no answer. `refused`: the service refused or could not compute
+#: it (a property of the item). `time_budget`: the inline wall clock stopped it (a property of
+#: load; the item may pass when idle).
 FailureCause = Literal["refused", "time_budget"]
 
 
@@ -1330,9 +1194,8 @@ class SpeciesSolventComparison(BaseModel):
     method: str
     temperature_k: float
     level: ReactionLevel
-    # One per medium, gas phase first, then the solvents in the order they were asked for. Kept
-    # whole rather than reduced to the responses: each carries its own warnings, its structure ids
-    # and its conformer counts, and a caller that wants "the answer in DMSO" wants that payload.
+    # One per medium, gas phase first, then solvents in request order; each kept whole with its own
+    # warnings, structure ids and conformer counts.
     distributions: list[SpeciesDistribution]
     responses: list[SpeciesSolventResponse]
     dominance_changes: bool
@@ -1418,10 +1281,9 @@ class SpeciesEnergy(BaseModel):
     smiles: str
     role: Literal["reactant", "product"]
     multiplicity: int
-    # The rotational symmetry number this species' entropy was computed with, and the field that
-    # says whether it was *known*. None means the caller stated none, so sigma=1 was used and the
-    # entropy is too high by R ln(sigma_true) — the reason the reaction then withholds ΔG. It is
-    # also None at `quick`, where no entropy exists at all.
+    # The rotational symmetry number used, and whether it was known. None means none was stated:
+    # sigma=1 was used, the entropy is high by R ln(sigma_true), and the reaction withholds ΔG. Also
+    # None at `quick`, which has no entropy.
     symmetry_number: int | None
     electronic_energy_hartree: float
     enthalpy_hartree: float | None
@@ -1437,10 +1299,8 @@ class SpeciesEnergy(BaseModel):
     # reported a hardcoded 0 beside `sampled=True`, which reads as "sampled and found nothing".
     conformers_found: int = 0
     was_cached: bool
-    # The method the *server* reported for this species' optimisation, so a reaction can state the
-    # level of theory it was actually run at. Additive and defaulted because this crosses the
-    # Temporal wire and histories are in flight; empty means a run from before it was recorded, and
-    # `reaction_energy` falls back to the configured name only then.
+    # The method the server reported for this species' optimisation. Defaulted for older Temporal
+    # histories; empty means `reaction_energy` falls back to the configured name.
     method: str = ""
 
 
@@ -1464,26 +1324,20 @@ class ReactionEnergyResult(BaseModel):
     method: str
     solvent: str | None
     temperature_k: float
-    # Which reference state `delta_g_kcal` is quoted at. A solution ΔG is the 1 mol/L one, so a
-    # reaction with Δn != 0 carries a 1.894·Δn kcal/mol term that a 1 atm number does not — see
-    # `StandardState`. Historical rows predate the correction and read "gas-1atm", which is what
-    # they were.
+    # Which reference state `delta_g_kcal` is quoted at (see `StandardState`); a solution ΔG carries
+    # 1.894·Δn kcal/mol relative to 1 atm. Older rows read "gas-1atm".
     standard_state: StandardState = "gas-1atm"
     level: ReactionLevel
     delta_e_kcal: float
     delta_h_kcal: float | None
-    # None at `quick` (no Hessian, so no entropy) and None when any species' rotational symmetry
-    # number was left unstated, which `species[i].symmetry_number` pinpoints and `warnings`
-    # explains. One field for the two because they are one fact: a free energy this run is not
-    # entitled to report.
+    # None at `quick` (no entropy) and when any species' symmetry number was unstated
+    # (`species[i].symmetry_number`, explained in `warnings`): a free energy this run cannot report.
     delta_g_kcal: float | None
     species: list[SpeciesEnergy]
     cache_hits: int
     uncertainty_kcal: float
-    # Thermal-hazard screening flag. Advisory exactly as the structural hazard screen is (D-080): a
-    # strongly negative electronic energy is a reason to look at the thermal data, never a heat of
-    # reaction and never a clearance. It reads ΔE rather than ΔG deliberately — a runaway is driven
-    # by the heat released, which is the enthalpic quantity.
+    # Thermal-hazard screening flag, advisory only: a reason to look at thermal data, never a heat
+    # of reaction or a clearance. Reads ΔE, since a runaway is driven by the heat released.
     is_strongly_exothermic: bool
     exotherm_threshold_kcal: float
     # Which conformational treatment produced the deltas.

@@ -1,8 +1,7 @@
 """`propose_skill`: what it refuses, what it tells the model, and what it still cannot do.
 
-The tool's standing is the point — it writes a *proposal* and never a skill — so the first test
-here is the absence one: `SkillsReadOnlyRefusal` is unchanged, and adding a proposer did not open a
-way for a turn to write judgment into its own prompt.
+It writes a proposal and never a skill, so the first test is the absence one: no turn gained a
+way to write judgment into its own prompt.
 """
 
 import asyncio
@@ -34,11 +33,8 @@ def _queue(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(behaviour_proposals, "_IN_MEMORY", InMemoryProposalStore())
 
 
-#: One name this deployment's reviewed trees already occupy, for the refusal table below.
-#:
-#: Read off `shipped_skill_names()` rather than written out, and at module scope because a
-#: `parametrize` decorator is evaluated at collection: a literal would stop being a shipped name the
-#: next time `skills/` is renamed, and the row would then pass for the wrong reason.
+#: One name this deployment's reviewed trees already occupy, read off `shipped_skill_names()` at
+#: module scope (parametrize is evaluated at collection) so a rename in `skills/` carries the row.
 _A_SHIPPED_NAME = sorted(shipped_skill_names())[0]
 
 
@@ -52,13 +48,11 @@ def _call(**kwargs: str) -> str:
 
 
 def test_proposing_is_state_changing_so_no_helper_holds_it() -> None:
-    """Being in the partition is what takes it out of every helper, by arithmetic.
+    """`propose_skill` is state-changing, so no helper holds it.
 
-    A helper's surface is its caller's minus `side_effecting_tools()` on both halves
-    (`D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened`), so this one membership
-    is the whole of the narrowing — no second list to keep in step. The reason is
-    `ask_clarifying_question`'s exactly: a helper proposing behaviour changes from a context the
-    chemist cannot see is worse than one that cannot propose.
+    A helper's surface subtracts `side_effecting_tools()`, so this membership is the whole
+    narrowing. A helper proposing behaviour changes from a context the chemist cannot see is ruled
+    out, as for `ask_clarifying_question`.
     """
     assert "propose_skill" in side_effecting_tools()
 
@@ -67,26 +61,14 @@ def test_proposing_is_state_changing_so_no_helper_holds_it() -> None:
 #: each with the argument for it. An entry here is a reviewed exemption, not a waiver: the point is
 #: that adding one is a diff a reader sees.
 _ARGUED = {
-    # The proposer imports the queue for `propose` and `content_hash`. It must not reach `decide`,
-    # which the symbol check below is what actually holds.
-    #
-    # **And `local_skills` for `validated_skill`, which is a read of the tier's admission rules and
-    # not a write into it.** `_validated` used to hand-copy three of that function's four checks and
-    # omit the fourth — the shipped-name conflict — so a proposal that the accept route answers 409
-    # for was recorded as `open` and reported to the chemist as waiting for their decision, with no
-    # way to accept it. The symbol half of this test is what keeps the exemption narrow: the two
-    # writes into the tier (`save_local_skill`, `delete_local_skill`) are in `_WRITES_BEHAVIOUR`, so
-    # naming either of them still reds this test with the import argued.
+    # The proposer imports the queue for `propose` and `content_hash`; it must not reach `decide`,
+    # which the symbol check holds. `local_skills` is imported for `validated_skill`, a read of the
+    # tier's admission rules; its writes (`save_local_skill`, `delete_local_skill`) are in
+    # `_WRITES_BEHAVIOUR`.
     "chemclaw.agent.proposal_tools": {"behaviour_proposals", "local_skills"},
-    # The generated `run_*` job launchers, whose whole job is resolving a `module:attribute`
-    # reference a bundle's `connector.yaml` declares — so `importlib` is what this module is for,
-    # not a way around a static reader. It is guarded on its own terms by `check_driver_module`,
-    # and the symbol half of this test still covers it: it names none of `_WRITES_BEHAVIOUR`.
-    #
-    # It appears here only once `_register_generated_tools()` has run, which is why this entry was
-    # missing until a full-suite run — in isolation the registry holds no generated tool, so this
-    # test passed on a smaller surface than the one it claims to cover. That is the same defect as
-    # a ratchet whose fixture binds no connector, one file over.
+    # The generated `run_*` job launchers resolve a manifest's `module:attribute` reference, so
+    # `importlib` is their purpose; `check_driver_module` guards it and they name nothing in
+    # `_WRITES_BEHAVIOUR`. Present only once `_register_generated_tools()` has run.
     "chemclaw.connectors.jobs": {"importlib"},
 }
 
@@ -103,11 +85,8 @@ def _tool_defining_modules() -> dict[str, pathlib.Path]:
     from chemclaw.agent.chemclaw_agent import _capability_tools
     from chemclaw.core.tool_registry import registered_tools
 
-    # `_capability_tools` is what runs `_register_generated_tools()`, and calling it here is the
-    # difference between covering the shipped surface and covering whatever the import above
-    # happens to reach. Without it the generated `run_*` launchers are absent, so this test passed
-    # in isolation and failed in a full run — a control measuring a smaller system than the one it
-    # claims, which is the defect this file exists to stop shipping.
+    # `_capability_tools` runs `_register_generated_tools()`, so this covers the shipped surface
+    # including generated launchers, in isolation as in a full run.
     _capability_tools()
     found: dict[str, pathlib.Path] = {}
     for fn in registered_tools():
@@ -119,22 +98,11 @@ def _tool_defining_modules() -> dict[str, pathlib.Path]:
 
 
 def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
-    """The absence this whole feature rests on, over every module that defines a tool.
+    """No turn can write a skill, even now that it can propose one.
 
-    `agent/skill_backend.SkillsReadOnlyRefusal` refuses every write verb on the shared tree and
-    `agent/local_skills.ReadOnlyStoreBackend` on the chemist's own. Adding a proposer must not have
-    opened a third path.
-
-    **This used to read one module's source with `in`, and that is not the property.** Driven: a
-    registered `settle_proposal` tool added to *that same module* — looking its caller's proposal
-    up,
-    writing it into their tier and calling `decide(accepted=True)` — left this file and
-    `tests/test_api_proposals.py` at 16 passed. A substring check over one file is a claim about
-    where somebody chose to put the code. So the subject is now the registry: every module that
-    defines a tool, and every name in it, against the calls that turn a proposal into behaviour.
-
-    **`importlib` is refused outright in this set**, because the one thing a static reader cannot
-    follow is a module name built at run time, and no tool module has a reason to build one.
+    The subject is the tool registry: every module defining a tool, checked against the calls that
+    turn a proposal into behaviour, not one module's source text. `importlib` is refused because a
+    module name built at run time is the one thing a static reader cannot follow.
     """
     import ast
 
@@ -174,11 +142,9 @@ def test_no_turn_can_write_a_skill_even_now_that_it_can_propose_one() -> None:
 
 
 def test_the_symbols_that_absence_test_names_still_exist() -> None:
-    """A rename must red the guard above rather than quietly satisfying it.
+    """The symbols the absence test names still exist.
 
-    An absence test passes trivially once the thing it forbids is called something else, which is
-    the failure mode `tests/test_upstream_surface.py` names for its two absence arms. So the names
-    are resolved against the modules that define them.
+    So a rename fails the guard rather than satisfying it.
     """
     from chemclaw.agent import behaviour_proposals, local_skills
 
@@ -188,11 +154,10 @@ def test_the_symbols_that_absence_test_names_still_exist() -> None:
 
 
 def test_the_model_is_told_which_of_three_things_happened() -> None:
-    """A proposer can learn what became of its proposal — a requirement, not a courtesy.
+    """The model is told which of three things happened to its proposal.
 
-    Without it the only strategy after a decline is to propose again, which the queue's idempotence
-    makes harmless and its counters make visible, but which wastes a turn every time. Three
-    answers, because the three situations call for different next moves.
+    Each calls for a different next move; without it the only strategy after a decline is to propose
+    again.
     """
     fresh = _call(name="cold-quench", body=_BODY, rationale="twice now")
     repeat = _call(name="cold-quench", body=_BODY, rationale="twice now")
@@ -220,14 +185,10 @@ def test_the_model_is_told_which_of_three_things_happened() -> None:
 
 
 def test_a_re_proposed_superseded_body_is_reported_as_proposed_and_not_as_waiting() -> None:
-    """The falsehood this tool told, and the one-word difference it turned on.
+    """A re-proposed superseded body is reported as proposed, not as already waiting.
 
-    `proposed_now` was `outcome.content_hash != standing`, where `standing` came from a `store.one`
-    keyed *on that same hash* — so it could only ever tell "absent" from "present", and a body a
-    newer version had superseded read as present and therefore as a repeat. The model was told the
-    proposal was "already waiting for this chemist to decide" about a document listed nowhere the
-    chemist looks. `propose` now revives it, so the first answer is the true one; the test is that
-    the tool says so rather than that the store did the work.
+    `propose` revives it; the test is that the tool says so truthfully rather than claiming a repeat
+    of something listed nowhere the chemist looks.
     """
     _call(name="cold-quench", body=_BODY, rationale="twice now")
     _call(name="cold-quench", body=_BODY.replace("Quench cold.", "Quench warm."), rationale="or")
@@ -260,18 +221,9 @@ def test_a_re_proposed_superseded_body_is_reported_as_proposed_and_not_as_waitin
             {"name": "a/b", "body": "---\nname: a/b\ndescription: d\n---\n\nb\n", "rationale": "r"},
             "a '/' is the traversal shape",
         ),
-        # **The arm the fix was about, and the table had no row for it.** `_validated` used to
-        # hand-copy three of `validated_skill`'s four checks and omit the fourth — that the name is
-        # not one the deployment already ships — and the commit's only test change was an import
-        # allowlist. Swallowing the `conflict=True` refusal leaves 34 tests green (48 with
-        # `test_api_proposals` and `test_local_skills`) and reproduces the defect verbatim: shipped
-        # code refuses `'protocol-generation' is the name of a skill this deployment already ships`,
-        # the mutation answers "proposed … waiting for this chemist to accept or decline" while
-        # `POST /proposals/skill/protocol-generation` answers **409**, so the proposal cannot be
-        # accepted and the only exit is declining one they wanted.
-        #
-        # The name is taken from `shipped_skill_names()` rather than written down, so a rename in
-        # `skills/` carries this row instead of emptying it.
+        # A name the deployment already ships is refused at proposal time, as the accept route would
+        # refuse it with 409. Otherwise the proposal waits unacceptably and can only be declined.
+        # The name comes from `shipped_skill_names()`.
         (
             {
                 "name": _A_SHIPPED_NAME,
@@ -285,11 +237,10 @@ def test_a_re_proposed_superseded_body_is_reported_as_proposed_and_not_as_waitin
 def test_a_body_that_could_not_be_written_is_refused_at_the_proposal(
     kwargs: dict[str, str], because: str
 ) -> None:
-    """Validated here rather than at acceptance, and that ordering is the point.
+    """A body that could not be written is refused at the proposal, not at acceptance.
 
-    `POST /skills/mine` refuses a malformed `SKILL.md`, so a proposal that skipped this check would
-    be reviewed, accepted, and then fail at the write — the worst place to discover it, because the
-    person has already decided and the failure looks like the system losing their decision.
+    `POST /skills/mine` refuses a malformed `SKILL.md`; failing after the person decided would look
+    like the system losing their decision.
     """
     with pytest.raises(ChemclawError):
         _call(**kwargs)

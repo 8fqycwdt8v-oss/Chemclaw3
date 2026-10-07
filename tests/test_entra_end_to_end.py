@@ -1,25 +1,12 @@
 """The enforced identity path, proven end to end against a real OIDC issuer over real HTTP.
 
-**Why this file exists.** `tests/test_auth.py` proves the *validator*: it signs a token with a
-local key and swaps `auth._signing_key` for a lambda that returns that key, so signature, audience,
-issuer and claim extraction are all exercised — and the JWKS lookup, the one part of validation that
-talks to a network, never runs. Every other authorization test sets the ambient identity by hand.
-So the chain that a deployment actually depends on — *an issuer publishes a key, the front door
-fetches it over HTTP, validates a token against it, turns the token into a `Principal`, stamps that
-principal into the turn's ambient identity, and the authorization gates decide on it* — had no test
-that ran it as one thing. `docs/planning/DEFERRED.md` recorded this as gated on "a real Entra
-tenant", which was never true: an issuer is a JWKS document served over HTTP, and this file serves
-one.
+An issuer publishes a key, the front door fetches it over HTTP, validates a token, turns it into a
+`Principal`, stamps that into the turn's ambient identity, and the authorization gates decide on
+it. `tests/test_auth.py` covers the validator with the JWKS lookup patched; this runs the chain.
 
-Nothing here is patched inside the module under test. `_JwksIssuer` is a real HTTP server on a real
-port; `settings.entra_jwks_url` points at it; `api/auth._HttpxJwkClient` fetches from it over
-real httpx;
-`create_app()` is the production app with `entra_required=True`. The only fake is the model, through
-the `graph_factory` seam every other front-door test uses.
-
-The companion piece is `Chemclaw3_mock`'s `/entra` surface, which is this issuer as a long-running
-service so the live lane and the four-repo e2e can run enforced too. This file is what makes the
-claim checkable in CI, where no lane runs.
+Nothing in the module under test is patched: `_JwksIssuer` is a real HTTP server,
+`settings.entra_jwks_url` points at it, and `create_app()` is the production app with
+`entra_required=True`. The only fake is the model, through the `graph_factory` seam.
 """
 
 import base64
@@ -130,9 +117,7 @@ class _JwksHandler(BaseHTTPRequestHandler):
 class _JwksIssuer:
     """A real HTTP identity provider: one JWKS document, rotatable, with its fetches counted.
 
-    The fetch counter is what makes `test_the_keys_are_fetched_once_and_then_cached` a measurement
-    rather than a belief — the JWKS fetch is blocking network I/O on the path that serves every
-    request, so "cached" is a property worth proving rather than asserting in a docstring.
+    The counter lets the caching tests measure fetches rather than assume them.
     """
 
     def __init__(self, jwks: str, tls: tuple[Path, Path] | None = None) -> None:
@@ -188,10 +173,8 @@ class _AnswerOnlyTurn(ScriptedTurn):
 class _IdentityProbeTurn(ScriptedTurn):
     """A turn that records the ambient identity and asks the real gate for a real decision.
 
-    This is the last link of the chain and the one nothing else covered: a token is validated at the
-    HTTP edge, and what the *authorization* gate reads is a contextvar several layers below. The
-    probe closes it by calling `authorize_tool` — the same function the tool middleware calls — from
-    inside the model call, and recording both what it saw and what it was told.
+    It calls `authorize_tool`, the function the tool middleware calls, from inside the model call,
+    closing the chain from HTTP edge to the contextvar the gate reads.
     """
 
     def __init__(self) -> None:
@@ -231,10 +214,8 @@ def issuer() -> Iterator[_JwksIssuer]:
 def _enforced(monkeypatch: pytest.MonkeyPatch, issuer: _JwksIssuer) -> None:
     """Put the process in the posture a real deployment ships: identity required, tenant reachable.
 
-    The two module-level caches in `chemclaw.api.auth` are cleared rather than left alone. They are
-    keyed by endpoint and each test gets a fresh port, so nothing would leak — but a test that
-    *measures* fetch counts and refresh cooldowns must not depend on that reasoning holding for the
-    next person who adds one.
+    The module-level caches in `chemclaw.api.auth` are cleared so tests measuring fetch counts and
+    cooldowns do not depend on port uniqueness.
     """
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "entra_audience", _AUDIENCE)
@@ -280,9 +261,8 @@ def test_a_token_the_issuer_vouches_for_opens_a_session(issuer: _JwksIssuer) -> 
 def test_the_keys_are_fetched_once_and_then_cached(issuer: _JwksIssuer) -> None:
     """Twenty requests cost one JWKS fetch, not twenty.
 
-    Measured rather than argued: the fetch is blocking network I/O on the path that serves every
-    request, and a per-request fetch would both stall the shared validation thread pool and turn
-    ordinary traffic into an amplifier against the tenant.
+    The fetch is blocking network I/O on every request's path; a per-request fetch would stall the
+    validation pool and amplify traffic against the tenant.
     """
     token = _sign(_KEY_A, "kid-a", oid="u-alice")
     with _client() as client:
@@ -294,10 +274,8 @@ def test_the_keys_are_fetched_once_and_then_cached(issuer: _JwksIssuer) -> None:
 def test_the_roles_in_the_token_reach_the_tool_authorization_gate() -> None:
     """A role claim, carried over HTTP, decides a tool call several layers down.
 
-    Two turns, identical but for the `roles` claim in the token: the role-less one is refused
-    `record_knowledge_note` by `DEFAULT_WRITE_TOOL_GATES`, the entitled one is not. That the same
-    request differs only by the token is what makes this a proof of the *chain* rather than of the
-    gate — which `tests/test_authz.py` already covers by setting the contextvar directly.
+    Two turns differing only in the token's `roles` claim: one is refused `record_knowledge_note` by
+    `DEFAULT_WRITE_TOOL_GATES`, the other is not. That proves the chain, not just the gate.
     """
     probe = _IdentityProbeTurn()
     with _client(probe) as client:
@@ -326,9 +304,7 @@ def test_a_role_gated_route_refuses_the_same_caller_the_token_does_not_entitle(
 ) -> None:
     """`DELETE /jobs/{id}` is 403 without the role and reaches the handler with it.
 
-    The two responses are 403 and 404, and the 404 is the point: with the role held, the request
-    got past the gate and asked the job registry a question it answered "no such job". The role
-    claim in the token is the only difference between the two calls.
+    The 404 with the role held shows the request got past the gate to the job registry.
     """
     monkeypatch.setattr(front_door, "cancel_job", _no_such_job)
     with _client() as client:
@@ -376,15 +352,11 @@ def test_one_chemists_session_is_invisible_to_another() -> None:
     ],
 )
 def test_a_token_that_fails_one_check_is_refused(name: str, claims: dict[str, Any]) -> None:
-    """Audience, issuer, expiry, a *missing* expiry, and identity are each load-bearing.
+    """Audience, issuer, expiry, a missing expiry, and identity each refuse a token.
 
-    The absent-`exp` case is not a duplicate of the expired one and does not overlap it: PyJWT
-    checks `exp` only when the claim is present, so a token that simply omits it validates forever
-    unless the decoder demands it. Entra always issues one; this closes the edge anyway.
-
-    The audience case is the confused-deputy guard specifically: the front door is both an OAuth
-    client and a protected resource, so a token minted by *our own tenant*, correctly signed by the
-    key the issuer publishes, must still be refused when it was issued for a different resource.
+    PyJWT checks `exp` only when present, so a token omitting it must be refused by demanding it.
+    The audience case is the confused-deputy guard: a token from our own tenant issued for another
+    resource must be refused.
     """
     token = _sign(_KEY_A, "kid-a", **claims)
     with _client() as client:
@@ -397,9 +369,8 @@ def test_a_token_that_fails_one_check_is_refused(name: str, claims: dict[str, An
 def test_a_token_signed_by_a_key_the_issuer_does_not_publish_is_refused() -> None:
     """A forged token whose `kid` names a real key is rejected on the signature.
 
-    `kid-a` *is* published, so key resolution succeeds and the token is verified against the right
-    public key — and fails, because it was signed with key B. This is the case a test that patches
-    `_signing_key` to "return the key that signed it" cannot express.
+    Key resolution succeeds and verification fails, which a test patching `_signing_key` cannot
+    express.
     """
     with _client() as client:
         forged = _sign(_KEY_B, "kid-a", oid="u-attacker")
@@ -409,11 +380,10 @@ def test_a_token_signed_by_a_key_the_issuer_does_not_publish_is_refused() -> Non
 def test_a_token_naming_an_unpublished_kid_is_refused_without_a_second_fetch(
     issuer: _JwksIssuer,
 ) -> None:
-    """An unknown `kid` costs one refresh, and every later one costs nothing until the cooldown.
+    """An unknown `kid` costs one refresh, and every later one nothing until the cooldown.
 
-    The `kid` comes from an unauthenticated caller, so without the cooldown each credential-less
-    request would become one outbound request to the tenant. Fifty requests, two fetches: the warm
-    one and the single refresh the first unknown `kid` is allowed.
+    The `kid` comes from an unauthenticated caller; without the cooldown each such request would be
+    an outbound request to the tenant.
     """
     with _client() as client:
         # Warm the cache with a good token, so the count below is about the unknown kid alone.
@@ -428,11 +398,9 @@ def test_a_token_naming_an_unpublished_kid_is_refused_without_a_second_fetch(
 def test_a_rotated_signing_key_is_picked_up_after_the_cooldown(
     issuer: _JwksIssuer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A tenant rotates its key and the front door follows, without a restart.
+    """A rotated signing key is picked up after the cooldown, without a restart.
 
-    The cost of the cooldown above is rotation latency, and this is the other side of that trade:
-    once the window passes, the first token carrying the new `kid` pays one refresh and every later
-    caller reads the refreshed cache.
+    The first token carrying the new `kid` after the window pays one refresh.
     """
     monkeypatch.setattr(settings, "entra_jwks_refresh_cooldown_seconds", 0.0)
     with _client() as client:
@@ -444,11 +412,9 @@ def test_a_rotated_signing_key_is_picked_up_after_the_cooldown(
 
 
 def test_an_unreachable_issuer_answers_503_and_not_401(issuer: _JwksIssuer) -> None:
-    """An IdP outage is our failure, not the caller's bad credential.
+    """An unreachable issuer answers 503, not 401.
 
-    401 would tell a chemist holding a perfectly good token that it was rejected, and would hide a
-    dependency failure inside the metric operators read as "someone is probing us". The token here
-    is valid; only the issuer is gone.
+    An IdP outage is our failure, not the caller's bad credential; the token here is valid.
     """
     token = _sign(_KEY_A, "kid-a", oid="u-alice")
     issuer.stop()
@@ -468,24 +434,12 @@ def test_an_unreachable_issuer_answers_503_and_not_401(issuer: _JwksIssuer) -> N
 def test_an_issuer_answering_with_something_that_is_not_a_key_set_answers_503(
     issuer: _JwksIssuer, name: str, body: str
 ) -> None:
-    """A 200 carrying anything but a JWKS is still "we could not reach the tenant to decide".
+    """An issuer answering 200 with something that is not a key set answers 503.
 
-    `IdentityProviderUnavailable` exists so that failure is a 503 rather than a 401, and its
-    reasoning — "an IdP failure is our outage, not the caller's bad credential" — covers a
-    *successful* HTTP response carrying junk exactly as it covers a refused connection. That is the
-    common shape of an intercepting proxy, a captive portal or a tenant misconfiguration, and it
-    used to be a bare HTTP 500: the wrong contract for the client ("this request is broken, do not
-    retry"), a page for the on-call as an application bug, and a 5xx spike naming nothing.
-
-    Two shapes because they fail in two different places, and the two are refused by two different
-    frames. The HTML page fails the decode in `_HttpxJwkClient.fetch_data` — it used to die in
-    PyJWT's own `json.load`, whose `json.JSONDecodeError` that client does not convert, and moving
-    the fetch onto httpx moved the refusal to where the decoding now happens. The JSON one dies in
-    `PyJWKSet.from_dict` (`PyJWKSetError` — a `PyJWTError` that is neither a `PyJWKClientError` nor
-    an `InvalidTokenError`, so every handler in `api/auth.py` missed it), which runs on data that
-    was fetched perfectly well: the transport change did nothing for it, and `_signing_key`'s last
-    arm is still what catches it. Both must stay 503 whichever frame refuses them, which is why
-    this test drives the app rather than either function.
+    That is the shape of an intercepting proxy, captive portal or tenant misconfiguration. Two
+    shapes fail in two places: an HTML page fails the decode in `_HttpxJwkClient.fetch_data`, and
+    JSON that is not a key set fails in `PyJWKSet.from_dict` and is caught by `_signing_key`'s last
+    arm. The test drives the app so both stay 503 whichever frame refuses them.
     """
     token = _sign(_KEY_A, "kid-a", oid="u-alice")
     issuer.publish(body)
@@ -524,18 +478,8 @@ def test_a_key_rotated_just_after_the_warm_fetch_is_accepted_on_its_first_token(
 ) -> None:
     """The first token under a new `kid` is admitted at once, at the shipped cooldown.
 
-    The common rotation: the tenant publishes a new key, and the first token signed with it
-    arrives *after* the front door has warmed its cache. `entra_jwks_refresh_cooldown_seconds` is
-    left at its shipped default on purpose, because the claim is that the configured limiter has
-    nothing to limit yet: no forced refresh has been granted, so this token pays one and is
-    admitted, with no latency at all.
-
-    **This one is not what catches a second limiter, and it was measured not to be.** With
-    `_client_for`'s `cooldown_duration=0` removed (PyJWT 2.15.1's own 30 s back), this test still
-    passes: upstream's cooldown runs only between *forced* refreshes, so a warm fetch does not
-    start it. The composition bites when a refresh was already forced, which is
-    `test_rotation_latency_is_the_configured_cooldown_and_no_longer` below, and that one fails
-    under the same mutation.
+    A warm fetch does not start the limiter, so the first forced refresh is granted. This test does
+    not catch a second limiter (PyJWT's own cooldown); the test below does.
     """
     with _client() as client:
         assert client.post("/sessions", headers=_bearer(_sign(_KEY_A, "kid-a"))).status_code == 200
@@ -548,15 +492,11 @@ def test_a_key_rotated_just_after_the_warm_fetch_is_accepted_on_its_first_token(
 def test_rotation_latency_is_the_configured_cooldown_and_no_longer(
     issuer: _JwksIssuer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A rotated key refused once is admitted as soon as *our* cooldown has passed.
+    """A rotated key refused once is admitted as soon as our cooldown has passed.
 
-    The worst case for rotation latency: a token under the new `kid` arrives *before* the tenant
-    publishes it, spends the one forced refresh the limiter grants, and is refused. The documented
-    bound is `entra_jwks_refresh_cooldown_seconds` from that refresh — measured here at a 1 s
-    cooldown, so a second limiter composing with ours (PyJWT's 30 s, restarted by that same fetch)
-    would show up as a 401 well after our window closed. Measured with `_client_for`'s
-    `cooldown_duration=0` removed: the last request answers 401, as does the older rotation test
-    above, while with it in place the key is admitted just past the 1 s window.
+    Worst case: a token under the new `kid` arrives before the tenant publishes it and spends the
+    one forced refresh. With a 1 s cooldown, a second limiter composing with ours (PyJWT's 30 s,
+    restarted by that fetch) would show up as a 401 after our window; `_client_for` disables it.
     """
     cooldown = 1.0
     monkeypatch.setattr(settings, "entra_jwks_refresh_cooldown_seconds", cooldown)
@@ -588,9 +528,8 @@ def private_ca_issuer(
 ) -> Iterator[tuple[_JwksIssuer, Path]]:
     """An https issuer whose certificate no public root vouches for, and its CA as a PEM file.
 
-    Self-signed for `127.0.0.1`, which is the shape `Chemclaw3_mock`'s browser-facing tenant
-    takes (msal-browser refuses a non-https authority), and the shape a TLS-inspecting proxy's
-    private root presents to a pod. `settings.entra_jwks_url` is pointed at it.
+    Self-signed for `127.0.0.1`, the shape a mock browser-facing tenant or a TLS-inspecting proxy's
+    private root takes. `settings.entra_jwks_url` is pointed at it.
     """
     cert, key = _self_signed("private-tenant-ca", tmp_path)
     running = _JwksIssuer(_jwks(("kid-a", _KEY_A)), tls=(cert, key))
@@ -636,11 +575,10 @@ def test_a_tenant_on_a_private_ca_is_trusted_through_the_configured_bundle(
 def test_an_unset_bundle_is_the_process_trust_store_and_a_set_one_replaces_it(
     tmp_path: Path,
 ) -> None:
-    """Unset is today's behaviour exactly: the very `default_ssl_context` object, certifi.
+    """Unset, the trust store is `default_ssl_context` (certifi); set, the bundle replaces it.
 
-    Set, the bundle *replaces* certifi rather than joining it — one CA in the file, one CA in the
-    store — so the mounted file is the complete statement of whom the tenant is trusted from.
-    Verification stays on in both.
+    The mounted file is the complete statement of whom the tenant is trusted from. Verification
+    stays on in both.
     """
     from chemclaw.core.http import default_ssl_context
 

@@ -1,11 +1,8 @@
-"""Detect reaction chains: product of A = reactant of B (plan step 5.2).
+"""Detect reaction chains: a product of A is a reactant of B.
 
-The backbone of the episodic layer. Two experiments are causally linked when a product of
-one is a reactant of another — the same structural identity the fingerprint index already
-keys compounds by (`canonical_smiles`), so this reuses Phase 3's compound identity, no new
-data. Reactions form a directed graph (edge A→B when a product of A is an input of B); each
-weakly-connected component with ≥2 reactions is a chain (a campaign), returned topologically
-ordered so the narrative reads reactant→product. Pure and deterministic — no LLM, no store.
+Linking uses the compound identity the fingerprint index already keys by (`canonical_smiles`).
+Each weakly connected component with >=2 reactions is a chain, returned topologically ordered so
+the narrative reads reactant to product. Pure and deterministic.
 """
 
 import networkx as nx
@@ -54,12 +51,9 @@ def _reactant_inputs(reaction: OrdReaction) -> set[str]:
 def detect_chains(reactions: list[OrdReaction]) -> list[Chain]:
     """Return the reaction chains (>=2 linked reactions), each topologically ordered.
 
-    An edge A→B is drawn when a product of A is a reactant of B; when several compounds
-    are shared, the edge carries them all (one `ChainLink` each). Linking goes through a
-    compound → consuming-reactions index, so it is O(n·k) in reactions n and consumers
-    per compound k — not all-pairs O(n²). Chains are the weakly connected components of
-    the resulting graph; singletons (unlinked reactions) are not campaigns and are
-    omitted. Results are sorted by first reaction id for determinism.
+    An edge A->B carries every compound shared between A's products and B's reactants. Linking goes
+    through a compound-to-consumers index, so it is O(n*k) rather than all-pairs. Unlinked reactions
+    are omitted; results are sorted by first reaction id.
     """
     graph: nx.DiGraph = nx.DiGraph()
     for reaction in reactions:

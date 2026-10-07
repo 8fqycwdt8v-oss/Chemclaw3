@@ -1,31 +1,16 @@
-"""The compiled middleware sequence, pinned — the instrument the `create_deep_agent` swap needed.
+"""The compiled middleware sequence, pinned.
 
-**Written before the swap, and it earned its place during it.** Every other change in this
-workstream fails loudly: delete a module and the prose gate reddens, add a filesystem tool and the
-cache-floor ratchet reddens, break the audit ordering and the MCP tests redden. The swap is the one
-change whose failure modes are *silent*, and it produced one — the first version compiled a helper
-through `create_deep_agent` with an empty roster, which is not what "no helpers" means to upstream:
-with no spec claiming the general-purpose name it inserts its own, so the recursion guard grew an
-ungoverned `task` surface one level down. Reading the compiled list is what found it.
-`tests/test_subagents.py` is where that property now lives.
+The `create_deep_agent` assembly can fail silently in three ways:
 
-The hazards this file exists for, all three still live:
+- `_apply_custom_middleware` splices by `.name`: a matching name replaces upstream's entry in
+  place, a new name lands after the last core member. That is the difference between our
+  `FilesystemMiddleware` withholding `execute`/`delete` and upstream's offering them beside it.
+- The governance wrappers must stay inside every middleware that registers a tool; their position
+  follows upstream's splice rule, which is not promised.
+- Two skills middlewares: a cached listing could shadow the role-narrowed one.
 
-- **`_apply_custom_middleware` splices by `.name`.** An entry whose name matches one upstream
-  already composed replaces it *in place*; a new name lands after the last core member. So this is
-  the difference between `FilesystemMiddleware` withholding `execute`/`delete` and a second one
-  sitting beside upstream's offering them anyway.
-- **The governance wrappers must stay inside every middleware that registers a tool.** They arrive
-  as new names, so their position is decided by upstream's splice rule rather than by this
-  repository's list order — an arrangement that is correct today and is not promised.
-- **Two skills middlewares.** Upstream composes one only when `skills=` is passed, which is why it
-  is not; the failure mode if that changes is a cached role-narrowed listing shadowing a re-narrowed
-  one, whose only symptom is a chemist occasionally offered a skill their role no longer holds.
-
-None of those turns a test red on its own. This file is what makes them reviewable: the order is
-asserted at construction, and the *effect* of the order is asserted by running a tool through the
-compiled graph. Both halves are needed. Order alone is the shape-without-effect failure
-`tasks/lessons.md` rule 10 names; effect alone would not notice a second skills middleware.
+The order is asserted at construction and its effect by running a tool through the compiled graph;
+both halves are needed. The helper behind `task` is covered by `tests/test_subagents.py`.
 """
 
 import asyncio
@@ -40,52 +25,29 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
 from tests.fakes import scripted
 
-# The sequence as it compiles today, outermost first. `create_agent` nests `wrap_tool_call` in list
-# order, so position here *is* nesting depth: entry 0 sees a tool call before entry 1 does.
+# The sequence as it compiles, outermost first. `create_agent` nests `wrap_tool_call` in list order,
+# so position is nesting depth. Recorded rather than derived so a change must be deliberate. Entries
+# 0-3 are upstream's core stack; ours land after the last core member. Positions worth explaining:
 #
-# Recorded rather than derived, and the point is that changing it must be deliberate. Entries 0–3
-# are upstream's own core stack, in upstream's order; 4 onwards are this repository's, and they land
-# where `_apply_custom_middleware` puts a new name — immediately after the last core member. Three
-# positions carry an argument that is not obvious from the name:
-#
-# - `FilesystemMiddleware` is *this repository's*, occupying upstream's slot by sharing its name.
-#   That is what withholds `execute` and `delete`.
-# - the `wrap_tool_call` wrappers sit inside it and inside `SubAgentMiddleware`, so a
-#   scratchpad write and a `task` spawn cross the audit row and the authorization gate exactly like
-#   any other tool call.
-# - `AnthropicPromptCachingMiddleware` is **upstream's own, and nothing here contributes it**:
-#   `deepagents.graph` calls `append_prompt_caching_middleware` unconditionally, after everything
-#   else, so it lands behind even the model-call observers. This repository used to splice a
-#   replacement into that slot by sharing the name; the collapse to one gateway deleted the
-#   replacement (`D-2026-09-04-a-gateway-is-the-only-provider`) and left upstream's entry running
-#   on every turn, where it no-ops — it is built with `unsupported_model_behavior="ignore"` and
-#   the gateway client is a `ChatOpenAI`. Its presence here is therefore a fact about upstream's
-#   assembly rather than about a decision taken in this file. The two do not contend either way:
-#   caching marks the system prompt and tool schemas, which compaction never touches.
-# - `enforce_loop_cap` appears on *every* build, harness or not
-#   (`D-2026-08-27-the-cap-is-a-property-of-the-loop-not-of-the-mode`): the runaway it bounds is
-#   the model-call loop itself, which exists in both modes. Its position carries no nesting
-#   argument — it is a model-call hook, not a tool gate.
-# - `enforce_spend_cap` and `MeterTurnSpend` are the same guard in the unit that costs money, and
-#   they travel with it for the same reason. The pair is split because the two halves cannot live
-#   in one hook: only the *response* carries the bill, so metering is a `wrap_model_call`, while
-#   enforcement must be a `before_model` — an `after_model` counter is short-circuited by any
-#   middleware that jumps from there
-#   (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`). `MeterTurnSpend`'s
-#   position among the `wrap_model_call` middlewares carries no argument either: it reads
-#   `usage_metadata` off the response and passes it through, so nothing it does depends on what is
-#   nested inside it.
+# - `FilesystemMiddleware` is ours, occupying upstream's slot by sharing its name, which withholds
+#   `execute` and `delete`.
+# - The `wrap_tool_call` wrappers sit inside it and inside `SubAgentMiddleware`, so scratchpad
+#   writes
+#   and `task` spawns cross the audit row and authorization gate like any tool call.
+# - `AnthropicPromptCachingMiddleware` is upstream's, appended unconditionally by
+#   `deepagents.graph`;
+#   with `unsupported_model_behavior="ignore"` and a `ChatOpenAI` client it no-ops.
+# - `enforce_loop_cap` is on every build, harness or not; it is a model-call hook, not a tool gate.
+# - `enforce_spend_cap` (`before_model`) and `MeterTurnSpend` (`wrap_model_call`) are split because
+#   only the response carries the bill, while an `after_model` counter can be skipped by a jump.
 _EXPECTED_ORDER = (
     "FilesystemMiddleware",
     "SubAgentMiddleware",
     "SummarizationMiddleware",
     "PatchToolCallsMiddleware",
-    # **Here since D-2026-09-13 made the harness the default**, and this list now records the
-    # shipped shape rather than the one no deployment ran. It is a capability middleware, not a
-    # gate: it owns the `todos` channel and contributes `write_todos`, so it belongs in this block
-    # above the governance chain — and the plan gate at the bottom of that chain *must* nest inside
-    # it, because `enforce_plan_approval` reads `request.state["todos"]`, which is this
-    # middleware's own view of the plan as it stands at that instant.
+    # A capability middleware, not a gate: it owns the `todos` channel and contributes
+    # `write_todos`. The plan gate must nest inside it, because `enforce_plan_approval` reads
+    # `request.state["todos"]`.
     "ScopedTodoListMiddleware",
     "enforce_loop_cap",
     "enforce_spend_cap",
@@ -95,53 +57,34 @@ _EXPECTED_ORDER = (
     "AnswerAtTheCap",
     "MeterTurnSpend",
     # A `before_agent` hook, so its position carries no nesting argument: it runs once, before the
-    # first model call, and removes the `files` entries past `agent_scratch_retention_days`
-    # (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`).
+    # first model call, and removes `files` entries past `agent_scratch_retention_days`.
     "expire_stale_scratch",
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",
     # Outermost of what rewrites a result, so the handle line lies outside the envelope and the
-    # defang (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+    # defang.
     "stamp_result_handles",
-    # Inside both converters and outside the trail
-    # (`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`): a refusal this system
-    # composed must not be wrapped in the envelope the instructions call evidence, and the two
-    # readers that record a failure — the announcer and the audit trail — must read the result the
-    # tool actually returned rather than the one the model is shown.
+    # Inside both converters and outside the trail: a refusal this system composed must not be
+    # wrapped in the evidence envelope, and the announcer and audit trail must read what the tool
+    # returned, not what the model is shown.
     "frame_connector_results",
-    # Inside the framing and outside the trail, for the two reasons the framing itself is: the
-    # envelope must wrap an already-bounded payload rather than lose its closing tag to the cut,
-    # and `audit_events.detail` must keep recording what the tool returned rather than what the
-    # model was shown (`agent/tool_result_size.py`).
+    # Inside the framing and outside the trail: the envelope wraps an already-bounded payload, and
+    # `audit_events.detail` records what the tool returned (`agent/tool_result_size.py`).
     "bound_tool_results",
     "announce_tool_failures",
     "audit_tool_calls",
     "enforce_tool_authz",
     "refuse_writes_on_dry_run",
     "refuse_repeated_calls",
-    # Innermost of the *deciding* gates, and the position is the mechanism rather than a
-    # preference: a call whose arguments the model mis-serialised is promoted onto `tool_calls` by
-    # `PromoteInvalidToolCalls` precisely so it reaches this chain, and sitting below all of them
-    # means the announcer, the trail, the authorization gate and both guards have seen it before it
-    # is refused. It still raises before the tool body, so the in-process tools with no required
-    # argument cannot be executed by a promotion that carries no usable arguments.
-    #
-    # **"Innermost of everything" is what this comment used to say, and it was false** — the two
-    # harness entries below nest inside it. That went unnoticed because every test that pinned this
-    # chain built a profile attaching neither, which is the configuration the default now *is*.
-    # `tests/test_invalid_tool_calls.py`'s
-    # `test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate`
-    # states the property as a relation rather than an index and pins both arrangements.
+    # Innermost of the deciding gates: a mis-serialised call promoted by `PromoteInvalidToolCalls`
+    # reaches this chain, so the announcer, trail, authorization gate and guards all see it before
+    # it is refused, and it still raises before the tool body. The two harness entries below nest
+    # inside it; `tests/test_invalid_tool_calls.py` states the relation for both arrangements.
     "refuse_unparsed_arguments",
-    # Inside the guard, deliberately: this raises before calling its handler, so a promoted call
-    # never reaches the plan gate. That is right — arguments that did not parse are not a
-    # well-formed request for a gate to decide about — and it is the one consequence of this
-    # ordering that a reader would otherwise have to derive.
-    #
-    # Below every other gate for a second reason of its own: `side_effecting_call(name, args)`
-    # reads the arguments, so the gate cannot decide about a call whose arguments have not been
-    # settled by everything above it.
+    # Inside the guard: a promoted call never reaches the plan gate, since unparsed arguments are
+    # not a request to decide about. Below every other gate because `side_effecting_call(name,
+    # args)` reads arguments settled by everything above.
     "enforce_plan_approval",
     "stamp_plan_link",
     # Above the compaction group, so the preferences it appends to the system message are charged
@@ -156,12 +99,9 @@ _EXPECTED_ORDER = (
     "MeasureRequestPrefix",
     "OffLoopContextEditing",
     "RecordContextCompaction",
-    # The two model-call observers, innermost of this repository's block and therefore closest to
-    # the provider call. Below the compaction group deliberately: the context edits also run in
-    # `wrap_model_call`, so recording from above them would fold this repository's own token
-    # counting into the histogram an operator reads as "how slow is the endpoint". The promotion is
-    # outside the recorder because it reads the response the recorder timed, and it takes no
-    # provider call of its own — which is the difference from the repair it replaced.
+    # The two model-call observers, closest to the provider call and below the compaction group, so
+    # compaction's own token counting is not folded into endpoint latency. The promotion is outside
+    # the recorder because it reads the response the recorder timed and makes no provider call.
     "PromoteInvalidToolCalls",
     "RecordModelCalls",
     "AnthropicPromptCachingMiddleware",
@@ -171,18 +111,10 @@ _EXPECTED_ORDER = (
 def _middleware_names(**kwargs: Any) -> list[str]:
     """Build an agent and report the middleware `create_agent` was finally handed, in order.
 
-    Captured at the call rather than read off the compiled graph, because a `CompiledStateGraph`
-    exposes its nodes and not the middleware that produced them — so the list is only observable
-    where it is passed.
-
-    **Patched inside `deepagents.graph`, which is the whole point of the file.** The list this
-    repository passes to `create_deep_agent` is not the list that compiles: upstream splices it into
-    a stack of its own by `.name`. Spying on `build_langgraph_agent`'s own argument would assert
-    what this repository *asked for*, which is exactly the half that has never been in doubt.
-
-    The helper compiled for the `task` tool goes through `langchain.agents.create_agent` directly,
-    so it does not pass this spy — `tests/test_subagents.py` covers it, and keeping it out of this
-    capture is why one build yields one list.
+    Patched inside `deepagents.graph`, because upstream splices our list into its own stack by
+    `.name` and a compiled graph exposes nodes, not middleware. The `task` helper compiles through
+    `langchain.agents.create_agent` directly, so it does not pass this spy and one build yields one
+    list.
     """
     from langchain.agents import create_agent as real
 
@@ -203,22 +135,19 @@ def _middleware_names(**kwargs: Any) -> list[str]:
 
 
 def test_the_middleware_sequence_is_the_recorded_one() -> None:
-    """The order is load-bearing, so it is a value a reviewer adjudicates rather than a side effect.
+    """The middleware sequence is the recorded one.
 
-    A change here is not necessarily wrong — it is necessarily *deliberate*. The failure this
-    catches is the one that has no other symptom: a middleware that arrives beside the one it was
-    meant to replace, or a governance wrapper that ends up outside the thing it was meant to wrap.
+    A change is not necessarily wrong but must be deliberate: it catches a middleware arriving
+    beside the one it should replace, or a governance wrapper outside what it should wrap.
     """
     assert tuple(_middleware_names()) == _EXPECTED_ORDER
 
 
 def test_every_governance_wrapper_sits_inside_the_capability_middleware() -> None:
-    """The property the order exists for, stated independently of the exact sequence.
+    """Every governance wrapper sits inside the middleware that registers tools.
 
-    Written as a relation rather than a list so it survives a deliberate reordering: whatever else
-    moves, a tool call must cross the audit row and the authorization gate, and the middleware that
-    *registers* tools must be outside them — otherwise a filesystem write or a `task` call would
-    execute through a chain that never saw it.
+    A relation rather than a list, so it survives deliberate reordering: a filesystem write or
+    `task` call must cross the audit row and authorization gate.
     """
     names = _middleware_names()
     registrars = [
@@ -233,11 +162,10 @@ def test_every_governance_wrapper_sits_inside_the_capability_middleware() -> Non
 
 
 def test_the_skills_middleware_appears_exactly_once() -> None:
-    """The `.name` splice hazard, asserted directly.
+    """The skills middleware appears exactly once.
 
-    `ReloadingSkillsMiddleware` exists because upstream caches its listing across turns while this
-    repository's listing is narrowed by the caller's role. Two of them in one chain means the
-    narrowed one is shadowed by a cached one, and the only symptom is a stale skill offer.
+    Upstream caches its listing across turns while ours is narrowed by the caller's role; two in one
+    chain would shadow the narrowed listing with a stale one.
     """
     names = _middleware_names()
     skills = [n for n in names if "Skills" in n]
@@ -248,17 +176,10 @@ def test_the_skills_middleware_appears_exactly_once() -> None:
 
 
 def test_the_filesystem_middleware_is_the_one_that_withholds_the_shell() -> None:
-    """The name-splice, asserted on the artifact rather than on the intent.
+    """Exactly one `FilesystemMiddleware`, and it is the narrowed one that withholds the shell.
 
-    This assertion replaces one that pinned `SubAgentMiddleware` as an *absence*, which was true
-    while nothing spawned a helper and stopped being true the moment `create_deep_agent` arrived:
-    it composes that middleware unconditionally and `_apply_excluded_middleware` raises rather than
-    let a profile strip it. What is worth pinning now is the entry that *replaced* an upstream one.
-
-    Exactly one `FilesystemMiddleware`, and its tool set is the narrowed one. Two would mean this
-    repository's landed beside upstream's instead of in its slot, and upstream's registers all eight
-    verbs — so `execute` (a shell) and `delete` (which decides what judgment the next turn can load)
-    would both be reachable while every other test stayed green.
+    Two would mean ours landed beside upstream's, whose eight verbs include `execute` (a shell) and
+    `delete`.
     """
     from chemclaw.agent.scratchpad import scratchpad_tools
 
@@ -287,12 +208,11 @@ class _Recording(AuditSink):
 
 
 def test_a_filesystem_write_crosses_the_audit_trail() -> None:
-    """The effect the ordering exists for, on the tools the scratchpad added.
+    """A filesystem write crosses the audit trail.
 
-    This is the half that a list cannot give: `write_file` is registered by upstream middleware, not
-    by this repository, so "the chain wraps our tools" is not the same claim as "the chain wraps the
-    tools upstream added". A scratchpad write that never reached the audit row would be a durable
-    side effect with no record that it happened.
+    `write_file` is registered by upstream middleware, so the chain wrapping our tools does not
+    imply it wraps upstream's; an unaudited scratchpad write would be a durable side effect with no
+    record.
     """
     sink = _Recording()
 

@@ -1,49 +1,24 @@
 """Validate the connector bundles: real manifests, real declarations, and a safe tool surface.
 
-`make connector-validate`, the gate that keeps a connector's *declaration* honest — the same job
-`make skill-validate` does for `SKILL.md` and `make kg-validate` does for notes. Pydantic already
-rejects a malformed manifest at load; this gate catches what a per-file schema cannot see. No count
-is written here: the sentence said "four" over five numbered rules and then over six, which is the
-drift `CLAUDE.md` records about a target count that read 23 while the file held 28.
+`make connector-validate`. Beyond pydantic's per-file schema it refuses:
 
-1. **An enabled connector that does not exist.** `connectors_enabled` naming a missing bundle would
-   otherwise advertise nothing at run time and look like a capability that quietly stopped working.
-2. **A declaration that does not match the bundle on disk.** A manifest listing a skill or profile
-   whose file is absent ships a promise nothing fulfils; a bundle containing a skill the manifest
-   does not declare ships a skill nobody reviewed as part of that capability. Both directions
-   matter.
+1. **An enabled connector that does not exist** — it would advertise nothing at run time.
+2. **A declaration that does not match the bundle on disk**, both ways: a declared skill or
+   profile with no file, and a file nobody declared.
 3. **A mutating tool on the agent-facing allow-list.** The agent's connector surface is
-   read/compute only: mutation goes through a `jobs:` entry (which core authorizes, dry-run-gates
-   and
-   attributes) or through a core write tool. This is the `allowed_tools` boundary (D-029) promoted
-   from a convention to something CI enforces, because a connector quietly adding an `index_*` tool
-   to its allow-list would hand the model a write path around every one of those controls.
-4. **A job that cannot be built.** A `params_model` reference that does not resolve, or two
-   connectors claiming the same job name, fails here rather than when a chemist first calls it.
-5. **A disagreement between what a bundle declares and what its server serves — in either
-   direction.** Everything above reads the manifest, so none of it could see that gap at all.
-   *Served and undeclared*: `molfp` and `rxnfp` each served an `index_*` write tool that no
-   manifest named — not on `tools` (correct, D-029), but not in `state_changing`/`read_only`
-   either, so `_check_classification` never saw it and nothing else looked. A connector
-   authenticates nothing by design — the network policy is the boundary — so an undeclared tool on
-   `/mcp` is reachable by anything that can open a socket to that pod. Proved by completing an
-   anonymous MCP handshake against the real app and writing a row into `molecule_fingerprints`,
-   the table the report path cites as lab precedent. *Declared and unserved* is the mirror image
-   and was the half this rule computed no answer for: a phantom tool passes into
-   `available_tool_names()`, which is the one set the other three validators resolve names
-   through, so it is green everywhere and fails at call time.
+   read/compute only; mutation goes through a `jobs:` entry (authorized, dry-run-gated,
+   attributed) or a core write tool (D-029).
+4. **A job that cannot be built** — an unresolvable `params_model` or a duplicate job name.
+5. **A disagreement between what a bundle declares and what its server serves**, both ways. A
+   connector authenticates nothing (the network policy is the boundary), so an undeclared tool on
+   `/mcp` is reachable by anything that can reach the pod; a declared, unserved tool fails at call
+   time.
+6. **A `connector_urls` key naming no discovered bundle** — `_endpoint_url` would silently fall
+   back to the dev-loopback default, which looks like an outage.
 
-6. **A `connector_urls` key naming no discovered bundle.** A typo'd key is silently ignored by
-   `_endpoint_url`, which falls back to the manifest's dev-loopback default — unreachable in a
-   cluster. The symptom is a WARNING plus a degraded `/readyz`, indistinguishable from a transient
-   outage, so a configuration bug presents as an infrastructure problem.
-
-**What this gate cannot cover, and says so.** The direction that needs a server to ask only works
-for a bundle whose server is in this tree. `chem` and `safety` declare an endpoint and ship no
-`server/` here (D-2026-08-09), so their `tools:` lists are unverifiable offline;
-`unverified_tool_surfaces` names them on both the passing and the failing path rather than letting
-a shrinking check hide behind an unchanged green line. `Chemclaw3-mcp`'s own
-`assert_manifest_matches` is where those are checked, against the running server.
+Rule 5's served direction needs a server in this tree; bundles served from `Chemclaw3-mcp` (`chem`,
+`safety`) are named by `unverified_tool_surfaces` on every run and checked there by
+`assert_manifest_matches`.
 
 Read-only; touches nothing.
 """
@@ -76,20 +51,15 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.durable.registry import registered_workflows, temporal_name
 
-# Name prefixes that mark a tool as mutating. A prefix list rather than an exact allowlist because
-# the rule is about *intent*: a connector author naming a tool `index_*`, `write_*`, `delete_*` or
-# `propose_*` is writing something, and the agent-facing surface is not where that belongs. A
-# genuine read tool that trips this is renamed — which is cheaper than a write path nobody noticed.
+# Name prefixes that mark a tool as mutating. A prefix list because the rule is about intent; a
+# genuine read tool that trips it is renamed.
 _MUTATING_PREFIXES = ("index_", "write_", "delete_", "remove_", "update_", "propose_", "submit_")
 
 
 def _both_ways(kind: str, declared: list[str], present: set[str], where: Path) -> list[str]:
     """Report a declaration with no file *and* a file with no declaration (rule 2, both directions).
 
-    One helper for skills and profiles because the asymmetry is the same in both cases and stating
-    it twice would let the two copies drift: a declaration without a file is a promise nothing
-    fulfils, and a file without a declaration is content shipped inside a capability nobody reviewed
-    as part of it.
+    One helper for skills and profiles so the two cases cannot drift apart.
     """
     missing = [
         f"{where}: declares {kind} {name!r} but no such {kind} exists in the bundle"
@@ -134,58 +104,28 @@ def _tool_surface_problems(manifest: ConnectorManifest) -> list[str]:
 def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     """Refuse any disagreement between what a bundle declares and what it serves (rule 5).
 
-    The only check here that reads the *running server* rather than the YAML. Everything the other
-    rules know comes from the manifest, which is precisely why an undeclared tool was invisible to
-    all of them: `_check_classification` validates the `tools` allow-list against
-    `state_changing`/`read_only`, and a tool on none of the three lists is not a violation of
-    anything it can see.
+    The only check that reads the running server rather than the YAML. `state_changing` and
+    `read_only` must be subsets of `tools`, so the manifest cannot express "served but not
+    agent-facing": `tools` is the served set and the two must agree exactly. A capability that must
+    stay off the agent's surface is a `jobs:` entry or a core write tool.
 
-    The comparison is against `tools`, and that is forced rather than chosen.
-    `_check_classification` already refuses a manifest that classifies a tool it does not serve,
-    so `state_changing` and `read_only` are constrained to be subsets of `tools` — **the manifest
-    has no vocabulary for "served but not agent-facing" at all.** The comment that justified the
-    gap ("the server still
-    exposes it, for the ingestion path") described a state the schema cannot express, which is why
-    the only place it was ever written down was a comment.
+    A bundle with no server module (`results`, job-only) is not a violation; one whose server module
+    has no `server` object is reported, since a rename is what this rule must survive.
 
-    So `tools` is the served set, and the two must agree exactly — **both differences are
-    computed**, which they were not: this reported `served - declared` and left `declared - served`
-    uncalculated while stating the rule as an equality. A capability that genuinely must not be on
-    the agent's surface is a `jobs:` entry — which core authorizes, dry-run-gates and attributes —
-    or a core write tool. That is D-029's actual shape; an undeclared MCP tool was never the
-    third option it looked like, and a declared one nothing serves was never a way to reserve a
-    name.
-
-    A bundle with no server module is not a violation: `results` is job-only, and its capability
-    is a
-    Temporal workflow behind `jobs:` rather than an MCP surface. A bundle that *has* one and no
-    `server` object in it is a different thing entirely, and used to return the same empty list:
-    the rule then passed without ever asking what is served. All six bundles with an endpoint
-    define `server = FastMCP(...)`, so the only way in is a rename — the change this rule most
-    needs to survive — and it is reported.
-
-    Costs one import of every bundle's server package (measured 20.8s for the whole gate, mostly
-    rdkit and the ML stack). That is a real cost for a CI gate and it is the price of asking the
-    server instead of the file — the isolation this would otherwise violate is a *runtime* property
-    of the chat pod
-    (`tests/test_connector_isolation.py`), and this is a separate short-lived process.
+    Imports every bundle's server package (slow: rdkit and the ML stack); acceptable in a separate,
+    short-lived CI process.
     """
     if manifest.endpoint is None:
         return []
     try:
-        # `server_tools_module` returns None only for "this bundle has no server module" —
-        # `results` is
-        # job-only, its capability a Temporal workflow behind `jobs:`. A *transitive*
-        # ModuleNotFoundError (a missing rdkit, a renamed dependency) means the bundle is broken and
-        # comes back out of it, because swallowing that made the rule pass vacuously for exactly the
-        # bundle most likely to be misbuilt.
+        # `server_tools_module` returns None only when the bundle has no server module. A transitive
+        # `ModuleNotFoundError` means the bundle is broken and propagates, so the rule cannot pass
+        # vacuously.
         module = server_tools_module(manifest.name)
     except ModuleNotFoundError as exc:
         return [f"connector {manifest.name!r}: its server module could not be imported ({exc})"]
     except Exception as exc:
-        # Anything else — an ImportError from a submodule, a failure at import time — is reported
-        # rather than propagated, so CI prints "connector X: ..." instead of a bare traceback from
-        # a validator that never reached its own `main()`.
+        # Any other import failure is reported as "connector X: ..." rather than a bare traceback.
         return [f"connector {manifest.name!r}: its server module raised on import ({exc!r})"]
     if module is None:
         return []
@@ -218,17 +158,10 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
 def unverified_tool_surfaces() -> dict[str, list[str]]:
     """Endpoint-bearing bundles whose declared tools nothing here can check, by connector.
 
-    The declared→served direction above needs a server to ask, and two shipped bundles have none:
-    `chem`'s and `safety`'s capabilities are `Chemclaw3-mcp`'s, and what stays here is the manifest
-    (D-2026-08-09). Their `tools:` lists are therefore unverifiable offline — not wrong, unasked.
-
-    Reported rather than raised, and reported rather than left silent, for the reason
-    `validate_templates.unchecked_arguments` gives about the identical blind spot in the argument
-    check: failing would force deleting a correct manifest to make a validator pass, and staying
-    quiet would make "connector validation passed." mean less than it did the day before with
-    nothing in the output saying so. A phantom tool in one of these lists is caught by
-    `Chemclaw3-mcp`'s own `assert_manifest_matches`, against the running server — which is the only
-    place it *can* be caught.
+    `chem` and `safety` are served from `Chemclaw3-mcp`, so their `tools:` lists cannot be verified
+    offline. Reported rather than raised (failing would force deleting a correct manifest) and
+    rather than silenced (so a pass says what it did not check). `Chemclaw3-mcp`'s
+    `assert_manifest_matches` checks them against the running server.
     """
     try:
         found = discovered()
@@ -251,16 +184,10 @@ def unverified_tool_surfaces() -> dict[str, list[str]]:
 def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
     """Check that a declared `precondition` can accept the params model it will be handed.
 
-    `resolve_precondition` proves the reference imports and is callable, and stops there — so
-    `connectors/bo/connector.yaml` could name `require_rounds_within_ceiling(n_rounds: int)` while
-    `connectors/jobs.py` calls `precondition(spec)` with a `CampaignSpec`. Every
-    `start_optimization_campaign` raised `TypeError` before any durable work, and nothing caught it:
-    the type is erased to `Callable[[Any], None]` so mypy cannot see it, the validator built the
-    tool without invoking it, and the only tests called the rule directly with a bare `int`.
-
-    Binding the signature catches an arity mismatch; comparing the annotation catches the shape.
-    An unannotated or `Any` parameter is accepted — the contract is stated in prose for those, and
-    a validator that demanded annotations would be inventing a rule the manifest does not make.
+    `resolve_precondition` only proves the reference imports and is callable; `connectors/jobs.py`
+    calls `precondition(spec)` with the job's params model, and the type is erased to
+    `Callable[[Any], None]`. Binding the signature catches arity; comparing the annotation catches
+    shape. An unannotated or `Any` parameter is accepted.
     """
     if job.precondition is None:
         return []
@@ -291,9 +218,8 @@ def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
 def _unavailable_reason_problems(connector: str, job: JobSpec) -> list[str]:
     """Check that a declared `unavailable_reason` resolves, takes nothing, and answers str | None.
 
-    Called rather than only resolved, because the launcher filter calls it on every agent build and
-    a hook that raised there would take `registry.job_tools()` — and every other bundle's
-    launchers — down with it; the validator is where that belongs to be found first.
+    Called, not only resolved: the launcher filter calls it on every agent build, and a raise there
+    would take down every bundle's job launchers.
     """
     if job.unavailable_reason is None:
         return []
@@ -315,12 +241,9 @@ def _unavailable_reason_problems(connector: str, job: JobSpec) -> list[str]:
 def _registered_workflow_names(connector: str) -> set[str] | None:
     """The Temporal type names this bundle's own modules register, or `None` if it has no worker.
 
-    Importing `connectors.<name>.workflows` is what registers them — the same side-effect-import
-    contract the workers themselves rely on — so this validator has to do the import the worker
-    would do. `None` (no such module) is not a problem to report here: a bundle may legitimately
-    declare jobs whose workflow lives elsewhere in a future arrangement, and a missing module is
-    already an unmistakable failure at worker start. What this function exists to catch is the
-    silent case: a module that *is* there and does not register the name the manifest promises.
+    Importing `connectors.<name>.workflows` registers them, as it does for the worker. A missing
+    module is not reported here (it fails loudly at worker start); the silent case caught is a
+    module that does not register the name the manifest promises.
     """
     try:
         import_module(f"chemclaw.connectors.{connector}.workflows")
@@ -332,11 +255,8 @@ def _registered_workflow_names(connector: str) -> set[str] | None:
 def _job_problems(manifest: ConnectorManifest) -> list[str]:
     """Build each declared job's tool, so an unresolvable `params_model` fails here (rule 4).
 
-    Also checks the one cross-cutting number a manifest cannot validate on its own:
-    `inline_wait_seconds` is spent *inside* a turn, so a bundle declaring a wait at or beyond
-    `service_turn_timeout_seconds` has written a job whose fast path can never win — the turn is
-    killed first, and every call looks like a timeout rather than like the deferral it should have
-    been. The manifest cannot see the deployment's timeout; this check can.
+    Also refuses an `inline_wait_seconds` at or beyond `service_turn_timeout_seconds`: the wait is
+    spent inside a turn, so the turn would be killed first and every call would read as a timeout.
     """
     problems: list[str] = []
     served = _registered_workflow_names(manifest.name)
@@ -345,25 +265,17 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
             build_job_tool(manifest.name, job)
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: job {job.name!r} cannot be built: {exc}")
-        # Asked here as well as at launch, because the two are different moments and both matter.
-        # `require_funded_ceiling` refuses at launch — bounding the blast radius to the job being
-        # started rather than to every launcher this process builds — which means building a tool
-        # no longer raises, and a declaration nobody funded would otherwise reach production
-        # without this gate ever being red. Called directly rather than through `build_job_tool`
-        # so the validator does not depend on where the refusal happens to live.
+        # `require_funded_ceiling` refuses only at launch, so building a tool no longer raises;
+        # asking it here keeps an unfunded declaration from reaching production green.
         try:
             require_funded_ceiling(manifest.name, job)
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: {exc}")
         problems.extend(_precondition_problems(manifest.name, job))
         problems.extend(_unavailable_reason_problems(manifest.name, job))
-        # **The last unchecked string in a seam whose design is two plain strings.** `workflow` is a
-        # Temporal type name, resolved at dispatch against whatever the bundle's worker registered —
-        # so `mypy` cannot see it, no test covered it, and a typo passed lint, type, pytest and
-        # every other rule in this file. What it costs at runtime: the child starts on a queue whose
-        # worker serves no such type, the parent waits the whole `connector_job_timeout_seconds`,
-        # and the chemist is told "running" for a day. That is the failure
-        # `durable/registry.py` exists to prevent, one level above where it can see.
+        # `workflow` is a Temporal type name resolved at dispatch, invisible to mypy. A typo would
+        # start the child on a queue whose worker serves no such type, and the parent would wait the
+        # whole `connector_job_timeout_seconds`.
         if served is not None and job.workflow not in served:
             queue = bundle_queue(manifest.name)
             problems.append(
@@ -385,9 +297,8 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
 def _queued_problems(manifest: ConnectorManifest) -> list[str]:
     """Check a queued endpoint's inline wait against the deployment's turn timeout.
 
-    The same arithmetic `_job_problems` does for a job's `inline_wait_seconds`, for the same
-    reason: the wait is spent inside a turn, so one at or beyond the turn timeout can never hand
-    back the answer — the turn dies first and every queued call reads as a timeout.
+    Same arithmetic as `_job_problems`: a wait at or beyond the turn timeout can never return an
+    answer.
     """
     endpoint = manifest.endpoint
     queued = getattr(endpoint, "queued", None)
@@ -404,10 +315,8 @@ def _queued_problems(manifest: ConnectorManifest) -> list[str]:
 def _connector_urls_problems(discovered_names: set[str]) -> list[str]:
     """Check that every key in `connector_urls` names a discovered bundle (rule 6).
 
-    A typo'd key is silently ignored by `_endpoint_url`, falling back to the manifest's
-    dev-loopback default, which is unreachable in a cluster. The symptom is a WARNING plus a
-    degraded `/readyz`, identical to a transient outage — so a configuration bug presents as an
-    infrastructure problem. This check forces any configured URL to name a real bundle.
+    A typo'd key is silently ignored by `_endpoint_url`, which falls back to the unreachable
+    dev-loopback default, so a configuration bug looks like a transient outage.
     """
     return [
         f"settings.connector_urls names unknown connector {key!r}; "
@@ -420,9 +329,7 @@ def _connector_urls_problems(discovered_names: set[str]) -> list[str]:
 def validate_connectors() -> list[str]:
     """Return one problem string per violation across every discovered bundle (empty = all good).
 
-    Discovery (not just the enabled set) is validated, because a bundle that is broken while
-    disabled is a bundle nobody can enable — and CI is where that should surface, not the day an
-    operator turns it on.
+    Discovered, not only enabled: a bundle broken while disabled is one nobody can enable.
     """
     try:
         found = discovered()
@@ -439,27 +346,15 @@ def validate_connectors() -> list[str]:
     # Check that connector_urls configuration is valid (rule 6).
     problems.extend(_connector_urls_problems(discovered_names))
     try:
-        # Two properties of the enabled *set*, not of any one manifest: `connectors_enabled` naming
-        # a bundle that exists (rule 1), and no two enabled connectors claiming one tool name (rule
-        # 4) — a job against another job, or against another bundle's *endpoint* tool, which is the
-        # pairing that let `props`' `compare_solvents` and `calc`'s silently absorb each other.
+        # Two properties of the enabled set: `connectors_enabled` names bundles that exist (rule 1),
+        # and no two enabled connectors claim one tool name — job or endpoint tool (rule 4).
         names = [manifest.name for manifest in enabled()]
         job_tools()
     except ChemclawError as exc:
-        # `ChemclawError`, not `ConnectorError`. `job_tools()` rebuilds every enabled bundle's job
-        # tools, so it re-raises whatever `build_job_tool` raises — and that is `ConnectorJobError`,
-        # which is a *sibling* of `ConnectorError` under `ChemclawError`, not a subclass. A bundle
-        # with an unresolvable `params_model` therefore escaped this arm and killed the CLI with a
-        # traceback, after `_job_problems` above had already worked out the clean sentence and put
-        # it in `problems` — the report was computed and then thrown away on the way out.
-        #
-        # The common base is the right width here for the reason both classes' docstrings give:
-        # every one of them means "this deployment is misconfigured", which is exactly what this
-        # entry point exists to print rather than raise.
-        #
-        # Appended only if nothing above already said it. `_job_problems` builds the same tools per
-        # manifest and reports the same fault with the connector and job named, so re-appending the
-        # bare message would describe one fault twice and lose the more specific line in the noise.
+        # `ChemclawError`, not `ConnectorError`: `job_tools()` re-raises `ConnectorJobError`, a
+        # sibling under `ChemclawError`. Every such error means "misconfigured", which this entry
+        # point prints rather than raises. Appended only if `_job_problems` has not already reported
+        # it more specifically.
         message = str(exc)
         if not any(message in problem for problem in problems):
             problems.append(message)
@@ -472,14 +367,9 @@ def validate_connectors() -> list[str]:
 def main(argv: Sequence[str] | None = None) -> int:
     """Validate every connector bundle; print problems and exit non-zero if any (the CI gate).
 
-    The unverified-surface note prints on both paths, because it qualifies a pass exactly as much
-    as it qualifies a failure — and the reader who only ever sees the green line is the one it is
-    for. Same reasoning, and same shape, as `validate_templates`' unchecked-argument note.
-
-    Parses even though it declares no option: not parsing is not neutral — this used to accept a
-    directory on the command line, discard it, and print the green line about the *configured*
-    bundles. `CHEMCLAW_CONNECTORS_DIR` is the knob and is a `PATH`-style list, so it stays the one
-    spelling; argparse turns the wrong one into a refusal and supplies `--help`.
+    The unverified-surface note prints on both paths, since it qualifies a pass as much as a
+    failure. Parses arguments though it declares none, so a stray directory argument is refused
+    rather than ignored; `CHEMCLAW_CONNECTORS_DIR` is the knob.
     """
     argparse.ArgumentParser(
         prog="python -m chemclaw.cli.validate_connectors",

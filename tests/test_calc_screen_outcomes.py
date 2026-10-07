@@ -1,17 +1,10 @@
 """Every item of a screen ends as an outcome: an answer, or a failure that names it.
 
-The three screens — bonds, reaction media, species media — are sets of *independent* answers, so
-one item the calculation refuses is reported beside the rest rather than aborting the job at the
-first one. A species ranking is not a set of independent answers: its populations are normalised
-over the whole set, so it refuses, naming every form it could not compute, rather than re-share the
-missing forms' population among the survivors.
-
-The boundary is `ValueError` — the repository's "this input is bad" contract — and nothing wider,
-so every test that makes an item fail also has a sibling that makes the *backend* fail and shows
-the outage still propagating. Every refusal here is driven through `FakeCalcServer.overrides`, so it
-arrives down the real wire path (`core/mcp_session.invoke` -> `connectors/calc/remote._call`)
-rather than being raised by a stub: a refusal as `CalcToolError`, a full pod as `CalcBusyError`, a
-server fault as `CalcServerError`.
+Bond, reaction-media and species-media screens are sets of independent answers, so a refused item
+is reported beside the rest. A species ranking normalises populations over the whole set, so it
+refuses, naming every form it could not compute. The boundary is `ValueError` only: each item
+failure has a sibling test showing a backend outage still propagates. Refusals are driven through
+`FakeCalcServer.overrides`, down the real wire path.
 """
 
 import asyncio
@@ -105,10 +98,8 @@ def test_a_refused_bond_is_reported_beside_the_bonds_that_were_computed(
 ) -> None:
     """One bond the server refuses is that bond's answer, not the survey's.
 
-    `considered == bonds + failed` is the invariant that makes the drop impossible to hide: every
-    bond asked about is in exactly one of the two lists. And the weakest bond is flagged as the
-    weakest *of the rest*, with a warning that says the refused one may be weaker — the flag is a
-    claim about the whole molecule otherwise, and nobody measured the missing bond.
+    `considered == bonds + failed`: every bond asked about is in exactly one list. The weakest bond
+    is flagged as weakest of the rest, with a warning that the refused one may be weaker.
     """
     server = install(monkeypatch, FakeCalcServer())
     _refuse(server, "embed_structure", _embedding("[CH3]"))
@@ -146,11 +137,10 @@ def test_a_survey_in_which_no_bond_could_be_computed_refuses_naming_each(
 def test_an_outage_during_a_survey_is_not_reported_as_a_failed_bond(
     monkeypatch: pytest.MonkeyPatch, head: str, outage: type[Exception]
 ) -> None:
-    """A fault or a full pod says nothing about the bond, so it must reach Temporal as itself.
+    """A fault or a full pod says nothing about the bond, so it reaches Temporal as itself.
 
-    Both are `SubsystemUnavailableError`s — the *retryable* hierarchy. Folding either into
-    `failed` would turn a pod restart into a survey that confidently omits a bond, and the job
-    would complete instead of being retried.
+    Both are retryable `SubsystemUnavailableError`s; folding them into `failed` would complete a
+    survey that silently omits a bond.
     """
     server = install(monkeypatch, FakeCalcServer())
     _refuse(server, "embed_structure", _embedding("[CH3]"), message=f"{head} try later")
@@ -165,11 +155,10 @@ def test_an_outage_during_a_survey_is_not_reported_as_a_failed_bond(
 def test_a_refused_medium_is_reported_and_the_rest_are_still_ranked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A medium the server refuses — an optimisation that will not converge there — costs that row.
+    """A medium the server refuses while computing costs that row only.
 
-    Not an unparameterised solvent: the job's precondition refuses those before launch
-    (`science/calc/solvents.require_supported_solvents`), so what reaches a screen is a refusal
-    the server makes while computing.
+    Unparameterised solvents are refused before launch by
+    `science/calc/solvents.require_supported_solvents`, so this is a server-side refusal.
     """
     server = install(monkeypatch, FakeCalcServer())
     _refuse(server, "relax_structure", _relaxing(solvent="toluene"))
@@ -258,8 +247,8 @@ def test_a_payload_the_client_cannot_validate_fails_the_screen_rather_than_one_m
 ) -> None:
     """A contract skew only some inputs reach is the server's bug, not a medium the server refused.
 
-    pydantic's `ValidationError` is a `ValueError`, so the per-item boundary used to record it as
-    one medium "refused" — the job completed, and the server's defect sat in a chemistry column.
+    pydantic's `ValidationError` is a `ValueError`, so it must not be recorded per item as one
+    medium "refused"; it fails the screen.
     """
     from pydantic import ValidationError
 
@@ -287,9 +276,8 @@ def test_a_payload_the_client_cannot_validate_fails_the_screen_rather_than_one_m
 def test_an_outage_in_one_medium_stops_the_others_and_is_raised_as_itself() -> None:
     """The siblings of a failing medium are cancelled, and the error is not wrapped.
 
-    `asyncio.gather` alone leaves them running after the screen has failed; `asyncio.TaskGroup`
-    would stop them but raise an `ExceptionGroup`, which the by-name retry classification in
-    `durable/publish.py` does not recognise. Both halves are asserted.
+    `asyncio.gather` alone leaves them running; `asyncio.TaskGroup` would raise an `ExceptionGroup`
+    that `durable/publish.py`'s retry classification does not recognise. Both halves are asserted.
     """
     stopped: list[str] = []
 
@@ -346,12 +334,10 @@ def test_media_that_all_answer_come_back_in_the_order_they_were_asked() -> None:
 def test_a_ranking_with_a_refused_form_refuses_after_trying_every_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A population over part of the set is wrong, so the ranking refuses — usefully.
+    """A ranking with a refused form refuses after trying every form.
 
-    Usefully means two things, and both are asserted. The refusal names the form, and it comes
-    after every other form was computed: each one that could be is now cached (D-011), so the rerun
-    without the offender pays for nothing a second time. The *first* form is the refused one, so
-    stopping at the first failure — the old behaviour — would never have reached the second.
+    The refusal names the form, and every other form is computed (and cached) first, so the rerun
+    pays nothing twice. The refused form is first, so stopping at the first failure would fail this.
     """
     server = install(monkeypatch, FakeCalcServer())
     _refuse(server, "embed_structure", _embedding(_KETO))
@@ -396,11 +382,10 @@ def test_a_full_pod_during_a_ranking_stays_retryable(monkeypatch: pytest.MonkeyP
 def test_a_species_screen_reports_the_medium_where_a_form_failed_and_ranks_the_rest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A form that fails in one medium costs that medium — whole — and no other.
+    """A form that fails in one medium costs that whole medium and no other.
 
-    Never a distribution over part of the set: `species_ranking` refuses the medium, so every
-    distribution that *is* reported ranks both forms, and every response has one standing per
-    reported medium.
+    Every reported distribution ranks both forms, and every response has one standing per reported
+    medium.
     """
     server = install(monkeypatch, FakeCalcServer())
     _refuse(server, "relax_structure", _relaxing(smiles=_ENOL, solvent="toluene"))

@@ -1,17 +1,8 @@
-"""What one authenticated caller could do to the front door, and what one upload could.
+"""Per-caller request limits and the request body cap at the front door.
 
-**Nothing bounded requests.** Two admission controls existed and both were scoped to the expensive
-path: the concurrency cap bounds turns in flight, the budget guard (D-144) meters tokens. So a
-caller holding both at zero could still drive `GET /proposals`, `GET /jobs`, `GET /schedules` and
-`POST /sessions` as fast as the network allowed — every one of which does real work against Temporal
-or Postgres. A loop with no LLM call in it was free.
-
-**The upload cap was in the wrong place**, and the mistake is easy to make because the check did
-exist.
-`parse_attachment` refuses anything over `attachment_max_bytes`. But it runs in the route handler,
-and by then Starlette's multipart parser has already consumed the whole body into a spooled temp
-file — RAM to 1 MB, then the pod's ephemeral disk. A 5 GB upload was ingested in full and *then*
-refused. The cap described what the parser would accept, never what the process would ingest.
+The turn cap and the token budget cover only the expensive path, so cheap routes need a
+per-principal request budget. The upload cap must sit above the app: by the time a route runs,
+the multipart parser has already consumed the body.
 """
 
 import asyncio
@@ -61,12 +52,7 @@ def _limiter(
 
 
 def test_a_caller_may_burst_and_then_must_wait() -> None:
-    """The finding: an authenticated caller had no request budget at all.
-
-    Driven with an injected clock rather than `sleep`, because a rate limiter tested by sleeping is
-    a rate limiter tested at exactly one rate — and the slow assertions are the ones that get
-    deleted later.
-    """
+    """A caller may burst and then must wait, driven with an injected clock rather than `sleep`."""
     limiter = _limiter(burst=2.0)
     limiter.check("chemist", now=100.0)
     limiter.check("chemist", now=100.0)
@@ -75,11 +61,9 @@ def test_a_caller_may_burst_and_then_must_wait() -> None:
 
 
 def test_the_bucket_refills_continuously_rather_than_at_a_window_edge() -> None:
-    """Why a bucket and not a fixed window.
+    """The bucket refills continuously rather than at a window edge.
 
-    A fixed window lets a caller spend a whole allowance in its last millisecond and the next in its
-    first, so the observed peak is twice the configured rate at the moment a system can least absorb
-    it. A bucket has no edge to align to: at 60/min one token is back one second later, and not two.
+    A fixed window allows twice the rate across a boundary; a bucket has no edge to align to.
     """
     limiter = _limiter(per_minute=60.0, burst=2.0)
     limiter.check("chemist", now=0.0)
@@ -93,12 +77,7 @@ def test_the_bucket_refills_continuously_rather_than_at_a_window_edge() -> None:
 
 
 def test_the_refill_never_exceeds_the_burst() -> None:
-    """An idle caller returns to `burst`, not to an unbounded credit.
-
-    Without the clamp, a caller who waited an hour would accumulate an hour's tokens and could spend
-    them all at once — which is precisely the spike the limiter exists to prevent, arrived at from
-    the other direction.
-    """
+    """An idle caller returns to `burst`, not to an unbounded credit."""
     limiter = _limiter(per_minute=60.0, burst=2.0)
     limiter.check("chemist", now=0.0)
     for spent in range(2):
@@ -121,12 +100,9 @@ def test_one_callers_budget_is_not_anothers() -> None:
 
 
 def test_the_bucket_map_cannot_grow_without_bound() -> None:
-    """A map keyed by caller identity, with an attacker-influenced key.
+    """The bucket map, keyed by caller identity, cannot grow without bound.
 
-    Minting tokens for many `oid`s is exactly the way around a per-principal limit, so the limiter
-    would be the thing that fails first — this codebase has fixed unbounded identity-keyed maps
-    three times, most recently for metric label series (D-152). Eviction costs the evicted caller
-    one free burst and costs the process nothing.
+    Eviction costs the evicted caller one free burst and costs the process nothing.
     """
     limiter = _limiter(principals=3)
     for index in range(50):
@@ -147,11 +123,9 @@ def test_eviction_drops_the_least_recently_seen_not_the_busiest() -> None:
 def test_a_limited_request_is_a_429_carrying_how_long_to_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end through the real dependency, because the wiring is the claim.
+    """A limited request is a 429 with `Retry-After`, through the real dependency.
 
-    The limit is spent inside `require_principal` so it covers every authenticated route and cannot
-    be forgotten by a new one; that is only true if the dependency really calls it. `Retry-After` so
-    a client backs off by the right amount instead of guessing.
+    The limit is spent in `require_principal`, so every authenticated route is covered.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_per_minute", 60.0)
     monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_burst", 1.0)
@@ -166,12 +140,7 @@ def test_a_limited_request_is_a_429_carrying_how_long_to_wait(
 
 
 def test_the_probes_are_never_limited(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A throttled probe reads as a down pod, and a throttled scrape as a down target.
-
-    `/healthz`, `/readyz` and `/metrics` do not depend on `require_principal`, which is what keeps
-    them out — asserted rather than assumed, because moving the gate to a middleware or an app-level
-    dependency (both tempting) would silently catch them.
-    """
+    """The probes and `/metrics` are never limited; a throttled probe reads as a down pod."""
     monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_per_minute", 60.0)
     monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_burst", 1.0)
     reset_limiter()
@@ -201,12 +170,7 @@ def test_the_limiter_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_oversized_body_is_refused_before_anything_reads_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """413 from the declared `Content-Length`, without the body being consumed.
-
-    This is the layer `parse_attachment` could not be: by the time a route handler runs, the
-    multipart parser has already written the whole upload to a spooled temp file. The refusal has
-    to happen above the app or it happens after the cost.
-    """
+    """An oversized body is refused with 413 from `Content-Length`, before anything reads it."""
     monkeypatch.setattr("chemclaw.core.config.settings.service_max_request_bytes", 1024)
 
     with _app_with_sessions() as client:
@@ -249,25 +213,17 @@ def test_an_ordinary_request_passes_through_untouched(monkeypatch: pytest.Monkey
 
 
 def test_the_ceiling_leaves_room_for_the_envelope_around_an_attachment() -> None:
-    """The body limit bounds the whole multipart, not the file inside it.
-
-    Set equal to `attachment_max_bytes` it would refuse a file *at* the documented attachment size,
-    because the boundaries and part headers push the body over — a limit that makes the neighbouring
-    documented limit unreachable.
-    """
+    """The body limit leaves room for the multipart envelope around a maximum-size attachment."""
     from chemclaw.core.config import settings
 
     assert settings.service_max_request_bytes > settings.attachment_max_bytes
 
 
 async def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
-    """The `Content-Length` check is not a duplicate of the counting path — it is the cheap one.
+    """A declared oversize body is refused without reading a byte.
 
-    The counting path alone already refuses the request, so this looked redundant and a mutation
-    that deleted it passed every other test here. What it buys is that a client announcing a 5 GB
-    upload is turned away *before* the transfer, rather than after `service_max_request_bytes` of it
-    has crossed the network and been parsed. Asserted by driving the middleware directly with a
-    sentinel app, because in-process test transport cannot show the difference at the HTTP level.
+    The counting path would refuse it too, but only after the transfer; driven at the middleware
+    with a sentinel app because in-process transport cannot show the difference.
     """
     from chemclaw.core.asgi import BodySizeLimit
 
@@ -301,10 +257,7 @@ async def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> N
 class _SlowParse:
     """Stands in for a hostile document: real blocking work, released only when the test says so.
 
-    `threading.Event().wait()` rather than a sleep, because the thing under test is *when* a slot
-    comes back, and a sleep would make that a race against a duration instead of a fact. It blocks
-    a real thread, exactly like the CPU-bound library call it replaces — a fake that awaited would
-    prove nothing, since an await is precisely what the defect lacked.
+    It blocks a real thread on an `Event`, so when the slot returns is a fact rather than a race.
     """
 
     def __init__(self) -> None:
@@ -332,18 +285,10 @@ async def _upload(client: httpx.AsyncClient, session_id: str) -> httpx.Response:
 async def test_a_slow_upload_does_not_stall_every_other_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The finding: `upload_attachment` is `async def` and parsed inline, on one uvicorn worker.
+    """A slow upload does not stall every other request on the worker.
 
-    Size is not cost. A decompression bomb or a hostile font map well inside `attachment_max_bytes`
-    holds a CPU for tens of seconds (measured: 33.8 s for a 201 KB PDF on the previously locked
-    pypdf), and every session, SSE stream and health probe on the pod waited for it —
-    `service_max_concurrent_turns` meters turns, `BodySizeLimit` meters bytes, and neither meters
-    parse cost.
-
-    Counterfactual, measured: call `parse_attachment` inline in the route again and this test's
-    probe cannot even be *reached* until the parse has finished — the assertion that the upload is
-    still in flight is what discriminates, and it fails. A latency bound alone would not have: with
-    the loop blocked, the probe still answers quickly once it finally runs.
+    Parse cost is not bounded by size, so parsing runs off the event loop. The discriminating
+    assertion is that the probe answers while the upload is still in flight.
     """
     parse = _SlowParse()
     monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
@@ -370,20 +315,10 @@ async def test_a_slow_upload_does_not_stall_every_other_request(
 async def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A burst of hostile uploads must not pile threads into the pool that validates tokens.
+    """Uploads past the parse cap are shed with a retryable 503 rather than queued.
 
-    Queuing *threads* would move the outage one layer out: `chemclaw.api.auth` validates every
-    bearer token through `asyncio.to_thread`, so uploads that hog the default executor stall
-    authentication for everyone. Shed with a retryable 503 instead — the same answer the turn
-    admission gives.
-
-    **The queue window is zero here so this test asks one half of the policy.** The policy has two
-    halves and they pull against each other: shedding at the cap with no wait at all fails the
-    ordinary case (four spreadsheets dropped on the UI at once came back as two 200s and two 503s),
-    so the parse gate waits a bounded time before shedding. Removing the wait isolates what must
-    hold under *sustained* load — that the wait ends in a shed rather than in an unbounded queue.
-    The burst half is `test_a_burst_inside_the_queue_window_is_served_rather_than_shed` below, and
-    neither test is meaningful without the other.
+    Queued threads would stall token validation, which shares the default executor. The queue
+    window is zero here to test sustained load; the burst half is the next test.
     """
     from chemclaw.core.config import settings
 
@@ -409,15 +344,9 @@ async def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
 async def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ordinary case the bare cap got wrong: several files dropped on the UI at once.
+    """A burst inside the queue window is served rather than shed.
 
-    An unremarkable 482 KB spreadsheet takes about 1.3 s to parse, so with a cap of two, four
-    simultaneous uploads measured as `[200, 200, 503, 503]` — a chemist selecting four files got
-    two hard failures out of a system that was working normally. Shedding is the right answer to
-    sustained overload and the wrong one to a burst, and a clock is what tells them apart.
-
-    Every upload is released together, so the claim is that the last two *waited* rather than were
-    refused: with no queue they could not have been.
+    All uploads are released together, so the last ones must have waited rather than been refused.
     """
     from chemclaw.core.config import settings
 
@@ -439,13 +368,7 @@ async def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
 
 
 def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shedding is the cap working, and it was invisible from outside the pod until now.
-
-    Without a counter an operator cannot distinguish a replica refusing every upload from one
-    nobody is uploading to — the lesson `chemclaw_turns_shed_total` already exists for, applied to
-    the other resource. Asserted as a delta rather than an absolute, so the test does not depend on
-    what else in the session incremented it.
-    """
+    """A shed upload is counted, asserted as a delta."""
     from chemclaw.core.config import settings
     from chemclaw.core.metrics import METRICS
 
@@ -472,20 +395,10 @@ def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_a_worker_thread_that_never_starts_gives_its_slot_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A slot stands for a running thread, so a thread that never started must not hold one.
+    """A worker thread that never starts gives its slot back.
 
-    Between claiming the slot and attaching `give_back` to the future there was no guard: if
-    `loop.run_in_executor` itself raised — the default executor shut down during pod drain, a loop
-    closing under a cancelled request — the slot was taken and nothing would ever give it back.
-    `_ParseSlots` is a module singleton with no reset, so the loss is permanent and process-wide.
-
-    Measured on the unguarded code with a cap of 2: two raises took `in_flight` from 0 to 2, and
-    every subsequent upload on that replica was answered with a retryable 503 reading "2 uploads
-    are already being parsed on this replica" — false, and the exact opposite of the observability
-    the shed counter was added to give the operator.
-
-    The assertion is on the counter rather than on the status code because that is the durable
-    damage: the request that triggered it fails either way, and what matters is the replica after.
+    If `run_in_executor` raises, the module-wide slot would otherwise be lost for the life of the
+    process. Asserted on the slot counter, since that is the lasting damage.
     """
     from chemclaw.core.config import settings
 
@@ -514,25 +427,11 @@ async def test_a_worker_thread_that_never_starts_gives_its_slot_back(
 async def test_a_parse_past_its_timeout_is_refused_to_its_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The client stops waiting on the deadline and is told which deadline it was.
+    """A parse past its timeout is refused to its client with 422 naming the budget.
 
-    422 rather than 503: the file is unreadable *here*, and sending it again would do the same
-    thing. The message names the budget because "it failed" and "it was too slow for this pod" send
-    a chemist to different next steps.
-
-    **This test used to assert the wedge as though it were the design.** It read
-    `..._and_keeps_its_slot_until_the_thread_ends` and checked `in_flight == 1` after the refusal,
-    on the reasoning that "Python cannot kill the thread, so the slot must stay taken until that
-    thread actually ends". The first clause is true and the conclusion is a permanent capacity
-    loss: driven at the shipped cap, two such parses took the replica's upload path down for the
-    life of the process. Killing the *work* is what was missing, and it is not something this test
-    could ever have seen, because the fake parse it patches in is a thread that blocks on an
-    `Event` — unkillable by construction, so the old assertion was about the fixture. The real
-    property is driven against a real slow parse in
-    `tests/test_parse_isolation.py::test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload`.
-
-    What stays here is the bookkeeping either way: the slot is released when the worker thread
-    ends, whatever ends it.
+    The fake parse blocks on an `Event` and cannot be killed, so this test covers only the
+    bookkeeping: the slot is released when the worker thread ends.
+    `tests/test_parse_isolation.py` drives freeing the slot from a real slow parse.
     """
     from chemclaw.core.config import settings
 

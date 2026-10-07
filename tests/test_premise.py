@@ -1,21 +1,10 @@
 """An answer days later is answered against a corpus that moved.
 
-ADR: `D-2026-09-15-an-answer-days-later-is-answered-against-a-corpus-that-moved`.
-
-A durable wait holds a question open for up to 90 days and the BO case deliberately waits a week for
-plates. Nothing asked, before releasing the workflow, whether the knowledge the question rested on
-was still standing. These tests are the two ends of the control that closes it: the ask refuses a
-premise that is already broken, and the answer refuses one that broke while it waited.
-
-**The two halves are a pair, and testing either alone proves nothing.** Without the ask-time
-refusal, an answer-time break is indistinguishable from a note that was already retired when the
-question was written — this tree has no arrival signal for a note, so "since" is established by the
-ask being refused, not by a timestamp. `test_a_question_on_retired_knowledge_is_refused_at_the_ask`
-is therefore load-bearing for the *other* test's claim, not a separate nicety.
-
-The corpus is built on disk the way `tests/test_digest.py` builds one —
-`note_repo_dir/knowledge_dir`, the layout a pod actually has — because `build_graph` reads
-files, and a fake would prove only that the fake was consulted.
+`D-2026-09-15-an-answer-days-later-is-answered-against-a-corpus-that-moved`. A durable wait can
+stay open for weeks, so the ask refuses a premise already broken and the answer refuses one that
+broke while it waited. The halves are a pair: with no arrival signal for a note, the ask-time
+refusal is what establishes that a later break happened since. The corpus is built on disk in the
+pod layout, because `build_graph` reads files.
 """
 
 import asyncio
@@ -99,12 +88,10 @@ def test_a_retired_note_breaks_the_premise(tmp_path: Path, monkeypatch: pytest.M
 def test_an_id_that_resolves_to_nothing_breaks_the_premise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`note_in`, not `in graph`, and this is the test that tells them apart.
+    """An id that resolves to nothing breaks the premise: `note_in`, not `in graph`.
 
-    `_assemble_graph` mints a bare node for every cited-but-undefined id, so `note_id in graph` is
-    `True` for exactly the ids that resolve to nothing. A premise check written with the membership
-    test would report a whole premise for a note that is not there — the failure mode inverted.
-    The standing note's body cites the missing id, which is what puts that bare node in the graph.
+    `_assemble_graph` mints a bare node for every cited-but-undefined id, so membership would report
+    a missing note as present. The standing note cites the missing id to create that node.
     """
     citing = Note(
         id="playbook-degassing",
@@ -204,12 +191,7 @@ async def test_the_store_round_trips_the_premise(tmp_path: Path) -> None:
 async def test_a_re_ask_replaces_the_premise_rather_than_keeping_the_old_one(
     tmp_path: Path,
 ) -> None:
-    """A re-ask is a new question, validated against today's corpus.
-
-    Keeping the previous cycle's premise would check an answer against notes this question never
-    rested on — and where the old cycle cited a note that has since been retired, would refuse every
-    answer to a question whose own premise is whole.
-    """
+    """A re-ask replaces the premise rather than keeping the old cycle's."""
     await migrated_db_or_skip()
     await _clear("premise-reask")
     for premise, run in (["old-note"], "run-1"), (["new-note"], "run-2"):
@@ -235,11 +217,9 @@ async def test_a_re_ask_replaces_the_premise_rather_than_keeping_the_old_one(
 def test_an_answer_is_refused_once_its_premise_has_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The whole point, end to end: the wait opened whole and the answer arrives after the change.
+    """An answer is refused once its premise has gone, and the request stays waiting.
 
-    The request is left **waiting**, deliberately. The premise moving is not an ending — somebody
-    who re-reads the current evidence can still answer, and the deadline still expires on its own.
-    Settling it here would destroy a question nobody decided.
+    Someone who re-reads the current evidence can still answer, and the deadline still expires.
     """
 
     async def _run() -> None:
@@ -283,11 +263,10 @@ def test_an_answer_is_refused_once_its_premise_has_gone(
 async def test_an_answer_goes_through_while_its_premise_stands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The guard against a check that refuses everything.
+    """An answer goes through while its premise stands.
 
-    Without this, a `premise_breaks` that returned a break unconditionally would pass every other
-    test in this file. The 503 is the *broker* being absent in this test environment, which is
-    exactly the point: the request got past the premise check and died at the signal.
+    Guards against a check that refuses everything. The 503 is the absent broker: the request passed
+    the premise check and failed at the signal.
     """
     await migrated_db_or_skip()
     await _clear("premise-stands")
@@ -340,15 +319,10 @@ def _external() -> Note:
 def test_an_external_citation_is_not_a_broken_premise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`[[reaction-…]]` names a row in a record store, so it resolves to nothing *here* and holds.
+    """An external citation (`[[reaction-…]]`) is not a broken premise.
 
-    This refused the questions the tool exists for. `measurement` is `request_external_input`'s
-    default kind and "confirm the isolated yield reported for [[reaction-abc123]]" is its
-    archetypal use — and the reaction record is real, a row in `reaction_records`, written into
-    notes by `memory/campaign.py` and handed to the model by `retrieval/retrievers.py`. Both of
-    this tree's other citation readers exempt the external namespace first, and `dangling_links`
-    says in as many words that without the exemption "every campaign and optimization note would
-    be reported broken for links that resolve". This function had become that counter-example.
+    It names a row in a record store, so it resolves to nothing in the graph, and the external
+    namespace is exempt as in the other citation readers.
     """
     _corpus(tmp_path, monkeypatch, _external())
     assert asyncio.run(premise_breaks(["reaction-abc123"])) == []
@@ -377,17 +351,11 @@ def test_a_note_that_is_not_yet_valid_is_not_reported_as_refuted(
 
 
 def test_an_absent_note_refuses_the_ask_but_never_the_answer() -> None:
-    """The asymmetry is the fix: `absent` is not self-validating and `retired` is.
+    """An absent note refuses the ask but never the answer.
 
-    A `retired` break required the corpus to be read and to answer; `absent` is the *absence* of an
-    answer, and a wedged knowledge sidecar, a note pushed with broken frontmatter or a PVC that
-    mounted empty all produce it — `build_graph` returns an empty graph rather than raising for a
-    missing directory, so a whole missing corpus arrives as every premise being absent. Refusing a
-    chemist on that is unappealable (the route has no override) and contradicted this feature's own
-    stated failure direction, which is that a stale replica should admit rather than wrongly refuse.
-
-    The ask still refuses on it, and should: there the model is being told, it gets the text back,
-    and it can rewrite its own citation.
+    `retired` requires the corpus to answer; `absent` can mean an empty or broken corpus mount,
+    since `build_graph` returns an empty graph for a missing directory. Refusing an answer on that
+    would be unappealable. At the ask the model is told and can fix its citation.
     """
     absent = BrokenPremise(note_id="playbook-gone", reason="absent")
     retired = BrokenPremise(note_id="playbook-old", reason="retired")
@@ -399,12 +367,10 @@ def test_an_absent_note_refuses_the_ask_but_never_the_answer() -> None:
 
 
 def test_every_wait_producer_carries_a_premise_not_only_the_agent_tool() -> None:
-    """Derived by the model, so a producer cannot store `{}` by simply not setting the field.
+    """Every wait producer carries a premise, derived by the model, not only the agent tool.
 
-    The field's own docstring said the premise is "never taken as an argument, so it cannot be
-    omitted" while two of the three producers omitted it: the BO plate wait — the case the ADR
-    opens with — and the approval for an irreversible external change, the highest-stakes wait in
-    the tree. Both stored an empty array and were checked against nothing.
+    Otherwise the BO plate wait and the irreversible-change approval would store `{}` and be checked
+    against nothing.
     """
     from chemclaw.durable.awaiting import AwaitRequest
 
@@ -417,14 +383,10 @@ def test_every_wait_producer_carries_a_premise_not_only_the_agent_tool() -> None
 
 
 def test_a_citation_that_cannot_be_a_note_id_is_not_carried_into_the_premise() -> None:
-    """The ids are cut out of free text and were dumped into the model's context unescaped.
+    """A citation that cannot be a note id is not carried into the premise.
 
-    `subject`/`rationale` are defanged before the inbox shows them to the model, because they are
-    text a caller supplied. The premise ids are cut from that same text and were not, so a citation
-    carrying a `</retrieved-note-…>` closing delimiter put a **live** one in front of the model —
-    the class `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` closed for
-    helper reports. `cited_ids` bounds nothing; `is_note_slug` is what the migration's own comment
-    already claimed constrained this column.
+    Premise ids are cut from caller-supplied text and shown to the model, so `is_note_slug` keeps a
+    forged closing delimiter out.
     """
     from chemclaw.durable.awaiting import AwaitRequest
 
@@ -438,14 +400,10 @@ def test_a_citation_that_cannot_be_a_note_id_is_not_carried_into_the_premise() -
 
 
 async def test_the_activity_carries_the_premise_onto_the_row(tmp_path: Path) -> None:
-    """The one line that puts the derived premise on the stored row, driven end to end.
+    """`open_pending_request_activity` carries the derived premise onto the stored row.
 
-    Nothing covered it. `open_pending_request_activity` is the single caller of `open_request`, and
-    `premise_note_ids` is its only optional keyword — so deleting that one argument reduced the
-    whole feature to "every row stores `{}`, every answer is admitted" with the suite still green.
-    Proven by mutation when this was written: swapping the store for a proxy that strips the kwarg
-    left `tests/test_awaiting.py`, `tests/test_premise.py` and `tests/test_pending_store.py` all
-    passing. This is the assertion that fails instead.
+    It is the single caller of `open_request` and `premise_note_ids` is optional, so dropping it
+    would store `{}` and admit every answer with the rest of the suite green.
     """
     from chemclaw.durable.awaiting import AwaitRequest, _OpenInput, open_pending_request_activity
 

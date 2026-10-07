@@ -1,26 +1,10 @@
 """The storm harness's own honesty mechanisms, tested where they are pure.
 
-Everything the storm *measures* needs a live stack, and that half is `make live-storm`'s job. What
-this file covers is the other half: the small pure functions whose output is quoted as a finding,
-and the guards that exist so the harness cannot overstate what it did. Those have to hold on a
-diff, because the failure they prevent is silent by construction — a coverage claim that is wrong,
-a knee that is an artefact, a check that passes for a reason unrelated to what it names.
-
-That is not a hypothetical list. Each of these guards was added after the thing it prevents had
-already happened once, in this repository, in a run that reported success:
-
-* the families count, after a report printed "17/17 checks passed" for a matrix two of whose eight
-  families were never implemented;
-* `_knee`, after a throughput metric that counted refusals as completions inverted SCALE-3's answer;
-* `_bad_call_was_reported`, after every adversarial check passed on `empty_answer` without once
-  looking at the tool;
-* the `[[selector]]` assertion, after the mock served the wrong behaviour for a turn's second model
-  call and the storm graded the answer anyway;
-* `mock_llm._validate`, after LOAD-1 — 100 tool calls reported as "the tool path is genuinely
-  exercised" when every one had died in MAF's parse-error branch.
-
-No network, no database, no broker. A test of the harness that needed the stack the harness tests
-would only run where the harness already ran.
+What the storm measures needs a live stack (`make live-storm`). This file covers the pure functions
+whose output is quoted as a finding and the guards that stop the harness overstating what it did:
+the families count (planned versus ran), `_knee` (goodput, not refusals), `_bad_call_was_reported`
+(the tool, not `empty_answer`), the `[[selector]]` assertion, and `mock_llm._validate` (catalogue
+calls match the live tool surface). No network, database or broker.
 """
 
 from __future__ import annotations
@@ -49,10 +33,8 @@ from chemclaw.cli.storm_behaviours import BEHAVIOURS
 def _row(cap: int, goodput: float, spread: float = 0.0) -> dict[str, object]:
     """One admission-sweep row, with only the fields `_knee` and `noise` read.
 
-    `spread` is the within-cap disagreement across that cap's repeated samples, as a fraction of
-    its median. It defaults to zero so a test that is not about noise can ignore it — but a sweep
-    that really measured zero spread would be one that took a single sample, which is the shape
-    this whole mechanism exists to stop being read as an answer.
+    `spread` is the within-cap disagreement across repeated samples, as a fraction of the median. It
+    defaults to zero so tests not about noise can ignore it.
     """
     return {"cap": cap, "goodput": goodput, "spread": spread, "samples": [goodput]}
 
@@ -61,11 +43,10 @@ def _row(cap: int, goodput: float, spread: float = 0.0) -> dict[str, object]:
 
 
 def test_the_knee_is_the_cap_whose_successor_stops_paying() -> None:
-    """The measured SCALE-3 shape: goodput climbs, then flattens — against a *measured* floor.
+    """The knee is the cap whose successor stops paying, against a measured noise floor.
 
-    Real numbers from run 2 in `docs/archive/storm-2026-08-04.md` — 0.82, 1.01, 1.52, 1.58, 1.78
-    answered/s at caps 2 → 32 — with a 5 % noise floor. The 8 → 16 step is +3.9 %, inside the
-    floor, so the knee is at 8.
+    Goodput 0.82, 1.01, 1.52, 1.58, 1.78 answered/s at caps 2 to 32 with a 5 % floor: the 8 to 16
+    step is +3.9 %, inside the floor, so the knee is 8.
     """
     rows = [
         _row(2, 0.82, 0.05),
@@ -78,19 +59,11 @@ def test_the_knee_is_the_cap_whose_successor_stops_paying() -> None:
 
 
 def test_a_sweep_too_noisy_to_read_reports_no_knee_rather_than_the_first_step() -> None:
-    """The guard against a *fabricated* knee, which is the failure mode a noise floor introduces.
+    """A sweep too noisy to read reports no knee rather than the first step.
 
-    Identical goodput series, one number different: a 20 % measured spread instead of 5 %. The
-    naive reading — "a step smaller than the spread means it stopped paying" — fires *sooner* as
-    noise grows, so at a large enough spread every step qualifies and the knee lands on the first
-    pair. A sweep that could not see anything would confidently name the smallest cap.
-
-    This was found by writing the test expecting the opposite and watching it fail, which is worth
-    recording: the correction to a fixed threshold (D-2026-08-04-a-plateau-needs-the-noise-you-
-    measured-it-with) introduced its own way to be confidently wrong, and only running it said so.
-
-    So `_knee` refuses above `_MAX_READABLE_NOISE`, and None means "we do not know yet" for both
-    reasons a sweep can fail to answer: it ran out of range, or it could not see well enough.
+    Treating "a step smaller than the spread" as flat fires sooner as noise grows, so at large
+    spread every step qualifies and the smallest cap would be named. `_knee` refuses above
+    `_MAX_READABLE_NOISE`; `None` means "not known yet", whether from range or from noise.
     """
     readable = [
         _row(2, 0.82, 0.05),
@@ -119,21 +92,19 @@ def test_the_noise_floor_is_the_worst_cap_not_the_average() -> None:
 
 
 def test_a_sweep_that_never_flattens_reports_no_knee() -> None:
-    """Still improving at the top means the sweep ran out, not that the system did.
+    """A sweep still improving at the top reports no knee.
 
-    The honest answer there is "we do not know yet", and `None` is how the finding says so — a
-    check that returned the top of the range would present a limit of the *measurement* as a
-    property of the system.
+    Returning the top of the range would present a limit of the measurement as a property of the
+    system.
     """
     assert _knee([_row(2, 1.0), _row(4, 2.0), _row(8, 4.0), _row(16, 8.0)]) is None
 
 
 def test_the_line_between_flat_and_still_climbing_is_the_measured_spread() -> None:
-    """The same two-row sweep answers differently depending on what its noise turned out to be.
+    """The line between flat and still climbing is the measured spread.
 
-    A 9 % step is flat against a 10 % floor and a real climb against a 5 % one. That the answer
-    moves with the measurement is the point: the alternative is a constant that is right for
-    whichever machine it was chosen on.
+    A 9 % step is flat against a 10 % floor and a climb against a 5 % one; a constant threshold
+    would be right only for the machine it was chosen on.
     """
     assert _knee([_row(2, 1.00, 0.10), _row(4, 1.09, 0.10)]) == 2
     assert _knee([_row(2, 1.00, 0.05), _row(4, 1.09, 0.05)]) is None
@@ -149,11 +120,9 @@ def test_a_single_step_sweep_has_no_successor_to_judge() -> None:
 
 
 def test_the_report_names_the_families_that_produced_nothing() -> None:
-    """The guard against the exact overstatement this harness already made once.
+    """The report names the families that produced nothing.
 
-    "17/17 checks passed" was true of what ran and silent about the two families that did not, and
-    a pass count can never say otherwise. So the report is asked here for the thing a reader needs:
-    planned versus ran, with the missing ones named.
+    A pass count is silent about families that never ran, so the report states planned versus ran.
     """
     findings = [Finding(family="A", name="something", ok=True, observed="1")]
     text = report(findings, [], {}, ["A", "B", "C"])
@@ -172,11 +141,9 @@ def test_a_full_report_says_so_without_a_did_not_run_line() -> None:
 
 
 def test_the_sweep_table_says_which_column_is_throughput() -> None:
-    """Both rates are printed, and the report states which one is the measurement.
+    """Both rates are printed, and the report labels which one is throughput.
 
-    Printing `drain` at all is a deliberate choice — it is what the first version reported as
-    throughput, and dropping it would hide why the earlier numbers looked the way they did. What
-    it must never do is stand unlabelled beside the real one.
+    `drain` explains earlier numbers but must never stand unlabelled beside the real measurement.
     """
     sweep = [
         {
@@ -200,11 +167,10 @@ def test_the_sweep_table_says_which_column_is_throughput() -> None:
 
 
 def test_a_bad_call_is_only_reported_when_the_tool_says_so() -> None:
-    """`empty_answer` alone must not count — that was the vacuous pass this predicate replaced.
+    """A bad call is reported only when the tool says so; `empty_answer` alone does not count.
 
-    Every adversarial behaviour writes no prose, so every one of them produces `empty_answer`. A
-    predicate that accepted any error code passed all eight without ever looking at the tool, which
-    is a signal reporting success for a reason unrelated to what it claims to measure.
+    Every adversarial behaviour writes no prose and so produces `empty_answer`; accepting any error
+    code would pass all of them without looking at the tool.
     """
     silent = TurnResult(status=200, error_code="empty_answer", result_previews=["[]"])
     assert not _bad_call_was_reported(silent)
@@ -256,12 +222,10 @@ def test_percentiles_ignore_turns_that_never_answered() -> None:
 
 
 def test_a_custom_message_without_its_selector_is_refused() -> None:
-    """A message that lost its `[[name]]` would silently run the default behaviour.
+    """A custom message without its `[[name]]` selector is refused.
 
-    Family H sends the user's own words — unicode, an injection string — because those are what
-    Postgres has to survive, so the message is not always the harness's own. The selector is how
-    the mock knows which scenario it is in; a turn that dropped it would be graded against a
-    behaviour it never ran, which is the drift this assertion exists to make impossible.
+    Family H sends user-shaped text, and the selector is how the mock knows its scenario; without it
+    the turn would be graded against a behaviour it never ran.
     """
     with pytest.raises(ValueError, match=r"\[\[h-unicode\]\]"):
         asyncio.run(storm("h-unicode", turns=1, concurrency=1, message="no marker here"))
@@ -283,22 +247,11 @@ def test_the_lane_scripts_the_chaos_family_drives_exist() -> None:
 
 
 def test_the_note_repo_is_provisioned_before_the_docker_branch_takes_over() -> None:
-    """`exec docker compose` never returns, so anything after it runs only without Docker.
+    """The note repo is provisioned before the Docker branch's `exec docker compose`.
 
-    This is a defect that shipped: `ensure_note_repo` sat in the *native* list, below an
-    `exec` — so on the branch `bootstrap.sh` itself calls "the right way", the lane came up with
-    no dedicated clone, `note_repo_dir` fell back to the working checkout, and the PR-gate refused
-    every submission before running a git command. Since job results, reports and distilled
-    playbooks all take that gate (D-005), the knowledge-contribution half of a live run was
-    unreachable on exactly the machines most likely to run it — and nothing failed loudly.
-
-    Asserted on the ordering rather than on mere presence, because presence is what was already
-    true and was not enough. A textual check because the only alternative is starting Docker in
-    CI: the invariant is positional, so position is the honest thing to pin.
-
-    Both anchors match the *commands* rather than any prose about them — the first draft searched
-    for `exec docker compose`, found that string inside the very comment explaining the fix, and
-    failed against the corrected script. A guard that a nearby sentence can move is not a guard.
+    `exec` never returns, so a step placed after it runs only without Docker; without the dedicated
+    clone, `note_repo_dir` falls back to the working checkout. The invariant is positional, so the
+    test pins order textually, matching the commands rather than prose a nearby comment could move.
     """
     script = (live_storm._LANE_DIR / "bootstrap.sh").read_text(encoding="utf-8")
     provision = script.index("\n    ensure_note_repo\n")
@@ -313,13 +266,10 @@ def test_the_note_repo_is_provisioned_before_the_docker_branch_takes_over() -> N
 
 
 def test_the_catalogue_passes_the_load_1_guard() -> None:
-    """Every shipped behaviour is validated against the live tool surface, at import time here.
+    """Every shipped behaviour validates against the live tool surface.
 
-    This is the check that would have caught LOAD-1 in July: the previous load test sent
-    `{"query": ...}` to a tool taking `text`, every call died in MAF's parse-error branch before a
-    tool body ran, and the run reported "100 tool calls, the tool path is genuinely exercised".
-    Running it over the whole catalogue on a diff means a behaviour cannot rot against a renamed
-    parameter and be discovered by a storm three weeks later.
+    Run over the whole catalogue on every diff, so a behaviour cannot silently rot against a renamed
+    parameter, sending calls that die before any tool body runs.
     """
     for behaviour in BEHAVIOURS:
         _validate(behaviour)
@@ -354,12 +304,10 @@ def test_deliberate_malformation_must_be_declared() -> None:
 
 
 def test_a_request_carrying_tool_output_is_recognised_as_a_continuation() -> None:
-    """The runaway-loop guard: a mock that replays its calls forever never lets a turn finish.
+    """A request carrying tool output is recognised as a continuation.
 
-    Measured before it existed — the first storm turn made **41** tool calls for a behaviour that
-    declares one, because MAF re-invokes the model after every result and the mock answered
-    identically each time. Read off the request rather than from per-session state, so concurrent
-    turns cannot corrupt each other's counters at the concurrency this harness offers.
+    Otherwise the mock replays its calls after every result and a turn never finishes. Read off the
+    request rather than per-session state, so concurrent turns cannot corrupt each other's counters.
     """
     first = {"input": [{"type": "message", "role": "user", "content": "hello"}]}
     after_tools = {"input": [{"type": "function_call_output", "call_id": "c1", "output": "[]"}]}
@@ -374,18 +322,11 @@ def test_a_request_carrying_tool_output_is_recognised_as_a_continuation() -> Non
 
 
 def test_the_mock_serves_the_protocol_the_engine_actually_posts_to() -> None:
-    """`ChatOpenAI` posts to `/v1/chat/completions`, and for a while the mock served neither.
+    """The mock serves `/v1/chat/completions`, the route `ChatOpenAI` posts to.
 
-    The mock was written when the conversation layer ran on the Microsoft Agent Framework, whose
-    client resolved to the **Responses** API. The LangGraph rebuild builds a `ChatOpenAI`; nothing
-    here followed. From that day every credential-free lane — `make live-degradation`,
-    `make live-storm`, `make live-soak` — got a bare `404 Not Found` and every turn died with no
-    answer and no tool call, which reads as a system defect rather than a missing route. Measured:
-    a degradation run scored 1/3 with "the turn produced no token or answer at all" while the
-    mock's own counter read `requests: 0`.
-
-    Asserted against the app's real routing table rather than by calling the handler, because the
-    defect was the *absence of a route* — the one thing a handler test cannot see.
+    Without it every credential-free lane gets a 404 and every turn dies with no answer, reading as
+    a system defect. Asserted against the app's routing table, since a missing route is invisible to
+    a handler test.
     """
     from chemclaw.cli.mock_llm import MockLlm, build_app
 
@@ -397,19 +338,11 @@ def test_the_mock_serves_the_protocol_the_engine_actually_posts_to() -> None:
 
 
 def test_every_declared_behaviour_is_reached_by_some_check() -> None:
-    """A behaviour nothing drives is a scenario the catalogue advertises and the run never has.
+    """Every declared behaviour is reached by some check.
 
-    **This test exists because the claim it enforces was false when it was written.** The
-    catalogue's docstring said "every behaviour here is reached by some check in
-    `cli/live_storm.py`, and that is enforced rather than intended" — and `a-retrieval` and
-    `d-status` were reached by nothing, one round after six other dead behaviours had been the
-    finding that started this pass. Confident prose about coverage is exactly what this repository
-    has learned not to trust, including its own.
-
-    Checked by reading the harness's source for each name rather than by instrumenting a run,
-    because the alternative — noticing during a twenty-five minute live run — is how the previous
-    six survived. The names travel as `[[selector]]` strings inside turn messages, so the source is
-    genuinely where the reference lives; there is no symbol to resolve.
+    A behaviour nothing drives is a scenario the catalogue advertises and the run never has. Checked
+    by reading the harness source for each name, since names travel as `[[selector]]` strings inside
+    turn messages and there is no symbol to resolve.
     """
     harness = (live_storm._LANE_DIR.parents[1] / "src/chemclaw/cli/live_storm.py").read_text(
         encoding="utf-8"
@@ -423,17 +356,11 @@ def test_every_declared_behaviour_is_reached_by_some_check() -> None:
 
 
 def test_run_turn_reads_the_same_awkward_stream_the_probe_harness_does() -> None:
-    """One wire reader, three harnesses — and this is the half that proves it is one.
+    """`run_turn` reads the same awkward stream the probe harness does.
 
-    `run_turn` used to carry its own `line.startswith("data: ")` / `line[6:]` pair, a sixth-
-    character slice against a fifth-character slice in `cli/live_benchmark` and a third spelling in
-    `evals/live`. A storm grades a turn on whether it answered, so a reader that dropped a legal
-    frame reported a *system* that went silent under load, which is this harness's headline finding.
-    They now share `evals.live.decoded_events`; the fixture is shared too, so the three cannot
-    drift apart without one of the three tests going red.
-
-    No network, no broker — `httpx.MockTransport` serves the bytes, which is what the module
-    docstring's "a test of the harness that needed the stack the harness tests" rules out.
+    The storm grades whether a turn answered, so a reader dropping a legal frame would report a
+    system going silent under load. All three harnesses share `evals.live.decoded_events` and the
+    fixture, served through `httpx.MockTransport`.
     """
     import httpx
 
@@ -458,18 +385,11 @@ def test_run_turn_reads_the_same_awkward_stream_the_probe_harness_does() -> None
 
 
 def test_run_turn_keeps_the_answer_of_a_turn_whose_stream_was_cut_off() -> None:
-    """The harness that *makes* truncated streams must be the one that can read them.
+    """`run_turn` keeps the answer of a turn whose stream was cut off.
 
-    A storm's finding is whether the front door still answers under load and under cancellation,
-    and a cancelled turn's stream ends after its last `data:` line with no blank line behind it.
-    The SSE grammar dispatches an event on that blank line, so a driver that does nothing at
-    end-of-stream drops the last frame of exactly the turns this harness exists to observe —
-    measured, one event where the reader it replaced yielded two. `answered` is the column that
-    moves, and it moves the wrong way: a turn that answered and was then cut reads as a turn that
-    went silent, which is this harness's headline finding being manufactured by its own reader.
-
-    The fixture is `tests/test_live_probes.TRUNCATED_STREAM`, imported rather than copied, for the
-    reason the awkward one above is.
+    A cancelled turn's stream ends after its last `data:` line with no blank line; dropping that
+    frame would turn an answered turn into a silent one. The fixture is
+    `tests/test_live_probes.TRUNCATED_STREAM`, imported rather than copied.
     """
     import httpx
 
@@ -492,14 +412,11 @@ def test_run_turn_keeps_the_answer_of_a_turn_whose_stream_was_cut_off() -> None:
 
 
 def test_a_refused_turn_is_recorded_as_its_status_rather_than_as_a_transport_failure() -> None:
-    """The ordering that makes admission control measurable: status first, stream second.
+    """A refused turn is recorded by its status, not as a transport failure.
 
-    Family A's whole subject is what the front door does at capacity, and it says so with a 429 and
-    a JSON body — not an event stream. `decoded_events` answers a body that is not a stream by
-    yielding nothing, which is the right answer for a 200 that is not a stream and says nothing at
-    all here: a shed turn would then be indistinguishable from a turn that answered nothing, which
-    takes it out of the `status` histogram the shedding check reads. So the status comes off the
-    response before the stream is touched, and this is the test that holds that ordering.
+    Admission control answers with a 429 and a JSON body, which `decoded_events` reads as an empty
+    stream. The status is taken off the response before the stream is touched, so shed turns stay in
+    the `status` histogram the shedding check reads.
     """
     import httpx
 
@@ -521,11 +438,10 @@ def test_a_refused_turn_is_recorded_as_its_status_rather_than_as_a_transport_fai
 
 
 def test_the_calibration_check_reads_the_ratio_not_the_in_flight_estimate() -> None:
-    """Check H asked `turn_costs.estimated_tokens` to be positive on a turn that completed.
+    """The calibration check reads the ratio leaving its clamp, not the in-flight estimate.
 
-    That column is only what nobody was billed *through* — an in-flight or cancelled prompt
-    (`agent/turn_usage.InFlightPrompts`) — so it is 0 on every completed turn and the check could
-    not pass. The property is the published ratio leaving its clamp, and exactly-1.0 is the clamp.
+    The clamp is exactly 1.0. `turn_costs.estimated_tokens` covers only in-flight or cancelled
+    prompts and is 0 on every completed turn.
     """
     exposition = (
         "# HELP chemclaw_context_estimator_ratio x\n"

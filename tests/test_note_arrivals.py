@@ -1,11 +1,8 @@
 """A note the model could not date still reaches a subscriber, on the day it arrived.
 
-`durable/digest._is_new` read an absent `valid_from` as *open-ended* — correct about the fact and
-wrong about the question a digest asks — so an undated note reached only a subscriber who had never
-been told anything, and 34 of the shipped corpus's 41 notes are undated. `kg.graph.note_arrivals`
-answers "when did this note reach the corpus" from the notes repository's own history: one
-`git log` per process, then only the commits since the one it remembers (measured on a 10,000-note
-corpus written one commit per note: ~2.9 s full, 78 ms for the last 100 commits).
+An absent `valid_from` says nothing about arrival, so `kg.graph.note_arrivals` answers "when did
+this note reach the corpus" from the notes repository's git history: one full `git log` per
+process, then only the commits since the last one it saw.
 """
 
 import shutil
@@ -183,10 +180,8 @@ def test_a_note_merged_from_a_back_dated_branch_arrives_on_the_merge(
 ) -> None:
     """A `--no-ff` merge is the day the note reached this branch, not the day it was written.
 
-    Without `--first-parent -m` the file is attributed to its side-branch commit, so a note merged
-    on 02-01 from a branch committed on 01-02 read as 01-02 — older than a subscriber's 01-15
-    watermark, and so never reported. The `since..HEAD` range has the same defect, because the
-    side-branch commits are in it with their old dates; both paths are driven.
+    Without `--first-parent -m` the file is attributed to its side-branch commit and can predate a
+    subscriber's watermark. The `since..HEAD` range has the same hazard, so both paths are driven.
     """
     _add(repo, "playbook/playbook-a.md", "2026-01-01")
     notes = repo / "knowledge"

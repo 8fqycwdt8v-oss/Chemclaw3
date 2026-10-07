@@ -1,8 +1,7 @@
-"""Three claims about measurement that the measurement itself refutes.
+"""Three measurement claims checked against the measurement.
 
-An embedding chokepoint one retrieval leg walks past; a label value that does not match the HELP
-describing it; and a WARNING documented under a rule ("log volume is a function of the pass") that
-it does not obey, on the one path where the pass is a chemist's turn.
+An embedding chokepoint one retrieval leg bypasses; a label value that must match its HELP; and a
+WARNING whose volume must follow the fault rather than the traffic.
 """
 
 import asyncio
@@ -32,13 +31,10 @@ def _help_for(name: str) -> str:
 
 
 def test_the_embedding_outcome_label_is_a_value_its_own_help_names() -> None:
-    """A rule written from the HELP selected an empty series for the life of the metric.
+    """The embedding outcome label is a value its own HELP names.
 
-    The HELP says "by outcome (ok / error)" and the failure path emitted `outcome="failure"`, so
-    `chemclaw_embedding_calls_total{outcome="error"}` — the series anybody reading the HELP would
-    alert on — never existed. Checked against the *rendered* HELP rather than against a literal,
-    because the HELP is the only description of this series an operator has and a test that
-    hardcoded "error" would go green if the HELP changed underneath it.
+    Otherwise an alert written from the HELP selects an empty series forever. Checked against the
+    rendered HELP, the only description an operator has.
     """
 
     def broken(text: str) -> list[float]:
@@ -68,11 +64,10 @@ def test_the_embedding_outcome_label_is_a_value_its_own_help_names() -> None:
 
 
 def test_the_embedding_chokepoint_claim_names_its_own_exception() -> None:
-    """`_embed_uncached` called itself "the one place every provider goes through". It is not.
+    """`_embed_uncached` must not call itself the one place every provider goes through.
 
-    An absence assertion, because the defect *is* the sentence: a docstring that overstates the
-    coverage of a metric is what makes an operator read a missing leg as a quiet one. The measured
-    fact is the test below; this is what stops the claim coming back.
+    An absence assertion: overstating a metric's coverage makes a missing leg read as a quiet one.
+    The measured fact is the test below.
     """
     source = inspect.getsource(embeddings._embed_uncached)
     assert "one place every provider goes through" not in source
@@ -82,12 +77,10 @@ def test_the_embedding_chokepoint_claim_names_its_own_exception() -> None:
 def test_a_server_side_warehouse_embedding_books_nothing_on_the_embedding_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`vector: {embedding: server}` hands the raw query to the warehouse; `embed_texts` is skipped.
+    """A server-side warehouse embedding books nothing on the embedding metrics.
 
-    So that leg's calls, failures and latency are absent from `chemclaw_embedding_*` — which is a
-    property of where the embedding happens (inside the warehouse's SQL, with no client call to
-    time) rather than a gap to plug. It is named here so the number is a measured fact rather than
-    a reading of the branch.
+    `vector: {embedding: server}` hands the raw query to the warehouse and skips `embed_texts`, so
+    that leg is absent from `chemclaw_embedding_*` by construction; stated here as a measured fact.
     """
     monkeypatch.setattr(
         "chemclaw.ingest.eln.warehouse.retriever.default_record_store",
@@ -139,16 +132,12 @@ def _fresh_unresolved_state() -> Any:
 def test_a_drifted_collection_warns_once_and_counts_every_time(
     _fresh_unresolved_state: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """`_report_unresolved` runs on every external vector search, so drift is per turn forever.
+    """A drifted collection warns once and counts every time.
 
-    A collection that has drifted meets the condition on *every* query against it — one WARNING per
-    source per turn, indefinitely, for a standing fault an operator has already been told about.
-    That is the failure `ingest/documents/sync._summarise_skips` states the rule against and this
-    work cites four times: log volume must be a function of the fault, not of the traffic. There is
-    no pass to summarise at the end of here, so the unit is the collection and a clock.
-
-    The counter stays per query, because that is what says how *much* drift there is and it is what
-    an alert reads.
+    `_report_unresolved` runs on every external vector search, so an unthrottled WARNING would
+    repeat per turn for a standing fault. Log volume must follow the fault, not the traffic, so the
+    WARNING is per collection and clock; the counter stays per query, since it measures how much
+    drift there is and is what an alert reads.
     """
     before = _counter("chemclaw_vector_unresolved_points_total")
 

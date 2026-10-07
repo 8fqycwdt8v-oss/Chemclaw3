@@ -1,16 +1,9 @@
-"""The in-process tool schemas are derived once per process, and the graph really gets them.
+"""The in-process tool schemas are derived once per process, and the graph really uses them.
 
-Two assertions, and they are deliberately not the same one. The first is about the cache: the same
-function converts to the same object. The second is about the *wiring*, and it is the one that
-matters — a memo nothing routes through is a memo that saves nothing, which is the shape this
-repository keeps finding (a control that exists and has no caller). So the second reaches into a
-compiled graph and asserts the object the executor would run is the cached one.
-
-Why this is safe to share across turns, stated here because it is the whole premise: a first-party
-capability tool is a module-level function, and its schema is derived from its signature and
-docstring. Neither can differ between two turns. The per-turn objects are the *connector* tools,
-which arrive already built from that turn's own MCP session and are passed through untouched —
-`build_langgraph_agent` converts only the in-process half.
+One test covers the cache itself; the other asserts a compiled graph's executor holds the cached
+objects, since a memo nothing routes through saves nothing. Sharing is safe because a first-party
+tool's schema derives from a module-level signature and docstring; connector tools are per turn
+and are passed through untouched.
 """
 
 from typing import Any
@@ -48,19 +41,11 @@ def test_one_function_converts_to_one_tool_object_for_the_life_of_the_process() 
 
 
 def test_two_compiles_hand_the_executor_the_same_tool_objects() -> None:
-    """The saving is wired, not merely available.
+    """Two compiles hand the executor the same registry tool objects.
 
-    Compiling per turn is the rule (`build_langgraph_agent` says why), so this asserts the thing
-    that costs nothing to get wrong: two builds must reuse the derived schemas rather than build
-    a second set. Asserted by object identity, because equality would pass on a rebuild.
-
-    **Scoped to the registry's own tools, and the exclusion is a finding rather than a
-    convenience.** Seven names on the executor — `read_file`, `write_file`, `edit_file`, `ls`,
-    `glob`, `grep` and `task` — *are* rebuilt on every compile, because upstream's
-    `FilesystemMiddleware` and `SubAgentMiddleware` construct them inside the build rather than
-    taking them from a registry. They are not reachable from here and are not what this cache is
-    about; what they say is that the remaining per-compile schema work is upstream's, which is the
-    next thing to measure if this budget ever gets tight again.
+    Asserted by identity, since equality would pass on a rebuild. Scoped to registry tools: the
+    filesystem and `task` tools are built inside upstream middleware on every compile and are out of
+    this cache's reach.
     """
     model = _model()
     first = _executor_tools(build_langgraph_agent(model, audit_sink=NullAuditSink()))
@@ -79,21 +64,12 @@ def test_two_compiles_hand_the_executor_the_same_tool_objects() -> None:
 
 
 def test_the_cache_does_not_grow_with_the_number_of_turns() -> None:
-    """The bound on the cache was documented and not checked, which is this repo's own failure mode.
+    """Building more turns does not grow the unbounded schema cache.
 
-    `functools.cache` is unbounded, and the only thing between it and a leak is the docstring's
-    claim that every caller passes a module-level function out of `chemclaw.core.tool_registry`.
-    That claim is true today and is one edit from false: `connectors.registry.job_tools()` and
-    `templates.registry.template_tools()` mint **fresh closures on every call**, so relaxing the
-    by-name guard in `_register_generated_tools` — to re-read manifests on a config reload, say,
-    which looks harmless — would grow this cache by one entry per generated tool per build, forever,
-    in a long-lived pod. Nothing would turn red.
-
-    **Asserted as "does not grow", not as "equals the registry".** The first version compared
-    `currsize` against `len(_capability_tools())` and failed in a full run at 56 against 54: other
-    files register their own probe tools, so the registry is not the same size at assertion time as
-    it was when those entries were cached. That comparison was never the invariant — the invariant
-    is that a *turn* adds nothing, which is what this measures and what the leak would violate.
+    `functools.cache` is safe only while every caller passes a module-level function; generated job
+    and template tools are fresh closures per call and would leak one entry per build if routed
+    here. Asserted as "a turn adds nothing" rather than "equals the registry size", since other
+    tests register probe tools.
     """
     model = _model()
     for _ in range(2):

@@ -1,16 +1,8 @@
-"""The evidence sweep as a `Send` fan-out, and the balance it was supposed to fix (M10).
+"""The evidence sweep as a `Send` fan-out, and the source balance it exists for.
 
-Two things are under test and they are not the same thing. The fan-out's own properties — order,
-degradation, per-branch reporting — are asserted directly. The *reason* it exists is
-`D-2026-08-01-a-cap-that-starves-a-source`, in which one retrieval leg contributed zero surviving
-chunks while the sweep looked healthy in aggregate, and that is re-measured here against the
-numbers the ADR recorded rather than asserted in the abstract.
-
-`test_the_starved_source_measurement_rerun` is the one worth reading. It rebuilds the ADR's exact
-mixed sweep — 45 graph hits, 8 lexical, 7 dense, against a 40-chunk cap — and reports what each
-source contributes now. The ADR's own measurements were 38/0/2 under the flat union it removed and
-40/0/0 with the score sort taken out; the test prints today's split so the number is in the record
-rather than in a commit message.
+The fan-out's own properties (order, degradation, per-branch reporting) are asserted directly.
+`test_the_starved_source_measurement_rerun` rebuilds a mixed sweep against the chunk cap and
+checks that every source with hits survives it, printing the per-source split.
 """
 
 import asyncio
@@ -61,23 +53,18 @@ class _Retriever:
 def _swept(sources: list[_Retriever]) -> list[list[EvidenceChunk]]:
     """Run one sweep and return its per-source ranked lists.
 
-    Drops the second half of `sweep_sources`' return — the names of the sources that raised — so
-    the order and cap tests below keep asking exactly what they asked before that channel existed.
-    The failure channel has its own tests; folding it in here would make every test depend on it.
+    Drops the failed-source names from `sweep_sources`' return; that channel has its own tests.
     """
     lists, _failed, _skipped = asyncio.run(sweep_sources([(s.name, s) for s in sources], "q", {}))
     return lists
 
 
 def test_the_fan_in_is_in_source_order_not_completion_order() -> None:
-    """The property `operator.add` does not give you — and why each branch carries an index.
+    """The fan-in is in source order, not completion order.
 
-    The first source is made much slower than the last, so completion order is the reverse of
-    source order. Both merge modes downstream read these lists positionally — `reciprocal_rank_
-    fusion` takes a note's representative chunk from the first list that found it, and the
-    round-robin interleaves in list order — so a sweep whose order depended on which database
-    answered first would return different evidence for the same question on different runs. In a
-    chemist that is a reproducibility defect, not a nondeterminism nobody notices.
+    The first source is made slowest. Both merge modes read the lists positionally, so order
+    depending on which database answered first would return different evidence for one question
+    across runs.
     """
     slow = _Retriever("graph", 1, delay=0.05)
     fast = _Retriever("lexical", 1)
@@ -111,18 +98,11 @@ def test_every_source_gets_its_own_branch_and_they_run_together() -> None:
 
 
 def test_a_source_that_fails_costs_its_own_leg_and_not_the_sweep() -> None:
-    """One dead retriever degrades the evidence; it does not fail the research question.
+    """A source that fails costs its own leg and not the sweep.
 
-    The same trade the connector transport makes: losing a capability is a much smaller failure
-    than losing the turn. The failed source contributes an empty list *in its own position*, so the
-    sources after it keep their places and the merge downstream is unaffected.
-
-    **The `[2, 0, 2]` here is about the merge, not about observability.** `sweep_sources` returns
-    ranked hit-lists and nothing else, so a failed leg is an empty list here by construction —
-    there is no third value a `list[EvidenceChunk]` could take. That is correct for this return
-    type and was wrong as the *whole* record of the failure, which is what
-    `test_a_failed_leg_and_an_empty_leg_report_differently` now covers on the channel that has
-    somewhere to put it.
+    Its empty list stays in its own position, so later sources keep their places and the merge is
+    unaffected. The failure itself is reported on a separate channel
+    (`test_a_failed_leg_and_an_empty_leg_report_differently`).
     """
     lists = _swept(
         [_Retriever("graph", 2), _Retriever("lexical", 1, fails=True), _Retriever("dense", 2)]
@@ -155,16 +135,11 @@ def _reports(sources: list[_Retriever]) -> list[dict[str, Any]]:
 
 
 def test_a_failed_leg_and_an_empty_leg_report_differently() -> None:
-    """The two ways to contribute nothing, told apart on the channel a chemist watches.
+    """A failed leg and an empty leg report differently on the turn's event stream.
 
-    A retriever that raises degrades to an empty list, so for as long as a branch reported only a
-    count the broken leg and the genuinely-quiet leg published the identical payload — the exact
-    collapse this fan-out exists to undo, reproduced one level down. They are not the same finding:
-    "the corpus has nothing on this" is an answer, "the index is down" is an outage, and a surface
-    that renders them alike sends someone to fix the wrong thing.
-
-    Asserted as a *difference* between two legs in one sweep rather than as a flag on one, because
-    the defect was never "the flag was false" — it was that the two payloads were equal.
+    "The corpus has nothing on this" is an answer; "the index is down" is an outage. Asserted as a
+    difference between two legs in one sweep, since the defect would be the two payloads being
+    equal.
     """
     sources = [_Retriever("graph", 2), _Retriever("lexical", 0), _Retriever("dense", 1, fails=True)]
     by_source = {payload["evidence_source"]: payload for payload in _reports(sources)}
@@ -178,21 +153,11 @@ def test_a_failed_leg_and_an_empty_leg_report_differently() -> None:
 
 
 def test_the_failure_counter_names_the_source_that_failed() -> None:
-    """The across-turns half of the same distinction, and why the label had to be added.
+    """The failure counter names the source that failed.
 
-    The chunk counter has always been labelled `{source}` and the failure counter carried no labels
-    at all, so the two series could not be joined: "some source raised" and "the dense leg went
-    dark" were two numbers with no way to decide whether they described one event or two. That is
-    the correlation `D-2026-08-01-a-cap-that-starves-a-source` needed and did not have, and an
-    unlabelled counter cannot supply it however long it is retained.
-
-    **The source names are unique to this test, because the registry is process-global.** The
-    absence half — "the healthy source got no failure series" — is the assertion that carries the
-    labelling claim, and it was written against the names `graph` and `dense`, which any other test
-    in the session may also have swept. `test_gather_evidence_outage` sweeps a *failing* source
-    called `graph`, so this passed or failed on collection order alone (measured: green with these
-    two files in alphabetical order, red with them reversed) — and this suite runs under
-    `pytest-randomly`, which picks a different order every run.
+    Labelled `{source}` like the chunk counter, so the two series can be joined across turns. The
+    source names are unique to this test because the registry is process-global and other tests
+    sweep failing sources named `graph`; shared names would make the absence half order-dependent.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -210,13 +175,10 @@ def test_no_sources_is_an_empty_sweep_and_not_an_error() -> None:
 
 
 def test_each_branch_reports_what_it_contributed() -> None:
-    """The point of the branch existing: a starved leg is visible while the sweep runs.
+    """Each branch reports what it contributed, while the sweep runs.
 
-    In an aggregate hit-list a source returning nothing and a source nobody asked are the same
-    observation. Here they are not — the branch reports zero, which is what
-    `D-2026-08-01-a-cap-that-starves-a-source` needed and had no way to see.
-
-    Read off the graph's own custom stream, which is how a surface receives it during a real turn.
+    A source returning nothing and one nobody asked look the same in an aggregate list; the branch
+    reports zero. Read off the graph's custom stream, as a surface receives it in a real turn.
     """
     sources = [_Retriever("graph", 3), _Retriever("lexical", 0), _Retriever("dense", 2)]
     reported = {item["evidence_source"]: item["chunks"] for item in _reports(sources)}
@@ -224,18 +186,11 @@ def test_each_branch_reports_what_it_contributed() -> None:
 
 
 def test_the_starved_source_measurement_rerun(capsys: pytest.CaptureFixture[str]) -> None:
-    """Re-measure `D-2026-08-01-a-cap-that-starves-a-source`, per branch (the M10 acceptance).
+    """Every source that had hits survives the chunk cap.
 
-    The ADR's sweep, rebuilt: 45 graph hits at the notes' 0.8 confidence, 8 lexical at ts_rank
-    0.02–0.09, 7 dense at cosine 0.60–0.85, against a 40-chunk cap. Its recorded measurements were
-    **38 graph / 0 lexical / 2 dense** under the flat union that has since been removed, and
-    **40 / 0 / 0** with the score sort taken out — either way the lexical leg contributed nothing
-    an agent could read, which is the whole reason a deployment enables it.
-
-    What is asserted is the property, not the exact split: **every source that had hits survives
-    the cap**. Pinning precise per-source counts would freeze the round-robin's arithmetic against
-    a corpus shape nobody promised, and the defect was never "the wrong ratio" — it was a zero.
-    The measured split is printed so the number is in the record.
+    A sweep of 45 graph hits at 0.8 confidence, 8 lexical at low `ts_rank` and 7 dense at mid
+    cosine, against a 40-chunk cap. Asserted as the property rather than exact counts, which would
+    freeze the round-robin's arithmetic; the defect is a zero. The split is printed for the record.
     """
     from chemclaw.agent.research_tools import _interleave_dedup
     from chemclaw.core.config import settings
@@ -269,20 +224,11 @@ def test_the_starved_source_measurement_rerun(capsys: pytest.CaptureFixture[str]
 
 
 def test_a_branch_report_reaches_the_turn_event_stream() -> None:
-    """The end-to-end claim: a starved leg is visible to a *chemist*, not just to a counter.
+    """A branch report reaches the turn event stream, end to end.
 
-    The counter makes a permanently-dark source alertable across turns; this makes one sweep's
-    arithmetic visible while it happens, which is what `D-2026-08-01-a-cap-that-starves-a-source`
-    lacked — that defect went unnoticed until someone counted by hand.
-
-    Driven through the whole path rather than by calling the translator directly: the branch runs
-    inside a tool, inside a `Send` branch of the agent's own model→tools edge, and the report has
-    to cross both boundaries to arrive. Asserting on `_custom_event` alone would prove the mapping
-    and skip the part that was in doubt.
-
-    A third source is added that *raises*, because `failed` has the same two boundaries to cross
-    and a flag set on the branch but dropped by the translator would be indistinguishable, from the
-    chemist's side, from never having been set.
+    The branch runs inside a tool, inside a `Send` branch of the agent's model→tools edge, and the
+    report must cross both boundaries; asserting `_custom_event` alone would skip that. A raising
+    third source checks that `failed` crosses them too.
     """
     from langchain_core.tools import StructuredTool
 
@@ -338,13 +284,10 @@ def test_a_branch_report_reaches_the_turn_event_stream() -> None:
 
 
 def test_a_failed_source_is_named_on_the_channel_the_caller_reads() -> None:
-    """The stream event says a leg failed; the *return value* has to say so too.
+    """A failed source is named in the return value the caller reads.
 
-    `test_a_failed_leg_and_an_empty_leg_report_differently` covers the surface watching the turn.
-    This covers the caller — a different audience with a different problem: `gather_evidence`
-    reads the return value, and while that carried hit-lists alone an unreachable source and a
-    source with nothing to say were the same empty list. That is what let an outage be handed to the
-    model under a docstring promising "nothing on file, never invented".
+    `gather_evidence` reads the return value, and an unreachable source must not reach the model as
+    "nothing on file".
     """
     lists, failed, _skipped = asyncio.run(
         sweep_sources(
@@ -380,11 +323,9 @@ def test_a_sweep_where_nothing_failed_names_nothing() -> None:
 
 
 def test_a_declined_source_is_a_skip_not_a_failure_and_not_a_zero() -> None:
-    """The third channel: a `RetrieverSkip` travels as a reason, never as a bare `[]`.
+    """A declined source is a skip with a reason, not a failure and not a zero.
 
-    The D-2026-08-01 class one category over: "asked, found nothing", "could not ask" and
-    "declined, and said why" used to collapse into one indistinguishable empty list on every
-    path that was not an exception.
+    "Found nothing", "could not ask" and "declined, and said why" stay distinct.
     """
     from chemclaw.retrieval.evidence import RetrieverSkip
 

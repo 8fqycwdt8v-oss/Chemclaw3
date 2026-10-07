@@ -1,28 +1,9 @@
 """`infra/sql/README.md` lists exactly the tables the migrations create.
 
-The repository had no current inventory of its own schema. The only one that existed sits in
-`docs/archive/audit/13-storage-and-knowledge-audit.md`, describes "nineteen files in `infra/sql/`"
-against the thirty-six that shipped, and stops at migration 019 — so the single document a reader
-would reach for was seventeen migrations out of date, under a directory `docs/README.md` marks "do
-not treat any of these as current".
-
-Writing a fresh one only helps if something keeps it true. This is that something, and it is the
-same bidirectional shape `tests/test_repo_map.py` uses on `ARCHITECTURE.md`: a table on disk with
-no row is an undocumented table, and a row with no table is a document describing something that
-does not exist. Both directions matter — the second is how the archived inventory decayed, one
-renamed migration at a time.
-
-Two of the four columns are judgements and stay unverified: **Written by** names the module that
-owns a table's writes and **Disposal** says what bounds its growth, and a test for either would be
-a second copy of the answer or a regex over English.
-
-**Migration is not a judgement.** Which files touch a table is a fact the files state, so the
-column that says so is checkable — and it was the one part of an inventory whose own prose
-advertises being verified that nothing verified. Measured on the shipped set, four of twenty-seven
-rows were wrong: `bo_suggestions` omitted 037, `calculation_results` omitted 019,
-`note_proposals` omitted 036, `session_messages` omitted 026 — every one of them a migration that
-had added a column the row did not mention. So the set check below is joined by a column check,
-and the rule is kept honest by refusing to pass over a statement shape it does not understand.
+Checked in both directions, like `tests/test_repo_map.py`: a table with no row is undocumented,
+a row with no table describes nothing. **Written by** and **Disposal** are judgements and stay
+unverified; **Migration** is a fact the files state, so it is checked too, and an unrecognised
+statement shape fails rather than being passed over.
 """
 
 import re
@@ -40,13 +21,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 _SQL = _ROOT / "infra" / "sql"
 _README = _SQL / "README.md"
 
-# How a table may be spelled where a statement names one. Every pattern below used to say `\w+`,
-# which is the bare lower-case spelling every merged migration happens to use and only that one —
-# so `ALTER TABLE ONLY audit_events …`, the form **`pg_dump` emits**, resolved to the "table"
-# `only`, and `public.audit_events` to `public`. Neither is in the inventory, so the migration was
-# credited to no table at all and the column check below passed over the row it had just stopped
-# checking. Written once, substituted everywhere, and normalised by `_bare` so the schema qualifier
-# and the quotes are dropped rather than compared.
+# How a table may be spelled where a statement names one, including `ONLY` (as `pg_dump` emits),
+# schema-qualified and quoted forms; `_bare` drops the qualifier and quotes before comparing.
 _NAME = r"[\w.\"]+"
 
 
@@ -66,11 +42,9 @@ _NUMBER = re.compile(r"\d{3}")
 
 _LINE_COMMENT = re.compile(r"--[^\n]*")
 
-# The two operator lists at the foot of the README, each keyed by its own `###` heading rather than
-# by position, and each read as the migration filenames its bullets open with. Scoped to a heading
-# on purpose: migration filenames appear in the README's running prose too (`037_document_index.sql`
-# is named in the "two files may share a number" paragraph), so a whole-file scan would read that as
-# a claim about rollbacks.
+# The two operator lists at the foot of the README, each keyed by its `###` heading and read as the
+# migration filenames its bullets open with; scoped to the heading because the running prose also
+# names migrations.
 _ROLLBACK_HEADING = '### Migrations that end "deploy the previous image"'
 _REPLAY_HEADING = "### Migrations that are not re-runnable, and the recipe for each"
 _BULLET = re.compile(r"^- `(\d{3}_[a-z0-9_]+\.sql)`", re.MULTILINE)
@@ -84,10 +58,8 @@ def _listed_under(heading: str) -> list[str]:
     return _BULLET.findall(after.split("\n### ", 1)[0].split("\n## ", 1)[0])
 
 
-# A statement acts on the table it names in one of these positions. Matching the construct rather
-# than the bare identifier is load-bearing: `observations` is both a table and a column of
-# `bo_suggestions`, so "the name appears in the file" would credit migration 031 with touching a
-# table it only mentions as a column.
+# A statement acts on the table it names in one of these positions. Matching the construct, not
+# the bare identifier, matters: `observations` is both a table and a column of `bo_suggestions`.
 _TOUCHES = (
     re.compile(rf"^CREATE TABLE(?:\s+IF NOT EXISTS)?\s+({_NAME})", re.I),
     re.compile(rf"^ALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?({_NAME})", re.I),
@@ -107,10 +79,7 @@ _TOUCHES = (
 )
 # Statements that legitimately name no table.
 #
-# `DROP INDEX` is here rather than in `_TOUCHES` because its syntax names an *index*, never the
-# table under it — so there is no table to credit, and crediting the index's own name to the
-# Migration column would put a non-table in it. It is a real construct in this directory since
-# `106`, which drops an index `105` created for a containment query nobody ever wrote.
+# `DROP INDEX` names an index, never its table, so there is nothing to credit.
 _TABLE_FREE = (
     re.compile(r"^CREATE EXTENSION", re.I),
     re.compile(r"^DROP INDEX", re.I),
@@ -120,27 +89,9 @@ _TABLE_FREE = (
 def _split_on_statement_ends(body: str) -> list[str]:
     """Split SQL on the semicolons that end a statement, ignoring those inside a string literal.
 
-    A plain `body.split(";")` tears any statement whose *prose* contains a semicolon into
-    fragments — and the one construct in this directory that carries prose is `COMMENT ON`, whose
-    whole purpose is to explain a column in sentences. Two migrations wrote one ("... could
-    resolve; a sourced write supersedes ...", "... withdrawn; NULL means not retracted"), and each
-    fragment then matched no pattern at all.
-
-    That failed loudly rather than silently, because `test_every_migration_statement_is_one_the
-    _rule_understands` exists — but the failure it reported named the migrations, not this
-    function, which is why the fix belongs here rather than in a new `_TOUCHES` entry: the
-    construct was already listed, and the text was never one statement to begin with.
-
-    SQL escapes a quote inside a literal by doubling it, and a doubled quote is just two state
-    flips in a row, so tracking a single boolean is sufficient and `''` needs no special case.
-
-    **A `DO $$ … $$` block is one statement too**, and for the same reason: its body is PL/pgSQL
-    with semicolons of its own, which the runner sends whole (`core.migrate` says so) and a split
-    here would turn into `END IF` and `END $$` fragments naming nothing. The first one is `108`, a
-    constraint added behind a `pg_constraint` guard because `ALTER TABLE … ADD CONSTRAINT` has no
-    `IF NOT EXISTS`. Only the anonymous `$$` tag is read, because it is the only one this directory
-    writes; a quote inside the body does not toggle the literal state, since the body is itself the
-    literal.
+    `COMMENT ON` carries prose that may contain semicolons. A doubled quote is two state flips, so
+    one boolean suffices. A `DO $$ … $$` block is one statement, as the runner sends it whole; only
+    the anonymous `$$` tag is read, since it is the only one this directory writes.
     """
     out: list[str] = []
     current: list[str] = []
@@ -253,15 +204,9 @@ def test_the_inventory_lists_no_table_that_does_not_exist() -> None:
 
 
 def test_a_semicolon_inside_a_comment_does_not_end_the_statement() -> None:
-    """The splitter must read SQL, not text that mostly looks like SQL.
+    """A semicolon inside a `COMMENT ON` literal does not end the statement.
 
-    `COMMENT ON` is the one construct here that carries sentences, so it is the one that will
-    contain a semicolon, an apostrophe, or both. Splitting naively turned one such comment into
-    two fragments that named no table — which would have stopped crediting its migration to its
-    table, the exact decay the surrounding tests exist to catch.
-
-    Driven directly rather than through the corpus: a migration that happens to contain no
-    semicolon in its prose today would make this pass for the wrong reason tomorrow.
+    Driven directly, so it does not depend on what today's migrations happen to contain.
     """
     body = (
         "ALTER TABLE t ADD COLUMN c TEXT;\n"
@@ -295,12 +240,10 @@ def test_a_do_block_is_one_statement_and_names_its_table() -> None:
 
 
 def test_every_migration_statement_is_one_the_rule_understands() -> None:
-    """Guard the guard: an unrecognised statement must fail loudly, not count as touching nothing.
+    """An unrecognised migration statement fails loudly rather than counting as touching nothing.
 
-    Without this, teaching the schema a construct `_TOUCHES` does not list — a `COMMENT ON`-only
-    migration, a `DELETE FROM` backfill — would silently stop crediting that migration to its
-    table, and the column check below would pass while going stale in exactly the way it exists to
-    prevent. Failing here costs one regex; the alternative is a test that quietly stops testing.
+    Otherwise a new construct would silently stop crediting its migration and the column check
+    would go stale.
     """
     unrecognised = [
         f"{name}: {statement[:60]}"
@@ -333,26 +276,16 @@ def test_every_migration_statement_is_one_the_rule_understands() -> None:
     ],
 )
 def test_a_table_is_recognised_however_it_is_spelled(statement: str) -> None:
-    """Every spelling Postgres accepts names the same table — or the column check goes blind.
+    """Every spelling Postgres accepts names the same table, or the column check goes blind.
 
-    The failure this closes is silent, which is why it is asked of synthetic SQL rather than of the
-    tree. `ALTER TABLE ONLY audit_events …` is the form **`pg_dump` emits**; read by a rule that
-    expects a bare identifier it yields the "table" `only`, which is in no inventory, so the
-    migration is credited to nothing and `test_the_migration_column_names_every_migration_that_
-    touches_the_table` below passes over a row it has just stopped checking. A schema qualifier
-    resolves to `public` the same way. Every merged migration happens to use the bare lower-case
-    spelling, so the tree can never raise this — only these rows can.
+    Asked of synthetic SQL because every merged migration uses the bare spelling, so the tree can
+    never raise this.
     """
     assert table_named_by(statement) == "audit_events"
 
 
 def test_the_migration_column_names_every_migration_that_touches_the_table() -> None:
-    """The column the README's "an inventory nobody verifies" paragraph vouched for.
-
-    It was the one column nothing checked, and four of twenty-seven rows were wrong — each of them
-    a later `ALTER TABLE` adding a column the row never mentioned. A reader using this table to
-    answer "when did this table last change shape" got the wrong answer for a seventh of it.
-    """
+    """The **Migration** column names every migration that touches the table."""
     actual = migrations_that_touch_each_table()
     declared = migrations_in_the_inventory()
     wrong = {
@@ -368,22 +301,10 @@ def test_the_migration_column_names_every_migration_that_touches_the_table() -> 
 
 
 def test_the_rollback_note_names_every_reviewed_break() -> None:
-    """The list an operator reads before a `helm rollback`, checked against the registers.
+    """The rollback note names every reviewed rollback-breaking migration, in order.
 
-    It was transcribed, and it was wrong in the direction that matters: the README said **four**
-    reviewed rollback-breaking migrations and listed 041, 056, 058, 063 while the register held
-    five, the missing one being 088 — the newest, and the only one bearing on a rollback of the
-    current release. So a paragraph whose own sentence claimed the list was "derived from that set"
-    told an operator that the `turn_costs` primary-key move is not a rollback break. It is.
-
-    Checked in both directions and in order, the same shape as the **Migration** column above: a
-    register entry with no bullet is a break nobody planning a rollback will see, and a bullet with
-    no entry is a warning about a migration that does not break anything. The count that used to
-    open the paragraph is gone rather than checked — it is derivable from the list, and a redundant
-    number is the thing that went stale.
-
-    Both registers, because an operator does not care which one found the break: one holds the
-    migrations a pattern flagged, the other the one that only review could reach.
+    Checked against both registers in both directions: a missing bullet is a break an operator will
+    not see, an extra one a false warning. No count is stated, since it derives from the list.
     """
     reviewed = sorted(set(_REVIEWED_ROLLBACK_BREAKS) | set(_REVIEWED_SEMANTIC_BREAKS))
     assert _listed_under(_ROLLBACK_HEADING) == reviewed, (
@@ -394,12 +315,9 @@ def test_the_rollback_note_names_every_reviewed_break() -> None:
 
 
 def test_the_replay_note_names_every_recipe() -> None:
-    """The same, for the migrations that cannot simply be replayed.
+    """The replay note names every migration that cannot simply be re-run, with its recipe.
 
-    A restore whose `schema_migrations` ledger is older than its tables is recovered by re-running
-    the migrations, and two of them abort the run instead (046 on a restore, 058 on a
-    hand-built database). The recipe for each is one statement, and it is useless in a test file:
-    the person who needs it is reading this directory at the time.
+    The recipe lives in the README because that is what the person recovering a restore reads.
     """
     assert _listed_under(_REPLAY_HEADING) == sorted(_REVIEWED_REPLAY_BREAKS), (
         "infra/sql/README.md's replay-recipe list disagrees with `_REVIEWED_REPLAY_BREAKS` "
@@ -413,10 +331,8 @@ def test_the_replay_note_names_every_recipe() -> None:
         )
 
 
-# The notations a second structure-identity scheme would arrive as. Names, not prose: `051`'s own
-# comment lists three of these while declining them, and a test that matched the comment would
-# pass on a migration that adds the column beside it
-# (`D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability`).
+# The notations a second structure-identity scheme would arrive as. Matched as column names, not
+# prose, since `051`'s own comment names them while declining them.
 _SECOND_IDENTITY = re.compile(
     r"^(std_)?(inchi|inchi_key|inchikey|cas|cas_number|cas_rn|formula|molecular_formula"
     r"|molecular_weight|mol_weight|registry_number|corporate_id)$"
@@ -452,10 +368,7 @@ def _top_level_parts(body: str) -> list[str]:
 def _declared_columns() -> list[tuple[str, str]]:
     """Every `(file, column)` this family's schemas declare — both databases.
 
-    `schema/result-store/` is included because it is the *other* place a compound is named, and the
-    argument being held is about structure identity across both: the result store's `compound` row
-    reuses `compound_id` deliberately, and a second scheme added there would be exactly as dead as
-    one added here.
+    `schema/result-store/` is included because it also names compounds, reusing `compound_id`.
     """
     out: list[tuple[str, str]] = []
     files = sorted(_SQL.glob("*.sql")) + sorted((_ROOT / "schema").rglob("*.sql"))
@@ -491,17 +404,9 @@ def test_the_schemas_declare_columns_at_all() -> None:
 def test_no_schema_mints_a_second_structure_identity() -> None:
     """Structure identity is the standardized SMILES and nothing else.
 
-    `051_reaction_labels.sql` declined an InChIKey, a formula and a molecular weight because
-    nothing asked and this tree deletes dead columns, and
-    `D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability` measured the
-    argument that was supposed to reopen it — that an InChIKey survives a `STANDARDIZATION_VERSION`
-    bump — and found it false: an InChIKey taken after standardization moves exactly when
-    `compound_id` moves, and one taken before it fragments the join `standard_smiles` exists to
-    make. So a column here is dead on the day it is added, in both databases.
-
-    This is a column-name check over comment-stripped SQL, which is the whole reason it can fail:
-    the three notations it forbids are named in `051`'s own prose, so a test reading the file as
-    text would pass on a migration that adds the column directly beneath that sentence.
+    An InChIKey taken after standardization moves exactly when `compound_id` does, and one taken
+    before fragments the join, so a second scheme is dead on arrival. Checked over comment-stripped
+    SQL, since the forbidden notations are named in `051`'s prose.
     """
     minted = sorted(
         {

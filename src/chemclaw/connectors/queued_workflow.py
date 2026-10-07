@@ -1,15 +1,11 @@
 """The durable half of a queued tool call: wait for a slot, make the call, deliver the answer.
 
-Started by the turn (`connectors/queued.py`) on the connector's interactive queue and run by that
-connector's interactive worker (`connectors/interactive_worker.py`). The turn waits
-`queued.inline_wait_seconds` for it; when that runs out it signals `detach` with its session, and
-this run delivers the answer to that session's mailbox when it lands — the same `job_completed`
-push-back a durable job sends, so every surface that already shows one shows this.
+Started by the turn (`connectors/queued.py`) and run by the connector's interactive worker. When
+the turn's `queued.inline_wait_seconds` runs out it signals `detach` with its session, and this run
+delivers the answer to that session's mailbox as `job_completed`.
 
-**One run per identical call.** The turn starts it under an id derived from the call and joins the
-run already open under that id, so fifty chemists asking for the same pKa share one calculation —
-the cross-process single-flight `cached_compute` does not have. Every chemist whose wait ran out
-detaches with their own session, and each is told.
+One run per identical call: the turn joins an open run under the same id, so identical concurrent
+requests share one calculation, and every detached session is told.
 """
 
 import contextlib
@@ -34,8 +30,7 @@ _SUMMARY_CHARS = 500
 def envelope(call: QueuedToolCall, raw: dict[str, Any]) -> ConnectorJobResult:
     """Wrap the server's answer in the connector envelope every job collector already decodes.
 
-    So `get_durable_job_status` and `GET /jobs/{id}` answer for a detached queued call with no
-    branch of their own, and the summary a chemist sees in the mailbox is the tool's own words.
+    So job status lookups answer for a detached queued call with no branch of their own.
     """
     text = " ".join(
         str(block.get("text", "")) for block in raw.get("content", []) if isinstance(block, dict)
@@ -78,9 +73,7 @@ class QueuedToolWorkflow:
                 retry_policy=queued_tool_retry(),
             )
         except Exception as exc:
-            # Suppressed as `ConnectorJobWorkflow._notify_failure` suppresses it: the failure being
-            # reported is the one this run must end with, and a push-back that fails too must not
-            # replace it.
+            # Suppressed: a failing push-back must not replace the failure this run must end with.
             for session in self._sessions:
                 with contextlib.suppress(BaseException):
                     await notify_session_best_effort(

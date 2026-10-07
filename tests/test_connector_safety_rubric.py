@@ -1,24 +1,16 @@
 """A connector tool is governed exactly like an in-process one — the claim the whole seam rests on.
 
-Moving capability out of process is only acceptable if it changes *where a tool runs* and
-nothing about *what governs it*. Two of the four safety-rubric invariants are the ones a process
-boundary could plausibly break, because both are tool-call middleware and a connector's tools are
-not functions we wrote:
+Two safety-rubric invariants could break at a process boundary, because both are tool-call
+middleware over tools we did not write:
 
-1. **Audit** — every call recorded with the turn's actor, whether it succeeded or was denied.
-2. **Per-tool authorization** — `tool_role_gates` addresses a connector tool by the same name the
-   model calls, and a denied call never runs on the connector.
+1. Audit — every call recorded with the turn's actor, whether it succeeded or was denied.
+2. Per-tool authorization — `tool_role_gates` addresses a connector tool by the name the model
+   calls, and a denied call never runs on the connector.
 
-Neither can be shown by inspecting the wiring: a connector's tools reach the model by a different
-route from the configured ones, so "the middleware list is attached" proves nothing about whether
-it wraps *these*. So this drives the real thing — a real compiled graph, a real connector server
-over HTTP, a real tool node — and asserts on what the audit sink recorded and what the server
-received.
-
-The other two invariants need no test here because the boundary makes them structural: a
-connector has no PR-gate access (its only route into the graph is a job result core publishes)
-and no way to launch durable work (a `jobs:` entry is a core-generated tool). What could regress
-is governance of the *call*, which is what this file pins.
+Connector tools reach the model by a different route, so this drives a real compiled graph, a real
+connector server over HTTP and a real tool node, asserting on the audit sink and the server. The
+other invariants are structural: a connector writes to the graph only through job results core
+publishes, and launches durable work only through core-generated job tools.
 """
 
 import asyncio
@@ -94,11 +86,10 @@ class _Server:
 
 
 class _Observed:
-    """What the connector actually saw, so a test can tell *connecting* apart from *being called*.
+    """What the connector actually saw, so a test can tell connecting apart from being called.
 
-    The distinction is the whole point of the denial test: opening the connection and
-    discovering the tool list happen before the model chooses anything, so they are not evidence
-    the gate leaked — only the tool body running is.
+    Connecting and listing tools happen before the model chooses anything; only the tool body
+    running is evidence the gate leaked.
     """
 
     def __init__(self) -> None:
@@ -188,10 +179,8 @@ def _run_turn_calling(tool_name: str, sink: _RecordingSink) -> str:
 def _signals_from_turn_calling(tool_name: str, sink: _RecordingSink) -> list[Signal]:
     """Drive the same turn on the graph's custom stream and return what it announced.
 
-    The chemist's transcript is fed by `chemclaw.core.turn_signals`, which publishes through
-    `get_stream_writer()` — so the only honest way to ask "did the chemist see this fail" is to
-    consume the real custom stream of the real graph, exactly as `tests/signals.collect_signals`
-    does for a bare tool body. `stream_mode="custom"` yields only those payloads.
+    `chemclaw.core.turn_signals` publishes through `get_stream_writer()`, so the real custom stream
+    (`stream_mode="custom"`) is what the chemist's transcript sees.
     """
 
     async def _go() -> list[Signal]:
@@ -212,10 +201,8 @@ def _signals_from_turn_calling(tool_name: str, sink: _RecordingSink) -> list[Sig
 def test_a_connector_tool_call_is_recorded_in_the_audit_trail(governed: _Observed) -> None:
     """Invariant 1: the audit middleware wraps a connector's tool, not just the in-process ones.
 
-    This is the assertion that could not be made by reading the wiring. A connector's tools are
-    loaded off a live MCP session rather than registered like the configured ones, so whether the
-    middleware chain reaches them is a property of how the framework binds tools, not of our
-    construction — and it is the property the whole out-of-process move depends on.
+    Connector tools are loaded off a live MCP session, so whether the middleware reaches them
+    depends on how the framework binds tools, which only a real run shows.
     """
     sink = _RecordingSink()
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))
@@ -241,15 +228,10 @@ def test_a_connector_tool_call_is_recorded_in_the_audit_trail(governed: _Observe
 def test_a_failed_connector_tool_is_audited_as_an_error_not_a_success(
     governed: _Observed,
 ) -> None:
-    """Invariant 1's other half: the trail's `outcome` means the same thing across the boundary.
+    """A failed connector tool is audited as an error, not a success.
 
-    An in-process tool signals failure by raising, and the audit middleware reads that off control
-    flow. **An MCP tool never raises**: `langchain_mcp_adapters` attaches `handle_tool_error`, so an
-    `isError=True` result is converted inside `StructuredTool.ainvoke` and returned as a
-    `ToolMessage(status="error")`. Deriving the outcome from control flow alone therefore wrote `ok`
-    for every failed connector call — with the error text in `detail`, the field an auditor reads as
-    the call's *effect*. A trail that records a failure as a success is worse than one that
-    records nothing, because it looks answered.
+    An MCP tool never raises: `langchain_mcp_adapters` converts `isError=True` into a
+    `ToolMessage(status="error")`, so the outcome must be read from the result, not control flow.
     """
     sink = _RecordingSink()
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))
@@ -269,13 +251,10 @@ def test_a_failed_connector_tool_is_audited_as_an_error_not_a_success(
 
 
 def test_a_failed_connector_tool_is_announced_to_the_chemist(governed: _Observed) -> None:
-    """The transcript says the step did not work — the other reader control flow had misled.
+    """A failed connector tool is announced to the chemist.
 
-    `announce_tool_failures` only caught exceptions, so a connector failure raised no
-    `ToolFailureSignal`. That is not merely a missing announcement: `api/graph_stream` suppresses a
-    `ToolMessage` with `status == "error"` on the documented ground that it is "already reported as
-    tool_failed" — false for exactly these tools — so the failed call left a `tool_call` event with
-    no result and no failure beside it, and vanished from the transcript entirely.
+    `announce_tool_failures` must read `status="error"` results too; `api/graph_stream` suppresses
+    error `ToolMessage`s as already reported, so otherwise the failure vanishes from the transcript.
     """
     sink = _RecordingSink()
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))
@@ -292,12 +271,10 @@ def test_a_failed_connector_tool_is_announced_to_the_chemist(governed: _Observed
 
 
 def test_a_successful_connector_tool_announces_no_failure(governed: _Observed) -> None:
-    """The mirror of the two tests above: nothing is reported for a call that worked.
+    """A successful connector tool announces no failure.
 
-    Worth pinning because the fix widened what `announce_tool_failures` inspects. A predicate that
-    fired on any returned `ToolMessage` — or on a *refusal*, which is deliberately not
-    `status="error"` — would flood the transcript with failures for calls that succeeded, which is
-    the same class of defect as the one being fixed, mirrored.
+    The mirror: a predicate firing on any `ToolMessage`, or on a refusal (deliberately not
+    `status="error"`), would flood the transcript.
     """
     sink = _RecordingSink()
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))
@@ -313,13 +290,10 @@ def test_a_successful_connector_tool_announces_no_failure(governed: _Observed) -
 def test_a_denied_connector_tool_never_runs_and_is_still_audited(
     governed: _Observed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Invariant 2: `tool_role_gates` addresses a connector tool by name, and denial is recorded.
+    """Invariant 2: a denied connector tool never runs and is still audited.
 
-    Two halves, and both matter. The gate must *stop* the call — a connector that is reachable
-    from the front door would otherwise happily serve a user who was refused — and the denial
-    must still appear in the trail, because "who was refused what" is exactly the question an audit
-    audit asks. The audit middleware is attached outermost for this reason, and this proves it
-    holds across the process boundary too.
+    The gate must stop the call, and the denial must appear in the trail; the audit middleware is
+    outermost for this reason, across the process boundary too.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
     monkeypatch.setattr(

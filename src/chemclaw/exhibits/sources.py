@@ -1,32 +1,16 @@
 """What a `geometry` artefact cites — a calculation artifact or a stored structure — and its XYZ.
 
-**A geometry may cite rather than copy.** Two stores hold geometries this system computed, and an
-artefact naming one shows the structure that calculation actually produced instead of a
-transcription of it:
+A geometry may cite rather than copy, so it shows what the calculation actually produced:
 
-- **`structure_id`**, the structure store's content address (`science/calc/structures.py`). It is
-  what the agent holds — every calculation result names its geometry by it, and none hands the
-  model 3N coordinates — so it is what `create_exhibit` advertises. Resolved to XYZ when the
-  artefact is *read* (`resolved_geometry`): the reader is served `xyz`, the stored revision keeps
-  the address, and an address that no longer resolves reads as no `xyz` plus a `bindings`-style
-  entry with `ok: false`, the way a swept binding reads.
-- **`source`**, a calc artifact's `<calc_key>#<name>` (D-124), content-addressed and
-  eviction-managed. Still valid, no longer advertised: the calc fleet stores no coordinate files, so
-  the model has nothing to name.
+- **`structure_id`**, the structure store's content address (`science/calc/structures.py`) and
+  what the agent holds. Resolved to XYZ on read (`resolved_geometry`); one that no longer
+  resolves reads as no `xyz` plus an `ok: false` entry, like a swept binding.
+- **`source`**, a calc artifact's `<calc_key>#<name>`. Still valid, no longer advertised.
 
-**Either is checked when it is written** (`require_source_stored`) exactly as an inline block is:
-it must exist *then* — the agent cannot cite something it guessed — and its XYZ must be **one
-frame** within `exhibit_max_atoms` with every highlighted atom inside it. A conformer ensemble is a
-stored `chemical/x-xyz` artifact too, and a viewer handed one shows its first frame as if it were
-the whole (`D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy`). A later read
-may find either gone, which the export route reports as a 404 rather than as a corrupt file.
-
-**Every artifact read is bounded by its recorded size first** (`calc_artifact_max_download_bytes`):
-the store decompresses a whole blob into memory on `open`, so a size check after the read would
-bound nothing. `GET /calc-artifacts/content` applies the same cap from the same field.
-
-`default_artifact_store` and `default_structure_store` are imported by name so a test swaps them
-here, the seam `science.calc.postgres_artifacts` documents for every importing module.
+Either is checked at write time (`require_source_stored`): it must exist, be one frame within
+`exhibit_max_atoms`, and contain every highlighted atom. Artifact reads are bounded by their
+recorded size first (`calc_artifact_max_download_bytes`), because the store decompresses a whole
+blob on `open`. The default stores are imported by name so tests can swap them.
 """
 
 from __future__ import annotations
@@ -78,8 +62,8 @@ def within_download_cap(ref: ArtifactRef) -> bool:
 async def read_calc_artifact(ref: ArtifactRef) -> bytes | None:
     """The artifact's original bytes, or `None` when its blob was evicted after the listing.
 
-    Callers decide `within_download_cap` first, from the recorded size: this read decompresses the
-    whole blob.
+    Callers check `within_download_cap` from the recorded size first: this decompresses the whole
+    blob.
     """
     return await default_artifact_store().open(ref.content_hash)
 
@@ -97,18 +81,13 @@ def structure_xyz(structure: Structure) -> str:
 async def require_source_stored(spec: Spec, session_id: str, *, parent: Spec | None = None) -> None:
     """Refuse a geometry citing something not stored, not one frame, or past a cap; else pass.
 
-    Write-time only, like `models.require_writable` and beside it in every writer: a stored
-    revision stays readable when what it cites is later evicted. An inline block is checked by the
-    spec itself and passes here; every other kind of spec passes too.
-
-    A `structure_id` must also have been **reported to this conversation** — named by one of its
-    stored tool results that is evidence (`_reported_here`) — unless `parent`, the revision being
-    revised, already cites it, in which case it is carried as a binding is
-    (`D-2026-10-03-a-cited-structure-is-one-this-conversation-was-shown`).
+    Write-time only, beside `models.require_writable`; a stored revision stays readable if what it
+    cites is later evicted. Inline blocks and other kinds pass. A `structure_id` must also have been
+    reported to this conversation by an evidence-bearing tool result (`_reported_here`), unless the
+    parent revision already cites it.
 
     Raises:
-        InvalidExhibit: naming the reference and what is wrong with it, so the writer can name a
-            structure a result reported or list what the calculation kept.
+        InvalidExhibit: naming the reference and what is wrong with it.
     """
     if not isinstance(spec, GeometrySpec):
         return
@@ -140,10 +119,8 @@ async def require_source_stored(spec: Spec, session_id: str, *, parent: Spec | N
         )
 
 
-# Does any evidence this session stored name the id? A substring over the stored bytes, newest
-# links first so a structure the turn just computed is found in the first rows. Measured on
-# Postgres 16 with the id absent (the worst case, every blob read): 4.5 ms for 50 results of 20 kB,
-# 13 ms for 200 of 50 kB, 46 ms for 500 of 100 kB — once per geometry write.
+# Does any evidence this session stored name the id? A substring scan over stored bytes, newest
+# links first; cheap enough to run once per geometry write.
 _REPORTED_HERE = f"""
 SELECT 1
 FROM tool_result_links l
@@ -156,9 +133,8 @@ LIMIT 1
 async def _reported_here(session_id: str, structure_id: str) -> bool:
     """Whether a stored, evidence-bearing tool result of `session_id` names `structure_id`.
 
-    Where this deployment keeps no session's results (`handles_resolve` false) there is nothing to
-    ask, and the id resolves as the calc tools resolve one — globally — rather than being refused
-    on every write.
+    Where the deployment keeps no session results (`handles_resolve` false), the id resolves
+    globally, as the calc tools resolve one.
     """
     if not handles_resolve():
         return True
@@ -179,9 +155,8 @@ async def _source_text(source: GeometrySource) -> str:
             "list_artifacts returns, or give the structure as `structure_id`"
         )
     if found.media_type != XYZ_MEDIA_TYPE:
-        # A Hessian or a vibrational spectrum is a stored artifact too, and the geometry's export
-        # would hand it out as an `.xyz` file a viewer cannot read. Its media type is the store's
-        # own record of what the bytes are (`science/calc/artifacts.media_type_for`).
+        # Only XYZ artifacts: a Hessian or spectrum is stored too but is not a geometry. The media
+        # type is the store's own record (`science/calc/artifacts.media_type_for`).
         raise InvalidExhibit(
             f"source {source.as_ref()!r} is a {found.media_type} artifact, not a geometry; "
             f"a geometry cites a {XYZ_MEDIA_TYPE} artifact holding one structure"
@@ -203,9 +178,8 @@ async def _source_text(source: GeometrySource) -> str:
 async def geometry_xyz(spec: GeometrySpec) -> str | None:
     """The geometry's XYZ text — inline, or what it cites — or `None` when that is not there.
 
-    `None` for a citation that is gone, for an artifact now over the download cap (decided from its
-    recorded size, never by reading it), and for bytes that are not UTF-8: none of those is an
-    XYZ file to hand out, and handing out the wrong file is worse than a missing one.
+    `None` for a missing citation, an artifact over the download cap (by recorded size, never read),
+    or non-UTF-8 bytes: none of those is an XYZ file to hand out.
     """
     if spec.xyz is not None:
         return spec.xyz
@@ -229,10 +203,9 @@ async def geometry_xyz(spec: GeometrySpec) -> str | None:
 async def resolved_geometry(view: ExhibitView) -> ExhibitView:
     """`view` with a cited `structure_id` resolved: `spec.xyz` served, `raw_spec` as stored.
 
-    A structure that no longer resolves — or a store that cannot be read — leaves `spec` as stored
-    (no `xyz`) and lists one entry in `bindings`, `{path: "xyz", tool: "structure", pointer:
-    <structure_id>, ok: false}`, the shape a swept binding reads in, so a reader has one place to
-    find "this value's source is gone". Any other view is returned unchanged.
+    An unresolvable structure (or unreadable store) leaves `spec` without `xyz` and adds a
+    `bindings` entry `{path: "xyz", tool: "structure", pointer: <structure_id>, ok: false}`. Other
+    views are returned unchanged.
     """
     raw = view.raw_spec
     if not isinstance(raw, GeometrySpec) or raw.structure_id is None:
@@ -267,11 +240,8 @@ async def resolved_geometry(view: ExhibitView) -> ExhibitView:
 def spec_for_model(view: ExhibitView) -> Spec:
     """The spec a model is shown of a resolved `view`: a cited structure as its address.
 
-    A geometry citing a `structure_id` is resolved to XYZ for a reader (`resolved_geometry`), and
-    its coordinates are a viewer's input — about fifty characters an atom of nothing the model can
-    act on, and an invitation to transcribe them back as an inline block. So `read_exhibit` and the
-    turn note that carries a referenced artefact both show the address the model holds and writes
-    back; every other spec is shown resolved.
+    Coordinates are viewer input the model cannot act on and might transcribe back, so
+    `read_exhibit` and the turn note show the `structure_id`; every other spec is shown resolved.
     """
     raw = view.raw_spec
     if isinstance(raw, GeometrySpec) and raw.structure_id is not None:

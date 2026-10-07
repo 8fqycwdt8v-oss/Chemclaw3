@@ -1,30 +1,12 @@
-"""What the *production* call sites publish — not what the projectors can project.
+"""What the production call sites publish, not what the projectors can project.
 
-**Why this file exists at all.** `test_publish_projection.py` proves every result shape projects
-correctly, and it proved that while the composite half of the system published nothing: it calls
-`project()` directly with a `payload_kind` it supplies by hand, which no production call site did.
-`test_publish_sql.py` calls `records_from_solvent_screen()` by hand, which nothing called either.
-Both suites were green across a seam whose headline claim — "every composite reaches the results
-store" — was false for every shipped job.
-
-The error is one level up from `tasks/lessons.md`'s "measure the mechanism, not the outcome":
-a projector *is* a mechanism, and testing it is still testing a mechanism I chose rather than the
-one something else calls. So every test here starts at a real hook — the envelope a connector job
-returns, the row the backfill reads, the payload the cache writes — and asserts what comes out the
-far end. A projector that no path can reach fails here and passes there, which is the whole point.
-
-**And this file made the same mistake one level down, which is why it now derives its own inputs.**
-Its first version hardcoded four `(calc_type, payload_kind)` pairs "each with the model its
-workflow returns". None of the three claims held: the bundles ship eleven jobs, one of the four
-named a tool, and the two `calc` pairs named the inner models while the workflow named the
-envelope. So it started at a hook it had written down rather than at the hook — and stayed green
-while all nine calc jobs published nothing. What it parametrises over now is read from the things
-that decide the answer: `XtbJobResult`'s own member fields, the connector manifests, and the fake
-that states the calculation server's key contract. A new job, result shape or cache type reaches
-these assertions with no edit here, and anything that genuinely cannot route yet is named in
-`_NOT_YET_PUBLISHED` or `_PRIMITIVES_NOT_PUBLISHED` rather than quietly omitted. Both sets are
-kept even when empty: an empty exclusion is what makes the next unroutable shape fail loudly
-instead of being added to a list nobody re-reads.
+Projector tests call `project()` with a hand-supplied `payload_kind`, which says nothing about
+whether any production path reaches it. Every test here starts at a real hook (the envelope a
+connector job returns, the row the backfill reads, the payload the cache writes, a real tool call)
+and asserts what comes out the far end. Inputs are derived from what decides the answer:
+`XtbJobResult`'s member fields, the connector manifests and the calculation server's key contract
+fake. Anything that cannot route yet is named in `_NOT_YET_PUBLISHED` or
+`_PRIMITIVES_NOT_PUBLISHED`, kept even when empty.
 """
 
 import asyncio
@@ -73,20 +55,9 @@ from chemclaw.science.calc.models import (
 from chemclaw.science.calc.thermo import half_life_from_barrier
 from tests.calc_server_fake import _KEYED
 
-# The shapes a durable job can publish, **derived rather than listed**.
-#
-# This was a hand-written tuple of four `(calc_type, payload_kind)` pairs, and every one of the
-# three things it said was wrong. It named four jobs where the bundles ship eleven. One of its
-# four, `calc.compute_thermochemistry`, is a *tool* and not a job at all. And it paired the two
-# `calc` routes with the inner domain models, while `CalcJobWorkflow` set `payload_kind` from
-# `type(result).__name__` on the **envelope** — so the file whose whole premise is "start at a
-# real hook" asserted a pairing no hook produced, and all nine calc jobs published nothing while
-# it stayed green.
-#
-# So the list is now read off the thing that decides it: the member fields of `XtbJobResult` (a
-# tenth result shape is one field there and appears here with no edit). A route is not asserted
-# alongside them because a route never identifies a shape — that was the original error — and
-# `test_a_route_never_routes_on_its_own` keeps that honest.
+# The shapes a durable job can publish, derived from `XtbJobResult`'s member fields, so a new result
+# shape appears here with no edit. Routes are not paired with shapes because a route never
+# identifies a shape (`test_a_route_never_routes_on_its_own`).
 _ENVELOPE_MEMBERS: tuple[str, ...] = tuple(
     sorted(
         annotation.__name__
@@ -96,29 +67,19 @@ _ENVELOPE_MEMBERS: tuple[str, ...] = tuple(
     )
 )
 
-# Shapes that reach a hook and have no projector yet, so this file stays green while saying so out
-# loud. **Empty, and that is the point of keeping it**: the four multi-step results from
-# `D-2026-08-25-the-loop-is-a-composite-not-a-template` were named here for exactly one release and
-# `D-2026-08-26-a-projector-per-shape-the-loop-produces` emptied it. A shape not named here must
-# route, so a tenth member field on `XtbJobResult` fails immediately rather than joining a silent
-# set — which is the whole reason this is a declared exclusion rather than an omission.
+# Shapes that reach a hook and have no projector yet, declared rather than omitted. Empty; a shape
+# not named here must route, so a new `XtbJobResult` member fails immediately.
 _NOT_YET_PUBLISHED: frozenset[str] = frozenset()
 
-# Every `calc_type` the calculation server stamps on a cache row, read off the fake that states
-# its key contract rather than re-listed here. A calculator that gains a cache type appears in this
-# parametrisation with no edit — which is the half that was missing when `developability` shipped
-# unroutable behind a projector table that said `descriptors`.
+# Every `calc_type` the calculation server stamps on a cache row, read off the fake that states its
+# key contract, so a new cache type is parametrised with no edit.
 _STAMPED_CALC_TYPES: tuple[str, ...] = tuple(
     sorted({calc_type for calc_type, _ in _KEYED.values()})
 )
 
-# Stamped types with no projector, declared for the same reason as `_NOT_YET_PUBLISHED` above.
-# **Empty, and kept empty on purpose.** `xtb.hess` was its one entry, and
-# `D-2026-08-27-a-composite-needs-a-hook-not-a-projector` emptied it in both halves: the row itself
-# now projects (`_hessian` — an electronic energy, an atom count, and the gradient that says whether
-# the geometry differentiated was stationary), and the *frequencies*, which no arrangement of that
-# projector could ever have produced because the row carries no masses, reach the store through the
-# third hook as part of `ThermochemistryResult`.
+# Stamped types with no projector, declared for the same reason as `_NOT_YET_PUBLISHED`. Empty:
+# `xtb.hess` projects its row (`_hessian`), and frequencies reach the store through the tool hook as
+# `ThermochemistryResult`.
 _PRIMITIVES_NOT_PUBLISHED: frozenset[str] = frozenset()
 
 # The routes the hooks build, `<connector>.<job>`, read off the manifests so a new job cannot be
@@ -175,9 +136,8 @@ def _reaction() -> ReactionEnergyResult:
 def _thermochemistry() -> ThermochemistryResult:
     """A thermochemistry result carrying vibrational modes.
 
-    Present because `_thermochemistry` is one of the four projectors that reads *list-element*
-    fields (`modes[].wavenumber_cm`) and so raised a bare `KeyError` on a partial payload. A
-    mutation sweep over reaction shapes alone would have passed against the old narrow guard.
+    `_thermochemistry` reads list-element fields (`modes[].wavenumber_cm`), so the partial-payload
+    sweep needs it.
     """
     return ThermochemistryResult(
         smiles="CCO",
@@ -210,9 +170,8 @@ def _thermochemistry() -> ThermochemistryResult:
 def test_a_route_never_routes_on_its_own(route: str) -> None:
     """`<connector>.<job>` names where a result came from, never what shape it is.
 
-    Asserted for every job in every manifest rather than for a chosen few, because the failure it
-    guards is a prefix growing until it collides with a connector name — at which point a
-    composite would be projected by accident, as whatever calculator owns that prefix.
+    Asserted for every job in every manifest, so a prefix colliding with a connector name cannot
+    make a composite project by accident.
     """
     assert projector_for(route) is None, (
         f"{route!r} resolved a projector from its route alone: a `_CALC_TYPE_PROJECTORS` prefix "
@@ -223,12 +182,10 @@ def test_a_route_never_routes_on_its_own(route: str) -> None:
 
 @pytest.mark.parametrize("payload_kind", _ENVELOPE_MEMBERS)
 def test_every_shape_a_calc_job_can_return_routes_to_a_projector(payload_kind: str) -> None:
-    """Every member `XtbJobResult` can carry is a shape some job publishes — or admits it cannot.
+    """Every member `XtbJobResult` can carry routes to a projector, or is declared unpublished.
 
-    This is the assertion whose absence let the seam ship inert, and the reason it is written
-    against the envelope's *fields* rather than against a list of jobs: nine jobs share one
-    workflow and one envelope, so the envelope's members are the complete set of shapes this
-    bundle can hand the publish path, and they cannot drift from it.
+    Many jobs share one workflow and envelope, so the envelope's members are the complete set of
+    shapes this bundle can publish.
     """
     routed = projector_for("calc.any_job", payload_kind) is not None
     if payload_kind in _NOT_YET_PUBLISHED:
@@ -247,18 +204,12 @@ def test_every_shape_a_calc_job_can_return_routes_to_a_projector(payload_kind: s
 
 @pytest.mark.parametrize("calc_type", _STAMPED_CALC_TYPES)
 def test_every_calc_type_the_server_stamps_routes_to_a_projector(calc_type: str) -> None:
-    """The primitive twin of the test above, and it failed for the same kind of reason.
+    """Every `calc_type` the server stamps routes to a projector.
 
-    The cache hook (`science/calc/store.py::publish_stored_result`) passes no `payload_kind` — it
-    holds an untyped dict from an MCP call and has nothing to name — so a primitive is routed by
-    its `calc_type` prefix alone, and that prefix is stamped by the *server*, not chosen here.
-    `_CALC_TYPE_PROJECTORS` said `descriptors`; the server has always stamped `developability`, so
-    every descriptor panel was dropped at the enqueue while `test_publish_projection.py` exercised
-    the spelling nothing emits.
-
-    Parametrised over `calc_server_fake._KEYED` because that map is this repository's statement of
-    the server's key contract — the same one `test_calc_remote.py` and the composite suites are
-    driven against. If it drifts from the real server, more than this test is wrong.
+    The cache hook (`science/calc/store.py::publish_stored_result`) has an untyped dict and no
+    `payload_kind`, so a primitive routes by its server-stamped `calc_type` prefix alone.
+    Parametrised over `calc_server_fake._KEYED`, this repository's statement of the server's key
+    contract.
     """
     if calc_type in _PRIMITIVES_NOT_PUBLISHED:
         assert projector_for(calc_type) is None, (
@@ -272,31 +223,21 @@ def test_every_calc_type_the_server_stamps_routes_to_a_projector(calc_type: str)
 
 
 def test_a_retired_calculators_rows_still_project() -> None:
-    """`calculation_results` is never pruned, so a stored row outlives the code that wrote it.
+    """A retired calculator's rows still project.
 
-    The `dft` rows the removed QM bundle stamped are the live case
-    (`D-2026-08-26-semiempirical-is-the-whole-tier`); `xtb.scan` is the same shape from an earlier
-    move. Both resolve by `calc_type` prefix alone, which is all the backfill path has — a row
-    carries no model name. Deleting the projector with the calculator would leave a deployment's
-    existing rows silently unpublishable.
+    `calculation_results` is never pruned, so `dft` rows from the removed QM bundle and older
+    `xtb.scan` rows remain and resolve by `calc_type` prefix, all the backfill has.
     """
     assert projector_for("dft@nextflow-1.0.0:abc:def") is not None
     assert projector_for("xtb.scan@GFN2:abc:def") is not None
 
 
 def test_what_the_calc_workflow_returns_projects_into_records() -> None:
-    """The whole hook, through the function `CalcJobWorkflow.run` itself calls.
+    """What the calc workflow returns projects into records, through `job_envelope`.
 
-    Every other test in this file starts one step *after* the workflow — it builds the envelope by
-    hand — and that is exactly the gap the seam shipped through: a hand-built envelope carried
-    `ReactionEnergyResult` while the workflow's own `type(result).__name__` carried `XtbJobResult`,
-    which routes nowhere. Measured on the shipped code, the production pair queued 0 rows where the
-    hand-built one queued 1.
-
-    So this calls `job_envelope`, which is what the workflow calls — not a copy of its body, which
-    is the mistake one level up. Asserting it without a worker is sound because the function is
-    pure: the workflow applies it in workflow code, where a replay must produce byte-identical
-    output from an activity result already in history.
+    `job_envelope` is the function `CalcJobWorkflow.run` calls, so its `payload_kind` is the
+    production one. It is pure (workflow code must replay identically), so it can be called without
+    a worker.
     """
     envelope = job_envelope(
         XtbJobResult(kind="reaction", summary="ΔE = -38.2 kcal/mol", reaction=_reaction())
@@ -597,23 +538,10 @@ def _microstate_pka() -> MicrostatePka:
     )
 
 
-# One minimal-valid instance per shape the envelope can carry, keyed by the model's own name — the
-# same key `payload_kind` carries and `_ENVELOPE_MEMBERS` derives.
-#
-# **This replaced a four-entry `_MULTI_STEP` tuple and the test over it**, which asserted the same
-# property — envelope in, record out — over the four shapes someone had listed. A list is exactly
-# what let the fifth shape ship broken, so the parametrisation is now driven by the envelope and
-# this mapping is only checked *against* it.
-#
-# **Keyed rather than listed, and checked against the envelope below**, because the test underneath
-# is the one this file was missing: every assertion here already proved that each shape *routes* to
-# a projector, and routing is what `MicrostatePka` did — straight into a projector that raised
-# `UnknownPropertyError` on every payload it could ever be given, because three of the five
-# properties it emits were never registered. Nine `_ENVELOPE_MEMBERS` assertions were green, 126
-# publish tests were green, and every microstate pKa this system computed — two CREST metadynamics
-# searches, minutes to hours — was dropped at the enqueue behind a generic failure counter.
-# Typed `Any` rather than `BaseModel` only because the envelope field it is splatted
-# into is a specific optional member type, which a `BaseModel` return would not satisfy.
+# One minimal-valid instance per shape the envelope can carry, keyed by the model's own name (the
+# `payload_kind` key) and checked against `_ENVELOPE_MEMBERS`. Used to prove each shape actually
+# projects, not only routes: a projector that raises on every payload (an unregistered property in a
+# required field) still routes. Typed `Any` because the envelope field is a specific optional type.
 _SHAPES: dict[str, Callable[[], Any]] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
@@ -654,15 +582,10 @@ def test_a_specimen_exists_for_every_shape_the_envelope_can_carry() -> None:
 
 @pytest.mark.parametrize("payload_kind", _ENVELOPE_MEMBERS)
 def test_every_shape_a_calc_job_can_return_actually_projects(payload_kind: str) -> None:
-    """Not "routes to a projector" — *projects*. That gap is what shipped the defect.
+    """Every shape a calc job can return actually projects, not merely routes.
 
-    A projector can be registered, be reached, and still raise on every payload it will ever see:
-    `_fact` routes each numeric fact through `properties.to_canonical`, which refuses a name the
-    registry does not define, so one unregistered property in a *required* field makes the whole
-    projector unreachable in production while every registration assertion stays green.
-
-    Driven through `job_envelope` — what `CalcJobWorkflow.run` itself calls — so this asserts what
-    the hook produces rather than what a hand-built payload would.
+    `_fact` refuses property names the registry does not define, so one unregistered property in a
+    required field makes a projector raise on every payload. Driven through `job_envelope`.
     """
     field = _MEMBER_FIELDS[payload_kind]
     envelope = job_envelope(
@@ -692,12 +615,10 @@ def test_every_shape_a_calc_job_can_return_actually_projects(payload_kind: str) 
 
 
 def test_a_refined_ensemble_publishes_electronic_energies_and_free_energy_populations() -> None:
-    """The one place two ensemble shapes could silently disagree, asserted rather than argued.
+    """A refined ensemble publishes electronic energies and free-energy populations.
 
-    `_refined_ensemble`'s docstring commits to `energy_hartree` carrying the *electronic* energy
-    even though the ranking is by G, so that "the same conformer, E-weighted and G-weighted" is a
-    comparison on one column. If that ever changes to the Gibbs energy, the two ensemble kinds stop
-    being comparable and nothing else in the suite would notice.
+    `energy_hartree` carries the electronic energy even though ranking is by G, so the two ensemble
+    kinds stay comparable on one column.
     """
     envelope = job_envelope(XtbJobResult(kind="refined", summary="s", refined=_refined()))
     record = records_for(
@@ -723,26 +644,11 @@ def test_a_refined_ensemble_publishes_electronic_energies_and_free_energy_popula
 def test_a_refined_ensemble_stored_before_the_rename_still_publishes_both_headline_numbers(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The one field rename in this tree that a projector read past in silence.
+    """A refined ensemble stored before the entropy-field rename still publishes both numbers.
 
-    `c7035b66` renamed `RefinedEnsemble.conformational_entropy_cal_per_mol_k` to
-    `refined_conformational_entropy_cal_per_mol_k` (and the correction likewise), and
-    `_refined_ensemble` read only the new names through `.get()`. So a row stored between migration
-    055 and that commit projected cleanly, counted as queued, and reached the results store
-    **missing both of its headline numbers** — no warning, no counter, no refusal, and a consumer
-    could not tell it from an ensemble that genuinely had none. Measured before the fix: the old
-    shape published `[total_conformers, refined_conformers, refined_population_covered,
-    conformer_treatment]` where the new one published those plus the two.
-
-    Read the same numbers under both names, because the rename **was a rename**: the commit changed
-    two keyword names in `connectors/calc/compose.py` and nothing else — same `entropy`, same
-    `populations`, same `degeneracies`, same `round(-temperature * entropy / 1000.0, 3)` — and its
-    own message says the label was wrong, not the arithmetic. A rename where the quantity had also
-    moved would have to refuse the row instead, and the assertion on the *values* here is what says
-    which of the two this is.
-
-    The warning is asserted too: publishing a number from a field name this release does not write
-    is a fact about a legacy corpus that an operator running a backfill over one wants to see.
+    `_refined_ensemble` reads the old and new names, since the rename changed only the label, not
+    the arithmetic; the values asserted confirm that. The warning is asserted too, since an operator
+    backfilling a legacy corpus wants to see it.
     """
     legacy = _refined().model_dump(mode="json")
     entropy = legacy.pop("refined_conformational_entropy_cal_per_mol_k")
@@ -795,11 +701,10 @@ def test_a_current_refined_ensemble_reads_no_legacy_field_and_says_nothing(
 
 
 def test_a_bond_survey_publishes_pairs_and_hoists_the_weakest() -> None:
-    """A bond is an atom *pair*, and 'which breaks first' must be a scalar predicate.
+    """A bond survey publishes atom pairs and hoists the weakest bond to a scalar.
 
-    Both are decisions `_bond_survey` states, and both are invisible from the routing test: a
-    projector that emitted one site per bond with `atom_j = -1` would route identically and make
-    every bond unaddressable.
+    A projector emitting one site per bond with `atom_j = -1` would still route, so this is checked
+    directly.
     """
     envelope = job_envelope(XtbJobResult(kind="bonds", summary="s", bonds=_bond_survey_result()))
     record = records_for(
@@ -818,11 +723,10 @@ def test_a_bond_survey_publishes_pairs_and_hoists_the_weakest() -> None:
 
 
 def test_a_species_distribution_publishes_candidates_not_subject_members() -> None:
-    """A ranked set is what a calculation *produced*, never what it was *about*.
+    """A species distribution publishes candidates, not subject members.
 
-    `CandidateFact` shipped with the schema and had no producer at all until this projector; the
-    distinction it encodes is the one that keeps a compound's tautomer set from colliding with the
-    compound.
+    A ranked set is what a calculation produced, not what it was about; this keeps a compound's
+    tautomer set from colliding with the compound.
     """
     envelope = job_envelope(
         XtbJobResult(kind="distribution", summary="s", distribution=_distribution())
@@ -853,11 +757,9 @@ def test_an_envelope_carrying_no_result_is_a_loud_failure() -> None:
 
 
 def test_the_envelope_carries_the_shape_its_data_came_from() -> None:
-    """The hook reads `payload_kind` off the envelope, so the envelope must be able to hold it.
+    """The envelope carries `payload_kind`, defaulting to "not said" and surviving validation.
 
-    `data` is `dict[str, Any]` by the time it crosses the Temporal wire, which destroys the model
-    identity. This asserts the field exists, defaults to "not said" for histories written before it,
-    and survives a round trip through the envelope's own validation.
+    `data` is a plain dict across the Temporal wire, so the model identity must travel separately.
     """
     assert ConnectorJobResult(summary="x").payload_kind == "", (
         "payload_kind must default empty — every history in flight decodes without it"
@@ -875,11 +777,10 @@ def test_the_envelope_carries_the_shape_its_data_came_from() -> None:
 
 
 def test_the_durable_record_keeps_the_shape_for_the_backfill() -> None:
-    """The backfill reads `job_records`, not the envelope, so the row has to carry it too.
+    """The durable record keeps the shape for the backfill.
 
-    Without this the backfill inferred a projector from `<connector>.<job>` and skipped every
-    composite row in the table — reporting them as "unprojectable by this release", which reads
-    like a deployment holding results from a retired calculator rather than a bug.
+    The backfill reads `job_records`, not the envelope; without it every composite row would be
+    skipped as unprojectable.
     """
     from chemclaw.durable.connector_job import ConnectorJobInput
 
@@ -903,12 +804,10 @@ def test_the_durable_record_keeps_the_shape_for_the_backfill() -> None:
 
 
 def test_a_solvent_screen_publishes_its_parts_and_not_only_its_verdict() -> None:
-    """`records_for` is what puts the decomposition on the live path.
+    """A solvent screen publishes its parts and not only its verdict.
 
-    "Never store an aggregate whose parts are not also stored" was stated in a docstring, asserted
-    in two tests, and reachable from neither hook: all three production call sites went to
-    `project()`, which returns the comparison alone. A chemist would then have found
-    `best_solvent='toluene'` with no way to ask what ΔG actually was in toluene.
+    `records_for` puts the decomposition on the live path, so ΔG in each solvent is queryable, not
+    only `best_solvent`.
     """
     screen = SolventComparisonResult(
         reactants=["C=C", "C=CC=C"],
@@ -958,13 +857,11 @@ def test_a_shape_that_does_not_decompose_still_yields_exactly_one_record() -> No
 
 
 def test_a_repeated_species_gets_its_own_member_and_its_own_row_id() -> None:
-    """Listing a species once per equivalent is the tools' convention; the projection honours it.
+    """A repeated species gets its own member and its own row id.
 
-    Matching each `SpeciesEnergy` to the *first* member with that identity looked harmless: both
-    copies carried the same numbers, which is what the equation says. It was not. Member 1 received
-    no facts at all, and the two facts for member 0 collided on `value_id` — a content hash over
-    `(calc_ref, scope, ordinal, property)` — so the far end's upsert kept one and discarded the
-    other. The two energies here differ deliberately, so a collision loses a distinguishable value.
+    Tools list a species once per equivalent; matching each energy to the first matching member
+    would leave the second without facts and collide two facts on `value_id`. The two energies
+    differ so a collision is detectable.
     """
     from chemclaw.publish.dialect import rows_for
 
@@ -1042,11 +939,10 @@ def test_an_ensemble_publishes_populations_through_the_same_entry_point() -> Non
 
 
 def test_every_payload_projector_is_reachable_by_some_declared_kind() -> None:
-    """A projector nobody can name is dead code that reads like coverage.
+    """Every payload projector is reachable by some declared kind.
 
-    The 17-entry table was entirely unreachable for a release: `payload_kind` won over the prefix
-    inference and no production site set it. This asserts the table's keys are exactly what
-    `projector_for` will honour, so the *route* stays real even as shapes are added.
+    The table's keys must be exactly what `projector_for` honours, or a projector is dead code that
+    reads like coverage.
     """
     for kind in PAYLOAD_PROJECTORS:
         assert projector_for("nothing.matches.this.prefix", kind) is not None, (
@@ -1057,17 +953,11 @@ def test_every_payload_projector_is_reachable_by_some_declared_kind() -> None:
 def test_a_partial_payload_never_escapes_the_enqueue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every single-field deletion must be absorbed, not raised.
+    """A partial payload never escapes the enqueue.
 
-    `enqueue_payload`'s contract is "never raises", and its guard caught `(ProjectionError,
-    ValueError)` — which is what a projector raises *deliberately*. Measured by mutating each of
-    the shipped shapes, four projectors raise a bare `KeyError` when a field is missing from a list
-    element (`modes[].wavenumber_cm`, `atom_charges[].charge`, `sites[].index`,
-    `points[].energy_hartree`) and those escaped into the caller.
-
-    A live calculation never hit it, because pydantic had just produced the payload.
-    `backfill_cached` walks rows a *different calculator version* wrote, and one aborted the walk —
-    breaking the exact property `backfill.py`'s docstring promises.
+    `enqueue_payload` never raises, yet projectors reading list-element fields raise a bare
+    `KeyError` on a missing field. Live payloads come from pydantic, but `backfill_cached` reads
+    rows other calculator versions wrote. Every single-field deletion must be absorbed.
     """
     from chemclaw.publish import outbox
 
@@ -1115,16 +1005,10 @@ async def _never_written(records: Any) -> int:
 
 
 def test_the_shipped_driver_satisfies_the_shipped_sink() -> None:
-    """`SqlResultSink` type-checks its driver at runtime, and the one we ship must pass.
+    """The shipped driver satisfies the shipped sink's runtime check.
 
-    `Warehouse` is `@runtime_checkable`, and such a check tests for the *presence of every member* —
-    so a driver missing one is rejected wholesale. `PostgresWarehouse` had no `vector_dialect`
-    (it searches nothing, so there was nothing to write) and the sink refused it with "did not
-    build a Warehouse". Every delivery failed at the connect, and the 72 green publish tests said
-    nothing about it because not one of them built a sink and a driver together.
-
-    Asserted with `isinstance` rather than by listing members, because `isinstance` is literally
-    what production runs.
+    `Warehouse` is `@runtime_checkable`, which requires every member, so a driver missing one fails
+    every delivery at connect. Asserted with `isinstance`, which is what production runs.
     """
     from chemclaw.ingest.eln.warehouse.driver import Warehouse
     from chemclaw.publish.drivers.postgres import PostgresWarehouse
@@ -1138,21 +1022,16 @@ def test_the_shipped_driver_satisfies_the_shipped_sink() -> None:
 
 # --- the third hook: a tool composite -----------------------------------------------------------
 #
-# Everything above this line starts at one of the two hooks that already existed — the cache-miss
-# path and the job envelope. `D-2026-08-27-a-composite-needs-a-hook-not-a-projector` added a third,
-# and these start at it: a real tool call through the real MCP tool manager, with the publish hook
-# installed the way `connector_app` installs it, rather than a call to `publish_tool_result`. The
-# reason is the one this file's own docstring gives — a projector that no path can reach passes
-# every test that starts at a projector, and so does a hook that nothing calls.
+# `D-2026-08-27-a-composite-needs-a-hook-not-a-projector` added a hook for tool composites. These
+# tests start at a real tool call through the MCP tool manager, with the hook installed as
+# `connector_app` installs it, not at `publish_tool_result`.
 
 
 def _publishing(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """Turn publishing on the way a deployment does, and capture what reaches the queue.
 
-    `settings.result_sinks` is the knob rather than `publishing_enabled` itself, because two modules
-    read that function and patching one of them is how a hook can look wired and not be — which is
-    exactly how the first draft of these tests passed with the tool hook never firing. Only the
-    queue *write* is stubbed: the projection, the routing and the record are the real ones.
+    `settings.result_sinks` is set rather than patching `publishing_enabled`, which two modules
+    read. Only the queue write is stubbed.
     """
     from chemclaw.core.config import settings
     from chemclaw.publish import outbox
@@ -1190,16 +1069,11 @@ def _calc_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
 def test_a_hessian_cache_miss_publishes_what_its_row_actually_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The primitive half, driven through `cached_compute` rather than through `_hessian`.
+    """A Hessian cache miss publishes what its row actually holds, through `cached_compute`.
 
-    `xtb.hess` was the one `calc_type` the calculation server stamps that no prefix matched, so
-    every Hessian this system has ever computed was dropped at the enqueue with a debug line. This
-    runs the composite's own `hessian()` — remote key, store miss, remote compute, `store.put`,
-    `publish_stored_result` — and reads what came out the far end.
-
-    **What is asserted is what the row holds, which is not a frequency.** A wavenumber is an
-    eigenvalue of the *mass-weighted* matrix and a `HessianPayload` carries no elements, so
-    nothing keyed on this row can produce one. That is the measurement behind the third hook.
+    Runs the composite's own `hessian()`: remote key, store miss, remote compute, `store.put`,
+    `publish_stored_result`. A wavenumber needs the mass-weighted matrix and the row carries no
+    elements, so no frequency is asserted; that is why the third hook exists.
     """
     from chemclaw.connectors.calc import compose
     from chemclaw.science.calc.artifacts import InMemoryArtifactStore
@@ -1226,12 +1100,9 @@ def test_a_hessian_cache_miss_publishes_what_its_row_actually_holds(
         "a Hessian row cannot yield a frequency — it carries no masses. If this passes, the "
         "projector is inventing one"
     )
-    # The one payload in this system that is bytes rather than numbers. `result_publications` is a
-    # queue nobody prunes, so the packed arrays are dropped on the way in — the matrix is already
-    # content-addressed in the artifact store, and re-projecting it could not produce a frequency
-    # either. Measured on the JSON document: 9,217 bytes against 184 at nine atoms, 108 KB against
-    # 185 at 33, and 1,394,499 against 186 at 120 — the arrays are (3N)^2 doubles and everything
-    # else about a Hessian is a constant handful of scalars.
+    # The packed arrays are dropped from the published payload: `result_publications` is never
+    # pruned, the matrix is already content-addressed in the artifact store, and the arrays grow as
+    # (3N)^2 doubles while everything else is a few scalars.
     assert not {"hessian_npy", "dipole_derivatives_npy"} & set(records[0].payload), (
         "the packed arrays rode into the outbox document"
     )
@@ -1243,16 +1114,11 @@ def test_a_hessian_cache_miss_publishes_what_its_row_actually_holds(
 async def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The predicate column is canonical or it is a lie, and it was a lie for `max_gradient`.
+    """A published gradient is converted into the unit the registry keeps.
 
-    `_fact`'s docstring predicted this exactly: every call site passed a unit that already *was* the
-    property's canonical unit, "so the conversion is an identity on every live path", and the
-    first projector reporting in something else "lands off ... with the unit string still right".
-    Both calculators that report a gradient report it per Angstrom
-    (`OptimizationResult.max_gradient`, `HessianPayload.max_gradient_hartree_per_angstrom`) while
-    the registry keeps `max_gradient` in Hartree/bohr — so `_optimization` was publishing every
-    gradient 1.89x too large. Asserted over both projectors, from the real cache hook, against an
-    independently written constant rather than against the one `properties.py` holds.
+    Both calculators report gradients per Angstrom while the registry keeps `max_gradient` in
+    Hartree/bohr. Asserted over both projectors from the real cache hook, against an independently
+    written constant.
     """
     from chemclaw.connectors.calc import compose
     from chemclaw.science.calc.artifacts import InMemoryArtifactStore
@@ -1284,16 +1150,11 @@ async def test_a_published_gradient_is_converted_into_the_unit_the_registry_keep
 def test_a_thermochemistry_tool_call_publishes_the_frequencies_it_computed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The third hook, from the only place it can be observed: a real tool call.
+    """A thermochemistry tool call publishes the frequencies it computed.
 
-    `compute_thermochemistry` is a *tool* composite — no cache row (its key would name the geometry
-    its refinement loop settles on) and no job envelope — so neither existing hook can see it, and
-    its projector had never once been called in production. The call goes through the MCP tool
-    manager, which is what `FastMCP.call_tool` delegates to, with the hook installed by
-    `connector_app`; nothing here calls `publish_tool_result`.
-
-    The numbers asserted are the ones the tool handed back, not re-derived: a publish path that
-    republished a stale or re-computed value would be worse than none.
+    `compute_thermochemistry` is a tool composite with no cache row or job envelope, so only the
+    tool hook sees it. Driven through the MCP tool manager with the hook `connector_app` installs;
+    the numbers asserted are the ones the tool returned.
     """
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
@@ -1318,10 +1179,8 @@ def test_a_thermochemistry_tool_call_publishes_the_frequencies_it_computed(
     assert published, "the whole point of this hook is that a frequency reaches a results store"
 
 
-# The tool that produces each declared tool composite, and the arguments it needs. Paired with
-# `TOOL_COMPOSITES` by the test below rather than trusted, so a shape can be declared publishable
-# only if some tool actually publishes it — the completeness half of
-# `test_every_projector_is_claimed_by_exactly_one_hook`, which proves the set is not too *small*.
+# The tool that produces each declared tool composite, and its arguments. Paired with
+# `TOOL_COMPOSITES` below so a shape is declared publishable only if some tool publishes it.
 _TOOL_COMPOSITE_CALLS: dict[str, tuple[str, dict[str, Any]]] = {
     "ThermochemistryResult": ("compute_thermochemistry", {"smiles": "CCO"}),
     "LogdResult": ("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"}),
@@ -1332,12 +1191,10 @@ _TOOL_COMPOSITE_CALLS: dict[str, tuple[str, dict[str, Any]]] = {
 def test_every_declared_tool_composite_is_published_by_a_real_tool_call(
     payload_kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A declaration that no tool can produce is the same defect one level up.
+    """Every declared tool composite is published by a real tool call.
 
-    `TOOL_COMPOSITES` is what the tool hook publishes, and the derivation test beside it proves
-    nothing is *missing* from it. This is the other direction: each declared shape has to come out
-    of a tool call through the real surface, or the set names something nothing emits — which is
-    how `_CALC_TYPE_PROJECTORS` came to hold four spellings no version of this system ever wrote.
+    The derivation test proves nothing is missing from `TOOL_COMPOSITES`; this proves nothing in it
+    is something no tool emits.
     """
     from chemclaw.publish.hooks import TOOL_COMPOSITES
 
@@ -1360,11 +1217,11 @@ def test_every_declared_tool_composite_is_published_by_a_real_tool_call(
 async def test_asking_the_same_composite_twice_is_one_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool composite has no cache key, so its identity is the result it produced.
+    """Asking the same composite twice is one record.
 
-    The route plus a hash of the payload: two identical questions collapse to one row on the
-    outbox's `ON CONFLICT DO NOTHING`, while a second temperature must not — it is a second
-    measurement. The two tests below are the halves the *request* hash got wrong in each direction.
+    A tool composite has no cache key, so its identity is the route plus a hash of the result:
+    identical questions collapse on `ON CONFLICT DO NOTHING`, while a second temperature is a second
+    measurement.
     """
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
@@ -1383,17 +1240,11 @@ async def test_asking_the_same_composite_twice_is_one_record(
 async def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both tool composites take a **sentinel** default, and a request hash cannot see through one.
+    """An unstated default and the value it resolves to are one record.
 
-    `ph=None` resolves to `settings.logd_default_ph` and `temperature_k=0.0` to
-    `settings.xtb_thermo_temperature_k`, so the caller who omits the parameter and the caller who
-    passes exactly the value it resolves to send different arguments and get the identical answer.
-    Measured on the request hash, that was two rows for one measurement in a store nobody can
-    de-duplicate afterwards. The result restates the parameter it actually used, which is why the
-    identity is taken from there.
-
-    Both composites are exercised because the sentinel is a different type in each (`None` against
-    `0.0`) and a fix that only understood one of them would pass on the other.
+    `ph=None` and `temperature_k=0.0` are sentinels resolved from settings, so identity is taken
+    from the parameter the result restates. Both composites are exercised because the sentinel types
+    differ.
     """
     from chemclaw.core.config import settings
 
@@ -1422,19 +1273,10 @@ async def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
 async def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Moving the identity onto the result put a *presentational* argument inside it.
+    """A presentational argument does not fork a composite's identity.
 
-    `compute_thermochemistry` takes `top_bands`, and it changes no thermodynamic value: it truncates
-    `modes` to `strongest_bands(limit)` on the way out, for a caller's context budget. Everything
-    that is a measurement — `structure_id`, the frequencies that survive truncation by contract
-    (`mode_count`, `imaginary_frequencies_cm`, `lowest_wavenumbers_cm`), and every energy — is
-    identical between the two calls below. Hashing the whole payload made them two permanent rows,
-    which is the "two requests, one measurement" defect the payload hash was adopted to fix, coming
-    back through the other seam.
-
-    The pair below is the assertion in both directions: the presentational argument collapses, and
-    a real second measurement (a second temperature, asserted in
-    `test_asking_the_same_composite_twice_is_one_record`) still does not.
+    `top_bands` only truncates `modes` for the caller's context budget; every measurement is
+    identical, so it must not create a second permanent row. A real second temperature still does.
     """
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
@@ -1458,14 +1300,11 @@ async def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
 def test_a_composite_recomputed_after_the_calculator_moved_is_not_dropped_as_a_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other direction: a ref that cannot move pins the record to its first computation.
+    """A composite recomputed after the calculator moved is not dropped as a duplicate.
 
-    A delivered `result_publications` row is kept forever and the outbox's identity is
-    `(sink, calc_ref, schema_version)`, so re-running the same question after a calculator or epoch
-    change queued a genuinely different result and `ON CONFLICT DO NOTHING` dropped it. The two
-    older hooks carry a version in the ref (the cache key's `calc_version` and epoch-folded
-    `params_hash`; the job's workflow id); a composite has none to carry, and `publish` may not
-    import `science` to reach its parts' versions. What it has is the numbers, and here they moved.
+    The outbox identity is `(sink, calc_ref, schema_version)` and delivered rows are kept, so the
+    ref must move when the numbers do. Composites carry no version (`publish` may not import
+    `science`), so the result's numbers provide it.
     """
     from tests.calc_server_fake import FakeCalcServer, install
 
@@ -1507,12 +1346,10 @@ def test_a_composite_recomputed_after_the_calculator_moved_is_not_dropped_as_a_d
 def test_a_results_store_that_cannot_be_reached_fails_neither_the_tool_nor_the_calculation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The polarity every hook here shares: the science is done, so publishing cannot take it back.
+    """An unreachable results store fails neither the tool nor the calculation.
 
-    Driven from both new paths at once, with the queue write raising rather than returning — which
-    is what a local outbox on a database that has gone away does. `enqueue` swallows its own
-    failures, so this raises from *underneath* it, at `enqueue_payload`, to prove the guard rather
-    than the guard's neighbour.
+    Driven from both new paths with the queue write raising beneath `enqueue` (which swallows its
+    own failures), at `enqueue_payload`, to prove the guard itself.
     """
     from chemclaw.publish import hooks
     from chemclaw.science.calc.store import InMemoryStore
@@ -1539,18 +1376,12 @@ def test_a_results_store_that_cannot_be_reached_fails_neither_the_tool_nor_the_c
 
 
 def test_every_projector_is_claimed_by_exactly_one_hook() -> None:
-    """The completeness check the third hook needs, and the reason it cannot be forgotten.
+    """Every projector is claimed by exactly one hook.
 
-    `TOOL_COMPOSITES` is a declaration in `publish/hooks.py`, because a serving process has no
-    reason to hold the calculation server's key contract or `XtbJobResult`'s member fields. This
-    test holds both, so the declaration is *derived* here and compared: a shape whose projector no
-    `_CALC_TYPE_PROJECTORS` prefix reaches and no job envelope carries is a tool composite by
-    definition, and one that is not declared fails here rather than shipping with a projector
-    nothing calls — which is what `ThermochemistryResult` and `LogdResult` both did for a release.
-
-    Written against `_CALC_TYPE_PROJECTORS` rather than against the fake's `_KEYED` deliberately:
-    the fake does not declare `compute_atomic_descriptors` or `compute_surface_potential`, and
-    deriving from it would misclassify two cached primitives as composites.
+    `TOOL_COMPOSITES` is declared in `publish/hooks.py`; this test derives it: a shape no
+    `_CALC_TYPE_PROJECTORS` prefix reaches and no job envelope carries is a tool composite and must
+    be declared. Derived from `_CALC_TYPE_PROJECTORS` rather than the fake's `_KEYED`, which omits
+    two cached primitives.
     """
     from chemclaw.publish.hooks import TOOL_COMPOSITES
     from chemclaw.publish.project import _CALC_TYPE_PROJECTORS

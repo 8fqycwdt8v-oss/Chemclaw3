@@ -1,13 +1,9 @@
 """What an optimisation campaign's suggested points become as factors and arms.
 
-Driven against real `OptimizationProblem` / `Candidate` shapes rather than fixtures shaped like
-them, because the whole value of this module is that it consumes what the optimiser actually
-returns — a translation tested against a hand-written dict would agree with the test's idea of a
-candidate forever.
-
-Every assertion here is about a mistake a chemist would meet as a plate: a factor holding two
-variables, a level label that does not match the arm that cites it, a repeat nobody marked, or a
-setpoint quietly presented as something the screen varies.
+Driven with real `OptimizationProblem`/`Candidate` shapes, since the module's value is consuming
+what the optimiser returns. Assertions target mistakes a chemist would meet as a plate: a factor
+holding two variables, a level label not matching its arm, an unmarked repeat, or a setpoint shown
+as a varied factor.
 """
 
 import pytest
@@ -50,13 +46,10 @@ def _problem() -> OptimizationProblem:
 
 
 def test_a_candidate_becomes_an_arm_whose_levels_the_factors_declare() -> None:
-    """The blocker `factor_levels_declared` enforces, produced correctly by construction.
+    """A candidate becomes an arm whose levels the factors declare.
 
-    That check is the reason one function formats both halves: it matches an arm's level against
-    the factor's labels by **string equality**, so a float written `80` in the factor and `80.0` in
-    the arm fails a design that is in fact correct. Asserted as the set relation the check tests
-    rather than against literals, so a change to the formatting fails here only if it breaks the
-    agreement — which is the property, not the spelling.
+    `factor_levels_declared` compares labels by string equality (`80` vs `80.0` would fail), so one
+    function formats both halves. Asserted as the set relation the check tests, not literals.
     """
     translated = factors_and_arms(
         _problem(),
@@ -84,11 +77,10 @@ def test_a_candidate_becomes_an_arm_whose_levels_the_factors_declare() -> None:
 
 
 def test_a_categorical_level_carries_the_structure_the_campaign_declared() -> None:
-    """A level that is a species reaches the hazard screen and the precedent questions as one.
+    """A categorical level carries the structure the campaign declared.
 
-    `CategoricalParameter.structures` is the only place a SMILES exists on the BO side, so a
-    translation that dropped it would hand `components_resolve` and `forbidden_absent` a bare label
-    — and a base nobody can parse is a base nobody can screen.
+    `CategoricalParameter.structures` is the only SMILES on the BO side; without it
+    `components_resolve` and `forbidden_absent` get a bare label.
     """
     translated = factors_and_arms(
         _problem(),
@@ -100,11 +92,9 @@ def test_a_categorical_level_carries_the_structure_the_campaign_declared() -> No
 
 
 def test_a_parameter_the_runs_never_vary_is_a_setpoint_and_is_reported() -> None:
-    """One value across every run is not a factor, and silently dropping it loses a condition.
+    """A parameter the runs never vary is a setpoint and is reported, not dropped.
 
-    `Factor.levels` has `min_length=2`, so such a parameter cannot be expressed as a factor at all
-    — which makes the decision between *reporting* it and *dropping* it the only one available, and
-    dropping it would take a real setpoint out of the design with nothing saying so.
+    `Factor.levels` requires two levels, so it cannot be a factor.
     """
     translated = factors_and_arms(
         _problem(),
@@ -117,11 +107,9 @@ def test_a_parameter_the_runs_never_vary_is_a_setpoint_and_is_reported() -> None
 
 
 def test_a_repeated_run_is_a_replicate_rather_than_a_second_arm() -> None:
-    """A centre point run twice is one experiment repeated, and the design has to say so.
+    """A repeated run is a replicate rather than a second arm.
 
-    `arms_are_distinct` warns about two arms at identical settings unless one declares itself a
-    replicate. Marking it here is the point of the module: the model reading a run table cannot see
-    that run 3 repeats run 1 without comparing every column by eye.
+    `arms_are_distinct` warns on identical arms unless one declares itself a replicate.
     """
     translated = factors_and_arms(
         _problem(),
@@ -142,11 +130,10 @@ def test_a_repeated_run_is_a_replicate_rather_than_a_second_arm() -> None:
 
 
 def test_two_parameters_that_slug_to_one_factor_name_are_refused() -> None:
-    """The failure nothing downstream could catch, because by then there is only one factor.
+    """Two parameters that slug to one factor name are refused.
 
-    Merging them produces a design that is internally consistent and passes every check while
-    describing experiments nobody planned: each arm would carry one factor column holding whichever
-    of the two parameters was written last.
+    Merged, the design would pass every check while each arm holds whichever parameter was written
+    last.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -199,12 +186,10 @@ def test_a_parameter_over_more_levels_than_a_factor_may_declare_names_itself() -
 
 
 def test_the_units_a_bo_problem_does_not_carry_are_named_rather_than_assumed() -> None:
-    """The one gap this translation cannot close, said out loud instead of left blank.
+    """The units a BO problem does not carry are named rather than assumed.
 
-    An `OptimizationProblem` has no units anywhere, and `quantities_are_plausible` reads the
-    *setpoints* rather than a factor's levels — so nothing downstream catches a temperature factor
-    whose 80 might be °C or mol%. Asserted against the continuous parameter's presence rather than
-    against the wording, so the sentence can be improved.
+    `OptimizationProblem` has no units and `quantities_are_plausible` reads setpoints, not factor
+    levels. Asserted on the parameter's presence so the wording can change.
     """
     translated = factors_and_arms(
         _problem(),
@@ -219,13 +204,10 @@ def test_the_units_a_bo_problem_does_not_carry_are_named_rather_than_assumed() -
 
 
 def test_a_translated_design_clears_the_factor_and_arm_blockers() -> None:
-    """End to end: the two collections really are what `draft_experiment_protocol` needs.
+    """A translated design clears the factor and arm blockers, and only those.
 
-    The point is *which* blockers this is allowed to clear. `factor_levels_declared` and
-    `layout_fits` are the ones the translation is responsible for, and they are asserted absent.
-    `evidence_present` is asserted **present**, because a design assembled from a campaign's
-    arithmetic has cited nothing and must not look as though it had — the module supplies arms, not
-    grounds.
+    `factor_levels_declared` and `layout_fits` are cleared; `evidence_present` is still present,
+    because a design assembled from campaign arithmetic has cited nothing.
     """
     translated = factors_and_arms(
         _problem(),

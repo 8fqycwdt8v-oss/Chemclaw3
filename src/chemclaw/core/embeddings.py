@@ -1,22 +1,15 @@
-"""The one place an embedding client is built — the embedding provider seam (plan F10-A1).
+"""The one place an embedding client is built: the embedding provider seam.
 
-Mirrors `chemclaw.agent.llm_provider`: `embed_texts` selects how text is turned into a vector from
-config
-(`settings.embedding_provider`), so pointing Chemclaw at the internal endpoint's `/embeddings` route
-versus the offline dev embedder is a single config change, never a code edit at a call site. Only
-this module knows how an embedding is produced; retrieval (`chemclaw.retrieval.vector_index`)
-consumes the
-vectors provider-agnostically. It lives in the shared kernel (not `agent/`) because retrieval
-infrastructure depends on it — the dependency must point report → chemclaw, never report → agents.
+`embed_texts` selects the provider from `settings.embedding_provider`, so switching between the
+internal endpoint's `/embeddings` route and the offline dev embedder is a config change. Retrieval
+consumes the vectors provider-agnostically. It lives in the shared kernel because retrieval depends
+on it.
 
-Two providers:
-- `hash` (default): a deterministic, dependency-free **feature-hash** of the text's tokens into a
-  fixed-width unit vector. It is offline and reproducible (so tests and a no-credential dev run
-  work), and gives *token-overlap* cosine similarity — useful as a stand-in, but NOT neural-semantic
-  retrieval; production must use a real model. It is explicitly the dev/CI path.
-- `openai_compatible`: the internal OpenAI-compatible endpoint's embeddings API, reached with the
-  same base_url/generic credential/private-CA transport as the chat client
-  (`chemclaw.agent.llm_provider`).
+Providers:
+- `hash` (default): a deterministic feature-hash of the text's tokens into a unit vector. Offline
+  and reproducible, giving token-overlap similarity only — the dev/CI path, not semantic retrieval.
+- `openai_compatible`: the internal OpenAI-compatible embeddings API, reached with the same
+  base_url, credential and private-CA transport as the chat client.
 """
 
 import hashlib
@@ -41,11 +34,8 @@ log = logging.getLogger(__name__)
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
-# Recently embedded texts, keyed by (provider, model, dim, text) — see `embed_texts`. A plain
-# dict with FIFO eviction rather than `functools.lru_cache`: the API is a *batch*, and memoizing
-# the batch would only ever hit on an identical list, which is not what repeats. Bounded, because
-# an unbounded map of every text ever embedded is a slow memory leak in a long-lived retrieval
-# process.
+# Recently embedded texts, keyed by (provider, model, dim, text). A bounded FIFO dict rather than
+# `lru_cache`, because the API takes a batch and what repeats is individual texts, not batches.
 _CacheKey = tuple[str, str]
 _CACHE: dict[_CacheKey, list[float]] = {}
 # Guards every read, insert and trim of `_CACHE`. Held only around dict work, never around the
@@ -56,58 +46,16 @@ _CACHE_LOCK = threading.Lock()
 def embedding_config_key() -> str:
     """Which configuration produces a vector right now: provider, endpoint, model and dimension.
 
-    The identity half of an embedding — the same lesson the calculation cache learned the hard way
-    (D-011): **a vector is only reusable for the configuration that made it.** Pointing a
-    deployment at a different embedding model and then comparing its queries against the old
-    model's vectors corrupts every similarity, silently, and no error is ever raised.
+    A vector is only reusable for the configuration that made it; comparing queries against another
+    model's vectors corrupts every similarity silently. The in-process cache and the durable
+    `document_chunks.embedding_key` / `note_index.embedding_key` columns all key on this, and a
+    stored vector whose key differs is stale and gets re-embedded.
 
-    Public because the rule has to hold *durably*, not only in memory. The in-process cache below
-    keys on it, and so do `document_chunks.embedding_key` (038) and `note_index.embedding_key`
-    (039) — a stored vector whose key is not this one is stale and gets re-embedded
-    (`chemclaw.ingest.documents.sync.reembed_stale`, `chemclaw.retrieval.vector_index`). One
-    definition, because two spellings of "which model made this" is exactly how the memory cache
-    and the tables come to disagree about the same vector.
-
-    **The endpoint is part of the identity, and a model name is not enough on its own.** A model
-    name is not globally unique — `text-embedding-3-large` is what the vendor calls it and what any
-    gateway proxying it calls it too, and those need not be the same weights. Without the endpoint
-    in the key, repointing `llm_base_url` at another vendor serving that name left every stored key
-    reading as current, which is precisely the silent-corruption case the column exists to prevent.
-    Only `openai_compatible` is affected: the `hash` embedder never reaches the endpoint, so naming
-    it there would churn every dev vector on a setting that provably cannot change one. The slot
-    stays in the key — filled with `ep-none` rather than left empty — so the key has one shape for
-    every provider *and* that shape says what it means. A trailing slash is stripped because
-    `.../v1` and `.../v1/` address the same endpoint, and a
-    corpus-wide re-embed is too expensive to trigger on a spelling.
-
-    **The endpoint is *identified*, not reproduced.** The slot holds a digest of the URL rather than
-    the URL, because this key is written into `document_chunks.embedding_key` and
-    `note_index.embedding_key` — one copy per row, in tables nothing prunes and the runtime role can
-    read. `llm_base_url` is a plain `str` with no validator forbidding userinfo, so
-    `https://svc:token@chemclaw-llm/v1` is a configuration this deployment accepts and the verbatim
-    form persisted the password; even without one, an internal hostname does not belong in every row
-    of a corpus. A digest keeps the only property the key needs — two endpoints differ, one endpoint
-    does not — and the readable part (provider, model, dimension) is what an operator reads a key
-    for anyway. Twelve hex characters, because the population being distinguished is the handful of
-    endpoints one deployment has ever pointed at, not an adversarially chosen set. `_endpoint_slot`
-    logs the URL→digest mapping once, which is the only place an operator can read one back.
-
-    **Every slot is filled, and the one free-form slot is last.** The shape is
-    `provider:endpoint:dDIM:model` — `hash:ep-none:d1536:model-none` on a default deployment,
-    `openai_compatible:ep-b7be08f1d976:d1536:text-embedding-3-large` on a real one. The previous
-    order rendered the default as `hash:::1536`: two empty slots, not one, since `embedding_model`
-    also defaults to `""`, and a key an operator reads out of two durable columns must not look
-    truncated. The dimension moved ahead of the model and is prefixed `d` for the same reason the
-    model went last — a model name is free-form and the separator is `:`, so
-    `nomic-embed-text:v1.5` (ordinary Ollama/vLLM naming) produced `…:nomic-embed-text:v1.5:1536`,
-    a key with five fields and no way to tell which. With the free-form field last, a colon inside
-    it can never be mistaken for a separator.
-
-    **Changing this format re-embeds every corpus**, which is exactly why it changed now: the key is
-    compared for equality, so a new shape makes every stored row stale and `reembed_stale` /
-    `reindex_notes` rebuild it — the self-healing 038/039 were added for. Today that is a dev
-    database. After the first real deployment it is a bill, so the shape had to be settled before
-    one exists, not improved afterwards.
+    Shape: `provider:endpoint:dDIM:model`, every slot filled (`ep-none`, `model-none`), with the
+    free-form model last so a colon inside it cannot be read as a separator. The endpoint slot is a
+    digest of the URL (trailing slash stripped), because a model name is not globally unique and the
+    key is persisted per row, where a verbatim URL could leak userinfo. Only `openai_compatible`
+    fills it. Changing this format makes every stored row stale and re-embeds every corpus.
     """
     endpoint = (
         _endpoint_slot(settings.llm_base_url)
@@ -120,18 +68,10 @@ def embedding_config_key() -> str:
 
 @lru_cache(maxsize=8)
 def _endpoint_slot(base_url: str) -> str:
-    """This endpoint's slot in the key, logged once per URL so an operator can read one back.
+    """This endpoint's slot in the key, logged once per URL so an operator can map a digest back.
 
-    The digest is deliberately irreversible (see `embedding_config_key`), which leaves an operator
-    holding `ep-b7be08f1d976` out of a database column unable to answer "which endpoint is this?"
-    without recomputing it by hand. One INFO line at first use is the whole fix: the mapping exists
-    somewhere bounded and operator-facing instead of nowhere.
-
-    `lru_cache` is what makes "once" true — the key is computed per text on the embedding path, so
-    an unmemoized log would be one line per embedded chunk. It also stops re-hashing the same URL
-    on every call. The URL itself is safe to log because `SecretRedactingFilter` strips userinfo
-    from every record that reaches a handler; it is *not* safe to persist, which is why the column
-    gets the digest.
+    `lru_cache` makes the log line once per URL rather than once per embedded text. Logging the URL
+    is safe because `SecretRedactingFilter` strips userinfo; persisting it is not, hence the digest.
     """
     digest = f"ep-{stable_hash(base_url.rstrip('/'), chars=12)}"
     log.info(
@@ -151,21 +91,12 @@ def embed_texts(texts: list[str], *, cache: bool = True) -> list[list[float]]:
     Args:
         texts: The strings to embed (note bodies at index time, a query at search time).
         cache: Whether this batch may read and populate the in-memory cache. Bulk indexers pass
-            `False`: the cache is FIFO and sized for the *query* workload (repeats), so a
-            reindex of more texts than `embedding_cache_size` flushed every cached query vector
-            with note bodies that would each be read exactly once — the next interactive sweep
-            then paid a fresh round trip for a query the cache existed to remember.
+            `False` so a reindex does not flush the cached query vectors with texts read once.
 
     Returns:
-        One vector per input, in order. Vectors are directly comparable by cosine similarity.
+        One vector per input, in order, comparable by cosine similarity.
 
-    A half-configured `openai_compatible` selection (missing `llm_base_url`/`embedding_model`)
-    is rejected at startup by the config validator, so this path can rely on both being set.
-
-    **Repeats are served from memory (STO-12).** Every retrieval embeds its query, and the same
-    query recurs constantly — a refined report run, a retried turn, a user asking again. Under the
-    real provider each of those was a network round trip on the interactive path. Only the misses
-    are sent, so a batch that is half cached costs half a request rather than a whole one. Set
+    Repeated texts are served from memory and only misses are sent to the provider. Set
     `embedding_cache_size` to 0 to disable.
     """
     if not texts:
@@ -175,24 +106,14 @@ def embed_texts(texts: list[str], *, cache: bool = True) -> list[list[float]]:
         return _embed_uncached(texts)
 
     keys = [_cache_key(text) for text in texts]
-    # **The answer is assembled from values this call holds, never re-read from `_CACHE`.**
-    # `_CACHE` is a plain dict reached from several threads — `asyncio.to_thread` puts every
-    # concurrent turn's retrieval on the default executor — and the earlier shape read the batch
-    # back out of it after inserting. Two races followed, both reproduced at the shipped
-    # `embedding_cache_size` of 2048: another thread's trim could evict a key between the insert and
-    # the read (bare `KeyError`, naming nothing, on the interactive retrieval path), and two trims
-    # running together could `del` the same oldest key or mutate the dict mid-iteration
-    # (`RuntimeError: dictionary changed size during iteration`). Taking a snapshot under the lock
-    # and answering from it removes the class rather than narrowing the window: what the cache holds
-    # by the time we return can no longer affect what we return.
+    # The answer is assembled from values this call holds, never re-read from `_CACHE`: the cache is
+    # shared across threads, and another thread's trim may evict a key between insert and read.
     with _CACHE_LOCK:
         holding = {key: _CACHE[key] for key in keys if key in _CACHE}
     missing = [text for text, key in zip(texts, keys, strict=True) if key not in holding]
     if missing:
-        # Deduplicated before the call: a batch naming the same text twice should cost one
-        # embedding, not two, whichever provider is behind it. Outside the lock on purpose — this
-        # is a network round trip under the real provider, and serialising every turn's retrieval
-        # behind one mutex would trade a rare crash for a permanent stall.
+        # Deduplicated so a repeated text costs one embedding. Outside the lock on purpose: this is
+        # a network round trip, and holding the lock would serialise every turn's retrieval.
         unique = list(dict.fromkeys(missing))
         holding.update(
             (_cache_key(text), vector)
@@ -200,46 +121,20 @@ def embed_texts(texts: list[str], *, cache: bool = True) -> list[list[float]]:
         )
     with _CACHE_LOCK:
         _CACHE.update(holding)
-        # FIFO, oldest first. Not LRU: keeping a recency order costs a move per *hit*, on the hot
-        # path, to better serve a workload — repeated identical queries — that a FIFO of this size
-        # already serves. A cheaper policy that is right for the actual access pattern.
-        #
-        # The trim no longer has to be ordered against the read, which is what the previous
-        # "read before trimming" rule bought: it may evict a key this very call just inserted, and
-        # the caller still gets its vector because that vector is in `holding`.
+        # FIFO, oldest first: LRU would cost a move per hit on the hot path. Evicting a key this
+        # call just inserted is harmless, since the caller's vector is in `holding`.
         while len(_CACHE) > size:
             del _CACHE[next(iter(_CACHE))]
     return [holding[key] for key in keys]
 
 
 def _embed_uncached(texts: list[str]) -> list[list[float]]:
-    """Embed `texts` through the configured provider, with no cache in the way — and measure it.
+    """Embed `texts` through the configured provider, uncached, and record the call.
 
-    **This module had one log call in 301 lines and no measurement of any kind**, which made an
-    embedding provider the one dependency in this system whose health was unobservable: retries are
-    delegated to the OpenAI SDK (`llm_max_retries`), so they happen inside the client with no
-    callback, and a provider degraded enough to need three attempts per call showed up only as
-    latency nobody was recording. A failure was worse than invisible — it propagated as a bare
-    exception into whichever caller happened to be embedding, where `reembed_stale` logged a count
-    and `gather_evidence` logged a source name, neither of them saying that the *embedder* was what
-    failed.
-
-    Instrumented here rather than in `_openai_compatible_embeddings` because both of *this
-    module's* providers pass through it: a deployment on the `hash` embedder still books calls and
-    durations, so the series exist in dev and CI and a test can prove them with no network. The
-    unit is one **provider call for a batch**, which is the unit that fails and the unit that is
-    retried; `texts` rides on the log line so a slow call can be read against how much was in it.
-
-    **It is not every embedding this deployment performs, and saying so was wrong.** A warehouse
-    binding may declare `vector: {embedding: server}`
-    (`ingest/eln/warehouse/retriever.py`), which hands the raw query text to the warehouse and lets
-    *its* embedding function run inside the SQL — `embed_texts` is never called, so that leg books
-    no call, no failure and no duration here. That is a deliberate design (the vectors in such a
-    warehouse were produced by its own function, and re-embedding locally would compare vectors
-    from two different models), and it is not instrumentable from this module: there is no client
-    call to time, only a SQL expression whose cost is inside the warehouse's own query. What is
-    measurable about it is the leg as a whole, which
-    `chemclaw_evidence_source_seconds{source}` already records.
+    Counts calls and failures and times them, here so both providers book metrics (the `hash` path
+    lets tests prove them offline). The unit is one provider call per batch, which is what fails and
+    is retried. A warehouse binding with `vector: {embedding: server}` embeds inside its own SQL and
+    never reaches this function.
     """
     started = time.perf_counter()
     try:
@@ -248,11 +143,7 @@ def _embed_uncached(texts: list[str]) -> list[list[float]]:
         else:
             vectors = [_hash_embedding(text) for text in texts]
     except Exception as exc:
-        # `error`, not `failure`: `chemclaw_embedding_calls_total`'s HELP says "by outcome
-        # (ok / error)", and a rule written from the HELP — which is the only description of the
-        # series an operator has — selected an empty vector for the entire lifetime of the metric.
-        # Changed on this side because the label value is a string in one place and the HELP is
-        # documentation two other files quote.
+        # `error`, not `failure`: the series HELP documents the outcomes as "ok / error".
         record_metric(
             lambda m: m.increment("chemclaw_embedding_calls_total", 1, {"outcome": "error"})
         )
@@ -261,10 +152,8 @@ def _embed_uncached(texts: list[str]) -> list[list[float]]:
                 "chemclaw_embedding_duration_seconds", time.perf_counter() - started
             )
         )
-        # WARNING and re-raise, not `degraded`: nothing continues with less here — the caller gets
-        # the exception and decides. What was missing is that the *embedder* is named at all, with
-        # the exception type, the batch size and the configuration that produced it, none of which
-        # survives into any caller's own handler.
+        # WARNING and re-raise: the caller decides what to do; this line names the embedder,
+        # exception type, batch size and configuration, which no caller's handler preserves.
         log_event(
             log,
             "embedding.failed",
@@ -289,10 +178,8 @@ def _embed_uncached(texts: list[str]) -> list[list[float]]:
 def clear_embedding_cache() -> None:
     """Drop every cached vector.
 
-    A config change cannot serve a stale vector — the configuration is *in* the key — so this is
-    not a correctness hook. It exists because the cache outlives an individual test: a test that
-    counts how many times the provider was called needs to start from empty, or it measures the
-    previous test's leftovers. Production never calls it; a config change there is a restart.
+    Not a correctness hook (the configuration is in the key); it lets tests that count provider
+    calls start from an empty cache.
     """
     _CACHE.clear()
 
@@ -328,29 +215,20 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
         settings.llm_max_retries,
         settings.llm_tls_ca_bundle,
     )
-    # Chunked to `embedding_batch_size` per request: a whole-corpus reindex used to arrive here
-    # as one call with every changed text in it, which exceeds typical provider batch and token
-    # ceilings exactly on the first run — the one a fresh deployment cannot avoid.
+    # Chunked to `embedding_batch_size` per request so a whole-corpus reindex stays within provider
+    # batch and token limits.
     vectors: list[list[float]] = []
     step = settings.embedding_batch_size
     for start in range(0, len(texts), step):
         chunk = texts[start : start + step]
         response = client.embeddings.create(model=settings.embedding_model, input=chunk)
-        # **Paired by `index`, never by position.** The response carries a per-item `index`
-        # precisely because `data` order is not part of the contract, and the servers this endpoint
-        # is most likely to be — vLLM, TEI, a batching gateway — reorder. Read positionally, a
-        # reordered batch gives every text its neighbour's vector, and nothing downstream can see
-        # it: `embed_texts` pairs the results with `zip(..., strict=True)`, which catches a *count*
-        # mismatch and is blind to a *permutation*. The stored vectors are then all wrong,
-        # `embedding_key` still reads as current, and the only symptom is bad recall — what
-        # `embedding_config_key` calls corrupting every similarity, silently.
+        # Paired by `index`, never by position: `data` order is not part of the contract and
+        # batching servers reorder. A permutation would give every text its neighbour's vector
+        # undetectably.
         ordered = sorted(response.data, key=lambda item: item.index)
         if [item.index for item in ordered] != list(range(len(chunk))):
-            # And the sort is only a fix while `index` means what it says. A provider that repeats
-            # a value, omits some, or numbers a chunk against the whole request leaves `sorted`
-            # stable — which is arrival order again, with nothing to distinguish it from a correct
-            # answer. Refused rather than trusted, because this corruption is unrecoverable once
-            # written and invisible from the index afterwards.
+            # Sorting only helps while `index` is a valid permutation; a repeated or missing index
+            # is refused, because the resulting corruption is invisible once stored.
             raise ValueError(
                 f"the embedding endpoint answered a batch of {len(chunk)} with index values "
                 f"{[item.index for item in ordered]}, which are not that batch's own positions; "
@@ -367,29 +245,16 @@ def _openai_client(
 ) -> Any:
     """One embedding client per transport config, not one per `embed_texts` call.
 
-    Rebuilding the client (and its private-CA httpx transport) on every call would redo TLS setup
-    and drop connection keep-alive on the retrieval hot path. Keyed on the transport settings so a
-    config change (tests swap `Settings`) yields a fresh client, while a long-lived process reuses
-    one. The httpx client pins the internal CA when one is configured, else the system store.
+    Reuses TLS setup and keep-alive across calls; keyed on the transport settings so a config change
+    yields a fresh client.
     """
     import httpx
     from openai import OpenAI
 
-    # The CA pinning and the refusal to read an ambient proxy are
-    # `core/http.gateway_client_kwargs`'s — the same decision
-    # `agent/llm_provider._tls_http_clients` takes for the chat client against the same gateway.
-    # Only the class differs — this seam is synchronous.
-    #
-    # **Built unconditionally**, where this used to build one only when a CA bundle was configured
-    # and hand the SDK `None` otherwise. `None` means the SDK builds its own with `trust_env=True`,
-    # and no shipped configuration sets a bundle — so every embedding of a note went out on a
-    # client that would follow `HTTPS_PROXY` wherever it pointed
-    # (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
-    # `Any` because the two HTTP stacks do not agree on the type
-    # (`D-2026-08-14-two-http-stacks-is-the-price-of-the-openai-major`): this closure
-    # carries `httpx` 0.28 while `openai` types its `http_client` as `httpx2`. The SDK
-    # accepts it — the private-CA branch has passed exactly this object since it was
-    # written — and only the annotation has to be told.
+    # CA pinning and ignoring an ambient proxy come from `gateway_client_kwargs`, the same transport
+    # the chat client uses. Built unconditionally: passing `None` would let the SDK build a client
+    # that follows `HTTPS_PROXY`. `Any` because `openai` types `http_client` against a different
+    # httpx major.
     http_client: Any = httpx.Client(**gateway_client_kwargs(ca_bundle))
     return OpenAI(
         base_url=base_url,

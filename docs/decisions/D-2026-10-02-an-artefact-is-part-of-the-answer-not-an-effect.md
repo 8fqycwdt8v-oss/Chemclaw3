@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-10-02 · Phase 0 of the artefacts plan; phases 1-2 build it.
 
+**Superseded-by:** [D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves](D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves.md) (in part)
+
 ## Context
 
 A chemist asks for a design-space study plan, a solvent ranking or a series of analogues, and the

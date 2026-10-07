@@ -1,19 +1,10 @@
 """Today's workflow code still accepts the histories the shipped code wrote.
 
-The control `durable/connector_job.py` has asked for since it was written, and the defect it was
-asked for is measured in `D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`:
-between two merged commits `TemplateWorkflow` gained two `record_job` dispatches, and a history
-recorded before that change no longer replays against the code after it.
-
-Why a *closed* history is the right thing to check, when a closed run is never resumed in
-production: a closed history is the complete record of every command the shipped code emitted, so
-replaying it detects a divergence anywhere in the sequence — including the early positions that an
-*unfinished* run really does replay through when the background worker is replaced. It is a
-deliberately conservative proxy. A red result here is a question ("where does the sequence
-diverge?"), not automatically an outage.
-
-`tests/recorded_workflow_histories.py` holds the fixtures, how they were recorded, and the rule for
-re-recording one.
+A closed history records every command the shipped code emitted, so replaying it detects a
+divergence anywhere in the sequence — including the early positions an unfinished run replays
+when the background worker is replaced. It is a conservative proxy: red is a question about where
+the sequence diverges, not automatically an outage. `tests/recorded_workflow_histories.py` holds
+the fixtures and the rule for re-recording one.
 """
 
 import asyncio
@@ -28,21 +19,12 @@ from tests.recorded_workflow_histories import (
     superseded_histories,
 )
 
-# The workflows on core's `background-jobs` queue with no archived history, and therefore no
-# guard against a redeploy that changes their command sequence. Declared rather than counted, for
-# the reason `tests/test_context_floor.py` declares `SERVED_ELSEWHERE`: a gap a machine can see is
-# a gap somebody closes, and a gap only prose mentions is one a reader assumes is covered. Adding a
-# workflow to core's queue means either recording a fixture for it or adding its name here.
+# The workflows on core's `background-jobs` queue with no archived history, and so no guard against
+# a redeploy that changes their command sequence. Declared so the gap is visible: adding a workflow
+# to core's queue means recording a fixture for it or adding its name here.
 #
-# `background-jobs` and not every queue, deliberately. This is a deploy-safety control and the
-# background worker is the sharp case: `deployment-workers.yaml` deploys it `Recreate`, so the new
-# generation is handed every unfinished run the old one held. The connector workers keep the
-# default rolling update for reasons their own template argues.
-#
-# `CheckInWorkflow` and `HypothesisTournamentWorkflow` left this set at their first change, as their
-# own entries here said they would: each fixture was recorded from the released code (4aa5bbc8) in
-# a worktree, with that revision's own test stubs, on the one shape the change moved a command on —
-# a check-in page longer than one batch, and a computable check that names nothing.
+# Only `background-jobs`, because its worker deploys `Recreate` and the new generation inherits
+# every unfinished run; connector workers use a rolling update.
 UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
     {
         "ArtifactEvictionWorkflow",
@@ -93,9 +75,8 @@ def _background_workflows() -> dict[str, type]:
 def _workflow_for(archived: ArchivedHistory) -> type:
     """The class a fixture's history belongs to, or a failure that says why there is none.
 
-    Named rather than a bare subscript so a fixture recorded from a *bundle's* workflow fails
-    with the reason instead of a `KeyError`: this control is scoped to core's queue, and a history
-    from somewhere else is a scoping decision to make, not a lookup that went wrong.
+    A history from a bundle's workflow fails with the reason rather than a `KeyError`: this control
+    is scoped to core's queue.
     """
     workflows = _background_workflows()
     assert archived.workflow_type in workflows, (
@@ -113,10 +94,8 @@ def test_an_archived_history_still_replays_against_todays_code(
 ) -> None:
     """A history the shipped code wrote must still be a history this code can replay.
 
-    When this goes red the change under review alters the sequence of commands the workflow
-    issues. The two honest responses are in `recorded_workflow_histories`' docstring; silently
-    re-recording the fixture is not one of them, because it turns a control into a copy of
-    whatever was committed last.
+    Red means the change alters the workflow's command sequence. The honest responses are in
+    `recorded_workflow_histories`' docstring; silently re-recording the fixture is not one of them.
     """
     workflow_class = _workflow_for(archived)
     failure = asyncio.run(replay_failure(archived, workflow_class))
@@ -135,14 +114,9 @@ def test_the_control_still_detects_the_divergence_it_was_built_for(
 ) -> None:
     """A history this code is known to diverge from must come back as a divergence.
 
-    The test above can only ever report that nothing broke, which is exactly what it would report
-    if the replay were silently doing nothing at all. `superseded/` holds the measured case — a
-    `TemplateWorkflow` history from before `record_job` was dispatched on both endings — so the
-    detector is asserted against a real divergence rather than trusted.
-
-    If this ever goes green, today's code has become able to replay the pre-`record_job` shape.
-    That is a real finding and not a fixture to delete: it means the two `_record_run` dispatches
-    are gone or are now gated, and the change that did it should say so.
+    Proves the replay is not silently doing nothing, using a `TemplateWorkflow` history from before
+    `record_job` was dispatched. If this goes green, the `_record_run` dispatches are gone or gated
+    — a real finding, not a fixture to delete.
     """
     workflow_class = _workflow_for(archived)
     failure = asyncio.run(replay_failure(archived, workflow_class))
@@ -155,22 +129,11 @@ def test_the_control_still_detects_the_divergence_it_was_built_for(
 async def test_a_divergence_the_sdk_logged_beats_a_replay_that_returned_quietly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The control above can lose a race and report a divergent history as clean.
+    """A divergence the SDK logged beats a replay that returned quietly.
 
-    `replay_failure` races the replay against a watcher on the SDK's own log. `asyncio.wait` with
-    `FIRST_COMPLETED` returns *every* future that finished in that cycle, so when the SDK logs
-    `TMPRL1100` and the replay coroutine then completes without raising, both are done — and the
-    original branch order asked `replay` first, took its silence and returned "". That is
-    `test_the_control_still_detects_the_divergence_it_was_built_for` going green for the one reason
-    its own docstring says would be a real finding, while the finding is false.
-
-    Found by a full serial run, on a branch that does not touch this file: one failure, passing in
-    isolation and under every targeted ordering tried. So it is pinned as *logic* rather than as an
-    ordering — an order-dependent reproduction is exactly the kind that rots.
-
-    Driven through the real `replay_failure`, with only the `Replayer` replaced: a stand-in whose
-    `replay_workflow` logs the marker and returns cleanly, which is the shape that produced the
-    false clean. Both arms, because the fix must not turn every clean replay into a divergence.
+    `replay_failure` races the replay against a watcher on the SDK's log; `asyncio.wait` can return
+    both as done, and the logged `TMPRL1100` must win. Pinned as logic with a stand-in `Replayer`
+    that logs the marker and returns cleanly, plus the clean arm, so a clean replay is still clean.
     """
 
     class _Replayer:
@@ -210,14 +173,8 @@ async def test_a_divergence_the_sdk_logged_beats_a_replay_that_returned_quietly(
 def test_the_background_workflows_this_control_does_not_cover_are_named() -> None:
     """The gap is declared, so adding a workflow forces a decision about its history.
 
-    Covering all of them would mean recording one history per name below against infrastructure
-    this repository does not have offline, which is a backlog item rather than a thing to fake.
-    (A count is not written here. The two that were said "twenty" and "twenty-one" over a set of
-    twenty-two, one of them wrong on the day it was written — which is the argument
-    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` makes, inside the file whose whole
-    subject is a declaration going stale.) What
-    must not happen is the gap disappearing from view: "there is a replay check" is exactly the
-    kind of sentence this repository has been wrong about before.
+    Recording a history per name needs infrastructure not available offline; what must not happen is
+    the gap disappearing from view.
     """
     covered = {archived.workflow_type for archived in archived_histories()}
     uncovered = set(_background_workflows()) - covered

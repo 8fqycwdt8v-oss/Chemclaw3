@@ -1,5 +1,7 @@
 # D-147 — One file per ADR, and a `docs/` tree with a living half and an archive
 
+**Superseded-by:** [D-2026-07-31-adr-ids-that-cannot-collide](D-2026-07-31-adr-ids-that-cannot-collide.md) (in part)
+
 `DECISIONS.md` was 421 KB and 134 ADRs in one append-only file, sitting at the repository root
 beside `BACKLOG.md` (124 KB), `DEFERRED.md` and `ADR-REGISTRY.md`. `docs/` held a second,
 near-empty ADR mechanism (`docs/adr/`, one file, describing itself as the "long-form companion"),

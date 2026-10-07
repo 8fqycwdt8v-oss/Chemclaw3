@@ -1,30 +1,7 @@
 """Qdrant as a `VectorStore`, with the vendor client late-bound and never a hard dependency.
 
-The same construction `chemclaw.ingest.eln.warehouse.databricks` uses, for the same reasons: the
-client package is imported the moment a connection is first needed rather than at import time, so a
-deployment that never points at Qdrant never loads it, an image that does not carry it still starts,
-and the whole adapter is exercised in CI against a fake client injected through the same seam. The
-package is **not** in `pyproject.toml`'s runtime dependencies — a store nobody has configured must
-not weigh on every pod.
-
-**Why an adapter is small here.** Everything a vector database is bad at stayed in the catalogue
-(`chemclaw.retrieval.vectors.base` says which and why), so what is left is three operations that map
-onto Qdrant's own vocabulary almost directly: `upsert` → `upsert_points`, `search` → `query_points`
-with an optional payload filter, `delete` → `delete_points`. There is no join to emulate and no
-clock to invent.
-
-**Two details this adapter must get right, because they are where the semantics live:**
-
-*The scope is a filter on each point's group, applied by Qdrant before its own top-k.* Passing it
-as a post-filter would reproduce exactly the recall defect `base.py` describes and that
-`docs/planning/BACKLOG.md` already records against pgvector's post-filtering. Qdrant's filterable
-HNSW is the reason this store is worth attaching at all, so the filter goes to the server.
-
-*Cosine similarity is what the collection must be configured for.* Qdrant returns the configured
-distance's score, and `VectorMatch.score` is documented as a cosine bounded to [0, 1]. A collection
-created with `Distance.DOT` or `Distance.EUCLID` would return numbers in another range entirely and
-every fusion above would silently mis-rank. The collection is created by the operator, so this is
-stated in `retrieval/vectors/README.md` as a requirement rather than enforced from here.
+The group scope is a server-side filter applied before Qdrant's top-k. The operator must create the
+collection with cosine distance, since `VectorMatch.score` is a cosine.
 """
 
 import importlib
@@ -47,10 +24,8 @@ logger = logging.getLogger(__name__)
 class QdrantClient(Protocol):
     """The slice of the Qdrant async client this adapter uses, so a fake is three methods.
 
-    Declared here rather than imported, which is the point: `qdrant-client` is not a dependency of
-    this repository, and a Protocol is how the adapter is type-checked and tested without one. The
-    signatures are keyword-only where the real client's are, so a fake that satisfies this cannot
-    pass a call the real client would reject.
+    Keyword-only where the real client's signatures are, so a fake cannot accept what the client
+    would reject.
     """
 
     async def upsert(self, *, collection_name: str, points: list[Any]) -> Any:
@@ -77,8 +52,7 @@ class QdrantClient(Protocol):
 def _client_module() -> Any:
     """Import `qdrant_client`, or say which package to install rather than raising `ImportError`.
 
-    Late, and only from the two places that genuinely need a connection. A `VectorStoreConfigError`
-    because no retry can install a package: the operator has to act, and the message is the action.
+    A `VectorStoreConfigError` because no retry can install a package.
     """
     try:
         return importlib.import_module("qdrant_client")
@@ -99,19 +73,7 @@ def _models() -> Any:
 def open_qdrant_client() -> QdrantClient:
     """Build the async Qdrant client this deployment is configured for.
 
-    Reads the URL and the API key from settings rather than taking them as arguments, because this
-    is the one production entry point and the alternative is a second place that decides what
-    "the vector store" means.
-
-    **The key is registered with the log-redaction inventory here, at build time**, where the secret
-    is read — the warehouse seam's placement, and the one that cannot drift from the read.
-
-    It is no longer the *only* thing covering this key, and for one commit it covered nothing at
-    all: `register_secret_env` stores a variable *name* and `_secret_values` resolved it against
-    `os.environ`, while `Settings` reads `.env` without exporting anything — so on the documented
-    `.env` posture the registration resolved to the empty string. `logging._configured_by` closes
-    that, and the field is now a `SecretStr` in `_SECRET_SETTINGS` besides, which is the protection
-    that cannot depend on where the value came from.
+    The API key is registered for log redaction here, where it is read.
     """
     module = _client_module()
     register_secret_env("CHEMCLAW_VECTOR_STORE_API_KEY")
@@ -119,26 +81,14 @@ def open_qdrant_client() -> QdrantClient:
         "url": settings.vector_store_url,
         "api_key": settings.vector_store_api_key.get_secret_value() or None,
         "timeout": int(settings.vector_store_timeout_seconds),
-        # Unconditional, and it is the only seam there is. `AsyncQdrantClient` forwards its extra
-        # keywords through `AsyncApiClient` straight into the `httpx.AsyncClient` it builds for
-        # itself, so `trust_env` lands where it is needed — while a caller-supplied `http_client`
-        # is refused, because that same forwarding hands it to httpx as an unknown keyword.
-        # Observed 2026-09-12 against qdrant-client 1.19.0 in a scratch venv, construction only:
-        # default `trust_env=True`, with this keyword `False`, `http_client=` a `TypeError`. That
-        # is a dated observation rather than a claim this tree can hold — the extra is not in this
-        # closure (`pgvector` is the shipped provider), so `tests/test_vector_store.py` can only
-        # assert that the keyword is *sent*. Without it, a proxy variable on the pod would carry
-        # this store's embedded note text and query vectors off-address, past a guard that sees
-        # only the dial to the proxy.
+        # Unconditional: extra keywords are forwarded into the client's own `httpx.AsyncClient` (a
+        # caller-supplied `http_client` is refused). Without it a proxy variable on the pod would
+        # carry embedded note text and query vectors off-address, past a guard that sees only the
+        # dial to the proxy.
         "trust_env": False,
     }
-    # The private-CA bundle the rest of this system's transports honour, passed **only** when one
-    # is configured. The original reason for the condition is spent: it was that `verify` is
-    # forwarded to the underlying httpx client rather than being in the constructor's own
-    # signature and nothing here had run against a real client, so an unrecognised keyword might
-    # fail every deployment. The `trust_env` measurement above is a measurement of that forwarding,
-    # and httpx takes `verify`. The condition stays for its own reason instead: the setting's
-    # unset value is the empty string, which is not a CA bundle path.
+    # The private-CA bundle the other transports honour, passed only when configured: the unset
+    # value is the empty string, which is not a path.
     if settings.llm_tls_ca_bundle:
         options["verify"] = settings.llm_tls_ca_bundle
     client: QdrantClient = module.AsyncQdrantClient(**options)
@@ -151,9 +101,7 @@ class QdrantVectorStore:
     def __init__(self, client: QdrantClient | None = None) -> None:
         """Bind to a client, or resolve the configured one lazily on first use.
 
-        Lazy so that constructing this opens no connection: the data-source registry builds retrieve
-        halves in the chat pod at startup, and a store that dialled out from its constructor would
-        make an unreachable Qdrant a failure to *boot* rather than a failure to search.
+        Lazy so an unreachable Qdrant is a failure to search, not a failure to boot.
         """
         self._client = client
 
@@ -234,11 +182,8 @@ class QdrantVectorStore:
 def _point_id(reference: str) -> str:
     """Qdrant's own id for a catalogue reference.
 
-    Qdrant accepts an unsigned integer or a UUID as a point id and nothing else, while this system's
-    references are readable strings (`doc-9f2a1c…#3`). A UUIDv5 over the reference is the standard
-    resolution: deterministic, so re-embedding the same chunk replaces its point rather than adding
-    one, and collision-free in the way a hash truncation would not be. The readable form is kept in
-    the payload as `ref`, which is what the scope filter matches and what comes back out.
+    A deterministic UUIDv5 (Qdrant accepts only integers or UUIDs); the readable reference stays in
+    the payload as `ref`, which the scope filter matches.
     """
     import uuid
 
@@ -248,10 +193,8 @@ def _point_id(reference: str) -> str:
 def _matches(response: Any) -> list[VectorMatch]:
     """Read a `query_points` response into `VectorMatch`es, dropping anything unusable.
 
-    Tolerant of the two response shapes the client has carried — `.points` on newer versions, a bare
-    iterable on older ones — because pinning this adapter to one client minor would make a routine
-    dependency bump a code change. A point whose payload lost its `ref` cannot be rejoined to the
-    catalogue and is dropped rather than guessed at.
+    Accepts `.points` (newer clients) or a bare iterable (older). A point whose payload lost its
+    `ref` cannot be rejoined to the catalogue and is dropped.
     """
     points = getattr(response, "points", response)
     matches: list[VectorMatch] = []
@@ -260,11 +203,8 @@ def _matches(response: Any) -> list[VectorMatch]:
         if not reference:
             logger.warning("qdrant returned a point with no 'ref' payload; skipping it")
             continue
-        # The `> 0` floor the base contract states and both Postgres-backed indexes apply.
-        # The clamp alone did not enforce it: a negative cosine became `0.0` and *stayed a hit*,
-        # and the server-side `score_threshold=0.0` is a minimum a zero score satisfies — so this
-        # was the one backend that could surface an anti-correlated document as cited evidence
-        # on a narrow corpus, which is exactly the case the floor exists for.
+        # The `> 0` floor of the base contract: the clamp alone would keep a negative cosine as a
+        # `0.0` hit, and the server's `score_threshold=0.0` admits zero.
         score = float(point.score)
         if score <= 0.0:
             continue

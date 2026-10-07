@@ -12,7 +12,7 @@ checklist** for everything that check does not cover.
 ## Today's state (read this first)
 
 **No production Temporal cluster holds Chemclaw histories yet** — the rollout itself is written and
-not run (`docs/planning/DEFERRED.md`, "Push-to-registry + `helm upgrade` rollout, run"). The policy
+not run (`docs/planning/BACKLOG.md`, "Push-to-registry + `helm upgrade` rollout, run"). The policy
 below applies from the first production deploy; until then a workflow-logic change needs no
 retroactive patch gate, because there is no history to replay against.
 
@@ -101,7 +101,7 @@ A registered name is the string a history schedules against, so it is renamed by
 name registered** beside the new one for a release, then deleting it once no run that scheduled the
 old name is open (`D-2026-09-14-an-activity-name-is-a-wire-name-so-it-is-renamed-in-two-releases`).
 The live instance is `durable/report_workflow.py`'s `propose_report` alias of `record_report_note`;
-its removal condition is a `DEFERRED.md` row.
+its removal condition is a `BACKLOG.md` row.
 
 ### 3. Drain in-flight runs, then deploy (for a change too invasive to branch)
 

@@ -1,20 +1,9 @@
 """The delivery-channel manifest: one validated declaration of where a message may leave.
 
-The fourth attachment seam, written to the template the other three share — a folder, a YAML file,
-`extra="forbid"`, discovered from a path list, enabled by a name list. `connectors/manifest.py` is
-the first (a capability *produces*), `ingest/sources/manifest.py` the second (a source *supplies*),
-`publish/manifest.py` the third (a sink *consumes what this system produced*).
-
-**Why a channel is none of those.** A sink takes a typed scientific record to a database; nobody
-reads it. A channel takes a *message to a person* — a digest, a report, an escalation — and the
-difference is not the transport but the audience. `durable/digest.py` says so in as many words:
-"no new delivery mechanism, no email integration, no second notification system", which was right
-while the product was a chat window and is the reason a project leader could not be reached on a
-Monday morning. Nothing here changes what a sink is; it adds the seam that was missing beside it.
-
-**A channel carries no evidence and answers no question.** It is write-only and outbound: nothing
-in this tree reads from a channel, and a driver that offered to would be an ingest source declaring
-its way into a write path, which `ingest/sources/README.md` already forbids in the other direction.
+The fourth attachment seam, on the template of the other three (connectors produce, sources
+supply, sinks consume what this system produced): a folder, a YAML file, `extra="forbid"`,
+discovered from a path list, enabled by a name list. A channel takes a message to a person.
+It is write-only and outbound; nothing in this tree reads from a channel.
 """
 
 from typing import Any, Self
@@ -67,9 +56,8 @@ class DeliveryChannelManifest(BaseModel):
     def _config_does_not_shadow_the_name(self) -> Self:
         """Reject a `config:` key the registry itself supplies.
 
-        The builder passes `name=` alongside the config, so a manifest setting it there raises a
-        `TypeError` from inside the driver construction naming neither the channel nor the key —
-        the same guard `ResultSinkManifest` and `DataSourceManifest` carry, for the same failure.
+        The builder passes `name=` alongside the config, so a manifest setting it would fail inside
+        driver construction with a `TypeError` naming neither the channel nor the key.
         """
         if "name" in self.config:
             raise ValueError(

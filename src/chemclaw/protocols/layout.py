@@ -1,16 +1,9 @@
 """Turning a list of arms into a plate: wells, labels and run order.
 
-Deterministic arithmetic with no chemistry in it, kept apart from `checks` for the reason
-`science/` is kept apart from `connectors/`: a layout is testable without a design being valid, and
-`checks.layout_fits` needs to ask questions about a layout it did not itself produce.
-
-**Positions are row-major and run order is what gets shuffled.** Those are two different
-confounders and only one of them is worth trading a chemist's time for. Randomising *positions*
-makes a plate that has to be pipetted from a lookup table instead of left to right, and buys
-protection against an edge effect that a plate map already makes visible; randomising *run order*
-is what stops a drift over the session — a decaying stock solution, a warming room — from reading as
-a factor effect, which nothing else can catch. `bo`'s `generate_screening_design(randomize=True)`
-shuffles the same thing for the same reason.
+Deterministic arithmetic with no chemistry, kept apart from `checks` so `checks.layout_fits`
+can question a layout it did not produce. Positions are row-major and only the *run order* is
+shuffled: randomising positions would force pipetting from a lookup table, while randomising run
+order is what stops session drift (a decaying stock, a warming room) reading as a factor effect.
 """
 
 from __future__ import annotations
@@ -21,10 +14,8 @@ from collections.abc import Sequence
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.models import PlateLayout, ProtocolArm, Well
 
-#: `plate_format -> (rows, columns)`. Five formats: the SBS densities plus 48, which is the one a
-#: bench chemist actually reaches for when 24 is too few. A format not in this map is refused
-#: rather than guessed at: a 60-well plate would otherwise be laid out as 6x10 or 10x6 and the two
-#: are different plates.
+#: `plate_format -> (rows, columns)`: the SBS densities plus 48. An unlisted format is refused
+#: rather than guessed (6x10 and 10x6 are different plates).
 PLATE_SHAPES: dict[int, tuple[int, int]] = {
     24: (4, 6),
     48: (6, 8),

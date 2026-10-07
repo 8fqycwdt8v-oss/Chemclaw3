@@ -1,22 +1,10 @@
 """Create/update the Temporal Schedules that drive the periodic background jobs.
 
-The ELN sync and the three memory-synthesis workflows are worker-registered but only run
-when something fires them. That "something" is a Temporal Schedule — durability lives in
-Temporal, not host cron (D-006 reasoning) — created here and applied idempotently by
-`make schedules-apply`, so re-running updates each Schedule in place rather than erroring.
-
-Intervals come from config (`*_schedule_minutes`). Every Schedule targets the
-`background-jobs` queue. The ELN sync is self-cursoring (it loads/stores its high-water mark
-in `sync_cursors`), so its Schedule passes no argument; the memory-synthesis jobs re-scan
-the whole corpus and carry no state either. `planned_schedules()` is the pure, testable list
-of what will be applied; `apply_schedules()` applies it against a live client.
-
-This is durable-layer library code, not an entrypoint: a Temporal Schedule is Temporal's own
-durability primitive, and `chemclaw.api.app` imports `ScheduleHealth`/`describe_schedules` here at
-module scope for the `/schedules` health endpoint. It used to live in `chemclaw.cli`, which put
-the front door's health check reaching into the entrypoint layer for library functions. The CLI
-surface (`python -m chemclaw.cli.schedules`, `make schedules-apply`) is now a thin `main()` shim in
-`chemclaw.cli.schedules` that calls `apply_schedules()` here.
+Background workflows run only when a Temporal Schedule fires them (durability lives in Temporal,
+not host cron). `planned_schedules()` is the pure list of what to apply; `apply_schedules()`
+reconciles it idempotently against a live client (`make schedules-apply`), and
+`describe_schedules()` backs the front door's `/schedules` health endpoint. Every Schedule targets
+`background-jobs` and passes no argument: the jobs are self-cursoring or full re-scans.
 """
 
 import asyncio
@@ -77,10 +65,9 @@ class PlannedSchedule:
     interval: timedelta
 
 
-# Every Schedule id this script has ever owned — the prune namespace. Pruning must only
-# ever delete this script's own Schedules, so the namespace is a fixed explicit set (never
-# a prefix match against a shared Temporal namespace). `test_schedules.py` asserts the plan
-# stays inside this set, so a new planned job that forgets to register here fails a test.
+# Every Schedule id this module has ever owned — the prune namespace. Pruning deletes only these
+# ids (never a prefix match in a shared namespace); `test_schedules.py` asserts the plan stays
+# inside this set.
 OWNED_SCHEDULE_IDS = frozenset(
     {
         "eln-sync",
@@ -90,11 +77,8 @@ OWNED_SCHEDULE_IDS = frozenset(
         "eval-drift",
         "note-reindex",
         "retention",
-        # Retired with the audit hash chain. The id stays because this set is the *prune*
-        # namespace: it is the only thing authorising the applier to delete a Schedule, so
-        # dropping the name would strand a live `audit-verify` Schedule firing a workflow no
-        # worker registers. It is deleted on the next apply and can go once every deployment
-        # has run one.
+        # Retired job. Kept so the next apply prunes a still-live Schedule; remove once every
+        # deployment has applied once.
         "audit-verify",
         "digest",
         "agent-check-in",
@@ -103,20 +87,10 @@ OWNED_SCHEDULE_IDS = frozenset(
         "document-sync",
         "reaction-labels",
         "reaction-corpus",
-        # Planned since the commitment mirror shipped and missed by the audit that caught
-        # `result-publish` two lines below — because the guard that audit strengthened enabled
-        # eleven jobs against a floor of eleven, and this is the twelfth. Same consequence: a
-        # deployment that declares a `commitments:` half, gets the Schedule, and later drops the
-        # source from `CHEMCLAW_DATA_SOURCES` keeps firing `CommitmentSyncWorkflow` daily against
-        # a registry that returns nothing, through every subsequent `helm upgrade`, with no log
-        # line saying so.
+        # Conditional job: listed so dropping its source from `CHEMCLAW_DATA_SOURCES` prunes the
+        # Schedule instead of leaving it firing.
         "commitment-mirror",
-        # Planned since the result sinks shipped and registered here only after an audit found it
-        # missing: `_prune` computes `OWNED_SCHEDULE_IDS - planned_ids`, so a deployment that set
-        # `CHEMCLAW_RESULT_SINKS`, got the Schedule, and later cleared the setting kept firing
-        # `PublishResultsWorkflow` through every subsequent `helm upgrade`. The guard that was
-        # supposed to catch this enabled one conditional job and passed vacuously; it now builds
-        # the full plan.
+        # Conditional job: listed so clearing `CHEMCLAW_RESULT_SINKS` prunes the Schedule.
         "result-publish",
         "orphaned-waits",
         "exhibit-pushes",
@@ -127,14 +101,9 @@ OWNED_SCHEDULE_IDS = frozenset(
 def _retention_windows_are_set() -> bool:
     """Whether any table has a retention window, i.e. whether the sweep would delete anything.
 
-    **Derived from the settings, not listed.** It read four named windows while the sweep maps six
-    (`retention._window_days`), so a release whose only window was its artefacts'
-    (`retention_session_exhibits_days`) or its delivered publications' never scheduled the sweep —
-    a stated policy, applied by nothing, and the chart's own posture gate satisfied. Every
-    `retention_*_days` field is a window by this naming rule, which
-    `tests/test_schedules.py::test_every_retention_window_turns_the_sweep_on` holds against the
-    sweep's own map, so a window added there counts here with no edit. Kept a predicate here rather
-    than imported from `retention` so the plan stays free of the workflow module's own imports.
+    Derived from every `retention_*_days` setting rather than a list, so a new window counts with no
+    edit; `tests/test_schedules.py` holds that against the sweep's own map. Kept here rather than
+    imported from `retention` so the plan avoids the workflow module's imports.
     """
     return any(getattr(settings, name) for name in retention_window_fields())
 
@@ -149,153 +118,89 @@ def retention_window_fields() -> list[str]:
 
 
 def planned_schedules() -> list[PlannedSchedule]:
-    """The Schedules this script maintains.
+    """The Schedules this module maintains.
 
-    Pure and side-effect-free (no client), so a test can assert the set of jobs and their
-    configured cadences without a live Temporal server.
-
-    **No Schedule here mines knowledge on a timer** (D-2026-08-25). Campaign synthesis, playbook
-    distillation and optimization-campaign detection used to fire hourly and propose notes with
-    nobody having asked, which is knowledge arriving on a timer. The rule was written as "no
-    Schedule opens a pull request" and outlived its mechanism:
-    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the gate, so no path in this
-    tree opens one and the phrasing named the thing that went rather than the thing that matters,
-    which is who asked. The miners are unchanged and
-    still run — `CampaignSynthesisWorkflow`, `PlaybookDistillationWorkflow` and
-    `OptimizationCampaignWorkflow` are started on demand, by a chemist or by an agent workflow that
-    has a reason to look. What is left on a timer is ingestion, indexing, eviction and retention:
-    jobs that make the corpus queryable and none that decide what it means.
+    Pure and side-effect-free (no client), so a test can assert the jobs and cadences without a live
+    Temporal server. No Schedule mines knowledge on a timer: the campaign, playbook and
+    optimization miners run on demand. What runs on a timer is ingestion, indexing, eviction and
+    retention.
     """
     eln_every = timedelta(minutes=settings.eln_sync_schedule_minutes)
     schedules: list[PlannedSchedule] = []
-    # The ELN sync earns a Schedule only where there is an ELN to sync — the same question
-    # `document-sync` asks seventeen lines below, asked of the same registry. It was the one
-    # periodic job planned unconditionally, and with no source configured (the default) that is an
-    # hourly Schedule firing a workflow whose first act is to enumerate zero sources and merge an
-    # empty list. Asked of the manifests rather than of a new `eln_sync_enabled` setting, for the
-    # reason `document-sync` records: `CHEMCLAW_DATA_SOURCES` is already the enable switch (D-018),
-    # and a second flag could only restate it or contradict it.
+    # Only where there is an ELN to sync. Asked of the manifests, because `CHEMCLAW_DATA_SOURCES` is
+    # already the enable switch; a second flag could only restate or contradict it.
     if active_ingest_source_names():
         schedules.append(PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every))
-    # The drift check is opt-in (plan F10-F2): it only earns a Schedule where a committed baseline
-    # is maintained, so an unconfigured deployment does not fire an eval it has no baseline for.
+    # Opt-in: only where a committed baseline is maintained, so a deployment never fires an eval it
+    # has no baseline for.
     if settings.eval_drift_enabled:
         drift_every = timedelta(minutes=settings.eval_drift_schedule_minutes)
         schedules.append(PlannedSchedule("eval-drift", EvalDriftWorkflow, drift_every))
-    # The derived note index only earns a Schedule where a hybrid retrieval leg actually reads it
-    # (gap SCH-2). A graph-only deployment would otherwise pay to rebuild an index nothing queries.
-    # `note_reindex_effective` is derived from the source list unless a deployment overrides it —
-    # so enabling `vector`/`lexical` cannot leave both legs querying a never-built index.
+    # Only where a hybrid retrieval leg reads the derived note index. `note_reindex_effective`
+    # derives from the source list unless overridden, so enabling `vector`/`lexical` always builds
+    # the index.
     if settings.note_reindex_effective:
         reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
         schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
-    # A document share earns a Schedule only where one is actually enabled. Asked of the manifests
-    # rather than of a second setting: `CHEMCLAW_DATA_SOURCES` is the enable switch (D-018), and a
-    # `document_sync_enabled` flag beside it could only ever say something the source list already
-    # says, or say it wrongly.
+    # Only where a document share is enabled, asked of the manifests (the source list is the
+    # switch).
     if share_sources():
         share_every = timedelta(minutes=settings.document_sync_schedule_minutes)
         schedules.append(PlannedSchedule("document-sync", DocumentShareSyncWorkflow, share_every))
-    # The labelling drain earns a Schedule wherever there is a reaction corpus to label — an
-    # ingest half that writes record rows, or a bulk corpus binding. Still the manifests rather
-    # than a flag, for the third time in this file, because `CHEMCLAW_DATA_SOURCES` plus a
-    # declaration already answers it; and a deployment with neither still gets no Schedule, which
-    # is the concern that mattered — it would otherwise ask the labelling server for its version
-    # every hour and then label nothing.
-    #
-    # **Not `label_policies()`.** That was the gate until it was measured, and it is the wrong
-    # question: exactly one source in this tree declares a `labels:` block and it ships disabled,
-    # so on a stock deployment this Schedule was never created and the ELN corpus was never
-    # labelled by anything. A block says what a source already *carries*, not whether its rows may
-    # be labelled — `D-2026-08-25-a-label-is-derived-not-recorded` reads `provides` for the
-    # coverage report and the `override` subset check, and for nothing else.
+    # Wherever there is a reaction corpus to label: an ingest half writing record rows, or a bulk
+    # corpus binding. Not gated on `label_policies()`: a `labels:` block says what a source already
+    # carries, not whether its rows may be labelled.
     if active_ingest_source_names() or corpus_sources():
         label_every = timedelta(minutes=settings.label_sync_schedule_minutes)
         schedules.append(PlannedSchedule("reaction-labels", ReactionLabelWorkflow, label_every))
-    # And the corpus drain earns one only where a source declares a `corpus:` binding. Daily
-    # rather than hourly: a release changes when a vendor ships one, so an hourly re-walk would
-    # read a warehouse to learn nothing.
+    # Only where a source declares a `corpus:` binding. Daily: vendor releases are infrequent.
     if corpus_sources():
         corpus_every = timedelta(minutes=settings.corpus_sync_schedule_minutes)
         schedules.append(PlannedSchedule("reaction-corpus", ReactionCorpusWorkflow, corpus_every))
-    # And the commitment mirror earns one only where a source declares a `commitments:` half (F4).
-    # Daily rather than hourly, for the same reason the corpus drain is: a portfolio tool's dates
-    # move on a human cadence, so a tighter loop would spend a vendor's API budget to learn nothing.
+    # Only where a source declares a `commitments:` half. Daily: portfolio dates move on a human
+    # cadence.
     if active_commitment_sources():
         commitment_every = timedelta(minutes=settings.commitment_sync_schedule_minutes)
         schedules.append(
             PlannedSchedule("commitment-mirror", CommitmentSyncWorkflow, commitment_every)
         )
-    # Digests earn a Schedule where a deployment turns them on (gap IDEA-1, default off); with the
-    # flag clear the job would sweep the corpus daily to deliver nothing.
-    #
-    # **The flag is enough now, and for the whole first life of this job it was not.** The digest
-    # lands in a `session_events` mailbox keyed `digest-<owner>`, and until
-    # `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` nothing in the tree could read one:
-    # the ack still fired on the insert, so every run moved a subscriber's watermark past matches
-    # no surface could ever show them, and `_is_new` cannot re-qualify a note once it has. Turning
-    # this on lost matches rather than merely failing to deliver them. `api/routes/streams.py`'s
-    # `GET /digests` is the reader that makes the acknowledgement true, which is what leaves this
-    # condition an ordinary opt-in rather than one that has to ask whether a consumer exists.
+    # Opt-in (default off). Digests land in a `digest-<owner>` mailbox that `GET /digests` reads.
     if settings.digest_enabled:
         digest_every = timedelta(minutes=settings.digest_schedule_minutes)
         schedules.append(PlannedSchedule("digest", DigestWorkflow, digest_every))
-    # The check-in over a requester's own blocked work earns a Schedule where a deployment turns
-    # it on. Gated on a flag rather than on a registry, unlike its four neighbours above, because
-    # there is no manifest to ask: the thing it reports on is `pending_requests`, which every
-    # deployment has, and what a deployment chooses is whether its people want to hear about it.
+    # Gated on a flag rather than a registry: it reports on `pending_requests`, which every
+    # deployment has, so the choice is whether people want to hear about it.
     if settings.check_in_enabled:
         check_in_every = timedelta(minutes=settings.check_in_schedule_minutes)
         schedules.append(PlannedSchedule("agent-check-in", CheckInWorkflow, check_in_every))
-    # Retention only earns a Schedule where the deployment has stated a policy (gap SCH-1); an
-    # unconfigured deployment must never start deleting records on a default it did not choose.
-    #
-    # **The policy is the windows, not the boolean.** `retention_enabled` turns the *Schedule* on
-    # and `retention_*_days > 0` turns the *work* on, and all four windows default to 0 — so the
-    # documented act of "stating a policy" produced a job that swept nothing, reported
-    # `skipped: [... (retention disabled)]` for every table, and showed healthy in
-    # `describe_schedules` forever. Two expressions of one condition, in two files, disagreeing.
-    # Asking for both here makes "on but inert" unrepresentable, which is what `share_sources()`
-    # already does for `document-sync`.
+    # Only where the deployment stated a policy: `retention_enabled` **and** at least one window, so
+    # "on but inert" is unrepresentable. An unconfigured deployment never deletes on a default.
     if settings.retention_enabled and _retention_windows_are_set():
         retention_every = timedelta(minutes=settings.retention_schedule_minutes)
         schedules.append(PlannedSchedule("retention", RetentionWorkflow, retention_every))
-    # Artefact pushes expire on their own window wherever a mailbox can hold one — the durable
-    # session store, which every artefact push is written to — and whether or not a retention
-    # policy is stated: a push is a notification, and `exhibit_push_retention_hours` is not
-    # 0-disabled for that reason (`D-2026-10-03-an-artefact-push-expires-on-its-own-schedule`). It
-    # fires once a window, so a push outlives its window by at most one more.
+    # Artefact pushes expire on their own window wherever the durable session store holds them,
+    # whether or not a retention policy is stated: a push is a notification. Fires once a window, so
+    # a push outlives its window by at most one more.
     if settings.session_store == "postgres":
         push_every = timedelta(hours=settings.exhibit_push_retention_hours)
         schedules.append(PlannedSchedule("exhibit-pushes", ExhibitPushPruneWorkflow, push_every))
-    # Artifact eviction earns a Schedule as soon as either of its two bounds is set — those two
-    # settings *are* the documented way to turn eviction on, and until this entry existed they
-    # turned on nothing: the workflow was decorated, imported by the background worker and
-    # advertised on the queue, with no schedule, no route and no caller anywhere. Written,
-    # registered, never fired — the failure `durable/registry.py` exists to prevent, one level up.
+    # Either bound is the documented switch for artifact eviction.
     if settings.artifact_store_max_bytes or settings.artifact_evict_idle_days:
         eviction_every = timedelta(minutes=settings.artifact_eviction_schedule_minutes)
         schedules.append(
             PlannedSchedule("artifact-eviction", ArtifactEvictionWorkflow, eviction_every)
         )
-    # The orphaned-wait sweep is unconditional, unlike its neighbours, because there is no setting
-    # that turns waits on: any deployment can raise one, and a row whose run was terminated is
-    # stuck in an inbox whether or not anybody configured anything. With no waits it is one empty
-    # query an hour (`D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
+    # Unconditional: any deployment can raise a wait, and a wait whose run was terminated is stuck
+    # regardless of configuration. With no waits it is one empty query.
     orphan_every = timedelta(minutes=settings.awaiting_orphan_sweep_minutes)
     schedules.append(PlannedSchedule("orphaned-waits", OrphanedWaitsWorkflow, orphan_every))
-    # Draining the result outbox earns a Schedule only where a sink is actually enabled - the same
-    # question `document-sync` and `eln-sync` ask of their own registries, and asked of the sink
-    # registry rather than of a second `result_publish_enabled` flag, because
-    # `CHEMCLAW_RESULT_SINKS` is already the enable switch (D-018) and a second flag could only
-    # restate it or contradict it. With no sink configured the queue is empty by construction, so
-    # this would be a job sweeping a table nothing writes.
+    # Only where a result sink is enabled (`CHEMCLAW_RESULT_SINKS` is the switch); with none, the
+    # outbox is empty by construction.
     if publishing_enabled():
         publish_every = timedelta(minutes=settings.result_publish_schedule_minutes)
         schedules.append(PlannedSchedule("result-publish", PublishResultsWorkflow, publish_every))
-    # The observations tier is the one knowledge surface no human reviews before the agent reads
-    # it, so it fires only where a deployment has consciously turned it on (D-161). Without this
-    # guard the table would fill on a default nobody chose.
+    # Opt-in: the observations tier is the one knowledge surface no human reviews before the agent
+    # reads it.
     if settings.observations_enabled:
         observations_every = timedelta(minutes=settings.observation_schedule_minutes)
         schedules.append(
@@ -307,22 +212,15 @@ def planned_schedules() -> list[PlannedSchedule]:
 def _jitter(job: PlannedSchedule) -> timedelta:
     """A deterministic per-job offset inside its interval, so co-scheduled jobs do not collide.
 
-    Jobs sharing one configured cadence would otherwise fire simultaneously against a single
-    background worker (`replicas: 1`) and contend for the same reads (gap SCH-3). That was written
-    for the three memory-synthesis jobs, which no longer have Schedules (D-2026-08-25); the
-    collision it prevents is a property of any two schedules sharing a cadence, so the offset
-    stays. Temporal jitter is a *random*
-    delay drawn per fire; this is instead a fixed per-schedule phase offset derived from the
-    schedule id, which is stable across re-applies (so `apply_schedules` stays a reconcile, not a
-    reshuffle) and spreads the jobs deterministically.
-
-    Bounded to a fraction of the interval so a job never drifts into the next window.
+    Jobs sharing a cadence would otherwise fire together against the single background worker. A
+    fixed phase derived from the schedule id (unlike Temporal's random per-fire jitter) is stable
+    across re-applies, so applying stays a reconcile. Bounded to a fraction of the interval so a job
+    never drifts into the next window.
     """
     span = job.interval * settings.schedule_jitter_fraction
     if not span:
         return timedelta(0)
-    # A stable hash of the id, mapped into [0, span). `stable_hash` is the repo's one hashing
-    # scheme (D-033), so this cannot drift from the ids it is derived from.
+    # A stable hash of the id, mapped into [0, span), using the repo's one hashing scheme.
     bucket = int(stable_hash(job.schedule_id, chars=8), 16) % 10_000
     return span * (bucket / 10_000)
 
@@ -334,39 +232,21 @@ def _build_schedule(job: PlannedSchedule) -> Schedule:
             job.workflow.run,  # type: ignore[attr-defined]
             id=f"{job.schedule_id}-scheduled",
             task_queue=settings.background_task_queue,
-            # A ceiling on one run, because `SKIP` below makes a run that never ends the worst
-            # failure this file can have: every subsequent fire is skipped, indefinitely, and a
-            # skipped fire is not an error in `describe_schedules`, in a log or on a dashboard —
-            # the job simply stops running and nothing says so. Every activity these workflows
-            # schedule is now bounded on both sides (`durable/publish.py::queue_wait_timeout`), so
-            # this is the backstop for what that cannot see: a child that hangs, a timer, a wait.
-            # `schedule_run_timeout_seconds` explains why a day is the right size and why a
-            # terminated run is safe here.
+            # A ceiling on one run: with `SKIP` below, a run that never ends silently skips every
+            # later fire. Activities are already bounded; this backstops hung children, timers and
+            # waits.
             #
-            # **`run_timeout`, not `execution_timeout`, and the difference is the whole point.**
-            # `execution_timeout` is Temporal's WorkflowExecutionTimeout: it bounds the entire
-            # `continue_as_new` chain, and a continued run cannot extend it — the continue-as-new
-            # command carries a run timeout and a task timeout and no execution timeout. Four of
-            # the jobs scheduled here drain by continuing as new (`corpus_sync`, `document_sync`,
-            # `label_sync`, `eln_sync`), so a chain-wide ceiling would not bound "one run" at all:
-            # it would kill a first load of a multi-million-row corpus a day into the drain, and a
-            # release-mode `corpus_sync` persists no cursor at all, so the next fire would start
-            # again from its first page and never finish. (A source binding `append_only: true`
-            # keeps its keyset position in `corpus_cursors` and would resume — but the argument
-            # has to hold for the default, which is the release.) Measured against a live
-            # broker on a chain of ten
-            # one-second runs under a five-second ceiling: `execution_timeout` failed it at 5.64 s,
-            # `run_timeout` completed it in 12.38 s.
+            # `run_timeout`, not `execution_timeout`: the latter bounds the whole `continue_as_new`
+            # chain, and the draining jobs (`corpus_sync`, `document_sync`, `label_sync`,
+            # `eln_sync`) continue as new, so it would kill a long first load that may have no
+            # cursor to resume from.
             run_timeout=timedelta(seconds=settings.schedule_run_timeout_seconds),
         ),
         spec=ScheduleSpec(
             intervals=[ScheduleIntervalSpec(every=job.interval, offset=_jitter(job))],
         ),
-        # SKIP, not the default BUFFER_ONE: every job here is a full re-scan or a full reindex, so
-        # a run that overruns its interval must be allowed to finish rather than have the next fire
-        # queue behind it. Buffering would let a slow corpus scan accumulate a backlog it can never
-        # drain — the run it would buffer is redundant anyway, since the next fire re-scans
-        # everything (gap SCH-3). The ELN sync is cursored, so a skipped fire loses nothing either.
+        # SKIP, not the default BUFFER_ONE: every job is a full re-scan or a cursored sync, so an
+        # overrunning run should finish and the buffered fire would be redundant.
         policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
     )
 
@@ -374,19 +254,9 @@ def _build_schedule(job: PlannedSchedule) -> Schedule:
 def _preserving_pause(job: PlannedSchedule) -> Callable[[ScheduleUpdateInput], ScheduleUpdate]:
     """Build the update callback: this repository's spec, the *cluster's* paused state.
 
-    **A reconcile must not undo an operator's hand.** `_build_schedule` returns a fresh `Schedule`
-    whose `state` defaults to `paused=False`, and the chart runs this applier as a
-    `post-install,post-upgrade` hook — so pausing `document-sync` because a share is broken, or
-    `retention` during an incident, survived exactly until the next unrelated `helm upgrade`, with
-    no log line saying it had been resumed. Measured against a live server: pause → `True`, the old
-    one-line update → `False`, this callback → `True`.
-
-    The callback is already handed the live description; it was simply ignored, which is why the fix
-    is to read it rather than to add a setting recording what an operator paused.
-
-    Everything *else* stays declarative on purpose. The spec, the action and the overlap policy are
-    this repository's to state, and re-applying them is the whole point of the hook; only the
-    paused bit is a fact about the cluster that no file here can know.
+    A reconcile must not undo an operator's pause: the applier runs on every `helm upgrade`, and a
+    fresh `Schedule` defaults to unpaused. Spec, action and overlap policy stay declarative; only
+    the paused bit is a cluster fact, read from the live description the callback is handed.
     """
 
     def update(current: ScheduleUpdateInput) -> ScheduleUpdate:
@@ -409,12 +279,10 @@ async def _apply(client: Client, job: PlannedSchedule) -> str:
 
 
 async def _prune(client: Client, planned_ids: set[str]) -> None:
-    """Delete script-owned Schedules that exist in Temporal but are no longer planned.
+    """Delete owned Schedules that exist in Temporal but are no longer planned.
 
-    Without this, a job removed from the plan (e.g. `eval-drift` after
-    `eval_drift_enabled` is switched off) keeps firing forever. Only ids inside
-    `OWNED_SCHEDULE_IDS` are ever deleted, so Schedules created by anything else
-    in the namespace are untouched.
+    Without this, a job removed from the plan keeps firing forever. Only ids in
+    `OWNED_SCHEDULE_IDS` are ever deleted.
     """
     stale = OWNED_SCHEDULE_IDS - planned_ids
     if not stale:
@@ -428,8 +296,7 @@ async def _prune(client: Client, planned_ids: set[str]) -> None:
 async def apply_schedules(client: Client, jobs: Sequence[PlannedSchedule] | None = None) -> None:
     """Apply every planned Schedule idempotently against `client`, then prune stale ones.
 
-    Pruning makes a re-apply declarative: the Schedules in Temporal end up exactly the
-    planned set (within this script's owned id namespace), not a monotone accumulation.
+    Pruning makes a re-apply declarative: the owned Schedules end up exactly the planned set.
     """
     plan = list(jobs) if jobs is not None else planned_schedules()
     for job in plan:
@@ -473,12 +340,9 @@ class ScheduleHealth(BaseModel):
     runs_total: int = 0
     skipped_overlap: int = 0
     running_now: int = 0
-    # Temporal's own `WorkflowExecutionStatus` name for the newest run that has *finished* —
-    # `COMPLETED`, `FAILED`, `TIMED_OUT`, `TERMINATED`, `CANCELED`. Empty means no run has
-    # finished yet (a first fire still in flight, or a Schedule that never fired); `unknown`
-    # means the run could not be described, and `note` says why. It is deliberately not
-    # "the status of the run `last_run` names": a run still in flight has no outcome, and
-    # `running_now` is already the field that says one is in flight.
+    # Temporal's `WorkflowExecutionStatus` name for the newest *finished* run. Empty means none has
+    # finished yet; `unknown` means it could not be described (`note` says why). An in-flight run
+    # has no outcome; `running_now` reports that.
     last_outcome: str = ""
     note: str = ""
 
@@ -486,29 +350,11 @@ class ScheduleHealth(BaseModel):
 async def describe_schedules(client: Client | None = None) -> list[ScheduleHealth]:
     """Report every planned Schedule's health, in plan order.
 
-    A planned Schedule that does not exist in Temporal is reported with a note, never omitted:
-    "the job was never created" is precisely the failure this surface exists to show, and a silent
-    omission is indistinguishable from a healthy quiet job.
-
-    **Concurrently and each bounded, because this is a probe on the front door's event loop.** The
-    lookups are independent and there is one per planned Schedule; run in sequence with the SDK's
-    own retry underneath and no timeout, an unreachable broker made an authenticated route hang for
-    (retry budget × the plan) — at exactly the moment an operator opens the "is the machinery
-    running" page. How many that is is not written here: the plan grows, and this sentence said
-    eleven over a plan of twelve. Both halves are already argued elsewhere in this repository, on
-    the two probes that face the same broker: `connectors/health.py` ("concurrent because probes
-    are independent and a serial sweep would make startup wait for the sum of the timeouts rather
-    than the slowest one") and `api/runner.py` ("`retry=False` keeps it a *probe* — the SDK's
-    default retry would turn one unreachable broker into a per-turn backoff loop"). A timeout is
-    what bounds it here, since `describe()` takes no `retry` argument.
-
-    `gather` preserves order, so the report is still in plan order.
-
-    Each schedule now costs **two** bounded lookups rather than one — the schedule's own
-    `describe`, then one `describe` of its newest finished run to recover the outcome
-    `ScheduleInfo` does not carry (`_last_outcome`). Both are bounded by the same probe budget and
-    the schedules still run concurrently, so the sweep's worst case is
-    `2 x connector_health_timeout_seconds` rather than a per-schedule sum.
+    A planned Schedule missing from Temporal is reported with a note, never omitted. This runs on
+    the front door's event loop, so the lookups run concurrently (`gather` keeps plan order) and
+    each is bounded by `connector_health_timeout_seconds` — `describe()` takes no `retry` argument.
+    Each schedule costs two lookups (itself, then its newest finished run), so the worst case is
+    twice the probe timeout.
     """
     connection = client if client is not None else await connect()
     return list(await asyncio.gather(*(_describe(connection, job) for job in planned_schedules())))
@@ -545,9 +391,8 @@ async def _describe(connection: Client, job: PlannedSchedule) -> ScheduleHealth:
 def _workflow_id(execution: ScheduleActionExecution) -> str:
     """The workflow id a schedule action started, or `""` for an action shape we cannot read.
 
-    `ScheduleActionExecution` is a base class and `ScheduleActionExecutionStartWorkflow` is its
-    only member today, so this is one `isinstance` rather than a cast: a future action kind that
-    does not start a workflow drops out of the outcome lookup instead of raising in a health probe.
+    An `isinstance`, not a cast, so a future non-workflow action drops out instead of raising in a
+    health probe.
     """
     return (
         execution.workflow_id if isinstance(execution, ScheduleActionExecutionStartWorkflow) else ""
@@ -557,28 +402,11 @@ def _workflow_id(execution: ScheduleActionExecution) -> str:
 async def _last_outcome(connection: Client, info: ScheduleInfo) -> tuple[str, str]:
     """The newest *finished* run's status, and a note when it could not be read.
 
-    **Exactly one extra `describe` per schedule, and the in-flight runs are excluded without
-    spending any.** `ScheduleInfo.running_actions` already names the workflow ids Temporal
-    considers still running, so the newest recent action that is *not* in that set is the newest
-    run with an outcome — no describe is spent discovering that a run is unfinished, and there is
-    no lookback window to tune. The cost of `describe_schedules` is therefore two bounded
-    `describe` calls per planned schedule, still one `gather` across schedules; the bound is
-    `connector_health_timeout_seconds`, the same probe budget the schedule lookup above uses,
-    because this is the same probe on the same event loop and a second knob could only disagree
-    with it.
-
-    **Described without a `run_id`, which is the whole reason this reports anything useful.**
-    Four of the scheduled jobs drain by `continue_as_new` (`corpus_sync`, `document_sync`,
-    `label_sync`, `eln_sync`), and a chain shares one workflow id, so describing the id alone
-    answers with the chain's *tail*. `recent_actions[i].action.first_execution_run_id` addresses
-    the chain's *head*, which is `CONTINUED_AS_NEW` for every chained job whatever happened
-    afterwards. Measured against a live broker on a three-hop chain killed by its run timeout:
-    the id alone reported `TIMED_OUT`, the first run id reported `CONTINUED_AS_NEW` — so the
-    obvious field on the action is precisely the one that would report a killed drain as normal.
-
-    A run whose retention has expired no longer describes; that is `unknown` with the reason in
-    `note`, never an exception, because one unreadable run must not end the sweep for every other
-    planned Schedule.
+    `ScheduleInfo.running_actions` excludes in-flight runs without a lookup, so this costs one
+    `describe` per schedule, bounded by the same probe timeout. Described by workflow id without a
+    `run_id`, which answers with a `continue_as_new` chain's tail; the action's
+    `first_execution_run_id` would always report the head as `CONTINUED_AS_NEW`. A run past its
+    retention is `unknown` with a note, never an exception.
     """
     in_flight = {_workflow_id(action) for action in (info.running_actions or [])}
     finished = [

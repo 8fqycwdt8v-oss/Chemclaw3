@@ -1,47 +1,15 @@
 """What a plan step is allowed to call, declared by the step and approved with it.
 
-`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`. D-137 made the plan approval
-durable, D-167 made it bind an *act* rather than latch onto a session — and neither bounded what
-the act may be. `enforce_plan_approval` asked one question, "does an approval stand for this
-plan?", so an approval recorded against a one-line, read-only plan authorized every name in
-`authz.side_effecting_tools()`: every knowledge-graph write, every durable launcher, every enabled
-bundle's state-changing surface. `tests/test_plan_scope.py` drives that and holds the figure, which
-is why no number for it appears here.
+An approval must bound what the approved plan may do
+(D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool). Only the model knows which
+tools carry out a step, so `write_todos` takes a required `tools` list beside `content` and
+`status`; a call without it fails argument validation and the model rewrites it. An empty list means
+the step changes nothing.
 
-**The data has to come from the model, because nothing else knows it.** A plan step is prose; which
-tools carry it out is a modelling decision taken when the step is written. So the plan tool's own
-schema carries it: `write_todos` takes `tools` beside `content` and `status`, and the human
-approving the plan approves that declaration with it.
-
-**The field is required, and that is the decision this module exists to take deliberately.** The
-obvious alternative is an optional field with a fall-through — a step that declares nothing keeps
-today's unbounded behaviour — and that is a control that reads as one and is not: it bounds
-nothing until the model volunteers to be bounded, which is the failure this repository keeps
-finding in its own perimeter. The other alternative, an optional field that refuses when absent,
-makes the first omission look like an authorization decision to a chemist who has approved a plan
-and watched it refuse its own steps. A **required** field makes the omission unrepresentable
-instead: a `write_todos` call without it fails the tool's own argument validation, the model reads
-the error and rewrites the call, and no plan without a declaration ever reaches a human. An empty
-list stays expressible and means what it says — this step changes nothing.
-
-**A declaration is not an authorization.** `declared_scope` is only ever read to *record* what a
-human approved (`api/routes/plan.py`, `cli/chat.py`); the gate reads the recorded scope back off
-`plan_approvals`, never off the live plan. That direction is what stops a rewrite widening an
-approval that has already been given.
-
-**It is not what stops one widening an approval that is still being given, and that took a second
-decision** (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`). This
-paragraph used to end by arguing that hashing `content` only was safe *because* the stamped scope is
-the one the human saw. Both clauses were true and the conclusion was false, because the scope is
-stamped by reading the **live** plan at decide time: shown a plan declaring nothing, a model that
-keeps every step's text and widens its `tools` leaves the identity unchanged, so the chemist's own
-hash still satisfies the route's 409 freshness guard and the widened declaration is what gets
-recorded. Driven end to end through `POST /sessions/{id}/plan/decision`: shown scope `[]`, rewritten
-scope `['record_knowledge_note', 'watch_for']`, hash unchanged, 204, both tools then ran.
-`plan_identity` now hashes each step's `content` *and* its declaration, by way of
-`step_declaration` below — so the identity a human decides on is the whole of what they are
-deciding, and a widening rewrite is a different plan that has to be shown and approved again. A
-status flip still hashes identically, which is the property the content-only rule existed for.
+A declaration is not an authorization: `declared_scope` is read only to record what a human
+approved, and the gate reads the recorded scope from `plan_approvals`. `plan_identity` hashes each
+step's content and declaration (via `step_declaration`), so a rewrite that widens `tools` is a
+different plan that must be approved again, while a status flip hashes identically.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -58,9 +26,7 @@ from typing_extensions import TypedDict
 from chemclaw.core.config import settings
 from chemclaw.core.model_prose import ModelProse
 
-# The key a step's declaration is spelled with, in the tool schema, in the state channel and in the
-# two readers below. One constant because a rename has to move all of them at once — and because
-# `tests/test_plan_scope.py` asserts the schema requires it by this name.
+# The key a step's declaration is spelled with, in the schema, the state channel and both readers.
 TOOLS_FIELD: Final = "tools"
 
 
@@ -95,14 +61,8 @@ class ScopedWriteTodosInput(BaseModel):
     def _a_plan_is_bounded_in_both_directions(self) -> "ScopedWriteTodosInput":
         """Refuse a plan longer, or a step broader, than the configured bound.
 
-        Both halves were unbounded and each sizes something that outlives the call — the step count
-        sizes the durable approval row, the per-step declaration sizes the union in
-        `plan_approvals.scope` and the refusal sentence built from it (measured at 600,192
-        characters over 50,000 ten-character names). See `core/config/agent.py`, which carries the
-        arithmetic and why this is a bound rather than a gate.
-
-        The message names the step and the count and says what to do, because this is refused at
-        argument validation precisely so the model can read it and split the plan.
+        Both sizes outlive the call (the approval row and its recorded scope). Refused at argument
+        validation with a message naming the step and count, so the model can split the plan.
 
         Raises:
             ValueError: The plan declares more steps than `plan_max_steps`, or a step names more
@@ -125,10 +85,8 @@ class ScopedWriteTodosInput(BaseModel):
         return self
 
 
-# What the model is told about the new field, appended to upstream's own tool description and to
-# its system prompt rather than replacing either: everything upstream says about when to plan and
-# how to keep the list current is as true here as there, and a fork of that text is a paragraph
-# that goes stale on the next bump with nothing to notice.
+# What the model is told about the new field, appended to upstream's tool description and system
+# prompt rather than replacing them, so upstream's wording is not forked.
 _SCOPE_GUIDANCE = ModelProse("""
 ## Declaring what a step will call
 
@@ -144,10 +102,8 @@ the plan to include it and ask for the new plan to be approved.""")
 def _write_scoped_todos(runtime: ToolRuntime[Any, Any], todos: list[ScopedTodo]) -> Command[Any]:
     """Replace the plan with `todos` — upstream's own effect, over the wider item.
 
-    First-party rather than a reach for `langchain.agents.middleware.todo._write_todos`: the body
-    is one `Command`, and importing a private function to avoid writing it would be a coupling to
-    something upstream never published, in exchange for nothing. The channel name and the tool name
-    are the couplings that matter and both are pinned in `tests/test_upstream_surface.py`.
+    First-party rather than importing upstream's private `_write_todos`; the channel and tool names
+    are pinned in `tests/test_upstream_surface.py`.
     """
     return Command(
         update={
@@ -169,13 +125,9 @@ async def _awrite_scoped_todos(
 class ScopedTodoListMiddleware(TodoListMiddleware):
     """`TodoListMiddleware`, with every step declaring the tools it will call.
 
-    Everything upstream does is kept: the system prompt it injects, the parallel-rewrite guard in
-    `after_model`, the `todos` channel and the `write_todos` name. Only the tool's argument schema
-    is widened, and the two texts the model reads gain a paragraph about the new field.
-
-    **The instance's own attributes are read rather than the module's constants**, so upstream's
-    wording arrives on every bump instead of being forked here. That those attributes exist is the
-    coupling, and `tests/test_upstream_surface.py` pins it.
+    Keeps upstream's prompt, parallel-rewrite guard, `todos` channel and `write_todos` name; only
+    the argument schema is widened and the two texts gain a paragraph. Upstream's wording is read
+    from the instance's attributes (pinned in `tests/test_upstream_surface.py`).
     """
 
     def __init__(self) -> None:
@@ -198,21 +150,9 @@ class ScopedTodoListMiddleware(TodoListMiddleware):
 def step_declaration(todo: Mapping[str, Any]) -> list[str]:
     """One step's declaration as the scope reader sees it: sorted, deduplicated, strings only.
 
-    The primitive under both readings of a declaration — the scope a decision records
-    (`declared_scope`) and the identity a decision is keyed on (`plan_gate.plan_identity`) — and it
-    is one function because the two must not be able to disagree. **An identity derived from a
-    *different* reading of `tools` than the scope is derived from is the defect this module's header
-    records**, one layer down: if this narrowed a value that the hash kept whole, or kept one the
-    hash narrowed, there would again be a pair of plans that authorize differently and hash alike.
-
-    Unreadable entries contribute nothing — a non-list `tools`, a non-string element. That is the
-    fail-closed direction for the scope, and for the identity it is merely conservative: a
-    declaration this cannot read narrows the authorization, and a change to the unreadable part
-    leaves the hash alone, which costs at most a re-approval nobody needed.
-
-    Sorted and deduplicated because neither the order of a step's declaration nor a repeat in it
-    changes what the step may call, and an identity that moved on a reordering would revoke a live
-    approval for no reason a chemist could see.
+    The single reading under both `declared_scope` and `plan_gate.plan_identity`, so the scope and
+    the identity cannot disagree. Unreadable entries contribute nothing (fail closed for the scope).
+    Sorted and deduplicated so a reordering does not revoke a live approval.
     """
     declared = todo.get(TOOLS_FIELD)
     if not isinstance(declared, Sequence) or isinstance(declared, str | bytes):
@@ -223,12 +163,7 @@ def step_declaration(todo: Mapping[str, Any]) -> list[str]:
 def declared_scope(todos: Iterable[Mapping[str, Any]]) -> frozenset[str]:
     """Every tool this plan's steps declare — the scope a human approving it would authorize.
 
-    The union over steps rather than a per-step check, because the gate judges a call against the
-    *plan*, not against whichever step happens to be in progress: a batch that ticks step N while
-    running step N+1's tool is the canonical harness shape (`plan_gate.plan_after_batch`), and a
-    per-step scope would refuse exactly it.
-
-    Per-step reading is `step_declaration`'s, so the scope and the plan identity narrow a malformed
-    declaration the same way.
+    The union over steps, because the gate judges a call against the plan: a batch commonly ticks
+    step N while running step N+1's tool.
     """
     return frozenset(name for todo in todos for name in step_declaration(todo))

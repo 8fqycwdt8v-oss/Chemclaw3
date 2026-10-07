@@ -1,9 +1,7 @@
-"""Molecule/reaction fingerprint search (plan Phase 3, mcp-molfp/mcp-rxnfp).
+"""Settings for molecule and reaction fingerprint search.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from typing import Literal
@@ -20,146 +18,60 @@ class FingerprintSettings(BaseSettings):
     definitions feed.
     """
 
-    # ECFP4 = Morgan radius 2, 2048 bits; both are config so the fingerprint definition is a
-    # deliberate choice, not a magic number. The similarity threshold is the Tanimoto floor a
-    # match must clear to count as a structural neighbor — the capability exposes it, the
-    # `reaction-search` skill decides how to wield it (G6).
+    # ECFP4 = Morgan radius 2, 2048 bits. The similarity threshold is the Tanimoto floor for a
+    # structural neighbor; the `reaction-search` skill decides how to use it.
     ecfp_radius: int = Field(default=2, ge=0)
     ecfp_bits: int = Field(default=2048, gt=0)
-    # DRFP reaction fingerprint width (plan step 3.4, mcp-rxnfp). Its own field, not shared with
-    # ecfp_bits — a different fingerprint whose folded length is an independent choice, though
-    # both default to 2048 (matching their bit(N) columns). top_k/threshold below are shared:
-    # they are generic fingerprint-search knobs, not molecule-specific.
+    # DRFP reaction fingerprint width, independent of `ecfp_bits` (both match their bit(N) columns).
+    # `top_k`/threshold are shared search knobs.
     drfp_bits: int = Field(default=2048, gt=0)
     fingerprint_top_k: int = Field(default=10, ge=1)
     fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
-    # **Whether a structural-similarity search must be right, or only fast.** `exact` compares the
-    # query against every indexed fingerprint, so the neighbour list is the true top-k and an empty
-    # one is real evidence that the corpus holds no analog. `approximate` lets the HNSW index
-    # propose candidates and re-ranks them, so a true neighbour can be missed and "no precedent"
-    # stops being proof — which is why this is a deployment's decision and not a tuning constant,
-    # and why the answer says which arm ran (`FingerprintSearch.approximate`).
-    #
-    # The trade, measured on this branch against PostgreSQL 16.15 / pgvector 0.8.0 over 200,000
-    # real ECFP4 `bit(2048)` rows (`tests/test_molfp_postgres.py` re-measures the agreement half):
-    # the exact scan is 17.6 ms at 200k and linear at ~0.088 µs/row — ~880 ms at 10^6 and ~8.8 s at
-    # 10^7, and `CLAUDE.md` names Pistachio (order 10^7 reactions) as the first live integration.
-    # The index-ordered arm is ~1.25 ms and roughly flat in corpus size, a 14x at 200k that grows
-    # with the corpus. What it costs is *agreement*: over 60 queries at `ef_search=200` with a 10x
-    # over-fetch the returned page differed from the exact one for 22 of them — ties, not recall.
-    # Tanimoto over sparse bit vectors puts many rows at identical similarity and the exact
-    # `ORDER BY distance, id COLLATE "C"` breaks those ties across the *whole* table, which no
-    # truncated candidate set can reproduce.
-    #
-    # Default `exact`, because the tool this feeds is the one a chemist asks "have we ever made
-    # something like this?", and the failure mode of the other arm is the one this whole module is
-    # arranged against: a silent "no precedent" for a structure we have on file.
+    # Whether similarity search must be right or only fast. `exact` scans every fingerprint, so the
+    # top-k is true and an empty result is evidence of no analog. `approximate` uses the HNSW index
+    # and re-ranks: much faster on large corpora, but it can miss neighbours (Tanimoto ties are
+    # broken across the whole table), so "no precedent" stops being proof. The answer reports the
+    # arm (`FingerprintSearch.approximate`). Default `exact`.
     fingerprint_search_exactness: Literal["exact", "approximate"] = "exact"
-    # How many candidates per returned hit the approximate arm pulls off the index before it
-    # re-ranks and cuts. Only the top-k survives, so over-fetching buys agreement with the exact
-    # answer at the cost of a wider index probe; measured, the agreement curve is steep below ~4x
-    # and flat above ~10x. Ignored entirely under `exact`.
+    # Candidates per returned hit the approximate arm pulls before re-ranking; more buys agreement
+    # with `exact`. Ignored under `exact`.
     fingerprint_approximate_overfetch: int = Field(default=10, ge=1)
-    # `hnsw.ef_search` for the approximate arm — how wide pgvector's graph traversal keeps its
-    # own candidate list. pgvector's default of 40 is far too narrow for a page of 100 with a 10x
-    # over-fetch, so this is raised deliberately; the arm never sends less than it means to fetch,
-    # and pgvector's own hard ceiling of 1000 bounds it. Ignored entirely under `exact`.
+    # `hnsw.ef_search` for the approximate arm; pgvector's default 40 is too narrow for a 10x
+    # over-fetched page, and 1000 is its hard ceiling. Ignored under `exact`.
     fingerprint_approximate_ef_search: int = Field(default=200, ge=1, le=1000)
-    # Upper bound on an agent-supplied `top_k` for the similarity tools (SEC-4). `top_k` reaches
-    # `find_matches` from the model (the `molfp`/`rxnfp` bundles' MCP tools) and lands in a `LIMIT`,
-    # so an arbitrarily large value would be an unbounded query. Clamp it to this — the
-    # fingerprint-search analog of the `graph_max_hops` clamp on `expand_note`. Generous for a
-    # real neighbor list.
+    # Upper bound on the model-supplied `top_k` that lands in a `LIMIT`; values are clamped.
     fingerprint_max_top_k: int = Field(default=100, ge=1)
-    # How much deeper a *filtered* structural search looks than the page it returns (D-170). The
-    # fingerprint index knows bits and a label, never note metadata, so a type/tag/date filter can
-    # only be applied to neighbours after they come back — and applying it to the page would let
-    # one unwanted neighbour cost a wanted one. Bounded by `fingerprint_max_top_k` regardless, so
-    # this cannot become a way around the one cap on how much of the index a query pulls in.
+    # How much deeper a filtered structural search looks than the page it returns: metadata filters
+    # apply only after neighbours come back. Still capped by `fingerprint_max_top_k`.
     retrieval_filter_overfetch: int = Field(default=5, ge=1)
-    # Bound on how many stored fingerprints one substructure scan materializes (SEC-4). The scan
-    # has no similarity prefilter, so it loads records and RDKit-matches each; without a cap a
-    # large corpus is a full-table load into the worker heap (the 30s statement_timeout bounds
-    # DB time, not rows returned). The scan takes at most this many rows (deterministic id
-    # order) and logs a warning when it hits the cap so a truncated result is never silent.
-    # Raise it for a larger corpus, or add a pattern-fingerprint prefilter (deferred) when it
-    # starts truncating.
-    #
-    # **Raising it costs time, and the two budgets below are what it is spent against.** Measured
-    # on this branch over NCI molecules: the per-record scan runs at ~0.10 ms/record (2.01 s at
-    # 20,000) and building the `rdSubstructLibrary` index at ~0.25 ms/record (~5 s at 20,000). So a
-    # cap raised past what `substructure_index_build_timeout_seconds` allows means the index is
-    # skipped and every query is the per-record scan, and a cap raised past what
-    # `substructure_match_timeout_seconds` allows *that* scan means the search fails. Raise the two
-    # timeouts with it.
+    # Records one substructure scan materializes (no similarity prefilter; each is RDKit-matched).
+    # Hitting the cap logs a warning. Raising it costs time against
+    # `substructure_index_build_timeout_seconds` (index skipped) and
+    # `substructure_match_timeout_seconds` (search fails), so raise those with it.
     substructure_scan_max_records: int = Field(default=5000, gt=0)
-    # Bound on the length of a model-supplied substructure query string (SEC-4). SMARTS matching
-    # is subgraph isomorphism (worst-case exponential) run in-process over the scanned corpus
-    # with no statement_timeout analog, so a pathological multi-KB pattern could pin the server.
-    # Real pharmacophore/functional-group SMARTS run tens to a few hundred characters; 500
-    # leaves generous headroom while rejecting degenerate input.
+    # Maximum length of a model-supplied substructure query; SMARTS matching is worst-case
+    # exponential and runs in-process. Real patterns are at most a few hundred characters.
     substructure_query_max_length: int = Field(default=500, gt=0)
-    # Bounds on any molecule string reaching `core/chem.require_molecule` — the one gate every
-    # SMILES/SMARTS caller shares. RDKit's canonical-SMILES writer and the tautomer canonicalizer
-    # recurse per atom and overflow the C stack on a large linear molecule: measured, `MolToSmiles`
-    # / the standardizer SIGSEGV (exit 139) between 16,000 and 20,000 atoms, an *uncatchable* crash
-    # that takes the whole worker process — and every concurrent session on it — down. A ~20 KB
-    # SMILES clears the 1 MB body cap, so the bound has to be here. It is also an ingest poison
-    # pill: one such value in an ELN row segfaults the Temporal worker and, because the sync cursor
-    # is deterministic, stops that source permanently. The caps sit far below the cliff and far
-    # above any real reagent (a large natural product is a few hundred atoms).
+    # Bounds on any molecule string reaching `core/chem.require_molecule`. RDKit's SMILES writer and
+    # tautomer canonicalizer recurse per atom and segfault the whole process on very large
+    # molecules, which in ingest would also wedge a source's sync permanently. Far below that cliff,
+    # far above any real reagent.
     molecule_max_smiles_length: int = Field(default=4000, gt=0)
     molecule_max_atoms: int = Field(default=1000, gt=0)
-    # Wall-clock bound on one substructure scan's matching work (SEC-4, completing the guard
-    # above). Length and record caps bound the *inputs*, but a short adversarial recursive
-    # SMARTS can still run for minutes, and the scan is invoked from the async front door — so
-    # the matching loop runs in a worker thread under this timeout and the caller is released
-    # with a clear error instead of every other session's stream stalling behind it. Honest
-    # limit: the timeout frees the event loop and the caller, it cannot kill the RDKit thread
-    # (RDKit offers no interruption hook), so one CPU stays busy until that pattern finishes.
-    # Killing the work outright would need a subprocess — over-engineering until a real abuse
-    # case is measured. Seconds; normally ms.
+    # Wall-clock bound (seconds) on one scan's matching, run in a worker thread so the async caller
+    # is released with an error. It cannot kill the RDKit thread (no interruption hook), so one CPU
+    # stays busy until the pattern finishes.
     substructure_match_timeout_seconds: float = Field(default=5.0, gt=0.0)
-    # How long building the substructure index may take before the scan answers without one.
-    # **A separate number from the match bound above because it answers a separate question**, and
-    # sharing one was a permanent failure rather than a slow answer: charged against the 5.0 s
-    # match bound, a 19,996-record corpus ran out of budget while indexing on three attempts out of
-    # three and nothing is cached when a build is abandoned, so the search could never succeed —
-    # over a corpus the per-record scan answered in 2.01 s. The build is now skipped rather than
-    # fatal (`substructure_index.index_for` returns None and the scan matches record by record), so
-    # this bounds an *optimisation*: lowering it costs speed on a large corpus, never an answer.
-    #
-    # 3.0 s: the build runs at ~0.25 ms/record, so this covers the shipped
-    # `substructure_scan_max_records` of 5,000 (~1.2-2.6 s measured, busy box included) with
-    # headroom, and still leaves the 5.0 s match bound enough for the per-record scan to answer if
-    # the build is refused (~0.5 s at 5,000 records). It is a projection rather than a stopwatch —
-    # a build gives up as soon as its own measured rate says it will exceed this — so a corpus far
-    # over it costs tens of milliseconds to reject, not 3.0 s.
+    # How long building the substructure index may take before the scan matches record by record
+    # (`substructure_index.index_for` returns None). Separate from the match bound so a slow build
+    # costs speed, never the answer. It covers `substructure_scan_max_records` with headroom; the
+    # build projects from its own rate and gives up early on a corpus far over it.
     substructure_index_build_timeout_seconds: float = Field(default=3.0, gt=0.0)
-    # How long one chunk of a substructure scan may run before the deadline is consulted again.
-    # The scan matches through `rdSubstructLibrary`, whose `GetMatches` is a C++ call that cannot be
-    # interrupted, so the wall-clock bound above can only be enforced *between* calls — and the
-    # chunk is therefore sized in **time**, not in records. That unit is the whole point: measured
-    # on this branch, one molecule costs ~6 us for a functional-group SMARTS on caffeine and ~117 ms
-    # for a 16-atom recursive pattern on a 121-atom dendrimer, so a fixed chunk of 500 records is
-    # 7 ms of overrun on one corpus and ~58 s on another. Sized in time, the same 500-record chunk
-    # becomes one or two molecules on the second corpus — the granularity the per-record loop this
-    # replaced had — and the whole corpus in ~7 calls on the first.
-    #
-    # 0.25 s: a twentieth of the shipped `substructure_match_timeout_seconds`, so a scan that
-    # overruns its bound overruns it by a slice a caller will not notice, while the per-call cost it
-    # buys back (the query's own pattern fingerprint, ~69 us) stays invisible. Lower it for a
-    # tighter bound on an abandoned thread; the cost is one fingerprint per chunk.
+    # How long one chunk of a scan runs before the deadline is checked again. `GetMatches` cannot be
+    # interrupted and per-molecule cost spans orders of magnitude, so chunks are sized in time, not
+    # records. A twentieth of `substructure_match_timeout_seconds`.
     substructure_scan_deadline_slice_seconds: float = Field(default=0.25, gt=0.0)
-    # How many built substructure indexes are held in memory at once (D-080 follow-up). An index is
-    # the corpus slice pre-parsed into `rdSubstructLibrary` — 1.16 s to build for 5,000 molecules
-    # against 13-41 ms to search, so it is only worth building if it is kept — and it is keyed by a
-    # digest of the labels it was built from, because nothing in the schema moves when an upsert
-    # rewrites a row's SMILES in place.
-    #
-    # 2, not 1: an ingest that changes the corpus invalidates the key, and holding one generation
-    # behind means the queries already in flight against the old slice do not each rebuild it. Not
-    # more, because nothing reads a third generation and the memory is real — measured at 863 bytes
-    # per molecule (binary molecules plus pattern fingerprints), so this bound times
-    # `substructure_scan_max_records` is the ceiling: ~8.4 MB at the shipped defaults.
+    # Built substructure indexes held in memory, keyed by a digest of their source labels. 2 so
+    # queries in flight against the previous generation do not each rebuild it; memory is this times
+    # `substructure_scan_max_records` times ~1 kB per molecule.
     substructure_index_cache_entries: int = Field(default=2, ge=1)

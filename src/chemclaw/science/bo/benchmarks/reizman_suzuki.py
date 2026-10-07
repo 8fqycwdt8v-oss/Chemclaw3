@@ -1,15 +1,7 @@
-"""Reizman Suzuki-Miyaura reaction-condition benchmark (plan step 1d.3).
+"""Reizman Suzuki-Miyaura reaction-condition benchmark.
 
-A real reaction-optimization problem: maximize Suzuki coupling **yield** over the
-catalyst/ligand (categorical) plus continuous conditions (residence time,
-temperature, catalyst loading). The raw data (Reizman et al. 2016, vendored from
-Summit — see data/NOTICE.md) is a discrete experimental grid, so we fit a light
-RandomForest surrogate to give a continuous objective for the BO loop — the same
-idea as Summit's ExperimentalEmulator, in a Python-3.11-native stack.
-
-`load_benchmark()` returns the `OptimizationProblem` plus an async objective, which is what
-`objectives._reizman_suzuki` registers under `reizman_suzuki` for a durable campaign to resolve
-by name.
+Data from Reizman et al. 2016, vendored from Summit (see data/NOTICE.md). A RandomForest surrogate
+over the discrete grid gives a continuous yield objective, registered as `reizman_suzuki`.
 """
 
 from collections.abc import Awaitable, Callable
@@ -66,8 +58,7 @@ def build_problem(frame: pd.DataFrame) -> OptimizationProblem:
 class YieldSurrogate:
     """A RandomForest yield model over (catalyst one-hot + continuous conditions).
 
-    Stands in for a physical experiment so the BO loop has a continuous objective;
-    predictions are bounded by the training data, exactly as an emulator should be.
+    Stands in for a physical experiment; predictions are bounded by the training data.
     """
 
     def __init__(self, model: RandomForestRegressor, categories: list[str]) -> None:

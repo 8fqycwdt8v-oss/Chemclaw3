@@ -1,25 +1,15 @@
-"""A standing query reports a note once — including the day it appeared (DARK-7).
+"""A standing query reports a note once — including the day it appeared.
 
-`durable/digest.py` decides freshness on the note's own `valid_from`, which is a **date**, against
-a `last_seen_at` watermark that is a timestamp. That mismatch is the whole problem, and both
-obvious readings of it are wrong in opposite directions:
+`durable/digest.py` compares the note's `valid_from` (a **date**) against a `last_seen_at`
+timestamp, and both obvious comparisons are wrong: `>` drops a note that appeared later on the
+digest's own day, and `>=` re-reports every same-day note on every run. So the subscription
+remembers which ids it sent at the watermark's date. These tests pin the three cases and the bound
+on what is remembered.
 
-- `>` drops a note that appeared later on the same day the digest ran — the common case at the
-  shipped hourly cadence, and the failure the feature exists to prevent;
-- `>=` re-qualifies every same-day note on every run — up to 24 deliveries a day, against
-  `agent/subscriptions.py`'s own promise that "asking twice does not double-notify".
-
-The subscription therefore remembers which ids it sent *at the watermark's date*, which separates
-"dated today and already sent" from "dated today and new" without choosing between the two
-failures. These tests pin all three cases plus the bound on what is remembered.
-
-The second half of this file is about the *other* end of the same watermark: for the whole first
-life of this job nothing could read what it delivered, so the watermark advanced past matches no
-surface could show and `_is_new` could never re-qualify them
-(`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`). `GET /digests` is the reader, and these
-tests pin what makes the acknowledgement above honest — one owner reads their own mailbox and no
-one else's, the read is the consume, the claim is kind-scoped, retention can then age the row out,
-and the oid the route derives is the oid a watch is saved under.
+The second half covers the reader, `GET /digests`
+(`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`): an owner reads only their own mailbox,
+the read is the consume, the claim is kind-scoped, retention can then age the row out, and the
+route's oid is the oid a watch is saved under.
 """
 
 import asyncio
@@ -97,31 +87,18 @@ def test_a_same_day_note_is_reported_once_and_not_again() -> None:
 
 
 def test_a_same_day_note_that_arrives_later_is_still_reported() -> None:
-    """The other half, and the reason `>` is not the fix.
-
-    A note whose `valid_from` is today but which reached the tree after this morning's digest must
-    still be delivered — dropping it is the failure the ordering elsewhere in that module goes out
-    of its way to avoid.
-    """
+    """A same-day note that arrives later is still reported — the reason `>` is not the fix."""
     arrived_later = _note("reaction-2", date(2026, 7, 31))
 
     assert _is_new(arrived_later, _subscription(_TODAY, ["reaction-1"])) is True
 
 
 def test_an_undated_note_is_told_once_and_then_not_again() -> None:
-    """This asserted "silence is the worse answer" and the code delivered the other failure.
+    """An undated note is told once and then not again.
 
-    The branch returned `True` unconditionally, and the id memory cannot help because it is scoped
-    to the watermark's date and resets when that rolls over — so an undated note re-qualified on
-    **every** run, forever. Measured on the shipped corpus, 32 of 39 notes carry no `valid_from`,
-    so a subscriber's hourly digest was mostly the same notes over and over, which is the exact
-    promise `agent/subscriptions.py` makes (DARK-7) being broken by the branch written to keep it.
-
-    What `None` means settles it rather than a preference between two failures: `Note.is_current`
-    reads it as *open-ended*, true for as long as anyone has known, so such a note did not become
-    knowledge after a subscriber was last told. A subscriber who has never been told anything still
-    hears it once — that is the first arm below, and it is the whole of "silence is the worse
-    answer" that survives.
+    A `None` `valid_from` is open-ended (`Note.is_current`), so the note did not become knowledge
+    after the subscriber was last told; re-reporting it every run would break the "asking twice does
+    not double-notify" promise. A subscriber never told anything still hears it once.
     """
     undated = _note("playbook-1", None)
 
@@ -131,12 +108,10 @@ def test_an_undated_note_is_told_once_and_then_not_again() -> None:
 
 
 def test_a_distilled_playbook_carries_the_day_it_was_minted() -> None:
-    """The other half of the same fix, and the reason the half above can be strict.
+    """A distilled playbook carries the day it was minted.
 
-    A playbook is the one note type nobody writes on a day — a miner concludes it — so it shipped
-    with no `valid_from` and therefore, under the rule above, would reach only a subscriber who had
-    never been told anything. `minted_on` is the honest statement that it became knowledge when the
-    corpus first supported it, which is the day the miner ran.
+    A playbook is concluded by a miner, not written on a day; `minted_on` says it became knowledge
+    when the miner ran, so the strict undated rule above does not hide it.
     """
     from chemclaw.memory.playbook import playbook_note
 
@@ -152,16 +127,9 @@ def test_the_digest_reads_the_tree_the_notes_are_actually_written_to(
 ) -> None:
     """`collect_digests` resolves `settings.knowledge_path`, like every other reader.
 
-    It resolved `Path(settings.knowledge_dir)` raw — a *relative* default, so it scanned whatever
-    directory the process happened to be started in rather than the note repo. In the deployed
-    shape (`note_repo_dir` a dedicated clone, the whole point of the property) that is a different
-    tree from the one merged notes land in, and the failure is silent in the worst way available:
-    an empty scan is indistinguishable from "no new matches", so every subscriber's standing query
-    simply stops reporting and nothing anywhere says so.
-
-    Exercised against a note repo laid out the way a pod's is — `note_repo_dir/knowledge_dir` —
-    with a query token that appears in no shipped note, so reading the wrong tree yields nothing
-    and the test fails rather than passing on the corpus that happens to be next to the CWD.
+    A raw relative `knowledge_dir` would scan the process's working directory, and an empty scan is
+    indistinguishable from "no new matches". Exercised against a pod-shaped note repo with a query
+    token no shipped note contains, so reading the wrong tree fails.
     """
     repo = tmp_path / "note-repo"
     note = Note(
@@ -190,14 +158,11 @@ async def _resolved(value: Any) -> Any:
 
 
 def test_matching_is_unchanged_by_tokenizing_the_query_once_per_subscription() -> None:
-    """The query's terms are hoisted out of the per-note loop without changing a single verdict.
+    """Tokenizing the query once per subscription changes no verdict.
 
-    `_matches` called `query_terms(subscription.query)` itself, once for every note in the corpus:
-    50 subscriptions over 2,000 notes was 100,000 regex splits of a string that never varies, and
-    hoisting it measured 352 ms to 225 ms on an hourly activity. Correctness is the thing at risk
-    in a refactor like that, so the cases pinned here are the ones where the tokenizer does
-    something other than split on spaces — stopwords, punctuation-bearing chemistry, a query that
-    survives filtering as nothing, and the type filter that short-circuits ahead of the terms.
+    The query's terms are hoisted out of the per-note loop. The pinned cases are where the tokenizer
+    does more than split on spaces: stopwords, punctuation-bearing chemistry, a query that filters
+    to nothing, and the type filter that short-circuits ahead of the terms.
     """
     # A real `Note`, not the freshness tests' stub: `_matches` reads the whole searchable haystack
     # (`kg.search.search_text`), and a stub with two attributes would prove nothing about it.
@@ -247,11 +212,8 @@ async def _consumed_at(channel: str) -> list[object]:
 async def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
     """`GET /digests` delivers the caller's own mailbox, once, and never another chemist's.
 
-    The reproduction this closes (`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`): the
-    only consumer of a digest row was `GET /sessions/{id}/events`, which 404s the synthetic
-    `digest-<owner>` id and claims a kind set that never includes this one — so the exact claim it
-    makes returned `[]` against a real digest row and left it unconsumed, while
-    `acknowledge_digest` had already moved the watermark past the notes it named.
+    The digest job acknowledges (moves the watermark) when it writes, so the row must be readable by
+    its owner, or the matches it names are never seen.
     """
     await migrated_db_or_skip()
     alice, bob = "digest-alice", "digest-bob"
@@ -285,12 +247,10 @@ async def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
 
 
 async def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
-    """The claim is destructive, so this route must scope it — job push-back is not its to consume.
+    """The claim is destructive, so this route must scope it to the digest kind.
 
-    A digest mailbox is per *user* and a job's is per *session*, so today no row of another kind
-    shares this channel. That is a property of who writes, not of this route: claiming everything
-    here would destroy any future one silently, which is precisely how the mailbox's own docstring
-    says a kind-selective consumer must not be written.
+    No other kind shares this channel today, but claiming everything would silently destroy any
+    future one.
     """
     await migrated_db_or_skip()
     owner = "digest-mixed"
@@ -309,11 +269,10 @@ async def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
 
 
 def test_a_read_digest_becomes_prunable_and_an_unread_one_does_not() -> None:
-    """Reading is what lets retention age a digest out — and not reading is what kept it forever.
+    """A read digest becomes prunable and an unread one does not.
 
-    `durable/retention.py`'s `session_events` predicate is `consumed_at IS NOT NULL`, which is
-    right (an undelivered `job_completed` must survive its window). Its consequence, while nothing
-    could read a digest, was that every digest row ever written was immortal.
+    `durable/retention.py` prunes `session_events` only where `consumed_at IS NOT NULL`, so reading
+    is what lets retention age a digest out.
     """
 
     async def _run() -> tuple[list[object], list[object]] | None:
@@ -358,14 +317,12 @@ def test_a_read_digest_becomes_prunable_and_an_unread_one_does_not() -> None:
 
 
 async def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
-    """The two ends of the mailbox address agree, and neither restates the other.
+    """A watch is owned by the oid the route reads.
 
-    `/digests` derives its channel from `principal.oid`; the digest job addresses one from
-    `subscriptions.owner`, which `watch_for` takes from `require_actor()`. Those are the same
-    identity only because `require_principal` binds the principal into the identity context
-    (`api/middleware.bind_request_actor` → `set_current_identity`) — an invariant worth a test
-    rather than a paragraph, since a mismatch would leave every digest written to a mailbox the
-    owner cannot name and would look exactly like the defect this route closes.
+    `/digests` uses `principal.oid`; the job addresses `subscriptions.owner`, which `watch_for`
+    takes from `require_actor()`. They agree only because `require_principal` binds the principal
+    into the identity context, so a mismatch would deliver every digest to a mailbox its owner
+    cannot name.
     """
     await migrated_db_or_skip()
     oid = "digest-oid-8e1f"
@@ -386,15 +343,11 @@ async def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
 def test_a_new_note_that_contradicts_an_existing_one_is_marked_in_the_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`kg/conflicts.py` has always known this and only a reader who asked was ever told.
+    """A new note that contradicts an existing one is marked in the digest.
 
-    `retrieval.retrievers._conflict_index` flags a disputed note at *retrieval* time, so a chemist
-    who happens to query is warned and a chemist watching the subject is not — while the corpus
-    starting to disagree with itself on their standing query is the one thing in a digest that
-    changes what they should do next.
-
-    Driven over a real corpus with a real `contradicts` relation, not a stubbed index: the claim is
-    that the sweep and the digest agree about the same notes.
+    Retrieval flags disputed notes for a chemist who queries; a chemist watching the subject must be
+    told too. Driven over a real corpus with a real `contradicts` relation, so the sweep and the
+    digest are shown to agree.
     """
     repo = tmp_path / "note-repo"
     established = Note(
@@ -448,19 +401,16 @@ def test_an_undisputed_digest_says_nothing_about_disputes(
     item = asyncio.run(collect_digests())[0]
 
     assert item.disputed == []
-    # The body is *exactly* the list. Asserting the absence of the word "disputed" was the first
-    # form of this and it did not fire: the appended notice says "disagree with something already
-    # in the graph", so driving the mutation that appends unconditionally left it green. A guard
-    # against an extra line has to be about the line count, not about a word somebody chose.
+    # The body is *exactly* the list: a guard against an extra line must check the line count, not
+    # the absence of a chosen word.
     assert _digest_body(item.note_ids, item.disputed) == "- reaction-thermolysin-9"
 
 
 def test_the_body_marks_a_dispute_in_place_and_says_how_many() -> None:
-    """A reader's question is "what is new"; a dispute is a property of an entry in that list.
+    """The body marks a dispute in place and says how many.
 
-    The count is the half a reader acts on — `kg/conflicts.py`'s own rule is that a silent
-    truncation reads as completeness, and "two of these nine" is what makes the marks countable
-    without re-reading the list.
+    A dispute is a property of an entry; the count is what a reader acts on, since a silent
+    truncation reads as completeness.
     """
     body = _digest_body(["note-a", "note-b", "note-c"], ["note-b"])
 
@@ -484,18 +434,11 @@ def test_every_render_of_one_digest_says_the_same_thing() -> None:
 
 
 async def test_the_route_carries_the_dispute_flag_the_job_computed() -> None:
-    """`disputed` reached the mailbox and stopped at the API model, on the only default-config path.
+    """The route carries the dispute flag the job computed.
 
-    `collect_digests` has computed which matches the corpus now disagrees with since
-    `D-2026-08-27`, and writes them into the payload. Both outbound delivery channels rendered
-    them. `api/routes/streams.Digest` had no such field and `_digest` never read the key — and
-    `CHEMCLAW_DELIVERY_CHANNELS` is empty in every shipped deployment, so the flag existed, was
-    computed on every run, and reached nobody.
-
-    That is the asymmetry `DigestItem`'s own docstring names as the reason the field exists — "a
-    chemist who happens to ask is told, and a chemist watching the subject is not" — reproduced one
-    layer down. Driven here against a row written the way the job writes one, rather than against
-    the model, because a model assertion would have been satisfied by the field being *declared*.
+    With no delivery channels configured (the shipped default) `GET /digests` is the only path, so
+    `disputed` must survive into `api/routes/streams.Digest`. Driven against a row written the way
+    the job writes one, since a model assertion is satisfied by the field merely being declared.
     """
     await migrated_db_or_skip()
     owner = "digest-disputed-route"
@@ -528,14 +471,10 @@ async def test_the_route_carries_the_dispute_flag_the_job_computed() -> None:
 
 
 def test_a_digest_names_what_it_found_and_not_only_its_id() -> None:
-    """A digest built off a real corpus carries a sentence per match, not just a handle.
+    """A digest names what it found, not only its id.
 
-    Driven through `_match_corpus` against notes on disk rather than by calling `Note.headline`,
-    because the defect was never in the deriving — there was nothing to derive from, and every
-    surface printed `playbook-<hash>`. What has to hold is that the *job* carries it.
-
-    The id stays beside the headline everywhere it is rendered: it is what a reader passes to
-    `GET /notes/{id}` and what the watermark works in.
+    Driven through `_match_corpus` against notes on disk, since the job must carry the headline. The
+    id stays beside it: it is what `GET /notes/{id}` takes and what the watermark works in.
     """
     corpus = Path(settings.knowledge_path)
     notes = [note for note in load_notes(corpus) if note.headline()]
@@ -566,17 +505,10 @@ def test_a_digest_names_what_it_found_and_not_only_its_id() -> None:
 async def test_a_watch_says_so_when_nothing_will_evaluate_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Off, `watch_for` used to answer "you'll be told" and no schedule existed to tell anyone.
+    """A watch says so when nothing will evaluate it.
 
-    The two halves are separate failures and this pins the second. `digest_enabled` now defaults
-    **on**, so the shipped deployment evaluates a watch — but a deployment may still turn it off,
-    and `durable/schedules.py` then creates no `digest` Schedule at all. Nothing else in the tree
-    reads that setting, so with it off a chemist's watch was written, confirmed in the first
-    person, and never looked at again.
-
-    Asserted in both directions, because "says so when off" is satisfied by a tool that always
-    warns — which would be a different defect, telling every chemist on every deployment that their
-    watch does not work.
+    With `digest_enabled` off no `digest` Schedule exists, so `watch_for` must not promise "you'll
+    be told". Both directions, since a tool that always warns would be a different defect.
     """
     await migrated_db_or_skip()
     tokens = set_current_identity("watch-truth", frozenset())

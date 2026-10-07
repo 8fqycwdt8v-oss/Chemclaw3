@@ -1,13 +1,7 @@
-"""Crosslinking the calculation store and the knowledge graph, in both directions (STO-7).
+"""Crosslinking the calculation store and the knowledge graph, in both directions.
 
-The gap: the removed DFT bundle's note builder documented that it *could not* wikilink the
-compound its
-result was about, because a dangling link fails `kg-validate` on the very PR that adds the note.
-The consequence was that the two halves of the system's memory — what we computed and what we know
-— were disjoint stores with no reference between them in either direction.
-
-The fix is not an index. It is letting a submission carry a note *with its dependencies*, so the
-link and its target land in one reviewable unit.
+A note may carry its dependencies in one write, so a note about a computed result can link the
+compound it is about and cite calculation keys, instead of the two stores being disjoint.
 """
 
 import logging
@@ -44,9 +38,8 @@ class _Capturing:
 def test_a_note_may_cite_a_calculation_that_lives_outside_the_graph() -> None:
     """`calc_refs` is a frontmatter field, not a wikilink, and that is deliberate.
 
-    A calculation key names a row in Postgres. Making it an edge would mean every computed note
-    has a dangling link by construction — the exact failure this stage removes, reintroduced from
-    the other side.
+    A calculation key names a Postgres row; as an edge every computed note would carry a dangling
+    link by construction.
     """
     note = Note(id="n", type="job-result", calc_refs=[_KEY], artifact_refs=[f"{_KEY}#hessian"])
     assert note.calc_refs == [_KEY]
@@ -69,16 +62,9 @@ def test_a_note_may_cite_a_calculation_that_lives_outside_the_graph() -> None:
 def test_a_calc_ref_that_is_not_a_calculation_key_is_refused(bad: str) -> None:
     r"""Prose in this field is a crosslink nothing can resolve, so it fails at the schema.
 
-    The whole value of the field is that a machine can follow it. `"the GFN2 run"` looks like
-    provenance and is not, and a note carrying it would pass review looking perfectly informative.
-
-    **`"xtb.hess@v1:nothex:0011"` used to be in this list and is not a defensible refusal.** It
-    asserted that a hash must be lowercase hex, which `CalculationKey` never said — its two hash
-    fields are `[^\s:]+` — so this case was pinning the note side *narrower* than the store it
-    claims to mirror. Removed rather than kept, because keeping it would hold `_CALC_REF` to a rule
-    that refuses keys the calculation cache really writes; the cases that replace it are refusals
-    the store makes too. `tests/test_note.py` holds the other half, that every key the store
-    accepts is citable.
+    A machine must be able to follow the value. The refused cases are ones the calculation store
+    refuses too; the note side must not be narrower than the store (`tests/test_note.py` holds that
+    every key the store accepts is citable).
     """
     with pytest.raises(ValueError, match="not a calculation key"):
         Note(id="n", type="job-result", calc_refs=[bad])
@@ -101,18 +87,11 @@ def test_an_artifact_citation_implies_a_citation_of_the_run_that_produced_it() -
 
 
 def test_the_reverse_lookup_is_gone_and_stays_gone_until_something_calls_it() -> None:
-    """The two functions that answered "which notes rest on this key" had no caller, ever.
+    """The reverse lookup ("which notes rest on this key") stays gone until something calls it.
 
-    D-133 wrote them, D-158 gave them a producer in the `qm` bundle's note builder, and
-    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted that bundle — so from that day the
-    index had neither a caller nor a writer, and the only thing keeping it alive was the two
-    tests above this one, which called it directly. That is the shape CLAUDE.md names
-    (`map_to_hpc_identity`, `reject_widening`) and deletes.
-
-    An **absence** test rather than nothing, because two merged ADRs deliberately kept this module
-    and a third designed it: re-adding the lookup is a decision somebody takes on purpose with a
-    caller in hand, not a revert. `cited_calculations` stays and is asserted above — it has a real
-    caller (`tests/test_seed_corpus.py`) and it is the definition of what a note rests on.
+    It had no caller and, once its producer bundle was deleted, no writer. An absence test, so
+    re-adding it is a deliberate decision with a caller in hand. `cited_calculations` stays: it has
+    a real caller and defines what a note rests on.
     """
     import chemclaw.kg.crosslink as crosslink
 
@@ -141,10 +120,8 @@ async def test_a_note_and_the_compound_it_links_land_in_one_write() -> None:
 
     assert submitter.captured is not None
     paths = [file.path for file in submitter.captured.files]
-    # The compound is written **before** the note that cites it: a reader scanning mid-write
-    # must never meet a note whose `[[wikilink]]` dangles
-    # (`D-2026-09-05-the-gate-is-deleted-not-dormant`). Under the PR-gate both files merged in
-    # one commit, so the order was free and the subject came first.
+    # The compound is written **before** the note that cites it, so a reader scanning mid-write
+    # never meets a dangling `[[wikilink]]`.
     assert paths == [
         f"knowledge/compound/{compound_id(smiles)}.md",
         "knowledge/job-result/job-1.md",
@@ -234,16 +211,11 @@ def test_an_unparseable_smiles_does_not_fail_a_submission() -> None:
 async def test_a_link_to_a_note_that_does_not_exist_is_reported_at_write_time(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A hand-written `[[wikilink]]` at a note nobody wrote used to land in silence.
+    """A hand-written `[[wikilink]]` at a note nobody wrote is reported at write time.
 
-    `compound_dependencies` mints the derived `compound-<hash>` id and nothing else, so a target
-    the model typed itself is carried by no dependency — the note commits, `expand_note` on the
-    target then raises "no note with id …", and the chip in the UI 404s. The write is the one
-    moment the writer can say so, and `kg-validate` — the check that does catch it — runs over
-    *this* repository's corpus in CI, never over a deployment's.
-
-    A WARNING and not a refusal: the note is the record either way, the model is told what it
-    linked to, and refusing would lose a real observation over a typo in a citation.
+    No dependency carries a target the model typed itself, so the link would dangle silently in a
+    deployment (`kg-validate` runs only on this repository's corpus). A WARNING, not a refusal: the
+    note is still the record, and refusing would lose an observation over a typo in a citation.
     """
     monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
     note = Note(
@@ -264,9 +236,8 @@ async def test_a_link_whose_target_lands_in_the_same_write_is_not_reported(
 ) -> None:
     """The negative control: the ordinary computed note must not warn on every write.
 
-    Its compound dependency is written first (`record._build_write`), so the link resolves the
-    moment the unit lands — warning about it would make the marker noise and train the model to
-    ignore it.
+    Its compound dependency is written first, so the link resolves when the unit lands; a warning
+    here would be noise that trains the model to ignore it.
     """
     monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
     smiles = "CCO"

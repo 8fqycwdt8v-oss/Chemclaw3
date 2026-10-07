@@ -4,6 +4,8 @@
 `after_strategy` whose docstring promises to "shrink the persisted history so the next turn starts
 smaller". Under `session_store="postgres"` — the production default — it does nothing whatsoever.
 
+**Superseded-by:** [D-2026-08-10-langgraph-rebuild-of-the-conversation-layer](D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md)
+
 ### Why it cannot be fixed where it looks broken
 
 `CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]`: the slot

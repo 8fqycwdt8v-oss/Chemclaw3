@@ -1,32 +1,11 @@
 """Postgres backing for the turn-cost ledger (`infra/sql/033_cost_attribution.sql`).
 
-Kept separate from `chemclaw.agent.turn_cost` for the reason `audit_store` is kept separate from
-`audit`: the module the front door imports on every turn carries no database dependency, so a
-memory-store process never pulls psycopg for a store it will not use.
+Separate from `chemclaw.agent.turn_cost` so a memory-store process never loads psycopg.
 
-The write is an **upsert on `turn_id`**, not an append and no longer on the correlation id. The row
-is booked from a task that outlives its turn, and the one arithmetic error a cost ledger must never
-make is counting a turn twice — so a retried write of the same record replaces rather than adds.
-
-**The other arithmetic error is counting one turn zero times, and keying on the correlation id made
-that reachable from outside.** The front door adopts a caller's `X-Chemclaw-Correlation-Id` when it
-is well formed, deliberately (`api/middleware._request_correlation_id`), so with `ON CONFLICT
-(correlation_id)` a client that repeated one header overwrote its own history: measured 2026-09-06,
-two turns of 900,000 and 1,000 input tokens for one actor left **one row reading 1,000**, while
-`chemclaw_tokens_total` and `api/budget.py` still saw both. `turn_id` is minted per record by
-`core/turn_cost.TurnCost` and crosses no wire; `correlation_id` stays on the row and stays indexed,
-so every join it served still resolves (`D-2026-09-06-an-id-a-caller-chooses-is-not-a-key`,
-migration `infra/sql/088_turn_cost_identity.sql`).
-
-**Write-only from *this* module, and the ledger's one reader lives elsewhere.** There was a
-`read_spend_by_actor` here whose docstring called itself "the whole point of the table"; it had no
-caller in `src/` — no route, no CLI, no ops endpoint — and the only other reader of `turn_costs`,
-`evals/live.session_tokens`, had none either. Both went in the 2026-08-27 sweep, and what the sweep
-was enforcing was not "no reader" but *a query needs the surface that asks it*. That surface exists
-now: `chemclaw.operations.activity.spend` is the single reader and `review_activity` is what reaches
-it (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). `tests/test_turn_cost.py` pins both
-halves — exactly one reading module, and a registered tool over it — so neither a second reader nor
-a reader with no caller can come back quietly.
+The write upserts on `turn_id`, minted per record and never crossing a wire, so a retried write
+replaces rather than double-counts. Not on `correlation_id`: a caller may choose that header, and
+repeating it would overwrite its own history. Write-only here; the single reader is
+`chemclaw.operations.activity.spend`.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -38,9 +17,8 @@ from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.core import db
 from chemclaw.core.config import settings
 
-# Every column the writer sets, in one tuple so the INSERT list, the placeholder count and the
-# `DO UPDATE` list below are derived from it rather than being three hand-kept copies — the shape
-# in which the previous ten-column version was already one edit away from a mismatch.
+# Every column the writer sets; the INSERT list, placeholder count and `DO UPDATE` list are derived
+# from it.
 _COLUMNS = (
     "turn_id",
     "correlation_id",

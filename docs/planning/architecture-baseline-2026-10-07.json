@@ -1,0 +1,116 @@
+{
+  "date": "2026-10-07",
+  "import_s": {
+    "chemclaw.api.app_first": 9.95,
+    "chemclaw.api.app_second": 8.55
+  },
+  "agent_build": {
+    "first_build_s": 0.616,
+    "steady_build_s": 0.103,
+    "root_middleware": 32
+  },
+  "prose": {
+    "__init__": {
+      "code_lines": 1,
+      "prose_share": 0.95
+    },
+    "agent": {
+      "code_lines": 13534,
+      "prose_share": 0.623
+    },
+    "analytical": {
+      "code_lines": 290,
+      "prose_share": 0.49
+    },
+    "api": {
+      "code_lines": 7275,
+      "prose_share": 0.571
+    },
+    "cli": {
+      "code_lines": 8322,
+      "prose_share": 0.407
+    },
+    "connectors": {
+      "code_lines": 6754,
+      "prose_share": 0.522
+    },
+    "core": {
+      "code_lines": 6245,
+      "prose_share": 0.703
+    },
+    "deliver": {
+      "code_lines": 392,
+      "prose_share": 0.578
+    },
+    "durable": {
+      "code_lines": 7709,
+      "prose_share": 0.546
+    },
+    "evals": {
+      "code_lines": 2516,
+      "prose_share": 0.486
+    },
+    "exhibits": {
+      "code_lines": 2209,
+      "prose_share": 0.293
+    },
+    "hypotheses": {
+      "code_lines": 736,
+      "prose_share": 0.496
+    },
+    "ingest": {
+      "code_lines": 7609,
+      "prose_share": 0.522
+    },
+    "kg": {
+      "code_lines": 1885,
+      "prose_share": 0.627
+    },
+    "memory": {
+      "code_lines": 1173,
+      "prose_share": 0.577
+    },
+    "operations": {
+      "code_lines": 480,
+      "prose_share": 0.535
+    },
+    "protocols": {
+      "code_lines": 2829,
+      "prose_share": 0.444
+    },
+    "publish": {
+      "code_lines": 4131,
+      "prose_share": 0.401
+    },
+    "retrieval": {
+      "code_lines": 1578,
+      "prose_share": 0.612
+    },
+    "science": {
+      "code_lines": 6657,
+      "prose_share": 0.539
+    },
+    "templates": {
+      "code_lines": 649,
+      "prose_share": 0.58
+    },
+    "__total__": {
+      "code_lines": 82974,
+      "prose_share": 0.556
+    }
+  },
+  "static": {
+    "claude_md_lines": 532,
+    "lessons_md_lines": 1924,
+    "markdown_lines": 186621,
+    "adr_files": 761,
+    "tasks_files": 1640,
+    "test_files": 460,
+    "test_lines": 253130,
+    "src_lines": 201462,
+    "make_targets": 80,
+    "settings_fields": 546,
+    "chemclaw_env_names_in_src": 123,
+    "helm_values_lines": 2244
+  }
+}

@@ -1,17 +1,12 @@
 """The live probe harness, and the shipped probe corpus as a declaration against the live surface.
 
-Two kinds of test here, and the second is the one that earns its keep. The first exercises the
-runner's own logic — folding an event stream into an outcome, catching a duplicate id, telling a
-grounded citation from an invented one. The second gates `data/evals/probes/` the way
-`skill-validate` and `template-validate` gate their declarations: a probe that expects a tool the
-agent cannot resolve is a probe that can never pass, and it would show up in a run as a defect in
-the *system* rather than a typo in the corpus.
+The first kind of test exercises the runner's logic: folding an event stream into an outcome,
+catching duplicate ids, telling grounded citations from invented ones. The second gates
+`data/evals/probes/` like `skill-validate` gates skills: a probe expecting an unresolvable tool can
+never pass and would read as a system defect.
 
-The runner is driven through `httpx.MockTransport` rather than a live server. That is deliberate
-and it is not a mock of the thing under test: the SSE bytes are the real contract, and feeding
-exact wire frames is what lets a test assert that a `tool_failed` frame with no `answer` frame
-produces `answered=False, failed_loudly=True` — the silent-death signal that no amount of scripted
-agent testing could reach.
+The runner is driven through `httpx.MockTransport` with exact SSE wire frames, which is what lets a
+test assert that a `tool_failed` frame with no `answer` yields `answered=False, failed_loudly=True`.
 """
 
 from __future__ import annotations
@@ -82,25 +77,12 @@ def _sse(*events: dict[str, object]) -> bytes:
     return "".join(f"data: {json.dumps(e)}\n\n" for e in events).encode()
 
 
-#: One turn's stream written in the parts of the SSE grammar the hand-written readers did not have.
-#:
-#: Every line here is legal and three of the four shapes were unreadable before `httpx_sse`:
-#: sse-starlette's keepalive **comment**, the `event:` name `api/events.sse_frame` sets on every
-#: real frame and no fixture in this suite used to send, `id:`/`retry:` fields, and a `data:` field
-#: **split over two lines**, which the grammar says is joined with a newline before it is parsed.
-#: The three old readers each took one `data:` line as a whole payload, so the split frame decoded
-#: as two JSONDecodeErrors and the event simply disappeared — an answer the harness would have
-#: recorded as the system going silent.
-#:
-#: **The split frame is latent, not live**, and the distinction is the point of writing it down:
-#: `sse_starlette` serialises with `model_dump_json()`, which emits no raw newline, so this system
-#: has never sent one. It is here because the reader's job is the wire format rather than this
-#: server's current habits, and because a harness that misreads a legal frame reports the *system*
-#: as broken.
-#:
-#: Defined once and read by `tests/test_live_storm.py` and `tests/test_live_benchmark.py` as well,
-#: because "the three call sites agree" is the claim, and three copies of the fixture would be
-#: three chances for them to stop agreeing.
+#: One turn's stream using the less common parts of the SSE grammar: a keepalive comment, `event:`
+#: names, `id:`/`retry:` fields, and a `data:` field split over two lines (joined with a newline
+#: before parsing). This server never sends a split field, but the reader's contract is the wire
+#: format, and misreading a legal frame would report the system as broken. Shared with
+#: `tests/test_live_storm.py` and `tests/test_live_benchmark.py` so the three readers are checked
+#: against one object.
 AWKWARD_STREAM = (
     b": ping - 2026-09-16T00:00:00+00:00\n\n"
     b"event: tool_call\n"
@@ -112,17 +94,9 @@ AWKWARD_STREAM = (
     b'data:  "text": "the corpus says ethanol."}\n\n'
 )
 
-#: A turn whose stream stops after the answer's `data:` line, with no blank line to terminate it.
-#:
-#: This is not an exotic frame — it is what every *interrupted* turn looks like on the wire, and
-#: `cli/live_storm` is a chaos harness whose whole subject is producing them: a cancelled turn, a
-#: worker killed mid-answer, a connection cut by a proxy. The SSE grammar dispatches an event on
-#: the blank line that follows it, so a reader that only dispatches there drops the last frame of
-#: every such stream — the frame *nearest the fault the storm was run to observe*.
-#:
-#: Read by `tests/test_live_storm.py` as well, for the same reason `AWKWARD_STREAM` is: the claim
-#: is that the three call sites share one reader, and three copies of a fixture are three chances
-#: for that to stop being true.
+#: A stream that stops after the answer's `data:` line with no terminating blank line: what every
+#: interrupted turn looks like. A reader that dispatches only on blank lines drops the last frame,
+#: the one nearest the fault. Shared with `tests/test_live_storm.py`.
 TRUNCATED_STREAM = (
     b'data: {"type": "token", "text": "the corpus "}\n\n'
     b'data: {"type": "answer", "text": "says ethanol."}\n'
@@ -155,9 +129,8 @@ def _run(probe: Probe, *events: dict[str, object]) -> ProbeOutcome:
 def _result_event(tool: str, text: str) -> dict[str, object]:
     """A `tool_result` frame shaped exactly as `api.runner_trace` builds one from a full result.
 
-    The point of going through the real derivation rather than hand-writing the fields is that the
-    truncation is *in* the fixture: `preview` is cut at the wire budget while `numbers` is not, so
-    a test can show the two answering differently about the same result.
+    The real derivation puts the truncation in the fixture: `preview` is cut at the wire budget
+    while `numbers` is not.
     """
     from chemclaw.core.quantities import returned_values
 
@@ -185,12 +158,7 @@ def test_tool_call_arguments_and_answer_are_recorded() -> None:
 
 
 def test_a_turn_that_dies_without_an_error_is_recorded_as_a_silent_failure() -> None:
-    """No answer and no error is the defect class a passing test suite cannot see.
-
-    `failed_loudly` must stay False here. If a future change made any unanswered turn count as
-    loud, the run would report a system that broke visibly when it did not, and the one signal
-    worth having would be gone.
-    """
+    """No answer and no error is recorded as a silent failure, with `failed_loudly` False."""
     outcome = _run(_probe(), {"type": "tool_call", "tool": "gather_evidence", "arguments": "{}"})
     assert outcome.answered is False
     assert outcome.failed_loudly is False
@@ -219,17 +187,11 @@ def test_expected_tools_is_any_of_not_all_of() -> None:
 
 
 def test_a_legal_frame_the_old_readers_could_not_parse_is_read() -> None:
-    """The grammar, not the habit: a split `data:`, a comment, an `event:`, an `id:` and a `retry:`.
+    """Legal frames are read: a split `data:`, a comment, an `event:`, an `id:` and a `retry:`.
 
-    Driven through `run_probe` rather than through the decoder alone, because what broke before was
-    a whole event vanishing from an outcome rather than a function returning the wrong thing: the
-    `tool_call` has to reach `tools_called` and the split `answer` has to reach `answer`, out of
-    one stream that also contains a keepalive comment nothing may turn into an event.
-
-    Every assertion here failed before `httpx_sse` — the split frame decoded as two parse errors
-    and was dropped, so this probe recorded an unanswered turn, which is the silent-death signal
-    this harness exists to report. `AWKWARD_STREAM` says why that is latent against this system's
-    own server and why the test is worth having anyway.
+    Driven through `run_probe` because the failure is a whole event vanishing from an outcome: the
+    `tool_call` must reach `tools_called` and the split `answer` must reach `answer`, and the
+    keepalive comment must not become an event.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -270,18 +232,11 @@ def _run_bytes(body: bytes, headers: dict[str, str]) -> ProbeOutcome:
 
 
 def test_the_final_event_of_a_stream_that_ends_without_a_blank_line_still_arrives() -> None:
-    """A truncated stream keeps its last frame, which is the one worth having.
+    """A stream that ends without a blank line still delivers its final event.
 
-    The SSE grammar dispatches an event when the decoder sees a **blank line**, so a driver that
-    does nothing at end-of-stream silently drops the final frame of every stream that is cut off
-    — and a cut-off stream is exactly what `cli/live_storm` exists to produce. Measured on this
-    fixture, `EventSource.aiter_sse` yielded **1** event where all three hand-written readers it
-    replaced yielded **2**; `decoded_events` supplies the blank line the stream owed it.
-
-    Asserted through `run_probe` rather than against the decoder alone, because what a dropped
-    frame costs is an *outcome*: the answer vanishes, `answered` goes False, and the probe books a
-    silent death against the system under test. That is the signal this whole harness exists to
-    report, so a decoder defect and the defect it reports are one character apart.
+    `decoded_events` supplies the blank line the stream owed, since `EventSource.aiter_sse` alone
+    drops the last frame. Asserted through `run_probe`, because a dropped answer turns into a false
+    silent death against the system under test.
     """
     outcome = _run_bytes(TRUNCATED_STREAM, SSE_HEADERS)
     assert outcome.answer == "says ethanol."
@@ -293,19 +248,11 @@ def test_the_final_event_of_a_stream_that_ends_without_a_blank_line_still_arrive
 def test_a_response_that_is_not_an_event_stream_yields_nothing_rather_than_raising(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A 200 carrying JSON is an empty turn and a named warning, never an exception.
+    """A 200 carrying JSON yields an empty turn and a named warning, never an exception.
 
-    A proxy in front of the front door answering an error as JSON at 200 is the realistic way to
-    get one. `httpx_sse` refuses that content type by raising `SSEError` from inside the iterator,
-    which sounds stricter and is worse placed: whether the misconfiguration is *recorded* or
-    *fatal* then depends on which caller happens to hold a handler. `run_probe` holds one, so this
-    probe would be recorded — but `cli/live_benchmark._ask` holds none, and there the same response
-    ends the whole benchmark run with every already-answered question collected and lost.
-
-    So the turn reads as the turn that emitted nothing, which is what it was, and the finding the
-    old assertion was written for is kept where it costs nobody a run: the log names the content
-    type that arrived. A `transport_error` here would be a claim about the *network*, which was
-    fine.
+    `httpx_sse` raises `SSEError` for that content type, which would be fatal in a caller without a
+    handler (`cli/live_benchmark._ask`). The log names the content type that arrived;
+    `transport_error` stays empty because the network was fine.
     """
     with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live"):
         outcome = _run_bytes(
@@ -342,11 +289,9 @@ def test_a_transport_failure_is_recorded_not_raised() -> None:
 
 
 def test_a_citation_counts_only_when_a_tool_result_actually_returned_it() -> None:
-    """The grounding check, in both directions.
+    """A citation counts only when a tool result in this turn actually returned it.
 
-    The negative case is the point: an id the model produced from memory must be flagged even
-    though the note genuinely exists in the corpus, because the question is whether *this turn*
-    saw it. A check that re-retrieved instead would pass the invented citation.
+    An id produced from memory is flagged even if the note exists in the corpus.
     """
     returned = {"rxn-suzuki-biaryl"}
     assert _score_citations("see [[rxn-suzuki-biaryl]]", returned) == []
@@ -360,14 +305,11 @@ def _notes_event(tool: str, note_ids: list[str]) -> dict[str, object]:
 
 
 def test_the_gold_set_scores_what_retrieval_returned_and_not_what_the_answer_cited() -> None:
-    """The recall arithmetic, and the choice of denominator, neither of which had a test.
+    """The gold-set recall scores what retrieval returned, not what the answer cited.
 
-    `expects_notes` grades **retrieval**: `expected & returned_ids` over `expected`. Scoring the
-    answer's citations instead would fold two different failures into one number — a turn handed
-    the right note and failing to cite it is a citation defect, and `uncited_note_ids` is where it
-    belongs. The fixture makes the two disagree on purpose: the answer cites one note it was never
-    given and omits one it was, so a scorer reading citations would produce 0.5 with a different
-    numerator and a different denominator.
+    `expects_notes` grades retrieval as `expected & returned_ids` over `expected`; an uncited
+    returned note is a citation defect reported by `uncited_note_ids`. The fixture makes the two
+    disagree.
     """
     outcome = _run(
         _probe(expects_notes=["opt-a", "opt-b", "opt-c"]),
@@ -382,12 +324,10 @@ def test_the_gold_set_scores_what_retrieval_returned_and_not_what_the_answer_cit
 
 
 def test_a_probe_expecting_notes_that_got_none_scores_zero_rather_than_nothing() -> None:
-    """`0.0` and `None` are different findings, and one line of the report depends on it.
+    """A probe expecting notes that got none scores `0.0`, not `None`.
 
-    `cli/live_probes` filters on `expected_notes_recall is not None` to decide which probes are in
-    the gold-set mean, then reads `o.expected_notes_recall or 0.0` — so a real zero that arrived as
-    `None` would leave the failing probe out of its own denominator and raise the reported mean.
-    The distinction is the same one `expected_tools_met` already keeps.
+    `cli/live_probes` includes a probe in the gold-set mean only when recall is not `None`, so a
+    real zero reported as `None` would drop out of its own denominator.
     """
     missed = _run(
         _probe(expects_notes=["opt-a"]),
@@ -405,12 +345,9 @@ def test_a_probe_expecting_notes_that_got_none_scores_zero_rather_than_nothing()
 
 
 def test_the_report_counts_a_zero_scoring_probe_in_the_gold_set_mean() -> None:
-    """The reporting half, which is where the `None`-versus-`0.0` distinction is spent.
+    """The report counts a zero-scoring probe in the gold-set mean.
 
-    Driven through the real `_summary` rather than re-deriving the arithmetic: one probe at 1.0,
-    one at 0.0 and one that declares no notes must read as a mean of **0.50 over 2 probes**. A
-    reader of that line is asking "how much of what the questions are about did retrieval reach",
-    and a mean that silently dropped its failures would answer 1.00.
+    Through the real `_summary`: probes at 1.0, 0.0 and one declaring no notes read as 0.50 over 2.
     """
     probes = [_probe(id=f"t-0{i}") for i in (1, 2, 3)]
 
@@ -438,12 +375,10 @@ def test_the_report_counts_a_zero_scoring_probe_in_the_gold_set_mean() -> None:
 
 
 def test_a_citation_past_the_preview_budget_is_still_grounded() -> None:
-    """The defect that made the metric unusable: 40 retrieved chunks scored against 200 characters.
+    """A citation past the preview budget is still grounded.
 
-    Built so a substring scan over previews gives the wrong answer and nothing else does. Only the
-    first id fits inside the preview budget, so the old form reported the other 39 as ungrounded —
-    which is how a live run graded 19 of 36 answers as fabrication with nine of nine checked
-    verdicts false.
+    Only the first id fits in the preview, so a substring scan over previews is the one approach
+    that gives the wrong answer.
     """
     ids = [f"reaction-bh-amination-btmg-{n:04d}" for n in range(40)]
     result = "".join(
@@ -465,17 +400,11 @@ def test_a_citation_past_the_preview_budget_is_still_grounded() -> None:
 def test_the_figures_a_live_judge_called_invented_are_verified_against_the_real_tool_result() -> (
     None
 ):
-    """gr-26, rebuilt from the real tool result and the real answer: the six PDEs are quotations.
+    """Figures quoted from a real tool result are verified against the full result, not the preview.
 
-    The tool result is `ich_impurity_limit`'s own output, recorded rather than hand-written —
-    `tests/recorded_tool_results.py` says why it is a recording now that the ICH tables are
-    `Chemclaw3-mcp`'s. What is under test is the citation scorer, not the guideline.
-
-    This is the defect that survived the `note_ids` fix. On the re-run with untruncated ids in
-    place the judge still wrote "the answer invents specific PDE numbers (Pd: 100/10/1 µg/day; Cu:
-    3000/300/30 µg/day)… the tool results shown are truncated previews that do not display the
-    numerical limits" — and it was right about the previews, which is why the assertion below on
-    where character 200 falls is part of the test rather than a comment.
+    The tool result is a recorded `ich_impurity_limit` output (`tests/recorded_tool_results.py`);
+    the citation scorer is under test. The assertion on where character 200 falls shows the figures
+    lie beyond the preview a judge would otherwise be shown.
     """
     from tests.recorded_tool_results import RECORDED_ICH_LIMITS
 
@@ -502,14 +431,10 @@ def test_the_figures_a_live_judge_called_invented_are_verified_against_the_real_
 
 
 def test_a_figure_no_tool_returned_is_simply_not_on_the_verified_list() -> None:
-    """The whitelist's boundary: it vouches for what it saw and stays silent about the rest.
+    """A figure no tool returned is simply absent from the verified list, not reported.
 
-    Deliberately *not* the inverse of `uncited_note_ids`. A citation has a syntax that can only
-    come from retrieval; a number has none — an answer legitimately subtracts two values it was
-    given, totals a column or quotes a textbook constant — so "no tool returned this" was measured
-    on gr-18 and gr-29 and produced eleven flags and zero fabrications (`_verified_numbers`). The
-    harness therefore asserts membership and never absence, and this pins that: the unsupported
-    figure is missing from the list, not reported by it.
+    Numbers, unlike citations, are legitimately derived (differences, totals, textbook constants),
+    so the harness asserts membership and never absence.
     """
     text = '{"limits": [{"basis": "oral PDE", "value": 100.0, "unit": "\\u00b5g/day"}]}'
     outcome = _run(
@@ -521,14 +446,10 @@ def test_a_figure_no_tool_returned_is_simply_not_on_the_verified_list() -> None:
 
 
 def test_an_unreadable_figure_costs_that_figure_and_not_the_turn() -> None:
-    """A value the harness cannot read is an observation, never a network failure.
+    """An unreadable figure costs that figure, not the turn.
 
-    `float(value) for value in event.get("numbers", [])` sat inside the stream loop, and that
-    loop's `except` catches `ValueError`. So one non-numeric entry raised out of the `async for`:
-    every later event was dropped — the answer with them — and the turn was stamped
-    `transport_error="ValueError: could not convert string to float: 'n/a'"`, which
-    `cli/live_probes.py` then lists under "failed silently". A defect in the system under test,
-    filed as the network between us and it, on a turn that in fact answered.
+    A non-numeric `numbers` entry must not raise out of the stream loop, dropping the answer and
+    filing the turn as a transport error.
     """
     with pytest.raises(ValueError):
         float("n/a")  # the entry below really is one this harness cannot read
@@ -586,19 +507,10 @@ def test_shipped_probes_load_and_cover_every_user_story_section() -> None:
 
 
 def test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface() -> None:
-    """A probe expecting a tool the agent cannot resolve can never pass.
+    """Every expected tool in the shipped corpus exists on the agent surface.
 
-    The same declaration-versus-surface check `skill-validate` and `template-validate` already
-    apply, for the same reason: without it a typo in the corpus reports as a defect in the system.
-
-    **The fleet exemption is imported rather than restated**, from the file whose whole subject is
-    this check in both directions. This assertion and
-    `tests/test_probe_coverage.py::test_no_probe_expects_a_tool_that_does_not_exist` are one
-    invariant written twice, and the second copy had already drifted into being the weaker: it
-    reads `load_probes`, which does not recurse, so it covers 336 probes where the other covers 338
-    (the `m12/` suites are outside it). Keeping the *exemption* in one place is what stops that gap
-    widening into a disagreement — a probe naming a tool `Chemclaw3-mcp` serves is legitimate under
-    `needs_bundle:`, and a rule about it that lives in two files will shortly mean two things.
+    The fleet exemption is imported from `tests/test_probe_coverage.py` rather than restated, so the
+    rule about tools `Chemclaw3-mcp` serves under `needs_bundle:` lives in one place.
     """
     surface = available_tool_names()
     unknown = {t for p in load_probes(str(PROBE_DIR)) for t in p.expects_tools if t not in surface}
@@ -629,12 +541,9 @@ def test_probe_files_carry_nothing_but_probes() -> None:
 
 
 def test_a_run_that_graded_nothing_writes_no_grades_file(tmp_path: Path) -> None:
-    """`--no-judge` must not replace real verdicts with an empty list.
+    """`--no-judge` writes no grades file rather than overwriting real verdicts with an empty list.
 
-    It did: the outputs were written to the transcript directory's *parent*, so a six-probe
-    `--no-judge` run overwrote a 190-probe run's `grades.json` with `[]`, and the file survived
-    only because it had been committed. An empty grades file is indistinguishable from a run in
-    which every single answer failed.
+    An empty grades file is indistinguishable from a run in which every answer failed.
     """
     from chemclaw.cli.live_probes import _write_outputs
 
@@ -662,12 +571,10 @@ def test_outputs_land_beside_their_own_transcripts(tmp_path: Path) -> None:
 def test_a_probe_expecting_a_job_resolves_its_workflow_against_the_broker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`expects_job` is what turns "the turn said it started a job" into an observation.
+    """`expects_job` resolves the workflow against the broker.
 
-    The stream below is a *truthful* one: the turn really did start a workflow and really does say
-    so. That is exactly the case the event stream alone cannot grade, because a job tool returns an
-    id the moment the launch is accepted — so an answer can be honest about starting work the
-    broker never ran. The outcome must therefore carry what Temporal says, not what the turn said.
+    A job tool returns an id once the launch is accepted, so a truthful stream cannot show whether
+    the broker ran it; the outcome must carry what Temporal says.
     """
     monkeypatch.setattr(
         "chemclaw.evals.live._job_outcomes",
@@ -686,11 +593,10 @@ def test_a_probe_expecting_a_job_resolves_its_workflow_against_the_broker(
 def test_a_probe_not_expecting_a_job_never_asks_the_broker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The lookup is opt-in, so an ordinary probe run costs no Temporal round trip.
+    """The broker lookup is opt-in, so an ordinary probe costs no Temporal round trip.
 
-    Not merely an efficiency point: `_job_outcomes` records `unreachable` when it cannot connect,
-    and running it for every probe would put that string on 200-odd outcomes of a run that never
-    cared about durable work — noise indistinguishable from a finding.
+    `_job_outcomes` records `unreachable` when it cannot connect, which would be noise on every
+    outcome of a run that never cared about durable work.
     """
     called = False
 
@@ -739,12 +645,8 @@ def test_every_durable_probe_declares_the_job_expectation_it_is_named_for() -> N
     """
     durable = [p for p in load_probes(str(PROBE_DIR)) if p.id.startswith("du-")]
     assert durable, "no durable probes found — this test would assert nothing"
-    # Two exceptions, both of the same kind: they ask about the *record* of durable work, and
-    # starting a workflow to answer either would be the wrong instinct. du-04 asks what past jobs
-    # ran; du-10 asks what this system is still waiting on, which `check_pending_requests` answers
-    # from the `pending_requests` projection without touching the broker. Naming the exemptions
-    # rather than enumerating the expectant probes is what keeps an exception a named one rather
-    # than a habit, while letting the corpus grow without editing a list here.
+    # Two named exceptions ask about the record of durable work rather than starting any: du-04
+    # (what past jobs ran) and du-10 (what is pending, answered from `pending_requests`).
     exempt = {"du-04", "du-10"}
     silent = sorted(p.id for p in durable if not p.expects_job and p.id not in exempt)
     assert not silent, (
@@ -755,12 +657,10 @@ def test_every_durable_probe_declares_the_job_expectation_it_is_named_for() -> N
 
 
 def test_no_probe_direction_asserts_which_deployment_it_meets() -> None:
-    """A grading key that names one configuration stops being true when the stack changes.
+    """No probe direction asserts which deployment it meets (e.g. "Temporal is not running").
 
-    Six directions across three files asserted "Temporal is not running in this test". They were
-    honest when written and became wrong the day `make live-up` started the workers: a *successful*
-    launch would have been graded a failure. Directions describe behaviour; the environment is the
-    runner's business.
+    Such a key goes false when the stack changes; directions describe behaviour, and the environment
+    is the runner's business.
     """
     offenders: list[str] = []
     for probe in load_probes(str(PROBE_DIR)):
@@ -771,16 +671,10 @@ def test_no_probe_direction_asserts_which_deployment_it_meets() -> None:
 
 
 def test_a_job_that_finished_inside_the_turn_is_not_reported_as_no_job_at_all() -> None:
-    """The first thing the durable signal got wrong, live.
+    """A job that finished inside the turn is not reported as no job at all.
 
-    A job answering inside `inline_wait_seconds` is deliberately never announced — `connectors/jobs`
-    returns the result instead of an id, because an already-finished run would never emit the
-    matching `job_completed` and the surface would draw a row that stays "running" forever. So
-    `jobs_started` is legitimately empty for a job that ran end to end.
-
-    Scoring "started none" off that emptiness reported du-01 as a miss while Temporal held
-    `calc-compute_reaction_energy-4cf212292f8f8e4e` in COMPLETED. A signal that flags a working
-    path is worse than no signal: it spends the reader's attention on the thing that was fine.
+    A job answering within `inline_wait_seconds` returns its result instead of an id and is never
+    announced, so `jobs_started` is legitimately empty for a completed job.
     """
     from chemclaw.cli.live_probes import _summary
 
@@ -828,16 +722,10 @@ def test_a_probe_that_needed_a_job_and_called_no_job_tool_is_still_flagged() -> 
 
 
 def test_an_announced_outage_does_not_hide_a_silent_death() -> None:
-    """The harness's most important signal, and it could not fire on any broker-less deployment.
+    """An announced outage does not hide a silent death.
 
-    `capability_degraded` is announced *before the turn runs anything* — it names what this turn
-    will not have, which is the system working. Once the runner began probing Temporal per turn,
-    every deployment without a broker announced `durable-jobs (Temporal)` on every single turn, so
-    `failed_loudly` was true everywhere and "answered nothing, said nothing went wrong" became
-    unobservable. A run would report zero silent failures and mean it as a fact about the harness.
-
-    The stream here is exactly that shape: an outage announced, and then nothing at all. That is
-    the silent death this signal exists to find, not an exception to it.
+    `capability_degraded` is announced before the turn runs and is the system working, so it must
+    not set `failed_loudly`; otherwise a broker-less deployment could never show a silent failure.
     """
     outcome = _run(
         _probe(),
@@ -870,19 +758,10 @@ def test_a_turn_whose_tool_failed_is_still_loud_beside_an_outage() -> None:
 
 
 def test_the_harness_makes_no_token_cost_claim_it_cannot_take() -> None:
-    """An absence pinned, so re-adding the claim without a caller turns this red.
+    """The harness makes no per-probe token-cost claim.
 
-    `ProbeOutcome.tokens` was the only consumer of `session_tokens`, and `session_tokens` had no
-    caller anywhere — not even a test. So every probe of every live run recorded `tokens=None`,
-    which the field's own comment defined as "the ledger could not be asked", while two long
-    docstrings argued about *how* the measurement was taken and a fixed defect
-    ("15/15 turns priced `None` with 26 rows sitting in `turn_costs`") sat behind a function
-    nothing called. The reader it was built for — the routing comparison — went with the specialist
-    team in `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`.
-
-    Deleted rather than wired, because wiring it would have restored a column no report renders.
-    Whoever wants per-probe cost back needs the producer, a reader that shows it, and this test
-    updated in the same change.
+    The field had no producer, so every probe recorded `None`. Restoring it needs a producer, a
+    reader that shows it, and this test updated in the same change.
     """
     module = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "evals" / "live.py"
     source = module.read_text(encoding="utf-8")
@@ -894,15 +773,11 @@ def test_the_harness_makes_no_token_cost_claim_it_cannot_take() -> None:
 
 
 def test_a_run_where_every_judgement_is_ungraded_is_not_a_pass() -> None:
-    """The empty-selection rule below, reached through the other door.
+    """A run where every judgement is ungraded is not a pass.
 
-    `_main` ended `return 0` unconditionally, so a run against a gateway that cannot grade — the
-    scripted mock, which `infra/live/processes.sh` starts by default — reported three probes,
-    100% ungraded, exit 0, with both bolded honesty rows reading zero because nothing was judged.
-    Measured on the live lane before this rule existed; it is now exit 2 on the same run.
-
-    A verdict that is not `ungraded` is enough: the boundary is "nothing was measured", not a
-    quality bar, and any share in between is a real result about the probes it names.
+    A gateway that cannot grade (the scripted mock) would otherwise exit 0 with nothing measured.
+    Any verdict that is not `ungraded` suffices: the boundary is "nothing was measured", not
+    quality.
     """
     from chemclaw.cli.live_probes import _grading_status
     from chemclaw.evals.live_judge import Judgement
@@ -930,12 +805,10 @@ def _answered(probe_id: str, *, answered: bool = True) -> ProbeOutcome:
 
 
 def test_an_unserved_turn_that_never_answered_is_not_a_graded_verdict() -> None:
-    """The mock run of 2026-09-27: one broken stream, every other probe ungraded, exit **0**.
+    """An `unserved` verdict for a turn that never answered is not a grade.
 
-    `judge_outcome` returns `unserved` for a turn with no answer *without asking the judge*, so it
-    records a transport failure, not a grade — and `_grading_status` counted it as one, under the
-    very warning that said the run "will exit non-zero". The same verdict from a judge that read a
-    real answer is a grade and still counts.
+    `judge_outcome` returns it without asking the judge, so it records a transport failure; the same
+    verdict from a judge that read a real answer is a grade.
     """
     from chemclaw.cli.live_probes import _grading_status
     from chemclaw.evals.live_judge import Judgement
@@ -966,12 +839,10 @@ def test_a_run_against_the_scripted_mock_exits_non_zero_whatever_it_graded() -> 
 
 
 def test_a_run_that_reached_nothing_is_not_a_pass() -> None:
-    """The third arm of the same hole, and the one `_grading_status` does not close.
+    """A run that reached nothing is not a pass: it exits 3.
 
-    Measured with nothing listening: three probes came back 100% `ConnectError`, the judge called
-    the empty answers `unserved` — real verdicts, so the grading rule was satisfied — and the run
-    exited **0**. Exit 3 follows `validate_template_args_live`: could not reach, never counted as
-    checked. It binds `--no-judge` too, which is why that flag can keep exiting 0 otherwise.
+    All-`ConnectError` turns judged `unserved` satisfy the grading rule, so reachability is checked
+    separately, as `validate_template_args_live` does. It applies under `--no-judge` too.
     """
     from chemclaw.cli.live_probes import _reachability_status
 
@@ -991,12 +862,9 @@ def test_a_run_that_reached_nothing_is_not_a_pass() -> None:
 
 
 def test_a_run_writes_under_its_own_directory_and_never_over_the_record() -> None:
-    """A live run used to write over tracked files in the committed transcripts directory.
+    """A run writes under its own directory and never over the committed transcripts.
 
-    One review pass modified 196 of them and had to restore each with `git show HEAD:<p>`. The
-    parent stays committed on purpose — `.gitignore` says why, in the file that enforces it — so
-    the fix is a directory per run beneath it, shared by `live_probes` and `live_jobs` so two
-    writers cannot disagree about where a run's output goes.
+    The directory per run is shared by `live_probes` and `live_jobs` so the writers cannot disagree.
     """
     from chemclaw.cli.live_probes import _suite_dir, run_output_dir
 
@@ -1011,11 +879,10 @@ def test_a_run_writes_under_its_own_directory_and_never_over_the_record() -> Non
 
 
 def test_a_regrade_over_a_directory_with_no_transcripts_is_an_error(tmp_path: Path) -> None:
-    """`--regrade` had no empty guard at all, and its report is committed evidence.
+    """`--regrade` over a directory with no transcripts is an error.
 
-    It printed a "0 probes" summary, wrote it over `summary.md` in a directory `.gitignore`
-    deliberately exempts so a live result can be read back later, and exited 0. The artefact
-    survived; the run it describes never happened.
+    Otherwise it would write a "0 probes" summary as committed evidence of a run that never
+    happened.
     """
     from chemclaw.cli import live_probes
 
@@ -1025,11 +892,9 @@ def test_a_regrade_over_a_directory_with_no_transcripts_is_an_error(tmp_path: Pa
 
 
 def test_the_report_names_the_gateway_that_produced_it() -> None:
-    """A mock run and a real run used to produce files a reader cannot tell apart.
+    """The report names the gateway that produced it, so mock and real runs are distinguishable.
 
-    `live_storm` prints its gateway for the same reason. The mock is recognised by asking
-    `cli.mock_llm` rather than by a string written here — the transcription rule
-    `tests/test_config.py` already enforces on `infra/live/processes.sh`.
+    The mock is recognised by asking `cli.mock_llm` rather than by a string written here.
     """
     from chemclaw.cli.live_probes import _gateway_line
     from chemclaw.cli.mock_llm import MOCK_BASE_URL
@@ -1043,17 +908,11 @@ def test_the_report_names_the_gateway_that_produced_it() -> None:
 def test_a_selection_that_matches_no_probe_is_an_error_not_a_clean_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Filtering every probe out ran zero, summarised nothing, and exited 0.
+    """A selection that matches no probe is an error, not a clean run.
 
-    `--only` filters the list and `--limit` slices it, and neither guarded an empty result — so
-    `make live-probes ARGS="--only nosuchid"` measured nothing and reported success. A renamed
-    probe id turns a scripted invocation into a permanent green line over an empty set. The M12
-    suites in this same file already take the opposite convention (`0 if findings and all(...)
-    else 1`), so this is the file disagreeing with itself.
-
-    A non-positive `--limit` is refused by argparse rather than checked here, matching
-    `sync_share._positive`: `probes[:-1]` silently drops the last probe, and `probes[:0]` is the
-    empty selection above wearing a different spelling.
+    `--only` and `--limit` can produce an empty list, which would measure nothing and exit 0. A
+    non-positive `--limit` is refused by argparse, matching `sync_share._positive`: `probes[:-1]`
+    drops a probe and `probes[:0]` is the empty selection.
     """
     from chemclaw.cli import live_probes
 
@@ -1068,14 +927,10 @@ def test_a_selection_that_matches_no_probe_is_an_error_not_a_clean_run(
 
 
 # ---------------------------------------------------------------------------------------------
-# The judge, after it stopped importing a vendor SDK
-# (`D-2026-09-04-a-gateway-is-the-only-provider`).
+# The judge, through the OpenAI-compatible gateway.
 #
-# It was the last first-party importer of `anthropic`, and its one non-portable need was the
-# truncation signal: `stop_reason == "max_tokens"`, which separates `ungraded` — the *absence* of a
-# verdict — from a fabricated `unserved`. Conflating those mislabelled 65 of 190 probes in the first
-# run and inflated the headline unserved rate from at most 22 to 87, so it is the property this port
-# had to carry across rather than the one to lose quietly.
+# The truncation signal is the property to keep: it separates `ungraded` (no verdict) from a
+# fabricated `unserved`.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -1118,17 +973,11 @@ class _ScriptedJudge:
 def test_a_truncated_judge_reply_is_ungraded_rather_than_a_verdict(
     monkeypatch: pytest.MonkeyPatch, key: str
 ) -> None:
-    """A reply cut off by its own token ceiling has no verdict, and must not be read as one.
+    """A reply cut off by its token ceiling is `ungraded`, even when its payload parses.
 
-    **The payload here is deliberately parseable**, which is what makes this test worth having: a
-    truncated reply usually loses its closing brace and the JSON parse already yields `ungraded`, so
-    a test over a mangled payload would pass with the truncation check deleted. This one is a
-    complete, plausible `{"verdict": "unserved"}` — the shape that, read on its own, records a
-    grading crash as a system failure.
-
-    Both spellings, because LangChain does not normalise this: an OpenAI-compatible gateway reports
-    `finish_reason: "length"` and one relaying a vendor's own field can say `stop_reason:
-    "max_tokens"`. The vendor SDK this module used to import exposed only the second.
+    The payload is a complete `{"verdict": "unserved"}`, so the truncation check alone must catch
+    it. Both spellings are covered: `finish_reason: "length"` and a relayed `stop_reason:
+    "max_tokens"`.
     """
     from langchain_core.messages import AIMessage
 
@@ -1148,11 +997,9 @@ def test_a_truncated_judge_reply_is_ungraded_rather_than_a_verdict(
 
 
 def test_a_complete_judge_reply_is_graded_on_its_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other half: an ordinary reply is parsed, so the check above is not just refusing work.
+    """A complete judge reply is graded on its verdict.
 
-    The axis this holds constant against the test above is exactly the one that broke a reader
-    before — truncated vs complete — and without it the truncation check could be "return ungraded
-    always" and both tests would still be green.
+    Holds the truncated/complete axis against the test above, so "always ungraded" cannot pass both.
     """
     from langchain_core.messages import AIMessage
 
@@ -1170,8 +1017,7 @@ def test_a_complete_judge_reply_is_graded_on_its_verdict(monkeypatch: pytest.Mon
 
     assert judgement.verdict == "served"
     assert judgement.reason == "gives the number and the method"
-    # The prompt is a system message plus the rendered answer — the shape the seam expects, rather
-    # than the vendor-specific `system=` + `messages=[]` pair this module used to post by hand.
+    # The prompt is a system message plus the rendered answer, the shape the gateway seam expects.
     prompt = list(judge.prompts[0])  # type: ignore[call-overload]
     assert [m.type for m in prompt] == ["system", "human"]
     assert "4.76" in prompt[1].content
@@ -1189,13 +1035,10 @@ def test_a_complete_judge_reply_is_graded_on_its_verdict(monkeypatch: pytest.Mon
 def test_a_verdict_outside_the_vocabulary_is_ungraded_rather_than_a_crash(
     monkeypatch: pytest.MonkeyPatch, body: str
 ) -> None:
-    """A judge that answers off-vocabulary did not grade — the same failure as an unparseable reply.
+    """An off-vocabulary verdict is `ungraded` rather than a crash.
 
-    Every other grader failure here already degrades to `ungraded`: the token ceiling, a reply with
-    no JSON object, a `JSONDecodeError`. This one raised `ValidationError` straight out of
-    `judge_outcome` on the `Literal` field, and the three callers gather without
-    `return_exceptions=True` and report *after* the gather — so one `"Served"` among 190 probes
-    discarded every grade in the run.
+    A `ValidationError` out of `judge_outcome` would propagate through callers that gather without
+    `return_exceptions=True`, discarding every grade in the run.
     """
     from langchain_core.messages import AIMessage
 
@@ -1215,12 +1058,10 @@ def test_a_verdict_outside_the_vocabulary_is_ungraded_rather_than_a_crash(
 def test_an_unrouted_judge_says_it_is_grading_with_the_model_under_test(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The one property of this judge worth a log line, since it has no setting of its own now.
+    """An unrouted judge logs that it is grading with the model under test.
 
-    `live_probe_judge_model` was a vendor model id checked into this repository, which is what
-    `model_routes` exists so that nobody has to do. The cost of routing it instead is that an unset
-    route falls back to `llm_model` — the agent under test — and a judge sharing the agent's blind
-    spots ratifies them. That degradation is silent by construction, so it is announced.
+    An unset route falls back to `llm_model`, and a judge sharing the agent's blind spots ratifies
+    them; that degradation is silent unless announced.
     """
     import logging
 
@@ -1235,21 +1076,17 @@ def test_an_unrouted_judge_says_it_is_grading_with_the_model_under_test(
 
     caplog.clear()
     monkeypatch.setattr(settings, "model_routes", {"live-probe-judge": "big"})
-    # Deliberately *not* the shipped 4096, which is also `llm_max_tokens`' default: at equal values
-    # this assertion would pass with the `.bind` deleted. The first version of this test did exactly
-    # that and its own guard caught it.
+    # Deliberately not the shipped 4096, which is also `llm_max_tokens`' default: at equal values
+    # this assertion would pass with the `.bind` deleted.
     monkeypatch.setattr(settings, "live_probe_judge_max_tokens", 7331)
     live_judge._judge_client.cache_clear()
     try:
         with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live_judge"):
             client = live_judge._judge_client()
         assert not caplog.records
-        # The route reaches the model, and the judge's own ceiling reaches the *request* rather
-        # than only the constructed object — `llm_max_tokens` is the agent's answer allowance and
-        # is not what a judge reply needs. Read off the payload for the reason
-        # `tests/test_llm_effort.py` gives, and it is load-bearing here twice over: `ChatOpenAI`
-        # *renames* the kwarg to `max_completion_tokens` on the wire, so an assertion on the
-        # constructed object would neither have found the value nor noticed the rename.
+        # The judge's own ceiling must reach the request, not just the constructed object:
+        # `ChatOpenAI` renames the kwarg to `max_completion_tokens` on the wire, so it is read off
+        # the payload.
         assert client.bound.model_name == "big"
         payload = client.bound._get_request_payload([("user", "x")], **client.kwargs)
         assert payload["max_completion_tokens"] == settings.live_probe_judge_max_tokens
@@ -1264,16 +1101,10 @@ def test_an_unrouted_judge_says_it_is_grading_with_the_model_under_test(
 def test_the_corpus_fidelity_run_writes_under_its_own_directory_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`live_data` was the third writer into the committed transcripts directory.
+    """The corpus-fidelity run also writes under its own run directory.
 
-    It wrote `tasks/live-test/transcripts/corpus-fidelity.md` — a *tracked* file — so every
-    fidelity run dirtied the working tree and replaced the previous run's report with nothing
-    marking which run either came from. Fixed by routing it through the same `run_output_dir`
-    `live_probes` and `live_jobs` share, rather than by a second path policy: two writers into one
-    directory is how the overwrite happened, and three would not be better.
-
-    The checks themselves are stubbed out. What is under test is where the report lands, and that
-    is decided after they run.
+    It routes through the shared `run_output_dir` rather than a second path policy. The checks are
+    stubbed; only where the report lands is under test.
     """
     from chemclaw.cli import live_data
     from chemclaw.cli.live_probes import run_output_dir
@@ -1298,18 +1129,11 @@ def test_the_corpus_fidelity_run_writes_under_its_own_directory_too(
 def test_the_probe_client_does_not_hand_its_bearer_to_an_ambient_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one live-lane client carrying a credential, driven rather than scanned.
+    """The probe client does not hand its bearer to an ambient proxy, driven rather than scanned.
 
-    `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` is a ratchet
-    over the *tree*: it reads `trust_env=False` out of the source and cannot say what httpx then
-    does with it. This drives the real `_client()` against a loopback recorder standing in as the
-    proxy, with the probe token set, and asserts the recorder saw nothing at all — not merely that
-    it saw no `Authorization` header, because a proxy that receives the request receives the
-    credential on the next hop whatever this one carried.
-
-    The control arm is the same request through a client built without the keyword, which must
-    reach the recorder; otherwise a recorder that was never wired up would prove the property by
-    being broken.
+    Drives the real `_client()` against a loopback recorder posing as the proxy and asserts it saw
+    nothing, since a proxy that receives the request receives the credential. The control arm, a
+    client without `trust_env=False`, must reach the recorder, proving it is wired up.
     """
     received: list[str] = []
 
@@ -1358,10 +1182,10 @@ def test_the_probe_client_does_not_hand_its_bearer_to_an_ambient_proxy(
 def test_the_plan_gate_suite_refuses_to_stage_against_the_scripted_mock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exit 3, before a probe is asked — not the 0/5 FAIL the mock used to earn.
+    """The plan-gate suite refuses the scripted mock with exit 3, before a probe is asked.
 
-    `cli.mock_llm` never writes a plan, so every approval POST is a 409 and each check failed on a
-    scenario that was never staged. "Could not reach it" is this harness's exit 3.
+    `cli.mock_llm` never writes a plan, so every approval POST would be a 409 and every check would
+    fail on a scenario never staged. "Could not reach it" is this harness's exit 3.
     """
     from chemclaw.cli.mock_llm import MOCK_BASE_URL
 
@@ -1374,9 +1198,8 @@ def test_the_plan_gate_suite_refuses_to_stage_against_the_scripted_mock(
     assert asyncio.run(live_probes._run_plan_gate(args)) == 3
 
 
-#: Openings of live answers (2026-09-27, DeepSeek V4 Pro) that replied to the verifier's revision
-#: note instead of to the chemist, verbatim — every one from a single-question probe, so there was
-#: no earlier turn for the model to be "right" about.
+#: Openings of real answers that replied to the verifier's revision note instead of to the chemist,
+#: verbatim, each from a single-question probe with no earlier turn to be "right" about.
 _LEAKED_OPENINGS = [
     "You're right — I wrote `compute_thermochemistry` in prose without calling it, which is the",
     "Understood. I am dropping both claims. Here is the corrected assessment.\n\n---\n\n## What",

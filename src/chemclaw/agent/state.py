@@ -1,68 +1,20 @@
 """The conversation graph's typed state, and the one function that starts a turn in it.
 
-The framework layer 1 was first built on held its plan, its mode and its bookkeeping in a
-`session.state` dict keyed by strings nobody declared. Two of this migration's findings came
-straight out of that: the loop cap had to *infer* whether it had fired because nothing recorded it,
-and a todo waiting on a durable job was marked by prefixing its `description` with `awaiting-job:` —
-a convention that existed only because the item type had no field to put it in.
+Extends `PlanningState`, so `todos` (owned by `TodoListMiddleware`) is the one plan. A launched job
+is a `job_records` row and a `session_events` push-back, never a todo, so the plan gate needs no
+filter to ignore job bookkeeping. A field is declared only once something reads it.
 
-The first is a named field with a declared type here, which is what makes the rest of the rebuild
-cheap rather than clever. The second turned out not to need one at all — see below.
+**Per-turn versus per-thread is a property of the channel.** The checkpointer persists state under
+`thread_id` (the session id), so a plain field is checkpointed and per-thread. The runaway guards'
+fields are `UntrackedValue` channels, which are never checkpointed and so start empty on every run;
+otherwise a count would accumulate across turns and brick the session. This shape follows upstream's
+`ModelCallLimitMiddleware` counter, but the counting itself is first-party
+(`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`).
 
-**Extends `PlanningState`, not `AgentState`.** `TodoListMiddleware` declares `todos` and the
-`write_todos` tool that maintains them, so the plan itself is already typed by the middleware that
-owns it; adding a second list beside it would give the graph two answers to "what is the plan".
-
-**The marker convention is gone and nothing replaced it here**, which is the whole fix. The gate
-must not count "a job this plan agreed to is now in flight" as a change to the plan — an approved
-plan that revoked its own approval the first time it started a job would be unusable — and under
-MAF that took a filter, because the bookkeeping lived in the same list as the plan. Now it does not
-live there at all: a launched job is a `job_records` row and a `session_events` push-back, so
-`todos` holds the plan and only the plan, and the exclusion the gate needs is structural rather
-than a parse.
-
-An `awaiting_jobs: list[str]` field was declared here for that job before the durable side was
-built, and the durable side went to the two stores above instead. Nothing ever wrote it or read it,
-while three docstrings — this one, `plan_gate.enforce_plan_approval`'s and a test's — described it
-as the mechanism. It is removed rather than filled in, by the rule immediately below: a declared
-field nothing consults reads as coverage while proving nothing, and prose about it reads as a
-design somebody can rely on.
-
-**Every field here is either per-turn or per-thread, and the *channel* is what makes that true.**
-The checkpointer persists the whole state under `thread_id`, and `thread_id` is the *session* id —
-so a plain field resolves to a `LastValue` channel, which is checkpointed, which makes it per-thread
-whatever its docstring says. Nothing reset the runaway guard's fields and the consequence was not
-theoretical: the model-call count accumulated across turns, so the cap fired on the *session's*
-fourth model call rather than the turn's, and every later turn on that session ended before the
-model was called at all. Measured at `harness_max_loop_iterations=3`: turns 0-2 answered, turn 3
-returned the user's own question. A session bricked with no way back.
-
-That defect was first closed by zeroing the fields by hand in `turn_input`, which worked and was
-the wrong shape: it made "per-turn" a property of every *call site* rather than of the field, so a
-caller that hand-built `{"messages": ...}` — and `graph.ainvoke` accepts one — silently got the
-bricked session back. The field below is an `UntrackedValue` channel, which LangGraph never
-checkpoints (`checkpoint()` returns `MISSING`), so it starts empty on every run of the graph
-because there is nothing for the checkpoint to restore. The invariant moved out of a convention and
-into the schema, and there is no longer a way to spell the mistake.
-
-`ModelCallLimitMiddleware` upstream declares its own per-run counter exactly this way
-(`run_model_call_count: NotRequired[Annotated[int, UntrackedValue, PrivateStateAttr]]`), which is
-where the shape comes from — and the shape is *all* that was taken. M14 briefly delegated the count
-itself to that middleware; `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
-reverted it, so both fields below are first-party and `agent/loop_cap.py` subclasses nothing.
-
-**This paragraph is why the reversion is spelled out rather than merely undone in code.** For a day
-the delegated design survived here in prose after the code went back: the two comments on the
-fields below disagreed with each other, one describing a subclass that no longer existed and the
-other describing the counter that had returned. A reader had no way to tell which half was current.
-
-**Both fields are `UntrackedValue` *subclasses* rather than the class itself, and the reason is a
-fan-out.** The two channels cross the subagent boundary on purpose, so a superstep with more than
-one `task` call in it delivers more than one value for each of them — which bare `UntrackedValue`
-refuses with `InvalidUpdateError`, killing the turn after every helper has already spent its
-tokens. The classes below say what a concurrent write *means* for each field instead of refusing
-it; see their own docstrings for why `guard=False`, the escape hatch the error message names, is
-the wrong answer to it.
+The counters cross the subagent boundary on purpose, so a superstep with several `task` calls
+delivers several values; bare `UntrackedValue` would raise `InvalidUpdateError`. `TurnTotal` and
+`TurnFlag` define what a concurrent write means instead (see their docstrings for why `guard=False`
+is wrong).
 """
 
 from collections.abc import Sequence
@@ -76,44 +28,23 @@ from langgraph.channels.untracked_value import UntrackedValue
 
 from chemclaw.core.config import settings
 
-#: The attribute `agent/turn_graph.py` stamps on a compiled mesh, naming how many namespace frames
-#: a turn's own agent sits behind on it. `api/graph_stream.root_depth` is the reader.
-#:
-#: **Here rather than in either of those modules**, because it is the one fact both must agree on
-#: and they sit on opposite sides of a layering edge: `agent` may not import `api`
-#: (`tests/test_layering.py`), and `api` importing the turn-graph builder to read one string would
-#: drag the whole agent builder into the front door's import graph. This module is what both
-#: already import, and a marker about the shape of the conversation graph is what this module is
-#: about.
+#: The attribute `agent/turn_graph.py` stamps on a compiled mesh, naming how many namespace frames a
+#: turn's own agent sits behind; `api/graph_stream.root_depth` reads it. Defined here because
+#: `agent` may not import `api`, and both already import this module.
 PEER_DEPTH_ATTR = "chemclaw_peer_depth"
 
 
 class TurnTotal(UntrackedValue[int]):
     """An untracked counter that **folds** a superstep's writes instead of refusing them.
 
-    `UntrackedValue` raises `InvalidUpdateError` when one superstep delivers two values for its
-    key, and here that is a shipped failure rather than a hypothetical. `SubAgentMiddleware`'s
-    `task` tool returns each helper's whole final state as a `Command` update, and `model_calls` is
-    deliberately neither excluded nor private so that one budget spans the team — so two `task`
-    calls in one assistant message, which the helper's own description invites ("or several at
-    once"), delivered two values into one superstep and lost the whole turn. Reproduced on the
-    graph `build_langgraph_agent` compiles; `tests/test_subagents.py` drives it.
+    `SubAgentMiddleware`'s `task` returns each helper's whole final state, and `model_calls`
+    deliberately crosses that boundary so one budget spans the team; two `task` calls in one message
+    therefore deliver two values in one superstep (`tests/test_subagents.py`). `guard=False` would
+    keep only the last branch's count and under-count the shared budget.
 
-    **`guard=False` is the escape hatch the error message names, and it is the wrong one.** It
-    keeps whichever value arrived last, so every other branch's spend is discarded and a fan-out
-    silently under-counts the shared budget — which is per-specialist allowances again, regression
-    3 in `agent/loop_cap.py`'s list of reasons this counter is first-party at all.
-
-    So the fold is **additive over each writer's own advance**, which is exact rather than merely
-    defined. Every branch of a superstep was handed the same value when it began —
-    `SubAgentMiddleware` builds each helper's input from the parent's state — so `value - base` is
-    what that branch spent, and the sum of the advances is what the team spent. Measured on the
-    real graph at a fan-out of two: 4 model calls made, 4 counted. `max` counts 3.
-
-    One writer is the degenerate case and is unchanged: `base + (value - base) == value`, exactly
-    what `UntrackedValue` would have stored. A branch reporting *fewer* calls than it was handed
-    contributes 0 rather than a negative advance — this count is what a cap is compared against,
-    and a write must not be able to walk it back.
+    The fold is additive over each writer's advance: every branch starts from the same base, so
+    `value - base` is what that branch spent. With one writer it equals `UntrackedValue`. A negative
+    advance contributes 0, so no write can walk the count back.
     """
 
     def update(self, values: Sequence[int]) -> bool:
@@ -130,15 +61,9 @@ class TurnTotal(UntrackedValue[int]):
 class TurnFlag(UntrackedValue[bool]):
     """An untracked flag that stays set once any writer in the turn has set it.
 
-    The same `InvalidUpdateError` reaches `loop_capped`, for the same reason: it crosses the
-    subagent boundary beside `model_calls`. Here last-writer-wins would be worse than a miscount —
-    of two helpers finishing in one superstep, the uncapped one's `False` could overwrite the
-    capped one's `True` and a truncated turn would be reported as complete, which is the defect
-    `agent/loop_cap.py` exists to fix, arriving through the channel instead of through an
-    inference.
-
-    So the fold is `or`, and it also folds in the value already stored: a cap that fired is a fact
-    about the turn, and nothing that did not hit one may unwrite it.
+    `loop_capped` crosses the subagent boundary beside `model_calls`, and last-writer-wins could let
+    an uncapped helper's `False` hide a capped one's `True`. So the fold is `or`, including the
+    stored value: a cap that fired stays a fact about the turn.
     """
 
     def update(self, values: Sequence[bool]) -> bool:
@@ -152,19 +77,12 @@ class TurnFlag(UntrackedValue[bool]):
 class LastPeer(LastValue[str]):
     """A checkpointed name that takes the **first** writer in a superstep instead of refusing.
 
-    **A defensive fallback, not the arbiter.** Two `transfer_to_…` calls in one assistant message
-    do not reach this channel as two writers: ToolNode applies only the first
-    `Command(graph=PARENT)` and cancels the rest, and `handoff.refuse_a_later_handoff` refuses every
-    handoff after the first in its message before it can announce itself — driven on the compiled
-    mesh, one hop, `handoffs=1`, `active_agent` the first peer named
-    (`tests/test_turn_graph.py::test_two_handoffs_in_one_message_hand_over_once`). What this class
-    keeps is the behaviour if that ever changes upstream: `LastValue` — what a plain `str`
-    annotation resolves to — raises `InvalidUpdateError` when one superstep delivers two values,
-    which would kill the whole turn after the work had been done, and taking the first agrees with
-    the refusal above about which peer that is.
-
-    Checkpointed, unlike every other channel this module adds — see `active_agent`'s own comment
-    for why that is the point rather than an oversight.
+    A defensive fallback: today ToolNode applies only the first `Command(graph=PARENT)` and
+    `handoff.refuse_a_later_handoff` refuses later handoffs in the same message
+    (`tests/test_turn_graph.py::test_two_handoffs_in_one_message_hand_over_once`). If that changes
+    upstream, `LastValue` would raise `InvalidUpdateError` and kill the turn; taking the first
+    agrees with the refusal about which peer wins. Checkpointed, unlike the other channels here (see
+    `active_agent`).
     """
 
     def update(self, values: Sequence[str]) -> bool:
@@ -192,134 +110,64 @@ class ChemclawState(PlanningState):
     therefore unreadable by the time anyone asks, which is why neither field below delegates to it.
     """
 
-    # How many model calls *this turn* has authorised — the runaway guard's counter
-    # (`agent/loop_cap.py`). **Authorised, not made**, and the difference is one call: the increment
-    # is written in `before_model`, which is where it has to be (see below), so a *later*
-    # `before_model` hook that ends the run — `spend_cap.enforce_spend_cap`, ordered immediately
-    # after — leaves behind the increment for a call that never happened. Measured on the compiled
-    # graph: a turn stopped by the spend cap after four real calls returns 5.
+    # How many model calls this turn has *authorised* — the runaway guard's counter
+    # (`agent/loop_cap.py`). The increment is written in `before_model`, so a later `before_model`
+    # hook that ends the run (`spend_cap.enforce_spend_cap`) leaves one increment for a call never
+    # made; the cap can bind one call early, never late (pinned by `tests/test_spend_cap.py`).
     #
-    # Inert for the guard itself, which compares the same number it wrote, and conservative in the
-    # only direction that matters — a cap can bind one call early, never one call late. It is
-    # written down because the field is deliberately non-private so a caller may read it off the
-    # finished run, and `tests/test_spend_cap.py` pins it so the claim cannot drift back.
-    #
-    # A field rather than a framework internal, and that survived an attempt
-    # to delegate it: `ModelCallLimitMiddleware` counts in `after_model`, which any middleware
-    # declaring `after_model` with a `jump_to` runs *before* and short-circuits — measured, the
-    # challenge gate's revision jump skipped the increment and the cap let one extra model call
-    # through per round. `before_model` cannot be skipped that way. See the module docstring.
-    #
-    # Untracked is what makes "this turn" true of it: the channel is never written to a
-    # checkpoint, so a new run of the graph on the same `thread_id` starts it empty and
-    # `enforce_loop_cap`'s `state.get("model_calls", 0)` reads 0. It is also *not* private, which is
-    # what lets one budget span a whole team turn: `SubAgentMiddleware` strips private keys in both
-    # directions, so a private counter would give every specialist a fresh allowance. That second
-    # property is exactly what puts two writes in one superstep, which is `TurnTotal`'s subject.
+    # Counted in `before_model` because an `after_model` count can be skipped by any middleware
+    # jumping from `after_model`. Untracked, so a new run on the same thread starts at 0. Not
+    # private, so one budget spans a team turn (`SubAgentMiddleware` strips private keys), which is
+    # what makes `TurnTotal` necessary.
     model_calls: NotRequired[Annotated[int, TurnTotal(int)]]
 
-    # Whether the runaway guard stopped this turn — the *fact*, beside the count above. Both are
-    # first-party: `loop_cap.enforce_loop_cap` reads the count in `before_model` and writes this on
-    # the branch that fires, in the same hook, so the two cannot disagree about whether a cap was
-    # reached. The untracked shape is copied from upstream's `run_model_call_count`; the counting
-    # is not (see the module docstring).
-    #
-    # Untracked, because a session whose third turn hit the cap would otherwise report every later
-    # turn as capped, marking complete answers partial forever. The cost is that
-    # `get_state(config).values` does not carry it: the value lives only in what the run returns,
-    # which is where every reader already looks.
+    # Whether the runaway guard stopped this turn — the fact beside the count, written by
+    # `loop_cap.enforce_loop_cap` on the branch that fires, so the two cannot disagree. Untracked,
+    # so a capped turn does not mark every later turn partial; the value lives only in what the run
+    # returns.
     loop_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
 
-    # What this turn has **billed** so far, across every model call it has made — the spend guard's
-    # counter (`agent/spend_cap.py`), the cost-denominated sibling of `model_calls` above.
-    #
-    # The same three properties, for the same three reasons, and none of them is incidental:
-    # untracked so the count is the *turn's* rather than the session's; not private so one budget
-    # spans a turn that delegates, which is regression 3 in `agent/loop_cap.py`'s list; and
-    # `TurnTotal` so a fan-out's concurrent writes fold additively instead of raising
-    # `InvalidUpdateError` or silently keeping only the last branch's spend.
-    #
-    # Written from `wrap_model_call` rather than `after_model`, because only the response carries
-    # the bill and an `after_model` write is skippable by any middleware that jumps from there
-    # (`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`). The write is an
-    # **absolute** total rather than a delta, which is what `TurnTotal`'s fold is defined against:
-    # it stores `base + (value - base)`, so a delta would be read as a walk backwards and
-    # contribute 0.
+    # What this turn has billed so far across every model call — the spend guard's counter
+    # (`agent/spend_cap.py`). Untracked (the turn's, not the session's), not private (one budget
+    # across delegation), and a `TurnTotal` (fan-out writes fold additively). Written from
+    # `wrap_model_call` as an absolute total, which is what `TurnTotal`'s fold is defined against.
     billed_tokens: NotRequired[Annotated[int, TurnTotal(int)]]
 
-    # Whether the spend guard stopped this turn — the fact beside the count, exactly as
-    # `loop_capped` sits beside `model_calls`, and written on the one branch that stops the loop so
-    # the two cannot disagree. A comparison on the count could not answer it: the stopping branch
-    # does not bill, so a capped turn and a turn that spent its last allowed token and then
-    # finished both end at the same number.
+    # Whether the spend guard stopped this turn, written on the stopping branch. The count alone
+    # cannot answer it: the stopping branch bills nothing, so a capped turn and one that finished at
+    # its last allowed token end at the same number.
     spend_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
 
-    # Whether *this graph* has spent its one tool-less call at the loop cap
-    # (`loop_cap.enforce_loop_cap`) — the per-branch half of the cap, where `loop_capped` above is
-    # the per-turn half. **Private, and that is the whole reason it is a second field.**
-    # `loop_capped` crosses the subagent boundary on purpose, so a helper that hit the cap hands
-    # its caller `loop_capped=True`; had the wrap-up keyed on that, the caller would read its
-    # helper's cap as its own and end without writing anything — which is the live dl-01 shape this
-    # exists to close (three helpers capped, the chemist got no answer). `PrivateStateAttr` is what
-    # `SubAgentMiddleware` strips in both directions, so every graph gets exactly one wrap-up.
-    # Untracked for `loop_capped`'s reason, and so outside the checkpoint's channel stamp; a
-    # `TurnFlag` rather than a bare `UntrackedValue` only so a second writer in one superstep folds
-    # instead of raising, which no writer here produces and `tests/test_state_channels.py` holds
-    # every channel to anyway.
+    # Whether *this graph* has spent its one tool-less call at the loop cap — the per-branch half of
+    # the cap, where `loop_capped` is per-turn. Private, so `SubAgentMiddleware` strips it in both
+    # directions and a caller never reads its helper's cap as its own and ends without answering. A
+    # `TurnFlag` only so a second writer would fold rather than raise.
     loop_wrap_up: NotRequired[Annotated[bool, TurnFlag(bool), PrivateStateAttr]]
 
-    # Which peer agent holds the conversation — the one field on this state that is deliberately
-    # **per-thread** rather than per-turn, and the only reason `agent/turn_graph.py` needs a state
-    # channel at all.
+    # Which peer agent holds the conversation — the one deliberately **per-thread** field here, and
+    # the reason `agent/turn_graph.py` needs a state channel. A follow-up question goes to whoever
+    # the chemist was handed to, which is what distinguishes a handoff from re-routing every turn.
     #
-    # Every other field here is untracked, and three paragraphs above argue at length that a
-    # checkpointed field on this state is how a session gets bricked. This one is the case those
-    # paragraphs are the exception to, and the difference is what the field *means*: `model_calls`
-    # describes work this turn did, so carrying it across turns is a miscount; `active_agent`
-    # describes who the chemist is talking to, so *not* carrying it across turns is the bug. A
-    # chemist handed to the safety agent, who then asks a follow-up question, is still talking to
-    # the safety agent — that continuity is the whole difference between a swarm and a supervisor
-    # that re-routes from scratch every turn, and it is the property
-    # `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` names.
-    #
-    # It carries no authority. Two things make that structural rather than asserted: the value is
-    # only ever a name the turn graph compiled a node for (`turn_graph.entry_peer_or_root` falls
-    # back to the root when it reads a name it does not know, so a hand-edited checkpoint routes to
-    # the root rather than anywhere interesting), and every peer's surface was already intersected
-    # against the root's before any of them was compiled. Restoring it selects which of several
-    # already-bounded agents answers; it cannot select a surface.
-    #
-    # **`LastPeer` rather than a plain field, as a fallback.** A plain annotation resolves to
-    # `LastValue`, which raises `InvalidUpdateError` when one superstep delivers two values. Two
-    # `transfer_to_…` calls in one message do not do that today — ToolNode applies the first
-    # `Command(graph=PARENT)` and `handoff.refuse_a_later_handoff` refuses the rest — and
-    # `LastPeer`'s docstring says what it keeps if that changes.
+    # It carries no authority: it only names a node the turn graph compiled
+    # (`turn_graph.entry_peer_or_root` falls back to the root for an unknown name), and every peer's
+    # surface is already intersected with the root's. `LastPeer` rather than a plain field, as a
+    # fallback (see its docstring).
     active_agent: NotRequired[Annotated[str, LastPeer(str)]]
 
-    # How many times this turn has handed between agents — the bound on a chain, and per-turn for
-    # the reason `active_agent` is not. A conversation that moves between agents over twenty turns
-    # is working; a turn that bounces four times is a loop, and only the second is a runaway.
-    #
-    # `TurnTotal` because the fold is additive over each writer's advance, which is what counting
-    # hops means when two peers write in one superstep. The handoff tool therefore writes the
-    # **running total** rather than `1`: this channel is defined against absolute values, and a
-    # constant delta contributes 0 on every hop after the first — measured, a two-hop turn counted
-    # 1 and the cap could never be reached. Untracked so the count is the turn's:
-    # a thread that had handed over three times in earlier turns must not start its fourth turn
-    # already at the cap, which is `agent/loop_cap.py`'s bricked-session defect in a new field.
+    # How many times this turn has handed between agents — the bound on a chain. Per-turn: a
+    # conversation moving between agents over many turns is working; many hops in one turn is a
+    # loop. A `TurnTotal`, so the handoff tool writes the running total rather than `1` (a constant
+    # contributes 0 after the first hop). Untracked, so earlier turns' handoffs do not count against
+    # this one.
     handoffs: NotRequired[Annotated[int, TurnTotal(int)]]
 
 
 def turn_input(message: str) -> dict[str, Any]:
     """The graph input that starts one turn: the user's message.
 
-    **This is no longer where per-turn-ness comes from** — the two fields above are untracked
-    channels, so they reset because the checkpoint cannot restore them, not because a caller
-    remembered to zero them. What is left here is the one-line shape of a turn's input, kept as a
-    function for two reasons rather than inlined at its three call sites (`api/graph_stream.py`,
-    `durable/template_activities.py`, `cli/chat.py`): it is the seam a turn's invocation shape
-    belongs to (a `recursion_limit` config sibling is the next thing to land beside it), and it
-    keeps `("user", message)` — the tuple form the graph coerces — written once.
+    Per-turn reset comes from the untracked channels, not from here. Kept as a function so the
+    turn's input shape (the `("user", message)` tuple the graph coerces) is written once for its
+    callers.
 
     Args:
         message: The user's message for this turn.
@@ -333,33 +181,22 @@ def turn_input(message: str) -> dict[str, Any]:
 def turn_config(thread_id: str | None = None) -> dict[str, Any]:
     """The invocation config one turn runs under: its thread, step ceiling, and fan-out bound.
 
-    **The ceiling is the point.** `create_agent` bakes `recursion_limit=9999`, `create_deep_agent`
-    bakes a second one onto the graph it returns, and nothing in this
-    repo had ever chosen otherwise, so the only bound on a turn was thousands of model calls —
-    measured at 2 supersteps per call on the classic path and 4 with the harness, i.e. roughly 5,000
-    and 2,500. Worse, reaching it raises `GraphRecursionError`, which discards whatever the turn had
-    produced; `agent.loop_cap` states the opposite position explicitly, that a chemist is entitled
-    to see the work the last iteration managed. The cap is the graceful stop — attached on every
-    profile since the harness gate on it expired with the second engine — and this is the backstop
-    under it, sized so the cap always fires first.
-
-    One function so the number is chosen once. `turn_input` is its sibling on the input side; the
-    per-turn *state* reset that used to live there is now the channel's job (see `ChemclawState`),
-    which is why this is a config and not a second input builder.
+    Upstream bakes `recursion_limit=9999`, and hitting a recursion limit raises
+    `GraphRecursionError`, discarding the turn's work. The loop cap is the graceful stop; this
+    ceiling is the backstop under it, sized so the cap always fires first. One function so the
+    number is chosen once.
 
     Args:
         thread_id: The checkpointed session to continue, or `None` for a graph built without a
-            checkpointer — a template step, which is one bounded turn with no thread at all.
+        checkpointer (a template step, one bounded turn with no thread).
 
     Returns:
         The config to pass to `ainvoke`/`astream`.
     """
     config: dict[str, Any] = {"recursion_limit": settings.agent_recursion_limit}
-    # The fan-out bound beside the step ceiling: `ToolNode` gathers a whole parallel batch with no
-    # limit of its own, so this is the one knob that keeps a 40-call assistant message from taking
-    # 40 pool connections at once. LangGraph reads `max_concurrency` per superstep; 0 means a
-    # deployment chose unbounded, spelled by omission because the key's absence *is* upstream's
-    # unbounded default.
+    # `ToolNode` gathers a parallel batch with no limit of its own, so `max_concurrency` bounds how
+    # many tool calls (and pool connections) run at once. 0 means unbounded, expressed by omitting
+    # the key (upstream's default).
     if settings.agent_max_parallel_tool_calls:
         config["max_concurrency"] = settings.agent_max_parallel_tool_calls
     if thread_id is not None:
@@ -370,9 +207,8 @@ def turn_config(thread_id: str | None = None) -> dict[str, Any]:
 def _text_of(message: AIMessage) -> str:
     """One assistant message's content as text, joined across blocks and coerced for any shape.
 
-    Named apart from `answer_text` because emptiness is what that function now selects on: asking
-    "did this message say anything" has to be the same flattening as "what did it say", or a message
-    could count as prose and then be answered with `""`.
+    Shared with `answer_text` so "did this message say anything" and "what did it say" use the same
+    flattening.
     """
     content = message.content
     if isinstance(content, str):
@@ -387,42 +223,16 @@ def _text_of(message: AIMessage) -> str:
 def answer_text(result: Any) -> str:
     """The final assistant text out of a graph turn — the output side of `turn_input`.
 
-    The graph returns its whole message list rather than a single `response.text`, so the answer is
-    the last *assistant* message that said anything. Joined across content blocks because a model
-    may answer in parts, and coerced with `str` so a caller never fails on a shape the model managed
-    to produce.
+    The last `AIMessage` with non-empty text, walking back no further than the turn's own user
+    message. Not the last message: a turn stopped by a cap in `before_model` ends on a
+    `ToolMessage`, which is never the agent's answer. Not merely the last `AIMessage`: a
+    tool-calling message usually has empty content, and the prose an earlier iteration wrote must
+    not be lost (upstream's `SubAgentMiddleware` reports the same way). Stopping at the user message
+    keeps a previous turn's answer from being presented as this one's; with no text the answer is
+    `""`.
 
-    **The last `AIMessage`, not the last message, and the difference is a whole class of turn.**
-    Both caps end the run from `before_model` — which runs *after* the tool node — so a turn stopped
-    by `loop_cap.enforce_loop_cap` or `spend_cap.enforce_spend_cap` deterministically leaves a
-    `ToolMessage` last, for any cap at all. Taking the tail unconditionally then returned the
-    **tool's own output** as the turn's answer: measured at `harness_max_loop_iterations=3` on the
-    compiled graph, a capped turn answered `'No files found'` — the `ls` body — which `cli/chat.py`
-    printed to the chemist and `durable/template_activities.run_agent_step` interpolated into every
-    later step of its template as `${steps.<id>.result}`. A `ToolMessage` is never the agent's
-    answer, so a capped turn yields the last assistant text it managed, or `""` when the turn
-    produced none — which both callers already settle as an empty answer.
-
-    **The last assistant message *with text*, and that qualifier is the same class of turn again.**
-    A provider's tool-calling turn routinely carries `content=""` — the call is the whole message —
-    so the last `AIMessage` in a capped thread is usually the content-less one that issued the final
-    tool call, and taking it unconditionally threw away the prose the earlier iterations produced:
-    the answer went out as `""`, which is precisely the outcome `agent/loop_cap.py` says ending the
-    run rather than raising exists to avoid. The reference behaviour is upstream's own —
-    `SubAgentMiddleware` builds a report from the last **non-empty** `AIMessage` — and the first
-    test written for the capped path could not see the difference, because its fake put prose on
-    every tool-calling turn and so made the two readings name the same message.
-
-    **The walk stops at the turn's own user message.** `result["messages"]` is the whole
-    checkpointed thread, so a turn that produced no assistant text at all would otherwise answer
-    with the *previous* turn's answer — a stale answer presented as this turn's is worse than none,
-    and a follow-up question is exactly where it would land.
-
-    **One definition, because there were two.** `cli/chat.py` and `durable/template_activities.py`
-    each carried a byte-identical copy — the only exact structural clone in the tree — so the
-    reasoning above lived beside one of them and the other had a one-line docstring. Both already
-    import this module for `turn_input`/`turn_config`, which is why the shared home is here and not
-    a new one: this is the third function about the shape of a turn.
+    Shared by `cli/chat.py` and `durable/template_activities.py`. Blocks are joined and coerced with
+    `str` so no content shape fails a caller.
     """
     for message in reversed(result.get("messages") or []):
         if isinstance(message, HumanMessage):

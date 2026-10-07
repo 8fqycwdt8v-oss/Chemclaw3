@@ -1,10 +1,8 @@
-"""The mcp-rxnfp server advertises the reaction capability as MCP tools (3.4).
+"""The mcp-rxnfp server advertises the reaction capability as MCP tools.
 
-Mostly wiring (tool registration + schemas); the capability logic is proven in `test_rxnfp.py`.
-The one tool that *is* invoked here — over a substituted in-memory store, never the production
-one — is `similar_reactions` against an empty index, because that is the only level at which the
-question "does the sentence reach the model?" can be answered: it travels as `model_dump()` output
-over MCP, and a signal that does not survive that trip does not exist (see `ScreenResult.verdict`).
+Mostly wiring; capability logic is in `test_rxnfp.py`. `similar_reactions` is invoked over a
+substituted in-memory store, because only the `model_dump()` output over MCP shows what reaches
+the model.
 """
 
 import asyncio
@@ -45,9 +43,8 @@ def _structured(
 ) -> dict[str, Any]:
     """Call `similar_reactions` over `store` and return the structured payload MCP sends back.
 
-    The record store is substituted too, and must be: the tool now asks it which hits the source
-    has withdrawn, and the module-level default is the Postgres one — so leaving it in place would
-    turn every test in this file into a database test, silently.
+    The record store is substituted too, since the tool asks it for withdrawals and the default is
+    Postgres.
     """
     monkeypatch.setattr(tools, "_store", store)
     monkeypatch.setattr(tools, "_records", records or InMemoryReactionRecordStore())
@@ -110,14 +107,7 @@ def test_a_hit_still_carries_its_note_id_through_the_new_envelope(
 def test_the_identical_reaction_scores_a_perfect_similarity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A query matching an indexed reaction exactly comes back at Tanimoto 1.0, ranked first.
-
-    Inherited from `test_search_tools.py`, which proved it against the deleted in-process wrapper
-    (D-2026-08-05). The score is what the model reads as "this is the same transformation, not
-    merely a relative", so it is worth pinning on the path a turn actually takes rather than on a
-    lookalike of it — the wrapper had already drifted from this tool in both its arguments and its
-    result model.
-    """
+    """A query matching an indexed reaction exactly comes back at Tanimoto 1.0, ranked first."""
     store = InMemoryFingerprintStore(definition=reaction_definition())
     asyncio.run(store.add(record_for_reaction("rxn-1", _ESTER_ETHYL)))
     asyncio.run(store.add(record_for_reaction("rxn-2", _HALOGENATION)))
@@ -131,16 +121,10 @@ def test_the_identical_reaction_scores_a_perfect_similarity(
 def test_a_withdrawn_reaction_is_not_served_as_a_precedent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bundle tool asked the record store nothing, so it served withdrawn runs.
+    """A withdrawn reaction is not served as a precedent.
 
-    The fingerprint index holds bits and a label; whether the run still stands is the
-    transcription store's to say. This is the one of the five retraction readers a chemist reaches
-    *directly* — `similar_reactions` is what "have we made anything like this?" resolves to — and
-    it was the reader furthest from the record: it never opened the store at all.
-
-    Two reactions are indexed and one is withdrawn, so the assertion is a difference rather than an
-    emptiness: a tool that had simply stopped returning hits would pass "the withdrawn one is
-    absent" and fail this.
+    Two reactions are indexed and one withdrawn, so the assertion is a difference rather than an
+    emptiness.
     """
     store = InMemoryFingerprintStore(definition=reaction_definition())
     asyncio.run(store.add(record_for_reaction("rxn-live", _ESTER_ETHYL)))
@@ -174,17 +158,9 @@ def test_a_withdrawn_reaction_is_not_served_as_a_precedent(
 
 
 def test_two_sites_behind_one_entry_id_are_cited_apart(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The tool a chemist asks directly returned two hits citing one id, and neither resolved.
+    """Two sites behind one entry id are cited apart, with source-qualified citations.
 
-    `063` keyed `reaction_fingerprints` by `(source, id)` so one site's chemistry cannot overwrite
-    another's, and this tool kept spelling the bare `reaction-<id>` — so a two-source deployment
-    answered "have we made anything like this?" with two hits carrying the same citation, and
-    `records._one_of` refused both when either was expanded
-    (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
-
-    The two records are byte-identical apart from their source, which is the whole point: nothing
-    but the citation can tell them apart, so a tool that drops the source is offering the chemist a
-    link to neither run.
+    The records differ only by source, so only the citation can tell them apart.
     """
     store = InMemoryFingerprintStore(definition=reaction_definition())
     for site in ("site-alpha", "site-beta"):

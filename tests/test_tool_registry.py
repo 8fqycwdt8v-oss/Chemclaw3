@@ -1,9 +1,8 @@
-"""The capability-tool registry seam (config-extensibility item 2).
+"""The capability-tool registry seam.
 
-Proves the `@tool` registry replaced the hardcoded `_capability_tools()` list without changing the
-advertised toolset or the safety wiring: registration is by function name, duplicates are a loud
-programming error, and the agent still advertises exactly the same in-process tools wrapped by the
-same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md` §5/§8 (Spike 1).
+Registration is by function name, duplicates are a loud programming error, and the agent
+advertises exactly the expected in-process tools wrapped by the audit and authorization
+middleware.
 """
 
 import pytest
@@ -20,10 +19,9 @@ from chemclaw.core.tool_registry import (
 from chemclaw.templates.registry import template_tool_names
 from tests.surface import surface
 
-# Every in-process capability tool, spelled out: the registry must reproduce this set, no more and
-# no less (a connector's tools are advertised separately, per turn). Adding one is a deliberate,
-# reviewed edit here rather than a silent widening of what the agent can do — and the review that
-# edit invites is "should this be a connector tool instead?", which is the point.
+# Every in-process capability tool, spelled out: the registry must reproduce this set exactly.
+# Connector tools are advertised separately per turn. Adding one is a reviewed edit here, which
+# invites the question "should this be a connector tool instead?".
 _EXPECTED_INPROCESS_TOOLS = {
     # The conversation plumbing: everything that reads or writes the *turn's own* state, which is
     # by definition unavailable to another process.
@@ -42,11 +40,8 @@ _EXPECTED_INPROCESS_TOOLS = {
     "expand_note",
     "gather_evidence",
     "condense_protocols",
-    # The prescriptive half of the same pair: `condense_protocols` reads many recorded procedures,
-    # these write one proposed design and read it back
-    # (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`). In-process rather than a
-    # connector job for the reason the note tools are: the store is core's, and the drafting itself
-    # is a turn's composition rather than durable work.
+    # Experiment design tools: write one proposed design and read it back. In-process because the
+    # store is core's and drafting is part of a turn, not durable work.
     "structure_experiment_request",
     "compose_workflow",
     "run_composed_workflow",
@@ -65,10 +60,8 @@ _EXPECTED_INPROCESS_TOOLS = {
     # read the design store, which is core's.
     "attach_plate_results",
     "read_plate_results",
-    # The join between the two halves of "propose an experiment": a campaign's suggested points
-    # are `{parameter: value}` and a design needs labelled factors and arms citing those labels.
-    # In-process for the same reason as the pair above — the campaign store is core's and the
-    # translation is arithmetic, not durable work.
+    # Translates a campaign's suggested `{parameter: value}` points into labelled design arms.
+    # In-process: the campaign store is core's and the translation is arithmetic.
     "experiment_arms_from_campaign",
     # Unit arithmetic with a verdict, over values passed in the call. In-process because it reaches
     # nothing — no store, no connector, no engine — and because `core/units` is where the comparison
@@ -81,15 +74,9 @@ _EXPECTED_INPROCESS_TOOLS = {
     "record_confirmed_answer",
     "record_failure",
     "recall_observations",
-    # The durable launchers core still owns, and the one status tool every durable job is
-    # collected with, connector-owned or not. The QM launcher and its bespoke status tool were the
-    # last pair to go; every expensive job is a declared connector job now (D-118).
-    #
-    # The report's workflow has not moved into a bundle (D-115: its closure *is* core's).
-    # `synthesize_memory` is core's for the same reason and one more: D-2026-08-25 took the corpus
-    # miners' Schedules away so that no timer opens a pull request, which left four registered
-    # workflows with no caller at all — this is the trigger that replaced the clock, and a person
-    # asking is now the only thing that starts one.
+    # The durable launchers core still owns, and the status tool every durable job is collected
+    # with. Expensive jobs are otherwise declared connector jobs. `synthesize_memory` is the
+    # on-demand trigger for the corpus miners, which run on no schedule.
     "request_development_report",
     "rank_competing_hypotheses",
     "synthesize_memory",
@@ -98,10 +85,8 @@ _EXPECTED_INPROCESS_TOOLS = {
     # is core's for the same reason the status tool is — it is generic over every job, and a
     # connector must not be able to see another bundle's runs.
     "find_past_jobs",
-    # The operational read model (D-2026-08-29). In-process for the same reason `find_past_jobs`
-    # is: it is generic over every capability, and a connector bundle must not be able to read
-    # another bundle's record — nor, being a projection of the audit trail itself, may the
-    # capability that writes that trail be the thing that reads it back.
+    # The operational read model. In-process because it is generic over every capability and a
+    # connector bundle must not read another bundle's record.
     "review_activity",
     # The durable wait (D-2026-08-29). In-process because the wait is core's primitive rather than
     # any capability's: a BO round, a gate review and an effect approval are the same object, and a
@@ -126,22 +111,16 @@ _EXPECTED_INPROCESS_TOOLS = {
 def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides() -> None:
     """Importing the agent registers precisely the in-process tools; building it adds launchers.
 
-    Three populations share this registry on purpose. The `@tool` functions arrive on import; the
-    generated launcher for each declared connector job and each enabled step template is registered
-    when an agent is built — which is exactly what makes a generated tool addressable by
-    `tool_role_gates` and wrapped by the audit middleware like any other. So "exactly the
-    in-process set" is only true before a build, and the invariant worth asserting is that nothing
-    *else* ever appears.
+    Generated launchers for connector jobs and step templates are registered at build time so they
+    are gated and audited like any other tool; the invariant is that nothing else ever appears.
     """
     assert _EXPECTED_INPROCESS_TOOLS <= set(registered_tool_names())
     surface(None)
     extra = set(registered_tool_names()) - _EXPECTED_INPROCESS_TOOLS
     jobs = {job.name for manifest in enabled() for job in manifest.jobs}
     # Bounded on both sides rather than equal: the registry only grows, so a launcher an earlier
-    # build in this process registered under another configuration can still be held while this
-    # deployment withholds it (`chemclaw_agent._withheld_tool_names` subtracts it on read).
-    # A job whose manifest says this deployment cannot run it is withheld from the build too
-    # (`registry.withheld_job_names`), so the lower bound leaves it out and the upper keeps it.
+    # build registered may still be held while this deployment withholds it. A job this deployment
+    # cannot run is withheld too, so the lower bound leaves it out and the upper keeps it.
     bound_jobs = jobs - set(withheld_job_names())
     assert (
         bound_jobs | set(template_tool_names())
@@ -151,11 +130,9 @@ def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides
 
 
 def test_capability_tools_are_exactly_the_registry() -> None:
-    """`_capability_tools()` is the registry, whole and in order — connectors are not in it.
+    """`_capability_tools()` is the registry, whole and in order; connectors are not in it.
 
-    A connector's MCP tools are per-turn (`connector_tools`), not per-process, so the agent's own
-    tool list is the registry and nothing more — less any template launcher this deployment
-    withholds, which an earlier build in the same process may have registered.
+    Connector tools are per turn. Template launchers this deployment withholds are subtracted.
     """
     tools = _capability_tools()
     withheld = _withheld_tool_names()

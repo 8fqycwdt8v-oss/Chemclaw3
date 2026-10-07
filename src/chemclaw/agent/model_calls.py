@@ -1,91 +1,23 @@
-"""What happened at the model call — the one boundary in this system that recorded nothing.
+"""What happened at the model call: failure accounting and malformed tool calls.
 
-Two middlewares, both `wrap_model_call`, because the model call is where two separate blind spots
-met. Neither is a policy: remove them and a chemist gets the same answers.
+Two `wrap_model_call` middlewares; neither is a policy, and removing them changes no answer.
 
-**`RecordModelCalls` — there was no LLM error taxonomy anywhere.** No metric, no log, no span named
-a provider failure. `agent/llm_provider.py` constructs a client and returns it, and nothing wrapped
-what the client then did, so three distinct outages were one silence:
+**`RecordModelCalls`** counts and times every model call by outcome, using
+`llm_provider.classify_model_failure` (rate limit, context length, timeout, transport, auth, error),
+so outages and a too-long thread are distinguishable. The SDK's own retries (`llm_max_retries`)
+happen below `ainvoke`, so one recorded call may be several wire attempts and a
+`timeout`/`transport` outcome is the state after the SDK gave up. A call cancelled by turn teardown
+is not counted.
 
-- `max_retries=settings.llm_max_retries` (3 by default) is passed *into* the provider SDK, so a
-  single `ainvoke` covers up to four wire attempts with no callback and no log. A deployment
-  retrying every call three times looked identical to one retrying none.
-- A provider 429 had no counter of its own — the only rate-limit series in the process belonged to
-  the front door's *inbound* limiter, which is a different actor being throttled by a different
-  party.
-- A context-length `BadRequestError` fell through `api/runner._classify` to `("internal", False)`,
-  so the one failure mode `agent/compaction.py` exists to prevent was unmeasurable, and the chemist
-  was told "internal error, do not retry" about the one failure a shorter question fixes.
-
-The taxonomy itself is not invented here. `llm_provider._failover_exceptions` has always known
-which failures mean "this endpoint is down", because failover depends on the distinction;
-`llm_provider.classify_model_failure` reuses that set and names the neighbouring families beside
-it, so there is one statement of what a provider failure *is*.
-
-**What this still cannot see, stated rather than implied.** The SDK's own retries happen below
-`ainvoke`, so one recorded call is between one and `llm_max_retries + 1` wire attempts and this
-cannot say which. Making that observable means either `max_retries=0` plus a first-party retry
-loop — which is re-implementing somebody else's tested backoff — or an `httpx` event hook on the
-client this seam builds. Neither is done, so **the retry budget is configured and unmeasured**, and
-a `timeout` or `transport` outcome here is the state *after* the SDK gave up rather than the first
-failure.
-
-A model call cancelled by a turn teardown is deliberately not counted: `CancelledError` is a
-`BaseException`, the call did not fail, and the turn's own outcome series is where an abandoned
-turn is recorded.
-
-**`PromoteInvalidToolCalls` — an unparseable tool call was a silent no-op.** LangChain puts a tool
-call whose arguments do not parse onto `AIMessage.invalid_tool_calls` rather than `tool_calls`, and
-nothing in `src/` read that field. The agent iterates `tool_calls`, so the call vanished: no
-`tool_failed`, no `tool_result`, no audit row, no span. With no prose beside it the turn ended as
-`empty_answer`; **with prose it proceeded as though no tool had been needed**, which is
-`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` exactly.
-
-**What reaches that field is genuinely malformed JSON, and not a truncated document.** LangChain
-runs a streamed tool call's argument fragments through `parse_partial_json`, which closes an
-unterminated string and an unclosed brace, so a cut stream repairs itself before anything sees it:
-measured, `'{"smiles": "CC'` arrives as a valid entry on `tool_calls` with `invalid_tool_calls`
-empty. The field is reached by output that is not JSON at all, or that is JSON-shaped and broken in
-a way partial parsing cannot close — which a model emits rarely and does emit, and which nothing
-recovered from.
-
-**The fix is a change of address, and that is the whole of it.** The call is moved onto
-`tool_calls` carrying its unparseable document under `_UNPARSED_ARGUMENTS`, and
-`refuse_unparsed_arguments` — below every gate that decides — raises before the body runs. It is
-then an ordinary failing tool call, and everything a failing tool call already gets, it gets: the
-audit row, the span, the authorization gate, the dry-run and repeat guards, the `tool_failed` the
-announcer raises carrying the model's **own call id**, and a `ToolMessage` the model reads inside
-its own loop — an ordinary graph iteration the loop cap and the spend cap both count.
-
-**Three earlier designs asked the model again from inside `wrap_model_call` instead, and this
-supersedes all three** (`D-2026-08-27-a-refusal-is-not-a-crash`,
-`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`,
-`D-2026-08-29-a-discarded-call-is-not-a-lost-call`,
-`D-2026-08-29-a-refusal-is-not-a-failure-and-a-bound-is-not-a-truncation`). Each round of review
-found defects in that machinery and each round's fix introduced the next round's, and the cause was
-structural rather than careless: **a retry taken outside the graph is outside every bound the graph
-has**, so each one had to be rebuilt by hand. A "never a loop" ceiling, because the loop cap could
-not see the extra call. A reporting ceiling, because nothing bounded the corrective message. An
-announcement rule and five prose constants, because no `tool_failed` could be raised from a call
-the tool chain never saw. A `graph_stream` guard, because that announcement had no call id to pair
-with. And an invariant about streamed prose, because `astream(stream_mode=["messages"])` emits per
-*model call* rather than per returned message, so the discarded attempt's tokens reached the
-chemist while the recorded message held only the second attempt — a divergence that had to be
-closed by carrying the discarded prose forward. Promotion has none of those problems, because it
-introduces no hidden call: measured with docstrings and comments stripped, **42 lines of code
-replace 113** — and those 113 were the ones that kept being wrong. (This said "~20 replace ~180",
-a 9x reduction against a real one of 2.7x. Neither figure had been counted;
-`D-2026-08-30-a-review-of-the-review` counts them.)
-
-The one property the old design had that this does not: it corrected the model without spending a
-graph iteration. That is the trade, stated so it is not rediscovered — an iteration is what makes
-the correction visible to the loop cap, the spend cap, the transcript and the audit trail, and each
-of those was previously a hand-built substitute for it.
-
-**The operator's half is unchanged and stays here.** `chemclaw_invalid_tool_calls_total` and the
-WARNING answer a different question from the chemist's stream — how often the model emits malformed
-output, and for which tool — and they are counted at the emission, once, because there is no second
-attempt any more.
+**`PromoteInvalidToolCalls`** handles tool calls whose arguments do not parse. LangChain puts them
+on `AIMessage.invalid_tool_calls`, which the agent never iterates, so the call would silently
+vanish. They are moved onto `tool_calls` carrying the raw document under `_UNPARSED_ARGUMENTS`, and
+`refuse_unparsed_arguments` raises before the body runs. The call is then an ordinary failing tool
+call with an audit row, span, gates, `tool_failed` event and a `ToolMessage` the model reads inside
+its own loop, counted by the loop and spend caps. Retrying inside `wrap_model_call` instead would
+sit outside every bound the graph has. Calls in a reply cut off at the output limit are demoted and
+refused the same way, since upstream's partial-JSON repair makes them look complete.
+`chemclaw_invalid_tool_calls_total` and a WARNING record each malformed emission for operators.
 """
 
 import json
@@ -111,35 +43,21 @@ from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
-# The key a promoted call carries its unparseable document under, and the one definition of it.
-# Both halves of this mechanism import it from here: `PromoteInvalidToolCalls` writes it and
-# `refuse_unparsed_arguments` reads it, so they cannot disagree about the contract between them.
-#
-# **Dunder-flanked because it must not collide with a real parameter**, and unparseable arguments
-# are exactly the case where the model's own intent for the argument names is unknowable. No tool
-# in this tree declares a parameter of this shape, and `tests/test_invalid_tool_calls.py` scans the
-# live registry so a future one fails the suite rather than silently swallowing a promotion — a
-# tool that did declare it would have its own calls refused before the body, on every turn.
+# The key a promoted call carries its unparseable document under, shared by both halves of the
+# mechanism. Dunder-flanked so it cannot collide with a real parameter;
+# `tests/test_invalid_tool_calls.py` checks no registered tool declares it.
 _UNPARSED_ARGUMENTS = "__unparsed_arguments__"
 
-# The prefix a promoted call is given when the provider named no id, suffixed with its index in the
-# reply. `""` was used until a reviewer measured what two of them do: `graph_stream.failed_calls`
-# and `ToolCallTrace._issued` both key on a call id and both assume it identifies one call, so two
-# id-less calls in one reply made a failure suppress an unrelated result and made an
-# `_empty_answer_event` count more refusals than attempts. Distinct from anything a provider mints,
-# and stable within the reply, which is the only scope that can collide.
+# Prefix for a promoted call's id when the provider gave none, suffixed with its index in the reply,
+# because stream readers key on call id and two `""` ids would collide.
 _UNPARSED_CALL_ID = "unparsed-call-"
 
-# Set beside `_UNPARSED_ARGUMENTS` on a call that parsed only because upstream completed it: the
-# provider stopped at its output limit mid-document, and `parse_partial_json` closed the string and
-# the brace it was cut inside. Its own key so the refusal can say *why* the call did not run — the
-# arguments are valid JSON, so "not valid JSON" would send the model to fix a document it wrote
-# correctly as far as it got.
+# Set beside `_UNPARSED_ARGUMENTS` on a call that parsed only because upstream completed a document
+# cut off at the output limit, so the refusal says "cut off" rather than "not valid JSON".
 _CUT_OFF = "__cut_off_at_output_limit__"
 
-# The `finish_reason` values that mean the provider stopped because it ran out of output budget,
-# not because the model finished. `length` is the OpenAI-compatible spelling every gateway here
-# speaks; `max_tokens` is the Anthropic-native one a gateway may pass through unchanged.
+# `finish_reason` values meaning the provider ran out of output budget: `length` (OpenAI-compatible)
+# and `max_tokens` (Anthropic-native, possibly passed through by a gateway).
 _OUTPUT_LIMIT_REASONS = frozenset({"length", "max_tokens"})
 
 # The `error` a demoted call carries, and what the promotion recognises it by — not its id, which a
@@ -150,12 +68,8 @@ _CUT_OFF_ERROR = "the reply stopped at the output-token limit mid-call"
 def model_call_middleware() -> list[Any]:
     """The two model-call observers, as the list `build_langgraph_agent` splices in.
 
-    Order is nesting: the repair is outside the recorder, so a repaired turn books **two** model
-    calls — which is what happened, and is the only way the cost of a malformed emission is
-    visible. Spliced innermost of everything so the recorded duration is the provider call rather
-    than the middleware above it: the context edits run in `wrap_model_call` too, and folding their
-    token counting into `chemclaw_model_call_duration_seconds` would put first-party work into the
-    histogram an operator reads as "how slow is the endpoint".
+    The promotion is outside the recorder. Spliced innermost so the recorded duration is the
+    provider call, not first-party middleware above it.
     """
     return [PromoteInvalidToolCalls(), RecordModelCalls()]
 
@@ -163,11 +77,7 @@ def model_call_middleware() -> list[Any]:
 def _observe(outcome: str, seconds: float) -> None:
     """Book one finished model call: its outcome, and how long the gateway took over it.
 
-    **No `provider` label**, and its removal is the honest half of the collapse to one gateway
-    (`D-2026-09-04-a-gateway-is-the-only-provider`). It carried `settings.llm_provider`, which now
-    has exactly one possible value — a label with one value is a series that costs cardinality and
-    answers nothing, and keeping it as a hardcoded string would publish a distinction this
-    deployment can no longer make.
+    No `provider` label: there is one gateway, so it would carry no information.
     """
     record_metric(
         lambda metrics: metrics.increment("chemclaw_model_calls_total", labels={"outcome": outcome})
@@ -178,10 +88,8 @@ def _observe(outcome: str, seconds: float) -> None:
 def _record_failure(exc: BaseException, seconds: float) -> None:
     """Classify, count and log one failed model call, then let the caller re-raise.
 
-    The WARNING carries the **exception class**, never the message: an endpoint's error text can
-    quote the request, and the request is the chemist's question. The class and the outcome are what
-    separate a rate limit from a dead endpoint from a thread that no longer fits, which is the whole
-    distinction that was missing.
+    The WARNING carries the exception class, never the message, which can quote the chemist's
+    request.
     """
     outcome = classify_model_failure(exc)
     _observe(outcome, seconds)
@@ -204,11 +112,9 @@ def _record_failure(exc: BaseException, seconds: float) -> None:
 def _log_credential_refusal(exc: BaseException) -> None:
     """Name the gateway and the status that refused this deployment's credential, at ERROR.
 
-    The one model failure whose remedy is an operator's and never the chemist's: a rotated, revoked
-    or unset `CHEMCLAW_LLM_API_KEY`, or a key the gateway does not entitle to the model. So it gets
-    a line of its own an operator can grep for, carrying the host the request went to and the HTTP
-    status — both read off the SDK's exception, which records the request it sent. **Never the
-    credential and never the response body**: the key is the secret, and the body can quote it.
+    The remedy is an operator's (a rotated, revoked or unset `CHEMCLAW_LLM_API_KEY`), so the line
+    carries the request host and HTTP status from the SDK exception. Never the credential or the
+    response body.
     """
     request = getattr(exc, "request", None)
     host = getattr(getattr(request, "url", None), "host", None) or "an unknown host"
@@ -229,12 +135,8 @@ def _log_credential_refusal(exc: BaseException) -> None:
 class RecordModelCalls(AgentMiddleware[Any, Any, Any]):
     """Count and time every model call, by what went wrong.
 
-    Both hooks declared, for the reason `agent/compaction.RecordContextCompaction` gives at length:
-    `create_agent` puts a middleware declaring *either* into *both* chains, so an async-only
-    middleware makes every synchronous `graph.invoke()` raise.
-
-    Observation only — it re-raises whatever the model call raised, unchanged, so the front door's
-    classification and the failover above it behave exactly as they did.
+    Both sync and async hooks, because `create_agent` puts the middleware in both chains.
+    Observation only: it re-raises whatever the call raised, unchanged.
     """
 
     def wrap_model_call(
@@ -271,10 +173,8 @@ class RecordModelCalls(AgentMiddleware[Any, Any, Any]):
 def _messages_of(response: Any) -> Sequence[BaseMessage]:
     """The messages in whatever shape a `wrap_model_call` handler answered with.
 
-    LangChain lets a handler return a `ModelResponse`, a bare `AIMessage` or an
-    `ExtendedModelResponse`, and both readers here — the one that counts the failures and the one
-    that promotes them — must see the same thing on all three. One reading, so what is counted and
-    what is moved cannot disagree about what the model said.
+    `ModelResponse`, bare `AIMessage` or `ExtendedModelResponse`; one reading so counting and
+    promotion see the same messages.
     """
     if isinstance(response, AIMessage):
         return [response]
@@ -286,17 +186,9 @@ def _messages_of(response: Any) -> Sequence[BaseMessage]:
 def _bounded_text(value: object) -> str:
     """The tool **name** the model emitted, bounded by the audit budget and deliberately not repr'd.
 
-    One field, and naming it is the correction: this used to serve `BrokenCall.error` as well and
-    its docstring still described that field after `_bounded_reason` took it over. Bounded because
-    nothing upstream limits what a model may call a tool, and the string reaches a WARNING line and
-    — through the promoted call — an audit row, a metric label's comparison and the chemist's
-    event stream.
-
-    **Not** repr'd, unlike the parse error and the argument document beside it: `_metric_label`
-    compares the name against the names the request actually bound, and a quoted name matches none
-    of them — which would clamp every label to `UNKNOWN_TOOL` and lose the distinction the clamp
-    exists to keep. Escaping happens at the sink instead (`_count_invalid`), which is what keeps
-    the comparison honest and the log line unforgeable at the same time.
+    Bounded because nothing upstream limits a tool name and it reaches logs, audit rows and the
+    event stream. Not repr'd because `_metric_label` compares it against the bound tool names;
+    escaping happens at the sinks instead.
     """
     limit = settings.agent_audit_max_arg_chars
     text = str(value)
@@ -306,33 +198,10 @@ def _bounded_text(value: object) -> str:
 def _bounded_reason(value: object) -> str:
     r"""The provider's parse error, escaped and bounded from the **tail**.
 
-    Two departures from `_bounded_text`, and each is a defect this had before it was written.
-
-    **The tail, because the head is a copy of a field printed beside it.** LangChain builds the
-    message as `Function {name} arguments:\n\n{document}\n\nare not valid JSON. Received
-    JSONDecodeError {reason}` (upstream's `parse_tool_call`), so the head is the
-    tool name and a verbatim second copy of `BrokenCall.arguments` — and the only thing in the
-    field that is *not* already in the record beside it is the reason, at the very end. Measured
-    against the 200-char budget: the reason survived a 102-char argument document and was gone from
-    122 upward, so a chemist read the same document twice and never learned why it would not parse.
-    `agent/tool_result_size.py` states the general rule this broke — "head and tail, never head
-    alone… a head-truncated result reads as complete and silently drops the outcome"; here the head
-    is pure duplication, so the tail alone is what carries information. Upstream's "For
-    troubleshooting, visit: …" boilerplate sits between the two and spends about half the budget,
-    which is worth knowing when reading a truncated one.
-
-    **Escaped, because this string reaches a log line unquoted.** `_bounded_text` deliberately does
-    not `repr`, for a reason about the *name* — `_metric_label` compares it against the bound tools
-    and a quoted name matches none of them. That reason does not extend to this field, and
-    extending it silently was the defect: the provider's text embeds the model's own document,
-    which is attacker-influenceable through every retrieved corpus this tree frames as untrusted,
-    and `log_json` defaults to **false**, so an embedded newline forged a second log line
-    (`… ERROR chemclaw.audit: actor=admin action=approve_plan result=granted`). `bounded_repr`
-    already escapes `arguments` for the same reason; this closes the half beside it.
-
-    An empty error stays empty rather than becoming `"''"`, because `_count_invalid`'s log line
-    tests it for truthiness to decide whether to print the reason or the document — and on the
-    streamed shape it always is empty, which is when the document is the only thing there is.
+    The tail, because upstream's message starts with the tool name and a copy of the argument
+    document; the parse reason is at the end. Escaped (unlike `_bounded_text`), because the text
+    embeds the model's document and reaches a single-line log unquoted, where a newline could forge
+    a record. An empty error stays empty, since `_count_invalid` tests it for truthiness.
     """
     text = str(value)
     if not text:
@@ -341,29 +210,11 @@ def _bounded_reason(value: object) -> str:
     quoted = repr(text)
     if len(quoted) <= limit:
         return quoted
-    # Slice the *text* and quote the slice, never the other way round. Slicing `quoted` is what the
-    # first version did, and it cuts an escape sequence in half: a trailing newline is `\n` in the
-    # quoted form, so a cut landing between the two characters left the letter `n` in the reason a
-    # chemist reads — a corruption that reads as content. A search rather than a fixed width
-    # because `repr` expands by up to four characters per input character, so no fixed slice is
-    # both safe and tight.
-    #
-    # **The search space starts at 1, and that is the whole of what used to be a guard.**
-    # `text[-0:]` is the whole string, not the empty one, so a hand-rolled bisection that can
-    # settle on 0 hands the slice a length that means "everything": measured at a budget of 0, 1
-    # or 2 against a 100 kB parse error, the version before the guard returned **100,024**
-    # characters — the exact failure this function exists to prevent, at exactly the tightening an
-    # operator would make to be safer. `agent_audit_max_arg_chars` is `ge=0` with no floor, and
-    # `repr` of a single character is already three characters wide, so every budget under 3 fits
-    # nothing. Bisecting `range(1, …)` makes that value unrepresentable instead of guarded: the
-    # index 0 that `bisect_right` returns when nothing fits is a *count*, never a slice length,
-    # and it is answered below.
-    #
-    # `bisect_right` needs its keys non-decreasing, which they are: prepending a character can
-    # only add to the quoted body, and the quote flip `repr` makes when the string gains a `'` or
-    # a `"` only ever re-prices existing characters upward. Checked over 20,000 random strings
-    # drawn from quotes, backslashes, newlines, NUL and non-ASCII — no inversion, and the index
-    # agrees with the old loop and with a linear scan on every one of them.
+    # Slice the text and quote the slice, never the reverse, so an escape sequence is never cut in
+    # half. A search because `repr` expands each character by up to four. The range starts at 1
+    # because `text[-0:]` is the whole string; an index of 0 means nothing fits and is handled
+    # below. The keys are non-decreasing (prepending a character never shortens the quoted form), as
+    # `bisect_right` requires.
     longest = bisect_right(range(1, len(text) + 1), limit, key=lambda n: len(repr(text[-n:])))
     # The ellipsis alone is the honest answer when nothing fits: the budget says there is no room,
     # and something was still cut.
@@ -374,9 +225,8 @@ def _bounded_reason(value: object) -> str:
 class BrokenCall:
     """One tool call the model emitted whose arguments could not be parsed.
 
-    A record rather than a tuple because the third field arrived late and the two-tuple's call
-    sites read `name, error` positionally: what the model *sent* is the field that survives the
-    streaming path, and a reader has to be able to tell it from the parse error, which does not.
+    `arguments` (what the model sent) is kept apart from `error` (the parse error), since only the
+    former survives the streaming path.
     """
 
     name: str
@@ -392,14 +242,8 @@ class BrokenCall:
 def invalid_tool_calls(response: Any) -> list[BrokenCall]:
     """Every tool call in `response` whose arguments did not parse, as bounded strings.
 
-    The name falls back to `UNKNOWN_TOOL` because `invalid_tool_calls` is exactly the case where
-    the model's output was malformed: an entry can carry a parse error and no usable name, and a
-    counter that dropped those would under-report the failure it exists to surface.
-
-    **Every field here is the model's own output and is bounded on the way out**, by the budget an
-    audit row's arguments are bounded by (`settings.agent_audit_max_arg_chars`). The name is
-    bounded too, not only the arguments: it reaches a log field and a sentence sent back to the
-    model, and nothing upstream limits what a model may call a tool.
+    A missing name falls back to `UNKNOWN_TOOL` so such entries are still counted. Every field is
+    model output and is bounded by `settings.agent_audit_max_arg_chars`.
     """
     return [
         BrokenCall(
@@ -416,31 +260,10 @@ def invalid_tool_calls(response: Any) -> list[BrokenCall]:
 def _metric_label(request: ModelRequest[Any], name: str) -> str:
     """`name` if this request actually bound a tool by that name, else the `UNKNOWN_TOOL` bucket.
 
-    **The label was the model's own string, on the one metric that fires exactly when the model's
-    output is malformed.** The docstring beside it claimed the label space "stays the tool surface
-    plus one" and that was true only of the `unknown` fallback: `call.get("name")` is whatever the
-    model emitted, so a single hallucinated or corrupted name minted a permanent time series, and
-    model output is attacker-influenceable — which is the whole reason this tree carries
-    `frame_untrusted`. `agent/audit.py::metric_tool_name` makes exactly this argument for the tool
-    path and cannot be reused verbatim here: it resolves the *registered tool object* a
-    `wrap_tool_call` request carries, and a `ModelRequest` has no such object — it has the list of
-    tools this call was made with, which is the same registry one step earlier.
-
-    **Why it is worth refusing rather than merely bounding.** `/metrics` is unauthenticated by
-    design (a Prometheus scrape carries no identity), and retrieved content — ELN rows, share
-    documents, notes — is a prompt-injection surface this tree already frames as untrusted. So
-    "emit a tool call named <secret>" turns a verbatim label into an exfiltration channel, and the
-    per-counter series cap then blinds the metric permanently once the invented names fill it.
-    The 2026-08-28 security review reached the same conclusion independently and by the same
-    route, which is why this is stated here rather than left implied.
-
-    The bucket is `audit.UNKNOWN_TOOL` rather than a local literal, so an unregistered name lands
-    in the one series both paths already agree on instead of a second spelling of it. **The cost of
-    that choice, stated rather than discovered:** `unknown` is a legal tool name, so a tool actually
-    called that would be indistinguishable from this bucket, where an angle-bracketed
-    `<unknown>` could not be. `agent/audit.py::metric_tool_name` already has exactly that property
-    on `chemclaw_tool_calls_total`, so changing it is one decision over both metrics and one
-    constant, not a second spelling introduced here.
+    The emitted name is model output, which retrieved content can steer; as a label on the
+    unauthenticated `/metrics` it would mint unbounded series and be an exfiltration channel. The
+    same clamp as `audit.metric_tool_name`, but against the tools this `ModelRequest` was made with.
+    The bucket is `audit.UNKNOWN_TOOL`, shared with `chemclaw_tool_calls_total`.
     """
     for tool in request.tools or ():
         served = getattr(tool, "name", None)
@@ -454,9 +277,8 @@ def _metric_label(request: ModelRequest[Any], name: str) -> str:
 def _bump_invalid(tool: str, metrics: Metrics) -> None:
     """Increment the unparseable-call counter for one tool.
 
-    A named function bound with `partial` rather than a closure over the loop variable, which is
-    the idiom `agent/audit_store.py` already uses: a `lambda` capturing `name` in a loop captures
-    the *variable*, so every deferred update would book the last tool in the list.
+    Bound with `partial` rather than a loop-variable closure, which would book the last tool for
+    all.
     """
     metrics.increment("chemclaw_invalid_tool_calls_total", labels={"tool": tool})
 
@@ -464,25 +286,9 @@ def _bump_invalid(tool: str, metrics: Metrics) -> None:
 def _count_invalid(request: ModelRequest[Any], failures: list[BrokenCall]) -> None:
     """Count each unparseable call under its tool, and say once what the model emitted.
 
-    **The operator's record, and only the operator's.** The chemist's half used to live here too,
-    hand-built; it is now the `tool_failed` that `agent/tool_authz.announce_tool_failures` raises
-    for the promoted call, which is the same event every other tool failure has always produced.
-    One producer, one shape, one place to change it.
-
-    Once per emission rather than per attempt, because there is no second attempt any more: the
-    model corrects inside its own loop, and that iteration is an ordinary one the loop cap counts.
-
-    The counter takes the *clamped* name (`_metric_label`) and the log line takes the model's own
-    escaped string, which is the split `audit.metric_tool_name` states: what the model asked for is
-    the forensic fact and belongs in the record, and only the unbounded metric *label* is refused.
-
-    **The name is escaped here, not merely bounded.** `_bounded_text` deliberately does not quote —
-    `_metric_label` compares the name against the bound tools and a quoted name matches none of
-    them — but this line is `%s`-formatted into a log whose default formatter is single-line and
-    unescaped (`log_json` ships `False`), so a newline in a model-authored name forged a second
-    record reading `… ERROR chemclaw.audit: actor=admin action=approve_plan result=granted`. The
-    parse error beside it was escaped and the name was not, which is half a fix. `repr` at the sink
-    rather than at the source, so the comparison `_metric_label` makes is untouched.
+    The operator's record only; the chemist sees the `tool_failed` the announcer raises for the
+    promoted call. The counter takes the clamped name (`_metric_label`); the log line takes the
+    model's own name, repr-escaped at this sink so a newline cannot forge a log record.
     """
     for call in failures:
         record_metric(partial(_bump_invalid, _metric_label(request, call.name)))
@@ -504,35 +310,13 @@ def _count_invalid(request: ModelRequest[Any], failures: list[BrokenCall]) -> No
 class PromoteInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
     """Move a call the model mis-serialised onto `tool_calls`, so the tool chain can refuse it.
 
-    **The whole mechanism is a change of address.** `ToolNode` iterates `tool_calls`; LangChain puts
-    a call whose arguments did not parse on `invalid_tool_calls`; so the call is invisible to every
-    control this system has, and that invisibility — not the malformed JSON — is the defect. Moving
-    it one field over makes it an ordinary failing tool call, and everything downstream then works
-    because it already worked: `agent/tool_authz.announce_tool_failures` raises the `tool_failed`
-    the chemist reads, the audit middleware writes the row, the span opens, the authorization gate
-    and the dry-run and repeat guards all run, and `surface_domain_errors` hands the model a
-    `ToolMessage` it can act on inside its own loop.
+    `ToolNode` iterates only `tool_calls`, so a call left on `invalid_tool_calls` bypasses every
+    control. Moved one field over, it becomes an ordinary failing tool call that the announcer,
+    audit, span, gates and `surface_domain_errors` all handle, at the cost of one graph iteration.
 
-    **What this replaces, and why the replacement is smaller.** The first three versions of this
-    module retried the model from inside `wrap_model_call`, discarded the reply, and hand-rolled a
-    report to three audiences (`D-2026-08-29-a-call-the-tool-chain-never-sees…`,
-    `…-a-discarded-call-is-not-a-lost-call`, `…-a-refusal-is-not-a-failure…`). Each round's fix
-    introduced the next round's defect, and the reason was structural: a retry taken outside the
-    graph is outside every bound the graph has, so each one had to be rebuilt by hand — a
-    "never a loop" ceiling because the loop cap could not see it, a reporting ceiling because
-    nothing bounded the correction, an announcement rule because no `tool_failed` could be raised,
-    and a `graph_stream` guard because the announcement had no call id. Promoting the call costs
-    one graph iteration instead of one hidden model call, and every one of those bounds already
-    applies to it.
-
-    **The document travels under `_UNPARSED_ARGUMENTS` rather than as `{}`.** An empty argument
-    dict is not a safe stand-in: **11 of the 54 in-process tools take no required argument**, so a
-    promoted call with empty args would satisfy the schema and *run* — the tool would execute on a
-    request the model never successfully expressed. The sentinel makes the promotion refusable
-    before the body, and carries the raw document to the one place that can use it: back to the
-    model, which is the only party that can re-emit it.
-
-    Both hooks declared, for `RecordModelCalls`'s reason.
+    The document travels under `_UNPARSED_ARGUMENTS` rather than as `{}`, because several tools take
+    no required argument and would run on empty arguments; the sentinel makes the call refusable
+    before the body. Both sync and async hooks, for `RecordModelCalls`'s reason.
     """
 
     def wrap_model_call(
@@ -555,14 +339,8 @@ class PromoteInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
 def _promote(request: ModelRequest[Any], response: Any) -> Any:
     """Record the malformed emission for the operator, and move its calls where they can be seen.
 
-    The counter and the WARNING are the operator's record and stay exactly where they were. What
-    is gone is the chemist-facing half: it is no longer this module's job, because the promoted
-    call raises a `tool_failed` through the announcer every other failure already uses.
-
-    Edited in place rather than rebuilt: the response's shape is the handler's choice, so a rebuild
-    would have to reproduce the message's id, its usage metadata and its response metadata — three
-    things nothing here has an opinion about. The message is this call's own, freshly returned and
-    not yet in state.
+    Edited in place so the message keeps its id and metadata; it is this call's own, not yet in
+    state.
     """
     _demote_cut_off_calls(response)
     failures = invalid_tool_calls(response)
@@ -573,37 +351,21 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
         if not isinstance(message, AIMessage) or not message.invalid_tool_calls:
             continue
         promoted: list[Any] = list(message.tool_calls or [])
-        # Bounded, because one reply may carry any number of these and each becomes an audit row,
-        # a stream event and a `ToolMessage` in the model's own context — see
-        # `agent_max_promoted_invalid_calls` for the measurement and for why nothing is lost past
-        # the bound. `_count_invalid` above has already counted and named every one of them.
+        # Bounded, because each promoted call becomes an audit row, a stream event and a
+        # `ToolMessage`; `_count_invalid` has already counted every one (see
+        # `agent_max_promoted_invalid_calls`).
         ceiling = settings.agent_max_promoted_invalid_calls
         entries = message.invalid_tool_calls[:ceiling] if ceiling else message.invalid_tool_calls
         for index, call in enumerate(entries):
             promoted.append(
                 {
-                    # **Bounded, because this one reaches further than the operator's WARNING.**
-                    # It becomes `request.tool_call["name"]`, and from there `audit_events.tool`,
-                    # the `chemclaw.tool` span attribute and `ToolFailedEvent.tool` on the
-                    # chemist's stream — none of which bounds it, and `agent/audit.py::_recording`
-                    # `%s`-formats it into a log line the default formatter does not escape. The
-                    # design this replaced bounded the name for exactly this reason and the
-                    # promotion dropped the bound; `_bounded_text`'s own docstring already claimed
-                    # this was happening. Escaping stays at the sinks, so `_metric_label`'s
-                    # comparison against the bound tools is untouched.
+                    # Bounded because the name becomes `request.tool_call["name"]` and reaches the
+                    # audit row, span and event stream unbounded. Escaping stays at the sinks so
+                    # `_metric_label` is unaffected.
                     "name": _bounded_text(call.get("name") or UNKNOWN_TOOL),
-                    # The model's own id, kept: it is what pairs the `tool_failed` the announcer
-                    # raises with the `tool_call` event the stream already emitted, and dropping it
-                    # is what forced the previous design's `graph_stream` guard.
-                    #
-                    # **A missing id becomes a distinct synthetic one rather than `""`.** A
-                    # provider may omit it — measured, both `_convert_dict_to_message` and the
-                    # streamed chunk merge yield `id=None` when it does — and two such calls in one
-                    # reply then shared the empty string, which two independent readers key on:
-                    # `graph_stream.failed_calls` suppressed an unrelated call's `tool_result`, and
-                    # `ToolCallTrace._issued` collapsed both into one, so `_empty_answer_event`
-                    # printed "1 tool call(s) attempted, 2 refused by a gate" — an impossible count.
-                    # The index makes it unique within the reply, which is the scope that collides.
+                    # The model's own id pairs the `tool_failed` event with the `tool_call` the
+                    # stream already emitted. A missing id becomes a synthetic one unique within the
+                    # reply, since stream readers key on it.
                     "id": str(call.get("id") or "") or f"{_UNPARSED_CALL_ID}{index}",
                     "args": {
                         _UNPARSED_ARGUMENTS: bounded_repr(call.get("args")),
@@ -620,10 +382,7 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
 def _finish_reason(message: AIMessage) -> str:
     """Why the provider stopped emitting this message, as `response_metadata` names it.
 
-    **Read by containment, not equality, by whoever compares it.** Streamed chunks merge their
-    metadata with `merge_dicts`, which *concatenates* strings — so a gateway that repeats
-    `finish_reason` on a trailing usage chunk leaves `"lengthlength"` on the merged message, and an
-    equality test would let exactly the cut-off call this exists to stop run on upstream's guess.
+    Compare by containment: streamed chunks concatenate repeated strings (`"lengthlength"`).
     """
     metadata = message.response_metadata or {}
     return str(metadata.get("finish_reason") or metadata.get("stop_reason") or "")
@@ -632,25 +391,11 @@ def _finish_reason(message: AIMessage) -> str:
 def _demote_cut_off_calls(response: Any) -> None:
     """Move every tool call of a reply cut off at the output limit onto `invalid_tool_calls`.
 
-    **A cut-off document is not a finished one, and upstream makes the two look alike.** LangChain
-    runs a streamed call's argument fragments through `parse_partial_json`, which closes an
-    unterminated string and an unclosed brace — so `'{"smiles": "CC'` arrives as a valid call
-    reading `{"smiles": "CC"}`, and the tool ran on a truncated molecule with nothing anywhere
-    saying the document was incomplete. The call cannot tell, but the response can:
-    `finish_reason` is `length` when the provider stopped because the budget ran out.
-
-    **Every call in such a reply, not only the last.** A stream is cut once, at its end, so strictly
-    only the final call is truncated — but which call was being written when the budget ran out is
-    not something the merged message records, and running the earlier ones while refusing the last
-    would act on half of a plan the model was still stating. Refused together, the model re-issues
-    them together, inside its own loop and under every bound the loop has.
-
-    Demoted rather than refused here, so the one mechanism that already makes an unusable call
-    visible — `_promote` then `refuse_unparsed_arguments` — makes this one visible too, with the
-    audit row, the `tool_failed` and the `ToolMessage` it already produces
-    (`D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run`).
-
-    Marked with `_CUT_OFF_ERROR`, so the promotion can say "cut off" rather than "malformed".
+    Upstream's `parse_partial_json` closes a truncated document, so a cut-off call looks valid; the
+    reply's `finish_reason` is what reveals it. Every call in the reply is demoted, since the merged
+    message does not record which call was being written, and the model re-issues them together.
+    Demoted rather than refused here so `_promote` and `refuse_unparsed_arguments` handle it, marked
+    with `_CUT_OFF_ERROR`.
     """
     for message in _messages_of(response):
         if not isinstance(message, AIMessage) or not message.tool_calls:
@@ -674,45 +419,21 @@ def _demote_cut_off_calls(response: Any) -> None:
 class UnparsedArguments(ChemclawError):
     """The model asked for a tool with arguments that were not valid JSON.
 
-    A `ChemclawError` so the two mechanisms that already exist do the work, which is
-    `RepeatedCallRefusal`'s argument exactly: the audit middleware records it as an `error`
-    outcome, and `surface_domain_errors` hands the sentence to the model verbatim rather than an
-    opaque "Function failed."
-
-    **Deliberately not in `agent/audit.refusal_reason`'s table.** That table names the five *gates*
-    — decisions this system made on purpose. A document that will not parse is a fault, so
-    `refusal_reason` returns `None` and every surface renders it as one: `Chemclaw3_ui` in the
-    failure red, `evals/live` in `tools_failed`, `_TurnLedger` in `tool_failures`. That is the
-    correct classification and it is reached by adding nothing.
+    A `ChemclawError` so audit records an `error` outcome and `surface_domain_errors` hands the
+    sentence to the model. Not in `agent/audit.refusal_reason`'s table: it is a fault, not a gate's
+    decision, and every surface renders it as one.
     """
 
 
 @wrap_tool_call
 async def refuse_unparsed_arguments(request: Any, handler: Callable[[Any], Any]) -> Any:
-    """Refuse a promoted call before its body runs — below every gate that decides.
+    """Refuse a promoted call before its body runs — below the audit, authorization and guard gates.
 
-    **Below the gates, so all of them see the call**: the announcer raises `tool_failed`, the
-    audit trail records the row, and the authorization, dry-run and repeat guards all run on a call
-    the model really did make. That is the whole gain over the design this replaces, where none of
-    them could see it.
-
-    **Not innermost, though this said so.** `enforce_plan_approval` and `stamp_plan_link` are
-    appended below it whenever a profile enables the harness, so under `harness_enabled` they nest
-    inside — measured against a gated profile, not read off the list. Since this raises before
-    calling its handler, **the plan gate never sees a promoted call**. That is the right outcome
-    and is now written down rather than inherited: arguments that did not parse are not a
-    well-formed request for a gate to decide about, so the turn reports a fault (`reason=None`)
-    rather than a refusal nothing actually made.
-
-    **Before the body, because an empty argument dict is not safe.** Measured against the live
-    registry, **11 of 54** in-process tools have no required argument, so a promotion that dropped
-    the malformed document instead of carrying it under `_UNPARSED_ARGUMENTS` would satisfy those
-    schemas and execute the tool. This gate runs inside `awrap_tool_call`, which wraps
-    `_execute_tool_async` — so it raises before LangGraph validates the arguments and before the
-    body is entered, and neither the schema's opinion nor the tool's own defaults are consulted.
-
-    The sentence names the document because the model is the only party that can fix it, and it is
-    the only thing either record holds that says what broke.
+    Those gates all see the call. Under the harness, `enforce_plan_approval` and `stamp_plan_link`
+    nest inside this, so the plan gate never sees a promoted call; the turn reports a fault, not a
+    refusal. Raising inside `awrap_tool_call` happens before argument validation and the body, so an
+    empty or default argument set can never run. The message names the document, since only the
+    model can fix it.
     """
     arguments = request.tool_call.get("args") or {}
     document = arguments.get(_UNPARSED_ARGUMENTS) if isinstance(arguments, dict) else None

@@ -1,21 +1,11 @@
 """Read a soak record and say what the series did — as a fit, never as two endpoints.
 
-The soak exists to answer one question no single run can: does anything grow that should not?
-The previous attempt answered it the way that is always available and never sound — it subtracted
-the first sample from the last. api RSS went 643,304 → 650,756 KB across five rounds, which reads
-as a 7 MB leak and is equally consistent with a warm-up curve, with ordinary allocator jitter, and
-with a leak ten times larger hiding under a noisy fifth sample.
+The question is whether anything grows that should not. Each series gets a least-squares slope with
+its standard error, and a slope inside its own error is reported as unresolved rather than as a
+small number.
 
-So the verdict here is a *slope with its standard error*, and a series whose slope is inside its own
-error is reported as unresolved rather than as a small number. That is the same rule `live_storm`'s
-knee finder learned the hard way in
-`D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with`: a threshold chosen before the noise
-is measured produces a confident answer at random.
-
-The second half exists to separate the two shapes that both fit a rising line. A process that
-warms up and settles has a resolved slope over the whole series and an unresolved one over its
-tail; a leak has both, with the same sign. Nothing else distinguishes them at these lengths, and
-"the tail is flat" is the claim a memory leak cannot make.
+Warm-up and leak both fit a rising line; they are separated by fitting the two halves separately:
+a process that settles has an unresolved slope over its tail, a leak does not.
 """
 
 from __future__ import annotations
@@ -33,10 +23,8 @@ from chemclaw.core.markdown import render_table
 # fit has one degree of freedom and the error term is dominated by whichever sample was unlucky.
 _MIN_POINTS_TO_FIT = 4
 
-# A slope must clear twice its own standard error before it is called growth. Two is the
-# conventional ~95% line for a t-statistic at these sample sizes and, more to the point, it is
-# chosen here because it is the *only* number in this module that is not measured — so it is
-# named once, explained, and applied to every series rather than tuned per series.
+# A slope must clear twice its standard error (~95% for a t-statistic) to count as growth. The one
+# unmeasured constant here, applied to every series rather than tuned per series.
 _RESOLVING_SIGMA = 2.0
 
 
@@ -62,9 +50,7 @@ class Trend:
 def fit(values: Sequence[float]) -> Trend:
     """Least-squares slope of `values` against their index, with the slope's standard error.
 
-    Written out rather than pulled from numpy because the whole point is that the error term is
-    visible: a caller that can see `stderr` beside `slope` cannot accidentally report the slope
-    alone, which is the failure this module exists to prevent.
+    Returning `stderr` beside `slope` keeps a caller from reporting the slope alone.
     """
     n = len(values)
     if n < 2:
@@ -94,9 +80,8 @@ def describe(values: Sequence[float], unit: str) -> str:
         return f"flat within its own noise (slope {whole.slope:+.1f} ± {band:.1f} {unit}/round)"
     direction = "grows" if whole.slope > 0 else "falls"
     head, tail = fit(values[: len(values) // 2]), fit(values[len(values) // 2 :])
-    # A tail that is too short to fit and a tail that is genuinely flat both fail `resolved`, and
-    # they are opposite statements — "it settled" versus "we did not look". Collapsing them is how
-    # a five-round record gets read as a plateau, so the short case is named as short.
+    # A tail too short to fit is named as short, not read as flat: "we did not look" is not "it
+    # settled".
     if tail.n < _MIN_POINTS_TO_FIT:
         return (
             f"{direction} {whole.slope:+.1f} {unit}/round "
@@ -108,14 +93,8 @@ def describe(values: Sequence[float], unit: str) -> str:
             f"rises then settles — {whole.slope:+.1f} {unit}/round over the whole run, "
             f"flat within its noise over the last {tail.n} rounds"
         )
-    # Both halves resolved, so the series is still moving and the only question left is whether it
-    # is slowing. **That comparison is between the two halves, never between the tail and the
-    # whole**, because the whole *contains* the tail: on a series that rises in steps, the whole-run
-    # slope is dragged down by an early flat stretch, and a tail slope below it reads as
-    # deceleration when nothing decelerated. Measured on this repository's own soak — at 104 rounds
-    # `whole +2,317 / tail +1,345` said "decelerating", and the two halves at 138 rounds were
-    # +3,166 and +3,177, i.e. flat-out identical, with the last quarter at +5,138. The reading was
-    # an artefact of where the steps happened to fall, and it was reported before it was checked.
+    # Both halves resolved: compare the two halves, never the tail against the whole — the whole
+    # contains the tail, so a stepwise series reads as decelerating when it is not.
     trend = (
         "steady"
         if abs(tail.slope - head.slope) <= _RESOLVING_SIGMA * (head.stderr + tail.stderr)
@@ -189,19 +168,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("record", type=Path, help="the soak JSONL written by infra/live/soak.sh")
     args = parser.parse_args(argv)
     if not args.record.is_file():
-        # `is_file()`, not `exists()`: a directory argument reached `read_text` and came back as a
-        # raw `IsADirectoryError`, which is the same "the missing case is handled and the
-        # unreadable one is not" split the malformed-record arm below had.
+        # `is_file()`, not `exists()`, so a directory argument gets this message instead of a raw
+        # `IsADirectoryError`.
         print(f"no soak record at {args.record}")
         return 1
     try:
         rounds = read_rounds(args.record)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        # A soak record is written line by line by `infra/live/soak.sh` while a long run is in
-        # flight, so a truncated or half-written file is the *expected* damaged input, not an
-        # exotic one — an operator reporting on a run that was killed mid-write hits it. One line
-        # naming the file beats a `json.decoder.JSONDecodeError` traceback out of a reporting
-        # command. The exit code was already 1 and stays 1.
+        # `infra/live/soak.sh` writes the record line by line, so a truncated file from a killed run
+        # is expected input: name the file in one line rather than raising a traceback.
         print(f"cannot read the soak record at {args.record}: {exc}")
         return 1
     print(report(rounds))

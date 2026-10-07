@@ -3,6 +3,8 @@
 **Status:** accepted · **Date:** 2026-08-04 · **Implements:** W1 of
 D-2026-08-04-what-bofire-does-when-you-actually-run-it
 
+**Superseded-by:** [D-2026-08-05-a-gain-is-measured-from-the-last-gain](D-2026-08-05-a-gain-is-measured-from-the-last-gain.md) (in part)
+
 ## Context
 
 Two questions the BO surface asserted answers to and computed nothing for.

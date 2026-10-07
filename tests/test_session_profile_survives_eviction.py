@@ -1,23 +1,8 @@
-"""A session's profile survives eviction, so it cannot silently regain what it gave up (REV-14).
+"""A session's profile survives eviction, so it cannot silently regain what it gave up.
 
-`_LiveSessions` stores `(session, owner, profile)` because the three "can never drift"; the durable
-`session_owners` row stored only the owner. So a rehydrated session came back on the **default**
-profile, and the code said so plainly, calling it a case that "degrades gracefully — the
-conversation resumes with the full tool surface rather than a narrowed one".
-
-That has the direction backwards. A profile is *attenuation only* — `chemclaw.agent.chemclaw_agent`
-states
-it twice: "it can only attenuate, never widen". `property-lookup` cuts the surface to four tools and
-drops every connector but `calc`, specifically removing the ability to start a durable job. Coming
-back with the full surface is not graceful degradation; it is the control being switched off.
-
-And it did not need a restart. The live cache is an LRU with a capacity and no TTL, so on a busy pod
-session 1001 evicts session 1 while both are in use. A chemist mid-conversation, having done
-nothing, regains every tool their profile removed — and nothing anywhere says so.
-
-These tests drive the real front door with a one-entry cache, because the eviction is the point: a
-test that only restarted the app would exercise the case the old comment described and miss the one
-that actually happens.
+A profile only attenuates, so rehydrating on the default profile would switch the control off.
+The live cache is an LRU with no TTL, so eviction happens mid-conversation on a busy pod; these
+tests drive the real front door with a one-entry cache.
 """
 
 from typing import Any
@@ -50,10 +35,8 @@ def _client_with_one_slot(
 def _live_profile(app: Any, session_id: str) -> Any:
     """The profile the front door would run this session's next turn under.
 
-    Read off the live entry rather than off the session's owner row, because the owner records who
-    may reattach and says nothing about which profile the next turn runs under. `live.profile` is
-    what `POST /messages` passes to `graph_factory` and to `connector_factory`, so it is the value
-    that actually decides the surface.
+    Read off the live entry, since `live.profile` is what the turn route passes to the graph and
+    connector factories.
     """
     entry = app.state.live_sessions.get(session_id)
     assert entry is not None, "the session did not rehydrate at all"
@@ -94,12 +77,7 @@ def test_an_evicted_narrowed_session_comes_back_narrowed(monkeypatch: pytest.Mon
 
 
 def test_a_session_with_no_profile_still_rehydrates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The common case must not be broken by the fix: no profile means the default, as before.
-
-    Worth pinning because the natural way to write this fix — storing `""` for "no profile" — would
-    turn every ordinary session into a request for a profile named empty-string, which
-    `get_profile` rejects. `None` has to survive the round trip as `None`.
-    """
+    """A session with no profile rehydrates on the default; `None` round-trips as `None`."""
     client, app, _owners = _client_with_one_slot(monkeypatch)
     with client:
         plain = client.post("/sessions").json()["session_id"]

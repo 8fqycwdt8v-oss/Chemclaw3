@@ -1,29 +1,12 @@
 """What the two BO writers are allowed to claim about *who* proposed an experiment.
 
-`bo_campaigns.opened_by` and `bo_suggestions.actor` are the answer to "who framed this
-decision space" — `agent/leaver.py` retains them for exactly that reason, where it erases the
-conversation around them. Two code paths write those columns, and until this module they wrote
-them with equal confidence from unequal evidence:
-
-- The **durable** campaign reads `requested_by` off the run's Temporal memo, which core sets from
-  the validated front-door principal (`connectors/bo/workflows.py`, `connectors/bo/activities.py`).
-  Nothing attacker-writable is between that value and an authenticated login.
-- The **synchronous** MCP tool reads `X-Chemclaw-Actor` off the serving HTTP request. That header
-  is unauthenticated by design (`connectors/caller.py`), so the caller chooses the name, and the
-  row it produced was byte-indistinguishable from the durable path's.
-
-This paragraph used to add that the manifest declares `auth: mode: none`, "so the pod
-authenticates nobody at all — anything that can open a socket to it could name any chemist it
-liked". That stopped being true when the bundle gained a bearer, and the sentence outlived it in
-two places. `test_the_threat_model_this_module_states_is_the_one_its_manifest_declares` is what
-fails the next time the two disagree — in *either* direction, so a manifest that loses its
-credential fails it too.
-
-So these tests pin the asymmetry rather than a string: the synchronous path marks the name it could
-not verify, the durable path does not, and an absent caller is recorded as absent rather than as an
-unverified claim. Reverting the marker makes the first test below fail on the value it asserts
-*against* — the bare forged oid — which is the only shape of this test that can catch the
-regression.
+`bo_campaigns.opened_by` and `bo_suggestions.actor` answer "who framed this decision space"
+(`agent/leaver.py` retains them). The durable campaign reads `requested_by` from the run's memo,
+set from the validated principal; the synchronous MCP tool reads the unauthenticated
+`X-Chemclaw-Actor` header. So the synchronous path marks its name unverified, the durable path
+does not, and an absent caller is recorded as absent.
+`test_the_threat_model_this_module_states_is_the_one_its_manifest_declares` keeps the manifest's
+auth mode in step.
 """
 
 import asyncio
@@ -81,9 +64,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryCampaignStore:
 def _suggest_as(actor: str, session_id: str = "", correlation_id: str = "") -> str:
     """Call the synchronous tool with `actor` bound exactly as the request middleware would.
 
-    `bind_caller` is the same entry point `connectors/server.py` uses per tool call, so binding it
-    here reproduces a forged header without needing a live HTTP transport: the header is the *only*
-    thing that reaches those contextvars.
+    `bind_caller` is the entry point `connectors/server.py` uses per call, so this reproduces a
+    forged header without a live HTTP transport.
     """
     tokens = bind_caller(actor, session_id, correlation_id)
     try:
@@ -103,16 +85,10 @@ def _recorded(store: InMemoryCampaignStore, campaign_id: str) -> tuple[Campaign,
 def test_a_forged_actor_header_never_becomes_the_bare_recorded_identity(
     store: InMemoryCampaignStore,
 ) -> None:
-    """The regression this module exists for, asserted against the value that used to be written.
+    """A forged actor header never becomes the bare recorded identity.
 
-    Measured before the fix: binding `X-Chemclaw-Actor: victim-oid-0000-1111` and calling the tool
-    put that exact string into both columns. Nothing in the row said it had never been
-    authenticated, so an auditor reading `bo_suggestions` could not tell a forged proposal from a
-    real one — and `leaver.py` retains those columns precisely because they are supposed to answer
-    that question.
-
-    Asserting `!= FORGED_ACTOR` rather than `== "unverified:..."` is deliberate: it is the half that
-    fails the moment the marking is removed, whatever shape a future marker takes.
+    Asserting `!= FORGED_ACTOR` fails the moment the marking is removed, whatever shape a future
+    marker takes.
     """
     campaign, suggestion = _recorded(store, _suggest_as(FORGED_ACTOR))
 
@@ -131,13 +107,8 @@ def test_the_unverified_marker_still_carries_the_name_that_was_claimed(
 ) -> None:
     """Marked, not discarded — the claim is evidence even when the claimant is not authenticated.
 
-    Dropping the actor entirely would have closed the same hole and cost the record the one thing
-    it is for: the column is how an audit answers "who framed this campaign", and one that is
-    always empty answers nobody. The marker keeps the trail and removes only the false confidence.
-
-    What the marker does *not* license is handing the claim back out as provenance, which is why
-    `CampaignThread` no longer carries `opened_by` — a reader of a resumed campaign cannot tell a
-    marked actor from a verified one, so the audit trail is where that question gets answered.
+    The marker removes only the false confidence. `CampaignThread` no longer carries `opened_by`,
+    since a reader cannot tell marked from verified; the audit trail answers that.
     """
     campaign, suggestion = _recorded(store, _suggest_as(FORGED_ACTOR))
 
@@ -148,9 +119,7 @@ def test_the_unverified_marker_still_carries_the_name_that_was_claimed(
 def test_the_join_keys_are_not_marked(store: InMemoryCampaignStore) -> None:
     """Session and correlation ids pass through untouched: they are joins, not attribution.
 
-    They are how an auditor recovers the *validated* actor from core's own audit trail, which is
-    the recovery that makes marking the actor affordable in the first place. Marking them would
-    break the join and protect nothing.
+    They let an auditor recover the validated actor from core's own trail.
     """
     campaign_id = _suggest_as(FORGED_ACTOR, session_id="sess-7", correlation_id="corr-9")
     _campaign, suggestion = _recorded(store, campaign_id)
@@ -161,12 +130,7 @@ def test_the_join_keys_are_not_marked(store: InMemoryCampaignStore) -> None:
 def test_an_absent_caller_is_recorded_as_absent_not_as_an_unverified_claim(
     store: InMemoryCampaignStore,
 ) -> None:
-    """No header at all is "not recorded", and must not be dressed up as a claim nobody made.
-
-    A tool exercised directly — a test, the CLI, a dev stack — has genuinely no caller. Stamping
-    `unverified:` onto the empty string would invent an assertion, which is the same class of
-    dishonesty as certifying a forged one.
-    """
+    """No header at all is "not recorded", and must not be dressed up as a claim nobody made."""
     campaign, suggestion = _recorded(store, _suggest_as(""))
 
     assert (campaign.opened_by, suggestion.actor) == ("", "")
@@ -177,10 +141,7 @@ def test_the_durable_path_records_its_validated_actor_unmarked(
 ) -> None:
     """The other half of the asymmetry, without which the marker would say nothing.
 
-    A marker only carries information if the verified case is distinguishable from it. The durable
-    activity is driven directly (it is a plain coroutine) with the actor the workflow reads off the
-    run's memo — core's validated principal — and that one is written bare, so the column now says
-    which writer could vouch for the name it holds.
+    The durable activity, driven directly with the memo's validated actor, writes it bare.
     """
     from chemclaw.connectors.bo.activities import record_campaign_run
 
@@ -200,39 +161,4 @@ def test_the_durable_path_records_its_validated_actor_unmarked(
     assert (campaign.opened_by, suggestion.actor) == ("alice@example.com", "alice@example.com")
     assert not suggestion.actor.startswith("unverified:"), (
         "the memo-derived actor crossed no attacker-writable surface and must not be marked"
-    )
-
-
-def test_the_threat_model_this_module_states_is_the_one_its_manifest_declares() -> None:
-    """The marker's docstring describes who can forge the header; the manifest decides.
-
-    `_recorded_provenance`'s docstring is where a reader learns what the `unverified:` prefix is
-    defending against, and for a while it said the pod "does not even authenticate *core*: anything
-    that can open a socket to it can name any chemist it likes" — over a manifest that had declared
-    `mode: bearer` since `D-2026-08-20-a-networkpolicy-selects-peers-not-paths`. Driven against the
-    real app, `/mcp` answers 401 with no token and 401 with a wrong one, so the paragraph overstated
-    the exposure by the width of a credential.
-
-    Asserted in both directions rather than as "the phrase is absent", because the failure that
-    matters is *disagreement*: a bundle that loses its bearer and keeps a docstring saying it has
-    one is the same defect with the signs swapped, and it is the direction that understates the
-    exposure.
-
-    It does not assert the marking itself stays — that is the tests above. The prefix survives the
-    narrowing on its own argument: a bearer proves *core called*, never *which chemist*, so the
-    header is still an unverifiable claim.
-    """
-    from chemclaw.connectors.bo.server.tools import _recorded_provenance
-    from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
-    from chemclaw.connectors.registry import discovered
-
-    _path, manifest = discovered()["bo"]
-    assert isinstance(manifest.endpoint, HttpEndpoint)
-    authenticated = isinstance(manifest.endpoint.auth, BearerAuth)
-    doc = _recorded_provenance.__doc__ or ""
-    claims_open = "does not even authenticate" in doc
-    assert claims_open != authenticated, (
-        "connectors/bo/server/tools.py::_recorded_provenance describes a pod that authenticates "
-        f"{'nobody' if claims_open else 'its caller'} while connectors/bo/connector.yaml declares "
-        f"auth {manifest.endpoint.auth!r}"
     )

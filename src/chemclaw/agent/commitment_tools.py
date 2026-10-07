@@ -1,12 +1,7 @@
 """The agent tool over the commitment mirror: what a programme committed to, and what it waits on.
 
-**One tool, and it reads.** Nothing here moves a milestone, changes a date or assigns anybody: the
-mirror is read-only by the same rule every data source is (`ingest/sources/README.md` — a source
-"cannot acquire a write path by declaring one"), and writing back to a portfolio system is the
-effector seam's business rather than a tool's.
-
-The value it adds over the portfolio tool the organisation already runs is the join: this is the
-only place a slipping milestone sits beside the chemistry that is slipping it.
+Read-only: the mirror is a data source and cannot acquire a write path. Its value is the join —
+a slipping milestone beside the chemistry slipping it.
 """
 
 from datetime import datetime
@@ -50,13 +45,8 @@ class CommitmentReview(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before saying what a programme owes.
 
-        `computed_field` rather than a bare property, for the reason `FingerprintSearch.verdict`
-        states in full: a plain property is not serialized, so `model_dump()` would carry the rows
-        and drop every qualification on them.
-
-        The mirror caveat is unconditional because it is true of every arm: this is a copy of
-        somebody else's plan, and no answer built on it may present a date as a commitment being
-        made now.
+        A `computed_field` so `model_dump()` carries it. The mirror caveat is unconditional: this is
+        a copy of somebody else's plan, never a commitment being made now.
         """
         mirror = (
             "This is a MIRROR of the organisation's portfolio system, never the plan itself: it "
@@ -128,30 +118,8 @@ async def review_commitments(
         total_outstanding=page.total_outstanding,
         limit_applied=page.limit_applied,
         commitments=[
-            # **The whole row, not two fields of it, and the carve-out's justification was false.**
-            # This defanged `title` and `owner` on the stated ground that "the identifiers beside
-            # them are keys and bounded vocabularies". Measured against `ingest/commitments/models.
-            # Commitment`: only `kind` and `state` are `Literal`s. `source`, `external_id`,
-            # `parent_id`, `note_ids`, `job_ids` and `compounds` are unvalidated `str`/`list[str]`
-            # filled by a site-supplied `CommitmentAdapter` from a portfolio export this system does
-            # not control — the same trust position as `title`, which *was* defanged. Driven, a live
-            # closing delimiter in any of the five reached the model unescaped.
-            #
-            # `defanged_payload` rather than five more `defang(...)` entries, for the reason
-            # `protocol_design_tools._readable` uses it: a field added to that model next year is
-            # covered without this line being remembered, and a `Literal` or a datetime has no
-            # delimiter to spell so escaping it costs nothing.
-            #
-            # **This was claimed to be "the one field-level omission left" after the same wave
-            # closed the gap in `graph_tools`, `pending_tools`, `memory_tools`, `research_tools` and
-            # `durable_tools`, and two of those five had not been closed.** `pending_tools` still
-            # escaped two fields of a `PendingRequest` carrying **no `Literal` at all** — weaker
-            # than the `Commitment` case this comment argues from — and `memory_tools` escaped two
-            # fields of an `Observation` on the false ground that its `scope` and
-            # `evidence_note_ids` are "built from validated note ids". Driven, eight fields and
-            # three fields reached the model unescaped. Both are closed now, and
-            # `tests/test_tool_framing.py::test_every_row_projecting_tool_escapes_its_whole_row`
-            # is what holds all three together rather than a sentence counting them.
+            # Defang the whole row: most fields are unvalidated strings from a site-supplied
+            # adapter, and a field added later is covered without remembering this line.
             defanged_payload(row.model_dump(mode="json"))
             for row in page.commitments
         ],

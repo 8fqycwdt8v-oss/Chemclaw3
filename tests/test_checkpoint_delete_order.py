@@ -1,17 +1,10 @@
-"""The two deleters of the checkpoint tables, driven against a turn landing in the middle of them.
+"""The checkpoint-table deleters, driven against a turn landing in the middle of them.
 
-`durable/retention.py` was fixed under `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers` and
-the same defect stayed in the other two sites for a week: `agent/leaver.py`'s erasure and
-`agent/session_store.py`'s single-session delete each built their own checkpoints-first order by
-iterating `CHECKPOINT_TABLES`, with no re-ask, so a checkpoint committed by a live turn *after*
-`DELETE FROM checkpoints` survived while the later `DELETE FROM checkpoint_blobs` took its payload.
-
-**The interleaving is stepped by hand, and it has to be.** The window is a millisecond wide and
-cannot be hit by timing: the deleter's statements are executed one at a time on one connection
-while a second connection plays the checkpointer's committed write between them — which is exactly
-what the checkpointer's `autocommit=True` pool does to a sweep that thinks one transaction protects
-it. That is the same instrumentation the wave-6 review used to find this, kept here because a test
-that cannot produce the interleaving cannot tell the two orders apart: both are green without it.
+`agent/leaver.py`'s erasure and `agent/session_store.py`'s session delete must not leave a
+checkpoint committed by a live turn after `DELETE FROM checkpoints` whose blobs a later statement
+took. The interleaving is stepped by hand: the deleter's statements run one at a time on one
+connection while a second connection commits the checkpointer's write between them. Without that,
+both orders are green.
 """
 
 import pytest
@@ -25,10 +18,8 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
-# A thread id per test. They share one isolation schema, and the interleaved insert is an
-# `ON CONFLICT DO NOTHING` against a row the deleter's *open* transaction may have just deleted —
-# which blocks until that transaction ends, so a checkpoint id left behind by an earlier test
-# deadlocks the next one against its own deleter rather than failing it.
+# A thread id per test: the interleaved `ON CONFLICT DO NOTHING` insert blocks on a row the
+# deleter's open transaction deleted, so a shared id would deadlock rather than fail.
 _SESSION_THREAD = "sess-delete-order-session"
 _ERASE_THREAD = "sess-delete-order-erase"
 
@@ -105,11 +96,10 @@ async def test_a_session_delete_leaves_no_checkpoint_whose_payload_it_took() -> 
 
 
 async def test_an_erasure_leaves_no_checkpoint_whose_payload_it_took() -> None:
-    """The same statements the erasure sweep runs, against the same interleaving.
+    """The erasure sweep leaves no checkpoint whose payload it took.
 
-    `leaver` reaches its threads through a `session_owners` subselect rather than by id, so the
-    predicate differs and the rule does not: the two dependent statements must re-ask whether the
-    thread still has a `checkpoints` row.
+    `leaver` selects threads through a `session_owners` subselect, but the rule is the same: the
+    dependent statements re-ask whether the thread still has a `checkpoints` row.
     """
     await migrated_db_or_skip()
     await create_checkpoint_tables()

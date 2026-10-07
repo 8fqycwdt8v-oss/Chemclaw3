@@ -1,22 +1,14 @@
 """Who, besides its owner, may reach a session — and the one rule every reader of that asks.
 
-`D-2026-09-27-in-a-shared-session-the-sender-governs`. A session has one owner, recorded once in
-`session_owners`, and until this module that owner was the only person who could reach it
-(`session_store.owner_permits`). A **member** is someone the owner has let in: they may read the
-transcript and send messages, and every message they send runs as *them* — their roles, their
-memories, their spend caps — because the turn's identity is always the sender's
-(`api/routes/turns.post_message` passes the request's principal to `run_turn`, never the owner).
-Membership widens who may reach a session and grants nothing else.
+`D-2026-09-27-in-a-shared-session-the-sender-governs`. A member is someone the owner has let in:
+they may read the transcript and send messages, and every message runs as its sender (their roles,
+memories and spend caps). Membership widens who may reach a session and grants nothing else.
 
-**The owner alone admits and removes** (`PUT`/`DELETE /sessions/{id}/members/{actor}`); a member may
-remove only themselves. Membership is read on every request that is not the owner's rather than
-cached on the live session, so removing somebody takes effect on their next request rather than on
-the next cache eviction.
+The owner alone admits and removes; a member may remove only themselves. Membership is read on every
+non-owner request rather than cached, so removal takes effect on the next request.
 
-**Two backends, chosen as `plan_approval_store` chooses one**: durable where sessions are durable,
-process-lifetime where they are not, so a membership never outlives or is outlived by the session it
-admits to. The durable rows cascade from `session_owners` (`infra/sql/110_shared_sessions.sql`), so
-deleting, expiring or erasing a session takes its memberships with it.
+Durable where sessions are durable, in-process where they are not. Durable rows cascade from
+`session_owners`, so deleting, expiring or erasing a session takes its memberships with it.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -40,9 +32,8 @@ _ADD = (
 _REMOVE = "DELETE FROM session_members WHERE session_id = %s AND actor = %s"
 _IS_MEMBER = "SELECT 1 FROM session_members WHERE session_id = %s AND actor = %s"
 _MEMBERS = "SELECT actor, added_at FROM session_members WHERE session_id = %s ORDER BY added_at"
-# The sessions somebody else owns that `actor` has been let into, with what a conversation list
-# shows about each. Joined to `session_owners` rather than stored twice: the owner and the title are
-# that row's facts, and a copy here would be a second answer to "whose session is this".
+# Sessions somebody else owns that `actor` was let into. Joined to `session_owners` so owner and
+# title are not stored twice.
 _SHARED_WITH = (
     "SELECT m.session_id, o.owner, o.title, m.added_at, o.updated_at, o.profile "
     "FROM session_members m "
@@ -62,9 +53,8 @@ class SharedSession(NamedTuple):
     """A session somebody else owns that the caller is a member of.
 
     `owner`, `title`, `updated_at` and `profile` are `None` under the in-process backend, which
-    keeps memberships and nothing else; the durable one reads them off the session's ownership row.
-    The last two are what `GET /plans/pending` needs to fold a member's sessions into the same scan
-    as the caller's own: the order it reads plans in, and whether a plan can be waiting at all.
+    keeps memberships only. `GET /plans/pending` uses the last two to fold a member's sessions into
+    its scan.
     """
 
     session_id: str
@@ -100,7 +90,7 @@ class MemberStore(Protocol):
 
 
 class SessionMemberStore:
-    """`session_members`, on the session-store database (D-002)."""
+    """`session_members`, on the session-store database."""
 
     def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
@@ -163,8 +153,7 @@ class _Membership:
 class InMemorySessionMemberStore:
     """The same contract for a deployment whose sessions are in-process too.
 
-    Not a test double, for `InMemoryPlanApprovalStore`'s reason: `session_store="memory"` is a real
-    deployment, and a membership there has exactly the lifetime of the session it admits to.
+    Not a test double: `session_store="memory"` is a real deployment.
     """
 
     def __init__(self) -> None:
@@ -207,9 +196,8 @@ class InMemorySessionMemberStore:
 def session_member_store() -> MemberStore:
     """The membership store this deployment gets: durable where its sessions are durable.
 
-    One instance per process, for `plan_approval_store`'s reason: the front door writes memberships
-    and the agent's own session-scoped tools read them (`agent/evidence_tools.py`), and under the
-    in-process backend a second instance would be a second, empty registry.
+    One instance per process, so the front door's writes and the agent's session-scoped reads see
+    one registry under the in-process backend.
     """
     if settings.session_store == "postgres":
         return SessionMemberStore()
@@ -219,15 +207,10 @@ def session_member_store() -> MemberStore:
 async def participant_permits(session_id: str, owner: str | None, actor: str | None) -> bool:
     """Whether `actor` may reach `session_id` — as its owner, or as a member the owner let in.
 
-    **The one rule, and it extends `owner_permits` rather than replacing it.** The owner is decided
-    exactly as before, dev/enforced split included, and the membership question is asked only when
-    that answer is no — so a single-person session costs no extra statement, and a session with no
-    recorded owner can have no members: nobody holds the standing to have admitted them. A request
-    with no authenticated actor is never a member.
-
-    Read by the front door's session gate (`api/deps._resolve_session`) and by the agent's own
-    session-scoped read (`agent/evidence_tools.assemble_evidence_pack`), so a route and a tool
-    cannot disagree about who is in a conversation.
+    Extends `owner_permits`: membership is asked only when the owner check says no, so a
+    single-person session costs no extra statement. A session with no recorded owner has no members,
+    and an unauthenticated request is never a member. Both the front door's session gate and the
+    agent's session-scoped reads call this, so they cannot disagree.
     """
     if owner_permits(owner, actor):
         return True

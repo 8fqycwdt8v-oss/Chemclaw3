@@ -1,30 +1,9 @@
 """A bundle's heavy dependencies must not reach the chat service's process (D-118).
 
-This is the seam's central promise and the reason a capability "earns a bundle by taking a
-dependency closure with it". It held for imports the eye can see — core's modules simply do not
-`import chemclaw.connectors.calc` — and it was broken by the one field that resolves an import
-invisibly.
-
-`connector.yaml`'s `params_model` names a pydantic model as `module:Class`, and
-`connectors/jobs.py` resolves it by importing that module. It does so inside `build_job_tool`,
-which `agent/chemclaw_agent.py` calls on **every** `build_agent`. The `calc` bundle pointed its
-five jobs at `connectors/calc/specs.py`, which imported four science modules for the *result* types
-that lived alongside the request types. Measured on `main` at the time, building the enabled job
-tools loaded **`tblite`** — a compiled quantum-chemistry library — **and fifteen science modules**
-into the agent's process.
-
-The heavy half has since left the repository altogether
-(`D-2026-08-16-the-physics-leaves-the-cache-stays`), which makes this check *more* worth keeping
-rather than less: the boundary it guards must hold because it is declared, not because nothing
-heavy happens to exist on the other side of it today.
-
-Nothing failed. The chat pod just carried, in memory and in its image, the whole closure the
-bundle exists to keep out of it. That is the failure mode this file exists to make loud: a
-correctness property no test asserted, broken by a change that looked like tidy organisation.
-
-A subprocess is not incidental — it is the only way to ask the question. `sys.modules` in the test
-session is already polluted by every other test's imports, so an in-process check would pass no
-matter what.
+`connector.yaml`'s `params_model` (`module:Class`) is imported by `build_job_tool` on every
+`build_agent`, so a params module that imports science code drags that closure into the chat pod
+silently. The boundary must hold because it is declared, whatever happens to be heavy today. Run
+in a subprocess, because the test session's `sys.modules` is already polluted.
 """
 
 import subprocess

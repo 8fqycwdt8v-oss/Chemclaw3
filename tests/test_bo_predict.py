@@ -1,17 +1,10 @@
-"""Tests for reading the fitted surrogate back (W5).
+"""Tests for reading the fitted surrogate back.
 
-Two capabilities over one fit: what the model expects at a point the *caller* named, and how well
-that model predicts runs it was not shown. The second was refused until a measurement reversed the
-refusal — the objection was that `cross_validate` forces us to name a surrogate class, and
-`strategy.surrogate_specs` turns out to expose the one BoFire itself chose (M-7).
-
-Every assertion here goes through `interrogate_surrogate`, which is the spelling
-`connectors/bo/server/tools.py::predict_outcome` uses — the only path a chemist reaches. It used to
-go through `engine.predict_at`, a one-statement wrapper that baked in `assess_fit=False` and
-projected the first half, and that wrapper had **zero** `src/` callers: 667 lines exercised a second
-entry into this function while the shipped one was untested here. `predict_at` was deleted on
-2026-09-07 and these calls inlined onto the function it forwarded to; `_predictions` below is a
-test's own convenience for the projection, named as such, the same way `_fit_quality` is.
+Two capabilities over one fit: the model's expectation at caller-named points, and how well it
+predicts held-out runs (`strategy.surrogate_specs` exposes the surrogate BoFire chose, so
+`cross_validate` needs no class named). Every assertion goes through `interrogate_surrogate`, the
+path `connectors/bo/server/tools.py::predict_outcome` uses; `_predictions` and `_fit_quality` are
+test conveniences.
 """
 
 import asyncio
@@ -70,13 +63,7 @@ def _fit_quality(
     folds: int | None = None,
     seed: int | None = None,
 ) -> list[FitQuality]:
-    """Cross-validate the surrogate and return the scores — the fit half of one interrogation.
-
-    This was `engine.surrogate_fit_quality`, a one-line forwarder to `interrogate_surrogate` whose
-    only callers were the assertions below; production reaches `interrogate_surrogate` directly
-    from `connectors/bo/server/tools.py::predict_outcome`. It was deleted in the 2026-08-27
-    dead-code sweep and the convenience kept here, where a test's convenience belongs.
-    """
+    """Cross-validate the surrogate and return the scores — the fit half of one interrogation."""
     return interrogate_surrogate(problem, observations, [], folds=folds, seed=seed)[1]
 
 
@@ -88,10 +75,7 @@ def _predictions(
 ) -> list[Prediction]:
     """The prediction half of one interrogation, with no fit assessed — this file's convenience.
 
-    Deliberately here and not in `engine`, which is where it was: as `engine.predict_at` it was a
-    second public entry into `interrogate_surrogate` with a different default posture, so a reader
-    had two spellings of one question and no way to tell which the system used. The answer was
-    neither — `predict_outcome` asks for both halves at once.
+    Production asks for both halves at once through `predict_outcome`.
     """
     return interrogate_surrogate(problem, observations, points, assess_fit=False, seed=seed)[0]
 
@@ -100,19 +84,9 @@ def _predictions(
 def predicted_at() -> dict[str, Prediction]:
     """One fit of `_problem()` over `_runs()`, read at every point the constant-input tests name.
 
-    **Measured, because the cost is the whole reason this exists.** On an idle box a
-    prediction-only interrogation of this problem is 4.4 s, of which `_fitted_strategy` is 4.3 s,
-    and reading a field off the answer is microseconds. The four tests below named four points
-    between them and each paid a whole GP fit to read one of them.
-
-    Sharing one fit is also the *stronger* arrangement, not a concession. Two of these tests
-    compare one point's posterior sd against another's, and two independently-fitted GPs of the
-    same data differ by the fit's own non-determinism — measured elsewhere in this file at R²
-    0.906-0.969 over identical inputs — so a comparison drawn across two fits carries that noise
-    inside it. `interrogate_surrogate`'s own docstring makes the same argument about the score.
-
-    Keyed by name rather than by list position: an assertion has to say which point it is about
-    without the reader counting.
+    The fit dominates the cost, and sharing it is also stronger: GP fits are non-deterministic, so
+    comparing sds across two fits would carry that noise. Keyed by name so an assertion says which
+    point it means.
     """
     points: dict[str, dict[str, float | str]] = {
         "a_run_already_done": dict(_runs()[4].params),
@@ -138,14 +112,10 @@ def test_a_point_among_the_runs_predicts_near_what_was_measured(
 def test_an_unexplored_corner_carries_a_larger_sd_than_an_observed_point(
     predicted_at: dict[str, Prediction],
 ) -> None:
-    """The posterior question `op-13` asks and the run list cannot answer.
+    """An unexplored corner carries a larger sd than an observed point.
 
-    "Is there an unexplored corner, or has the search been circling one region" is a statement
-    about the model's uncertainty, so it needs the model. The runs alternate THF and toluene at
-    every 10 °C from 20; the corner below asks about a temperature nothing sits near.
-
-    Both sds come from one fit, which is what makes the comparison a statement about the two
-    points rather than about two GPs.
+    Whether the search has been circling one region is a question about the model's uncertainty.
+    Both sds come from one fit.
     """
     corner = predicted_at["an_unexplored_corner"]
     assert corner.sds["yield"] > predicted_at["the_first_run"].sds["yield"]
@@ -155,11 +125,10 @@ def test_an_unexplored_corner_carries_a_larger_sd_than_an_observed_point(
 def test_an_out_of_range_point_is_answered_and_labelled_rather_than_refused(
     predicted_at: dict[str, Prediction],
 ) -> None:
-    """Measured (M-6): BoFire does not clamp — it extrapolates, and the sd rises sharply.
+    """An out-of-range point is answered and labelled rather than refused.
 
-    Refusing would withhold a number the chemist can read correctly once told which side of the
-    bound they are on, so the point is answered with `in_domain` false and a summary that says the
-    mean is unconstrained there.
+    BoFire extrapolates (its sd rises sharply); the answer carries `in_domain` false and a summary
+    saying the mean is unconstrained there.
     """
     inside, outside = predicted_at["mid_range"], predicted_at["far_outside_the_range"]
     assert inside.in_domain
@@ -174,19 +143,17 @@ def test_a_prediction_says_it_is_not_a_recommendation(
 ) -> None:
     """The whole reason `Prediction` is not `Candidate`.
 
-    A candidate carries an implicit endorsement; an answer to a question carries none. The
-    distinction lives in a `computed_field`, not a docstring, because a bare property is not
-    serialized and the caveat would never reach the model composing the reply.
+    A candidate carries an implicit endorsement; a prediction does not. The caveat is a
+    `computed_field` so it is serialized.
     """
     assert "not a recommendation" in predicted_at["mid_range"].summary
 
 
 def test_a_featurized_categorical_is_accepted() -> None:
-    """The shape a problem with molecular options actually reaches the engine as.
+    """A featurized categorical is accepted.
 
-    `featurize_problem` turns a categorical carrying `structures` into descriptor values, which
-    become a `CategoricalDescriptorInput`. Measured (M-6) that `predict` handles that domain; this
-    pins it against our own types rather than against the measurement script.
+    `featurize_problem` turns a categorical with `structures` into a `CategoricalDescriptorInput`,
+    which `predict` must handle.
     """
     problem = OptimizationProblem(
         parameters=[
@@ -249,11 +216,7 @@ def _two_objective() -> tuple[OptimizationProblem, list[Observation]]:
 def two_objective_interrogation() -> tuple[list[Prediction], list[FitQuality]]:
     """One interrogation of `_two_objective()` — both halves, the shape `predict_outcome` asks for.
 
-    The fit half is the expensive one (a five-fold cross-validation over two outputs), and the two
-    tests below read *different halves of the same constant question*: one that every objective is
-    predicted, one that every objective is scored. Asking once is also the arrangement
-    `interrogate_surrogate`'s docstring argues for on its own terms — the score describes the model
-    that made the prediction.
+    The fit half is expensive, and the tests read different halves of the same answer.
     """
     problem, runs = _two_objective()
     return interrogate_surrogate(problem, runs, [{"temperature": 60.0, "solvent": "THF"}])
@@ -275,13 +238,7 @@ def test_predicting_below_the_observation_floor_is_refused() -> None:
 
 
 def test_predicting_at_no_point_is_refused() -> None:
-    """An empty ask is a caller mistake, not an empty answer.
-
-    The message changed with `predict_at`'s deletion and the behaviour did not: the wrapper raised
-    "needs at least one point to predict", and `interrogate_surrogate` — asked for no point *and*
-    no fit — already refused the same call in its own words. One guard, in the function that
-    ships, is what the wrapper's removal leaves.
-    """
+    """An empty ask is a caller mistake, not an empty answer."""
     with pytest.raises(ValueError, match="neither a prediction nor a fit"):
         _predictions(_problem(), _runs(), [])
 
@@ -299,17 +256,9 @@ def test_point_in_domain_reads_both_kinds_of_parameter() -> None:
 def one_fit() -> list[FitQuality]:
     """One cross-validated fit of `_problem()` over `_runs()`, for the tests that read its fields.
 
-    **Measured on an idle box**: `_fit_quality(_problem(), _runs())` is 33.3 s — a 4.3 s surrogate
-    fit plus 22.0 s of five-fold cross-validation — while reading `summary` off the result is
-    1.6 µs. Three tests asked that identical constant question and each paid the 33 s to assert a
-    different property of the same answer, which is the one case a shared fixture costs nothing.
-
-    **`test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_does` must not use
-    this, and does not.** Its subject is that two identical calls give *different* scores; handed
-    one cached result it would compare a value with itself. That would fail here, because the
-    assertion is bounded on both sides for exactly this reason — but a test whose lower bound is
-    the only thing standing between it and vacuity is one to keep away from a cache rather than one
-    to rely on. It calls `_fit_quality` three times, and each of those three is a real fit.
+    Cross-validation is expensive and these tests ask the same constant question.
+    `test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_does` must not use
+    this: its subject is that repeated fits differ.
     """
     return _fit_quality(_problem(), _runs())
 
@@ -324,13 +273,9 @@ def test_fit_quality_is_finite_and_carries_what_it_was_computed_on(
     """
     quality = one_fit[0]
     assert quality.objective == "yield"
-    # Content, not a bound the model already enforces: `mae >= 0.0` is `Field(ge=0.0)` and cannot
-    # fail, and `r2 <= 1.0` is arithmetic. These runs are a deliberate rising trend, so a surrogate
-    # that had regressed to predicting the mean would score about 0 and be caught here.
-    #
-    # `is not None` is the *content* half of the same assertion, not a type appeasement: these runs
-    # span ~27 points, so a `None` here would mean the zero-spread branch had started firing on a
-    # trend — which would make every score in this suite unreachable.
+    # Content, not a bound the model already enforces: these runs are a rising trend, so a surrogate
+    # predicting the mean would score about 0. `r2 is not None` checks the zero-spread branch has
+    # not started firing on a real trend.
     assert quality.r2 is not None, "these runs vary; a fit quality must exist for them"
     assert quality.r2 > 0.5
     assert quality.mae < 5.0, "the runs span ~27 points; this is a fit, not a constant"
@@ -383,13 +328,8 @@ def test_the_tool_returns_predictions_and_the_fit_behind_them() -> None:
 def test_the_tool_can_skip_the_fit_assessment() -> None:
     """Cross-validation costs extra fits; a follow-up in the same turn need not repay them.
 
-    The summary used to be empty here and now says the fit was not assessed — a blank caveat reads
-    as "no caveat", which is the opposite of what it means.
-
-    **This absorbed `test_a_skipped_fit_says_so_rather_than_returning_an_empty_summary`**, which
-    sat 130 lines below with a byte-identical body and the same two assertions — one whole
-    surrogate fit, re-run to assert the sentence already asserted here. The sentence it stated in
-    its docstring is the paragraph above.
+    When skipped, the summary says the fit was not assessed; a blank caveat would read as "no
+    caveat".
     """
     answer = asyncio.run(
         predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "THF"}], False)
@@ -448,12 +388,10 @@ def test_the_tool_the_model_sees_says_a_prediction_endorses_nothing() -> None:
 
 
 def test_a_short_campaign_is_cross_validated_rather_than_refused() -> None:
-    """The bug the review found: `predict_outcome` raised on every 3- and 4-run campaign.
+    """A short campaign is cross-validated rather than refused.
 
-    `bo_cv_folds` is 5 and the tool always defaulted, so a campaign above the seeding floor but
-    below five runs — the early campaign this tool is most useful for — got a `ValueError` instead
-    of an answer. A defaulted fold count now bends to the run count, and `FitQuality.folds` records
-    what was actually used so the adaptation is visible rather than hidden.
+    A defaulted fold count bends to the run count, so 3- and 4-run campaigns are answered;
+    `FitQuality.folds` records what was used.
     """
     for n in (3, 4):
         answer = asyncio.run(
@@ -476,14 +414,8 @@ def test_a_fold_count_the_caller_named_is_still_refused_when_the_runs_cannot_car
 def test_the_prediction_and_the_score_come_from_one_fit(monkeypatch: pytest.MonkeyPatch) -> None:
     """`predict_outcome` fits the surrogate exactly once — counted, not inferred.
 
-    **This test replaced a version that could not fail.** It used to run `interrogate_surrogate`
-    and the `predict_at` wrapper separately and assert their predictions agreed, which is two fits
-    agreeing — the by-construction check it claimed to replace. Reverting the tool to fit twice left
-    it green.
-
-    Counting the fits is the only assertion that distinguishes the two designs, and the distinction
-    is load-bearing: the GP's hyperparameter fit is non-deterministic, so two fits are genuinely two
-    models, and "the score describes the model that made this prediction" would be false.
+    GP fits are non-deterministic, so "the score describes the model that made this prediction"
+    holds only for one fit; counting is the only assertion that distinguishes one fit from two.
     """
     fits = 0
     original = engine._fitted_strategy
@@ -576,14 +508,9 @@ def test_a_negative_tolerance_is_refused() -> None:
 def test_the_suggestion_wires_the_assay_noise_through_to_the_front() -> None:
     """One acquisition, for the plumbing. The three summary readings are checked without one.
 
-    This used to make two `suggest_next_experiment` calls and a sibling made a third — each fitting
-    a GP and running a multi-start acquisition to assert a sentence. That optimizer's run-to-run
-    variance is the real timeout risk here (a sibling was measured spiking from 4.3s to 39.9s), so
-    the acquisition is paid once, for the one thing only the tool can show: that `assay_noise`
-    reaches `pareto_front` as its tolerance.
-
-    The explicit timeout is the point of the marker rather than a guess at a budget: at 60s a spike
-    names itself instead of eating the 180s the whole file shares.
+    Acquisition variance is the timeout risk, so it is paid once, to show `assay_noise` reaches
+    `pareto_front` as its tolerance. The 60 s marker makes a spike fail here rather than consume the
+    file's budget.
     """
     problem, runs = _trade_off()
     tolerant = asyncio.run(suggest_next_experiment(problem, runs, count=1, assay_noise=0.5))
@@ -605,9 +532,8 @@ def test_the_suggestion_says_which_front_it_drew(
 ) -> None:
     """A reader cannot tell a strict front from a tolerant one by looking at it, so it is stated.
 
-    Built directly rather than through the tool: `summary` is a pure function of the fields, and an
-    acquisition run would cost seconds to assert nothing the constructor cannot. The zero row is the
-    one that caught a real bug — `if self.front_tolerance` read an explicit 0.0 as "none given".
+    Built directly: `summary` is a pure function of the fields. The zero row checks an explicit 0.0
+    is not read as "none given".
     """
     suggestion = ExperimentSuggestion(
         campaign_id="campaign-test",
@@ -626,16 +552,11 @@ def _scale(name: str) -> ObjectiveScale:
 
 
 def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_does() -> None:
-    """The measurement that changed how this number is printed.
+    """The fit score does not reproduce, and is reported to the precision it does.
 
-    BoFire fits the GP's hyperparameters by numerical optimization and that fit is **not**
-    deterministic — not under a pinned `torch` seed and not with a fresh copy of the surrogate
-    spec. Measured over twelve identical calls on this problem: R² spanned 0.906-0.969 and MAE
-    spanned 1.16-1.80, so MAE moved by more than half its own value. The first version printed R²
-    to three decimals and MAE to three significant figures, stating a stability neither has.
-
-    This test pins the *property*, not a value: repeats must land in a band, and the summary must
-    warn a reader off comparing two scores that differ by less than it.
+    GP hyperparameter fitting is not deterministic even under a pinned seed, so repeated R² and MAE
+    vary. This pins the property — repeats land in a band, and the summary warns against comparing
+    scores that differ by less — not a value.
     """
     scores = [_fit_quality(_problem(), _runs())[0] for _ in range(3)]
     values = [score.r2 for score in scores]
@@ -655,12 +576,8 @@ def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats(
 ) -> None:
     """Two decimals on R², two significant figures on MAE — what survives a repeat.
 
-    **Shared fit, deliberately, and the name is why that needs saying.** What *repeats* is asserted
-    by the sibling above, which refits three times; what this one asserts is the formatting of one
-    fitted score, and it read a single sample before this fixture existed as well. The formatter is
-    a literal `:.2f`/`:.2g` over whatever the fit produced, so a second sample from the same runs
-    exercises the identical branch — the only reason to pay for one would be to hunt a rare bad
-    fit, which is not this test's job.
+    Uses the shared fit: repeatability is asserted by the sibling above, and the formatting is the
+    same for any one sample.
     """
     summary = one_fit[0].summary
     # `(?!\S)` anchors the MAE group: without it, a value formatted as `1e+02` matched just the
@@ -674,11 +591,9 @@ def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats(
 
 
 def test_a_score_over_enough_runs_drops_the_small_sample_caveat_but_keeps_the_repeat_one() -> None:
-    """The high-`n` branch of the summary was never rendered by any test.
+    """A score over enough runs drops the small-sample caveat but keeps the repeat one.
 
-    Only the "fewer than 20 runs" branch was exercised, so a formatting break in the other half
-    would have shipped silently. Constructed directly rather than fitted: the summary is a pure
-    function of the fields, and a real fit here would cost seconds to assert nothing extra.
+    Constructed directly, since the summary is a pure function of the fields.
     """
     over_the_threshold = FitQuality(
         objective="yield",
@@ -715,20 +630,16 @@ def test_the_defaulted_fold_count_clamps_up_to_two_at_the_observation_floor() ->
 
 # --- a point's *values*, not only its parameter names ------------------------------------------
 #
-# `_require_points_match` checked that a point names exactly the declared parameters and never what
-# it names them with. The asymmetry that makes this matter is BoFire's, and it is measured: `tell`
-# runs `validate_experimental`, so the identical mistake in an **observation** already comes back as
-# a plain `ValueError` the connector forwards verbatim; `predict` runs no validation at all, so the
-# same mistake in a **point** arrives as a `KeyError`/`TypeError` that `connectors.server` replaces
-# with "an internal error occurred" — nothing the model can repair from, so it retries.
+# BoFire validates observations in `tell` but runs no validation in `predict`, so a bad point value
+# arrives as a `KeyError`/`TypeError` that `connectors.server` hides as an internal error. Points
+# are checked here instead.
 
 
 def test_the_tool_refuses_a_point_naming_a_category_the_problem_does_not_have() -> None:
     """A ligand nobody declared is not an extrapolation — it is a level with no encoding.
 
-    Measured before the fix: `strategy.predict` on `{"solvent": "DMF"}` over a two-level `solvent`
-    raised `KeyError: "None of [Index(['DMF'], dtype='str')] are in the [index]"`, which is neither
-    a `ValueError` nor one of `_SURROGATE_FAILURES`.
+    Unchecked, `strategy.predict` raises a `KeyError` that is neither a `ValueError` nor a known
+    surrogate failure.
     """
     with pytest.raises(ValueError, match=r"points\[0\]"):
         asyncio.run(predict_outcome(_problem(), _runs(), [{"temperature": 60.0, "solvent": "DMF"}]))
@@ -745,12 +656,7 @@ def test_the_refusal_names_the_parameter_the_value_and_the_levels_that_exist() -
 
 
 def test_the_tool_refuses_a_point_whose_continuous_value_is_not_a_number() -> None:
-    """The same fault in the other direction, measured as a `TypeError` before the fix.
-
-    `{"temperature": "hot"}` reached torch as an object-dtype array ("can't convert np.ndarray of
-    type numpy.object_"), where the same value in an observation already yields BoFire's own "not
-    all values of input feature `temperature` are numerical".
-    """
+    """A continuous value that is not a number is refused rather than reaching torch."""
     with pytest.raises(ValueError, match=r"points\[0\]"):
         asyncio.run(
             predict_outcome(_problem(), _runs(), [{"temperature": "hot", "solvent": "THF"}])
@@ -758,12 +664,10 @@ def test_the_tool_refuses_a_point_whose_continuous_value_is_not_a_number() -> No
 
 
 def test_a_point_outside_a_continuous_bound_is_still_answered() -> None:
-    """The documented behaviour the value check must not break.
+    """A point outside a continuous bound is still answered.
 
-    "Out-of-range points are answered, not refused" is true of a *range*: the model extrapolates and
-    the widened sd is the honest signal. Pinned because the natural over-fix for the category case —
-    validating every point through `point_in_domain` — would silently turn this documented answer
-    into a refusal, and `point_in_domain` returns False for both.
+    The value check must not turn documented extrapolation into a refusal; `point_in_domain` is
+    False for both cases, so it cannot be the check.
     """
     answer = asyncio.run(
         predict_outcome(_problem(), _runs(), [{"temperature": 400.0, "solvent": "THF"}], False)
@@ -775,17 +679,10 @@ def test_a_point_outside_a_continuous_bound_is_still_answered() -> None:
 def test_an_objective_with_no_spread_at_all_refuses_an_r2_instead_of_reporting_a_perfect_fit() -> (
     None
 ):
-    """R² is undefined when the target does not vary, and BoFire returns 1.0 for it.
+    """An objective with no spread refuses an R² instead of reporting a perfect fit.
 
-    With SS_tot = 0 a "fraction of variance explained" has no denominator; measured on eight runs
-    all reading 42, `cross_validate` scored **R² 1.0000 / MAE 0** three times running, and
-    `FitQuality.summary` called that "predicts held-out runs with R² 1.00". A campaign whose assay
-    has flatlined — dead catalyst, saturated response, mis-plumbed detector — is exactly when a
-    chemist asks whether the model is worth listening to, and both of the existing caveats are
-    about *precision*, so neither fires.
-
-    `SurrogateFitError` already names "an objective with no spread across the points seen so far"
-    as a cause of a raised failure. Measured, that input does not raise; it scores 1.00.
+    With no variance R² has no denominator, and BoFire scores it 1.0. A flatlined assay is exactly
+    when a chemist asks whether to trust the model.
     """
     problem = _problem()
     flat = [
@@ -803,18 +700,10 @@ def test_an_objective_with_no_spread_at_all_refuses_an_r2_instead_of_reporting_a
 
 
 def test_a_systematic_sub_noise_drift_is_not_a_response_either() -> None:
-    """`spread == 0.0` catches a stuck assay and is defeated by a trend in the last decimal.
+    """A systematic sub-noise drift is not a response either.
 
-    Driven over a real BoFire fit before this: eight runs of 42.0 with a systematic 1.7e-10 step
-    scored **R² 0.9991** and published "predicts held-out runs with R² 1.00", while the same eight
-    runs at exactly 42.0 correctly reported no fit quality at all. Neither caveat fires on it,
-    because both are about run *count* — and there was no field in `FitQuality` a reader could have
-    used to see that the whole range was a nanounit. A random flatline scores honestly (pure 1e-9
-    jitter over the same values measured R² 0.175), which is why the *systematic* case is the one
-    worth a test: it is the one that reads as a model.
-
-    The threshold is relative to the response's own magnitude, and stated once in
-    `bo_flat_response_relative_spread` rather than here.
+    `spread == 0.0` misses a trend in the last decimal, which BoFire scores near-perfect. The
+    threshold is relative to the response's magnitude, set by `bo_flat_response_relative_spread`.
     """
     problem = _problem()
     drifting = [
@@ -829,12 +718,10 @@ def test_a_systematic_sub_noise_drift_is_not_a_response_either() -> None:
 
 
 def test_a_score_states_the_range_it_is_a_fraction_of() -> None:
-    """R² is scale-free, and without the range a reader cannot tell 50 points of yield from 1e-9.
+    """A score states the range it is a fraction of.
 
-    A pure function of the fields, so constructed rather than fitted — the same argument the
-    high-`n` test above makes. What it pins is that the number reaches the sentence a chemist reads:
-    the field existing is not the same as the summary stating it, and only one of the two is what a
-    tool result carries.
+    R² is scale-free, so the summary must state the range. Constructed directly; the summary is a
+    pure function of the fields.
     """
     quality = FitQuality(
         objective="yield", r2=0.91, mae=1.2, folds=5, n_observations=8, response_range=48.5
@@ -843,14 +730,11 @@ def test_a_score_states_the_range_it_is_a_fraction_of() -> None:
 
 
 def test_the_defaulted_fold_count_never_asks_for_more_folds_than_there_are_runs() -> None:
-    """The asymmetry between `_resolve_folds`' two branches, held to the floor that makes it safe.
+    """The defaulted fold count never asks for more folds than there are runs.
 
-    A caller-supplied count is checked against `n_observations`; a defaulted one is
-    `max(2, min(bo_cv_folds, n))`, which bends down only to 2 — so it would ask for two folds over
-    one observation. That is unreachable today *because* `MIN_SEED_OBSERVATIONS == 2` and
-    `interrogate_surrogate` refuses below it, which is a coupling across two modules rather than a
-    property of the function. Asserted from the constant, so lowering that floor reds here instead
-    of producing a fold that holds out nothing.
+    A defaulted count bends down only to 2, which is safe only because `interrogate_surrogate`
+    refuses below `MIN_SEED_OBSERVATIONS == 2`; asserted from the constant so lowering it fails
+    here.
     """
     from chemclaw.science.bo.engine import _resolve_folds
     from chemclaw.science.bo.problem import MIN_SEED_OBSERVATIONS

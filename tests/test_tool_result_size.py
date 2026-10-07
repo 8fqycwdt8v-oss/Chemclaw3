@@ -1,13 +1,8 @@
-"""One tool result cannot be larger than the budget it is inside — the bound that did not exist.
+"""One tool result cannot be larger than the budget it is inside.
 
-`connector_max_request_bytes` capped what this system sends a capability server. Nothing capped
-what came back, and the two context edits are structurally unable to: `ClearToolUsesEdit` preserves
-the newest `agent_keep_last_tool_groups` results verbatim and the conversation window never cuts
-past the newest group, so a single oversized result is the one thing neither can reclaim.
-
-Measured on the shipped defaults, with each result inside its own tool's ceiling: two results at
-200,000 characters are 100,077 estimated tokens — one over the budget — and ~224,000 billed, with
-both edits running and reclaiming nothing.
+Neither context edit can reclaim the newest tool results (`ClearToolUsesEdit` keeps them verbatim
+and the conversation window never cuts past the newest group), so an oversized result must be
+bounded on its way in.
 """
 
 import asyncio
@@ -48,12 +43,9 @@ def test_a_result_inside_the_ceiling_is_untouched() -> None:
 
 
 def test_both_ends_of_an_oversized_result_survive() -> None:
-    """Head *and* tail, because a procedure states its outcome at the end.
+    """Head and tail both survive, because a procedure states its outcome at the end.
 
-    `agent/condense.py` makes this argument for a protocol and it generalises: a head-truncated
-    result returns conditions that look complete with the yield and purity silently absent, which
-    reads as "not measured" against neighbours that measured it. Keeping both ends costs nothing
-    and leaves the two places a reader's eye actually goes.
+    A head-only cut would drop yield and purity, which then read as "not measured".
     """
     content = "HEAD" + ("x" * 100_000) + "TAIL"
 
@@ -68,11 +60,10 @@ def test_both_ends_of_an_oversized_result_survive() -> None:
 
 
 def test_the_cut_says_it_happened_and_says_who_said_so() -> None:
-    """A silently shortened result is a model reporting on a corpus it was never shown all of.
+    """The cut says it happened and that this system said so.
 
-    The notice names the tool, the arithmetic and the remedy that exists — narrowing the question,
-    not asking again — and marks itself as system text, for the reason `TOOL_RESULT_PLACEHOLDER`
-    does: a model shown a shortened result with no explanation reads it as what the tool returned.
+    The notice names the tool, the arithmetic and the remedy (narrow the question), and marks itself
+    as system text, so a shortened result is not read as what the tool returned.
     """
     bounded, _ = bounded_content("x" * 50_000, "find_calculations", 1_000)
 
@@ -115,18 +106,11 @@ def test_the_cap_can_be_switched_off() -> None:
 def test_switching_the_cap_off_reaches_the_share_arithmetic_as_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """0 means "no ceiling" all the way through, and only the *callee* was ever asked.
+    """Switching the cap off reaches the share arithmetic as off.
 
-    `test_the_cap_can_be_switched_off` above proves `bounded_content(..., 0)` is a no-op. Nothing
-    asserted that `bounded_for_batch` hands it 0 when `agent_max_tool_result_chars` is 0 — and that
-    translation is where the meaning lives, because the share is `max(ceiling // width, 1)` and the
-    floor is deliberately *not* applied when the ceiling is off. Measured with `else 1` in that
-    conditional: a 5,000-character result comes back as **62 characters** of notice saying it was
-    cut, in every deployment that switched the cap off, with this whole file green. The rule was
-    tested; the translation the rule depends on was not.
-
-    Identity rather than equality, because "unchanged" is what `bound_tool_results` reads to decide
-    whether to copy the message at all.
+    `bounded_for_batch` must hand `bounded_content` 0 when `agent_max_tool_result_chars` is 0; the
+    `max(ceiling // width, 1)` floor must not apply then. Identity rather than equality, because
+    `bound_tool_results` reads "unchanged" to decide whether to copy the message.
     """
     monkeypatch.setattr(settings, "agent_max_tool_result_chars", 0)
     content = "A" * 5_000
@@ -141,13 +125,10 @@ def test_switching_the_cap_off_reaches_the_share_arithmetic_as_off(
 
 
 def test_a_result_of_exactly_the_limit_is_not_cut() -> None:
-    """`<=`, not `<`: at the ceiling exactly there is nothing to reclaim and nothing to say.
+    """A result of exactly the limit is not cut: `<=`, not `<`.
 
-    The boundary is the only place "at most `limit` characters" is an interesting claim, and it is
-    where this file used to stop — every fixture sat comfortably either side. One character in from
-    it, the cut is the one this module's own docstring calls the defect it exists to prevent: a
-    result at the ceiling replaced by a shorter result plus a notice, which is the truncation that
-    grew what it bounded re-entering by the other door.
+    At the ceiling there is nothing to reclaim, and cutting would replace it with a shorter result
+    plus a notice.
     """
     at_limit = "A" * 1_000
     bounded, removed = bounded_content(at_limit, "read_document", 1_000)
@@ -160,14 +141,7 @@ def test_a_result_of_exactly_the_limit_is_not_cut() -> None:
 
 
 def test_a_limit_of_exactly_the_notice_keeps_the_explanatory_form_and_no_text() -> None:
-    """`limit == widest` is where the two notice forms and the `kept` floor all disagree.
-
-    Below the widest form of the sentence the brief form is used; at it exactly the explanatory
-    form fits, and the whole share is spent on it — `kept` is 0, not 1. Three mutations of this
-    function disagree about this single point (`limit < widest` -> `<=`, `max(limit - widest, 0)`
-    -> `1`, and the at-the-limit branch above) and 126 tests could not tell any of them apart,
-    because no fixture ever put `limit` there.
-    """
+    """At `limit == widest` the explanatory notice takes the whole share: `kept` is 0, not 1."""
     total = 5_000
     widest = len(_notice("read_document", total, total))
 
@@ -179,20 +153,11 @@ def test_a_limit_of_exactly_the_notice_keeps_the_explanatory_form_and_no_text() 
 
 
 def test_the_head_and_tail_budgets_are_spent_down_across_every_block() -> None:
-    """Three text blocks, because at two the accumulation is indistinguishable from a reset.
+    """The head and tail budgets are spent down across every block.
 
-    `_kept` walks the spans spending one head budget and one tail budget down across all of them.
-    Every fixture in this file had one text block or two, and with two the second walk's `-=` is
-    reached at most once — so `head_budget -= len(...)` could become `head_budget = len(...)` and
-    all 18 tests in the repository that execute `_kept` still passed. Under that mutation the
-    budget *resets* at every block, so a result is bounded per block rather than in total: measured
-    here, 3,042 characters of tool text against a 2,000 limit. The share `bounded_for_batch`
-    divides is then not a ceiling at all, which is the property this whole module is for.
-
-    The same fixture pins the three things the walk owes its caller besides the total: the head
-    survives, the tail survives (the tail budget is spent down too, and a reset there loses it
-    outright), and the notice lands on a block that survives `_rebuilt` rather than on the trailing
-    image, whose text `_rebuilt` discards.
+    Three text blocks, because with two an accumulation cannot be told from a per-block reset, which
+    would bound each block rather than the total. The same fixture checks the head and tail survive
+    and that the notice lands on a block `_rebuilt` keeps, not the trailing image.
     """
     limit = 2_000
     image = {"type": "image", "source": {"data": "abc"}}
@@ -210,18 +175,11 @@ def test_the_head_and_tail_budgets_are_spent_down_across_every_block() -> None:
 
 
 def test_a_string_block_carries_the_notice_when_the_first_block_cannot() -> None:
-    """The same silent-cut guard, for the block shape an in-process tool returns.
+    """A bare string block carries the notice when the first block cannot.
 
-    `test_a_cut_is_not_silent_when_the_first_block_carries_no_text` proves this for a list of
-    *dicts*. A content list may also hold bare strings, and `_carrier`'s test for one is
-    `isinstance(block, str) or carries_text` — the `or` arm, which no fixture reached. Mutated to
-    `and`, no bare string is ever a carrier, the notice is computed for the leading image, and
-    `_rebuilt` discards the text of a block that carries none: the result is shortened by 9,000
-    characters with nothing in it saying so.
-
-    Driven below the explanatory notice's own length on purpose, because that is the only share at
-    which the head budget is 0 and the carrier — rather than where the budget ran out — decides
-    where the sentence lands.
+    `_carrier` accepts `isinstance(block, str) or carries_text`; this reaches the `str` arm. Driven
+    below the explanatory notice's length, where the head budget is 0 and the carrier decides where
+    the sentence lands.
     """
     image = {"type": "image", "source": {"data": "abc"}}
     content: list[Any] = [image, "y" * 9_000]
@@ -237,11 +195,10 @@ def test_a_string_block_carries_the_notice_when_the_first_block_cannot() -> None
 def test_an_oversized_result_is_bounded_on_its_way_to_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Through the middleware, because the claim is about the chain and not about the arithmetic.
+    """An oversized result is bounded on its way to the model, through the middleware.
 
-    Every tool, not only an out-of-process one: the two results that measured this defect —
-    `read_document` and `find_calculations` — are in-process, so a cap keyed on the `SERVED_BY`
-    stamp would have missed exactly the case it exists for.
+    Every tool is bounded, in-process ones included, so the cap is not keyed on the `SERVED_BY`
+    stamp.
     """
     monkeypatch.setattr(settings, "agent_max_tool_result_chars", 5_000)
     request = _Request("find_calculations")
@@ -256,14 +213,9 @@ def test_an_oversized_result_is_bounded_on_its_way_to_the_model(
 
     assert isinstance(result, ToolMessage)
     assert len(result.content) < 200_000
-    # **Exactly one, not "more than before", and the difference is the whole `count` argument.**
-    # `frame_connector_results` nests this middleware inside itself and re-bounds after escaping, so
-    # one cut passes through `bounded_for_batch` twice; `count=False` on the second pass is what
-    # keeps the counter and the `tool_result.truncated` row about the *result*. A `> before`
-    # assertion is satisfied by both passes counting, which is what shipped — measured, one
-    # oversized connector result advanced this counter by **2.0** — so an operator counting cuts saw
-    # 2N for N results, the second row carrying the understated figure. This is a single pass, so
-    # exactly one.
+    # Exactly one: `frame_connector_results` re-bounds after escaping with `count=False`, so the
+    # counter and the `tool_result.truncated` row describe the result once. A `> before` assertion
+    # would pass with both passes counting.
     assert METRICS.value("chemclaw_tool_results_truncated_total") == before + 1.0, (
         "one cut must count once: the counter moved by "
         f"{METRICS.value('chemclaw_tool_results_truncated_total') - before}"
@@ -273,9 +225,8 @@ def test_an_oversized_result_is_bounded_on_its_way_to_the_model(
 class _Request:
     """The attributes `bound_tool_results` reads off a tool-call request.
 
-    `tool` is `None`, which is both LangChain's documented default for a request built outside a
-    graph and what `ToolNode` passes for a name the graph does not hold — so the metric label
-    clamps to `"unknown"`, which is the case the clamp exists for.
+    `tool` is `None`, as `ToolNode` passes for a name the graph does not hold, so the metric label
+    clamps to `"unknown"`.
     """
 
     def __init__(self, name: str) -> None:
@@ -286,16 +237,11 @@ class _Request:
 
 
 def test_an_invented_tool_name_never_reaches_the_truncation_label() -> None:
-    """The counter is on an unauthenticated `/metrics`, so its label may not be model-authored.
+    """An invented tool name never reaches the truncation label.
 
-    `core/metrics.py` declares this counter's label as bounded and says why — "a tool name here is
-    one the registry served, never a string a caller invented" — and that was the belief rather
-    than the code. `ToolNode` dispatches an unregistered name through this chain deliberately, its
-    not-a-valid-tool error **echoes the name back**, and the echo is over the ceiling exactly when
-    the name is: measured on a compiled graph, a 90,006-character invented name minted a
-    **90,054-character** exposition line, one new series per name, while
-    `chemclaw_tool_calls_total` beside it correctly read `tool="unknown"` — the same clamp, two
-    middlewares away, already applied.
+    The counter is on an unauthenticated `/metrics`. `ToolNode` dispatches an unregistered name
+    through this chain and its error echoes the name back, so an unclamped label would mint a series
+    per invented name.
     """
     request = _Request("EXFIL_" + "B" * 200)
 
@@ -310,14 +256,10 @@ def test_an_invented_tool_name_never_reaches_the_truncation_label() -> None:
 
 
 def test_a_cut_result_is_never_larger_than_its_ceiling() -> None:
-    """The notice is charged against the ceiling, because the model reads it like any other span.
+    """A cut result is never larger than its ceiling.
 
-    Past the ceiling the function used to keep exactly `limit` characters and *then* add a
-    313-character notice, so the bound returned `limit + 313` — and for an overshoot smaller than
-    the notice it grew what it was bounding: measured at the shipped ceiling, 60,001 characters in,
-    **60,313 out**, 312 more than the tool returned, with the truncation counter incremented and a
-    notice telling the model to narrow its question. A ceiling that is exact is also what lets a
-    batch's share of it be exact (`bound_tool_results`).
+    The notice is charged against the ceiling, since the model reads it like any other span; an
+    exact ceiling also makes a batch's share of it exact.
     """
     for total in (60_001, 61_000, 100_000):
         bounded, removed = bounded_content("A" * total, "read_document", 60_000)
@@ -328,32 +270,25 @@ def test_a_cut_result_is_never_larger_than_its_ceiling() -> None:
 
 
 def test_a_cut_is_never_silent_at_the_smallest_configurable_ceiling() -> None:
-    """`agent_max_tool_result_chars` is `ge=0`, so a deployment may set 1 — and did lose the notice.
+    """A cut is never silent at the smallest configurable ceiling.
 
-    Three fifths of the limit goes to the head, which rounds to 0 below 2: the head loop then broke
-    before its first iteration, `last_head` stayed at -1, no index matched, and the notice was
-    dropped. `bounded_content("A" * 1_000, …, 1)` returned a single character with nothing saying
-    so — the one contract this module has, that a cut is never silent, broken at the edge of its
-    own configuration range.
+    `agent_max_tool_result_chars` is `ge=0`, so 1 is valid; the head share then rounds to 0 and the
+    notice must still be placed.
     """
     bounded, removed = bounded_content("A" * 1_000, "read_document", 1)
 
     assert removed == 1_000, "every character of the result was dropped"
-    # The brief form, because the explanatory sentence is 312 characters and the limit is 1. It
-    # keeps the three facts the model cannot act correctly without — that something was removed,
-    # how much, and that the system removed it rather than the tool returning nothing — and drops
-    # the advice about narrowing the question, which is what there is no room for.
+    # The brief form: the explanatory sentence does not fit, so it keeps that something was removed,
+    # how much, and that the system removed it, and drops the advice.
     assert "1,000 chars cut" in bounded
     # The mark, which is what the words "by the system" used to claim and could not prove.
     assert bounded.endswith(SYSTEM_SPEECH_MARK)
 
 
 def test_a_result_smaller_than_the_notice_is_left_alone() -> None:
-    """Below the notice's own length there is nothing to reclaim, so nothing is cut.
+    """A result smaller than the notice is left alone.
 
-    The two rules — a cut is never silent, and a bound never grows what it bounds — collide only
-    here, and this is the resolution: a result shorter than the sentence explaining the cut cannot
-    be made smaller by cutting it, so it is not cut and no notice is owed.
+    Cutting cannot make it smaller, so no cut is made and no notice is owed.
     """
     bounded, removed = bounded_content("AB", "read_document", 1)
 
@@ -405,19 +340,11 @@ def _oversized_sweep() -> Any:
 
 @pytest.mark.parametrize("width", [8, 20])
 def test_one_assistant_message_cannot_fan_out_past_the_request_budget(width: int) -> None:
-    """The ceiling bounds one *result*; what neither context edit can reclaim is one *batch*.
+    """One assistant message cannot fan out past the request budget.
 
-    **Measured before the fix, on this graph.** `ClearOlderToolResultsEdit` raises `keep` to the
-    newest batch's size so the batch survives by construction, and the conversation window clamps
-    its cut at the newest group — both correct for evidence the model has not read yet, and exactly
-    why a fan-out escapes. Nothing bounded the product of the per-result ceiling and the batch
-    width: at the shipped 60,000 characters and a width of 8 the request went out at **164,232**
-    estimated tokens against a 100,000 budget, and at 20 at **345,735** — every control doing
-    precisely what it documents, `chemclaw_context_compactions_total` at 0 because there was
-    nothing older to clear.
-
-    `agent_max_parallel_tool_calls` is not the missing bound: it is LangGraph's `max_concurrency`,
-    so 20 calls still yield 20 results, which is why the width is swept past it here.
+    The per-result ceiling bounds one result; the context edits deliberately keep the newest batch
+    whole, so the batch must be bounded by sharing the ceiling across it.
+    `agent_max_parallel_tool_calls` limits concurrency, not results, so the width is swept past it.
     """
     _SENT.clear()
     _BOUND.clear()
@@ -449,25 +376,16 @@ def test_one_assistant_message_cannot_fan_out_past_the_request_budget(width: int
 
 @pytest.mark.parametrize("width", [190, 400, 1000])
 def test_the_batch_share_bounds_the_batch_at_every_width(width: int) -> None:
-    """The share has to bound the *batch*, and past a certain width it stopped doing so.
+    """The batch share bounds the batch at every width, including past the notice-length crossover.
 
-    `bounded_content` refused to return less than the sentence explaining the cut, so once
-    `agent_max_tool_result_chars // width` fell below that sentence's ~312 characters every result
-    floored there and the batch total grew linearly with the width instead of being capped.
-    Measured before this: **124,800** characters at width 400 against a 60,000 ceiling, and
-    **312,000** at width 1000 — the defect the share was introduced to close, one order of
-    magnitude up.
-
-    Swept past the crossover deliberately. The first version of this test used widths 8 and 20,
-    both comfortably below it, which is why it passed against the floor.
+    Once `ceiling // width` falls below the notice length, flooring each result at the full notice
+    would grow the total linearly with width.
     """
     ceiling = settings.agent_max_tool_result_chars
     share = max(ceiling // width, 1)
     out, _ = bounded_content("x" * 200_000, "sweep", share)
-    # Per result, the share or the brief notice, whichever is larger — the notice is never cut,
-    # because a bound paid for by saying nothing is not what this module is for. Its length is
-    # *measured*, not written down: it was `19` here until the notice gained the system-speech mark
-    # and became 46, which is the same commit making the same sentence stale in two files.
+    # Per result, the share or the brief notice, whichever is larger; the notice is never cut. Its
+    # length is measured, not written down.
     brief = len(_brief_notice(200_000))
     assert len(out) <= max(share, brief), f"one result overran its share at width {width}"
     assert len(out) * width <= ceiling, (
@@ -476,13 +394,10 @@ def test_the_batch_share_bounds_the_batch_at_every_width(width: int) -> None:
 
 
 def test_a_cut_is_not_silent_when_the_first_block_carries_no_text() -> None:
-    """The notice has to land on a block that survives the rebuild.
+    """A cut is not silent when the first block carries no text.
 
-    `_kept` placed it at index 0 regardless, and `_rebuilt` drops the text computed for any block
-    that is neither a string nor a dict with a `text` key — so an image-first result lost the
-    notice entirely: the characters went, the truncation counter moved, and the model was handed
-    the image with nothing saying the rest had been removed. That is the silent cut this module
-    exists to prevent, one block along from where it was being prevented.
+    `_rebuilt` drops text computed for a block that is neither a string nor a text dict, so the
+    notice must land on one that survives, not on a leading image.
     """
     content = [{"type": "image", "source": {"data": "abc"}}, {"type": "text", "text": "y" * 9_000}]
     out, removed = bounded_content(content, "sweep", 500)
@@ -496,31 +411,20 @@ def test_a_cut_is_not_silent_when_the_first_block_carries_no_text() -> None:
 
 
 def test_the_notice_carries_the_mark_that_makes_it_this_systems_own_sentence() -> None:
-    """F5: the notice claimed to be system text and carried nothing that made it so.
+    """The notice carries `SYSTEM_SPEECH_MARK`, which makes it this system's own sentence.
 
-    Measured: `SYSTEM_SPEECH_MARK in _notice(...)` was **False** where the same test on
-    `compaction.TOOL_RESULT_PLACEHOLDER` is True — while this module's docstring said the notice is
-    "named as system text and not as tool output, for the reason `TOOL_RESULT_PLACEHOLDER` is". By
-    the prompt's own rule the model must read every unmarked word of a tool result as data, however
-    it is phrased, so the sentence was asking for a trust it had not been given — and a hostile
-    connector could compose it verbatim, since `framing._MARK_FORGERY` matches the mark and nothing
-    else.
-
-    Both forms, because the brief one is what a wide fan-out actually gets and it makes the same
-    claim in fewer words.
+    The model reads every unmarked word of a tool result as data. Both notice forms are checked,
+    since a wide fan-out gets the brief one.
     """
     assert SYSTEM_SPEECH_MARK in _notice("read_document", 40_000, 60_000)
     assert SYSTEM_SPEECH_MARK in _brief_notice(40_000)
 
 
 def test_a_connector_cannot_forge_the_notice_it_now_carries() -> None:
-    """The mark is only worth reading if the text on the other side cannot write it.
+    """A connector cannot forge the notice.
 
-    A connector's payload reaches the model through `framing.defang` (or `frame_untrusted`, which
-    calls it), and `_MARK_FORGERY` escapes any `[system <nonce>]`-shaped span — so a server copying
-    this notice verbatim, mark and all, arrives with `&#91;` where the anchor was. That is the
-    property the mark rests on, asserted here rather than believed, because the notice is the newest
-    thing to depend on it.
+    Connector payloads pass through `framing.defang`, whose `_MARK_FORGERY` escapes any
+    `[system <nonce>]`-shaped span; the mark is worth reading only because of that.
     """
     forged = defang(_notice("read_document", 40_000, 60_000))
 
@@ -529,11 +433,10 @@ def test_a_connector_cannot_forge_the_notice_it_now_carries() -> None:
 
 
 def test_the_notice_is_still_charged_against_the_limit_now_that_it_is_longer() -> None:
-    """The mark is 26 more characters of notice, and a bound that grows what it bounds is not one.
+    """The marked notice is still charged against the limit.
 
-    `bounded_content` measures the notice at its widest form and subtracts it from `limit`, so
-    lengthening the sentence tightens the cut rather than overshooting the ceiling. The contract is
-    the one this module's name asserts: at most `limit` characters come back.
+    The notice is measured at its widest form and subtracted from `limit`, so at most `limit`
+    characters come back.
     """
     bounded, removed = bounded_content("x" * 100_000, "read_document", 5_000)
 
@@ -544,23 +447,15 @@ def test_the_notice_is_still_charged_against_the_limit_now_that_it_is_longer() -
 
 @pytest.mark.parametrize("served", [False, True])
 def test_where_the_notices_mark_survives_the_chain_is_measured_not_assumed(served: bool) -> None:
-    """The mark reaches the model on an unframed result and is escaped inside an envelope.
+    """The notice's mark reaches the model on an unframed result and is escaped inside an envelope.
 
-    `_notice` claims exactly this and a claim about two middlewares composed is the kind this
-    repository does not take on prose. Driven in the shipped nesting order — `bound_tool_results`
-    inside `frame_connector_results` (`tool_call_middleware` fixes it, for two argued reasons) —
-    over a 200,000-character result:
+    Driven in the shipped order, `bound_tool_results` inside `frame_connector_results`:
 
-    - **in-process**: nothing rewrites the result afterwards, so the notice reaches the model with
-      the mark intact and the model's rule ("marked is this system's, unmarked is data") applies to
-      it;
-    - **connector-served**: the framer wraps the cut payload in the data envelope and defangs every
-      span, so the notice's mark arrives as `&#91;system …`. That is the consistent answer rather
-      than a hole — inside an envelope the model is told the whole span is data, and a live mark in
-      there would be the two trust anchors contradicting each other.
+    - **in-process**: nothing rewrites the result afterwards, so the mark arrives intact;
+    - **connector-served**: the framer defangs every span inside the data envelope, so the mark
+      arrives as `&#91;system …`, consistent with the envelope declaring the whole span data.
 
-    Pinned because it is a limitation, not because it is desirable: whoever changes the order, or
-    re-bounds after framing on the success path, should have to come here and say so.
+    Pinned as a limitation, so a change of order has to be made here deliberately.
     """
     request = cast(
         Any,

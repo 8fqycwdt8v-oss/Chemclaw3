@@ -1,12 +1,8 @@
 """The number grammar, pinned to the tool output it exists to read.
 
-Every fixture here is verbatim from a real tool result or a real live answer — the electronic
-properties of p-chlorobenzenesulfonyl fluoride as `compute_electronic_properties` returns them, an
-`ich_impurity_limit` PDE block, a `stoichiometry_table` row, a `gather_evidence` chunk envelope off
-the wire, and the charge table gr-29 actually wrote. That is not decoration. The last idealized
-fixture in this area hid that a retrieved-note envelope's quotes arrive JSON-escaped, so a pattern
-that looked right matched nothing on a live run; and the emphasis case below (`**2000 g**`) was a
-real draft of this module silently dropping five of the six masses in a charge table.
+Fixtures are verbatim tool results and live answers, because idealized fixtures hid real
+failures: JSON-escaped quotes in a retrieved-note envelope, and emphasis (`**2000 g**`) around
+masses in a charge table.
 """
 
 from chemclaw.core.quantities import (
@@ -74,9 +70,8 @@ def test_a_correctly_rounded_quotation_is_recognised_as_the_value_it_came_from()
 def test_a_figure_at_a_precision_the_value_does_not_support_is_not_a_quotation() -> None:
     """The precision the answer chose fixes the scale, in both directions.
 
-    "4.5" is not a quotation of 4.5579 — that value rounds to 4.6 — and "4.55" is not either, even
-    though it is a prefix of the digits. Without this the check would degenerate into "some tool
-    returned something roughly like it", which grounds almost anything.
+    "4.5" and "4.55" are not quotations of 4.5579 (which rounds to 4.6); otherwise the check
+    grounds almost anything.
     """
     values = returned_values(_PROPERTIES)
     assert not is_rounding_of("4.5", values)
@@ -96,23 +91,13 @@ def test_rounding_is_half_up_the_way_a_person_rounds_not_half_even() -> None:
 
 
 def test_the_six_ich_limits_a_live_judge_called_invented_are_all_recognised() -> None:
-    """gr-26, end to end on the real result: the PDEs are quotations, not inventions.
-
-    The judge's own words on the re-run were "the answer invents specific PDE numbers (Pd:
-    100/10/1 µg/day)… the tool results shown are truncated previews that do not display the
-    numerical limits". They were displayed here.
-    """
+    """ICH PDE limits in a real result are recognised as quotations, not inventions."""
     values = returned_values(_ICH_PALLADIUM)
     assert [is_rounding_of(figure, values) for figure in ("100", "10", "1")] == [True] * 3
 
 
 def test_a_mass_is_recognised_through_the_markdown_the_answer_wrapped_it_in() -> None:
-    """gr-29's charge table, verbatim on both sides: bold in a table cell is still a quantity.
-
-    A draft of this pattern took the number only after a whitelisted boundary character, which did
-    not include `*` — so five of the six masses in a real charge table were dropped, including
-    every one the judge had called fabricated. Emphasis and pipes are formatting, not context.
-    """
+    """Bold in a table cell is still a quantity: emphasis and pipes are formatting, not context."""
     answer = "| **Phenylboronic acid** | Coupling partner | **1565 g** | 1.2 equiv |"
     values = returned_values(_CHARGE_ROW)
     assert "1565" in stated_numerals(answer)
@@ -121,13 +106,7 @@ def test_a_mass_is_recognised_through_the_markdown_the_answer_wrapped_it_in() ->
 
 
 def test_digits_inside_an_identifier_are_not_quantities() -> None:
-    """A structure id, a SMILES and a note slug are names; reading them as numbers vouches falsely.
-
-    Each of these is in the fixtures above, so the scan meets all three on every real result: a
-    permissive pattern turns `st_8addd23b880dff9b` into four values and
-    `reaction-liu-orgsyn-procedure-1` into a 1, and any of them could then ground a figure the
-    tool never computed.
-    """
+    """A structure id, a SMILES and a note slug are names, not numbers to vouch for."""
     values = returned_values(_PROPERTIES)
     assert 8.0 not in values and 23.0 not in values and 880.0 not in values
 
@@ -138,16 +117,8 @@ def test_digits_inside_an_identifier_are_not_quantities() -> None:
 def test_a_code_span_or_a_wikilink_in_an_answer_is_not_a_quantity_claim() -> None:
     """An answer's SMILES and note citations carry digits and assert no figure whatsoever.
 
-    Both are real from gr-18. The wikilink is scored as a citation by `_score_citations`; counting
-    its trailing 0019 as a number too would have one id answer two different questions.
-
-    A prior version of this fixture (`Clc1ccc(S(=O)(=O)F)cc1` / `...deoxyfluorination-0019`) never
-    actually reached `_NOT_A_QUANTITY`: every digit in it already touched a letter or a
-    slug-hyphen, which `_NUMBER`'s own lookbehinds exclude regardless of `_NOT_A_QUANTITY` — so
-    deleting `_NOT_A_QUANTITY` left this test green. The `2020` runs below are free-standing digits
-    inside a code span and a wikilink respectively (bounded by whitespace, not by a letter or a
-    hyphen), so only the span-stripping keeps them out — deleting `_NOT_A_QUANTITY` makes both
-    reappear and this assertion fails.
+    The `2020` runs are free-standing digits inside a code span and a wikilink, so only the
+    span-stripping in `_NOT_A_QUANTITY` keeps them out; deleting it makes this test fail.
     """
     answer = "**40% yield:** `raw log 2020` with DBU, see [[note 2020 loose]] — dipole 4.56 D."
     assert stated_numerals(answer) == ["40", "4.56"]
@@ -156,13 +127,8 @@ def test_a_code_span_or_a_wikilink_in_an_answer_is_not_a_quantity_claim() -> Non
 def test_a_hyphen_after_a_number_is_never_read_as_a_minus() -> None:
     """A table cell's "| -7.95 |" states −7.95; "10-20%" states no −20.
 
-    Sign is what makes this a real distinction rather than a tidiness one: the list this feeds is
-    quoted to a judge as "that figure is verbatim tool output", and a value whose sign the answer
-    flipped is not that.
-
-    The range's upper bound goes with the slug tails the same lookbehind exists to drop — pinned
-    here as the price, not as an accident. Ranges are rare in these answers, hyphenated ids are on
-    every line of every retrieval result, and losing a figure only costs it a verification.
+    A flipped sign is not verbatim tool output. Losing a range's upper bound is the accepted price
+    of the lookbehind that drops hyphenated slug tails.
     """
     assert stated_numerals("a 10-20% window") == ["10"]
     assert stated_numerals("| **LUMO** | -7.95 eV | -8.54 eV |") == ["-7.95", "-8.54"]
@@ -181,12 +147,7 @@ def test_returned_values_deduplicates_and_keeps_first_seen_order() -> None:
 
 
 def test_a_json_result_names_every_number_it_returned() -> None:
-    """The label is the payload's key path, verbatim — never prettified and never inferred.
-
-    A surface printing `pka 4.76` and `sd 1.6` side by side is telling the truth; one printing
-    `pKa 4.76 ± 1.6` is not, unless the tool said so. The names are the whole of what this adds,
-    so they are the whole of what is asserted.
-    """
+    """The label is the payload's key path, verbatim — never prettified and never inferred."""
     values = labelled_values('{"pka": 4.76, "sd": 1.6}')
     assert [(v.label, v.value, v.unit) for v in values] == [("pka", 4.76, ""), ("sd", 1.6, "")]
 
@@ -207,22 +168,15 @@ def test_a_unit_is_read_only_from_the_object_that_states_it() -> None:
 
 
 def test_prose_is_left_to_the_bare_numbers() -> None:
-    """A non-JSON result yields no labels at all, and that is the honest report.
-
-    Falling back on the number grammar and pairing each value with whatever word preceded it would
-    be exactly the invented relationship this refuses. The figures are still on the wire — they
-    simply arrive unnamed, which is what they are.
-    """
+    """A non-JSON result yields no labels rather than invented value-word pairings."""
     assert labelled_values("the pKa is about 4.76") == []
     assert returned_values("the pKa is about 4.76") == [4.76]
 
 
 def test_a_pathological_nesting_costs_the_labels_and_not_the_turn() -> None:
-    """`json.loads` raises `RecursionError` at ~1000 levels, and that is not a `ValueError`.
+    """A `RecursionError` from deep nesting costs the labels, not the turn.
 
-    Left uncaught it escapes the trace producer and ends the turn's stream — so a result nobody
-    could have rendered anyway would cost the chemist the answer. Labels are a rendering; the
-    figures are still on the wire in `numbers`, which reads this with a regex and is unaffected.
+    It is not a `ValueError`, so uncaught it would end the stream; the figures stay in `numbers`.
     """
     deep = "[" * 5000 + "]" * 5000
     assert labelled_values(deep) == []

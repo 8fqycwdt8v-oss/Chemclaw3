@@ -1,18 +1,8 @@
-"""`get_durable_job_status` is the one *status tool* for a finished durable job.
+"""`get_durable_job_status`, the status tool for a durable job.
 
-It became the only one in D-118: the QM/DFT job was the last runner with a tool of its own
-(`agents/job_status.py`, which knew the DFT job's id prefix and its bespoke result shape), and
-it is a declared `qm` connector job now. Everything a launcher in this system hands an id for
-therefore returns `ConnectorJobResult`.
-
-That is what makes the envelope check a *hard* error rather than a degraded answer, and it is the
-behaviour worth a test: reporting `completed` with an empty result would tell a chemist their
-week-long calculation finished and then withhold the number.
-
-This file used to open "the one place a finished durable job is collected", and so did the module
-it tests. That was false — three sites collect one, including the in-turn wait in
-`chemclaw.connectors.jobs`, which is a different subsystem and cannot route through an agent tool.
-What is single is the decode, and the last test here is the one that keeps it that way.
+Every launcher returns `ConnectorJobResult`, so a completed job with any other result shape is a
+hard error: reporting `completed` with an empty result would withhold the number. Several sites
+collect a finished job; what is single is the envelope decode, held by the last test here.
 """
 
 import asyncio
@@ -53,10 +43,8 @@ class _Description:
 class _Handle:
     """A workflow handle with a scripted status and result.
 
-    `result()` blocks forever while the scripted status is RUNNING, because that is what the real
-    SDK's long-poll does — a fake that resolved instantly for a running workflow handed the
-    status tool's bounded wait a result that does not exist yet, which is how a fake stops
-    testing what it claims to.
+    `result()` blocks while the status is RUNNING, as the real SDK's long-poll does, so the bounded
+    wait is actually tested.
     """
 
     def __init__(
@@ -115,10 +103,8 @@ def _with_result(monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
 def _runtime(tool_call_id: str = "call-probe") -> Any:
     """A stand-in for LangChain's injected `ToolRuntime`, carrying only what the tool reads.
 
-    `synthesize_memory` takes the runtime for one reason — its `tool_call_id` is what makes a
-    `fresh` run's workflow id a function of the ask rather than of the clock, so a tool re-run on
-    resume rejoins instead of starting a second full-corpus mine. Direct callers here have to
-    supply it because LangChain injects it only through the tool wrapper.
+    `tool_call_id` makes a `fresh` run's workflow id a function of the ask, so a re-run rejoins.
+    LangChain injects it only through the tool wrapper, so direct callers supply it.
     """
     return SimpleNamespace(tool_call_id=tool_call_id)
 
@@ -148,11 +134,7 @@ def test_a_completed_job_that_is_not_the_envelope_is_a_hard_error(
 ) -> None:
     """A foreign result shape raises instead of degrading to a bare `completed`.
 
-    The fallback existed for exactly one job — the removed DFT run, which returned its own type and
-    was collected by its own tool. With that job on the connector seam nothing legitimately
-    returns anything else, so a non-envelope result means the id belongs to a workflow no launcher
-    in this system started, and the honest answer is to say so rather than to report a finished
-    job with no findings.
+    A non-envelope result means the id belongs to a workflow no launcher here started.
     """
     _with_result(monkeypatch, {"scheduler_job_id": "slurm-77"})
     with pytest.raises(ValueError, match="did not return the connector job envelope"):
@@ -244,11 +226,7 @@ def test_the_front_door_route_reports_queued_too(
 ) -> None:
     """`GET /jobs/{id}` is `job_status` with no wait, and it says `queued` exactly as the tool does.
 
-    It used to be pinned to `running`, because `Chemclaw3_ui`'s `terminalEventFrom` turned every
-    other word into `job_failed` and would have closed a waiting job's card as failed. The UI now
-    names the endings (Chemclaw3 #514), so a chemist refreshing the jobs page and one polling in
-    chat get the same answer about a run nothing has started — the property the shared function
-    exists for.
+    A chemist refreshing the jobs page and one polling in chat get the same answer.
     """
     from chemclaw.agent.durable_tools import job_status
 
@@ -264,9 +242,7 @@ def test_a_poll_moments_before_completion_returns_the_result(
 ) -> None:
     """The bounded long-poll: a job finishing inside the wait answers with its result now.
 
-    A poll from the model costs a whole conversation turn, so answering `running` for a job two
-    seconds from done used to spend another full turn — connector open, graph compile, model
-    call — learning what a short `handle.result()` wait delivers immediately.
+    A poll from the model costs a whole turn, so a short wait beats answering `running`.
     """
 
     class _FinishingHandle(_Handle):
@@ -309,12 +285,10 @@ def _expired(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_job_whose_history_expired_is_still_collected_from_the_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gap D-157 closes: an old job id must not read as "no such job".
+    """A job whose history expired is still collected from the durable record.
 
-    Temporal expires a closed workflow's history on the namespace's retention clock, and before
-    the durable record that took the campaign's result with it — so the tool told a chemist their
-    campaign never existed. Now the record answers, and it answers with the *reason* too, which is
-    the context that makes a months-old result interpretable.
+    Temporal expires closed histories on the namespace's retention clock; the record answers with
+    the result and the reason.
     """
     from chemclaw.durable.job_record import JobRecord
 
@@ -345,15 +319,8 @@ def test_the_record_path_frames_the_same_two_fields_the_search_path_frames(
 ) -> None:
     """Both readers of `job_records` frame `rationale` and `summary`, or neither is safe.
 
-    `find_past_jobs` and `_recorded_status` read the same two columns of the same table, and only
-    the first one framed them — so a rationale carrying a forged closing delimiter arrived defanged
-    through the search and **live** through the status tool. That is not an obscure branch: it is
-    the documented aged-out path, and `find_past_jobs`'s own docstring sends the model down it
-    ("Take its `job_id` to `get_durable_job_status`"), having already printed the nonce into the
-    same turn one tool call earlier.
-
-    Asserted as a property of the *record path* rather than of one tool, because the drift was two
-    readers of one table disagreeing and a per-tool assertion would not have caught it.
+    `find_past_jobs` sends the model to the status tool for the same row, so a forged closing
+    delimiter must be defanged on both paths. Asserted on the record path, not one tool.
     """
     from chemclaw.agent.framing import frame_untrusted
     from chemclaw.durable.job_record import JobRecord
@@ -382,19 +349,11 @@ def test_the_record_path_frames_the_same_two_fields_the_search_path_frames(
 def test_the_result_payload_reaches_the_model_with_no_live_delimiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The third field of the same record, which the two framed ones made look covered.
+    """The record's `result` payload reaches the model with no live delimiter either.
 
-    `summary` and `rationale` are framed and `result` was passed through raw — and `result` is
-    where the requester's own strings live: for a BO campaign it is `CampaignResult.model_dump()`,
-    whose `Observation.params` keys and categorical values come out of the campaign spec. So one
-    object reached the model with two fields neutralised and the third carrying a live closing
-    delimiter, which ends the envelope around the two beside it.
-
-    That is a cross-user channel rather than a self-injection: this tool applies no owner check by
-    decision (`D-2026-08-01-a-running-job-has-no-owner` — the id is `hash([connector, job,
-    payload])`, so a run genuinely has more than one requester) and `find_past_jobs` hands every
-    chemist everybody's ids. An open read is the reason the text on it has to be neutralised, not a
-    second defect.
+    `result` carries requester strings (e.g. campaign parameter names), and a live closing delimiter
+    there ends the envelope around the framed fields. The status tool applies no owner check, so
+    this is a cross-user channel.
     """
     from chemclaw.agent.framing import ENVELOPE_TAG
     from chemclaw.durable.job_record import JobRecord
@@ -430,19 +389,11 @@ def test_the_result_payload_reaches_the_model_with_no_live_delimiter(
 def test_the_shared_reader_leaves_the_stored_text_alone_for_the_front_door(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`job_status` is also the whole body of `GET /jobs/{id}`, so the envelope may not live there.
+    """The shared reader leaves the stored text alone, because it is also `GET /jobs/{id}`'s body.
 
-    The framing above belongs at the model's edge, and it was briefly put one level down in the
-    shared reader — which put `<retrieved-note-…>` markup into an HTTP response while `GET /jobs`
-    returned the same two columns of the same row raw, breaking the property `api/routes/jobs.py`
-    states in its own docstring: a chemist polling in chat and one refreshing a page cannot
-    disagree about a run. The nonce is per process unless `framing_envelope_secret` is set, so two
-    replicas would not even have agreed with each other.
-
-    Asserted on `job_status` rather than on the route, because the route is
-    `return await front_door.job_status(job_id)` with no projection — this function *is* the
-    response body, and a test that went through the app would pass just as well against a route
-    that stripped the envelope back off, which is not the property wanted.
+    Framing belongs at the model's edge; in the shared reader it would put envelope markup into an
+    HTTP response and make the chat and page answers disagree. Asserted on `job_status` because the
+    route returns it unprojected.
     """
     from chemclaw.agent.durable_tools import job_status
     from chemclaw.durable.job_record import JobRecord
@@ -510,11 +461,10 @@ def test_an_id_nobody_has_a_record_of_is_still_an_error(monkeypatch: pytest.Monk
 
 
 def test_finding_past_jobs_reports_what_ran_and_why(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cross-session entry point: a run is findable by the words its reason used.
+    """A past run is findable by the words its reason used.
 
-    Without this the only handle on a past job was its id, which lives in the transcript of the
-    conversation that started it — so a *new* session could not reach a single thing this system
-    had ever computed.
+    This is the cross-session entry point: otherwise a job's id lives only in the transcript that
+    started it.
     """
     from chemclaw.durable.job_record import JobRecordSearch, JobRecordSummary
 
@@ -544,19 +494,11 @@ def test_finding_past_jobs_reports_what_ran_and_why(monkeypatch: pytest.MonkeyPa
 
 
 def test_every_collector_of_a_finished_job_answers_a_foreign_result_identically() -> None:
-    """The three sites that collect a finished job must not disagree about what a bad one is.
+    """Every collector of a finished job answers a foreign result identically.
 
-    They did. `completed_job_status` raised a written sentence; `connectors.jobs._await_briefly`
-    called `ConnectorJobResult.model_validate` itself and let pydantic's `ValidationError` out.
-    That is not an internal detail: a `ValidationError` **is** a `ValueError`, and `ValueError` is
-    the family `connectors.server._sanitize_tool_errors` deliberately passes through untouched as
-    "a deliberately-worded, caller-safe message" — so the second path relayed
-    "2 validation errors for ConnectorJobResult" and pydantic's field dump to a chemist, while the
-    first said which id was foreign and why.
-
-    Measured before the fix, on one bad result: path A `ValueError: durable job 'job-1' completed
-    but did not return the connector job envelope...`, path C `ValidationError: 2 validation errors
-    for ConnectorJobResult`. Both go through `envelope_from_result` now.
+    A pydantic `ValidationError` is a `ValueError`, which the connector server passes through as a
+    caller-safe message, so a collector validating on its own would leak a field dump. All go
+    through `envelope_from_result`.
     """
     foreign = {"scheduler_job_id": "slurm-77"}
 
@@ -577,11 +519,9 @@ def test_every_collector_of_a_finished_job_answers_a_foreign_result_identically(
 
 
 def test_the_envelope_decode_has_exactly_one_definition() -> None:
-    """Structural, because the defect was a second copy rather than a wrong one.
+    """The envelope decode has exactly one definition.
 
-    A behavioural test only covers the collectors it knows about; a fourth one added tomorrow
-    would reintroduce the divergence silently. `model_validate` on the envelope belongs in
-    `envelope_from_result` and nowhere else.
+    Structural, because a behavioural test covers only the collectors it knows about.
     """
     src = Path(durable_tools.__file__).resolve().parents[1]
     offenders = [
@@ -621,18 +561,11 @@ class _StartingClient:
 def test_every_memory_job_kind_can_actually_be_started(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The four corpus miners must be reachable, which is exactly what they stopped being.
+    """Every memory job kind can actually be started on demand.
 
-    D-2026-08-25 took their Temporal Schedules away — rightly, since each opens pull requests and
-    knowledge arriving on a timer is knowledge nobody asked for — but removed the trigger without
-    adding one. For a while the only references to `CampaignSynthesisWorkflow`,
-    `PlaybookDistillationWorkflow`, `OptimizationCampaignWorkflow` and
-    `ObservationPromotionWorkflow` anywhere in `src/` were a docstring claiming they were "started
-    on demand". Campaigns, playbooks and promotions were never produced.
-
-    Asserted over `_MEMORY_JOBS` rather than a fixed list, so a kind added later is covered the day
-    it is added, and asserted on the *workflow method handed to Temporal* rather than on a returned
-    id, because an id proves only that this tool ran.
+    The corpus miners have no schedule, so this tool is their only trigger. Asserted over
+    `_MEMORY_JOBS` so a new kind is covered, and on the workflow method handed to Temporal because
+    an id proves only that this tool ran.
     """
     client = _StartingClient()
 
@@ -669,25 +602,12 @@ class _RequestRecordingClient:
 def test_the_report_launcher_carries_the_turn_s_correlation_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one line that sources a correlation id for a durable report had no test at all.
+    """The report launcher carries the turn's correlation id.
 
-    `request_development_report` builds `ReportRequest(..., correlation_id=
-    get_current_correlation_id() or "")`, and that call site is the *only* place a report run gets
-    the turn it was launched from (`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-
-    launched-with`). Every existing test around this constructs a `ReportRequest` or a
-    `SectionRequest` by hand with a correlation id supplied as a literal — which exercises the
-    field, the interceptor and the workflow, and never the launcher. Deleting the line, or the
-    `or ""` half of it, left the whole suite green while every report run in a deployment became
-    unjoinable to the conversation that asked for it.
-
-    So this drives the launcher itself, through the same monkeypatched `connect` the memory-job
-    tests use, and asserts against the object handed to Temporal rather than against a returned id:
-    an id proves only that this tool ran.
-
-    Both directions, because the line has two halves. Bound: the turn's id travels. Unbound: the
-    empty string travels, deliberately — a launch outside a turn is unjoined and says so, and
-    minting an id there would make an unjoined run look joined. Dropping `or ""` makes the second
-    case a `None` a `str` field refuses; dropping the line makes the first case `""`.
+    The launcher is the only place a report run gets the turn it was launched from, so it is driven
+    directly and asserted on the object handed to Temporal. Both directions: bound, the turn's id
+    travels; unbound, the empty string does, because minting an id would make an unjoined run look
+    joined.
     """
     from chemclaw.core.identity_context import (
         reset_current_correlation_id,
@@ -721,11 +641,9 @@ def test_the_report_launcher_carries_the_turn_s_correlation_id(
 def test_asking_twice_in_a_day_rejoins_rather_than_re_scanning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two chemists asking one morning get one corpus scan, not two — and one PR, not two.
+    """Two asks in one day rejoin one corpus scan rather than starting two.
 
-    The id is keyed on the UTC date because there is no request to key on: the input is the whole
-    corpus as it stands. A second full scan would also risk two pull requests for one finding,
-    which `memory.ids.with_id`'s anchor can produce when a cluster grows between runs.
+    The id is keyed on the UTC date because the input is the whole corpus, not a request.
     """
 
     class _Rejecting(_StartingClient):
@@ -744,21 +662,10 @@ def test_asking_twice_in_a_day_rejoins_rather_than_re_scanning(
 
 
 def test_no_workflow_starter_here_is_reachable_from_nowhere() -> None:
-    """A launcher nobody calls is a capability this deployment advertises and does not have.
+    """No workflow starter here is reachable from nowhere.
 
-    `request_note_reindex` was half-removed once already: `tests/test_service.py` records stripping
-    it from `api/app.__all__` because "no route read `front_door.request_note_reindex`, no test
-    patched it, and its only production starter is a merge webhook this app does not serve" — and
-    the function itself stayed for another week, with a present-tense docstring about a git host
-    that "can deliver several within seconds". It was deleted on 2026-09-07
-    (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`); `NoteReindexWorkflow` is alive on
-    its Schedule, so nothing was lost but the door.
-
-    Written as a rule rather than as that name's absence, because the specific check would pass
-    forever while the next unreachable launcher is written. **String constants count as a
-    reference**: this repository resolves half its capability by `module:callable`, and a scan that
-    only saw identifiers would report `create_face_app` — reached solely through
-    `uvicorn.run("chemclaw.api.mcp_face:create_face_app")` — as dead.
+    A launcher nobody calls is a capability advertised and not had. String constants count as a
+    reference, because callables are also resolved by `module:callable` strings.
     """
     import ast
 
@@ -800,13 +707,10 @@ def test_no_workflow_starter_here_is_reachable_from_nowhere() -> None:
 def test_find_past_jobs_says_when_its_answer_is_only_the_newest_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A "have we run this before?" answer must not be "no" because a page ended.
+    """`find_past_jobs` says when its answer is only the newest page.
 
-    The tool's own docstring tells the model to use it *before launching an expensive job*, and it
-    returned a bare list capped at `job_record_search_limit` — so the 21st-oldest matching campaign
-    was invisible and indistinguishable from absent. The flag and the verdict travel with the hits
-    for the reason `FingerprintSearch` carries `index_empty`: a truncation known only to the store
-    cannot reach the model that writes the answer.
+    The model uses it before launching an expensive job, so a truncated list must not read as
+    "never run". The flag travels with the hits because the store alone knows about the truncation.
     """
     from chemclaw.durable.job_record import JobRecordSearch, JobRecordSummary
 
@@ -836,18 +740,10 @@ def test_find_past_jobs_says_when_its_answer_is_only_the_newest_page(
 
 
 def test_a_fresh_mine_is_keyed_on_the_ask_rather_than_on_the_clock() -> None:
-    """The one launcher whose id was not a function of its inputs, which a replay duplicates.
+    """A fresh mine is keyed on the ask rather than on the clock.
 
-    Every other durable launcher in this tree derives its workflow id with `stable_hash` over its
-    arguments, so a tool re-run on resume — which
-    `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` measured happens
-    with the original arguments — rejoins instead of starting a second run. `fresh` suffixed the id
-    with `strftime('%H%M%S')`, so a replay a second later minted a different id and started a
-    second full-corpus mine.
-
-    Three arms, because the fix has to preserve what `fresh` is *for*. A replay of one ask rejoins;
-    two genuine asks do not; and a same-day repeat without `fresh` still rejoins, which is the
-    daily-unit behaviour the flag exists to escape.
+    A tool re-run on resume carries the original arguments and must rejoin. Three arms: a replay of
+    one ask rejoins, two genuine asks do not, and a same-day repeat without `fresh` still rejoins.
     """
     replayed = durable_tools._memory_job_id("campaign", fresh=True, discriminator="call-1")
     again = durable_tools._memory_job_id("campaign", fresh=True, discriminator="call-1")
@@ -862,12 +758,9 @@ def test_a_fresh_mine_is_keyed_on_the_ask_rather_than_on_the_clock() -> None:
 
 
 def test_the_injected_runtime_is_not_part_of_the_tool_surface() -> None:
-    """A parameter the model can see is a parameter the request prefix pays for, every call.
+    """The injected runtime is not part of the tool's model-facing schema.
 
-    `runtime` is taken for one internal reason and must not reach the schema — LangChain excludes a
-    `ToolRuntime` annotation from the model-facing args, and this asserts that rather than trusting
-    it, because the cost of being wrong is silent: `tests/test_context_floor.py` would move and the
-    model would be offered an argument it cannot supply.
+    A visible parameter costs prefix tokens every call and is one the model cannot supply.
     """
     from langchain_core.tools import StructuredTool
 

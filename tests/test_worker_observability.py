@@ -1,20 +1,8 @@
-"""A worker that nothing could scrape and nothing could probe.
+"""Every worker serves metrics and health probes over `core/worker_http.py`.
 
-Two findings that turned out to be one missing thing.
-
-**Metrics went nowhere.** The chart scraped the front door alone, on the reasoning — written into
-`metrics_bridge.py`'s docstring, the ServiceMonitor's comment and a chart test's assertion — that
-recording a metric outside the front door "is a no-op: there is no registry and no HTTP surface in
-those processes". The first half was never true. `core/metrics.py` is a stdlib-only module
-singleton, so the registry exists in every process that imports it, and the background worker and
-six connector workers have been incrementing a live registry that nothing could read.
-
-**Probes did not exist.** "Liveness is the Temporal poll itself" was asserted in three chart
-templates and enforced nowhere: a worker whose poll loop died kept its process open, so Kubernetes
-reported `Running` and — per the paragraph above — no counter contradicted it either.
-
-Both were waiting on the same missing HTTP surface, which is why `core/worker_http.py` is one
-module and these are one test file.
+The metrics registry exists in every process that imports `core/metrics.py`, so workers record
+counters that only an HTTP surface makes scrapeable. The same surface serves the probes, so a
+worker whose poll loop or broker connection has died stops reporting healthy.
 """
 
 import asyncio
@@ -49,11 +37,9 @@ def metrics_port(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
 
 
 def test_a_worker_serves_the_metrics_its_own_process_recorded() -> None:
-    """The finding itself: a counter incremented off the front door had no reader.
+    """A worker serves the counters its own process recorded.
 
-    `record_metric` is the path every worker, activity and connector tool uses, and it resolves the
-    same process-wide registry this route renders — which is precisely why the counters were never
-    missing, only unreachable.
+    `record_metric` resolves the same process-wide registry this route renders.
     """
     before = _client().get("/metrics")
     record_metric(lambda m: m.increment("chemclaw_jobs_started_total"))
@@ -88,12 +74,10 @@ def test_a_worker_that_has_stopped_polling_reports_not_ready() -> None:
 
 
 def test_liveness_answers_on_the_workers_own_event_loop() -> None:
-    """`/healthz` is a stronger claim than "the process is up", which is what it replaced.
+    """`/healthz` is answered on the worker's own event loop.
 
-    It is served by the worker's own loop, so a loop wedged inside an activity stops answering and
-    the kubelet restarts the pod — the failure the old comment ("liveness is the Temporal poll
-    itself") named and no probe could see. The component is echoed so a probe response identifies
-    which pod answered it.
+    A loop wedged inside an activity stops answering, so the kubelet restarts the pod. The component
+    is echoed so a probe response identifies which pod answered it.
     """
     body = _client().get("/healthz").json()
     assert body == {"status": "ok", "component": "test-worker"}
@@ -102,9 +86,8 @@ def test_liveness_answers_on_the_workers_own_event_loop() -> None:
 def test_the_surface_is_really_bound_while_the_worker_runs(metrics_port: int) -> None:
     """The context manager half: bound and answering before the body runs, gone after it.
 
-    Asserted over a real socket rather than the ASGI app, because the thing that can break here is
-    the binding — a `yield` that fires before the port accepts makes the first probe a connection
-    refused, which a kubelet reads as a dead pod during every rollout.
+    Asserted over a real socket, because a `yield` that fires before the port accepts makes the
+    first probe a refused connection, read as a dead pod during every rollout.
     """
     import urllib.error
     import urllib.request
@@ -147,9 +130,8 @@ def test_the_surface_can_be_switched_off_without_failing_the_worker(
 def test_a_connector_serves_metrics_and_still_serves_mcp() -> None:
     """The connector half, and the ordering it depends on.
 
-    `connector_app` mounts the MCP transport at `/`, so every route it declares has to be declared
-    *before* the mount or fall through to a transport that answers it with a protocol error. That
-    ordering has one comment and now two routes relying on it.
+    `connector_app` mounts the MCP transport at `/`, so every route must be declared before the
+    mount or the transport answers it with a protocol error.
     """
     from chemclaw.connectors.server import connector_app
 
@@ -165,16 +147,11 @@ def test_a_connector_serves_metrics_and_still_serves_mcp() -> None:
 
 
 def test_both_temporal_workers_go_through_the_one_runtime() -> None:
-    """Every worker entrypoint, not just the one that was easy to reach.
+    """Every Temporal worker entrypoint goes through the one runtime.
 
-    Core runs one worker and each bundle runs its own, and the second is the process doing the
-    expensive science — so a fix that reached only `background_worker` would leave the most
-    interesting fleet exactly as invisible, and exactly as un-drainable, as it was.
-
-    The probe surface, the Postgres pool and the graceful shutdown are one call rather than three
-    lines precisely because of this: a third worker wiring two of the three would be a pod that
-    looks healthy and does the wrong thing on termination. Asserted on the source because starting
-    a real Temporal worker needs a broker; what can go wrong offline is one forgotten entrypoint.
+    The bundle worker runs the expensive science, so a fix reaching only `background_worker` would
+    leave it invisible and un-drainable. Probe surface, pool and graceful shutdown are one call so a
+    new worker cannot wire two of three. Asserted on source, because a real worker needs a broker.
     """
     import inspect
 
@@ -200,14 +177,11 @@ def test_both_temporal_workers_go_through_the_one_runtime() -> None:
 
 
 def test_a_worker_may_not_admit_more_activities_than_its_pool_can_serve() -> None:
-    """The default has to hold the invariant its own comment states, not merely be a number.
+    """The default activity ceiling must not exceed the default pool width.
 
-    An activity borrows a connection for a fraction of its runtime, so a ceiling *at* the pool
-    width already leaves the pool mostly idle — equal is the point at which no activity can be the
-    one that waits, and above it is where a shortage becomes retry churn. A deployment may still
-    raise the ceiling deliberately (the `calc` bundle does, because a CREST search holds a slot
-    rather than database work); what must not happen is the shipped default drifting above the
-    shipped pool by accident.
+    At or below the pool width no activity waits for a connection; above it a shortage becomes retry
+    churn. A deployment may raise the ceiling deliberately (the `calc` bundle does); the shipped
+    defaults must not drift apart by accident.
     """
     from chemclaw.core.config import settings
 
@@ -217,32 +191,18 @@ def test_a_worker_may_not_admit_more_activities_than_its_pool_can_serve() -> Non
     )
 
 
-# There is deliberately no "the surface leaks no identity" test here. These routes are
-# unauthenticated, so that rule matters — and it is already enforced where it belongs:
-# `test_metrics_carry_no_identifiers_or_turn_content` is an allowlist over the *declared label
-# names* of the one registry all three surfaces render, so it covers this exposition byte for byte.
-# A second scan here could only be a weaker restatement of it (a substring sweep flags the word
-# "session" inside a HELP string), and a weaker duplicate of a security check is worse than none:
-# it is the copy people would trust.
+# No "the surface leaks no identity" test here: these routes are unauthenticated, and
+# `test_metrics_carry_no_identifiers_or_turn_content` already allowlists the declared label names
+# of the one registry they render. A weaker duplicate of a security check is worse than none.
 
 
 def test_a_worker_whose_broker_has_gone_quiet_reports_not_ready() -> None:
     """`is_running` is a lifecycle flag, so readiness has to name the broker as well.
 
-    Measured before this existed: a worker on a severed connection answered `/readyz` 200
-    `{"status":"ready"}` for as long as it was left running, while the SDK core logged
-    `poll_workflow_task_queue retried 8 times ... ConnectionRefused` — the pod stayed in the
-    Service, a rollout in that window reported complete, and the PodDisruptionBudget counted it
-    Available.
-
-    **Driven through `worker_ready` and through the route, which this test used to only claim.**
-    It called `broker_seen_recently()` directly — the *ingredient*, never the predicate — while its
-    docstring said it would fail "if either half is dropped". Measured, it does not: with the
-    freshness half removed the whole worker suite stayed green (75 passed, unchanged) and a severed
-    worker answered `/readyz` 200 again, which is the regression the predicate exists to stop. So
-    the lifecycle flag is held True here while the broker goes quiet, and the assertion is the
-    status code a kubelet reads: a test that substitutes its own copy of the thing under test
-    proves nothing about the thing under test.
+    A worker on a severed connection must answer `/readyz` not-ready, so it leaves the Service and a
+    rollout does not count it Available. The lifecycle flag is held True while the broker goes
+    quiet, and the assertion is the status code a kubelet reads, driven through `worker_ready` and
+    the route.
     """
     from chemclaw.core.config import settings
     from chemclaw.durable import job_metrics
@@ -280,20 +240,10 @@ async def test_the_bind_flag_wait_is_cancelled_when_the_bind_does_not_win_the_ra
 ) -> None:
     """The surface races two awaitables and must not walk away from the loser.
 
-    `asyncio.wait([bound.wait(), serving], FIRST_COMPLETED)` built a task for the bind flag and kept
-    no reference to it, so on the branch that exists for the bind *failing* — `serving` wins,
-    `bound` is never set — that task is left pending on an event nothing will ever set.
-    `api/detach.py::DetachableTurn._next_event` does the identical juggle and cancels its loser
-    in a `finally` for exactly this reason.
-
-    **The stderr line the finding predicted does not appear, and the reason is worth pinning.** With
-    a real port conflict uvicorn's `startup` calls `sys.exit(3)`, and a `SystemExit` out of a task
-    stops the loop — so `asyncio.run`'s own teardown cancels the orphan a few microseconds later and
-    nothing is ever printed. The orphan is therefore invisible while, and only while, upstream
-    answers a failed bind by killing the process. This test injects the other answer — a `startup`
-    that declines and returns, which is what the surface's own comment already describes ("a failed
-    bind — where `bound` is never set — ends the wait through `serving`") — so the race resolves
-    with the loop still running and the leak is observable rather than swallowed by a process exit.
+    When the bind fails, `serving` wins and the task waiting on `bound` must be cancelled, not left
+    pending forever. Uvicorn's own failed bind exits the process, which hides the leak, so this
+    injects a `startup` that declines and returns, keeping the loop running so the leak is
+    observable.
     """
     servers: list[_QuietServer] = []
     original_init = _QuietServer.__init__
@@ -312,10 +262,9 @@ async def test_the_bind_flag_wait_is_cancelled_when_the_bind_does_not_win_the_ra
 
     async with worker_http(component="declined", ready=lambda: True):
         assert servers, "the surface did not build a server"
-        # One turn of the loop, because `Task.cancel()` schedules the throw rather than
-        # performing it — the waiter is removed by `Event.wait`'s own `finally` when the task
-        # next runs. Without the cancel no number of turns removes it, which is the difference
-        # being asserted.
+        # One loop turn, because `Task.cancel()` schedules the throw; `Event.wait`'s `finally`
+        # removes the waiter when the task next runs. Without the cancel no number of turns removes
+        # it.
         await asyncio.sleep(0)
         assert not servers[0].bound._waiters, (
             "the bind-flag wait is still queued on an event nothing will set"

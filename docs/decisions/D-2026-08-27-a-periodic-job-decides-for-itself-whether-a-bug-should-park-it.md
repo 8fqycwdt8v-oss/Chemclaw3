@@ -3,6 +3,8 @@
 **Status:** accepted · **Date:** 2026-08-27 · Closes the scope `D-2026-08-16-a-job-that-cannot-fail-is-a-job-that-hangs`
 left open, without widening its test.
 
+**Superseded-by:** [D-2026-09-07-a-driver-with-no-caller-is-not-a-capability](D-2026-09-07-a-driver-with-no-caller-is-not-a-capability.md) (in part)
+
 ## Context
 
 `D-2026-08-16` gave every workflow on the **job path** `failure_exception_types=[Exception]`, because

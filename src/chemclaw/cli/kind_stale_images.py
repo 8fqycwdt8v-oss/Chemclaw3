@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """Which Deployments run pods on an image the node no longer holds under that pod's tag.
 
-`up.sh` loads every build as `chemclaw/<x>:kind`, so a rebuild leaves every pod template unchanged
-and nothing restarts by itself (see `restart_stale_images` in `up.sh`). This compares by digest,
-which a tag cannot tell apart: a container's `imageID` names the image it was started from, and
-`crictl inspecti` on the node lists the digests its current image for the tag answers to.
+Rebuilds reuse the `chemclaw/<x>:kind` tag, so compare by digest: each container's `imageID` against
+what `crictl inspecti` lists for its tag.
 
     kubectl get pods -o json | python3 src/chemclaw/cli/kind_stale_images.py --node <node>
 
-prints one Deployment name per line. `deploy/kind/up.sh` runs it **as a file**, on the host's own
-`python3`, where neither this package nor its virtualenv is installed — so it imports the standard
-library only, and `from __future__ import annotations` keeps it readable by a 3.9 interpreter.
+Prints one Deployment per line. Run as a file on the host's `python3`, so stdlib only and
+3.9-readable.
 """
 
 from __future__ import annotations
@@ -27,9 +24,8 @@ _PREFIX = "chemclaw/"
 def digest(reference: str) -> str:
     """The `sha256:<hex>` part of an image reference, `imageID` or image id ("" when there is none).
 
-    `imageID` arrives as `docker.io/chemclaw/core@sha256:…`, as a bare `sha256:…`, or with a
-    runtime prefix such as `docker-pullable://`; `repoDigests` as `<repo>@sha256:…`; the image id
-    as a bare `sha256:…`. The digest after the last `@` is the comparable part of all of them.
+    Handles bare digests, `<repo>@sha256:…` and runtime prefixes such as `docker-pullable://`: the
+    digest after the last `@` is the comparable part.
     """
     tail = reference.rsplit("@", 1)[-1]
     return tail if tail.startswith("sha256:") else ""
@@ -66,12 +62,8 @@ def _deployment(pod: dict[str, Any]) -> str | None:
 def stale_deployments(pods: dict[str, Any], current: dict[str, set[str]]) -> list[str]:
     """The Deployments with a container whose `imageID` is not among its tag's current digests.
 
-    Containers are matched to their statuses by name: Kubernetes does not promise the two lists
-    share an order, and the worker pods run two `chemclaw/` containers. A container is evidence
-    only when both sides are known — a container with no status or no `imageID` yet (still being
-    created, so it will start from the current image) and a tag the node could not be asked about
-    (an empty digest set) are skipped rather than counted stale, which would restart the fleet for
-    nothing.
+    Containers match statuses by name, since list order is not promised. A container with no status
+    or `imageID` yet, or a tag the node could not report, is skipped rather than counted stale.
     """
     stale: set[str] = set()
     for pod in pods.get("items", []):

@@ -1,18 +1,12 @@
 """Build the record phase of a label row from a canonical reaction.
 
-The one place that decides what "what was in the flask" means for the label index, so the ELN path
-and any corpus drain cannot disagree about it. Two choices here are load-bearing and neither is
-obvious:
+The one definition of "what was in the flask" for the label index, shared by the ELN path and corpus
+drains:
 
-* **`reaction_smiles()`, never `transformation_smiles()`.** The fingerprint form drops solvent and
-  catalyst on purpose, because leaving them in let a solvent swap dominate DRFP similarity. The
-  label index is asked *which solvent, which ligand, which base*, so it needs the form that keeps
-  them — and there is no later opportunity to recover them, because `ElnAdapter` can fetch entries
-  since a timestamp and cannot read one back by id.
-* **Every species, in `compounds()` order, with the role the source recorded verbatim.** The
-  ordinal is the row key, so it must be derived from the record and not from a set iteration; the
-  role is copied rather than interpreted, because interpreting it is the labeller's job and doing
-  it twice in two vocabularies is how the two end up disagreeing.
+* `reaction_smiles()`, never `transformation_smiles()`: the index is asked about solvents, ligands
+  and bases, which the fingerprint form drops, and they cannot be recovered later.
+* Every species in `compounds()` order (the ordinal is the row key), with the source's role copied
+  verbatim; interpreting it is the labeller's job.
 """
 
 from chemclaw.core.chem import standard_smiles
@@ -24,19 +18,15 @@ from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 def record_phase(reaction: OrdReaction, source: str) -> ReactionLabel:
     """The record phase of `reaction` as it arrived from `source`, with nothing derived.
 
-    `derived_role` is left `None` on every species — deliberately, even though
-    `species_role_from` could fill a coarse value here. NULL means "nothing has looked yet", which
-    is what makes the row stale and what the coverage report counts; pre-filling it would make an
-    unlabelled corpus indistinguishable from a labelled one at a glance. The coarse map is applied
-    by the enricher as the *floor* under a model's answer, not as a stand-in for it.
+    `derived_role` stays `None`: NULL means "nothing has looked yet", which makes the row stale and
+    is what coverage counts. The coarse source map is applied by the enricher only as a floor.
     """
     return ReactionLabel(
         source=source,
         reaction_id=reaction.reaction_id,
         record_smiles=reaction.reaction_smiles(),
-        # Qualified by the source, which this row already carries: "a precedent the chemist
-        # cannot follow back is not a precedent", and a bare id two sites both used follows back
-        # to a refusal (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+        # Qualified by source, so a citation follows back to one site's record even when ids
+        # collide.
         citation=note_id_for_reaction(reaction.reaction_id, source),
         performed_on=reaction.performed_at,
         temperature_c=reaction.temperature_c,
@@ -57,12 +47,9 @@ def record_phase(reaction: OrdReaction, source: str) -> ReactionLabel:
 def workup_text(reaction: OrdReaction) -> str | None:
     """The reaction's workup instructions, verbatim, or `None` when it recorded none.
 
-    Only `StepKind.WORKUP` steps, and only their own text — not the whole procedure. "How do we
-    best work up a reaction with this reagent" is answered by showing a chemist what other people
-    actually did, and a full procedure buries that in charging and purification. A reaction whose
-    export carries a procedure but no structured steps has no workup here rather than a guess at
-    one; a heuristic that split prose on "the mixture was quenched" would be a extraction model
-    hiding in an index.
+    Only the text of `StepKind.WORKUP` steps, not the full procedure. A reaction with a procedure
+    but no structured steps has no workup here; splitting prose heuristically is not this index's
+    job.
     """
     steps = [step.text.strip() for step in reaction.steps if step.kind is StepKind.WORKUP]
     joined = "\n\n".join(text for text in steps if text)

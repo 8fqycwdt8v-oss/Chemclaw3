@@ -1,16 +1,9 @@
-"""Generic child-workflow fan-out (plan F10-D1): run N independent sub-tasks as child workflows.
+"""Generic child-workflow fan-out: run N independent sub-tasks as child workflows.
 
-Orchestration is a Temporal-layer concern (the layer rule: layer 1 stays the single conversational
-agent; durability and fan-out live here). `fan_out` runs each input as its own child workflow with
-bounded concurrency and per-child isolation, so a report's sections or a memory job's groups each
-get independent retry + worker-restart durability instead of one monolithic activity where a single
-poison item fails the whole batch. Built with a *second real caller* in hand (the report and memory
-workflows both adopt it, D-A13 / Rule of Three), not speculatively.
-
-Isolation follows the D-030 discipline: a child that exhausts its retries is logged and dropped, and
-its siblings are unaffected — the fan-out returns the successful results in input order. Identity
-flows through unchanged: `fan_out` passes each input to its child verbatim, so an input that carries
-`requested_by` (F4-T3, as the QM job inputs do) propagates that actor into the child's audit trail.
+`fan_out` runs each input as its own child workflow with bounded concurrency and per-child
+isolation, so one poison item cannot fail the batch. A child that exhausts its retries is logged
+and dropped (D-030); the rest return in input order. Inputs pass to children verbatim, so an
+input carrying `requested_by` propagates that actor.
 """
 
 import asyncio
@@ -34,12 +27,8 @@ from chemclaw.durable.publish import BAD_DATA_RETRY
 async def resolve_fan_out_limit() -> int:
     """Resolve the configured fan-out concurrency bound — outside workflow code, on purpose.
 
-    The batch size decides how many StartChildWorkflow commands each workflow task emits, so
-    reading live settings *inside* `fan_out` would break replay whenever the config changed
-    mid-flight (history recorded N starts, the redeployed worker emits M). Resolving it through
-    a (local) activity records the value in history once per fan-out, making the batch shape a
-    pure function of history — the deterministic-capture pattern the Temporal SDK prescribes
-    for mutable config.
+    The batch size decides how many child starts each workflow task emits, so it is recorded in
+    history once through a local activity rather than read live.
     """
     return settings.orchestrator_max_parallel_children
 
@@ -62,12 +51,8 @@ async def _run_child(
 ) -> Any:
     """Start and await one child workflow with a deterministic, unique id, under a wall-clock cap.
 
-    **The retry policy is not that cap, and this call had only a retry policy.** `BAD_DATA_RETRY`
-    bounds how many times a child may *fail*; a child that neither fails nor completes — an
-    activity blocked on a dead dependency, a heartbeat that stops — is retried zero times and
-    awaited forever by the `asyncio.gather` in `fan_out`, which is a fan-out that can never
-    isolate-and-drop it. `ConnectorJobWorkflow` bounds its own child exactly this way; these were
-    the two starts in the tree with nothing above them.
+    The retry policy bounds failures; the cap bounds a child that neither fails nor completes, which
+    would otherwise be awaited forever.
     """
     return await workflow.execute_child_workflow(
         child.run,
@@ -82,25 +67,10 @@ async def _run_child(
 def _refuse_a_child_that_cannot_fail(child: Any) -> None:
     """Refuse a `fan_out` child that has not declared how it fails, at the seam that depends on it.
 
-    The contract is already written down — `fan_out`'s own docstring says a child raising
-    a plain exception needs `@workflow.defn(failure_exception_types=[...])` "or it will hang
-    instead of being dropped" — and until now nothing checked it *here*. What it costs when it is
-    missed is not a failure: the SDK parks the plain exception in an internal task-failure loop
-    that ignores `retry_policy` entirely, so the child is only freed by `execution_timeout`, and
-    the fan-out then logs it with the same line a genuinely hung child gets. Measured over three
-    children (ok / raise / hang), the raising one and the hanging one produced the identical
-    "Child Workflow execution timed out" and cost `fan_out_child_timeout_seconds` apiece — an hour
-    of somebody's time spent on a distinction the log had erased.
-
-    **Checked over what is passed rather than over a registry.** `tests/test_workflow_registry.py`
-    already asserts the declaration for the *job path*, so a bundle added later is covered without
-    editing a test; what neither that check nor the six deliberate parkers it allows can see is a
-    third `fan_out` caller whose child is on neither list. This is the one place that knows the
-    child is a fan-out child.
-
-    A `child` carrying no `__temporal_workflow_definition` at all is left alone: it is a test
-    double standing in for the SDK, not a workflow whose failure mode is in question, and the two
-    existing `fan_out` unit tests pass exactly that.
+    A child raising a plain exception without `failure_exception_types` parks in the SDK's task
+    retry loop until its execution timeout, logged identically to a hung child. Checked over the
+    class passed in, so any caller is covered. A `child` with no
+    `__temporal_workflow_definition` (a test double) is left alone.
     """
     definition = getattr(child, "__temporal_workflow_definition", None)
     if definition is None:
@@ -124,18 +94,10 @@ async def fan_out(
 ) -> list[Any]:
     """Run each of `inputs` as a `child` workflow, bounded-parallel, returning successful results.
 
-    `child` must actually be able to *fail* for the isolation contract below to mean anything
-    (D-093): the Temporal SDK by default treats a raw exception raised in workflow code as a
-    possible bug and suspends the workflow via an internal task-failure retry loop that ignores
-    `retry_policy` entirely and never gives up, rather than producing a real
-    `WorkflowExecutionFailed`. A child whose own failures are already SDK `FailureError`s (e.g. an
-    uncaught `ActivityError` from its own `execute_activity`, as in `PublishNoteWorkflow`) is fine
-    as-is; a child that raises a plain exception directly needs
-    `@workflow.defn(failure_exception_types=[...])` or it will hang instead of being dropped.
-    **That sentence is now enforced here rather than only stated** — see
-    `_refuse_a_child_that_cannot_fail`, which refuses an undeclared workflow class at the top of
-    this function, because the log line the omission produces is indistinguishable from a genuinely
-    hung child and costs `fan_out_child_timeout_seconds` before it says anything at all.
+    `child` must be able to fail for isolation to work (D-093): a child raising a plain exception
+    needs `@workflow.defn(failure_exception_types=[...])`, enforced by
+    `_refuse_a_child_that_cannot_fail`. A child whose failures are already SDK `FailureError`s is
+    fine as-is.
 
     Args:
         child: The child workflow class to start (its `run` method is invoked with one input).
@@ -144,16 +106,13 @@ async def fan_out(
         id_prefix: A short, caller-chosen tag for the child ids (`<parent>-<prefix>-<i>`), so a
             child in the Temporal UI reads as e.g. `...-section-2`. Required — ids must be clear.
         max_parallel: Concurrency bound; defaults to `orchestrator_max_parallel_children`,
-            resolved via a local activity so the recorded value — not a live settings read —
-            shapes the batches, keeping replay deterministic across config changes.
+            resolved via a local activity so replay stays deterministic across config changes.
 
     Returns:
         The results of the children that succeeded, in input order. A child that fails after its
         retries is logged and omitted (D-030: reject-and-continue), never restarting its siblings.
     """
-    # Read here rather than inside `_run_child` so every child of one fan-out is bounded by the
-    # same number, whatever a live settings edit does between batches — the determinism reason
-    # `max_parallel` is resolved once through a local activity.
+    # Read once so every child of one fan-out gets the same bound.
     child_timeout = timedelta(seconds=settings.fan_out_child_timeout_seconds)
     if max_parallel is not None:
         limit = max_parallel
@@ -170,33 +129,12 @@ async def fan_out(
     parent_id = workflow.info().workflow_id
     indexed = list(enumerate(inputs))
     results: list[Any] = []
-    # Batch rather than a semaphore: a fixed-size batch is deterministic under Temporal's replay
-    # (no reliance on lock-acquisition order) and bounds concurrency just the same.
+    # Batches rather than a semaphore: deterministic under replay, same concurrency bound.
     #
-    # **The queue and the per-child retry policy are not parameters**, though both were until
-    # every caller in this tree turned out to pass neither. Each is one line to re-add the day a
-    # second queue or a second policy exists; a `None`-defaulted argument nobody passes is a claim
-    # that callers choose, and these two paragraphs are what such a caller writes against.
-    #
-    # **The queue** is core's light `background-jobs`. A bundle owning durable work gets its own
-    # `connector-<name>` queue (D-118/D-150), and a fan-out child is core's work by construction.
-    #
-    # **Every child runs under `BAD_DATA_RETRY`**, which is bounded and is *not* Temporal's own
-    # default — that has `maximum_attempts=0` (unlimited), so a child failing deterministically (a
-    # bad-data error, or any other exception once its own activity retries are exhausted) would
-    # retry forever and this function could never isolate-and-drop it as its docstring promises
-    # (D-093: `_DoublerWorkflow`'s poison input hung the fan-out test indefinitely against a real
-    # server — the bug this default fixes).
-    #
-    # **Only the `maximum_attempts` half of that policy does anything here**: Temporal matches
-    # `non_retryable_error_types` against the *outermost* failure, and a child that failed through
-    # its own activity surfaces as a child/activity failure, a name deliberately absent from
-    # `_BAD_DATA_TYPES`. So the effective bound on a deterministic failure is
-    # `activity_max_attempts` child executions, which is only acceptable because a fan-out child's
-    # work is small and independent — and a child for which that is false is what re-adds the
-    # per-child `retry_policy` parameter this function used to take and no caller ever passed.
-    # `connector_job.py` and `template_job.py` pass `maximum_attempts=1` on their own
-    # `execute_child_workflow` calls for exactly this reason, their child being neither.
+    # Children run on core's `background-jobs` queue under `BAD_DATA_RETRY` (bounded; Temporal's
+    # default retries forever). Only its `maximum_attempts` takes effect here, since a child failing
+    # through its activity surfaces as a child failure; acceptable because fan-out children are
+    # small and independent.
     for batch in _batches(indexed, limit):
         settled = await asyncio.gather(
             *(
@@ -220,24 +158,8 @@ async def fan_out(
                 # logged child would silently swallow the cancellation intent).
                 raise outcome
             if isinstance(outcome, BaseException):
-                # Counted as well as logged, because the parent is about to complete
-                # *successfully* with a short list and a log line is not a signal anyone watches.
-                # The failure this makes visible: the note writer's git credential expires, every
-                # child fails, and the memory-synthesis jobs return `[]` every night while
-                # `/schedules` shows runs climbing and no failures. `metrics_bridge` is already
-                # proven callable from workflow code (`durable/publish.py`).
-                #
-                # Guarded on `is_replaying` for the same reason `publish.py`'s two counters are: a
-                # replayed history (a worker restart, a sticky-cache eviction, a query) would
-                # otherwise re-count every dropped child this workflow has ever seen, and
-                # `record_metric` adds no guard of its own. A counter whose value depends on how
-                # often a worker was restarted is not a rate anyone can alert on, which is exactly
-                # what this one was declared for.
-                #
-                # Found twice, independently and on the same day: by the review this comment came
-                # from and by the sweep merged as #256, which is worth recording because both
-                # arrived at it the same way — by asking which workflow-side increments lacked the
-                # guard their siblings had, rather than by observing a wrong number.
+                # Counted as well as logged, because the parent completes successfully with a short
+                # list; guarded on `is_replaying` so a replay does not re-count.
                 if not workflow.unsafe.is_replaying():
                     record_metric(lambda m: m.increment("chemclaw_fan_out_children_dropped_total"))
                 workflow.logger.warning(

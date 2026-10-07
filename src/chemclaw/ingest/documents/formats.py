@@ -1,21 +1,12 @@
 """The closed format allowlist, and nothing that can read one.
 
-Split out of `parse.py` for the reason `connectors/calc/specs.py` was split out of its results
-(D-118): a manifest binding has to *validate* an extension list, and a retriever has to know that
-`.pdf` is a document, long before anything wants to open one. Both of those run in the chat pod,
-where `pypdf`, `python-docx`, `python-pptx` and `openpyxl` have no business being imported.
-
-So this module names the formats and imports nothing. `parse.py` is what can read them, and only
-the sync worker imports that.
-
-Adding a format is one entry here plus its parser in `parse.py` — the two halves are checked
-against each other at import time by `parse._PARSERS`, so a format named here with no parser is a
-loud failure rather than a file type that silently never matches.
+Manifest validation and the retriever need the extension list in the chat pod, where the document
+parsers must not be imported; `parse.py` holds the readers and only the sync worker imports it.
+`parse._PARSERS` checks the two halves against each other at import.
 """
 
-# Content types this system can read, mapped from the extension a file share actually carries.
-# A share is full of things that are not documents (images, CAD, archives, executables); the walk
-# filters on this map before a single byte is read, which is what makes crawling a TB share cheap.
+# Content types this system can read, keyed by file extension. The walk filters on this before
+# reading a byte, which keeps crawling a large share cheap.
 EXTENSIONS: dict[str, str] = {
     ".md": "text/markdown",
     ".txt": "text/plain",

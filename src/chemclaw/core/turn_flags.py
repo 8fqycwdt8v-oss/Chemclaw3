@@ -1,32 +1,11 @@
 """Ambient boolean flags for the turn in flight, alongside the other turn-local ambients.
 
-**IDEA-4.** Every expensive path is idempotent and cached, but there was no way to ask "what
-would this cost, what would you do" without doing it. For a system whose production-default
-autonomy is `plan_only`, an explicit dry run is the natural product primitive — and a cheap
-safety valve in front of the durable job launchers.
-
-A `ContextVar` for the same reason the ambient session and identity are (see
-`chemclaw.core.session_context`, `chemclaw.core.identity_context`): it must be per-turn, it must
-not be a model-supplied tool argument (the model must not be able to turn a real run into a dry
-one or vice versa), and it must default to "off" for every non-request caller.
-
-**Why this is its own module, not part of a tool module.** The flag used to live in
-`chemclaw.agent.dialogue_tools`, which exists to register `ask_clarifying_question` into the
-model-facing tool registry. Two unrelated readers — `chemclaw.agent.tool_authz` (the turn's own
-authorization middleware) and `chemclaw.connectors.identity` (a connector reading the flag to
-stamp a header) — therefore had to import a *tool* module just to read a turn flag, which
-imported `dialogue_tools` for its side effect of registering that tool, a connector having no
-business anywhere near the model's tool surface. Moving the flag here — a plain ambient with no
-tool of its own — lets both read it without that side effect.
-
-**And why it is in `core` rather than in `agent`, where it first landed**
-(`D-2026-09-14-identity-stamping-is-cores-not-a-connectors`). The two ambients this module's own
-docstring compares itself to have always been `core.session_context` and `core.identity_context`;
-this one sat one package up for no reason but the order things were written in. That cost something
-real: the header stamp that reads all three lived in `connectors/identity.py` because *this* import
-pinned it there, so `ingest/labels/labeller.py` — an MCP client that is not a connector — could not
-reach it, and its leg to the labelling server went out with no actor, no session, no correlation id
-and no `traceparent` for as long as it has existed.
+The dry-run flag: ask "what would this cost, what would you do" without doing it, a safety valve in
+front of the durable job launchers. A `ContextVar` like `core.session_context` and
+`core.identity_context`: per turn, never a model-supplied argument (the model must not switch a real
+run to a dry one or back), and off for every non-request caller. In `core` with those ambients so
+readers such as `agent/tool_authz`, connector identity stamping and the labeller can read it without
+importing a tool module or the agent layer.
 """
 
 from contextvars import ContextVar

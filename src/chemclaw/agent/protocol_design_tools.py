@@ -1,20 +1,10 @@
 """The agent's way to *write* a protocol, having spent the turn reading the record.
 
-`agent/protocol_tools.py` is the reading half — `condense_protocols` turns twenty recorded
-procedures into one comparison. This is the writing half: the structured ask, the design that comes
-out of it, and the revision an edit produces. The two are separate modules because they are
-separate directions and a reader looking for one should not have to page past the other.
-
-**Nothing in this file decides any chemistry.** Which precedent counts, which factors are worth
-varying, what levels they take, when a computed number may be trusted — all of that is judgment and
-lives in `skills/protocol-generation` and `skills/hte-campaign-design`. What is here is the shape
-the answer has to take, the checks it has to survive, and the store it lands in.
-
-**The one thing this file enforces is that the record and the tools were actually used.**
-`checks.evidence_present` is a blocker, so a design citing no precedent and no tool cannot be
-stored at all. That is deliberate and it is the difference between a prompt asking for evidence and
-a system requiring it: a prompt can be ignored on the turn that matters most, which is the turn
-where the model has an answer it likes and no reason to go looking.
+The writing half beside `agent/protocol_tools.py`: the structured ask, the design that comes out of
+it, and the revisions an edit produces. Nothing here decides chemistry; that judgment lives in
+`skills/protocol-generation` and `skills/hte-campaign-design`. What is here is the shape of the
+answer, the checks it must survive, and the store it lands in. `checks.evidence_present` is a
+blocker, so a design citing no precedent and no tool cannot be stored.
 """
 
 from __future__ import annotations
@@ -94,22 +84,9 @@ _LISTING_LIMIT = 50
 def _readable(document: BaseModel) -> str:
     """`document` as the JSON a tool returns, with any envelope delimiter in it neutralised.
 
-    Every tool in this file answers with a serialised model, and every one of those models carries
-    free text the *model* wrote: the ask's title and goal, a `quote`, an evidence `summary`, a
-    change note, the rendered markdown. That text is durable — it is read back out of the design
-    store on any later turn, in any later session — so a delimiter smuggled into it through one
-    turn's arguments is replayed into every reading of the design afterwards. Measured before this
-    existed: all four tools returned a live `</retrieved-note-…>` verbatim.
-
-    **Defanged, not framed.** A design is this system's own document, drafted by the agent and
-    reviewed by a chemist; an envelope says "evidence to weigh and cite", which is the
-    misattribution `agent/tool_framing.py` withholds it for over a helper's report.
-
-    **The whole payload rather than a field list**, which is the argument `tool_framing.py` makes
-    for a connector result and it holds here for the same reason: escaping `<` cannot make the JSON
-    unparseable, and a convention naming which of `title`, `goal`, `quote`, `summary`,
-    `change_note` and `markdown` needs it is a list that goes stale the next time the schema grows
-    a string.
+    Every model here carries model-written free text that is stored and replayed into later turns.
+    Defanged rather than framed, since a design is this system's own document, not evidence; the
+    whole payload rather than a field list, so new string fields are covered.
     """
     return defang(document.model_dump_json())
 
@@ -118,73 +95,38 @@ def _store() -> DesignStore:
     return default_design_store()
 
 
-#: Digit runs, for relating a stated value to the words offered as evidence for it.
-#: A figure somebody wrote as a **quantity**, which is not the same as a run of digits.
-#:
-#: Measured over the 295 chemist asks in `data/evals/probes/`, a bare `\d+` finds **537** distinct
-#: figures and this finds **371**: 31% of what a quote could be credited with stating was never a
-#: quantity at all. What it drops is digits welded to letters — a SMILES's ring closures
-#: (`COc1ccc(-c2ccccc2C(=O)O)cc1` offered `1` and `2`, so `max_runs='1'` quoting a *structure*
-#: passed), a `C18` column — and the halves of a decimal, where `3.87 min` offered `3` and `87` and
-#: therefore supported `max_runs='87'`.
-#:
-#: Every legitimate spelling survives, which is the half that decides the shape: `96-well`, `2 g`,
-#: `24 wells`, `48 runs` and the `2026-09-01` of an ISO date all still state their figures, because
-#: a digit run beside punctuation is a figure and only a digit run beside a *letter* is not.
-#: See `D-2026-09-13-a-digit-inside-a-word-is-not-a-figure-somebody-stated`.
+#: A figure somebody wrote as a quantity, for relating a stated value to the words quoted for it.
+#: Digits welded to letters (SMILES ring closures, `C18`) and the halves of a decimal are not
+#: figures; digits beside punctuation (`96-well`, `2 g`, ISO dates) are.
 _DIGITS = re.compile(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?(?![A-Za-z])")
 
 
-#: Figures written as words, so a quote that states a number in prose is not read as stating no
-#: number at all. A chemist who wrote "five grams" stated the scale and the model normalised it;
-#: refusing that would push a real constraint into `inferred`, which is the mislabelling this whole
-#: check exists to prevent, running the other way.
+#: Figures written as words, so "five grams" still states a scale the model normalised to `5 g`.
 _NUMBER_WORDS = frozenset(
     """zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
     fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty
     ninety hundred thousand dozen half quarter single double triple""".split()
 )
 
-#: Alphanumeric runs, over text already lowercased — the tokens a value and a quote are compared as.
+#: Alphanumeric runs, over text already lowercased — the tokens a value and a quote are compared
+#: as.
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
 def _quote_supports(value: str, quote: str) -> bool:
     """Whether these words plausibly state this value.
 
-    **`stated` attests a *value*, and only the *quote* was ever checked.** Both halves passed as
-    long as the quote occurred somewhere in the message, and any substring occurs somewhere: against
-    a chemist who wrote "We need to get the Suzuki on the deactivated chloride working. Try what you
-    think.", a model stored `scale='5 g'` quoting `'working'`, `plate_format='96'` quoting `'the'`,
-    `max_runs='96'` quoting `'Suzuki'` and `deadline='2026-09-01'` quoting `'.'` — four limits the
-    chemist never named, recorded as their own words.
+    A quote that merely occurs in the chemist's message proves nothing about the value, so the two
+    are related for every quote:
 
-    **The first rule for that related the two only when the quote was one word**, and that is not a
-    property of a fabrication. `len(words) < 2` skipped the comparison entirely for anything longer,
-    so the same four limits went straight back in on two-word quotes out of the same message:
-    `scale='5 g'` quoting `'you think'`, `plate_format='96'` quoting `'deactivated chloride'`.
-    Measured, all four were accepted and stored as the chemist's own words. The quote's *length*
-    was never the thing that made those fabrications fabrications.
+    1. **A value carrying figures needs the quote's figures to be its own**, compared as numbers
+       (`'09'` meets `'9'`).
+    2. **A figure written in words satisfies rule 1** ("five grams" for `'5 g'`).
+    3. **A value with no figures needs the quote to carry its words**: the same token, or one
+       containing the other when long enough to mean something.
 
-    So the value and the quote are related for every quote, and the shape of the value decides how:
-
-    1. **A value carrying figures needs the quote's figures to be its own.** Compared as numbers
-       rather than as strings, so `'09'` in a date meets `'9'` in prose. A quote reading "no more
-       than 48 runs" cannot be the evidence for `max_runs='96'`.
-    2. **A quote that states its figure in words satisfies rule 1.** "five grams" is how a chemist
-       writes a scale, and the model normalising it to `'5 g'` is transcription rather than
-       inference.
-    3. **A value carrying no figures needs the quote to carry its words** — the same token, or one
-       containing the other where the token is long enough for that to mean something (`'toluene'`
-       against "in toluene", not `'g'` against "think").
-
-    **This is a heuristic and the docstring should not pretend otherwise.** It refuses a quote that
-    cannot state the value; it cannot tell whether the figure the quote does carry is *about* this
-    slot, so "24 wells" still supports `max_runs='24'` when the chemist said 24 wells about the
-    plate. What it no longer does is credit a quote with figures nobody wrote as quantities — see
-    `_DIGITS` for the 166-of-537 measurement and for why that is a different question from
-    attribution. `docs/planning/DEFERRED.md` carries the attribution half, with the count it is
-    waiting on.
+    A heuristic: it refuses quotes that cannot state the value, but cannot tell whether a figure the
+    quote does carry is about this slot.
     """
     value_numbers = {float(digits) for digits in _DIGITS.findall(value)}
     quote_tokens = set(_TOKEN.findall(quote.lower()))
@@ -204,11 +146,7 @@ def _quote_supports(value: str, quote: str) -> bool:
 def _said_somewhere(quote: str, haystacks: Sequence[str]) -> bool:
     """Whether the chemist wrote these words, in this order, in any *one* of their messages.
 
-    Per message rather than over a joined transcript, and that is the whole reason this is a
-    function: joining the thread into one haystack would accept a quote that runs off the end of
-    one message and into the beginning of the next — words in an order nobody ever wrote, arriving
-    in the record as a quotation. Whitespace is normalised on the quote here and on each message by
-    the caller, so a re-wrapped quotation is still the same words.
+    Per message, so a quote spanning two messages is refused. The caller normalises whitespace.
     """
     needle = " ".join(quote.split()).lower()
     return any(needle in haystack for haystack in haystacks)
@@ -219,33 +157,11 @@ def require_quotes_are_verbatim(
 ) -> None:
     """Refuse a `basis="stated"` slot whose quote is not in the chemist's own words.
 
-    The whole honesty claim of the structured request rests on this: a slot marked `stated` says
-    "the chemist wrote this", and without a check that is a claim the model grades itself on.
-    Whitespace is normalised on both sides — a quote re-wrapped across lines is the same words —
-    and nothing else is: a paraphrase is exactly what this refuses, because a paraphrase reaching
-    the record as a quotation is worse than an unmarked inference.
-
-    **`source_texts` is the chemist's own words, and it is ambient rather than an argument.** It
-    used to be a parameter of the tool, which is the same as no check at all: a model that wanted
-    `stated` supplied a `source_text` containing its own quotes and got it, and the fabricated
-    attribution landed in `experiment_protocols` indistinguishable from a real one. Measured, the
-    same request was refused against the real user text and accepted against an invented one.
-    `core.turn_text` carries it now, on the argument `session_context` states for the session id.
-
-    **It is the thread's user turns, not one message, and every one is a separate haystack.** This
-    tool is meant to be called "first … while correcting it is still cheap", i.e. iteratively, so
-    the constraint a chemist stated on turn 1 is usually two turns behind the "ok go ahead" that
-    triggers the intake — measured, `'24 wells'` refused against "ok go ahead" while the chemist
-    had written "24 wells, no DMF, by Friday please." in the same conversation. The messages are
-    *not* concatenated into one haystack: a quote that runs off the end of one message and into the
-    start of the next is words the chemist never wrote in that order, and joining them would accept
-    it. `core.turn_text` decides which messages those are and how far back they go; every one of
-    them was typed by a person, which is the property this check is built on.
-
-    `None` means there is no turn — a unit test, an activity, any caller that is not a conversation
-    — and every `stated` slot is refused, because there is no chemist to have said it. That is
-    `require_actor`'s reject-if-absent rule: a check that waived itself when its evidence was
-    missing would be one the caller can switch off by calling from elsewhere.
+    A `stated` slot claims "the chemist wrote this", so the quote must be verbatim (whitespace
+    normalised, no paraphrase) and must support the value (`_quote_supports`). `source_texts` is the
+    thread's user turns from `core.turn_text`, ambient rather than a tool argument the model could
+    fill; each message is a separate haystack. `None` (no conversation) refuses every `stated` slot,
+    following `require_actor`'s reject-if-absent rule.
 
     Raises:
         ChemclawError: naming the slot and its quote.
@@ -310,19 +226,9 @@ def require_quotes_are_verbatim(
 async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary | None:
     """The design's header, refusing the write when this actor does not own the design.
 
-    **The one ownership rule, `owner_permits`, applied to its third caller.** The HTTP layer
-    resolves ownership for `/sessions/{id}/…` and the agent resolves it for a tool handed an
-    explicit session id; a design handed an explicit `design_id` is the same question and a second
-    copy of the predicate is how one surface ends up looser than the other.
-
-    Nothing checked this before, so a turn could name any `design-…` id and write to it: a second
-    chemist's turn demoted an `approved` header to `draft` and replaced a signed-off plate, with
-    `status_history` still naming the first chemist's sign-off. `design_id_for` now scopes the id by
-    owner so the ordinary path cannot collide, and this is the half that holds when an id is passed
-    in rather than derived.
-
-    A design nobody has opened yet (`None`) is writable — that is the create path, and the write
-    that creates it is what records the owner.
+    Applies `owner_permits`, the same rule as the HTTP layer, to an explicit `design_id`.
+    `design_id_for` scopes derived ids by owner; this holds when an id is passed in. A design with
+    no header yet (`None`) is writable: that write creates it and records the owner.
     """
     header = await store.summary(design_id)
     if header is not None and not owner_permits(header.opened_by, require_actor()):
@@ -338,10 +244,8 @@ async def _read_design_or_refuse(
 ) -> DesignRevision:
     """One revision of a design — the head for `revision=0` — or a refusal the model can act on.
 
-    One refusal for the four tools that read a design, because the copies had drifted: one of them
-    read a specific revision and answered its absence as "no design", so a chemist asking for
-    revision 5 of a design that has four was told the design did not exist. The message names the
-    revision whenever one was asked for, and always the tool that lists what does exist.
+    Shared by the four reading tools. The message names the requested revision, if any, and the tool
+    that lists what exists.
     """
     stored = await store.read(design_id, revision or None)
     if stored is None:
@@ -356,12 +260,8 @@ async def _read_design_or_refuse(
 async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
     """The design's status as the store holds it — never a default this function invented.
 
-    Every caller reaches this *after* a revision exists, so a missing header row is a store that
-    lost one rather than a design that is merely `requested`. Four call sites each carried their own
-    `header.status if header else "requested"` / `else "draft"`, and both defaults are unreachable
-    and wrong: the receipt a chemist reads would name a status the design does not have, on the one
-    surface that reports what happened to their write. If the header is gone the honest answer is an
-    error naming the inconsistency.
+    Callers reach this after a revision exists, so a missing header is an inconsistency, not a
+    `requested` design.
 
     Raises:
         ChemclawError: the design has revisions and no header row.
@@ -378,22 +278,10 @@ async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
 async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
     """What the corpus already records as having failed, for the citations and reagents in `design`.
 
-    **The seam between a pure check and a corpus, and it lives here because this is the layer that
-    may reach both.** `tests/test_layering.py` allows `protocols -> core` and `protocols -> science`
-    and nothing else, which is right: a deterministic check must not depend on a corpus being
-    loadable, and fifteen checks that are arithmetic today must not acquire I/O because a sixteenth
-    wanted it. So `memory/failure.failures_against` answers in the knowledge graph's vocabulary,
-    this reduces what it found, and `no_documented_failure` decides.
-
-    Offloaded, because `load_notes` parses the corpus off disk - measured elsewhere in this tree at
-    151 ms for one scan of 10k notes - while `run_checks` itself is budgeted at 47 ms inline. A
-    synchronous read here would put the corpus on the event loop at every draft.
-
-    **It never raises.** A corpus that cannot be read is a reason to say less, not to refuse a
-    design. The cost is that the check then reports "no recorded failure bears on this design",
-    which is indistinguishable from having looked and found none - so the failure is counted
-    through `degraded()` rather than swallowed, because a lookup that has silently stopped working
-    returns every draft clean.
+    The seam between the pure check `no_documented_failure` (in `protocols`, which may import only
+    `core` and `science`) and the knowledge graph (`memory/failure.failures_against`). Offloaded to
+    a thread because loading notes parses the corpus off disk. Never raises: an unreadable corpus
+    says less rather than refusing a design, and is counted through `degraded()`.
     """
     cited = [ref.ref for ref in design.evidence if ref.ref]
     structures = [smiles for _, smiles in used_structures(design)]
@@ -414,12 +302,8 @@ async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
             exc,
         )
         return []
-    # **Inside the guard, because the reduction can raise too and the docstring above promises it
-    # cannot.** `RecordedFailure.id` is `Field(min_length=1)`, so a note the corpus holds with an
-    # empty id is a `ValidationError` out of a function two callers rely on never raising — and
-    # since `api/routes/protocols.post_revision` began calling this, such a value is a 500 on a
-    # chemist's edit rather than a quieter check. The lookup failing and the lookup returning
-    # something unusable are the same thing to a caller.
+    # Inside the guard because the reduction can raise too (`RecordedFailure.id` requires a
+    # non-empty id), and callers rely on this never raising.
     try:
         return [RecordedFailure(id=note.id, summary=observation_of(note)) for note in notes]
     except ValidationError as exc:
@@ -436,28 +320,10 @@ async def recorded_failures(design: ExperimentDesign) -> list[RecordedFailure]:
 async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
     """Runs the record already holds that resemble this design and that it does not cite.
 
-    **The second caller of the seam `recorded_failures` opened**, and deliberately the same shape:
-    a check must stay pure over its arguments, `protocols` may import only `core` and `science`, so
-    the lookup lives here and `precedent_consulted` decides. Two instances is what makes that a
-    pattern rather than one function's arrangement — and it is why `run_checks` now dispatches
-    through a mapping instead of a chain of identity tests.
-
-    **It offers, it never cites.** A hit is a thing that exists; a citation is a claim the chemist
-    makes about what a decision rests on. Writing a hit into `design.evidence` would forge the
-    first out of the second and leave `evidence_present` passing on a design nobody grounded, which
-    is a check satisfying itself.
-
-    **Already-cited hits are dropped, and the comparison is the citation's own spelling.**
-    `EvidenceRef.ref` carries `reaction-<source>.<id>` or the bare `reaction-<id>` that
-    `note_id_for_reaction` mints, while a `Match.id` is the record id alone — so comparing the two
-    raw would report every citation the design *does* carry as uncited, which is the noisiest
-    possible way to be wrong. `external_record_ref` is the inverse that already exists.
-
-    It never raises, for `recorded_failures`' reason and one more: this search reaches Postgres,
-    so an unreachable index is an ordinary condition of a laptop rather than a fault of the design.
-    The cost of that is the same — a silent "nothing to offer" is indistinguishable from having
-    looked — which is why the failure is counted through `degraded()` and why
-    `precedent_consulted`'s passing text says nothing was *offered* rather than that nothing exists.
+    The same seam shape as `recorded_failures`, for `precedent_consulted`. It offers and never
+    cites: writing hits into `design.evidence` would let `evidence_present` pass on an ungrounded
+    design. Already-cited hits are dropped by comparing in the citation's own spelling
+    (`external_record_ref`). Never raises; failures are counted through `degraded()`.
     """
     reaction = design.request.reaction_smiles.strip()
     if not reaction:
@@ -474,11 +340,9 @@ async def uncited_precedent(design: ExperimentDesign) -> list[UncitedPrecedent]:
             exc,
         )
         return []
-    # Inside the guard for `recorded_failures`' reason, and this one is the reachable half:
-    # `Match.similarity` is an unconstrained float while `UncitedPrecedent.similarity` is
-    # `Field(ge=0.0, le=1.0)`, so a store returning `1.0000000000000002` — one float ulp from a
-    # perfectly ordinary exact match — or a `nan` raises out of a function whose docstring says it
-    # never does, and the route turns that into a lost edit.
+    # Inside the guard: `Match.similarity` is an unconstrained float while
+    # `UncitedPrecedent.similarity` is bounded to [0, 1], so a rounding overshoot or `nan` would
+    # raise.
     try:
         return [
             UncitedPrecedent(id=hit.id, similarity=hit.similarity, label=hit.label)
@@ -525,34 +389,22 @@ async def structure_experiment_request(request: ExperimentRequest, salt: str = "
             design of that ask belonging to another chemist.
     """
     require_quotes_are_verbatim(request, get_current_user_texts())
-    # Scoped by the actor, so two chemists phrasing one ask the same way get two designs rather
-    # than one they overwrite in turn.
+    # Scoped by the actor, so two chemists phrasing one ask the same way get two designs rather than
+    # one they overwrite in turn.
     design_id = design_id_for(request, owner=require_actor(), salt=salt)
     store = _store()
     await _require_writable(store, design_id)
     head = await store.read(design_id)
-    # **The protocol survives a re-structured ask**, which the first version did not do. The id is
-    # derived from the ask, so re-structuring the same one reaches the same design — and building a
-    # bare `ExperimentDesign(request=…)` then appended a head with no base, no arms and no layout
-    # over a drafted plate. Measured: `arm_count` reset to 0, the header stayed `draft`, and every
-    # default read — the listing, `GET /protocols/{id}`, `read_experiment_protocol` — served the
-    # empty ask. The history kept the plate and no consumer reads a non-head revision.
-    #
-    # Correcting the ask is the point of this tool, so the correction lands and the procedure is
-    # carried forward untouched; the checks are then graded at the stage the *design* is at, not at
-    # the stage this tool usually runs in, because a protocol that now contradicts a corrected ask
-    # is exactly what a chemist needs to see.
+    # Re-structuring the same ask reaches the same design id, so the corrected ask lands and the
+    # existing procedure and plate are carried forward. Checks are graded at the design's stage, so
+    # a protocol contradicting the corrected ask is visible.
     design = (
         head.design.model_copy(update={"request": request})
         if head is not None
         else ExperimentDesign(request=request)
     )
-    # **An identical document is not a revision, and appending one un-approved designs.** The id is
-    # derived from the ask, so re-stating the same ask reaches the same design and carries its
-    # protocol forward unchanged — and `advanced()` retires an `approved` or `executed` status on
-    # any revision landing, justified by "the document has changed". Measured: a chemist approved a
-    # plate, the ask was restated in a later session, and the header came back `draft` over a head
-    # that compared equal to the approved one. Nothing changed, so nothing is stored.
+    # An identical document is not a revision; appending one would retire an `approved` status for
+    # no change.
     if head is not None and design == head.design:
         return _readable(
             receipt(
@@ -671,12 +523,9 @@ async def draft_experiment_protocol(
         factors=list(factors or []),
         arms=list(arms or []),
         evidence=list(evidence),
-        # **The previous plate is carried forward when no format is passed**, because `plate_format`
-        # defaults to 0 and a revision that only changes a temperature was silently deleting the
-        # well assignments and the run order. A randomised order is not recoverable — a fresh
-        # `place()` with another seed is a different plate — and `layout_fits` degraded to a
-        # *passing* warning reading "no plate layout", so nothing said it had happened. Re-laying
-        # out is what passing a `plate_format` asks for; not passing one asks for nothing.
+        # The previous plate (well assignments and run order) is carried forward when no format is
+        # passed; a randomised order is not recoverable. Passing `plate_format` is what asks for a
+        # new layout.
         layout=previous.design.layout,
     )
     if plate_format:
@@ -817,16 +666,10 @@ class RescaleReadout(BaseModel):
     stored: bool = False
 
 
-# **Why this tool's docstring is short, when the thing it is about is a long argument.**
-# A tool description is serialised ahead of the system message on every model call, and the first
-# draft of the one below cost 1,169 tokens against the 728 of headroom
-# `tests/test_context_floor.py` had — it was the widest single contributor in the prefix. The
-# reasoning it carried (which durations are not linear in the charge, and why a scaled batch gains
-# an impurity the bench never saw) is judgment, so it belongs where judgment belongs: in
-# `protocols/rescale.py`'s module docstring for a reader, and in `skills/protocol-scale-translation`
-# for the model, loaded on the turns that need it rather than on all of them. What stays here is
-# what the model needs to *call* it correctly and the one instruction it must not get wrong, which
-# is that the caveats are reported rather than summarised.
+# The tool description is short because it is in every call's prefix
+# (`tests/test_context_floor.py`). The scaling rationale lives in `protocols/rescale.py` and
+# `skills/protocol-scale-translation`; the description keeps what is needed to call it and the rule
+# that caveats are reported, not summarised.
 @tool
 async def rescale_experiment_protocol(design_id: str, target_scale: str) -> str:
     """Scale a stored protocol's charges to a new basis, and list what does not scale.
@@ -878,9 +721,8 @@ class PlateReadout(BaseModel):
     # Each measured arm's factor levels beside its value — the shape a campaign fits. Empty unless
     # an outcome was named, because "every outcome at once" is not a table a surrogate can take.
     observations: list[dict[str, float | str]] = Field(default_factory=list)
-    # Why `observations` is empty although an outcome was named: its latest values are in more
-    # than one unit. Beside the readout rather than instead of it, because the results, the
-    # disagreements and the unmeasured arms are exactly what a chemist needs to fix that.
+    # Why `observations` is empty although an outcome was named: its latest values span more than
+    # one unit. Reported beside the readout, which the chemist needs to fix that.
     observations_refused: str = ""
 
 
@@ -896,11 +738,8 @@ class AttachedResults(BaseModel):
     disagreements: list[str] = Field(default_factory=list)
 
 
-# **Why the judgment is short here and long in the skill.** This tool's cost is charged to every
-# model call (`tests/test_context_floor.py`), and what a chemist should be told about a half-run
-# plate, a re-measured well or an outcome name that matches no objective is judgment —
-# `skills/hte-campaign-design` carries it. What stays is what the model needs to call this
-# correctly and the two things it must not do with the answer.
+# The description is short because it is charged to every model call; the judgment about reporting
+# results lives in `skills/hte-campaign-design`.
 @tool
 async def attach_plate_results(
     design_id: str,
@@ -1018,10 +857,8 @@ class ProtocolListing(BaseModel):
     # The bound actually applied, which is not always the one asked for.
     limit_applied: int = Field(default=0, ge=0)
 
-    # `frozen` but **not** `extra="forbid"`, unlike its neighbours here: a `computed_field` is
-    # serialized and is not a settable field, so its own `model_dump_json()` cannot be validated
-    # back under `forbid` — the round trip the listing tests do. Forbidding extras would make the
-    # honesty field and the model's own output mutually exclusive.
+    # `frozen` but not `extra="forbid"`: the serialized `computed_field` could not be validated back
+    # under `forbid`.
     model_config = ConfigDict(frozen=True)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -1029,9 +866,7 @@ class ProtocolListing(BaseModel):
     def verdict(self) -> str:
         """The one sentence to read before saying what designs exist.
 
-        `computed_field` rather than a bare property, for the reason `FingerprintSearch.verdict`
-        states in full: a plain property is not serialized, and this listing reaches the model as
-        JSON.
+        A `computed_field` so the sentence is serialized with the listing.
         """
         if self.total > len(self.designs):
             return (
@@ -1083,24 +918,14 @@ class ExperimentArms(BaseModel):
     factors: list[Factor]
     arms: list[ProtocolArm]
     constants: dict[str, str]
-    #: What the translation could not supply, one sentence each — units above all. Read these
+    #: What the translation could not supply, one sentence each — units above all. Read these :
     #: before drafting; none of them is optional and none is checked downstream.
     notes: list[str]
 
 
-# The description below is deliberately short, and the rationale a reader wants is here rather than
-# there. `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`: a tool's docstring is sent to
-# the model on every call of every turn, so it holds what the model needs to decide whether to call
-# this and what to pass — and nothing else. Measured, the first draft of it cost **626** tokens
-# against 290 for `read_experiment_protocol` and 191 for `find_experiment_protocols`, and pushed
-# `tests/test_context_floor.py`'s observed prefix 26 tokens over its ceiling.
-#
-# What moved here: a BO suggestion is `{parameter: value}` points and a design needs factors whose
-# levels carry labels and arms citing those labels exactly, so the model has been transcribing a
-# candidate table by hand — which is where a level lands in the wrong column and a plate runs a
-# condition nobody planned. `protocols/from_bo.py` carries the whole argument, including why the
-# protocol body is not translated and why this lives in `protocols/` rather than beside the
-# optimiser.
+# The description is short because a tool docstring is sent on every model call. This tool turns BO
+# suggestions into labelled factor levels and arms so the model does not transcribe a candidate
+# table by hand; `protocols/from_bo.py` carries the full rationale.
 @tool
 async def experiment_arms_from_campaign(campaign_id: str, prefix: str = "arm") -> str:
     """Turn a campaign's latest suggestion into the factors and arms to draft a protocol from.

@@ -1,13 +1,8 @@
-"""Reading a session's plan back from the checkpointer, between turns (M13 Step 5).
+"""Reading a session's plan back from the checkpointer, between turns.
 
-The plan gate reads the plan *during* a call, off `request.state`. `GET /sessions/{id}/plan` and
-the CLI's `/plan` read it when no turn is running, and under MAF that came off the in-process
-`TurnSession` the front door held — the object an LRU eviction or a pod roll dropped, which is
-half of why a rehydrated session used to propose the empty plan and meet its own already-spent
-approval.
-
-These drive a real graph with a real checkpointer, because the property under test is precisely
-that the plan *survives the turn that wrote it*. A fake saver would prove the dict access.
+`GET /sessions/{id}/plan` and the CLI's `/plan` read when no turn is running, so the plan must
+survive in the checkpointer rather than in an evictable in-process session. Driven with a real
+graph and checkpointer.
 """
 
 import asyncio
@@ -53,15 +48,9 @@ def _graph(saver: Any) -> Any:
 
 
 def test_a_plan_written_in_a_turn_is_readable_after_it() -> None:
-    """The whole point: the read happens between turns, so the plan has to outlive one.
+    """A plan written in a turn is readable after it, through a separate `session_plan` call.
 
-    Asserted through a *separate* `session_plan` call rather than off the invoke's return value,
-    which is the difference that matters — the return value proves the node ran, the checkpointer
-    read proves the plan is still there when the chemist asks for it.
-
-    The steps come back whole, declaration included, because that is what an identity and a
-    decision are taken over
-    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`).
+    Steps come back whole, declaration included, since identities and decisions are taken over them.
     """
     saver = InMemorySaver()
 
@@ -76,24 +65,19 @@ def test_a_plan_written_in_a_turn_is_readable_after_it() -> None:
 
 
 def test_a_session_that_never_took_a_turn_reads_as_unreadable_not_as_an_empty_plan() -> None:
-    """No checkpoint is `None` — "there is nothing to read" — and that is not "the plan is empty".
+    """No checkpoint reads as `None`, not as an empty plan.
 
-    The two displays are the same to a chemist, and the two *authorizations* are not. `[]` hashes
-    to a real plan identity that a decision row can match; `None` cannot, and the caller that spends
-    a one-shot approval has to tell them apart or it leaves a live approval unspent for every later
-    turn (`plan_state.session_plan` records what that cost). The read-only callers coalesce with
-    `or []`, which is why the route still renders "no plan yet".
+    `[]` hashes to a real identity a decision can match; `None` cannot, so the approval-spending
+    caller can tell them apart. Read-only callers coalesce with `or []`.
     """
     assert asyncio.run(session_plan("sess-never-used", saver=InMemorySaver())) is None
 
 
 def test_an_unreadable_checkpointer_reads_as_no_plan_rather_than_failing() -> None:
-    """A plan is a display concern; failing to read it must not fail the request that asked.
+    """An unreadable checkpointer reads as `None` rather than failing the request.
 
-    Deliberately the same posture the runner takes for the plan event it yields mid-turn — but it
-    returns `None`, not `[]`. The WARNING is no longer the *only* thing distinguishing "the database
-    hiccuped" from "there is no plan": the return value is, which is what lets the approval-spending
-    path refuse to treat an outage as a session that proposed nothing.
+    The return value distinguishes an outage from no plan, so the approval-spending path does not
+    treat an outage as a session that proposed nothing.
     """
 
     class _BrokenSaver:
@@ -104,12 +88,10 @@ def test_an_unreadable_checkpointer_reads_as_no_plan_rather_than_failing() -> No
 
 
 def test_a_todo_without_content_is_skipped_rather_than_crashing_the_read() -> None:
-    """The checkpoint is somebody else's shape, so the read cannot assume every row is well-formed.
+    """A todo without `content` is skipped rather than crashing the read.
 
-    `TodoListMiddleware` owns `todos`, and a version of it that added a row kind without `content`
-    would otherwise turn a plan display into a 500. Skipping is right rather than substituting an
-    empty string: an unnameable item is not a plan item, and showing a blank line invites approving
-    something nobody can read.
+    `todos` is `TodoListMiddleware`'s shape, and an unnameable item is not a plan item anyone could
+    approve.
     """
 
     class _SaverWithJunk:

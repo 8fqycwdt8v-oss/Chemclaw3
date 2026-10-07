@@ -1,14 +1,9 @@
-"""PDF/PPTX/DOCX/XLSX ingest (D-089), and the refusal that survived the scope change.
+"""PDF/PPTX/DOCX/XLSX ingest (D-089), and the refusal that survives.
 
-These formats were originally refused outright: a PDF "parsed" by scraping text-like bytes yields
-confident nonsense a chemist cannot distinguish from a real reading. The scope decision reversed
-the refusal, not the reasoning — so what these tests pin is that extraction is *structural* (each
-format read through its own document model, with pages/slides/sheets preserved) and that the one
-case real extraction cannot fix, a **scanned** PDF, is still refused by name rather than returned
-as an empty document.
-
-Every fixture is **built by the format's own writer**, never a checked-in blob — see
-`tests/document_fixtures.py`, which the mounted-share tests build on too.
+Extraction is *structural*: each format is read through its own document model, with pages,
+slides and sheets preserved. A **scanned** PDF, which extraction cannot fix, is refused by name
+rather than returned as an empty document. Every fixture is built by the format's own writer
+(`tests/document_fixtures.py`), never a checked-in blob.
 """
 
 import io
@@ -68,11 +63,10 @@ def test_a_mixed_pdf_keeps_its_text_pages_and_does_not_invent_the_blank_ones() -
 
 
 def test_a_scanned_pdf_is_refused_rather_than_read_as_an_empty_document() -> None:
-    """The one case proper extraction cannot fix, and the reason the original refusal existed.
+    """A scanned PDF is refused rather than read as an empty document.
 
-    `pypdf` opens an image-only PDF happily and returns nothing, which would reach the agent as a
-    document with no content — and the chemist as "there was nothing in your CoA". The refusal is
-    the only truthful answer, so it names the cause instead of the file being silently blank.
+    `pypdf` returns nothing for an image-only PDF, which would reach the chemist as "there was
+    nothing in your CoA"; the refusal names the cause.
     """
     with pytest.raises(AttachmentError) as excinfo:
         parse_attachment("scan.pdf", _blank_pdf_bytes())
@@ -210,11 +204,10 @@ def test_a_binary_upload_never_reaches_a_text_parser() -> None:
 
 # --- a file that breaks mid-parse is a refusal, never an escaping exception ----------------------
 #
-# Every parser used to guard only its *constructor* — which is the one call these libraries do the
-# least work in. `openpyxl(read_only=True)` parses the sheet inside `iter_rows`; `python-pptx` loads
-# slide parts lazily; `csv.reader` raises from the reader, while the guard sat on the sniffer. On a
-# share those escapes failed the sync activity, and because the crawl keeps no cross-run cursor,
-# every later run restarted and hit the same file: one malformed document stopped the whole corpus.
+# These libraries do their work lazily (`openpyxl` in `iter_rows`, `python-pptx` per slide,
+# `csv.reader` on iteration), so guarding only the constructor lets an exception escape. On a share
+# that fails the sync activity, and with no cross-run cursor every later run hits the same file, so
+# one malformed document stops the whole corpus.
 
 
 @pytest.mark.parametrize(
@@ -263,11 +256,9 @@ def test_a_container_that_expands_far_past_its_size_is_refused(
 def _cmap_bomb_pdf_bytes(destination_hex_chars: int = 200_000, span: int = 20_000) -> bytes:
     """A small PDF whose font declares one `bfrange` line with an enormous destination string.
 
-    Hand-assembled rather than built by a writer, unlike every other fixture here: no PDF writer
-    will emit this, which is the point — it is what an attacker sends, not what a tool produces.
-    The destination starts with `A` and is otherwise zeros so incrementing it never gains a hex
-    digit; an all-`F` string overflows into an odd-length hex value on the second entry and pypdf
-    then skips the line as broken, which looks like a passing test and measures nothing.
+    Hand-assembled: no writer emits this; an attacker does. The destination is `A` then zeros so
+    incrementing never gains a hex digit (an all-`F` string overflows and pypdf skips the line,
+    which would measure nothing).
     """
     destination = b"A" + b"0" * (destination_hex_chars - 1)
     cmap = (
@@ -305,18 +296,12 @@ def _cmap_bomb_pdf_bytes(destination_hex_chars: int = 200_000, span: int = 20_00
 
 
 def test_a_font_map_that_expands_far_past_its_size_is_refused() -> None:
-    """The PDF twin of the zip bomb, and the reason `pypdf` is pinned at 6.15.0 or above.
+    """A font map that expands far past its size is refused.
 
-    Measured on the previously locked pypdf 6.14.2, in-process: this 201 KB input took **33.8 s
-    and took peak RSS from 35 MB to 1948 MB**, then returned 50,000 characters as if it were an
-    ordinary document. `MAPPING_DICTIONARY_SIZE_LIMIT` did not stop it because it bounds the
-    number of `/ToUnicode` entries, never the size of each one. On 6.15.0 the same bytes are
-    refused in 0.00 s at 36 MB (CVE-2026-71852, CVE-2026-71870).
-
-    Pinned as a *test* rather than left to the version pin because the pin is a floor: this is the
-    behaviour the floor exists for, and it fails loudly if a future resolution walks back under it.
-    The refusal itself is `parse_document`'s boundary net turning the library's `LimitReachedError`
-    into the same 422-shaped `AttachmentError` every other unreadable file gets.
+    The PDF twin of a zip bomb: older pypdf spent tens of seconds and gigabytes on this small input,
+    because its limit bounds the number of `/ToUnicode` entries, not their size (CVE-2026-71852,
+    CVE-2026-71870). Pinned as a test because the `pypdf>=6.15.0` floor is what provides it.
+    `parse_document`'s boundary net turns `LimitReachedError` into the usual `AttachmentError`.
     """
     raw = _cmap_bomb_pdf_bytes()
     assert len(raw) < 300_000  # the whole point: the input is small and the expansion is not
@@ -340,16 +325,11 @@ def test_an_ordinary_workbook_is_not_mistaken_for_a_bomb() -> None:
 
 @pytest.mark.parametrize("name", ["notes.txt", "notes.md", "runs.csv", "runs.tsv"])
 def test_a_utf8_document_reads_exactly_as_it_did_before_detection_existed(name: str) -> None:
-    """The additivity property `_decode` rests on, asserted rather than argued.
+    """A UTF-8 document reads exactly as it did before encoding detection existed.
 
-    Detection is consulted only for bytes strict UTF-8 refuses, so a correctly-encoded document must
-    decode to exactly what the single-encoding policy produced. That is the whole reason the
-    ordering is UTF-8-first rather than detector-first: a heuristic given the chance to re-label a
-    file that was already right can only make it wrong, and `charset_normalizer` demonstrably does
-    that on short inputs.
-
-    The comparison is against the *deleted* policy written out here, not against the code that
-    replaced it — a basis re-derived from the subject agrees with itself forever.
+    Detection is consulted only for bytes strict UTF-8 refuses, because a heuristic allowed to
+    re-label a correct file can only make it wrong (`charset_normalizer` does on short inputs).
+    Compared against the plain single-encoding policy written out here, not against the new code.
     """
     text = "Reaktion bei 60 °C; Ausbeute 87 %\nSolvens,Toluol\nBediener,A. Müller\n"
     for raw in (b"", b"plain ascii\n", text.encode("utf-8"), text.encode("utf-8") + b"\r\n"):
@@ -361,11 +341,10 @@ def test_a_utf8_document_reads_exactly_as_it_did_before_detection_existed(name: 
 
 
 def test_a_cp1252_document_is_read_rather_than_punched_full_of_replacement_characters() -> None:
-    """The defect that costs a chemist a unit: a Windows-encoded note on a decade-old share.
+    """A cp1252 document is read rather than punched full of replacement characters.
 
-    `errors="replace"` never raises, so this was invisible — the mojibake was chunked, embedded,
-    retrieved and cited exactly like a correct reading. Both halves are measured here: what the
-    old policy produced, and what this one does.
+    `errors="replace"` never raises, so mojibake would be chunked, embedded and cited like a correct
+    reading — and can cost a chemist a unit symbol.
     """
     text = (
         "Reaction held at 60 °C; yield 87 %. Solvent: toluene. Operator: A. Müller. "
@@ -384,11 +363,10 @@ def test_a_cp1252_document_is_read_rather_than_punched_full_of_replacement_chara
 
 
 def test_a_utf8_bom_does_not_end_up_inside_the_first_csv_header_cell() -> None:
-    """A BOM is valid UTF-8, so the single-encoding policy kept it — inside a *column name*.
+    """A UTF-8 BOM does not end up inside the first CSV header cell.
 
-    Excel's "CSV UTF-8" writes one. The first header cell then reads `<U+FEFF>Compound`, which is a
-    column name nothing a caller can type or configure will match, and which reaches a chemist in a
-    rendered table looking like `Compound`.
+    Excel's "CSV UTF-8" writes one, and `<U+FEFF>Compound` is a column name nothing can match yet
+    renders as `Compound`.
     """
     raw = "﻿Compound,Temp_C\naspirin,60\n".encode()
 
@@ -401,12 +379,10 @@ def test_a_utf8_bom_does_not_end_up_inside_the_first_csv_header_cell() -> None:
 
 
 def test_a_utf16_document_is_read_instead_of_being_refused_for_its_nul_bytes() -> None:
-    """Notepad's "Unicode" save, refused by the share with a true statement about the wrong thing.
+    """A UTF-16 document is read instead of being refused for its NUL bytes.
 
-    UTF-16 survives `errors="replace"` with its NUL bytes intact, so `sync._read_and_parse`'s
-    guard caught it and filed it as `skipped_unreadable` saying a Postgres `text` column cannot
-    hold a NUL. An operator reading that report learns nothing about the encoding, and the file
-    is simply absent from the corpus.
+    Under `errors="replace"` its NULs survive and the sync files it as `skipped_unreadable` for a
+    Postgres reason, saying nothing about the encoding.
     """
     text = "Reaction held at 60 °C; yield 87 %. Solvent: toluene.\n"
     raw = text.encode("utf-16")

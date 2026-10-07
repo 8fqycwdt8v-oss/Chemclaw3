@@ -1,15 +1,9 @@
 """What a commitment is, and the one thing this system adds to it.
 
-A commitment is a unit of work a programme has committed to — a programme, an activity, a
-milestone, a deliverable — mirrored in from the system that owns it. **It is a mirror and not a
-system of record**: the organisation already runs a portfolio tool, that tool is the truth, and
-nothing here plans, schedules, levels resources or computes a critical path. A deployment that let
-it try would have two answers to "when does this land", and the second one would be wrong more
-often.
-
-What this adds is the join no portfolio tool can compute: between a slipping milestone and the
-*chemistry* that is slipping it. `note_ids`, `job_ids` and `compounds` are how the source states
-that link, and they are the reason the mirror is worth keeping at all.
+A commitment (programme, activity, milestone, deliverable) is mirrored in from the portfolio tool
+that owns it. It is a mirror, not a system of record: nothing here plans, schedules or computes a
+critical path. What it adds is the link between a milestone and the chemistry holding it up —
+`note_ids`, `job_ids` and `compounds`, as the source states them.
 """
 
 from datetime import datetime
@@ -37,9 +31,8 @@ class Commitment(BaseModel):
     external_id: str = Field(min_length=1)
     kind: CommitmentKind = "activity"
     title: str = Field(min_length=1)
-    #: Who owns it, **in the source's namespace**. Deliberately not resolved to an Entra oid: a
-    #: mapping this system invented would be a second directory, and a wrong one would attribute
-    #: somebody else's work.
+    #: Who owns it, in the source's namespace. Not resolved to an Entra oid: an invented mapping
+    #: would be a second directory and could misattribute work.
     owner: str = ""
     state: CommitmentState = "open"
     due_at: datetime | None = None
@@ -58,8 +51,6 @@ class Commitment(BaseModel):
     def links_to_science(self) -> bool:
         """Whether the source said what chemistry this is waiting on.
 
-        The property the whole mirror exists for. A commitment with no link is a row a portfolio
-        tool already holds and holds better; one with a link is a question only this system can
-        answer.
+        A commitment with no link is one the portfolio tool already holds better.
         """
         return bool(self.note_ids or self.job_ids or self.compounds)

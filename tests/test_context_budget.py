@@ -1,19 +1,11 @@
-"""The budget's unit, its ceiling, and the two things that were never measured.
+"""The budget's unit, its ceiling, and the request prefix it charges.
 
-Three claims, and none of them is about the edits — they are about the arithmetic the edits are
-handed, which is where the defects were:
-
-1. **The unit.** chars/4 is within 4% on prose and tool schemas and roughly *half* the truth on
-   structured tool results, so a budget denominated in it is not a budget in billed tokens. The
-   ratio is measurable from the provider's own `input_tokens`, and `note_model_call` is where the
-   two meet.
-2. **The ceiling.** Nothing knew the model's context window, so the budget was a constant that
-   happened to sit under most of them.
-3. **The prefix.** ~43,000 tokens on `default`, outside the budget entirely — and then outside it
-   in every *shipped* configuration, because the subtraction that fixed that was guarded by a
-   window setting nothing declares. It is charged unconditionally now, which makes
-   `agent_context_token_budget` a bound on the whole request. A `ContextEdit` cannot see the
-   prefix; a middleware can; the contextvar is the seam.
+1. The unit: chars/4 is close on prose and schemas and about half the truth on structured tool
+   results, so the billed/estimated ratio is learned from the provider's `input_tokens` in
+   `note_model_call`.
+2. The ceiling: a declared context window bounds the budget.
+3. The prefix: charged unconditionally, so `agent_context_token_budget` bounds the whole request.
+   A `ContextEdit` cannot see the prefix; a middleware can, and a contextvar is the seam.
 """
 
 import asyncio
@@ -73,32 +65,18 @@ def _observe(ratio: float, calls: int = 40) -> None:
 def test_a_process_with_no_sample_yet_changes_nothing() -> None:
     """Before anything has been observed the trigger is exactly the configured number.
 
-    The property that makes this safe to ship: a deployment that upgrades and observes nothing gets
-    the behaviour it had. It is a claim about *zero* samples, and it used to be a claim about the
-    first twenty — see the test below for why that stopped being the shape.
+    A deployment that observes nothing keeps its behaviour; this is a claim about zero samples.
     """
     assert estimator_ratio() == 1.0
     assert effective_trigger(100_000) == 100_000
 
 
 def test_the_first_sample_is_believed_and_is_the_sample() -> None:
-    """One observation calibrates the budget, and calibrates it to what was observed.
+    """One observation calibrates the budget, to exactly what was observed.
 
-    **Two defects in one call, and the second hid the first.** `agent_context_calibration_min_calls`
-    shipped at 20, so a process's first twenty model calls budgeted at the uncalibrated end — the
-    *loose* end, since the ratio is clamped at 1.0 from below and believing a sample can therefore
-    only tighten. And the average itself was seeded at 1.0 with `_ALPHA = 0.1`, so even with the
-    floor lowered the answer stays mostly the seed for ~20 samples: the seed is divided back out
-    now, which is the ordinary EWMA bias correction.
-
-    Measured 2026-09-06 on a compiled graph with the connector surface bound, shipped defaults, a
-    dense connector-JSON thread and a 128k window declared — model calls that went out over the
-    123,904 tokens such a model accepts: **20** as shipped, **19** with the floor alone at 1, **1**
-    with both. `core/config/agent.py` carries the argument; this is the arithmetic.
-
-    Asserted as an identity rather than an inequality on purpose: after exactly one sample the
-    answer is that sample, which is what "the seed is divided back out" means and what a bare
-    `> 1.0` could not tell from the old 1.0675.
+    `agent_context_calibration_min_calls` is small and the EWMA's 1.0 seed is divided back out (bias
+    correction), so the first calls do not budget at the loose, uncalibrated end. Asserted as an
+    identity: after one sample the ratio is that sample.
     """
     note_model_call(10_000, 16_000)
 
@@ -121,17 +99,10 @@ def test_the_first_sample_is_believed_and_is_the_sample() -> None:
 
 
 def test_a_fresh_calibration_answers_with_its_first_sample() -> None:
-    """The seed is 1.0, and every test in this file reached that fact through `reset()` instead.
+    """A fresh calibration answers with its first sample.
 
-    `_CALIBRATION` is built once at module scope and the autouse fixture above re-seeds it through
-    `reset()`, so `__init__`'s own `self._ratio = 1.0` had exactly one executing test in the whole
-    repository and it reached it by *importing the module*. Seeded at 2.0 instead, a fresh process's
-    first sample comes back as 11.5 rather than 2.5 — clamped to the maximum factor, so every pod's
-    opening calls budget at a quarter of what was asked for — and the suite stays green, because
-    `reset()` puts 1.0 back before any assertion looks.
-
-    Constructed here rather than reached through the singleton, which is the whole point: a class
-    whose constructor no test runs is a constructor no test asserts.
+    Constructed directly rather than via the module singleton, because the autouse fixture re-seeds
+    the singleton through `reset()` and would hide a wrong seed in `__init__`.
     """
     fresh = _Calibration()
 
@@ -146,17 +117,11 @@ def test_a_fresh_calibration_answers_with_its_first_sample() -> None:
 
 
 def test_the_plausible_band_includes_its_own_endpoints() -> None:
-    """`_SANE` is a closed interval, and which way it closes decides whether a sample is believed.
+    """`_SANE` is a closed interval: its endpoints are believed.
 
-    The band exists to drop a measurement fault — usage reported for a different request — rather
-    than a tokenizer difference, so its endpoints are plausible ratios and are kept. Nothing
-    asserted that: both `<=` could become `<` and 249 tests could not tell, because every sample
-    any test feeds sits comfortably inside.
-
-    Driven downwards from an already-calibrated ratio, because `ratio()` clamps at 1.0 from below
-    and a low sample is otherwise invisible from outside — the observable consequence of accepting
-    0.2 is that it *pulls a high average down*, which is exactly the safety property the clamp is
-    there to bound.
+    The band drops measurement faults, not tokenizer differences. Driven downward from a calibrated
+    ratio, because `ratio()` clamps at 1.0 and a low sample is visible only as pulling a high
+    average down.
     """
     _observe(4.0)
     for _ in range(40):
@@ -192,12 +157,9 @@ def test_the_plausible_band_includes_its_own_endpoints() -> None:
 
 
 def test_a_one_token_estimate_is_a_sample_rather_than_a_fault() -> None:
-    """The guard rejects *non-positive* estimates, and `<= 1` is a different rule with no test.
+    """A one-token estimate is a sample rather than a fault.
 
-    `test_a_nonsense_sample_is_dropped` pins `note(0, n)` and `note(n, 0)`. Neither of them can
-    distinguish `estimated <= 0` from `estimated <= 1`, and the second silently discards a real
-    call — small, but it is the one every degenerate request makes, and a filter that widens
-    without saying so is how a calibration stops calibrating.
+    The guard rejects non-positive estimates only; `<= 1` would silently drop real degenerate calls.
     """
     for _ in range(40):
         note_model_call(1, 4)
@@ -206,11 +168,10 @@ def test_a_one_token_estimate_is_a_sample_rather_than_a_fault() -> None:
 
 
 def test_a_measured_underestimate_tightens_the_trigger() -> None:
-    """A budget in billed tokens becomes a smaller number in the estimator's unit.
+    """A measured underestimate tightens the trigger.
 
-    2.2x is the measured figure for a thread of connector JSON results — the payload class the
-    tool-result edit exists to reclaim — so a 100,000-token budget is really ~45,000 estimated
-    tokens, and that is the line the edits must compare against.
+    At a 2.2x ratio (typical of connector JSON results) a 100,000-token budget is ~45,000 estimated
+    tokens, the line the edits compare against.
     """
     _observe(2.2)
 
@@ -221,10 +182,8 @@ def test_a_measured_underestimate_tightens_the_trigger() -> None:
 def test_it_never_loosens_a_budget() -> None:
     """An overestimate leaves the trigger alone rather than raising it.
 
-    The asymmetry is the whole safety argument. chars/4 *over*-estimates prose by up to 20%, and a
-    ratio below 1.0 would let a thread grow past what the deployment asked to spend in order to
-    correct a conservative estimate — trading a hard provider failure for a rounding error. Clamped
-    at 1.0, the worst a mismeasurement can do is compact earlier than necessary.
+    Clamped at 1.0, the worst a mismeasurement can do is compact early; a ratio below 1 would let a
+    thread outgrow what the deployment asked to spend.
     """
     _observe(0.5)
 
@@ -261,12 +220,11 @@ def test_calibration_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_a_declared_window_bounds_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a window declared the thread gets what the model has left, not what config hoped for.
+    """A declared window bounds the budget.
 
-    Undeclared, the configured budget is the only bound — which is the honest state for an endpoint
-    whose window this repository cannot know. It is not, any more, "today's behaviour": the prefix
-    comes off in both arms (`test_the_prefix_reaches_the_edits_with_no_window_declared`), and this
-    test isolates the *window* arm by running off the request path, where the prefix is 0.
+    Undeclared, the configured budget is the only bound. Run off the request path (prefix 0) to
+    isolate the window arm; the prefix arm is
+    `test_the_prefix_reaches_the_edits_with_no_window_declared`.
     """
     monkeypatch.setattr(settings, "llm_max_tokens", 4_096)
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
@@ -281,11 +239,10 @@ def test_a_declared_window_bounds_the_budget(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_a_declared_window_subtracts_the_measured_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The prefix is ~43,000 tokens on `default` and it is not in the thread — so it is subtracted.
+    """A declared window subtracts the measured prefix.
 
-    Driven through the middleware rather than by setting the contextvar, because the claim is that
-    a *request*'s prefix reaches the edits: the seam is the whole point and setting the variable by
-    hand would assert nothing about it.
+    Driven through the middleware, because the claim is that a request's prefix reaches the edits;
+    setting the contextvar by hand would not test the seam.
     """
     monkeypatch.setattr(settings, "llm_max_tokens", 1_000)
     monkeypatch.setattr(settings, "llm_context_window_tokens", 50_000)
@@ -308,22 +265,11 @@ def test_a_declared_window_subtracts_the_measured_prefix(monkeypatch: pytest.Mon
 def test_the_prefix_reaches_the_edits_with_no_window_declared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same seam, in the arm that ships — and the one this repository had left open.
+    """The prefix reaches the edits with no window declared.
 
-    `llm_context_window_tokens` defaults to 0 and no value in `deploy/`, `infra/` or `.env.example`
-    states one, so the `if window:` that used to guard the subtraction meant the prefix was charged
-    against nothing in every real deployment: the system message, the skills listing and every bound
-    tool schema were outside the only budget there was. Measured end to end on 2026-09-04, a thread
-    the policy cut to its 90,030-token budget left as a 137,301-token request at a 128k model with
-    the overrun indicator flat.
-
-    So `agent_context_token_budget` is a bound on *request* spend now, and this is that sentence as
-    an assertion: with no window declared, the trigger the edits compare against is the configured
-    budget **minus** what this particular request already costs before a word of conversation.
-
-    Through the middleware, for `test_a_declared_window_subtracts_the_measured_prefix`'s reason: the
-    claim is about a request's prefix reaching the edits, and setting the contextvar by hand would
-    assert nothing about the seam that carries it.
+    `llm_context_window_tokens` defaults to 0, so the prefix must be charged without a window: the
+    trigger is the configured budget minus what this request costs before any conversation. Driven
+    through the middleware, as above.
     """
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
     measured: list[int] = []
@@ -347,32 +293,13 @@ def test_the_prefix_reaches_the_edits_with_no_window_declared(
 def test_a_budget_the_prefix_exhausts_floors_at_one_and_says_so(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The degenerate case, and the reason it is loud rather than silent.
+    """A budget the prefix exhausts floors at one and says so.
 
-    A trigger of 1 is not a small budget, it is "reduce on every model call": every non-empty thread
-    is over it, so the lossless edit clears every reclaimable tool result and the window cuts back
-    to the newest group, on every call, forever. Raising instead is not the alternative — these run
-    inside a middleware and an exception there costs the turn — so the floor stands and the fact is
-    reported.
-
-    **It is reachable from a plain misconfiguration now, not only from the window corner.** Before
-    the prefix was charged unconditionally it took a declared window narrower than its own prefix;
-    it now takes any configured budget below the prefix — which is where the shipped
-    `agent_tool_result_clear_trigger` sat, unnoticed, for as long as the number was derived from a
-    prefix measured with no connector bound. Both defaults were re-derived on 2026-09-05 from the
-    honest prefix, and
-    `tests/test_compaction.py::test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged` is
-    what asserts the shipped configuration is out of this state — the **opposite** state to the one
-    this test drives — against a prefix that includes the connector surface, which is the half that
-    made the previous assertion vacuous.
-
-    No shipped figure is restated here beyond that, deliberately: this test is about the mechanism,
-    and a default quoted in it is a claim about a commit
-    (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`).
-
-    Once per distinct `(configured, prefix, window)`, because the condition is static: it is the
-    same on every model call of every turn, so a line per call would be noise in exactly the
-    situation an operator is trying to read.
+    A trigger of 1 means reducing on every call. Raising is not an option inside a middleware, so
+    the floor stands and is reported, once per distinct `(configured, prefix, window)` since the
+    condition is static. Any budget below the prefix reaches it;
+    `tests/test_compaction.py::test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged`
+    asserts the shipped defaults do not.
     """
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
     reset_floor_reports()
@@ -403,17 +330,10 @@ def test_a_budget_the_prefix_exhausts_floors_at_one_and_says_so(
 def test_a_trigger_of_exactly_one_is_a_budget_and_not_a_floor(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """One estimated token of thread is the smallest budget there is; it is not the floor.
+    """A trigger of exactly one is a budget and not a floor.
 
-    The floor and the smallest budget return the **same number**, so the only observable difference
-    between them is the WARNING — which is the whole point of reporting it, since a deployment that
-    asked for a tiny thread allowance and one that asked for a negative one behave identically and
-    need to be told apart. `trigger < 1` could therefore become `<= 1` or `< 2` and 299 tests could
-    not tell, because none of them drove the boundary: the test above drives 0 and below, this one
-    drives exactly 1 and asserts the line is *not* emitted.
-
-    The pair is run against one prefix so the two budgets differ by exactly one token, which is the
-    only way the two predicates disagree.
+    Both return 1, so the WARNING is the only difference. One prefix, two budgets one token apart,
+    so the boundary is driven and the line is asserted absent at exactly 1.
     """
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
     reset_floor_reports()
@@ -441,12 +361,10 @@ def test_a_trigger_of_exactly_one_is_a_budget_and_not_a_floor(
 def test_the_floor_report_stops_at_its_own_cap(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The once-per-key set is bounded, because a key is three numbers a caller chooses.
+    """The floor report stops at its own cap.
 
-    `_note_floored_trigger` de-duplicates on `(configured, prefix, window)` and the prefix moves
-    with the bound tool surface, so the set is not closed by construction — `_MAX_REPORTED_FLOORS`
-    is what stops a pathological deployment turning a once-per-condition warning into a log per
-    model call. Nothing drove it: `>=` and `>` are the same for every key count any test reached.
+    The de-duplication key includes the prefix, which moves with the tool surface, so
+    `_MAX_REPORTED_FLOORS` bounds the set.
     """
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
     reset_floor_reports()
@@ -471,14 +389,11 @@ def test_the_floor_report_stops_at_its_own_cap(
 def test_a_prefix_past_the_basis_is_paid_in_spend_and_said_once(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Binding more than the budgets were derived for costs the request, not the thread.
+    """A prefix past the basis is paid in spend and said once.
 
-    The 2026-10-02 live lane, in miniature: the budget is a prefix basis plus a thread allowance,
-    the deployment's real prefix is larger than the basis, and the old arithmetic took the whole
-    difference out of the thread — 118,700 against a 109,743-token prefix left 8,957 — with no
-    warning, because the trigger never reached the floor. Driven at the boundary in both
-    directions: a prefix at the basis behaves exactly as before, a prefix past it leaves the thread
-    exactly what the basis left it, and a declared window still charges the whole prefix.
+    The budget is a prefix basis plus a thread allowance; a larger real prefix must not come out of
+    the thread. At the basis nothing changes, past it the thread keeps what the basis left, and a
+    declared window still charges the whole prefix.
     """
     monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
     monkeypatch.setattr(settings, "agent_context_prefix_basis", 80_000)
@@ -518,16 +433,10 @@ def test_a_prefix_past_the_basis_is_paid_in_spend_and_said_once(
 
 
 def test_the_ambient_prefix_is_put_back_after_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A contextvar that is set and never reset is one turn's prefix budgeting the next one.
+    """The ambient prefix is put back after the call.
 
-    Every existing assertion about this middleware reads `prefix_tokens()` from *inside* the
-    handler, which proves the value is published and says nothing about the `finally`. Inverted to
-    `if token is None`, the reset never runs on the path that matters and the ambient keeps the
-    last measured prefix for whatever runs next in that context — a background sweep, the next turn
-    on a reused context — while every test still passes.
-
-    All three exits, because the guard is about which of them own a token: a call that returns, a
-    call that raises, and a call whose measurement failed and therefore set nothing at all.
+    Otherwise one turn's prefix budgets whatever runs next in that context. All three exits: return,
+    raise, and a failed measurement that set nothing.
     """
     outer = _prefix.set(4_321)
     try:
@@ -574,9 +483,8 @@ def test_the_ambient_prefix_is_put_back_after_the_call(monkeypatch: pytest.Monke
 async def _ambient_after_an_async_call(middleware: Any, request: Any) -> int:
     """The ambient prefix after `awrap_model_call`, read in the context the call ran in.
 
-    Read inside the coroutine on purpose: `asyncio.run` copies the context, so a contextvar the
-    call leaks would be invisible to an assertion made after it returns — which is how the async
-    half of this guard stayed unasserted while the sync half was pinned.
+    `asyncio.run` copies the context, so a leak would be invisible to an assertion made after it
+    returns.
     """
     seeded = _prefix.set(4_321)
     try:
@@ -608,11 +516,10 @@ def _request(*, system: str) -> Any:
 
 
 def test_tool_schemas_are_measured_the_way_a_provider_is_sent_them() -> None:
-    """Through `convert_to_openai_tool`, which is what LangChain binds with.
+    """Tool schemas are measured through `convert_to_openai_tool`, as LangChain binds them.
 
-    `tests/test_context_floor.py` records why: reading `.name`/`.description` off a plain decorated
-    callable finds a repr, an empty string and `None`, and measures the whole tool surface at ~11
-    tokens per tool — a number that would make every budget derived from it meaningless.
+    Reading attributes off a plain decorated callable measures almost nothing
+    (`tests/test_context_floor.py`).
     """
     from chemclaw.agent.chemclaw_agent import _capability_tools
     from chemclaw.agent.profile_discovery import load_profiles
@@ -631,9 +538,7 @@ def test_tool_schemas_are_measured_the_way_a_provider_is_sent_them() -> None:
 def test_the_ratio_is_learned_from_a_real_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     """The observer feeds the calibration from the response of the call it wrapped.
 
-    The measurement and the bill exist in one function, three lines apart, and nothing compared
-    them — which is why the budget stayed in the wrong unit. A fake model reporting usage is enough
-    to prove the wiring, and the wiring is the part that was missing.
+    A fake model reporting usage proves the wiring.
     """
     monkeypatch.setattr(settings, "agent_context_calibration_min_calls", 1)
     # Comfortably above what one short turn estimates — the static prefix alone is ~43,000 tokens
@@ -693,62 +598,21 @@ def test_the_turn_record_says_whether_the_policy_acted() -> None:
 def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_record_overrun`'s silence is sound — swept, not argued, and now with no window needed.
+    """A clean overrun reading means the request fits its budget.
 
-    `compaction._record_overrun` compares the thread being sent against
-    `effective_trigger(agent_context_token_budget)`. The question this sweep answers is what a
-    *clean* reading of that counter is evidence of.
+    `compaction._record_overrun` compares the sent thread with `effective_trigger(budget)`. Swept, a
+    clean reading implies:
 
-    **The predecessor of this test could only answer it under a declared window**, because that was
-    the only case in which `effective_trigger` charged the request's prefix — so undeclared, the
-    counter compared a thread against a number the prefix had never met, and a 137,301-token
-    request left at a 128k model with the counter flat. The prefix is charged unconditionally now,
-    so the invariant gets stronger rather than being relaxed:
+    - always: `(min(prefix, basis) + sent) * ratio <= budget`, a bound on the request with no window
+      declared. The ratio applies to prefix and thread together; this is the unit-level half of
+      `tests/test_compaction.py::test_a_calibrated_process_does_not_bill_past_its_budget`. A prefix
+      past `agent_context_prefix_basis` is paid in spend
+      (`D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread`).
+    - with a window: also `prefix + sent + llm_max_tokens <= window`.
 
-    - **Always**: `sent <= effective_trigger(budget)` implies `(prefix + sent) * ratio <= budget`.
-      That is the whole of what the setting now means — a bound on the *request*, not on the
-      thread — and it holds with no window declared, which is every shipped deployment.
-
-      **The parenthesis is the correction, and this sweep shipped without it.** It read
-      `prefix + sent * ratio <= budget`, which charges the measured ratio to the thread alone and
-      so asserts that the prefix bills at exactly one billed token per estimated one. Nothing
-      measured that; measured 2026-09-06 the `default` prefix bills 0.985 and a connector-JSON
-      thread ~1.6, so the blend `note_model_call` folds is dragged toward the prefix and the thread
-      is permitted to grow into the difference. `effective_trigger` divided by that blend and this
-      sweep multiplied by it in the same asymmetric way, so the two agreed with each other at every
-      one of these points while a driven request billed 140,500 against a 119,000 budget. Written
-      whole, this sweep is red against the old arithmetic at every point with `ratio > 1` and
-      `prefix > 0` — it is the unit-level half of
-      `tests/test_compaction.py::test_a_calibrated_process_does_not_bill_past_its_budget`.
-    - **Charged up to `agent_context_prefix_basis`**, so the budget's half reads
-      `(min(prefix, basis) + sent) * ratio <= budget`: a prefix past the basis the defaults were
-      derived for is paid in spend rather than thread
-      (`D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread`). The basis
-      axis below includes one larger than every prefix, which is the arithmetic before it existed.
-    - **And where a window is declared**, additionally `prefix + sent + llm_max_tokens <= window`,
-      which is D-2026-08-28's property, kept: the window arm still caps the budget at
-      `window - llm_max_tokens` before the prefix comes off.
-
-    Both follow from the trigger being *derived* from those quantities, and from the ratio being
-    clamped at 1.0 so it can only tighten. What a clean reading is therefore evidence *of* is now a
-    statement about the configured budget in every configuration, and about the provider's real
-    limit wherever a deployment states one.
-
-    **The one exception is stated rather than swept under, and it is no longer exotic.** When the
-    prefix alone exhausts the budget there is no room for any thread and the trigger floors at 1, so
-    a thread of 0 or 1 estimated tokens reads clean on a request that is already over. That corner
-    used to need a window narrower than its own prefix; it is now reachable from a plain
-    misconfiguration — any configured budget under a prefix that measured 43,175 tokens on
-    2026-09-04 and grows with every bound tool. That is why `effective_trigger` reports a floor
-    instead of returning it silently. **No shipped default sits in it**:
-    `agent_tool_result_clear_trigger` is derived as the ratchet ceiling plus 30,000 of thread, and
-    `tests/test_compaction.py::test_the_shipped_clear_trigger_clears_the_prefix_it_is_charged` pins
-    that band end to end.
-
-    The prefix is set on the contextvar directly here because the claim is about the arithmetic;
-    that a *request*'s prefix reaches it is
-    `test_the_prefix_reaches_the_edits_with_no_window_declared`'s claim, and is proven through the
-    middleware there.
+    Exception: when the prefix alone exhausts the budget the trigger floors at 1, which
+    `effective_trigger` reports. The prefix is set on the contextvar directly, since the claim is
+    the arithmetic.
     """
     unsound: list[tuple[int, int, int, int, float, int, int, int]] = []
     degenerate = 0
@@ -824,15 +688,9 @@ def _costly_conversion(
 ) -> Callable[[Any], dict[str, Any]]:
     """`convert_to_openai_tool` with its real cost made explicit and its real shape kept.
 
-    Every call is recorded, so "how often was the surface swept" is a count rather than a timing
-    inference — and, given `on_threads`, so is *where* it ran.
-
-    **A synchronous `time.sleep`, not a busy-wait, and the difference is only the GIL.** Either one
-    holds the thread that calls it, so on the event loop's thread both stop the loop for the whole
-    conversion — which is the block the burst test below exists to keep out. They differ off the
-    loop: a busy-wait keeps the GIL, so the loop turns only when CPython's switch interval hands it
-    back, and the burst test's heartbeat then counted that arbitration instead of anything this
-    module decides (see its docstring for the measurement).
+    Every call is recorded with its thread. A `time.sleep` rather than a busy-wait: both block the
+    calling thread, but sleep releases the GIL, so the burst test measures where the work runs
+    rather than CPython's GIL arbitration.
     """
 
     def convert(tool: Any) -> dict[str, Any]:
@@ -862,16 +720,10 @@ def _tool_request(tools: list[Any]) -> Any:
 def test_the_tool_schema_sweep_runs_once_per_process_not_once_per_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The memo outlives the middleware, because the middleware is per turn and the answer is not.
+    """The tool-schema sweep runs once per process, not once per turn.
 
-    `MeasureRequestPrefix` is constructed inside the compaction group of a graph `langgraph_agent`
-    compiles **per turn**, so an instance memo is cold at every turn's first model call: measured
-    2026-09-06 on the `default` profile with connectors bound (92 tools), every turn paid ~20 ms of
-    `convert_to_openai_tool` over a surface that had not changed since the process started, and the
-    process's first turn paid ~100 ms.
-
-    Counted rather than timed, because the claim is about how often the sweep runs. The prefix each
-    turn publishes is asserted too: a memo that returns the wrong number is worse than no memo.
+    `MeasureRequestPrefix` is built per turn, so the memo is module-level. Counted, not timed; the
+    prefix each turn publishes is asserted too, since a wrong memo is worse than none.
     """
     _SCHEMA_TOKENS.clear()
     converted: list[str] = []
@@ -901,60 +753,21 @@ def test_the_tool_schema_sweep_runs_once_per_process_not_once_per_turn(
 
 
 def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> None:
-    """The front door has one event loop, and a memo miss must not own it.
+    """A burst of cold prefix measurements leaves the loop schedulable.
 
-    One uvicorn worker carries every SSE stream, both kubelet probes and the submission side of
-    every token validation, and `service_max_concurrent_turns` turns may take their first model
-    call together — a pod rollout, a UI reconnect storm, several chemists hitting send. On a cold
-    process every one of those misses the memo, so the sweep has to run somewhere other than the
-    loop: with it on the loop the burst ran back to back in one iteration and nothing else was
-    serviced for the whole of it.
-
-    **Two properties, and this test used to measure a third.** What `awrap_model_call` decides is
-    *which thread* runs `_measured`, and so whether the loop is free while it runs. Both are
-    asserted: every conversion is recorded with the thread that ran it and must not be the loop's,
-    and a heartbeat counting loop turns must be scheduled while the burst runs. The neutered arm
-    (`asyncio.to_thread` replaced by an inline await — the mutation this test exists to fail) is
-    run as the control for both, so each assertion is shown to separate the two outcomes in this
-    process.
-
-    The third property was how often **CPython** hands the GIL back to the loop while four threads
-    hold it busy-waiting. That is what the offloaded arm's heartbeat counted while the stand-in
-    was a busy-wait: the loop can only turn when it wins the GIL, which it contends for at the
-    interpreter's switch interval against every busy worker. Measured with the same shape outside
-    this tree: 18-23 beats at a 20 ms switch interval, 27-43 at the default 5 ms, 59-100 at 1 ms —
-    the count moved with `sys.setswitchinterval` and nothing in `context_budget` changes it. On the
-    CI runner it read 6 beats in 665 ms against the control's 3 in 1284 ms, 3.86x against a floor
-    of 5 (run 36096044005), after four earlier corrections to that same instrument recorded in
-    `git log -- tests/test_context_budget.py`. Every one of them tuned a bar against the
-    scheduler's arbitration of one lock; none could make it this code's property.
-
-    So the stand-in sleeps (`_costly_conversion`). A synchronous `time.sleep` holds the thread that
-    calls it exactly as the real CPU-bound conversion does — on the loop it stops the loop cold,
-    which is the control's 3 beats — and releases the GIL, so an offloaded one leaves the loop's
-    turns to the operating system. How much of the GIL a *real* CPU-bound sweep leaves the loop is
-    CPython's to decide and `api/runner.py` records it for the graph build; what this code owes is
-    that the sweep is not on the loop, and that is now what reds.
-
-    **What each assertion binds, and where it stops.** Thread identity catches the sweep, or any
-    part of it, running on the loop's thread. The rate catches a sweep moved to another thread and
-    then *waited on* from the loop — `executor.submit(...).result()` passes the first assertion and
-    holds the loop for the whole burst, driven at the control's rate. Neither catches the loop held
-    for part of the burst by something that is not the sweep: a `time.sleep` on the loop beside a
-    correct offload was driven and passes, because the loop is free for the rest of the burst and a
-    rate does not see when. That is not a decision this module makes.
+    One event loop carries every stream and probe, and many turns can miss the memo at once, so the
+    sweep runs off the loop. Asserted: every conversion runs on a thread other than the loop's, and
+    a heartbeat keeps turning during the burst. The control replaces `asyncio.to_thread` with an
+    inline await and must fail both. Thread identity catches work on the loop; the rate catches work
+    moved to a thread and then waited on synchronously from the loop.
     """
     _SCHEMA_TOKENS.clear()
     converted: list[str] = []
     on_threads: list[int] = []
     per_tool = 0.04
     turns = 4
-    # **Distinct tools per turn, so the memo cannot confound the comparison.** With turns sharing
-    # tools, how many conversions actually run depends on how the turns interleave: started
-    # together they all miss, run serially the first warms `_SCHEMA_TOKENS` for the rest. An
-    # earlier draft passed with the offload deleted for exactly that reason — the mutated path
-    # serialised and went warm while the control stayed cold. Distinct names make both arms do
-    # the same 32 conversions whatever the scheduling.
+    # Distinct tools per turn, so the memo cannot confound the comparison: both arms do the same
+    # conversions whatever the scheduling.
     tools_per_turn = [[_NamedTool(f"turn{n}_tool{i}") for i in range(8)] for n in range(turns)]
     conversions = turns * len(tools_per_turn[0])
     work = conversions * per_tool
@@ -974,9 +787,8 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
     async def burst() -> tuple[int, float, int]:
         """The four measurements under the heartbeat; returns (loop turns, wall, the loop's thread).
 
-        Offloaded or not depends only on whether `asyncio.to_thread` is patched out around the
-        call, so both arms go through the identical code path. Beats after the gather returns are
-        dropped, so the count is about the burst rather than about the teardown.
+        Both arms use the identical code path, differing only in whether `asyncio.to_thread` is
+        patched; beats after the gather are dropped.
         """
         beats: list[float] = []
         stop = asyncio.Event()
@@ -1024,10 +836,8 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
         "the event loop's own thread: the sweep is running on the loop that serves every other "
         "turn's stream and both kubelet probes"
     )
-    # Loop turns per second, against the control in the same process. The control is pinned near
-    # zero by construction — a sleep on the loop's thread stops it, leaving only the turns between
-    # the four inline measurements — and the offloaded arm has nothing holding the loop at all, so
-    # the two rates differ by orders of magnitude rather than by a factor a busy box can erase.
+    # Loop turns per second against the in-process control, which a sleep on the loop pins near
+    # zero; the two differ by orders of magnitude.
     offloaded_rate = beats / wall
     blocked_rate = max(blocked_beats, 1) / blocked_wall
     assert offloaded_rate > 20 * blocked_rate, (
@@ -1064,10 +874,8 @@ def _clean_encoding() -> Any:
 def _encoding_or_skip() -> Any:
     """The configured encoding, or a skip saying what this run is therefore not evidence about.
 
-    A skip rather than a failure because the merge table is a *deployment* artefact: an image bakes
-    it and `TIKTOKEN_CACHE_DIR` names it, and a checkout with neither is exactly the fallback the
-    tests below this one cover. Loud, because a check that quietly shrinks is worse than one that
-    says what it did not look at.
+    The merge table is a deployment artefact (baked into the image, named by
+    `TIKTOKEN_CACHE_DIR`); without it the fallback tests below apply.
     """
     encoding = _encoding()
     if encoding is None:
@@ -1081,15 +889,11 @@ def _encoding_or_skip() -> Any:
 def test_the_prompt_is_counted_with_the_encoding_rather_than_estimated(
     _clean_encoding: None,
 ) -> None:
-    """The system message is a *block list*, and counting only strings was a silent no-op.
+    """The prompt is counted with the encoding rather than estimated.
 
-    This is the assertion the first implementation needed and did not have. `_message_tokens`
-    tested `isinstance(content, str)` and fell back otherwise — and the prompt `create_agent` hands
-    a model arrives as `[{"type": "text", "text": ...}]`, so the exact path was never taken and the
-    measured prefix was byte-for-byte the estimator's. A fallback that is never taken and one that
-    is always taken produce the same number, so the property to assert is that the count *moved*,
-    and moved in the direction chars/4 is wrong in: it over-charges prose. Measured 2026-09-16 on
-    the observed `default` prompt, 7,755 estimated against 6,574 billed by `o200k_base` — 18%.
+    The system message arrives as a block list (`[{"type": "text", ...}]`), so counting only strings
+    would silently fall back. Asserted that the count moved, in the direction chars/4 is wrong: it
+    over-charges prose.
     """
     encoding = _encoding_or_skip()
     from chemclaw.agent.chemclaw_agent import instructions_for
@@ -1116,12 +920,9 @@ def test_the_prompt_is_counted_with_the_encoding_rather_than_estimated(
 
 
 def test_the_schema_half_is_counted_with_the_encoding_too(_clean_encoding: None) -> None:
-    """And it barely moves, which is the finding rather than a weak assertion.
+    """The schema half is counted with the encoding too.
 
-    Measured 2026-09-16 over the `default` profile's 98 bound tools: 61,123 against 61,093
-    estimated — chars/4 is within 0.05% on JSON schemas. So this asserts the two agree *closely*
-    rather than that one is smaller, because the direction is not the property and pinning a
-    direction here would fail on a schema whose punctuation happened to tokenise the other way.
+    chars/4 is very close on JSON schemas, so this asserts close agreement rather than a direction.
     """
     _encoding_or_skip()
     from chemclaw.agent.chemclaw_agent import _capability_tools
@@ -1159,12 +960,10 @@ def _with_encoding(name: str, call: Callable[[], int]) -> int:
 
 
 def test_a_special_token_spelling_is_counted_rather_than_raising(_clean_encoding: None) -> None:
-    """A tool result is text a server wrote, and `Encoding.encode` refuses some of it.
+    """A special-token spelling is counted rather than raising.
 
-    `encode` raises `ValueError` on `<|endoftext|>` and the other special-token spellings; a
-    connector could return one in a document, a SMILES comment or an error string. A counter that
-    raises on its own input would fail the turn it exists to make cheaper, so this path uses
-    `encode_ordinary`, which has no such refusal.
+    `encode` raises on `<|endoftext|>` and similar, which a server could return; this path uses
+    `encode_ordinary`.
     """
     _encoding_or_skip()
 
@@ -1174,11 +973,9 @@ def test_a_special_token_spelling_is_counted_rather_than_raising(_clean_encoding
 
 
 def test_an_unpriceable_block_falls_back_to_the_estimator_whole(_clean_encoding: None) -> None:
-    """An image is 85 tokens to the estimator and nothing at all to an encoding.
+    """An unpriceable block falls back to the estimator for the whole message.
 
-    So a message carrying one is counted by the estimator entirely rather than half each way,
-    which is what `_text_tokens` returning `None` buys: the two counters are never mixed *inside*
-    one message.
+    `_text_tokens` returning `None` keeps the two counters from mixing inside one message.
     """
     _encoding_or_skip()
     picture = SystemMessage(
@@ -1191,15 +988,11 @@ def test_an_unpriceable_block_falls_back_to_the_estimator_whole(_clean_encoding:
 def test_no_baked_cache_means_the_estimator_and_no_socket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, _clean_encoding: None
 ) -> None:
-    """Production is air-gapped, so the fallback must not be "try the network and recover".
+    """No baked cache means the estimator and no socket.
 
-    `tiktoken.get_encoding` fetches its merge table over HTTPS on a miss. Measured here with an
-    empty cache directory and no network namespace, that is a `requests.exceptions.ProxyError` —
-    an `OSError` — after 0.03 s where the proxy refuses at once; on a network that *drops* the
-    packet instead it is a connect timeout, on the thread measuring the prefix. So the question
-    `_baked_cache_dir` asks is whether a table was baked at all, and this test is what proves the
-    common misconfiguration never dials: every socket constructor and every name lookup fails the
-    test if it is reached.
+    `tiktoken.get_encoding` fetches over HTTPS on a miss, which on an air-gapped network may hang.
+    So `_baked_cache_dir` asks whether a table was baked, and every socket constructor and name
+    lookup fails this test if reached.
     """
     import socket
 
@@ -1220,12 +1013,10 @@ def test_no_baked_cache_means_the_estimator_and_no_socket(
 def test_an_encoding_nobody_baked_costs_accuracy_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch, _clean_encoding: None
 ) -> None:
-    """A name that cannot be resolved degrades to the estimator instead of failing the turn.
+    """An encoding nobody baked costs accuracy and nothing else.
 
-    The residual `_baked_cache_dir` cannot close — a populated cache that does not hold the
-    *configured* encoding — is this one, and what it must cost is one swallowed attempt per process
-    and a WARNING naming the encoding. Driven through a resolution that raises rather than by
-    unsetting the cache, so it covers the arm the directory check lets through.
+    A populated cache without the configured encoding costs one swallowed attempt per process and a
+    WARNING naming it. Driven through a resolution that raises.
     """
 
     def explode(name: str) -> Any:
@@ -1244,19 +1035,10 @@ def test_an_encoding_nobody_baked_costs_accuracy_and_nothing_else(
 
 
 def test_the_cache_directory_this_module_asks_about_is_the_one_tiktoken_reads() -> None:
-    """An upstream shape, pinned: `_baked_cache_dir` transcribes `read_file_cached`'s resolution.
+    """`_baked_cache_dir` transcribes `read_file_cached`'s resolution; the upstream shape is pinned.
 
-    That function takes a blob path rather than answering "where would you look", so the steps are
-    copied into this module. A bump that renames or reorders them would leave `_baked_cache_dir`
-    pointing at a directory nothing bakes into, and the only symptom would be a budget quietly
-    counting with chars/4 again.
-
-    **Two of the five strings below are the ones this test used to be missing**, and their absence
-    is the whole of the defect the test beside it now drives: upstream decides on *presence*
-    (`"TIKTOKEN_CACHE_DIR" in os.environ`) and treats an empty value as *caching disabled — fetch
-    every time* (`cache_dir == ""`), where this module asked `os.environ.get(...) or ...` and so
-    read an empty value as "not set". Pinning the three directory names could not see that,
-    because the three names were never the part that was wrong.
+    Including presence semantics: `"TIKTOKEN_CACHE_DIR" in os.environ`, with an empty value meaning
+    caching disabled (`cache_dir == ""`).
     """
     import inspect
 
@@ -1280,26 +1062,12 @@ def test_the_cache_directory_this_module_asks_about_is_the_one_tiktoken_reads() 
 def test_the_baked_cache_question_is_answered_the_way_tiktoken_answers_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, _clean_encoding: None
 ) -> None:
-    """Every arm of the resolution, driven — because the string pin above agreed with a dial.
+    """The baked-cache question is answered the way tiktoken answers it, every arm driven.
 
-    `_baked_cache_dir` is the whole air-gap precondition: `_resolve_encoding` calls `tiktoken` only
-    where this says a table is baked, so a `Path` returned here is this module saying "loading is
-    safe, nothing will be fetched". The assertion that used to stand behind that claim read three
-    string literals out of upstream's source, which is evidence about upstream and none at all
-    about this function. Measured with `TIKTOKEN_CACHE_DIR=""` and a populated
-    `/tmp/data-gym-cache`, with that assertion green: this returned `/tmp/data-gym-cache`,
-    `tiktoken` ignored it exactly as upstream documents, and the resolve dialled `127.0.0.1` — the
-    guard was the reason the fetch happened.
-
-    So the arms are driven instead. The empty-string one is the regression, and it is driven
-    through `_encoding()` as well as through the return value, because what the return value is
-    *for* is deciding whether a socket is opened.
-
-    **The egress guard is not what asserts that here, and the reason is worth recording.**
-    `core/netguard.py` is armed in this process, and it did not see the dial above: a proxy
-    variable moved the destination to loopback, which `_check` exempts by construction and must
-    keep exempting. So `_refused` stayed 0 through the defect it exists to catch, and the sentinel
-    below — which fails on *any* host, loopback included — is the assertion that holds.
+    A `Path` returned here means "loading is safe, nothing will be fetched". The empty-string arm is
+    driven through `_encoding()` too, because the return value decides whether a socket opens. A
+    sentinel failing on any host is the assertion: `core/netguard.py` exempts loopback, which a
+    proxy variable can redirect to.
     """
     import socket
     import tempfile
@@ -1364,20 +1132,12 @@ def test_the_baked_cache_question_is_answered_the_way_tiktoken_answers_it(
 
 
 def test_the_encoding_the_image_bakes_is_the_encoding_the_config_asks_for() -> None:
-    """The one declaration that decides whether a shipped pod ever reaches the network.
+    """The encoding the image bakes is the encoding the config asks for.
 
-    Two files name this encoding and nothing joined them: `deploy/Containerfile` bakes a merge
-    table under `TIKTOKEN_CACHE_DIR` as a literal, and `llm_token_encoding` is what
-    `_resolve_encoding` then asks for. They agreeing is not a tidiness property — it is the
-    residual `_baked_cache_dir` cannot close, because a *populated* cache that does not hold the
-    configured encoding is precisely the case where this module says "safe to load" and `tiktoken`
-    fetches. On a dropping network that fetch has no timeout (`tiktoken.load.read_file` calls
-    `requests.get` with none), so changing the config default alone would put every pod on that
-    path at its first model call, with the only symptom a slow one.
-
-    The cache *directory* is asserted for the same reason and in the same breath: a bake into one
-    path and an `ENV` naming another leaves the image with a table no runtime reads, which is the
-    same fetch by a different route.
+    `deploy/Containerfile` bakes a merge table under `TIKTOKEN_CACHE_DIR`, and `llm_token_encoding`
+    names what `_resolve_encoding` asks for. If they differ, a populated cache lacks the configured
+    encoding and `tiktoken` fetches with no timeout. The cache directory is asserted too: a table
+    baked where no runtime reads it is the same fetch.
     """
     import re
 

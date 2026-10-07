@@ -1,10 +1,8 @@
-"""Knowledge-graph note: the frontmatter schema and parser (plan steps 2.1, 2.2).
+"""Knowledge-graph note: the frontmatter schema and parser.
 
-A note is a Markdown file with a YAML frontmatter header (structured, queryable)
-and a Markdown body whose `[[wikilinks]]` encode relations to other notes by id
-(D-004). This module is the single source of the note schema and the only parser;
-malformed frontmatter or an invalid note yields a clear `NoteError` with the file
-context, never a crash (G4).
+A note is a Markdown file with a YAML frontmatter header and a body whose `[[wikilinks]]` encode
+relations to other notes by id. This module is the single source of the note schema and the only
+parser; an invalid note yields a `NoteError` naming the file, never a crash.
 """
 
 import re
@@ -28,15 +26,10 @@ WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 def split_link(target: str) -> tuple[str, str]:
     """Split a wikilink's inside into `(relation, note id)`.
 
-    `[[precursor-of:compound-x]]` is a *typed* edge; a bare `[[compound-x]]` is a citation and
-    yields `DEFAULT_RELATION`. The syntax was free to take: `_SLUG` excludes `:`, so a colon form
-    previously parsed as one dangling id and failed `kg-validate` — nothing in any corpus could
-    already be relying on it (STO-8).
-
-    A target containing a colon but no relation before it (`[[:x]]`), or no id after it
-    (`[[rel:]]`), is returned as a plain citation of the whole string, which then fails the
-    unknown-note check with the text the author actually wrote rather than a silently repaired
-    version of it.
+    `[[precursor-of:compound-x]]` is a typed edge; a bare `[[compound-x]]` is a citation and yields
+    `DEFAULT_RELATION`. A target with an empty relation (`[[:x]]`) or empty id (`[[rel:]]`) is
+    returned as a plain citation of the whole string, so it fails the unknown-note check with the
+    text the author wrote.
     """
     relation, separator, note_id = target.partition(":")
     relation, note_id = relation.strip(), note_id.strip()
@@ -48,17 +41,9 @@ def split_link(target: str) -> tuple[str, str]:
 def strip_links(text: str) -> str:
     """`text` with every `[[wikilink]]` reduced to its target, so it carries no graph edges.
 
-    The one place that rule lives, because three renderers need it and each one that grows its own
-    copy is a place the report layer and the graph indexer can come to disagree about what a link
-    points at. Reduces to the *target* via `split_link` rather than to the whole bracket contents:
-    a typed edge reads `[[precursor-of:compound-x]]`, and substituting the raw group would drop
-    `precursor-of:compound-x` into prose a person reads.
-
-    **Retrieved text is what this is for.** A chunk's content becomes a bullet inside a report, and
-    a `[[link]]` surviving that interpolation is not decoration — it is a real outgoing edge on a
-    note about to be written, pointing at something no retriever returned. A share
-    or warehouse document is written by whoever wrote it; the report's citations must come from the
-    report.
+    For interpolating retrieved or external text into a note body: a surviving link would be a real
+    outgoing edge the report never cited. Reduces to the target via `split_link`, so a typed edge
+    does not leak its relation prefix into prose.
     """
     return WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)
 
@@ -66,20 +51,9 @@ def strip_links(text: str) -> str:
 def as_cell(text: str) -> str:
     """`text` as one line that can fill a slot in a note body but cannot add structure to it.
 
-    The two rules `retrieval/harness._as_evidence` argues at length, in one place because there are
-    now three callers: `strip_links` so interpolated text cannot mint a graph edge on the note being
-    written, and whitespace collapse so it cannot mint Markdown. A newline ends a line and a leading
-    `- ` starts a list item, so multi-line text placed in a bullet does not render badly — it
-    renders
-    as *more bullets*, which read as independent, uncited content. Measured on the committed corpus,
-    eight retrieved chunks became twenty-three bullets that way.
-
-    **Model-authored text needs this exactly as much as retrieved text does**, which is what brought
-    it here from `harness`. A hypothesis statement is a sentence this system asked a model to write,
-    and a model that emits `[[playbook-degassing]]` inside it would put a real outgoing edge on a
-    proposal note, citing a note nothing retrieved.
-
-    The text is preserved rather than truncated: a reader still sees what it said, on one line.
+    Strips wikilinks (no new graph edges) and collapses whitespace (no new Markdown, e.g. a newline
+    plus `- ` becoming extra uncited bullets). Applies to retrieved and model-authored text alike.
+    The text is preserved, not truncated.
     """
     return " ".join(strip_links(text).split())
 
@@ -87,9 +61,7 @@ def as_cell(text: str) -> str:
 def cited_links(text: str) -> list[tuple[str, str]]:
     """Every `(relation, note id)` a body cites, deduplicated by pair in first-seen order.
 
-    Deduplicated on the *pair*, not the id: a note may legitimately stand in two relations to the
-    same target (a compound that is both a precursor and a product of a reaction), and collapsing
-    those would lose the very information typing the edges exists to record.
+    By pair, not id: a note may stand in two relations to one target.
     """
     ordered: dict[tuple[str, str], None] = {}
     for match in WIKILINK.findall(text):
@@ -99,45 +71,23 @@ def cited_links(text: str) -> list[tuple[str, str]]:
     return list(ordered)
 
 
-#: What separates a source from an entry id inside a qualified `reaction-` citation.
-#:
-#: A `.` because `_SLUG` already admits it, so a qualified id is a legal note slug, a legal git ref
-#: component and a legal filename with no widening anywhere. It splits on the **first** occurrence,
-#: so an entry id containing dots survives and a *source* name containing one is refused at the
-#: point it would be spelled — a source name is a token in `CHEMCLAW_DATA_SOURCES` and an
-#: unsplittable id is a citation that silently names the wrong run.
+#: Separator between source and entry id in a qualified `reaction-` citation. `.` is already a
+#: legal slug, ref and filename character. Splits on the first occurrence, so entry ids may contain
+#: dots but source names may not.
 _SOURCE_SEPARATOR = "."
 
 
 def note_id_for_reaction(record_id: str, source: str = "") -> str:
     """The `reaction` note id for a fingerprint-index record id, qualified by its source.
 
-    One definition, because three callers were each spelling `f"reaction-{id}"` themselves and one
-    of them did not. `connectors.rxnfp.similar_reactions` returned the raw index key while
-    `retrieval.retrievers` and the ELN ingest both prefixed it, so a chemist handed a search hit
-    straight to `expand_note` was told the note did not exist — while it sat on disk under the
-    prefixed name. Two spellings of one id is how a search stops reaching the thing it found.
-
-    **The qualified form exists now, and what makes it real is that the readers take it.** One
-    existed here for a day and was deleted, correctly: nothing passed it, every reader still
-    spelled and stripped the bare form, and a spelling no reader accepts is a claim that two sites
-    can be told apart rather than a way of telling them apart. Migration `063` had already keyed
-    the fingerprint index on `(source, id)`, so a two-source deployment returned **two hits citing
-    one id** and `ingest.eln.records._one_of` raised `AmbiguousReactionRecord` the moment a reader
-    expanded either — loud rather than wrong, and still not an answer. `Match.source` is what the
-    search knows and the citation did not carry.
-
-    **The bare form is not deprecated and must keep resolving.** Every citation already committed
-    to `knowledge/` and every `reaction_labels.citation` row written before this spells it, so the
-    resolvers (`kg.note.external_record_ref`, `ingest.eln.records.read`) accept both: a qualified
-    id names one source's row exactly, and a bare one resolves through `_one_of`, which is
-    unchanged — it still refuses when two sources hold the id, because a bare citation genuinely
-    does not name one run.
+    The one spelling of this id, so a search hit can be expanded directly. The qualified form names
+    one source's row exactly, since the index is keyed on `(source, id)`. The bare form stays valid
+    for existing citations and resolves across all sources, refusing when two sources hold the id.
 
     Args:
         record_id: The ELN's own entry id, as the store and the index key it.
-        source: The registry source name that transcribed it — `Match.source`, or the `source`
-            argument an ingest already carries. Empty produces the bare, unqualified form.
+        source: The registry source name that transcribed it (`Match.source`, or the ingest's
+            `source`). Empty produces the bare, unqualified form.
 
     Returns:
         `reaction-<source>.<id>`, or `reaction-<id>` when no source is given.
@@ -155,46 +105,26 @@ def note_id_for_reaction(record_id: str, source: str = "") -> str:
     return f"reaction-{source}{_SOURCE_SEPARATOR}{record_id}"
 
 
-# Id namespaces that resolve *outside* the markdown graph (D-2026-08-25).
-#
-# An ELN transcription is data, not a knowledge claim, so it lives in `reaction_records` rather
-# than as a file in `knowledge/` — but `memory.campaign` and `memory.optimization` still cite each
-# run as `[[reaction-<id>]]`, which is what makes a campaign narrative traversable. Without this,
-# every campaign, playbook and optimization note would fail `kg-validate` the moment reactions
-# stopped being files, for links that resolve perfectly well.
-#
-# The cost is stated rather than hidden: offline validation can check the *shape* of these ids and
-# not their existence, because `kg-validate` runs in CI with no database. Existence is checked
-# against the store by `kg.validate`, which CI runs with a database (`ReactionRecordStore.known`).
+# Id namespaces that resolve outside the markdown graph. An ELN transcription is a row in
+# `reaction_records`, not a file, but campaign and optimization notes cite runs as
+# `[[reaction-<id>]]`. Offline validation can check only the shape of these ids; existence is
+# checked against the store by `kg.validate` when a database is available.
 EXTERNAL_ID_PREFIXES = ("reaction-",)
 
 
 def resolves_outside_graph(note_id: str) -> bool:
     """Whether `note_id` names a record in a store rather than a note in the graph.
 
-    One predicate, because two callers ask it — `kg.graph.dangling_links` (is this link broken?)
-    and `agent.graph_tools.expand_note` (where do I look this up?) — and a link the first calls
-    fine that the second cannot find is exactly the two-spellings failure `note_id_for_reaction`
-    exists to prevent.
+    One predicate so `kg.graph.dangling_links` and `agent.graph_tools.expand_note` agree.
     """
     return note_id.startswith(EXTERNAL_ID_PREFIXES)
 
 
 def external_record_ref(note_id: str) -> tuple[str, str]:
-    """The `(source, record_id)` an external citation names — `("", id)` for the bare form.
+    """The `(source, record_id)` an external citation names, `("", id)` for the bare form.
 
-    The inverse of `note_id_for_reaction`, and the pair rather than the id alone because a
-    qualified citation's whole point is that the source is part of what it names: a resolver handed
-    only the id back would ask the store the same ambiguous question the qualification was written
-    to answer.
-
-    Split on the **first** separator, so an entry id containing dots is returned whole.
-    `note_id_for_reaction` refuses a source containing one, which is what makes that split exact
-    rather than a guess.
-
-    A citation with no separator is bare — every one committed to `knowledge/` before this — and
-    comes back with an empty source, which every caller reads as "ask across all sources", the
-    behaviour it has always had.
+    The inverse of `note_id_for_reaction`. Splits on the first separator, which is exact because
+    source names cannot contain it. An empty source means "ask across all sources".
     """
     for prefix in EXTERNAL_ID_PREFIXES:
         if note_id.startswith(prefix):
@@ -205,20 +135,12 @@ def external_record_ref(note_id: str) -> tuple[str, str]:
 
 
 def external_record_id(note_id: str) -> str:
-    """The store-side id behind an external citation — the prefix and any source stripped.
+    """The store-side id behind an external citation, with the prefix and any source stripped.
 
-    `unresolved_citations` used to spell `removeprefix("reaction-")` twice against a constant that
-    is a *tuple*, so a second entry in `EXTERNAL_ID_PREFIXES` would have queried the store with an
-    unstripped id and reported every such citation missing. One function, driven by the constant,
-    so growing the namespace list cannot silently break the lookup.
-
-    The id half of `external_record_ref`, for the one caller that asks only whether a record
-    *exists* (`kg.validate.unresolved_citations`). **That is a deliberately weaker check than a
-    resolve, and saying so is the point**: a qualified citation whose source does not hold the id
-    passes the validator when another source does, and is then refused at read time by
-    `records.read`, loudly, naming the id. The cut is drawn there rather than closed because
-    `records.known` answers a page of ids with one indexed lookup, and this validator's own
-    message says what it asked.
+    Driven by `EXTERNAL_ID_PREFIXES`. Used only for an existence check
+    (`kg.validate.unresolved_citations`), which is deliberately weaker than a resolve: a qualified
+    citation whose own source lacks the id passes if another source has it, and is refused at read
+    time by `records.read`.
     """
     return external_record_ref(note_id)[1]
 
@@ -226,11 +148,7 @@ def external_record_id(note_id: str) -> str:
 def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
-    The one filename shape the whole system depends on, and until this it was an f-string in the
-    write path (`chemclaw.kg.record`) that three other places re-derived by hand — including
-    `chemclaw.kg.graph.note_file_fingerprints`, which reads a note's id back out of `path.stem`,
-    and the warehouse retriever, which spelled the layout *and* the literal type `"reaction"` into
-    a `stat` call. A layout that lives in four places is a layout one of them will get wrong.
+    The one filename shape the system depends on; readers derive a note id from `path.stem`.
     """
     return f"{note_type}/{note_id}.md"
 
@@ -238,14 +156,8 @@ def note_relative_path(note_type: str, note_id: str) -> str:
 def cited_ids(text: str) -> list[str]:
     """Extract the note ids a body of text cites via `[[wikilinks]]`, stripped and deduped.
 
-    The one extraction every citation reader shares (`Note.outgoing_links`, the answer verifier):
-    each target is stripped (a padded `[[ id ]]` resolves to `id`, matching the slug schema) and
-    empties are dropped, preserving first-seen order so a repeated citation yields one id. Kept here
-    beside `WIKILINK` so the pattern and its normalization have exactly one home and cannot drift.
-
-    Relation-typed links contribute their *target*, so a caller asking "what does this note point
-    at" is unaffected by whether the author typed the edge — which is what let typed links land
-    without touching `chemclaw.kg.validate`'s dangling-link check or the answer verifier.
+    The one extraction every citation reader shares. Targets are stripped (`[[ id ]]` resolves to
+    `id`), empties dropped, first-seen order kept. Typed links contribute their target.
     """
     ordered: dict[str, None] = {}
     for _, note_id in cited_links(text):
@@ -253,29 +165,13 @@ def cited_ids(text: str) -> list[str]:
     return list(ordered)
 
 
-# How this system serializes a note's id into a tool result: the `id="..."` attribute of the
-# `<retrieved-note-...>` envelope `gather_evidence` wraps chunks in, and the `id` / `note_id` /
-# `source_note_id` fields of anything dumped as JSON (`expand_note`, `find_notes`, `EvidenceChunk`,
-# every connector returning a note model). These are *our own* output formats rather than guesses
-# about arbitrary text, which is what makes scanning for them honest — and `tests/test_note.py`
-# pins them against real tool output, so a fourth serialization breaks a test instead of silently
-# narrowing the scan.
-#
-# The three keys are enumerated rather than matched as a `*_id` suffix, because that would also
-# swallow `structure_id`, `calc_id`, `job_id` and `session_id` — none of which names a note, and
-# every one of which would make an answer look grounded in something it never saw. The bare `id`
-# key is the residual over-capture the enumeration cannot close: any JSON object with a plain
-# `"id":` field matches, including a session or job dumped with one. The exposure is bounded by
-# what the check does with a capture — a grounding verdict only credits an id the *answer also
-# cites*, so a swallowed `sess-…` grounds nothing unless the model cites `[[sess-…]]` — but it is
-# an over-capture, not the "our own formats only" claim the paragraph above makes, and narrowing
-# it means renaming the `id` field in the note serializations, not tightening this pattern.
-#
-# The `\\?` before each quote is not defensive padding. A `gather_evidence` result is JSON whose
-# `content` field holds the `<retrieved-note ... id="X">` envelope as *text*, so on the wire the
-# envelope's quotes arrive escaped — `id=\"X\"` — and a pattern insisting on a bare quote matches
-# nothing at all on the one tool this check exists for. Found by pinning the fixture to a real
-# result instead of an idealized one.
+# How this system serializes a note id into a tool result: the `id="..."` attribute of the
+# `<retrieved-note-...>` envelope, and the `id` / `note_id` / `source_note_id` JSON fields.
+# `tests/test_note.py` pins these against real tool output. Keys are enumerated rather than matched
+# as `*_id`, which would capture `job_id`, `session_id` and the like. A plain `"id":` field on a
+# non-note object is still captured; that grounds nothing unless the answer also cites it. The
+# optional `\\` before each quote matches the envelope when it arrives JSON-escaped inside a
+# `gather_evidence` result.
 _SERIALIZED_ID = re.compile(
     r"""\\?["']?\b(?:source_note_id|note_id|id)\\?["']?\s*[=:]\s*"""
     r"""\\?["']([A-Za-z0-9][A-Za-z0-9_.-]*)"""
@@ -283,26 +179,11 @@ _SERIALIZED_ID = re.compile(
 
 
 def mentioned_ids(text: str) -> list[str]:
-    """Every note id a *tool result* put in front of the model, deduped, in first-seen order.
+    """Every note id a tool result put in front of the model, deduped, in first-seen order.
 
-    The counterpart to `cited_ids`, and deliberately a different question. `cited_ids` reads what
-    an author *claims* (`[[wikilinks]]`); this reads what a payload *contains* — the ids of notes
-    the turn actually retrieved, however they were serialized. Both live here for the same reason:
-    a citation reader and a citation writer that disagree about what an id looks like is how a
-    grounding check silently stops working.
-
-    Wikilinks count too. If `expand_note` returns a note whose body cites `[[playbook-degassing]]`,
-    that id was in the context window this turn, and an answer repeating it is traceable to
-    something the turn saw rather than to the model's memory — which is the only question a
-    grounding check is entitled to ask.
-
-    Why this exists at all: the live harness scored citations against `ToolResultEvent.preview`,
-    truncated to 200 characters for the browser, while `gather_evidence` returns up to 40 chunks.
-    Every id past the first chunk read as fabricated, and a run graded 19 of 36 answers as
-    fabrication with nine of nine checked verdicts false — see
-    `docs/archive/live-grounded-2026-08-03.md`.
-    The preview's budget is right for a UI and wrong for a grounding check, so the two now read
-    different fields off one event instead of sharing the wrong one.
+    Unlike `cited_ids` (what an author claims), this reads what a payload contains, however
+    serialized, including wikilinks inside returned note bodies: anything in the context window is
+    traceable. Grounding checks must read the full result, not a truncated UI preview.
     """
     ordered: dict[str, None] = {}
     for note_id in _SERIALIZED_ID.findall(text):
@@ -312,26 +193,18 @@ def mentioned_ids(text: str) -> list[str]:
     return list(ordered)
 
 
-# `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and reach `git add` as a
-# pathspec, and ELN entry ids flow in from external JSON.
-# Constraining them to a plain slug at the model is the traversal/ref-injection
-# barrier: no `/`, no leading `.`, nothing git or the filesystem could reinterpret.
-# `_` is included because BO note ids embed registry objective names (e.g.
-# `bo-reizman_suzuki-<sha>`).
+# `id` and `type` become path segments (`knowledge/<type>/<id>.md`) and git pathspecs, and ELN ids
+# come from external JSON, so they are constrained to a plain slug: no `/`, no leading `.`. `_` is
+# allowed because BO note ids embed objective names.
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def is_note_slug(value: str) -> bool:
-    """Whether `value` could name a note — the predicate half of `require_note_slug`.
+    """Whether `value` could name a note: the predicate half of `require_note_slug`.
 
-    A separate function because one caller is filtering rather than validating:
-    `agent.compaction.cited_note_ids` reads ids out of a cleared tool result and may only name the
-    ones `expand_note` could resolve. An `EvidenceChunk.source_note_id` is not always a note id —
-    the document share writes `<share>:<doc>#<ordinal>`, the warehouse ELN `<source>:<key>`, a
-    vendored dataset `vendored:<name>:<index>` — and a placeholder telling the model to
-    `expand_note` on one of those names a thing that cannot be read. Exception flow is the wrong
-    shape for that question, and restating the rule there would be the second definition this
-    function was extracted to prevent.
+    For callers that filter rather than validate, e.g. `agent.compaction.cited_note_ids`, since an
+    `EvidenceChunk.source_note_id` is not always a note id (share documents, warehouse keys,
+    vendored rows).
     """
     return ".." not in value and not value.endswith((".", ".lock")) and bool(_SLUG.fullmatch(value))
 
@@ -339,17 +212,9 @@ def is_note_slug(value: str) -> bool:
 def require_note_slug(value: str) -> str:
     """Return `value` if it is a safe note slug, else raise `ValueError` naming the rule.
 
-    Extracted from `Note`'s validator because `ingest.eln.records.ReactionRecord` needs the same
-    rule and must not restate it. An ELN entry id no longer becomes a filename directly — a
-    transcription is a database row (D-2026-08-25) — but it still becomes the `reaction-<id>`
-    citation that campaign and playbook notes carry into git, so it reaches a file and a diff one
-    indirection later. Dropping the constraint when the storage changed would have been a silent
-    widening of what external JSON can put into a committed note body.
-
-    A few git ref rules the character class alone does not cover are refused explicitly (defense in
-    depth): `..` (an invalid ref component, e.g. `a..b`), a trailing `.`, and a `.lock` suffix —
-    git rejects all three, so an id that passed the schema would otherwise fail later at branch
-    creation.
+    Shared with `ingest.eln.records.ReactionRecord`, whose ids reach committed note bodies as
+    `reaction-<id>` citations. Also refuses `..`, a trailing `.` and a `.lock` suffix, which git
+    rejects in a ref.
     """
     if not is_note_slug(value):
         raise ValueError(
@@ -359,27 +224,11 @@ def require_note_slug(value: str) -> str:
     return value
 
 
-# `CalculationKey.as_str()`: `calc_type@calc_version:input_hash:params_hash`. **The four segment
-# patterns below are `CalculationKey`'s own**, restated rather than imported because `kg` may
-# import `chemclaw.core` and nothing else (`tests/test_layering.py`), and `CalculationKey` lives in
-# `science`. `tests/test_note.py::test_every_calculation_key_the_store_accepts_can_be_cited` closes
-# that by driving real keys through both, so the restatement cannot drift in silence.
-#
-# **It had drifted, in the direction that refuses real work.** This was
-# `[^\s@:]+@[^\s:]+:[0-9a-f]+:[0-9a-f]+`, which is narrower than the store on two arms, and the
-# error message beside it claimed to accept whatever `as_str()` writes:
-#   - the *version* excluded `:`, but the store leaves it free on purpose and says why — "a real
-#     version carries them … `cal-0.28733:-29.3116` the `:`, which is the measured fact that made
-#     the key cross the wire as four parts". A calibrated calculation's key was therefore
-#     uncitable, and the only key in a live `calculation_results` was one;
-#   - the two hashes demanded lowercase hex, where the store admits any non-colon, non-space text.
-# Both refusals surfaced as a pydantic `ValidationError` out of `record_knowledge_note`, so a note
-# resting on a calibration could not be written at all, and `make kg-validate` called one written
-# any other way an "invalid note" rather than a citation.
-#
-# The parse stays unambiguous with the version free of both delimiters, for the reason the store
-# gives: `calc_type` bars `@` (so the first `@` ends it) and the two hashes bar `:` (so the last
-# two colons end them), and the version is whatever lies between.
+# `CalculationKey.as_str()`: `calc_type@calc_version:input_hash:params_hash`. The segment patterns
+# restate `CalculationKey`'s own, because `kg` may not import `science`;
+# `tests/test_note.py::test_every_calculation_key_the_store_accepts_can_be_cited` keeps them in
+# step. The version is free to contain `:` (calibrated versions do); the parse stays unambiguous
+# because `calc_type` bars `@` and the two hashes bar `:`.
 _CALC_TYPE = r"[^\s@:]+"
 _CALC_VERSION = r"\S+"
 _CALC_HASH = r"[^\s:]+"
@@ -387,21 +236,11 @@ _CALC_REF = re.compile(rf"^{_CALC_TYPE}@{_CALC_VERSION}:{_CALC_HASH}:{_CALC_HASH
 
 
 def _reject_unencodable(value: str, field: str) -> str:
-    r"""Refuse a string UTF-8 cannot encode — a lone surrogate is not text a note can hold.
+    r"""Refuse a string UTF-8 cannot encode: a lone surrogate is not text a note can hold.
 
-    Reachable rather than theoretical. An agent-authored note arrives as JSON, and JSON *can*
-    carry an unpaired surrogate (`json.loads('"\ud800"')` returns one happily), so a model that
-    emits a truncated escape puts a `str` in this field that no UTF-8 consumer can accept. The
-    field itself then looks fine and every write of it fails: `path.write_text` raises
-    `UnicodeEncodeError` when `kg/record.py` writes the note, and psycopg and the vector index
-    raise the same way on the index refresh.
-
-    So the check belongs on the note, not on the file writer. A `Note` is by definition something
-    that gets written to a UTF-8 file in Git; a value that cannot be is not a note field that
-    happens to fail late, it is invalid input — and rejecting it here fails one proposal loudly at
-    the boundary instead of crashing whichever writer reaches it first. Found by
-    `tests/test_properties_core.py`'s round-trip generator, which is exactly the kind of input a
-    hand-written example never supplies.
+    JSON can carry an unpaired surrogate, and such a value would fail every later writer (the note
+    file, Postgres, the vector index). A note is by definition written to a UTF-8 file, so the value
+    is invalid input and is rejected at the boundary.
     """
     try:
         value.encode("utf-8")
@@ -416,9 +255,7 @@ def _reject_unencodable(value: str, field: str) -> str:
 def _walk_encodable(model: BaseModel, prefix: str) -> None:
     """Reject any unencodable string on `model`, recursing into nested models and lists.
 
-    The generic walk behind `Note._text_is_writable`. Field names are joined dotted
-    (`conditions.major_impurity`) so the error names the actual field a fix has to touch, not the
-    top-level container it sits under.
+    Field names are joined dotted (`conditions.major_impurity`) so the error names the field to fix.
     """
     for name in type(model).model_fields:
         value = getattr(model, name)
@@ -435,17 +272,9 @@ def _walk_encodable(model: BaseModel, prefix: str) -> None:
                     _walk_encodable(item, f"{path}[{index}].")
 
 
-# Every note type this system mints, with what it means. Previously `type` was an unconstrained
-# slug written from nine different call sites, so a typo minted a *new* type silently and any
-# retrieval filter keyed on type (the committed `retrieval-coupling-playbook-filter` eval case does
-# exactly this) then missed with no error (gap KNW-6).
-#
-# Enforced by `kg-validate` rather than by this schema, and that placement is deliberate: a
-# deployment may legitimately be extending its vocabulary, and a hard schema rejection would fail
-# the agent's write at the tool. CI names an unknown type over the whole corpus instead, once,
-# while an intended one costs one line here. (This paragraph used to end "a human sees it at the
-# PR-gate"; there is no gate, so the placement is now bought by what it costs a *write* rather than
-# by what a reviewer sees.)
+# Every note type this system mints, with what it means. A typo'd type would make a note invisible
+# to every type-keyed filter. Enforced by `kg-validate` over the corpus rather than by the schema,
+# so a deployment extending its vocabulary does not fail the agent's write at the tool.
 KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
     {
         "reaction",  # one ELN experiment (eln/note.py)
@@ -455,78 +284,40 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "playbook",  # a transferable rule distilled across projects (memory/playbook.py)
         "interaction",  # a chemist-confirmed answer (memory/interaction.py)
         "report",  # a drafted development report (report/harness.py)
-        # A calculation written up as a graph citizen. It sat in `connectors/qm/connector.yaml`
-        # while the `qm` bundle's `publish_to_graph` job was the thing that minted it; with that
-        # bundle removed (`D-2026-08-26-semiempirical-is-the-whole-tier`) no bundle mints one, and
-        # the rule that put it there says where it goes instead. A type a bundle *mints* belongs to
-        # that bundle; this one is now written only through core's own write path
-        # (`record_knowledge_note`), about results the corpus in `knowledge/job-result/` already
-        # holds — so it is core's vocabulary again. `bo-candidate` stays in `connectors/bo/`,
-        # because `bo` still mints it.
+        # A calculation result written up as a graph citizen, via core's `record_knowledge_note`. A
+        # type a connector bundle mints belongs in that bundle's manifest instead (e.g.
+        # `bo-candidate`).
         "job-result",
         # The agent's reasoned proposal for the next run in a series, argued from the record
-        # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
+        # rather than from a surrogate model; the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
-        # A field of competing explanations, ranked against each other by judged pairwise
-        # comparison (`durable/hypothesis_tournament.py`). Distinct from `experiment-proposal`,
-        # which is the single next run argued from the record: this one holds the *alternatives*
-        # that were considered and how they placed, so a later session can see what was ruled
-        # against rather than only what was chosen. The tournament writes `experiment-proposal`
-        # notes for the checks a human must run; this type is the field they came out of.
+        # A field of competing explanations ranked by pairwise comparison
+        # (`durable/hypothesis_tournament.py`). Unlike `experiment-proposal` (the single next run),
+        # it keeps the alternatives and how they placed.
         "hypothesis-field",
-        # How a measurement was made: the assay or purity method a chemist actually ran, as they
-        # recorded it. **This exists because `relations.py` declares `measured-by` — "this claim
-        # rests on that experimental method or instrument" — and until now no note type could be
-        # its target.** Measured on the shipped corpus: the one `measured-by` edge in it points at
-        # `playbook-recrystallisation-purity`, a *transferable rule* about quoting a yield with the
-        # purification that produced it, because that was the nearest thing available. A corpus
-        # author had already hit the gap and worked around it
-        # (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
-        #
-        # **It holds a method somebody ran; this system never devises one.** There is no
-        # chromatographic model here and nothing in this change adds one — what changes is that a
-        # method a chemist states can be recorded, cited, and pointed at by the results that rest
-        # on it, instead of being prose inside a reaction note that no edge can reach.
+        # How a measurement was made: an assay or purity method a chemist ran, as recorded. The
+        # legal target of the `measured-by` relation. It records a stated method; this system never
+        # devises one.
         "analytical-method",
     }
 )
 
-#: The tag a `playbook` carries while it records a recurrence and no rule has been distilled.
-#:
-#: **It is a tag rather than a note type, and the distinction is what keeps a chemist safe.** The
-#: cross-project miner finds a real, deterministic fact — this transformation recurs across these
-#: projects, here is the evidence — and that fact is knowledge the moment it is found
-#: (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). What it is *not* is a transferable
-#: rule, which is judgment over the cited runs and is the `playbook-distillation` skill's. A second
-#: note type would make the pattern unfindable by every reader that already asks for playbooks; a
-#: tag leaves it in the corpus, citable, and says what it is.
-#:
-#: Here rather than in `memory/` because two packages must agree on the string and only one of them
-#: may import the other: `memory/jobs.py` stamps it and `kg/analytics.py` counts it, and `kg` is
-#: layer 4 with no edge to `memory`. `tests/test_memory.py` and `tests/test_knowledge_gaps.py`
-#: both read it from here, so the producer and the reporter cannot drift apart.
+#: The tag a `playbook` carries while it records a recurrence and no rule has been distilled. A tag
+#: rather than a note type, so readers asking for playbooks still find it while it says it is not
+#: yet a transferable rule (that is the `playbook-distillation` skill's judgment). Defined in `kg`
+#: because `memory/jobs.py` stamps it and `kg/analytics.py` counts it, and `kg` cannot import
+#: `memory`.
 UNDISTILLED_TAG = "undistilled"
 
 
 def known_note_types() -> frozenset[str]:
     """Core's note types plus those the enabled connector bundles declare.
 
-    **The vocabulary belongs to the deployment, not to this file.** `bo-candidate` is minted by
-    `connectors/bo/` rather than by core, and used to be added to the frozenset above by hand. That
-    made "contribute a note type" the one connector contribution that required editing core, inside
-    the seam whose whole claim is that a capability is a folder and nothing else (D-118). A bundle
-    now declares `note_types:` in its manifest and this unions them in.
-
-    The set stays *closed*, which is the property worth keeping: a name no manifest and no core
-    entry declares still fails `make kg-validate`, so a typo cannot reach the graph and make a note
-    invisible to every filter keyed on its type.
-
-    The connector registry is imported **inside the function**, deliberately. `chemclaw.kg` is
-    layer 4 and `chemclaw.connectors` is layer 2/3, so a module-scope import would make the graph
-    depend on the capability layer at import time — for a set that only two validators ever ask
-    for. The same shape, and the same reason, as `core.logging`'s lazy resolution of connector
-    token names; both are declared in `tests/test_layering.py::_ALLOWED_LAZY_EDGES`.
+    A bundle declares `note_types:` in its manifest, so adding a type needs no core edit. The set
+    stays closed: an undeclared type still fails `make kg-validate`. The connector registry is
+    imported inside the function because `kg` must not depend on the connector layer at import time
+    (an allowed lazy edge in `tests/test_layering.py`).
     """
     from chemclaw.connectors.registry import declared_note_types
 
@@ -568,10 +359,8 @@ class TemporalWindow(BaseModel):
     def _valid_interval(self) -> Self:
         """A validity window must not end before it starts.
 
-        `valid_from`/`valid_to` answer "what did we know at time T"; a `valid_to` earlier than
-        `valid_from` describes no interval at all, so every query over it silently returns
-        nothing. Refused at the schema boundary, where the message can name the file, rather than
-        read back later as an absence.
+        Such a window matches no query, so it is refused at the schema where the message can name
+        the file.
         """
         if (
             self.valid_from is not None
@@ -587,10 +376,8 @@ class TemporalWindow(BaseModel):
     def is_current(self, as_of: date) -> bool:
         """Whether this is inside its validity window on `as_of` (bounds inclusive).
 
-        Either bound may be absent (open-ended). Discovery retrieval excludes non-current notes so
-        a not-yet-valid or superseded entry is not served as *current* evidence (freshness —
-        audit KM-7); the note is never deleted, it stays in Git and is still reachable by explicit
-        id, it is only dropped from current-evidence sweeps.
+        Either bound may be absent (open-ended). Discovery retrieval excludes non-current notes from
+        current-evidence sweeps; the note stays in Git and is reachable by explicit id.
         """
         if self.valid_from is not None and as_of < self.valid_from:
             return False
@@ -652,35 +439,19 @@ class ProcessConditions(BaseModel):
     time_h: float | None = Field(default=None, ge=0.0)
     yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
-    # `OrdReaction.outcome_class`'s value. Carried because a failure that reads as an ordinary run
-    # is the one row in a comparison a chemist must not misread. Silence here means "the source did
-    # not say", not "it worked" — and since `D-2026-08-26-silence-is-not-a-successful-run` that is
-    # true of the field it is copied from as well, so a stated success now arrives as `"success"`
-    # rather than being erased into the same `None` as an unassessed run.
+    # `OrdReaction.outcome_class`'s value, so a failed run is not misread as an ordinary one. `None`
+    # means the source did not say, not that it worked.
     outcome: Literal["success", "failure", "inconclusive"] | None = None
     # `OrdReaction.major_impurity()`'s answer, by whatever identity the record carries. A process
     # campaign is rarely optimizing yield; it is optimizing the impurity the yield hides.
     major_impurity: str | None = None
     impurity_area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
 
-    # `extra="forbid"` for the reason `TemporalWindow` gives: a typo'd key silently dropped is a
-    # number a chemist wrote that no comparison will ever render.
-    #
-    # `allow_inf_nan=False` because this model is written straight into a `jsonb` column
-    # (`reaction_records.conditions`), and `NaN`/`±Infinity` are not JSON. Postgres refuses them at
-    # the wall, as an `InvalidTextRepresentation` naming a *token* — a `psycopg` error that is
-    # neither `ChemclawError` nor `ValidationError`, so it walked past the per-entry
-    # reject-and-continue in `ingest/eln/sync.py`, aborted the pass and advanced no cursor: one
-    # entry deterministically holding a whole corpus at a fixed date on every scheduled run after
-    # it. As a `ValidationError` it is one rejected entry with the field named in the ledger.
-    #
-    # **Four of these five fields were guarded by accident, and only three of them fully.** Every
-    # comparison
-    # against NaN is false, so `ge`/`le` already rejected it on `yield_percent`, `purity_percent`,
-    # `impurity_area_percent` and `time_h` — while `temperature_c`, the one field with no bounds to
-    # state, took it, and `time_h`'s `ge=0.0` still admitted `+Infinity`. A guarantee that is a
-    # side effect of a range nobody chose for it is a guarantee that disappears the day the range
-    # is widened, which is why it is stated here rather than left to the bounds.
+    # `extra="forbid"`: a typo'd key silently dropped is a number no comparison will render.
+    # `allow_inf_nan=False`: this model is written into a `jsonb` column and NaN/Infinity are not
+    # JSON; as a `ValidationError` the entry is rejected individually instead of a database error
+    # aborting the whole ingest pass. Stated explicitly rather than relying on the field bounds,
+    # which do not cover every field.
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
@@ -718,27 +489,19 @@ class Note(TemporalWindow):
     compound_smiles: str | None = None
     tags: list[str] = Field(default_factory=list)
     created_by: Literal["human", "agent"] = "human"
-    # Omitted from the rendered frontmatter while `None` (`render_note` dumps `exclude_none`), so
-    # every note written before this field existed re-renders to the same bytes and the writer's
-    # "nothing staged, nothing to commit" rule holds across the change.
+    # Omitted from the frontmatter while `None`, so older notes re-render byte-identically.
     actor: str | None = Field(default=None, min_length=1)
     source: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    # Calculations and stored by-products this note's claims rest on (STO-7). These are
-    # `CalculationKey.as_str()` and `ArtifactRef.as_str()` values — they point *out* of the graph
-    # into the calculation store, which is exactly why they are frontmatter fields and not
-    # `[[wikilinks]]`: an edge to something the graph does not contain is a dangling link, and
-    # `kg-validate` would fail the very PR that added the note. Shape-validated here; whether the
-    # target exists is a question only a database can answer, and `kg-validate` runs without one.
-    # The run's recorded setpoints and outcomes, when this note is about one (`ProcessConditions`
-    # says why they are frontmatter). Note-type-specific on a shared model exactly as
-    # `compound_smiles` above is, and for the same reason: the alternative is a second note class.
-    # `valid_from` already carries the date the run was performed (D-162), so it is not repeated
-    # here — one fact, one field.
+    # `conditions`: the run's recorded setpoints and outcomes when the note is about one;
+    # `valid_from` already carries the run date. `calc_refs` / `artifact_refs`:
+    # `CalculationKey.as_str()` and `ArtifactRef.as_str()` values pointing into the calculation
+    # store, so they are frontmatter rather than wikilinks (which would dangle). Shape-validated
+    # here; existence needs a database.
     conditions: ProcessConditions | None = None
     calc_refs: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
-    # Typed edges in structured form, for the metadata a body wikilink cannot carry (STO-8/9).
+    # Typed edges in structured form, for the metadata a body wikilink cannot carry.
     # Additive: a note may use body links, this field, or both.
     relations: list[Relation] = Field(default_factory=list)
     body: str = ""
@@ -770,25 +533,11 @@ class Note(TemporalWindow):
 
     @model_validator(mode="after")
     def _text_is_writable(self) -> Self:
-        """Every *unconstrained* string this note carries must survive UTF-8.
+        """Every unconstrained string this note carries must survive UTF-8.
 
-        Walked off `model_fields` rather than spelled out, for the reason `skill_tool_names` reads
-        the framework's own constants: a note that grows another string field would otherwise
-        gain an unchecked one silently, and the whole point is that any unencodable value breaks
-        every writer rather than the one that happened to be tested.
-
-        **Some fields are deliberately not walked, because something already refuses them.**
-        Measured: pydantic's own constrained-string validation rejects a surrogate in `id`, `type`
-        and `Relation.rel`/`to` (all `min_length=1`) with `string_unicode` before this validator
-        runs, and `_calc_ref_shape`/`_artifact_ref_shape` reject the ref lists because a lone
-        surrogate is no calculation key. What actually reaches here is the unconstrained set —
-        `body`, `source`, `compound_smiles`, `tags`, and every unconstrained string on a *nested*
-        model. The nested walk exists because the enumeration above once went stale exactly as
-        this docstring predicted: `conditions` grew `major_impurity`, an unconstrained `str`,
-        and a surrogate in it built a Note that raised `UnicodeEncodeError` on the write of the
-        note file — the precise failure this validator says it prevents.
-        `tests/test_properties_core.py` pins both halves without pinning *who* rejects what, so
-        the split fails loudly if either of the other two checks ever stops covering its part.
+        Walks `model_fields` (and nested models) so a new string field is covered automatically.
+        Constrained fields (`id`, `type`, relation fields, the ref lists) are already rejected by
+        pydantic or their own validators; `tests/test_properties_core.py` checks the split.
         """
         _walk_encodable(self, "")
         return self
@@ -797,11 +546,8 @@ class Note(TemporalWindow):
     def authorship(self) -> Authorship:
         """Who wrote this note, in the shape every subsystem answers that question in.
 
-        `created_by: agent` is the agent half, and it names no agent: nothing that writes a note
-        knows which graph it runs on (the value is a build-time argument of the audit middleware and
-        reaches no tool body), so it reads as `UNNAMED_AGENT` rather than as a name somebody chose.
-        A note from before `actor` existed reads with the person unrecorded — the backfill rule for
-        frontmatter, applied at read time because the files are not this system's to rewrite.
+        `created_by: agent` names no specific agent, so it reads as `UNNAMED_AGENT`. A note without
+        `actor` reads with the person unrecorded.
         """
         return Authorship(
             actor=self.actor, agent=UNNAMED_AGENT if self.created_by == "agent" else None
@@ -810,12 +556,8 @@ class Note(TemporalWindow):
     def outgoing_links(self) -> list[str]:
         """The ids this note links to, from its body `[[wikilinks]]` and its `relations:`.
 
-        Deduplicated, preserving first-seen order, so a note that references the same target twice
-        yields one id. This is the *untyped* view — what `chemclaw.kg.validate` checks for dangling
-        targets
-        and what the answer verifier resolves — and it deliberately treats both forms alike, so a
-        frontmatter relation to a note that does not exist fails validation exactly as a body link
-        would.
+        Deduplicated in first-seen order. The untyped view used by `kg.validate` and the answer
+        verifier; a frontmatter relation to a missing note fails validation like a body link.
         """
         ordered: dict[str, None] = dict.fromkeys(cited_ids(self.body))
         for relation in self.relations:
@@ -825,22 +567,9 @@ class Note(TemporalWindow):
     def outgoing_relations(self) -> list[Relation]:
         """Every typed edge this note asserts, from both forms, in body-link order.
 
-        A body `[[rel:target]]` becomes a `Relation` with no confidence or validity — that is all
-        the syntax can express, and inventing values for the rest would be a lie about what the
-        author wrote. A frontmatter entry is taken as given.
-
-        Deduplicated by `(rel, to)`, so writing an edge both ways is harmless rather than a doubled
-        edge — **and the frontmatter entry wins**, because the body form can express nothing the
-        frontmatter cannot and the frontmatter form can express three things it cannot. The body
-        form used to win, which meant an author who wrote the edge in both places silently lost the
-        confidence and the validity window they had gone out of their way to declare. Every note in
-        the shipped corpus that declares a typed relation also writes the link in its body, so the
-        measured effect was that D-134's edge metadata existed in the schema, in the parser and in
-        the corpus, and reached no query: `graph.related(..., as_of=)` had no dated edge to filter
-        and `Relation.confidence` was `None` everywhere it was read.
-
-        Order still follows the body, so a note's edges read in the order the prose introduces
-        them; only the *value* at a duplicated pair changes.
+        A body `[[rel:target]]` becomes a `Relation` without confidence or validity. Deduplicated by
+        `(rel, to)`, and the frontmatter entry wins, since only it carries that metadata. Order
+        follows the body.
         """
         seen: dict[tuple[str, str], Relation] = {}
         for rel, target in cited_links(self.body):
@@ -852,27 +581,13 @@ class Note(TemporalWindow):
     def headline(self, limit: int = 120) -> str:
         """The note's first line of prose, for a surface that can show one line and not a note.
 
-        **There is no `title` field and this is deliberately not one.** A title would be a second
-        place to say what a note is about, settable independently of the body and therefore able to
-        disagree with it — and every existing note would need one backfilled. The first non-empty
-        body line already *is* the headline in every note this corpus holds: a playbook opens with
-        the rule as a heading ("## Degas properly for Pd(0), or accept a bimodal yield
-        distribution"), a campaign with a one-sentence summary. Deriving it cannot drift from the
-        note, and it needs no migration.
-
-        Written because `durable/digest.py` had nothing else to send. A digest names the notes that
-        matched a standing query, and it named them by **id** — so the one proactive surface this
-        system has told a chemist `playbook-aee3d30407cc` and left them to go and look. The job
-        already holds the parsed note, so the line costs nothing to carry.
-
-        Leading `#` marks are stripped because they are the file's formatting rather than the
-        sentence, and `[[wikilinks]]` are flattened to their target text so a headline rendered
-        outside the graph does not show its brackets. Empty for a note with no body, which a caller
-        shows as the id — there is nothing better to say and inventing one would be worse.
+        Derived from the body rather than stored as a title, so it cannot disagree with the note.
+        Leading `#` marks are stripped and wikilinks flattened to their target. Empty for a note
+        with no body; callers show the id instead.
 
         Args:
             limit: Longest headline to return; a longer first line is cut on a word boundary and
-                given a trailing ellipsis, so a surface can size a row without re-trimming.
+                given a trailing ellipsis.
 
         Returns:
             One line, never containing a newline, at most `limit` characters.
@@ -894,13 +609,9 @@ class NoteError(ChemclawError):
 def read_note(path: Path) -> Note | None:
     """Parse a note file; return None if it has no frontmatter (not a note).
 
-    This is the one error boundary for per-file failures: an unreadable file
-    (non-UTF-8 bytes, vanished mid-scan), malformed YAML frontmatter — including
-    non-string keys like bare dates, which surface as TypeError — or valid
-    frontmatter that fails the schema all raise `NoteError` with the path, so one
-    bad file can never crash a whole-tree consumer (`load_notes`, `kg-validate`)
-    that catches only `NoteError` (G4). A plain Markdown file with no frontmatter
-    (e.g. a README) is not a note and returns None.
+    The one error boundary for per-file failures: an unreadable file, malformed YAML (including
+    non-string keys, which surface as TypeError) or a schema violation all raise `NoteError` with
+    the path, so whole-tree consumers catching only `NoteError` never crash.
     """
     try:
         text = path.read_text(encoding="utf-8")

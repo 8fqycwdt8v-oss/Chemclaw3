@@ -1,74 +1,26 @@
 """`python -m chemclaw.cli.mock_llm` — an OpenAI-compatible mock, to drive the system hard.
 
-The point is not to avoid paying for tokens. It is that a real model cannot be asked for the inputs
-that actually break this system: an empty function name (STREAM-1), a malformed argument document,
-four hundred argument fragments, forty parallel calls in one turn, or a turn with no prose at all.
-Every one of those has been a live defect here, and none of them is reachable by prompting. A mock
-makes them a parameter.
+A real model cannot be asked for the inputs that break this system — an empty function name, a
+malformed argument document, hundreds of argument fragments, forty parallel calls, a turn with no
+prose. A mock makes them a parameter. It speaks HTTP, both `/v1/chat/completions` (what
+`ChatOpenAI` posts to) and `/v1/responses`, so the streaming assembler, middleware, budget
+admission, audit sink and session store are all exercised.
 
-It speaks the wire, not the Python — **both chat protocols, because the engine changed under it.**
-`/v1/responses` came first: the Microsoft Agent Framework's `OpenAIChatClient` resolved to the
-Responses client, and the previous generation of this idea took 37 × HTTP 404 on exactly that point
-(`docs/archive/load-test-2026-07.md`). The LangGraph rebuild builds a `ChatOpenAI`, which posts to
-`/v1/chat/completions` — and nothing here followed, so from that day every credential-free lane got
-a bare 404 and every turn died with no answer and no tool call. The lesson is the one the 404s
-taught the first time, repeated because the *other* side moved: a mock of a protocol is pinned to
-whichever client is actually built, and neither an ADR nor a docstring notices when that changes.
+Behaviours are validated at startup against the live tool surface, so one naming a tool or
+argument the system lacks refuses to serve; `adversarial=True` opts out per behaviour. A mock may
+be narrower than the endpoint it stands in for, never more forgiving
+(`D-2026-09-07-a-mock-that-answers-unasked-hides-the-lane-that-asks-nothing`): usage is reported
+only when asked for, input can be billed by request size, and oversize requests can be refused.
+`tests/test_mock_llm_contract.py` holds the wire to those shapes.
 
-Talking HTTP rather than injecting a `BaseChatClient` is also the only way to exercise what actually
-broke before: the streaming assembler, the middleware stack, budget admission, the audit sink and
-the session store all sit between the socket and the agent, and the in-process scripted client in
-`tests/` bypasses every one of them — its own docstring records passing green while production
-failed 100 % of the time.
+A behaviour is chosen by a `[[name]]` marker in the newest user message that carries one, so a
+later marker overrides an earlier one and an unmarked follow-up inherits the last; only when no
+user message is marked does a whole-request scan run. Tool results count only after the newest
+user message, so each turn calls its own tools.
 
-**The argument names come from the real tools, and this is the whole design.** LOAD-1: the previous
-stub emitted `{"query": "benzene"}` where `find_notes` takes `text`, so every call died in the
-parse-error branch *before the tool body ran*, and the run was published as "100 tool calls, the
-tool path is genuinely exercised". Nothing was exercised. So a `Behaviour` here is validated at
-startup against the live tool surface, and one naming a tool or an argument the system does not have
-refuses to serve rather than quietly producing a green run over nothing. `adversarial=True` opts out
-of that check — explicitly, per behaviour, because emitting what the real tool would reject is
-precisely what the adversarial family is for.
-
-**Every green result in the live lane is evidence about this file, so where it is kinder than a
-gateway it disables a control**
-(`D-2026-09-07-a-mock-that-answers-unasked-hides-the-lane-that-asks-nothing`).
-Measured against a real OpenAI-compatible endpoint on 2026-09-07, three things here were generous
-in ways that made a real deployment's failure unreachable: usage was reported on a stream that had
-not asked for it (so `llm_stream_usage=False` — the escape hatch that books **zero** on every turn —
-looked exactly like the metered configuration), the input bill was a constant (so
-`context_budget`'s calibration could only ever read its 1.0 clamp), and no request could be refused
-for its own size (so `classify_model_failure`'s `context_length` label had no lane at all).
-`tests/test_mock_llm_contract.py` is what holds the wire to the measured shapes now, and it is also
-the first thing in this suite to drive a turn through this mock at all — a frame-shape regression in
-`_chat_stream` was caught by nothing before it. The general rule it leaves behind: **a mock may be
-narrower than the endpoint it stands in for, never more forgiving** — an omission costs coverage
-loudly, and a kindness costs it silently.
-
-**Selection: the latest marked message wins, not the first marker in the thread.** A behaviour is
-chosen by a `[[name]]` marker, and the scan used to read the whole serialized request in catalogue
-order. Chat completions resends the whole thread on every call, so the *opening* marker stayed in
-every later request and a conversation could never change behaviour: measured by the UI's kind
-suite, an `[[f-slow]]` asked after an `[[a-cheap]]` answered in 0.4 s as `a-cheap`. `MockLlm.select`
-now reads the user messages newest first and takes the first one that carries a marker (by position
-within it), so a later marker overrides an earlier one while an *unmarked* follow-up still inherits
-the conversation's last behaviour — which is what a shared session's "queue behind a slow turn" and
-a plan's "Go ahead with the approved plan." rely on. Only when no user message carries a marker does
-the old whole-request scan run, so a request whose marker sits elsewhere is served as before.
-`already_has_tool_results` moved with it for the same reason: it reads the tool results *of this
-turn* (after the latest user message), so turn two of a conversation calls its tools instead of
-inheriting turn one's results and answering blind.
-
-**Some behaviours read the request — the `e2e:*` family, and only it.** A `Behaviour` is still a
-plan rather than an improvisation, but five browser workflows cannot be planned without the request:
-an answer that cites the record a search *returned*, a job id the launcher *minted*, the standing
-preferences the system message *carried*, and a plan that is proposed on one turn and executed on
-the next. Such a behaviour carries a `script` (`Script`) that is handed a `Conversation` — the
-request, normalized across both protocols — and returns the concrete pass. Its `calls` are then
-*templates*: validated at startup exactly as before, and a scripted pass may only emit a call whose
-tool and argument names a template declared (`_within_declared`), so the LOAD-1 guard still holds
-over everything a script can produce. The catalogue is `cli/e2e_behaviours.py`, served with the
-storm's under `--catalogue e2e`; its markers are documented there and in `deploy/kind/README.md`.
+The `e2e:*` behaviours (`cli/e2e_behaviours.py`, served under `--catalogue e2e`) read the request
+through a `script` handed a `Conversation`; their `calls` are templates, and `_within_declared`
+holds every scripted call to a tool and argument names a template declared.
 """
 
 from __future__ import annotations
@@ -93,19 +45,13 @@ from chemclaw.core.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
-# Where the mock listens. A dev-only affordance, so a module constant rather than a config field —
-# the same call `cli/connectors_dev.py` makes, and for the same reason: nothing in a deployment
-# reads it.
+# Where the mock listens. Dev-only, so a module constant rather than a config field.
 MOCK_HOST = "127.0.0.1"
 MOCK_PORT = 8820
-# The address a caller must configure to reach this mock, spelled once so nothing has to rebuild it
-# from the two constants above. `Settings.llm_base_url` ships exactly this value
-# (`test_the_default_gateway_is_the_mock_on_this_machine` pins the two together), and
-# `infra/live/processes.sh` decides whether to start the mock by comparing the resolved setting
-# against *this* string rather than against a copy of it — a shell literal that has to match a
-# Python default is a duplication that goes wrong silently, and did: the lane gated the mock on
-# `$CHEMCLAW_LLM_BASE_URL` being the literal, nothing set that variable once it became a default,
-# so `make live-up` started a front door pointed at a port nothing was serving.
+# The address a caller configures to reach this mock, spelled once. `Settings.llm_base_url` ships
+# this value (`test_the_default_gateway_is_the_mock_on_this_machine`), and
+# `infra/live/processes.sh` compares the resolved setting against this string to decide whether to
+# start the mock, rather than keeping a shell copy.
 MOCK_BASE_URL = f"http://{MOCK_HOST}:{MOCK_PORT}/v1"
 
 
@@ -113,13 +59,8 @@ MOCK_BASE_URL = f"http://{MOCK_HOST}:{MOCK_PORT}/v1"
 class ToolCall:
     """One function call the mock will emit, and how finely to slice its arguments.
 
-    `fragments` is the knob that matters. The OpenAI Responses client emits every
-    `response.function_call_arguments.delta` carrying *both* the name and a non-empty argument
-    fragment, which is the shape that once made the front door announce N `ToolCallEvent`s for one
-    call, each holding a partial argument document. Nothing reassembles fragments any more — the
-    graph hands a finished tool call over on its `updates` stream and `api/graph_stream.py`
-    deliberately does not read the fragmented chunks — so this field now exercises the *client*
-    against a real streamed call rather than a reassembler downstream of it.
+    `fragments` streams the arguments in N deltas, each carrying the name as the Responses client
+    does, to exercise the client against a real streamed call.
     """
 
     tool: str
@@ -134,79 +75,51 @@ class ToolCall:
 class Behaviour:
     """What the mock does for one turn: some tool calls, some text, and how slowly.
 
-    A behaviour is deliberately a *plan*, not a reaction to the prompt. The storm needs to know
-    exactly what the system was asked to do in order to check what it did; a mock that improvised
-    would put the thing under test on both sides of the comparison.
+    A plan, not a reaction to the prompt: the storm must know exactly what the system was asked to
+    do to check what it did.
     """
 
     name: str
     calls: list[ToolCall] = field(default_factory=list)
     text: str = "Done."
-    # Seconds of pretend thinking before the first frame, then between frames. Real endpoints are
-    # slow and this system's concurrency behaviour is entirely about what happens while turns are
-    # in flight — a zero-latency mock measures a system nobody runs.
+    # Seconds of pretend thinking before the first frame, then between frames; concurrency behaviour
+    # is about turns in flight, which a zero-latency mock never has.
     think_seconds: float = 0.0
     # Fail the HTTP call itself. NB `llm_max_retries=3`, so the SDK will retry this three times:
     # one injected failure is four requests, and a storm that forgot would mis-attribute the load.
     http_status: int = 200
     # Skip the startup validation below. Only the adversarial family sets this.
     adversarial: bool = False
-    # Tokens reported as this request's input. Without a usage block `usage_tokens` records zero
-    # and budget admission is silently never pressured — the run would "pass" a gate it never met.
+    # Tokens reported as this request's input; without usage, budget admission is never pressured.
     #
-    # **A constant by default, and `None` is what a calibration lane needs.** A real gateway bills
-    # for the request it was sent: measured 2026-09-07 against the gateway, one prompt of 25, 2,500
-    # and 100,000 characters billed 12, 321 and 12,509 input tokens. This mock billed 900 for all
-    # three. That is not merely unrealistic — it disables a control:
-    # `agent/context_budget._Calibration` divides billed by estimated (chars/4) and clamps the
-    # result at 1.0 from below, so a lane whose billed input never grows can only ever observe a
-    # ratio *under* 1 and therefore reports exactly 1.0 forever. Measured over 50 calls of a
-    # 10,000-token estimate: `estimator_ratio()` = 1.0 on this mock's numbers, 1.34 on the fleet's
-    # real ones. The EWMA, `agent_context_calibration_max_factor` and the whole ">1.0 tightens the
-    # budget" branch that D-2026-08-28 and D-2026-09-04 rest on are unreachable from any lane.
-    #
-    # `None` therefore bills the *serialized request* at `input_tokens_per_char`, so a thread that
-    # grows costs more and a behaviour that names a factor above 0.25 (the estimator's own chars/4)
-    # drives a calibration ratio above 1 — including above `max_factor`, which is the arm nothing
-    # but a hand-fed unit test has ever driven. The constant stays the default because a behaviour
-    # asserting a fixed token count needs determinism, and because every existing lane is written
-    # against it.
+    # A constant by default, for determinism. `None` bills the serialized request at
+    # `input_tokens_per_char`, as a real gateway does, so a growing thread costs more and a factor
+    # above 0.25 drives `agent/context_budget._Calibration`'s ratio above 1 — the tightening branch
+    # a constant bill can never reach (the ratio clamps at 1.0).
     input_tokens: int | None = 900
-    # Billed input tokens per character of serialized request, when `input_tokens` is None. 0.25 is
-    # `count_tokens_approximately`'s own chars/4, i.e. an endpoint this system estimates perfectly;
-    # a larger value is a tokenizer this system undercounts, which is the direction that matters.
+    # Billed input tokens per character when `input_tokens` is None. 0.25 matches the chars/4
+    # estimator; larger is a tokenizer this system undercounts.
     input_tokens_per_char: float = 0.25
     output_tokens: int = 120
-    # The cached share of the input, published as `prompt_tokens_details.cached_tokens` — the key
-    # `langchain_openai._create_usage_metadata` turns into `input_token_details["cache_read"]` and
-    # `agent/turn_usage.graph_usage_tokens` subtracts back out of priced input. Omitted from the
-    # wire entirely when 0, which is what the gateway this mock is measured against does, so the
-    # default request is byte-identical to the one every lane already gets.
+    # The cached share of the input, as `prompt_tokens_details.cached_tokens` (read by
+    # `langchain_openai` as `cache_read` and subtracted from priced input). Omitted when 0, as the
+    # gateway does.
     cached_tokens: int = 0
-    # `service_tier` on the response body. Only `priority` and `flex` mean anything: upstream reads
-    # the tier off the *response* and prefixes both cache keys with it (`priority_cache_read`), and
-    # `turn_usage._cache_detail` matches by suffix for exactly that reason. That suffix match has
-    # never been driven by anything but a hand-built mapping; this is the knob that lets a lane
-    # drive it over the wire.
+    # `service_tier` on the response body. `priority` and `flex` prefix the cache keys
+    # (`priority_cache_read`), which `turn_usage._cache_detail` matches by suffix; this drives that
+    # over the wire.
     service_tier: str = ""
-    # Refuse any request whose billed input exceeds this, the way a real gateway refuses a thread
-    # that no longer fits: HTTP 400, `invalid_request_error`, "prompt is too long: N tokens > M
-    # maximum" — the vendor wording `llm_provider._CONTEXT_LENGTH_MARKERS` already matches.
-    # 0 means never. This is the only failure `http_status` cannot express, because it is a property
-    # of the *request* rather than of the behaviour: the same behaviour serves a short thread and
-    # refuses a grown one, which is what makes `classify_model_failure`'s `context_length` label —
-    # and the compaction policy that exists to prevent it — reachable from a lane at all.
+    # Refuse any request whose billed input exceeds this with a gateway-shaped HTTP 400 ("prompt is
+    # too long: N tokens > M maximum", matched by `llm_provider._CONTEXT_LENGTH_MARKERS`). 0 means
+    # never. A property of the request, not the behaviour, which makes the `context_length` label
+    # reachable.
     refuse_over_input_tokens: int = 0
-    # The `finish_reason` the streamed reply ends on, when it is not the natural one. `length` is
-    # the provider running out of output budget mid-emission — with a raw argument document that
-    # stops mid-string it is a call `parse_partial_json` completes into a valid-looking one, the
-    # case `agent/model_calls._demote_cut_off_calls` exists to catch. Empty means the natural
-    # value: `tool_calls` when there are calls, `stop` otherwise.
+    # The `finish_reason` the streamed reply ends on, when not the natural one. `length` with a raw
+    # argument document cut mid-string exercises `agent/model_calls._demote_cut_off_calls`. Empty
+    # means `tool_calls` when there are calls, `stop` otherwise.
     finish_reason: str = ""
-    # Seconds over which the answer's text frames are spread, after `think_seconds`. A turn that
-    # *streams* for a while is a different thing from one that thinks and then dumps its answer:
-    # the Stop button, a second participant watching the stream and a message queued behind it all
-    # need the turn to be visibly producing tokens, not silent. 0 sends the text at once.
+    # Seconds over which the answer's text frames are spread, after `think_seconds`, so the Stop
+    # button and queued messages see a turn visibly producing tokens. 0 sends the text at once.
     stream_seconds: float = 0.0
     # Reads the request and returns the concrete pass (see the module docstring). `None` for every
     # behaviour that is a fixed plan, which is all of them outside `cli/e2e_behaviours.py`.
@@ -217,9 +130,8 @@ class Behaviour:
 class Message:
     """One message of a request, normalized across the two protocols this mock speaks.
 
-    `role` is the chat-completions spelling (`system`, `user`, `assistant`, `tool`); a Responses
-    `developer` item and `instructions` read as `system`. `tool_calls` names the calls an assistant
-    message made — the names only, because what a script asks of a past call is whether it happened.
+    `role` uses chat-completions spelling; a Responses `developer` item and `instructions` read as
+    `system`. `tool_calls` holds only names: a script asks only whether a call happened.
     """
 
     role: str
@@ -230,9 +142,8 @@ class Message:
 def _text_of(content: Any) -> str:
     """The text of a message's `content`, whichever of the two shapes it has.
 
-    A string is itself; a list of parts contributes every part's `text` (chat completions' `text`,
-    the Responses API's `input_text`/`output_text`). Anything else contributes nothing rather than
-    its repr, so a marker can only ever be found where a person or a tool wrote text.
+    A string is itself; a list of parts contributes each part's `text`. Anything else contributes
+    nothing, so a marker is only found where a person or tool wrote text.
     """
     if isinstance(content, str):
         return content
@@ -245,11 +156,9 @@ def _text_of(content: Any) -> str:
 class Conversation:
     """The request a behaviour is answering, as the messages it holds — both protocols, one shape.
 
-    Built from the request alone, never from per-session state, for the reason
-    `already_has_tool_results` gives: the mock stays stateless, so concurrent turns cannot see each
-    other. A Responses continuation carries only the new `function_call_output` items, so its view
-    holds no user message at all and every tool result in it is this turn's — which is exactly what
-    that continuation means.
+    Built from the request alone so the mock stays stateless and concurrent turns cannot interfere.
+    A Responses continuation holds only the new `function_call_output` items, so all its tool
+    results are this turn's.
     """
 
     messages: tuple[Message, ...]
@@ -301,8 +210,7 @@ class Conversation:
     def marker(self, known: Iterable[str]) -> str | None:
         """The behaviour the newest marked user message names, or `None` when none names one.
 
-        Newest message first, and within one message the marker that comes first in its text — so
-        a later marker overrides an earlier one, and an unmarked follow-up inherits the last one.
+        Within one message, the marker first in its text wins.
         """
         names = set(known)
         for message in reversed(self.messages):
@@ -331,9 +239,8 @@ class Conversation:
     def called_since_marker(self, name: str) -> set[str]:
         """Tools called after the message carrying `[[name]]` and before this turn's message.
 
-        What a behaviour that spans turns reads to know which turn it is on: a call made in an
-        earlier turn *of this behaviour* — not one from before the marker, which belongs to a
-        different behaviour, and not one from this turn, which is the turn being answered.
+        How a multi-turn behaviour knows which turn it is on: calls from earlier turns of this
+        behaviour only.
         """
         start = self.marked_index(name)
         end = self._last_user_index()
@@ -353,8 +260,8 @@ Script = Callable[[Behaviour, Conversation], Behaviour]
 def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """The request's message items: `messages` (chat completions) then `input` (Responses).
 
-    Both, in that order, because the contract test sends one body to both routes; a real client
-    sends exactly one of the two. A bare-string `input` is one user message.
+    Both, because the contract test sends one body to both routes. A bare-string `input` is one user
+    message.
     """
     items: list[dict[str, Any]] = []
     for key in ("messages", "input"):
@@ -369,45 +276,25 @@ def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def already_has_tool_results(payload: dict[str, Any]) -> bool:
     """Whether this request already carries the output of a tool call made *in this turn*.
 
-    **A model that always calls a tool never finishes.** The agent re-invokes the model after each
-    tool result, so a mock that replays its behaviour verbatim each time drives the agent round its
-    loop until the iteration cap — the first storm turn made 41 tool calls for a behaviour that
-    declares one. A real model calls tools, reads what came back, and then answers, and the mock
-    has to do the same or it is testing a runaway rather than the system.
-
-    Detected from the request rather than from per-session state on purpose: the mock stays
-    stateless, so concurrent turns cannot interfere with each other's step counters — which at the
-    concurrency this harness offers would be a race that looked like an application defect.
-
-    **Both request shapes, because the two protocols say it differently.** The Responses API carries
-    a `function_call_output` item in `input`; chat completions carries a `role: "tool"` message in
-    `messages`. Reading only the first would drive the chat-completions route round the loop until
-    the iteration cap — the same runaway this function was written to stop, one protocol over.
-
-    **This turn's, not the thread's.** Chat completions resends the whole conversation, so a scan
-    of every message found turn one's tool result in every later request and turn two answered
-    without calling anything — a conversation could call a tool once in its life. Only tool
-    results after the newest user message count (`Conversation.tool_results`).
+    The agent re-invokes the model after each tool result, so a mock replaying its calls would loop
+    to the iteration cap; once results are present it answers instead. Read from the request (a
+    `function_call_output` item or a `role: "tool"` message after the newest user message), never
+    from session state, so concurrent turns cannot race.
     """
     return bool(Conversation.of(payload).tool_results)
 
 
 def _validate(behaviour: Behaviour) -> None:
-    """Refuse a behaviour whose tool or arguments the real system would reject (the LOAD-1 guard).
+    """Refuse a behaviour whose tool or arguments the real system would reject.
 
-    Resolved against the live surface rather than a copy of it: `available_tool_names` is what the
-    agent actually advertises, and the registry holds the callable whose signature the schema is
-    derived from. A behaviour that passes here cannot fail for the reason every measurement in the
-    previous load test failed.
+    Resolved against the live surface: `available_tool_names` is what the agent advertises, and the
+    registry holds the callable whose signature the schema comes from.
     """
     from chemclaw.agent.chemclaw_agent import available_tool_names
     from chemclaw.core.tool_registry import registered_tools
 
-    # Checked before the adversarial opt-out, because `adversarial` waives the *tool surface* check
-    # — the thing a deliberately malformed call is for — and says nothing about this mock's own
-    # arithmetic. A behaviour that refuses over a token count while billing a constant would refuse
-    # every request or none, whatever the thread did, which is the opposite of the request-level
-    # failure the knob exists to produce.
+    # Checked before the adversarial opt-out, which waives only the tool-surface check: refusing
+    # over a token count while billing a constant would refuse every request or none.
     if behaviour.refuse_over_input_tokens and behaviour.input_tokens is not None:
         raise ValueError(
             f"behaviour {behaviour.name!r} refuses over "
@@ -447,12 +334,9 @@ def _validate(behaviour: Behaviour) -> None:
 def _within_declared(declared: Behaviour, served: Behaviour) -> Behaviour:
     """`served`, once every call in it is shown to be one `declared`'s templates allow.
 
-    The LOAD-1 guard for a scripted behaviour. `_validate` checks the templates against the live
-    tool surface at startup, but a script chooses argument *values* at request time — so what keeps
-    a script from emitting a tool or an argument nobody validated is this: each served call must
-    name a templated tool and pass only argument names that template declared. A breach is a defect
-    in the catalogue, not in the system under test, so it raises rather than serving a call the
-    run would then report as having happened.
+    Templates are validated at startup, but a script picks values at request time; each served call
+    must name a templated tool and use only argument names that template declared. A breach is a
+    catalogue defect, so it raises.
 
     Raises:
         ValueError: A served call names a tool, or an argument, no template of `declared` holds.
@@ -478,9 +362,8 @@ def _within_declared(declared: Behaviour, served: Behaviour) -> Behaviour:
 class MockLlm:
     """The scripted endpoint: a queue of behaviours, plus a count of what was actually asked of it.
 
-    The counter is not bookkeeping. "No LLM calls were made" is a claim the storm has to be able to
-    *prove*, and reconciling this number against the turn count is how — an unset API key proves
-    only that Anthropic was not reached.
+    The counter lets the storm prove how many model calls were made, by reconciling it against the
+    turn count.
     """
 
     def __init__(self, behaviours: Iterable[Behaviour]) -> None:
@@ -498,27 +381,10 @@ class MockLlm:
     def select(self, payload: dict[str, Any]) -> Behaviour:
         """Pick the behaviour this request continues, by chain first and then by marker.
 
-        Selection is by explicit marker rather than by matching the prompt, so a storm scenario and
-        the behaviour it expects cannot drift apart.
-
-        **The chain lookup is not an optimisation; without it the mock answers as the wrong
-        behaviour.** Measured: the client's first call carries the user message (marker present),
-        and its second carries `previous_response_id` plus *only* the `function_call_output` — the
-        marker is gone. Falling back to the default there meant every turn's final prose came from
-        whichever behaviour happened to be first in the catalogue, so `f-no-text` reported an answer
-        it never wrote and the `text` field of every other behaviour was dead. That is LOAD-1's
-        shape again, one layer up: the harness measuring something other than what it named.
-
-        **Chat completions needs no chain, and that is a property of the protocol rather than an
-        omission.** It has no `previous_response_id`; the client resends the whole conversation on
-        every call, so the user message carrying the marker is present on the second pass and the
-        marker scan below finds it unaided. The chain exists only because the Responses API drops
-        everything but the tool output on continuation.
-
-        **The newest marked user message decides, and the whole-request scan is only the fallback**
-        (see the module docstring for the measurement). Within the fallback the old rule stands —
-        catalogue order over the serialized request — so a request whose marker sits outside any
-        user message is served exactly as it was.
+        The chain matters for the Responses API: a continuation carries `previous_response_id` and
+        only the `function_call_output`, so the marker is gone. Chat completions resends the whole
+        conversation, so the marker scan finds it unaided. The newest marked user message decides;
+        the fallback scans the serialized request in catalogue order.
         """
         previous = payload.get("previous_response_id")
         if isinstance(previous, str):
@@ -537,9 +403,7 @@ class MockLlm:
     def remember(self, response_id: str, behaviour: Behaviour) -> None:
         """Bind a minted response id to the behaviour that produced it, for the next call.
 
-        Bounded, because a soak mints one id per model call and an unbounded map keyed by a
-        generated id is the growth bug this codebase has already fixed three times. `BoundedLru` is
-        the one eviction policy those four call sites were consolidated onto.
+        Bounded (`BoundedLru`), because a soak mints one id per model call.
         """
         self._chain.put(response_id, behaviour.name)
 
@@ -561,16 +425,9 @@ def _fragments(document: str, count: int) -> list[str]:
 def _billed_input_tokens(behaviour: Behaviour, payload: dict[str, Any]) -> int:
     """What this request is billed for its input: a constant, or the request's own size.
 
-    The size is the *serialized request* rather than the message text, because that is what the
-    thing being calibrated measures: `agent/context_budget` estimates prefix and thread together —
-    system message, skills listing, every bound tool schema — and comparing a bill for the messages
-    against an estimate of the whole request is the half-a-comparison defect
-    `D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` is about, one
-    layer down.
-
-    Never 0: `note_model_call` drops a sample with a non-positive bill, so a mock that billed 0 for
-    an empty request would look like a lane that measured nothing rather than one that measured a
-    tiny request.
+    The size is the serialized request — system message, skills listing, tool schemas — because
+    `agent/context_budget` estimates the whole request. Never 0: `note_model_call` drops
+    non-positive samples.
     """
     if behaviour.input_tokens is not None:
         return behaviour.input_tokens
@@ -580,9 +437,8 @@ def _billed_input_tokens(behaviour: Behaviour, payload: dict[str, Any]) -> int:
 def _chat_usage(behaviour: Behaviour, billed_input: int) -> dict[str, Any]:
     """The chat-completions `usage` block, with the cached breakdown only when there is one.
 
-    `prompt_tokens` *includes* the cached share — OpenAI's own definition, and what
-    `turn_usage.graph_usage_tokens` subtracts back out — so a behaviour naming `cached_tokens`
-    does not add to the bill, it says how much of it was cheap.
+    `prompt_tokens` includes the cached share (OpenAI's definition), so `cached_tokens` says how
+    much of the bill was cheap rather than adding to it.
     """
     usage: dict[str, Any] = {
         "prompt_tokens": billed_input,
@@ -597,12 +453,9 @@ def _chat_usage(behaviour: Behaviour, billed_input: int) -> dict[str, Any]:
 def _oversize_refusal(billed_input: int, limit: int) -> JSONResponse:
     """The 400 a real gateway returns for a thread that no longer fits, field for field.
 
-    Measured 2026-09-07 against the gateway: `{"error": {"code": "invalid_request_error",
-    "message": "prompt is too long: 300024 tokens > 200000 maximum", "type":
-    "invalid_request_error", "param": null}}`. The wording is the vendor's, relayed through the
-    gateway, which is why `llm_provider._CONTEXT_LENGTH_MARKERS` matches on it — and this is the
-    only way anything in this tree reaches `classify_model_failure`'s `context_length` label
-    without hand-building an exception.
+    `{"error": {"code": "invalid_request_error", "message": "prompt is too long: N tokens > M
+    maximum", "type": "invalid_request_error", "param": null}}` — the wording
+    `llm_provider._CONTEXT_LENGTH_MARKERS` matches.
     """
     message = f"prompt is too long: {billed_input} tokens > {limit} maximum"
     return JSONResponse(
@@ -630,35 +483,15 @@ class DecidedTurn:
 def decide_turn(mock: MockLlm, payload: dict[str, Any]) -> DecidedTurn | JSONResponse:
     """The sequence of decisions both `/v1/responses` and `/v1/chat/completions` make, once.
 
-    Either the turn to encode, or the `JSONResponse` that ends the request instead — a refusal is
-    a decision, and returning it here is what keeps the two routes from each having to remember
-    the order the refusals come in.
-
-    **One function because the property is "the same sequence of decisions", and that was asserted
-    in prose across two verbatim copies.** `chat_completions` said so in its own docstring while
-    the sequence lived twice. Driven over both wires before the copies were merged, the fourteen
-    statements did still agree — but their *commentary* had already parted: only the Responses arm
-    carried the note below explaining why the oversize refusal has to follow the injected status,
-    so the reason a reader needs in order to keep the order was present in one copy and absent
-    from the other. The storm's scenarios are written against these decisions rather than against
-    either encoding, so a lane that passes on one protocol has to mean the same thing on the other.
-
-    What deliberately stays outside: `mock.remember`, because only the Responses API has a
-    `previous_response_id` to chain from, and the minting of a `resp_…`/`chatcmpl-…` id, because
-    the id space is the protocol's.
+    Returns the turn to encode, or the `JSONResponse` refusal that ends the request; one function so
+    the two routes cannot diverge in the order of refusals. `mock.remember` and id minting stay in
+    the routes because they are protocol-specific.
     """
     behaviour = mock.select(payload)
-    # Second and later passes of the same turn answer instead of calling again — see
-    # `already_has_tool_results`. `dataclasses.replace` rather than mutation: the catalogue is
-    # shared across every concurrent turn and must stay immutable.
-    #
-    # The text is carried through *unchanged*, including when it is empty. Substituting a default
-    # here quietly defeated the scenarios whose whole point is a turn that writes nothing:
-    # `f-no-text` reported `answered=True` on its first run, because this line had helpfully
-    # invented an answer for it.
-    #
-    # A scripted behaviour decides its own passes — it is handed this turn's tool results — so the
-    # collapse is the script's, and what it returns is held to the calls its templates declared.
+    # Later passes of the same turn answer instead of calling again (`already_has_tool_results`).
+    # `dataclasses.replace`, not mutation: the catalogue is shared across concurrent turns. The text
+    # is carried through unchanged, even when empty, so `f-no-text` stays a turn that writes
+    # nothing. A scripted behaviour decides its own passes, held to its declared templates.
     if behaviour.script is not None:
         behaviour = _within_declared(
             behaviour, behaviour.script(behaviour, Conversation.of(payload))
@@ -687,8 +520,7 @@ def _response_object(
 ) -> dict[str, Any]:
     """The `Response` body both the streaming and non-streaming paths report.
 
-    `status` is always `completed`. `in_progress` or `queued` makes the client mint a continuation
-    token and then poll `GET /responses/{id}` — a second protocol to implement for no coverage.
+    `status` is always `completed`; `in_progress` would make the client poll `GET /responses/{id}`.
     """
     return {
         "id": response_id,
@@ -716,9 +548,7 @@ def _response_object(
 async def _paced(behaviour: Behaviour) -> AsyncIterator[str]:
     """The answer's text in 40-character frames, spread over `stream_seconds` when it names any.
 
-    One generator for both encoders, so a slow-streaming turn is the same turn on either wire. The
-    pause comes *before* each frame after the first, so the text starts arriving at once and the
-    last frame lands `stream_seconds` later — the shape of a model writing, not of one stalling.
+    Shared by both encoders. The pause precedes each frame after the first, so text starts at once.
     """
     chunks = [behaviour.text[i : i + 40] for i in range(0, len(behaviour.text), 40)]
     pause = behaviour.stream_seconds / max(len(chunks) - 1, 1) if behaviour.stream_seconds else 0.0
@@ -733,10 +563,8 @@ async def _stream(
 ) -> AsyncIterator[str]:
     """The SSE frames for one turn, in the order the SDK's discriminated union accepts them.
 
-    Every frame is constructed as the SDK's own model and dumped, rather than hand-written JSON:
-    the SDK validates each event before the agent ever sees it, so a frame this mock got subtly
-    wrong would raise inside the client and read as an application defect. Building through the
-    model makes that failure impossible to ship.
+    Every frame is built as the SDK's own model, so a malformed frame fails here rather than inside
+    the client, where it would read as an application defect.
     """
     from openai.types.responses import (
         Response,
@@ -748,9 +576,7 @@ async def _stream(
         ResponseTextDeltaEvent,
     )
 
-    # Validated into the SDK's own `Response` rather than passed as a dict: the client deserializes
-    # every frame before the agent sees it, so a body this mock got subtly wrong would raise inside
-    # SDK and read as an application defect. Building through the model makes that unshippable.
+    # Validated into the SDK's `Response`, so a malformed body fails here rather than in the client.
     body = Response.model_validate(_response_object(response_id, model, behaviour, billed_input))
     sequence = 0
 
@@ -833,28 +659,18 @@ async def _chat_stream(
 ) -> AsyncIterator[str]:
     """The same turn as `_stream`, in chat-completions frames.
 
-    A second encoding of one behaviour rather than a second mock, because the behaviour catalogue —
-    and the LOAD-1 guard that validates it against the live tool surface — is the part with the
-    value in it. Only the wire shape differs.
-
-    Built through `ChatCompletionChunk` for the reason `_stream` builds through the Responses
-    models: `langchain_openai` deserializes every frame before the agent sees it, so a chunk this
-    mock got subtly wrong would raise inside the client and read as an application defect.
-
-    The tool-call encoding is the part worth naming. Chat completions streams a call as deltas over
-    an *indexed* slot: the first delta carries `id`, `type` and `function.name`, and every later one
-    carries only an argument fragment against the same `index`. Sending the name again on a
-    fragment makes the client assemble two calls out of one — the reassembly hazard `graph_stream`
-    refuses to read calls from the token stream because of.
+    Built through `ChatCompletionChunk` so a malformed chunk fails here. A tool call streams over an
+    indexed slot: the first delta carries `id`, `type` and `function.name`, later ones only argument
+    fragments against the same `index` — repeating the name would make the client assemble two
+    calls.
 
     Args:
         behaviour: The turn to encode — its calls, its prose and its billed output.
         model: The model name to echo back on every chunk.
         completion_id: The `chatcmpl-…` id every chunk of this turn carries.
         billed_input: What `_billed_input_tokens` decided this request costs in input.
-        include_usage: Whether the request sent `stream_options.include_usage`. See the terminal
-            frame below — a gateway reports streamed usage only when asked, and this mock used to
-            report it either way.
+        include_usage: Whether the request sent `stream_options.include_usage`; usage is reported
+            only when asked, as a gateway does.
     """
     from openai.types.chat import ChatCompletionChunk
 
@@ -914,21 +730,9 @@ async def _chat_stream(
         async for chunk_text in _paced(behaviour):
             yield frame({"delta": {"content": chunk_text}})
 
-    # Usage rides the final frame — measured 2026-09-07 against the gateway, which puts it on the
-    # same chunk as `finish_reason` rather than on a trailing choice-less one — and the turn is
-    # metered from it by `graph_usage_tokens`. Omitting it meters every turn at zero and silently
-    # disarms the budget guard under the storm, which is why it is here at all.
-    #
-    # **And it is emitted only when the request asked, because a gateway only answers when asked.**
-    # Measured the same day, streaming with no `stream_options`: this mock put usage on 1 of 7
-    # frames, the gateway on 0 of 7; through `ChatOpenAI(stream_usage=False)` the mock reported
-    # `input_tokens: 900` and the gateway reported `usage_metadata: None`. `llm_stream_usage` exists
-    # as the escape hatch for an endpoint that rejects `stream_options`, and turning it off books
-    # **zero** on every turn — `turn_usage`, `api/budget.py`, `agent/spend_cap.py` and
-    # `context_budget.note_model_call` all read that one field. Reporting usage unasked made that
-    # lane invisible: every mock-driven run showed a fully metered turn for a configuration that
-    # meters nothing. `_openai_compatible_model`'s docstring records this exact failure having
-    # shipped once already, and the mock was the reason it could not recur *visibly*.
+    # Usage rides the final frame, on the same chunk as `finish_reason` as the gateway sends it, and
+    # meters the turn via `graph_usage_tokens`. Emitted only when the request asked: with
+    # `llm_stream_usage` off every turn books zero, and the mock must show that rather than hide it.
     yield frame(
         {
             "delta": {},
@@ -943,13 +747,7 @@ async def _chat_stream(
 def build_app(mock: MockLlm) -> FastAPI:
     """The routes the OpenAI SDK will actually reach, over this mock's behaviour set.
 
-    **Two chat protocols, because the engine changed under this file.** `/v1/responses` was the only
-    one for as long as the conversation layer ran on the Microsoft Agent Framework, which spoke the
-    Responses API. The LangGraph rebuild builds a `ChatOpenAI`, which posts to
-    `/v1/chat/completions` — so from that day every credential-free lane (`make live-degradation`,
-    `make live-storm`, `make live-soak`) got a bare `404 Not Found` from the mock and the turn died
-    with no answer and no tool call. Measured before it was fixed: a degradation run scored 1/3 with
-    "the turn produced no token or answer at all" while the mock's own counter read `requests: 0`.
+    `/v1/chat/completions` is what `ChatOpenAI` posts to; `/v1/responses` serves the Responses API.
     """
     app = FastAPI(title="chemclaw-mock-llm")
 
@@ -986,16 +784,10 @@ def build_app(mock: MockLlm) -> FastAPI:
     async def chat_completions(request: Request) -> Any:
         """The same turn as `/v1/responses`, for the protocol `ChatOpenAI` actually posts to.
 
-        The decisions are literally the same ones — `decide_turn` is the single function both
-        routes ask, because the storm's scenarios are written against those decisions rather than
-        against either encoding. Only the encoding differs, and it differs in `_chat_stream`.
-        `tests/test_mock_llm_contract.py::test_both_routes_decide_one_turn_the_same_way` drives
-        the whole behaviour catalogue through both wires and compares what they decided, so the
-        claim is checked rather than restated: this docstring used to assert the sameness in prose
-        over two verbatim copies of the sequence.
-
-        No `mock.remember`: chat completions has no `previous_response_id` to chain from, and the
-        client resends the conversation, so `select` finds the marker on every pass unaided.
+        Both routes ask `decide_turn`; only the encoding (`_chat_stream`) differs, which
+        `tests/test_mock_llm_contract.py::test_both_routes_decide_one_turn_the_same_way` checks. No
+        `mock.remember`: there is no `previous_response_id`, and the resent conversation carries the
+        marker.
         """
         payload = await request.json()
         decided = decide_turn(mock, payload)
@@ -1012,8 +804,8 @@ def build_app(mock: MockLlm) -> FastAPI:
                 ),
                 media_type="text/event-stream",
             )
-        # The non-streaming body always carries usage, on this mock and on the gateway measured
-        # beside it: `stream_options` is a *streaming* option and has nothing to say here.
+        # The non-streaming body always carries usage, as a gateway's does: `stream_options` applies
+        # only to streaming.
         body: dict[str, Any] = {
             "id": completion_id,
             "object": "chat.completion",
@@ -1062,27 +854,16 @@ def build_app(mock: MockLlm) -> FastAPI:
 def catalogue(name: str) -> list[Behaviour]:
     """The named behaviour set this process serves.
 
-    Independent catalogues may not be served together. `MockLlm.select` falls back to the *first*
-    entry of whatever it was given when a request carries no marker, so a union would silently hand
-    one lane's default to the other — and a marker collision between two independently edited files
-    would be invisible until a report read wrong. One lane, one catalogue, named on the command
-    line.
+    Catalogues are not served together: `MockLlm.select` falls back to the first entry when no
+    marker is present, so a union would leak one lane's default into another. `e2e` is the one
+    deliberate union: the storm's list first (so the default is the storm's), then
+    `cli/e2e_behaviours.py`'s entries namespaced `e2e:` (`tests/test_mock_llm_e2e.py` holds the
+    absence of collisions).
 
-    **`e2e` is the one deliberate union, and it is built so neither hazard applies.** The browser
-    suite on the kind cluster drives the storm's markers (`a-retrieval`, `f-slow`, `d-collide`, the
-    fault injections) *and* the scripted workflows of `cli/e2e_behaviours.py`, against one mock. The
-    storm's list comes first, so the unmarked default is the storm's own; and every `e2e` entry is
-    namespaced `e2e:`, a prefix no storm name carries, which
-    `tests/test_mock_llm_e2e.py::test_the_e2e_catalogue_extends_the_storms_without_a_collision`
-    holds rather than this sentence.
-
-    Imported here rather than at module scope because each catalogue validates itself against the
-    live tool surface, which builds the connector registry: a process that serves one must not pay
-    for the other.
+    Imported lazily because each catalogue validates itself against the live tool surface.
 
     Raises:
-        KeyError: No catalogue is called that, named rather than falling back to the storm's — a
-            typo would otherwise serve a measurement the wrong script and report it as a result.
+        KeyError: No catalogue is called that, rather than silently serving the storm's.
     """
     from chemclaw.cli.delegation_behaviours import DELEGATION_BEHAVIOURS
     from chemclaw.cli.e2e_behaviours import E2E_BEHAVIOURS
@@ -1101,10 +882,8 @@ def catalogue(name: str) -> list[Behaviour]:
 def main(argv: list[str] | None = None) -> int:
     """Serve one behaviour catalogue until killed."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    # **The bind address is a flag because a pod cannot use the default.** Loopback is right for the
-    # live lane, where every caller shares this machine; in a cluster (`deploy/kind/`) the callers
-    # are other pods, and a mock bound to 127.0.0.1 answers none of them. The default stays
-    # loopback so nothing that already starts this mock changes what it exposes.
+    # A flag because a pod cannot use loopback: in a cluster (`deploy/kind/`) callers are other
+    # pods. The default stays loopback.
     parser.add_argument("--host", default=MOCK_HOST)
     parser.add_argument("--port", type=int, default=MOCK_PORT)
     parser.add_argument(

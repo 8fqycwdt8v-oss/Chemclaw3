@@ -1,37 +1,12 @@
-"""Resolve the names chemists actually write to the structures every tool demands (gap TOOL-2).
+"""Resolve the names chemists actually write to the structures every tool demands.
 
-Every chemistry capability in this codebase speaks SMILES — `compute_xtb_energy(smiles)`,
-`predict_pka(smiles)`, `similar_molecules(smiles)`, `find_substructure_matches(query)`. Chemists
-write `Pd(dppf)Cl2`, `DIPEA`, `2-MeTHF`, `TBTU`, and ELN free text writes the same. Nothing bridged
-the two, and the consequences compounded rather than added:
+Every chemistry capability speaks SMILES, while chemists and ELN text write `Pd(dppf)Cl2`, `DIPEA`,
+`2-MeTHF`. This bridges the two for name-based queries, species linking and compound identity.
 
-- `find_notes` is literal substring matching, so a query by trivial name missed a SMILES-keyed
-  corpus *entirely* rather than partially;
-- the deferred "per-step species linking from free-text prose" is blocked on precisely this — its
-  `docs/planning/DEFERRED.md` entry says linking needs "a name→SMILES tool", which did not exist;
-- the conditions-vocabulary gap (KNW-4) and compound notes (KNW-7) both need one canonical identity
-  to hang on.
-
-**Deliberately a committed table, not a network call.** The reagents a process-chemistry group uses
-daily are a small, stable, high-value set, and a table is deterministic, offline, reviewable in a
-PR, and citable — the same reasoning that keeps the eval case-set in Git. An external resolver
-(PubChem/OPSIN) belongs behind the F7 `DataSource` seam as one more source when a real need appears;
-it is not a prerequisite for the common case, and making the common case depend on a network round
-trip would be strictly worse.
-
-Resolution is deliberately *conservative*: an unknown name returns no match rather than a guess.
-Fabricating a structure from a name is the one failure mode that would be worse than the gap — a
-wrong structure propagates silently into a calculation, a fingerprint search, and a recorded note.
-
-**There was a density table here, and it is gone.** `density_of` and its 23-entry
-`_RAW_DENSITIES` block existed for `stoichiometry_table` — the comment argued its correctness
-against that caller in the present tense, at length — and `stoichiometry_table` left this
-repository with the `chem` capability. Nothing in `src/` called it, and unlike `core/http.py`'s
-`error_detail` (deleted for the same reason on the same day) no test covered it either, so a
-transposed digit in a solvent density would have gone unnoticed indefinitely. The measurement
-behind `D-2026-08-02-a-solvent-charge-is-a-volume` stands and the ADR is the record of it; the
-data belongs beside whatever computes a solvent charge next, which is `Chemclaw3-mcp`, with the
-self-validating test `Chemclaw3-mcp:servers/props/tests/test_dataset.py` sets as the pattern.
+A committed table rather than a network call: the reagents a process group uses daily are a small,
+stable set, and a table is deterministic, offline, reviewable and citable. An external resolver
+would belong behind the `DataSource` seam. Resolution is conservative: an unknown name returns no
+match, because a fabricated structure propagates silently into calculations, searches and notes.
 """
 
 from typing import NamedTuple
@@ -44,10 +19,9 @@ from chemclaw.core.chem import (
     require_standard_smiles,
 )
 
-# Common bench reagents, solvents, bases, and catalysts, keyed by every spelling a chemist writes.
-# Entries are grouped by role for review; the lookup itself is flat and folds case/punctuation.
-# Each SMILES is canonicalized at import, so a typo here fails loudly at startup rather than
-# silently yielding an unparseable structure to a calculator.
+# Common bench reagents, solvents, bases and catalysts, keyed by every spelling a chemist writes.
+# Grouped by role for review; the lookup folds case and punctuation. Each SMILES is canonicalized at
+# import, so a typo fails at startup.
 _RAW_SYNONYMS: dict[str, tuple[str, str]] = {
     # --- solvents ---
     "thf": ("C1CCOC1", "tetrahydrofuran"),
@@ -148,20 +122,14 @@ _RAW_SYNONYMS: dict[str, tuple[str, str]] = {
     "tbhp": ("CC(C)(C)OO", "tert-butyl hydroperoxide"),
     "oxone": ("[K+].[K+].OOS([O-])(=O)=O.[O-]S(=O)(=O)O", "Oxone"),
     "naio4": ("[Na+].[O-][I](=O)(=O)=O", "sodium periodate"),
-    # Sodium peroxide beside hydrogen peroxide, because the two are one hazard written two ways and
-    # a table holding only the liquid could not express the solid. It is also the molecule whose
-    # SMILES — one-coordinate anions rather than a HO-OH — has now defeated three separate screening
-    # patterns in `Chemclaw3-mcp`'s hazard table, so having it here is what lets a test drive the
-    # screen with the reagent a chemist actually names.
+    # Sodium peroxide beside hydrogen peroxide: one hazard in solid and liquid form. Its ionic
+    # SMILES (no HO-OH bond) is a known stress case for hazard screening patterns.
     "na2o2": ("[Na+].[O-][O-].[Na+]", "sodium peroxide"),
     "sodiumperoxide": ("[Na+].[O-][O-].[Na+]", "sodium peroxide"),
     # --- reductants held as salts, whose free-base spelling a screen must not depend on ---
     #
-    # Hydrazine is the reagent a bench chemist weighs out, and the table held none of it at all —
-    # so the `hydrazine` structural rule and the hydrazine arm of `oxidizer-with-reductant`, both
-    # widened twice for exactly these spellings, could not be exercised against a *named* reagent.
-    # The catalogue forms are the salts, which is why the widening was needed: their nitrogen is
-    # `NX4+`, and a neutral-only pattern passes them.
+    # Hydrazine and its catalogue salts, whose nitrogen is `NX4+`, so a hazard screen can be
+    # exercised against the reagent a chemist actually names.
     "hydrazine": ("NN", "hydrazine"),
     "n2h4": ("NN", "hydrazine"),
     "hydrazinehydrate": ("NN.O", "hydrazine hydrate"),
@@ -202,9 +170,8 @@ def _build_table() -> dict[str, tuple[str, str]]:
 
 _TABLE = _build_table()
 
-# Reverse map: canonical SMILES -> preferred display name, for rendering a structure back as the
-# name a chemist would recognise. First spelling wins, which is why the table lists the common
-# abbreviation before the systematic name for each reagent.
+# Reverse map: canonical SMILES -> preferred display name. First spelling wins, so the table lists
+# the common abbreviation before the systematic name.
 _BY_STRUCTURE: dict[str, str] = {}
 for _key, (_smiles, _display) in _TABLE.items():
     _BY_STRUCTURE.setdefault(_smiles, _display)
@@ -220,15 +187,10 @@ class _Compound(NamedTuple):
 def _index_by_compound() -> dict[str, _Compound]:
     """Index the table a second time, on the standardized SMILES — the "same compound?" key.
 
-    The canonical index above cannot answer for a reagent whose two keys differ, and seven shipped
-    ones do: DMSO's S=O normalizes to a charge-separated sulfoxide, TBTU and HATU lose their
-    counterion, LDA loses its lithium. Everything downstream of `compound_id` — the compound note,
-    the fingerprint row, `memory.progression`'s species names — holds the *standardized* string, so
-    without this index a DMSO note rendered an anonymous structure with no name on it.
-
-    Built once at import rather than scanned per lookup, because the callers are per-note loops and
-    the scan would re-standardize the whole table each time. First spelling still wins the display
-    name, for the same reason it does above.
+    Some reagents' canonical and standardized forms differ (DMSO's charge-separated sulfoxide, TBTU
+    and HATU losing their counterion, LDA losing lithium), and everything downstream of
+    `compound_id` holds the standardized string. Built once at import because callers loop per note.
+    First spelling wins the display name.
     """
     synonyms: dict[str, list[str]] = {}
     displays: dict[str, str] = {}
@@ -259,19 +221,15 @@ class ResolvedCompound(BaseModel):
 def resolve_compound_name(name: str) -> ResolvedCompound | None:
     """Resolve a written reagent name (or a SMILES) to a canonical structure, or `None`.
 
-    Returns `None` rather than guessing: a fabricated structure propagates silently into a
-    calculation, a similarity search, and eventually a recorded note, which is strictly worse than
-    an honest miss.
+    Returns `None` rather than guessing: a fabricated structure is strictly worse than an honest
+    miss.
     """
     lookup = _TABLE.get(_normalize(name))
     if lookup is not None:
         smiles, display = lookup
         return ResolvedCompound(query=name, smiles=smiles, name=display, source="synonym")
-    # A caller may already hold a structure; accepting it here means one entry point for
-    # "give me the canonical form of whatever the chemist typed". `require_` (not the lenient
-    # `canonical_smiles`, which returns its input unparsed) is essential: the lenient variant
-    # would resolve any unknown name to itself, turning every miss into a fabricated structure —
-    # exactly the failure this module exists to prevent.
+    # A caller may already hold a structure. `require_` is essential: the lenient `canonical_smiles`
+    # returns unparseable input unchanged, which would resolve any unknown name to itself.
     try:
         canonical = require_canonical_smiles(name)
     except InvalidSmilesError:
@@ -287,10 +245,8 @@ def resolve_compound_name(name: str) -> ResolvedCompound | None:
 def display_name(smiles: str) -> str | None:
     """The recognised name for a structure, or `None` if it is not a known reagent.
 
-    The exact structure first, then the *compound* it standardizes to. The second lookup is what
-    lets a caller holding a standardized SMILES — a compound note, a `memory.progression` species
-    list — still name DMSO or TBTU, whose two keys differ. It is a lookup, never a guess: an
-    unrecognised structure still returns `None` rather than a fabricated name.
+    Tries the exact structure, then the compound it standardizes to, so callers holding a
+    standardized SMILES can still name DMSO or TBTU. Never a guess.
     """
     try:
         canonical = require_canonical_smiles(smiles)
@@ -304,11 +260,10 @@ def display_name(smiles: str) -> str | None:
 
 
 def synonyms_of(smiles: str) -> list[str]:
-    """Every recognised spelling of this *compound*, sorted — the KNW-4 controlled vocabulary.
+    """Every recognised spelling of this *compound*, sorted — the controlled vocabulary.
 
-    The compound question, not the structure question, because the caller writing these into a
-    note body already holds the standardized SMILES its id was hashed from. Empty for an
-    unrecognised or unparseable structure, so a caller can write the line only when there is one.
+    Keyed by compound because callers writing these into a note already hold the standardized
+    SMILES. Empty for an unrecognised or unparseable structure.
     """
     try:
         compound = _BY_COMPOUND.get(require_standard_smiles(smiles))

@@ -1,25 +1,11 @@
 """What one turn's prune of superseded checkpoints does, and what it must not do.
 
-The claim under test is `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record`: a thread's
-older checkpoints are copies of state its newest one still holds in full, so deleting them disposes
-of no record — and until this landed nothing bounded a thread that was still in use. `checkpoints`
-grew four full copies of the whole message list per turn, so blob bytes went as the square of the
-turn count: measured on this suite's own shape, 2.57 / 10.29 / 41.17 MB at 20 / 40 / 80 turns, ratio
-4.00 twice.
-
-**Every test here drives the real compiled agent against the real Postgres saver**, because the
-things that could go wrong are things a mock cannot have: a live turn committing on a connection
-the prune is not inside, and a resume that reads back a conversation LangGraph reassembles from
-`checkpoint_blobs`.
-
-**A second `checkpoint_ns` used to arrive for free and no longer does.** It came from a `task`
-helper inheriting its caller's saver, which
-`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed, so the namespace the
-partition is about is now written deliberately through the saver's own API — see
-`_write_namespace`. That is the one thing in this file not driven by a compiled agent, and it is
-written rather than mocked for the same reason as the rest.
-
-`tests/test_checkpointer_schema.py` owns the stamp and the refusal; this file owns the bytes.
+Claim: `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` — older checkpoints copy state
+the newest holds, so pruning them bounds a thread that otherwise grows with the square of its turns.
+Tests drive the real compiled agent against the real Postgres saver, because the risks (a live
+turn committing beside the prune, a resume reassembling from `checkpoint_blobs`) need real
+storage. A second `checkpoint_ns` is written through the saver's API (`_write_namespace`).
+`tests/test_checkpointer_schema.py` owns the stamp and refusal; this file owns the bytes.
 """
 
 import asyncio
@@ -50,9 +36,7 @@ def _script(turn: tuple[Any, ...], turns: int) -> ScriptedChatModel:
 async def _drive(saver: Any, thread: str, turns: int, turn: tuple[Any, ...]) -> list[str]:
     """Take `turns` turns on one thread and return the conversation the last one saw.
 
-    A graph per turn, because that is what the front door does — `build_langgraph_agent` binds tools
-    at construction — and because a prune that only works on a graph held open across turns would
-    not be a prune of anything a deployment runs.
+    A graph per turn, as the front door builds them.
     """
     model = _script(turn, turns)
     final: dict[str, Any] = {}
@@ -89,9 +73,7 @@ async def _thread_rows(thread: str) -> dict[str, int]:
 async def _namespace_rows(thread: str, table: str) -> dict[str, int]:
     """Rows of `table` per `checkpoint_ns` on one thread.
 
-    `_namespaces` counts `checkpoints` only, so the `checkpoint_ns` predicates in `pruned_writes`
-    and `pruned_blobs` had nothing asserting them — measured, either could be dropped and this
-    whole file stayed green, in both this version and the one before it.
+    Needed to assert the `checkpoint_ns` predicates in `pruned_writes` and `pruned_blobs`.
     """
     async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
         await cur.execute(
@@ -114,18 +96,9 @@ async def _namespaces(thread: str) -> dict[str, int]:
 async def _write_namespace(saver: Any, thread: str, namespace: str, count: int) -> None:
     """Put `count` checkpoints on one thread under `namespace`, through the saver's own API.
 
-    A second namespace on a thread used to arrive for free, because a `task` helper inherited its
-    caller's saver and checkpointed under `tools:<uuid>`.
-    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed that — it was 98% of
-    what a spawn cost — so the partition below has to be driven rather than observed as a side
-    effect. Written through `aput`/`aput_writes` rather than as raw `INSERT`s so the rows carry the
-    real `channel_versions` the prune's floor is computed from.
-
-    **It writes channel *values* and pending writes, not bare checkpoints, and that is the point.**
-    A namespace of bare checkpoints exercises only the `pruned_checkpoints` CTE, leaving the
-    `checkpoint_ns` joins in `pruned_blobs` and `pruned_writes` with nothing under them — measured,
-    dropping either join survived this whole file. Writing a value per version puts rows in all
-    three tables, so the statement is pruned the way a real namespace would be.
+    Uses `aput`/`aput_writes` so rows carry real `channel_versions`, and writes channel values and
+    pending writes so all three tables have rows; bare checkpoints would leave the `checkpoint_ns`
+    joins in `pruned_blobs` and `pruned_writes` untested.
     """
     from langgraph.checkpoint.base import empty_checkpoint
 
@@ -157,15 +130,10 @@ async def _ready(monkeypatch: pytest.MonkeyPatch, keep: int) -> Any:
 def test_a_thread_stops_growing_with_the_square_of_its_turns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The A/B the fix rests on: same turns, same script, prune off then prune on.
+    """A thread stops growing with the square of its turns: prune off versus on.
 
-    Both arms in one test on purpose. A threshold on the pruned arm alone would be a number to
-    re-tune every time the fixture's message size moved; the *ratio* between two arms of the same
-    fixture is the claim, and it is what says the growth changed shape rather than got smaller.
-
-    The row assertion is the sharper of the two. Twelve turns write 156 `checkpoints` rows
-    unpruned; pruned, the thread holds the retained checkpoints plus one turn's writes and nothing
-    else, which is a bound that does not move with turn count at all.
+    Both arms in one test, because the ratio between them is the claim, not a re-tunable threshold.
+    Pruned, the row count is bounded independently of the number of turns.
     """
 
     async def _run(keep: int, thread: str) -> tuple[dict[str, int], list[str]]:
@@ -201,25 +169,12 @@ def test_a_thread_stops_growing_with_the_square_of_its_turns(
 def test_every_namespace_of_a_thread_is_bounded_and_not_only_the_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A thread can carry more than one `checkpoint_ns`, and the prune must bound each of them.
+    """Every namespace of a thread is bounded, not only the root.
 
-    **This test used to get its second namespace for free, and that is the thing that changed.**
-    A `task` helper inherited its caller's saver and checkpointed under `tools:<uuid>` on the
-    caller's own `thread_id` — one new namespace per call, seven `checkpoints` each.
-    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed that, because it was
-    98% of what a spawn cost in checkpoint rows, and the assertion that no such namespace appears
-    now lives in `tests/test_subagents.py` where the helper is built.
-
-    So the namespace is written deliberately here. The guard is worth keeping without a shipped
-    subgraph behind it: the statement is generic over namespaces, LangGraph writes one for *any*
-    subgraph that inherits a saver, and the failure it prevents is silent.
-
-    **The direction the review expected is not the direction this statement fails in.** The caveat
-    was written as over-pruning: take the newest K checkpoints across namespaces and a live
-    namespace goes whole. That is the failure of a *thread-wide* floor, and this statement does not
-    have one — its `oldest_kept` groups by `checkpoint_ns`, so a namespace with no row in the
-    global top-K gets no floor and is never touched. The real failure is a leak that grows with
-    namespaces rather than a loss, and this test fails if the `PARTITION BY` is dropped.
+    The namespace is written deliberately; the statement is generic over namespaces and LangGraph
+    writes one for any subgraph that inherits a saver. `oldest_kept` groups by `checkpoint_ns`, so
+    the failure mode is a leak growing with namespaces rather than over-pruning; this fails if the
+    `PARTITION BY` is dropped.
     """
 
     async def _run() -> tuple[dict[str, int], dict[str, int], dict[str, int], list[str]]:
@@ -274,16 +229,11 @@ def test_every_namespace_of_a_thread_is_bounded_and_not_only_the_root(
 def test_a_prune_beside_live_turns_leaves_the_thread_readable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The race the version floor is chosen for, driven rather than argued.
+    """A prune beside live turns leaves the thread readable.
 
-    The prune runs on its own connection, so it is not in the turn's transaction and the turn is not
-    in its own — the same two-writer shape `D-2026-09-06-a-sweep-and-a-live-turn-are-two-writers`
-    found for the retention sweep, where the fix was a `NOT EXISTS` that left one window open. Here
-    the predicate is a version floor over monotone counters, so a row written after the statement's
-    snapshot sorts above every floor it computed.
-
-    Hammered every 5 ms for the whole of eight turns, with `keep=1` — the most aggressive setting
-    the config allows, chosen because a margin would hide a fault this test exists to find.
+    The prune runs on its own connection; its predicate is a version floor over monotone counters,
+    so a row written after its snapshot sorts above every floor it computed. Hammered every 5 ms
+    with `keep=1`, the most aggressive setting, so no margin hides a fault.
     """
 
     async def _run() -> tuple[list[str], int]:
@@ -336,11 +286,9 @@ def test_a_prune_beside_live_turns_leaves_the_thread_readable(
 def test_the_prune_is_off_when_a_deployment_asks_for_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """0 is the escape hatch for a deployment that wants the whole history, and it must be real.
+    """`0` turns the prune off, asserted against the row count.
 
-    Asserted against the row count rather than by counting statements: what a deployment is buying
-    with 0 is the rows, and a prune that ran but deleted nothing would be indistinguishable from
-    one that did not run — until the day it deleted something.
+    A prune that ran but deleted nothing would be indistinguishable by statement counting.
     """
 
     async def _run() -> dict[str, int]:

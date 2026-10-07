@@ -1,10 +1,7 @@
-"""DRFP reaction fingerprints — the reaction capability core (plan step 3.4).
+"""DRFP reaction fingerprints.
 
-Pure, GPU-free, model-free: a reaction SMILES (`reactants>>products`) becomes a DRFP
-(Differential Reaction FingerPrint) folded to `settings.drfp_bits` and stored as a
-fixed-width bitstring, so it maps onto a Postgres `bit(drfp_bits)` column exactly like the
-molecule ECFP4. DRFP is the reaction-specific "reaction SMILES → bits" step; ranking and
-the store are the shared, domain-neutral `chemclaw.science.fingerprints.store`.
+Pure and model-free: a reaction SMILES becomes a DRFP folded to `settings.drfp_bits` and stored as a
+fixed-width bitstring, matching a Postgres `bit(drfp_bits)` column like the molecule ECFP4.
 """
 
 from drfp import DrfpEncoder
@@ -17,33 +14,17 @@ from chemclaw.science.fingerprints.store import FingerprintInputError
 def _standardize_species(reaction_smiles: str) -> str:
     """Standardize every `.`-separated species in a `reactants>agents>products` string.
 
-    `OrdReaction.transformation_smiles` builds every indexed row this way (`standard_smiles`
-    per component), so a query built any other way scores against a form it never shares
-    (REV-1). Applied here rather than left to each caller, because a caller with only a bare
-    string has nothing else to standardize it with — this is the one function every query and
-    every indexed row passes through.
+    Every indexed row is built with `standard_smiles` per component, so every query passes through
+    here too, or it would score against a form it never shares. All three fields are standardized,
+    agents included, because `DrfpEncoder` folds the agent slot onto the reactants; a 3-part string
+    and its folded 2-part form must standardize identically.
 
-    Splits on the single-`>` reaction-SMILES convention — `reactants>agents>products`, of
-    which `reactants>>products` is the empty-agents case — and standardizes each field's
-    tokens independently, agents included. Not just the outer two fields: `DrfpEncoder`
-    folds the agent slot onto the reactants before it shingles anything
-    (`sides[0] += "." + sides[1]`, see `reaction_definition`), so a 3-part string and its
-    hand-folded 2-part equivalent must come out standardized identically, token for token, or
-    the fold stops being a no-op and two spellings of one reaction diverge.
+    A string that does not split into exactly three fields is returned unchanged for `DrfpEncoder`
+    to reject.
 
-    A string that does not split into exactly three `>`-delimited fields is returned
-    unchanged: it is not a reaction SMILES this module's callers write, and `DrfpEncoder` is
-    what should raise on it, not a guess here about how to parse it.
-
-    **Atom maps are part of what `standard_smiles` normalises, and that is load-bearing here rather
-    than incidental** (`D-2026-09-09-a-map-number-is-not-a-molecule`). DRFP shingles atom
-    environments as SMILES strings, so `[CH3:1][C:2](=[O:3])[OH:4]` and `CC(=O)O` shingle to
-    disjoint sets: measured, a mapped reaction scored **0.0000** against its own unmapped form and
-    0.0000 against the same reaction renumbered by a re-label. `ingest/labels/corpus.py` indexes
-    atom-mapped literature reactions and `ingest/eln/ord.py` indexes unmapped in-house ones, so at
-    a 0.3 threshold the two tables answered nothing about each other — a "we have no precedent" for
-    a reaction on file in both. The clearing lives in `standardize` and not here, because the same
-    string mints `compound_id`.
+    Atom maps are cleared by `standard_smiles`, which is load-bearing: DRFP shingles atom
+    environments as SMILES text, so a mapped and an unmapped spelling of one reaction would
+    otherwise share no bits.
     """
     fields = reaction_smiles.split(">")
     if len(fields) != 3:
@@ -54,25 +35,14 @@ def _standardize_species(reaction_smiles: str) -> str:
 def drfp_bitstring(reaction_smiles: str) -> str:
     """Return the DRFP fingerprint of `reaction_smiles` as a `drfp_bits`-long bitstring.
 
-    Standardizes each `.`-separated species before folding, so a query naming a salt, a
-    charged species or another tautomer of an indexed compound scores against the same
-    standardized form the index was built from (REV-1) — the index already goes through
-    `standard_smiles` per component
-    (`chemclaw.ingest.eln.ord.OrdReaction.transformation_smiles`), so an unstandardized
-    query was comparing against a form it could never equal.
+    Standardizes each species first so a query matches the form the index was built from.
 
-    Raises `FingerprintInputError` if the input is not a valid reaction SMILES (DRFP needs a
-    `>>`-separated reaction) or if it yields an empty fingerprint (a degenerate reaction
-    with no extracted features is not useful to index or search), so the caller never
-    stores or queries a meaningless fingerprint (G4). The narrow type is what lets a caller
-    treat an unfingerprintable *argument* as an empty answer without also absorbing a store
-    that cannot be searched.
+    Raises `FingerprintInputError` if the input is not a valid reaction SMILES or yields an empty
+    fingerprint, so nothing meaningless is stored or queried. The narrow type lets a caller treat a
+    bad argument as an empty answer without also absorbing a store failure.
     """
-    # Bound each species before DRFP parses it: `DrfpEncoder.encode` runs its *own* RDKit parse,
-    # so the `core/chem` size gate that protects `standard_smiles` does not reach it — an oversized
-    # species (measured: ~20k atoms) hangs or crashes the writer here regardless. A real reaction
-    # SMILES never carries a component this large; refusing it is the same class of guard
-    # `require_molecule` applies, at the one boundary DRFP owns.
+    # Bound each species before DRFP parses it: `DrfpEncoder.encode` runs its own RDKit parse, which
+    # the `core/chem` size gate does not reach, and an oversized species can hang or crash it.
     for token in reaction_smiles.replace(">", ".").split("."):
         if len(token) > settings.molecule_max_smiles_length:
             raise FingerprintInputError(
@@ -95,16 +65,8 @@ def drfp_bitstring(reaction_smiles: str) -> str:
 def reaction_definition() -> str:
     """The current DRFP definition signature stored on each reaction row.
 
-    Recorded per row so the store never ranks DRFP bits folded to a different width against
-    each other — changing `drfp_bits` and re-indexing can't silently mix incomparable rows.
-
-    `agents-excluded` marks rows built from `OrdReaction.transformation_smiles` — the solvent and
-    the catalyst left *out* of the string rather than moved into the agent slot. A row carrying
-    either earlier token encoded the solvent as part of the transformation, whichever slot it was
-    written in: `DrfpEncoder.internal_encode` folds the agent slot back onto the reactants
-    (`sides[0] += "." + sides[1]`), so the `agents` token named a change that produced
-    byte-identical bits. Ranking across the two would compare a solvent-dominated fingerprint
-    against a solvent-neutral one and report the difference as chemistry, so the token moves and
-    the old rows fall out of search until a re-index rebuilds them.
+    Recorded per row so the store never ranks bits of different definitions against each other.
+    `agents-excluded` marks rows built with solvent and catalyst left out of the string; earlier
+    rows encoded them as part of the transformation, so they fall out of search until re-indexed.
     """
     return f"drfp:b{settings.drfp_bits}:agents-excluded:{STANDARDIZATION_VERSION}"

@@ -1,22 +1,12 @@
-"""Structural questions about the graph as a whole (gap KNW-5).
+"""Structural questions about the graph as a whole: what don't we know.
 
-`kg/graph.py` exposes exactly `build_graph` and `neighborhood`: you can walk *outward from a hit*.
-That answers "what do we know about X" and can never answer **"what don't we know"** — which is the
-question that actually steers experimental design, and the one `suggest_next_experiment` should be
-seeded from instead of a decision space the model assembles by hand from prose evidence.
+Traversal from a hit answers "what do we know about X"; these reads over the parsed note set answer
+where knowledge is missing, to seed experimental design. No new store or index. Three shapes of gap:
 
-Everything here is a read over the already-parsed note set, so it adds no store and no index: the
-data to answer these questions was always present, only unaskable.
-
-Three deliberately different shapes of "gap", because they fail differently:
-
-- **Isolated notes** — knowledge nobody linked to anything. Retrieval reaches these only by a
-  literal substring hit, so they are effectively invisible to graph traversal (D-004's reasoning
-  path); they are not *missing*, they are unreachable.
-- **Thin areas** — a note type or *tag* with evidence but no distillation above it (runs with no
-  playbook, a topic with no report). These are where synthesis is owed.
-- **Hubs** — the notes everything else cites. Useful for the opposite reason: they are where an
-  error propagates furthest, so they are what a reviewer should check first.
+- Isolated notes: linked to nothing, so unreachable by graph traversal.
+- Thin areas: a note type or tag with evidence but no distillation above it, where synthesis is
+  owed.
+- Hubs: the most-cited notes, where an error propagates furthest and a reviewer should look first.
 """
 
 from collections import Counter
@@ -35,15 +25,11 @@ class GraphGaps(BaseModel):
     total_notes: int
     isolated_note_ids: list[str] = Field(default_factory=list)
     type_counts: dict[str, int] = Field(default_factory=dict)
-    # Free-text `note.tags`, not projects: there is no project field on `Note` at all. The field
-    # was called `projects_without_distillation`, and the name — not the computation, which is
-    # right — is what let a live run report "27 projects tagged" as a portfolio status. A field
-    # name is an assertion about what the values *are*, and the model has nothing else to go on.
+    # Free-text `note.tags`, not projects: `Note` has no project field, and the name is all the
+    # model has to go on.
     tags_without_distillation: list[str] = Field(default_factory=list)
-    # Playbooks that record a *recurrence* and state no rule — the cross-project miner's own
-    # output, before anybody generalised it. A different question from the field above, which asks
-    # which topics have no playbook at all: this one asks which playbooks are still waiting.
-    # Neither subsumes the other, and only this one has a note id to act on.
+    # Playbooks that record a recurrence but state no rule yet: unlike the field above (topics with
+    # no playbook), these have a note id to act on.
     undistilled_playbook_ids: list[str] = Field(default_factory=list)
     most_cited: list[tuple[str, int]] = Field(default_factory=list)
     dangling_links: list[str] = Field(default_factory=list)
@@ -60,10 +46,7 @@ def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int | None = None) -
     Args:
         graph: The indexed note graph (`chemclaw.kg.graph.build_graph`).
         notes: The parsed notes behind it, for the metadata the graph nodes do not carry.
-        top_n: How many hubs to report; the configured `graph_analytics_top_n` by default. It was
-            a literal `5` with no caller ever passing anything else, which made the one number in
-            this module that shapes a model-facing result the only one an operator could not
-            change — unlike its siblings `graph_max_results` and `graph_max_hops`.
+        top_n: How many hubs to report; `graph_analytics_top_n` by default.
 
     Returns:
         The gap summary. Every list is sorted, so the result is deterministic and diffable.
@@ -72,9 +55,8 @@ def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int | None = None) -
     by_type = Counter(note.type for note in notes)
     return GraphGaps(
         total_notes=len(notes),
-        # A self-link is not a connection: a note whose only edge points at itself is exactly as
-        # invisible to traversal as one with no edges, and counting the loop as degree hid it
-        # from the report this module exists to produce.
+        # A self-link is not a connection: such a note is as invisible to traversal as one with no
+        # edges.
         isolated_note_ids=sorted(
             node
             for node in graph.nodes
@@ -92,13 +74,8 @@ def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int | None = None) -
 def _undistilled_tags(notes: list[Note]) -> list[str]:
     """Tags that carry recorded evidence but nothing distilled from it.
 
-    A topic with runs and no playbook/campaign/report is not a defect — it is a *backlog item for
-    the synthesis layer*, and naming it is the difference between the memory jobs being trusted and
-    merely running.
-
-    Tags, and only tags: this is a set difference over free-text `note.tags`, so on the committed
-    corpus it returns `suzuki`, `palladium`, `pka` and the like. Calling them projects was the
-    whole defect — the computation was always correct about what it measured.
+    A backlog for the synthesis layer, not a defect. A set difference over free-text tags, so values
+    are topics like `suzuki`, not projects.
     """
     evidence: set[str] = set()
     distilled: set[str] = set()
@@ -109,18 +86,10 @@ def _undistilled_tags(notes: list[Note]) -> list[str]:
 
 
 def _hubs(graph: nx.DiGraph, top_n: int) -> list[tuple[str, int]]:
-    """The most-cited *notes*, most first. Ties break by id so the result is deterministic.
+    """The most-cited notes, most first. Ties break by id so the result is deterministic.
 
-    **Only nodes that carry a note.** `build_graph` deliberately keeps a link to an unknown id as a
-    node with no `note` attribute, so `kg-validate` can report it — and this ranked those nodes
-    too, by the very citations that make them dangling. Measured on a corpus where four notes cite
-    a `compound-pending` that does not exist: it came back as *the most-cited note in the graph*.
-    That is not an exotic corruption but the state D-018 describes as normal — a fingerprint-indexed
-    reaction is citable before its note is written — so `find_knowledge_gaps` was telling a
-    chemist to check the hub that matters most, and `expand_note` on it raised.
-
-    A dangling target is not silently dropped by this filter, it is reported as what it is: it has
-    its own field, `GraphGaps.dangling_links`, which the same `analyze` fills from the same graph.
+    Only nodes that carry a note: a dangling link target would otherwise rank as a hub by the very
+    citations that make it dangling. Those are reported separately in `GraphGaps.dangling_links`.
     """
     ranked = sorted(
         (

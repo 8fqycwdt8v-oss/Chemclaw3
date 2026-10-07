@@ -1,14 +1,9 @@
 """The only path by which a composed workflow's durable jobs become runnable.
 
-**This file is the control.** `D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction`
-refuses a `job` step in a workflow the agent composed, because a template run has no session and so
-nothing can put a human in front of an unreviewed launch. These routes are that human. If the tests
-here do not hold, the widening is a hole rather than a control.
-
-Three facts are checked separately because they are three different things: **only a person can
-approve** (there is no tool, over the whole registered surface), **the approval binds to the
-version that was shown** (a 409, not a silent approval of whatever it is now), and **it is scoped
-to the caller's own workflows** (a name that is not yours is not found).
+`D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction` refuses `job` steps in an
+agent-composed workflow until a person approves; these routes are that person. Three facts: only a
+person can approve (no tool can), the approval binds to the version shown (409 otherwise), and it
+is scoped to the caller's own workflows.
 """
 
 import asyncio
@@ -64,11 +59,8 @@ def _document(name: str = "ranking") -> Template:
 def _memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """A *fresh* in-memory backend per test — a real backend, so these tests need no database.
 
-    `composed._IN_MEMORY` is a process singleton, which is correct for a CLI or dev process and
-    wrong for a test module where every test stores `(u-alice, "ranking")`. It did not show while a
-    `save` replaced the whole row: each test overwrote the last one's approval. Now that a save
-    carries an approval forward — because the agent's write must not erase a person's decision —
-    the leak is visible, and one test's approval would authorize the next one's document.
+    `composed._IN_MEMORY` is a process singleton and a save carries an approval forward, so a shared
+    one would let one test's approval authorize the next test's document.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     monkeypatch.setattr(composed, "_IN_MEMORY", composed.InMemoryComposedStore())
@@ -84,11 +76,9 @@ def _store(owner: str, document: Template, name: str = "ranking") -> None:
 
 
 def test_the_read_shows_what_approving_would_authorize() -> None:
-    """An approval that names no steps authorizes whatever the name currently contains.
+    """The read shows what approving would authorize.
 
-    That is `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` one layer over, and
-    it is why this route exists at all rather than the POST standing alone: the person deciding has
-    to be shown the steps, which of them cost compute, and the fingerprint they are deciding about.
+    The person deciding must see the steps, which cost compute, and the fingerprint they decide on.
     """
     document = _document()
     _store(_ALICE.oid, document)
@@ -139,10 +129,7 @@ def test_approving_the_version_that_was_shown_authorizes_it() -> None:
 def test_approving_a_version_that_is_no_longer_current_is_a_409() -> None:
     """The binding is the control: a workflow that changed after being shown is a different one.
 
-    Without this, a client that rendered one version and posted another would silently approve the
-    version it never displayed — which is the defect `decide_plan`'s own hash check exists for, and
-    which `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` measured
-    one layer up.
+    Otherwise a client could display one version and approve another.
     """
     _store(_ALICE.oid, _document())
     client = _client(_app(), _ALICE)
@@ -157,9 +144,8 @@ def test_approving_a_version_that_is_no_longer_current_is_a_409() -> None:
 def test_re_composing_lapses_the_approval_with_nothing_having_to_clear_it() -> None:
     """The property that makes this an approval of a *version* rather than of an actor.
 
-    A standing per-actor permission never lapses, so a workflow re-composed into something else
-    inherits the approval granted to what it used to be. Driven here rather than asserted: save a
-    different document under the same name, and the stored approval stops matching by itself.
+    Saving a different document under the same name makes the stored approval stop matching by
+    itself.
     """
     _store(_ALICE.oid, _document())
     client = _client(_app(), _ALICE)
@@ -188,10 +174,8 @@ def test_re_composing_lapses_the_approval_with_nothing_having_to_clear_it() -> N
 def test_another_chemists_workflow_is_not_found_rather_than_forbidden() -> None:
     """Owner scoping *is* the authorization here, so there is no 403 to reach.
 
-    A composed workflow is keyed `(owner, name)` and both routes resolve against the caller's own
-    rows — the same answer the store gives the agent, and one fewer branch than a 403 nobody can
-    get to. Asserted in both directions, because a read that leaked the steps would be as bad as a
-    write that approved them.
+    Workflows are keyed `(owner, name)` and both routes resolve against the caller's rows. Asserted
+    for reads and writes.
     """
     _store(_ALICE.oid, _document())
     client = _client(_app(), _BOB)
@@ -207,11 +191,10 @@ def test_another_chemists_workflow_is_not_found_rather_than_forbidden() -> None:
     [("GET", "/workflows/ranking"), ("POST", "/workflows/ranking/approval")],
 )
 def test_both_routes_are_behind_the_authentication_gate(method: str, path: str) -> None:
-    """`tests/test_route_auth_coverage.py` walks the whole table; this says it of these two.
+    """Both routes are behind the authentication gate.
 
-    Named here as well because forgetting `CurrentUser` skips authentication *and* the per-principal
-    rate budget in one stroke, and a control whose gate is asserted only in aggregate is one nobody
-    reads when they add the next route.
+    `tests/test_route_auth_coverage.py` walks the whole table; named here because a missing
+    `CurrentUser` skips authentication and the per-principal rate budget at once.
     """
     from chemclaw.api.routes import workflows
 
@@ -224,17 +207,9 @@ def test_both_routes_are_behind_the_authentication_gate(method: str, path: str) 
 def test_nothing_the_agent_can_call_approves_a_workflow() -> None:
     """**The control this whole seam rests on**, asserted over the surface rather than believed.
 
-    `api/routes/plan.py::decide_plan` states the rule for plans — *"a model must never be able to
-    authorize its own plan"* — and obtains it by not building the tool. This asserts that of the
-    registered surface: no advertised tool writes an approval, so a workflow cannot approve itself.
-
-    Scanned by *behaviour* and not by name: a tool called something innocuous that reached
-    `ComposedStore.approve` would pass a name check and is exactly what this is for.
-
-    **Writes, not reads.** `run_composed_workflow` reads `approved_fingerprint` and must — that
-    read *is* the enforcement, and a scan that forbade it would be asking the gate not to look at
-    the thing it gates on. What no tool may do is call `approve` or set the column, which is the
-    difference between consulting a decision and making one.
+    No registered tool writes an approval, so a workflow cannot approve itself. Scanned by
+    behaviour, not name. Reading `approved_fingerprint` is allowed — `run_composed_workflow` must
+    read it to enforce it; calling `approve` or setting the column is not.
     """
     import inspect
 
@@ -255,9 +230,8 @@ def test_nothing_the_agent_can_call_approves_a_workflow() -> None:
 def test_the_approval_column_is_not_writable_through_the_compose_path() -> None:
     """A save must not be able to set what only a person may set.
 
-    The separation is the control rather than tidiness: `_UPSERT` and `_APPROVE` are two statements
-    on purpose, so the agent's write has no column in common with the human's decision. Asserted on
-    the SQL, because folding them into one statement is the tempting simplification.
+    `_UPSERT` and `_APPROVE` are separate statements so the agent's write shares no column with the
+    human decision; asserted on the SQL.
     """
     from chemclaw.templates.composed import PostgresComposedStore
 
@@ -269,17 +243,9 @@ def test_the_approval_column_is_not_writable_through_the_compose_path() -> None:
 def test_saving_a_revision_lapses_the_approval_without_erasing_who_gave_it() -> None:
     """A re-compose stops the approval working and leaves the record of it standing.
 
-    **Two properties, and the earlier version of this test asserted the wrong one.** It required the
-    in-memory backend to *clear* `approved_fingerprint` on save and called that "lapsing exactly as
-    the SQL one does" — which the SQL one does not do: `_UPSERT` names no approval column, so the
-    stored row keeps it and the lapse comes from the fingerprint no longer matching. Driven against
-    both backends, the same call sequence left Postgres approved-by-Alice-at-the-old-hash and memory
-    blank, which is the divergence that sentence denied.
-
-    What the two must agree on, and now do: the *effect* lapses (`approved` is derived and goes
-    false), and the person's recorded decision is not erased — an agent's write must not be able to
-    delete the audit of a human's. What a reader must therefore not do is render `approved_by`
-    alone, which is why `approved` ships as a field.
+    Both backends must agree: `approved` (derived) goes false because the fingerprint no longer
+    matches, and the recorded decision (`approved_by`) is not erased by the agent's write. Readers
+    must therefore render `approved`, not `approved_by` alone.
     """
     _store(_ALICE.oid, _document())
     client = _client(_app(), _ALICE)
@@ -320,11 +286,9 @@ def test_saving_a_revision_lapses_the_approval_without_erasing_who_gave_it() -> 
 
 
 def test_the_listing_is_how_a_chemist_finds_a_workflow_they_forgot() -> None:
-    """Discovery, which the feature shipped without and a `BACKLOG.md` row recorded.
+    """The listing is how a chemist finds a workflow they forgot.
 
-    The only way to find a name was the refusal `run_composed_workflow` gives an unknown one, which
-    works once you have already guessed wrong. A listing was deferred because a third *tool* costs
-    prompt prefix on every model call; a route costs none, which is why it belongs here.
+    A route rather than a third tool, because a tool costs prompt prefix on every model call.
     """
     _store(_ALICE.oid, _document(), "ranking")
     _store(_ALICE.oid, _document("reads"), "reads")

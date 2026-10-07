@@ -79,9 +79,8 @@ def test_gated_tool_requires_a_permitted_role(monkeypatch: pytest.MonkeyPatch) -
 def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unconfigured write tool requires a privileged role even under the 'allow' default.
 
-    The built-in `DEFAULT_WRITE_TOOL_GATES` closes job launchers and state-mutating tools
-    out of the box: only `entra_privileged_roles` holders may call them until an operator
-    sets an explicit gate.
+    `DEFAULT_WRITE_TOOL_GATES` restricts job launchers and state-mutating tools to
+    `entra_privileged_roles` until an operator sets an explicit gate.
     """
     _enforced(
         monkeypatch,
@@ -169,9 +168,7 @@ def test_deny_default_refuses_write_tools_even_for_privileged_roles(
 ) -> None:
     """Under 'deny', an unlisted write tool is refused even for a privileged-role holder.
 
-    The built-in write gate only *narrows* the 'allow' default; it must never widen
-    'deny' — an empty `tool_role_gates` under 'deny' is documented as blocking ALL
-    tools, and privileged roles are not an allowlist entry.
+    The built-in write gate only narrows 'allow'; it never widens 'deny'.
     """
     _enforced(
         monkeypatch,
@@ -192,11 +189,8 @@ def test_deny_default_refuses_write_tools_even_for_privileged_roles(
 def _ctx(name: str) -> Any:
     """The call as the middleware reads it, with a slot for what it produced.
 
-    A `ToolCallRequest` plus a mutable `result` the assertions below read. The MAF halves these
-    replaced *wrote* their result onto the invocation context, so the tests were written against
-    that shape; a `wrap_tool_call` middleware returns a `ToolMessage` instead. `_drive_surfacing`
-    stores what came back on the request, which keeps the assertions about the *decision* rather
-    than about how the framework hands a result along.
+    `_drive_surfacing` stores the returned `ToolMessage` on the request, so assertions are about the
+    decision rather than how the framework hands a result along.
     """
     request = tool_request(name)
     object.__setattr__(request, "result", None)
@@ -213,14 +207,10 @@ def _drive(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
 
 
 def test_the_dry_run_refusal_reads_the_arguments_and_not_only_the_name() -> None:
-    """One tool name, two destinations, and only the arguments tell them apart.
+    """The dry-run refusal reads the arguments, not only the tool name.
 
-    `write_file` under `/memories/` outlives the session; the same verb under `/scratch/` dies with
-    the turn, and a dry run that denies the agent its own notepad is a dry run of nothing. That is
-    the entire reason `dry_run_refusal` takes `arguments` at all — and every dry-run test in the
-    repository used a tool whose classification its *name* settles, so the parameter could be
-    replaced by `None` and 118 tests still passed. A parameter no caller's tests can distinguish is
-    the shape `D-2026-08-15` deleted three modules for; this asserts the caller instead.
+    `write_file` under `/memories/` outlives the session while under `/scratch/` it dies with the
+    turn, and a dry run must not deny the agent its own notepad.
     """
     token = set_dry_run(True)
     try:
@@ -286,13 +276,9 @@ def _drive_surfacing(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> None:
 
 
 def test_surfacing_converts_a_denial_into_the_tool_s_own_result() -> None:
-    """A denial becomes the call's own safe, readable result — not a re-raised exception.
+    """A denial becomes the call's own safe, readable result, not a re-raised exception.
 
-    Without this, MAF's function-invocation executor collapses *any* escaping exception into
-    the same opaque "Error: Function failed." with zero explanation reaching the model
-    (`include_detailed_errors` defaults off) — so a real chemist question ("why didn't that
-    run?") got answered with an invented guess ("a temporary service issue") instead of the
-    true, safe reason.
+    Otherwise the model gets no explanation and invents one.
     """
 
     async def _denied() -> None:
@@ -309,11 +295,9 @@ def test_surfacing_converts_a_denial_into_the_tool_s_own_result() -> None:
 
 
 def test_surfacing_leaves_other_exceptions_untouched() -> None:
-    """Only `AuthorizationError` is caught — an unrelated failure still propagates as-is.
+    """Only `AuthorizationError` is caught here; an unrelated failure still propagates.
 
-    Any other exception (a bug, a database error) must keep falling through to MAF's generic,
-    safe-by-omission handling; only chemclaw's own, deliberately-worded denial message is
-    known-safe enough to surface verbatim.
+    Only deliberately worded denial messages are known-safe to surface verbatim.
     """
 
     async def _boom() -> None:
@@ -345,13 +329,10 @@ def _drive_domain_errors(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> N
 
 
 def test_domain_errors_convert_a_chemclaw_error_into_the_tool_s_own_result() -> None:
-    """A `ChemclawError` becomes the call's own safe, readable result — not a re-raised exception.
+    """A `ChemclawError` becomes the call's own safe, readable result.
 
-    Regression guard for a live e2e finding: `expand_note` citing a reaction note still pending
-    PR-gate review failed with MAF's opaque "Error: Function failed.", so the model could not
-    tell "pending review" apart from "typo'd id" and could only guess. `ChemclawError` is
-    chemclaw's own always-safe "bad input" contract (`chemclaw.core.errors`), so its message is safe
-    to surface verbatim, exactly like `AuthorizationError`.
+    `ChemclawError` is the always-safe bad-input contract (`chemclaw.core.errors`), so its message
+    lets the model tell, say, a pending note from a mistyped id.
     """
 
     async def _not_found() -> None:
@@ -363,14 +344,10 @@ def test_domain_errors_convert_a_chemclaw_error_into_the_tool_s_own_result() -> 
 
 
 def test_an_unclassified_failure_becomes_a_result_rather_than_ending_the_turn() -> None:
-    """A failed tool is a recoverable step. It stopped being one, and nothing said so.
+    """An unclassified failure becomes a result rather than ending the turn.
 
-    `announce_tool_failures` records and re-raises, neither converter caught anything outside the
-    two safe families, and `ToolNode`'s default handler re-raises what it is given — so a `KeyError`
-    from a parser or a driver's `TimeoutError` escaped the graph and killed the whole turn. The
-    chemist lost the answer, the tokens, and every other tool the turn had already run, for one
-    failed step. The framework this replaced collapsed any tool exception into a result, so this is
-    a regression rather than a decision.
+    `ToolNode`'s default handler re-raises, so an arbitrary exception would kill the turn and lose
+    everything it had already done; a failed tool is a recoverable step.
     """
     ctx = _ctx("predict_pka")
 
@@ -388,14 +365,10 @@ def test_an_unclassified_failure_becomes_a_result_rather_than_ending_the_turn() 
 
 
 def test_a_transport_failure_is_told_apart_from_a_bug_and_invites_one_retry() -> None:
-    """A raised timeout or reset is the *wire* failing, and "do not retry" is the wrong advice.
+    """A raised timeout or reset is told apart from a bug and invites one retry.
 
-    "MCP tools never raise" is true of tool-level errors — those return as
-    `ToolMessage(status="error")` with the server's own words — so what a connector call *raises*
-    is transport: an `McpError` timeout, an httpx reset, a dead session. The generic branch told
-    the model that was a permanent fault ("Do not retry it with the same arguments"), which turned
-    every transient blip into an abandoned capability for the rest of the turn. The repeat guard
-    already bounds how many retries a turn may spend, so inviting one is safe by construction.
+    MCP tool-level errors return as `ToolMessage(status="error")`, so what a connector call raises
+    is transport. The repeat guard bounds retries, so inviting one is safe.
     """
     from mcp.shared.exceptions import McpError
     from mcp.types import ErrorData
@@ -482,14 +455,10 @@ def _denial_message(tool: str, monkeypatch: pytest.MonkeyPatch) -> str:
 def test_every_denial_reads_as_an_access_decision(
     tool: str, configure: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """All three refusal paths name the user, name the tool, and say it is an access decision.
+    """All three refusal paths name the user and the tool and say it is an access decision.
 
-    They used to diverge, and the divergence reached the chemist: the deny-default message was
-    phrased for whoever edits the config ("not in the tool allowlist"), so the model relayed a
-    denial as "not currently available… a configuration issue" — sending a chemist to report a
-    bug rather than to request access. The built-in write gate said "lacks a privileged role" and
-    narrated correctly, which is why only the write tools ever explained themselves. One shape for
-    all three, so which gate fired cannot change whether the answer is intelligible.
+    One shape for all three, so the chemist is pointed at requesting access, never at a supposed
+    configuration bug.
     """
     if configure == "explicit_gate":
         monkeypatch.setattr(settings, "tool_role_gates", {tool: ["reviewer"]})
@@ -535,12 +504,7 @@ def _drive_announcing(ctx: Any, call_next: Callable[[], Awaitable[Any]]) -> list
 
 
 def test_a_failing_tool_is_announced_to_the_turn() -> None:
-    """The chemist's transcript learns the step failed; until this, only the log and audit did.
-
-    The live shape that motivated it: a job launcher raised on every attempt, MAF stopped the
-    tool loop after three consecutive errors, and the turn ended mid-sentence with no answer and
-    no error event — nothing anywhere in the stream said a tool had failed (D-138).
-    """
+    """A failing tool is announced on the turn's stream, not only in the log and audit trail."""
 
     async def _boom() -> None:
         raise AttributeError("'dict' object has no attribute 'model_dump'")
@@ -588,21 +552,11 @@ def test_a_long_failure_message_is_truncated_before_it_reaches_the_stream() -> N
 
 
 def test_a_calculator_domain_refusal_reaches_the_model_verbatim() -> None:
-    """A real domain refusal, driven through the real middleware, arrives as its message.
+    """A real calculator domain refusal, through the real middleware, reaches the model verbatim.
 
-    Deliberately raised by the production code path rather than by a hand-thrown error: the defect
-    was that these sites raised a *bare* `ValueError`, and `ChemclawError` subclasses `ValueError`,
-    so `except ChemclawError` could not catch one — the inheritance runs the wrong way. A test that
-    throws `CalculationDomainError` itself would pass before the fix and prove nothing.
-
-    Measured consequence, 2026-08-02 live run: the aliphatic-amine explanation — which names the
-    Spearman -0.17 correlation and tells the chemist to measure instead — reached the model as
-    "Error: Function failed.", and the answer then guessed the reason and stated the guess as fact.
-
-    The refusal driven here is now logD's rather than the pKa predictor's: the pKa engine left for
-    `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`) and the composition it feeds
-    stayed, along with the narrowing that is this repository's own — an amphoteric molecule that one
-    Henderson-Hasselbalch term cannot describe. Same class, same production path, no server needed.
+    Raised by the production code path, since the risk is a bare `ValueError` that `except
+    ChemclawError` cannot catch (the inheritance runs the other way). Uses logD's refusal for an
+    amphoteric molecule, which needs no server.
     """
     from chemclaw.science.calc.logd import logd_from_pka
     from chemclaw.science.calc.models import PkaResult
@@ -630,17 +584,11 @@ def test_a_calculator_domain_refusal_reaches_the_model_verbatim() -> None:
 def test_an_unreachable_durable_backend_says_nothing_was_started(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A broker outage must reach the model as an outage, and must say nothing was queued.
+    """An unreachable durable backend reaches the model as an outage and says nothing was started.
 
-    A chemist who believes a job may be running will wait for it. The live run's failure was worse
-    than silence: told only "Error: Function failed.", the model read the outage as bad input,
-    retried three SMILES variants, and on another turn **wrote a whole development report by hand**
-    and presented it as PR-gated.
-
-    Driven through the real `connect()` against a real closed port, not a hand-thrown error:
-    `SubsystemUnavailableError` is deliberately *not* a `ChemclawError`, so a middleware that only
-    caught that hierarchy would still drop this on the floor — and the point of the test is that
-    the second type is caught, which a fabricated instance of the right class would not prove.
+    A chemist who believes a job is running will wait for it. Driven through the real `connect()`
+    against a closed port: `SubsystemUnavailableError` is deliberately not a `ChemclawError`, so
+    this proves the second type is caught.
     """
     import socket
 
@@ -687,12 +635,9 @@ def test_a_pr_gate_git_failure_reaches_the_model() -> None:
 async def _connector_tools() -> AsyncIterator[dict[str, Any]]:
     """The real MCP tools of a two-tool server, keyed by name, over an in-memory session.
 
-    Real components on both sides of the boundary — a real `FastMCP` server, the real MCP client
-    session, and the real `load_mcp_tools` conversion — because the whole premise of these tests is
-    a shape *upstream* produces: a tool that fails by returning `ToolMessage(status="error")`
-    instead of raising. A hand-built `ToolMessage` would assert that the middleware does what the
-    test author already believed, which is exactly the class of proof this repository has been
-    burned by. Only the socket is dropped, which changes nothing about the message.
+    A real `FastMCP` server, client session and `load_mcp_tools`, because the premise is a shape
+    upstream produces: a tool failing by returning `ToolMessage(status="error")`. Only the socket is
+    dropped.
     """
     server = FastMCP("refusals")
 
@@ -723,16 +668,11 @@ async def _through_domain_errors(tool: Any, smiles: str) -> Any:
 
 
 async def test_a_connector_refusal_reaches_the_model_without_the_retry_flag() -> None:
-    """BACKLOG:317 — the policy `_refusal_message` states, applied to the kind that returns.
+    """A connector refusal reaches the model without the error flag.
 
-    `status="error"` reaches Anthropic as `is_error` on the tool_result block, which invites the
-    retry a worded refusal exists to prevent. Both in-process kinds raise, so both converters
-    answer with a `_refusal_message` that carries no such flag; the MCP kind returns, so nothing
-    converted it and the connector — where most domain refusals are actually diagnosed — was the
-    one path sending it.
-
-    The premise is asserted first, on the untouched tool, so this test fails loudly rather than
-    vacuously the day the adapter stops flagging a failed call.
+    `status="error"` reaches the provider as `is_error`, inviting the retry a worded refusal exists
+    to prevent. The adapter's flagging is asserted first, so this fails loudly if that premise
+    changes.
     """
     async with _connector_tools() as tools:
         raw = await tools["refuse_smiles"].ainvoke(
@@ -784,14 +724,11 @@ class _RecordingSink:
 
 
 def test_the_trail_and_the_transcript_still_see_the_failure_the_model_is_spared() -> None:
-    """The three readers must not cancel each other out — one real turn, all three checked.
+    """The audit trail and the transcript still see the failure the model is spared.
 
-    The flag is cleared *outside* the audit middleware and the announcer, which is the whole reason
-    it is cleared there. Clearing it any lower — at the MCP seam, where `langchain_mcp_adapters`
-    offers a `ToolCallInterceptor` that could rewrite the `CallToolResult` before it is ever
-    converted — would leave both of them reading a success, re-opening BACKLOG:309 in the act of
-    closing BACKLOG:317. Only a composed run can show that, so this drives the real compiled graph
-    rather than a hand-nested chain, and reads the chemist's signals off a real stream writer.
+    The flag is cleared outside the audit middleware and the announcer; clearing it lower, at the
+    MCP seam, would make both read a success. Only a composed run shows this, so the real compiled
+    graph is driven and the chemist's signals are read off a real stream writer.
     """
     sink = _RecordingSink()
 
@@ -805,10 +742,9 @@ def test_the_trail_and_the_transcript_still_see_the_failure_the_model_is_spared(
                 connectors=[tools["refuse_smiles"]],
             )
 
-            # Two stream modes on one run, because the two halves of the contract are published
-            # on two channels: the model-facing message lands in graph state (`values`) and the
-            # chemist's failure signal is written to the custom stream. Driving the turn twice
-            # would let them disagree about the same call.
+            # Two stream modes on one run: the model-facing message lands in graph state (`values`)
+            # and the failure signal on the custom stream, and one run keeps them about the same
+            # call.
             state: Any = None
             signals: list[Signal] = []
             async for mode, payload in graph.astream(
@@ -841,21 +777,11 @@ def test_the_trail_and_the_transcript_still_see_the_failure_the_model_is_spared(
 
 
 def test_a_raised_failure_cannot_carry_a_live_envelope_delimiter_to_the_model() -> None:
-    """The two converters sit *outside* framing and bounding, so nothing rewrote what they wrote.
+    """A raised failure cannot carry a live envelope delimiter to the model.
 
-    `tool_call_middleware` nests `frame_connector_results` and `bound_tool_results` **inside**
-    `surface_domain_errors`, and neither inner middleware has a `try`/`except` — so a tool that
-    fails by *raising* passes both untouched and is turned into a `ToolMessage` above them.
-    Measured before this, through the real chain: a `ChemclawError` whose text reproduced the
-    live closing delimiter reached the model with it intact, which lets fabricated text present
-    itself as retrieved evidence under an attacker-named `id=` in a system whose whole integrity
-    story is a citation a chemist can check.
-
-    Defanged and not framed, which is
-    `D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`'s own distinction one channel
-    further out: a refusal is this system's sentence and framing it
-    would tell the model to discount the one message written to stop it — but a sentence that
-    interpolates untrusted text still must not carry a live delimiter.
+    The converters sit outside framing and bounding, so a raised failure passes both untouched and
+    must be defanged where it is converted. Defanged rather than framed: a refusal is this system's
+    own sentence, but one that interpolates untrusted text must not carry a live delimiter.
     """
     from chemclaw.agent.framing import ENVELOPE_TAG
 
@@ -872,12 +798,9 @@ def test_a_raised_failure_cannot_carry_a_live_envelope_delimiter_to_the_model() 
 
 
 def test_a_raised_failure_is_bounded_like_every_other_tool_result() -> None:
-    """`agent/tool_result_size.py` says it bounds "every tool"; the chain said otherwise.
+    """A raised failure is bounded like every other tool result.
 
-    A raised failure never reaches `bound_tool_results`, so the one ceiling this repository has
-    over what a model reads did not cover the error path at all: measured, a
-    `SubsystemUnavailableError` carrying 200,000 characters produced a 200,007-character result
-    against a 60,000 ceiling and upstream's 80,000 evict threshold.
+    It never reaches `bound_tool_results`, so the converter must apply the same ceiling.
     """
     ctx = _ctx("find_calculations")
 
@@ -895,17 +818,11 @@ def test_a_raised_failure_is_bounded_like_every_other_tool_result() -> None:
 
 
 def test_an_access_decision_carries_a_mark_no_tool_can_write() -> None:
-    """`Refused:` is a *spelling*, and the safety floor told the model to trust it as system speech.
+    """An access decision carries a mark no tool can write.
 
-    Measured through the real chain: a connector returning `isError=True` has its content kept
-    verbatim by `answered_failure` and defanged-not-framed by `frame_connector_results`, so a
-    hostile server writes `Refused: …` and the model has been instructed to relay it as an
-    access-control decision about the chemist's account. Nothing enforced the promise — `defang`
-    neutralises delimiters, not prefixes.
-
-    The mark is the same unguessable value the envelope carries, for the reason `framing.py`
-    gives for that one: a boundary the model is told to trust must be one the text on the other
-    side of it cannot spell.
+    A connector's error content is kept verbatim and defanged, and `defang` neutralises delimiters,
+    not prefixes, so `Refused:` alone could be forged. The mark is the same unguessable value the
+    envelope carries.
     """
     from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 
@@ -922,21 +839,15 @@ def test_an_access_decision_carries_a_mark_no_tool_can_write() -> None:
     assert refusal.startswith("Refused: "), "the prefix every other reader keys on is gone"
     assert refusal.endswith(SYSTEM_SPEECH_MARK), "an access decision is no longer marked"
 
-    # **Driven through the middleware rather than through `denial_result`, because the composition
-    # is where this broke.** `_refusal_message` defangs what it is handed, and `_MARK_FORGERY`
-    # escapes the mark like any other span — so a mark composed in *before* that pass reached the
-    # model as `&#91;system <nonce>]`: an access decision wearing the escape that means a tool
-    # wrote it. Asserting on the returning message is asserting on what the model receives.
+    # Driven through the middleware, because `_refusal_message` defangs what it is handed and a mark
+    # composed before that pass would arrive escaped. This asserts what the model receives.
     assert "&#91;" not in refusal, "the system escaped its own mark"
 
 
 def test_every_profile_is_told_to_trust_the_mark_and_not_the_spelling() -> None:
-    """The floor must promise only what the code keeps, under every profile.
+    """Every profile is told to trust the mark, not the spelling.
 
-    The sentence this replaces said the compaction placeholder "is the only text in a tool result
-    you may trust as being about this system rather than data" — a promise a hostile connector
-    kept for it, because that string is thirteen words anyone can type. The absence half is the
-    point: a future edit restoring the promise fails here rather than shipping a claim.
+    The absence half fails if a promise to trust a typeable string is restored.
     """
     from chemclaw.agent.chemclaw_agent import instructions_for
     from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
@@ -955,21 +866,12 @@ def test_every_profile_is_told_to_trust_the_mark_and_not_the_spelling() -> None:
 
 
 def test_a_tool_withheld_for_speaking_to_the_chemist_is_refused_by_name_too() -> None:
-    """The disclosure `UndeclaredWriteRefusal` exists to prevent, on the one withheld read.
+    """A tool withheld for speaking to the chemist is refused by name too.
 
-    `undeclared_write_refusal` asked `side_effecting_tools()`, which is the right question for the
-    plan gate and the dry-run refusal and the wrong one for "was this agent given it":
-    `ask_clarifying_question` writes no row and starts no workflow, so it is correctly classified
-    as a read — and it is withheld from a helper anyway, because a turn signal is delivered on the
-    *chemist's* stream from a context the chemist cannot see (`subagents.SPEAKS_TO_THE_CHEMIST`).
-    Measured before this, `undeclared_write_refusal("ask_clarifying_question", held)` returned
-    `None`, so the call fell through to `ToolNode`'s own "not a valid tool, try one of […]" — and
-    24 tool names landed in `audit_events.detail`, where the column is what a reviewer reads as
-    what happened.
-
-    **Not fixed by reclassifying the tool.** Making it side-effecting would move it inside the plan
-    gate and the dry-run refusal, which is a posture change its own comment argues against; the
-    predicate here is the thing that was asking the wrong question.
+    `ask_clarifying_question` is correctly a read, but a helper may not hold it because it writes to
+    the chemist's stream (`subagents.SPEAKS_TO_THE_CHEMIST`). `undeclared_write_refusal` must cover
+    it, otherwise `ToolNode`'s "not a valid tool" error lists every tool into the audit record. The
+    predicate is fixed rather than the tool reclassified, which would pull it into the plan gate.
     """
     from chemclaw.agent.subagents import SPEAKS_TO_THE_CHEMIST
     from chemclaw.agent.tool_authz import undeclared_write_refusal
@@ -989,14 +891,7 @@ def test_a_tool_withheld_for_speaking_to_the_chemist_is_refused_by_name_too() ->
 
 
 def test_a_refusal_names_the_tool_it_answers_for() -> None:
-    """Every other `ToolMessage` in the thread carries `name`; a refusal carried `None`.
-
-    A gate answers *instead of* the tool, so `_refusal_message` builds the message itself rather
-    than copying one — and it left out the one field `ToolNode` fills for every result it returns.
-    Nothing reads it today, which is the reason this is a one-line consistency fix and not a bug
-    report: a thread in which some tool results are named and others are not is a thread whose next
-    reader has to discover which.
-    """
+    """A refusal names the tool it answers for, like every other `ToolMessage` in the thread."""
     request = tool_request("record_knowledge_note")
 
     async def _denied(_request: Any) -> Any:

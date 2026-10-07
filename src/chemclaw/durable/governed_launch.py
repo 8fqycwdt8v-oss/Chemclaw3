@@ -1,19 +1,10 @@
 """Launching a connector job through the same governed chain a chat turn's launch goes through.
 
-**Here rather than beside either caller, because there are now two.** `template_activities` wrote
-this first, for a finding worth restating: a template resolving and launching a job *directly* did
-so with no audit row and no authorization, while the same job asked for in a conversation was
-audited and gated. The hypothesis tournament is the second path that chooses a job's arguments and
-starts it without a human in the loop, so it needs the identical treatment — and a second
-hand-rolled copy is how the two would drift the first time the audit shape changed.
-
-The pre-flight is wrapped in a tool built on the spot rather than found on the surface, because
-what is audited is not a tool the model can call: it is the resolution and validation done before
-Temporal starts the workflow. Naming it after the job is what makes the row legible in the trail,
-and what makes it read the same as a chat launch's row.
-
-A refusal propagates after being recorded as an `error` outcome, exactly as a denied chat tool call
-is.
+A job launched by a template or by the hypothesis tournament, without a human in the loop, gets
+the same audit row and authorization as one asked for in conversation. The pre-flight (resolution
+and validation before Temporal starts the workflow) is wrapped in a tool built on the spot and
+named after the job, so its audit row reads like a chat launch's. A refusal is recorded as an
+`error` outcome and then propagates.
 """
 
 from __future__ import annotations
@@ -37,10 +28,8 @@ async def audited_launch(
 ) -> dict[str, Any]:
     """Run a job launch's pre-flight through the governed chain and return its validated payload.
 
-    `action` is the pre-flight itself — normally `prepare_job_launch`, which validates the
-    arguments against the job's declared params model, authorizes the expensive trigger and runs
-    the job's own precondition. It is passed in rather than called here so this module stays a
-    governance wrapper and does not become a second place that knows how a job is prepared.
+    `action` is the pre-flight itself, normally `prepare_job_launch` (validate arguments, authorize
+    the trigger, run the job's precondition). Passed in so this module stays a governance wrapper.
     """
 
     @tool_decorator(name_or_callable=job, description=f"launch the {job!r} job")

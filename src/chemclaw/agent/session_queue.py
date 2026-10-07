@@ -1,28 +1,19 @@
 """The messages waiting for a session's running turn to end — an ordered, bounded, leased queue.
 
 `D-2026-10-01-a-queued-message-waits-in-its-senders-request`. A message sent while another turn runs
-on the session used to be refused 409 (`SessionTurnClaims`, D-121), which was the right
-serialisation and the wrong answer once a session holds several people: the second chemist's
-question is not a double-submit, it is the next thing somebody said. So it waits.
+on the session waits rather than being refused.
 
-**What this module holds is the order, never the message.** A row names a session, a sender, a
-ticket and a lease — no text, no roles. The waiting itself happens in the sender's own request
-(`api/routes/turns.post_message`): its stream reports the position, and when the ticket reaches the
-head and the session's turn claim comes free, that same request runs the turn with the principal
-its own token established. That is how a queued message runs as its sender without this table
-carrying anybody's authority, and it is why nothing here can run a message on its own: there is no
-dispatcher, only waiters asking "am I next?".
+This module holds the order, never the message: a row is a session, a sender, a ticket and a lease.
+The waiting happens in the sender's own request (`api/routes/turns.post_message`), which runs the
+turn with its own principal once its ticket is at the head and the turn claim is free. There is no
+dispatcher, so no row carries authority.
 
-**A lease, like the turn claim beside it, and for the same reason.** The waiter refreshes its row
-every time it asks for its position; a waiter whose process died stops refreshing, and once its
-lease lapses the rows behind it stop counting it and the next enqueue sweeps it. A crashed pod
-therefore delays the queue by at most one lease, exactly as it delays the session's turn claim.
+The waiter refreshes its lease each time it asks its position; a dead waiter's lease lapses, the
+rows behind it stop counting it, and the next enqueue sweeps it.
 
-**Two backends, chosen as `session_members` chooses one**: durable where sessions are durable (two
-replicas share one session, so they must share one order), process-lifetime where they are not.
-The durable rows cascade from `session_owners` (`infra/sql/113_session_turn_queue.sql`), so deleting
-a session, the retention sweep and an owner's erasure take its queue with it — which a waiter
-notices on its next poll as its ticket being gone.
+Durable where sessions are durable (replicas must share one order), in-process otherwise. Durable
+rows cascade from `session_owners`, so deleting or erasing a session takes its queue with it, which
+a waiter sees as its ticket being gone.
 """
 
 import itertools
@@ -37,10 +28,9 @@ from psycopg.rows import TupleRow
 
 from chemclaw.agent.session_store import _session_connection, _session_dsn
 
-#: Why an enqueue was refused. `full`: the session already holds its cap of waiting messages.
-#: `waiting`: this sender already has a message waiting in this session — one each, so a member
-#: cannot fill the queue ahead of everybody else and a client that retries a POST queues at most one
-#: duplicate rather than a stream of them.
+#: Why an enqueue was refused. `full`: the session holds its cap of waiting messages. `waiting`:
+#: this sender already has one waiting here — one each, so nobody can fill the queue and a retried
+#: POST queues at most one duplicate.
 Refusal = Literal["full", "waiting"]
 
 
@@ -84,10 +74,8 @@ class TurnQueue(Protocol):
 
 
 # Serialises one session's enqueues so the cap check and the insert are one decision across
-# replicas. A transaction-scoped advisory lock rather than a row lock on `session_owners`: a row
-# lock needs UPDATE on that table and would queue behind the title write, while this names nothing
-# but the queue and is gone at commit. Namespaced by prefix so it cannot meet another subsystem's
-# `hashtextextended` key (`agent/skill_store.py`, `agent/behaviour_proposals.py`).
+# replicas. An advisory transaction lock avoids needing UPDATE on `session_owners`; the prefix keeps
+# it apart from other subsystems' `hashtextextended` keys.
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _SWEEP = "DELETE FROM session_turn_queue WHERE session_id = %s AND lease_until <= now()"
 _SENDERS = "SELECT sender FROM session_turn_queue WHERE session_id = %s"
@@ -95,11 +83,9 @@ _ENQUEUE = (
     "INSERT INTO session_turn_queue (session_id, sender, lease_until) "
     "VALUES (%s, %s, now() + make_interval(secs => %s)) RETURNING ticket"
 )
-# Refresh and count in one statement. The outer count reads the snapshot from before the UPDATE,
-# which is exactly "the others"; a ticket that no longer exists returns no row at all, and that is
-# how a waiter learns it was cancelled, erased or swept with its session. A *lapsed* ticket returns
-# no row either rather than being revived: the rows behind it already stopped counting it, so
-# letting it back in would put it ahead of messages that have moved up past it.
+# Refresh and count in one statement; the count reads the pre-UPDATE snapshot, i.e. the others. A
+# missing or lapsed ticket returns no row, which tells the waiter it is gone; a lapsed one is not
+# revived ahead of messages that moved past it.
 _POSITION = (
     "WITH mine AS ("
     "  UPDATE session_turn_queue SET lease_until = now() + make_interval(secs => %s) "
@@ -117,7 +103,7 @@ _WAITING = (
 
 
 class SessionTurnQueue:
-    """`session_turn_queue`, on the session-store database (D-002)."""
+    """`session_turn_queue`, on the session-store database."""
 
     def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
@@ -180,8 +166,7 @@ class SessionTurnQueue:
 def _refusal(senders: list[str], sender: str, capacity: int) -> Refusal | None:
     """Which limit, if any, refuses `sender` a place among the live `senders` already waiting.
 
-    `waiting` is asked first because it is the more specific answer: a chemist who already has a
-    message in line is told that, rather than that the line is full.
+    `waiting` is checked first because it is the more specific answer.
     """
     if sender in senders:
         return "waiting"
@@ -203,9 +188,8 @@ class _Entry:
 class InMemoryTurnQueue:
     """The same contract for a deployment whose sessions are in-process too.
 
-    Not a test double, for `InMemorySessionMemberStore`'s reason: `session_store="memory"` is a real
-    deployment. Every method is free of `await`, so each is atomic on the event loop — the lock the
-    durable backend takes is what that property costs across processes.
+    Not a test double: `session_store="memory"` is a real deployment. No method awaits, so each is
+    atomic on the event loop.
     """
 
     def __init__(self) -> None:

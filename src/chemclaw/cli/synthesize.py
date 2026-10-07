@@ -1,15 +1,10 @@
-"""`make synthesize`: start a memory-synthesis job without a model in the loop (D-2026-08-25).
+"""`make synthesize`: start a memory-synthesis job without a model in the loop.
 
-The four miners run on demand, never on a Schedule — and after the Schedule went, their only
-trigger was `agent/durable_tools.synthesize_memory`, an LLM tool: a chemist who wanted "mine the
-corpus after this import" had to phrase it in chat and hope the model picked the tool, and an
-operator finishing a backfill had no way to start one at all. Knowledge generation deserves a
-switch a person can flip directly; this is that switch, going through the same workflows and the
-same daily-dedup id as the tool.
+Runs the same workflows with the same daily-dedup id as `agent/durable_tools.synthesize_memory`, so
+an operator can mine the corpus directly (e.g. after a backfill) instead of asking the model.
 
-Usage: `python -m chemclaw.cli.synthesize <kind> [--fresh] [--actor <id>]` — kinds as the tool
-lists them (`campaign`, `playbook`, `optimization`, `observation-promotion`), `--fresh` to force
-a re-mine when today's run predates the corpus change you care about.
+Usage: `python -m chemclaw.cli.synthesize <kind> [--fresh] [--actor <id>]` — kinds `campaign`,
+`playbook`, `optimization`, `observation-promotion`; `--fresh` forces a re-mine today.
 """
 
 import argparse

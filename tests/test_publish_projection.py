@@ -1,14 +1,8 @@
 """Every result shape this system produces is representable as a published record.
 
-**This is the test that answers the request "any calculation shall be stored".** It walks the
-result models one by one and asserts that projecting each produces the subject, conditions and
-facts that shape implies — so a model gaining a field, or a projector losing one, fails here rather
-than silently publishing less than was computed.
-
-The coverage check at the end is the one that matters most: it tracks which payload keys each
-projector actually *reads*, and pins the set it deliberately ignores. A field added to a result
-model tomorrow shows up as an unread key and fails, which is what stops this from drifting into a
-projection that quietly drops the newest half of a calculator's output.
+Each result model is projected and checked for the subject, conditions and facts it implies. The
+coverage check tracks which payload keys each projector reads and pins the deliberately ignored
+set, so a new result-model field fails as an unread key rather than being silently dropped.
 """
 
 import ast
@@ -137,9 +131,7 @@ def _reaction() -> ReactionEnergyResult:
 def _distribution(species: list[tuple[str, str, float, float]]) -> SpeciesDistribution:
     """A ranked species set from `(smiles, label, relative_kcal, population)` tuples.
 
-    Built from the tuples rather than from a fixed fixture because what the distribution tests turn
-    on is *which species* are in it — two enumerations of one substance, or a set with a single
-    member — and each of those is one line here.
+    So each test states which species are in it in one line.
     """
     return SpeciesDistribution(
         kind="microstates",
@@ -635,33 +627,17 @@ def test_every_result_shape_projects(kind: str, calc_type: str, payload: dict[st
     assert record.payload == payload
 
 
-#: The field that makes two copies of one fixture item distinct, per grown shape.
-#:
-#: Written out per shape rather than probed, because the failure this exists to stop is a field
-#: that quietly is not there: the first version wrote four names none of these items carry.
+#: The field that makes two copies of one fixture item distinct, per grown shape. Written out so a
+#: renamed field fails rather than being silently skipped.
 _DISTINGUISHING = {"sites": "index", "points": "value", "conformers": "relative_kcal"}
 
 
 def _grown(kind: str, calc_type: str, key: str, count: int) -> dict[str, int]:
     """Project one shape with `count` items under `key`, and count the rows per result-store table.
 
-    The items are copies of the fixture's own, made distinct so the row counts below are about the
-    *shape* of the growth — a fixture with one conformer cannot answer it.
-
-    **The distinctness is not what stops a dedup, and the claim that it was is retracted.** This
-    said "re-identified so nothing dedupes them"; driven, deleting the re-identification entirely
-    still leaves this file at 58 passed, because `project` does not dedupe at all. So the premise
-    was never exercised and could not be: there is nothing to defeat. What the fields below do buy
-    is that the copies are distinguishable to a reader of a failure, and that a rename is loud —
-    see `_DISTINGUISHING`.
-
-    **The re-identification used to write fields these items do not have.** It set `structure_id`,
-    `conformer_id`, `id` and `atom_index`; the real keys are `index` on a fukui site, `value` on a
-    scan point and `relative_kcal` on a conformer (`structure_id` exists, one level *inside*
-    `structure`, and was never reached). Deleting the whole loop left this file at 58 passed, so
-    the growth law was measured over byte-identical copies and the anti-dedup premise it rests on
-    was never exercised. `_DISTINGUISHING` names the field per shape and the assertion below fails
-    if one stops existing, because a silently-skipped rename is how the first version died.
+    Copies of the fixture's own item, made distinguishable through `_DISTINGUISHING` (`project` does
+    not dedupe, so distinctness only aids reading a failure). The assertion fails if a
+    distinguishing field stops existing.
     """
     payload = next(p for k, c, _m, p in _cases() if k == kind and c == calc_type)
     items = payload[key]
@@ -697,16 +673,10 @@ def _grown(kind: str, calc_type: str, key: str, count: int) -> dict[str, int]:
 def test_a_result_projects_a_fixed_number_of_rows_per_item(
     kind: str, calc_type: str, key: str, table: str, per_item: int
 ) -> None:
-    """How many rows one calculation becomes, as a law rather than as a fixture's count.
+    """How many rows one calculation becomes, as a per-item law.
 
-    **This is the number that decides whether the result store needs partitioning, and nothing had
-    measured it** (`D-2026-09-14-property-value-is-the-shallow-table`). A conformer search is ~47
-    conformers and a reactive-site panel is one entry per heavy atom, so the per-*item* slope is the
-    whole cost: measured, `xtb.fukui` is **7 rows per site** — 47 sites is 329 rows in one table —
-    `xtb.scan` is 2 per point and `xtb.conformers` is 1 per conformer.
-
-    A projector that starts emitting one more fact per item multiplies the store by the item count,
-    which is exactly the change that looks like one line and is not.
+    `D-2026-09-14-property-value-is-the-shallow-table`. The per-item slope decides partitioning: one
+    more fact per item multiplies the store by the item count.
     """
     one = _grown(kind, calc_type, key, 1)
     many = _grown(kind, calc_type, key, 47)
@@ -727,13 +697,10 @@ def test_a_result_projects_a_fixed_number_of_rows_per_item(
 def test_property_value_does_not_grow_with_the_size_of_a_calculation(
     kind: str, calc_type: str, key: str
 ) -> None:
-    """`property_value` is per *result*, not per item — so it is not the table to partition.
+    """`property_value` does not grow with the size of a calculation.
 
-    The open question `BACKLOG.md` carried was whether `property_value` needs partitioning "and on
-    what". Measured, it does not grow with a calculation's size at all: a 1-site and a 47-site Fukui
-    panel write the same number of `property_value` rows, and the 329-row difference is entirely
-    `calculation_site_value`. A partition key chosen for `property_value` would have been chosen for
-    the shallow table.
+    It is per result, not per item; per-item growth lands in tables such as
+    `calculation_site_value`, so `property_value` is not the table to partition.
     """
     assert (
         _grown(kind, calc_type, key, 1)["property_value"]
@@ -744,9 +711,8 @@ def test_property_value_does_not_grow_with_the_size_of_a_calculation(
 def test_a_reaction_attaches_each_species_energy_to_the_right_member() -> None:
     """Per-species facts are matched by (role, molecule), never by list position.
 
-    The fixture lists its species **product first**, while the equation lists reactants first — so
-    a projector that zipped the two by index would attach cyclohexane's free energy to ethene.
-    Both are plausible numbers in the same units, so nothing downstream would notice.
+    The fixture lists the product first while the equation lists reactants first, so index matching
+    would attach plausible numbers to the wrong member.
     """
     reaction = _reaction()
     record = project(
@@ -767,11 +733,10 @@ def test_a_reaction_attaches_each_species_energy_to_the_right_member() -> None:
 
 
 def test_an_absent_number_is_never_substituted() -> None:
-    """A `quick`-level reaction publishes no free energy — there is no fallback in the projector.
+    """An absent number is never substituted.
 
-    `delta_g_kcal` is None at `quick` level and whenever a species' symmetry number was unstated.
-    Falling back to `delta_e_kcal` would publish an electronic energy under the name of a free
-    energy, which is the single most consequential thing this projector could get wrong.
+    `delta_g_kcal` is None at `quick` level; falling back to `delta_e_kcal` would publish an
+    electronic energy as a free energy.
     """
     quick = _reaction().model_copy(update={"delta_g_kcal": None, "delta_h_kcal": None})
     record = project(
@@ -787,11 +752,11 @@ def test_an_absent_number_is_never_substituted() -> None:
 
 
 def test_both_ensemble_shapes_project() -> None:
-    """The cached search and the weighted ensemble carry different halves; both must work.
+    """Both ensemble shapes project.
 
-    Measured against the models rather than assumed: `EnsembleMember` has `energy_hartree` and no
-    population; `Conformer` has `relative_kcal` and `population` and no absolute energy. A
-    projector requiring either one would make half the ensembles in this system unpublishable.
+    `EnsembleMember` has `energy_hartree` and no population; `Conformer` has `relative_kcal` and
+    `population` and no absolute energy. Requiring either would make half the ensembles
+    unpublishable.
     """
     by_kind = {kind: (ctype, payload) for kind, ctype, _, payload in _cases()}
     weighted_type, weighted_payload = by_kind["ConformerEnsemble"]
@@ -839,19 +804,12 @@ def test_a_solvent_name_is_canonicalized_at_projection() -> None:
 
 
 def test_a_microstate_pka_publishes_the_free_energy_the_number_is_a_map_of() -> None:
-    """The most expensive calculation in the tier, and the one that published nothing.
+    """A microstate pKa publishes the free energy the number is a map of.
 
-    Three of the five properties this projector emits were absent from the registry, so `_fact`
-    raised `UnknownPropertyError` out of `to_canonical` on **every** payload — and because
-    `delta_g_kcal` is a required field of `MicrostatePka`, the raise was unconditional. Every
-    microstate pKa was dropped at the enqueue.
-
-    Two of those three are registered now. The third is not, and that is the finding underneath the
-    finding: `branch` is `PkaResult.site` under another name — both are `acid` / `base`, both say
-    which equilibrium was computed — so registering a second name for it would have split the one
-    property "which equilibrium is this pKa about" in two, which is exactly the failure
-    `property_definition` exists to prevent. The winning microstate's *constitution* is a different
-    fact and gets its own name.
+    Every property the projector emits must be registered, or `_fact` raises on every payload.
+    `branch` is not registered separately: it is `PkaResult.site` under another name, and two names
+    would split one property. The winning microstate's constitution is a distinct fact with its own
+    name.
     """
     record = project(
         calc_ref="microstate@v1:a:b",
@@ -889,13 +847,10 @@ def test_a_microstate_pka_publishes_the_free_energy_the_number_is_a_map_of() -> 
 
 
 def test_a_condition_set_canonicalizes_its_own_solvent() -> None:
-    """Structural, because the fifteenth projector forgot and the sixteenth would too.
+    """A condition set canonicalizes its own solvent, structurally.
 
-    Canonicalization used to be a call every projector made by hand — fourteen of them did and one
-    did not, and the one that did not stored `Tetrahydrofuran` as a first-class `solvent_id` with
-    its own `condition_id`, so the same acid computed under two spellings landed under two
-    conditions and `WHERE solvent_id = 'thf'` returned half of it. `Conditions`' own docstring
-    already promised this happens at write time; now it does.
+    Canonicalization happens in `Conditions` at write time, not per projector, so one solvent under
+    two spellings cannot land under two `condition_id`s.
     """
     assert Conditions(solvent=" Tetrahydrofuran ").solvent == "thf"
     assert Conditions(solvent="H2O").solvent == "water"
@@ -907,11 +862,10 @@ def test_a_condition_set_canonicalizes_its_own_solvent() -> None:
 
 
 def test_a_solvent_screen_publishes_its_parts_as_well_as_its_aggregate() -> None:
-    """Never store an aggregate whose parts are not also stored.
+    """A solvent screen publishes its parts as well as its aggregate.
 
-    A screen that published only its spread would leave "what was delta-G in DMSO" unanswerable
-    even though the run computed it — and would make the cross-solvent question answer over
-    screens only, missing every solvent run on its own.
+    Otherwise "what was delta-G in DMSO" would be unanswerable and cross-solvent queries would miss
+    every part.
     """
     from chemclaw.publish.project import records_from_solvent_screen
 
@@ -1137,10 +1091,8 @@ def test_every_model_field_is_read_or_deliberately_ignored(
 ) -> None:
     """No result-model field is silently dropped on the way into the published record.
 
-    Measured, not argued: the payload records which keys the projector touched, and anything it
-    ignored has to be listed above with a reason. This caught three real gaps when it was written —
-    a missing descriptor, an exotherm threshold whose flag was published without it, and a scan
-    whose coordinate said "dihedral" without saying which atoms.
+    The payload records which keys the projector touched; anything ignored must be listed above with
+    a reason.
     """
     tracked = _TrackingDict(payload)
     projection.PAYLOAD_PROJECTORS[kind](tracked)
@@ -1157,19 +1109,11 @@ def test_every_model_field_is_read_or_deliberately_ignored(
 
 
 def test_the_conversion_guard_is_load_bearing_on_a_live_path() -> None:
-    """Derive how many projected facts actually convert, instead of asserting a number in prose.
+    """The unit-conversion guard is load-bearing on a live path.
 
-    The claim this replaces ("every call site already passes the canonical unit, so the conversion
-    is an identity") was true when written, was quoted with a call-site count in two docstrings,
-    and went false in the commit that corrected `max_gradient` — which is exactly the drift
-    D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose is about. A count nobody re-derives
-    is a claim about its author's afternoon.
-
-    So this scans `project.py` for `_fact` call sites whose literal unit is not its property's
-    canonical unit, and asserts the set is non-empty: the guard has at least one live caller and
-    deleting it would silently corrupt a published number. It deliberately does not pin the exact
-    count — the point is that the answer is computed, and a projector added tomorrow moves it
-    without anybody having to notice.
+    Scans `project.py` for `_fact` call sites whose literal unit is not the property's canonical
+    unit and asserts the set is non-empty, without pinning a count
+    (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose).
     """
     source = ast.parse(_PROJECT_MODULE.read_text(encoding="utf-8"))
     converting: set[tuple[str, str]] = set()
@@ -1204,23 +1148,11 @@ def test_the_conversion_guard_is_load_bearing_on_a_live_path() -> None:
 
 
 def test_a_fact_reported_in_a_non_canonical_unit_is_converted_before_it_is_published() -> None:
-    """`value` is the predicate column's number, so it is canonical or the column is a lie.
+    """A fact reported in a non-canonical unit is converted before it is published.
 
-    This docstring used to say the guard was an identity on every live path — that an AST scan
-    found every `_fact` call site passing an already-canonical unit, so deleting `to_canonical`
-    changed nothing. That stopped being true the moment `_optimization` was corrected to report
-    `max_gradient` in the unit it actually holds, and the count it quoted has moved twice since.
-    The number is therefore derived by
-    `test_the_conversion_guard_is_load_bearing_on_a_live_path` below rather than written here
-    (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose).
-
-    What the guard buys is unchanged and is the reason it stays: a projector reporting an energy
-    difference in hartree or kJ/mol — the natural shape for anything coming back from
-    `servers/calc` — lands off by 627.5 or 4.184 with the unit string beside it still right, so it
-    passes every range filter the column exists for while being wrong.
-
-    The reported pair is asserted beside it because a conversion nobody can undo is the other half
-    of the same problem: `value` alone cannot answer "what did the calculator actually say".
+    `value` is the predicate column, so it must be canonical: an energy in hartree or kJ/mol would
+    be off by 627.5 or 4.184 while passing range filters. The reported value and unit are asserted
+    too, so the original stays recoverable.
     """
     fact = projection._fact("reaction_delta_g", -0.02, "hartree")
     assert fact is not None
@@ -1239,19 +1171,12 @@ def test_a_fact_reported_in_a_non_canonical_unit_is_converted_before_it_is_publi
 
 
 def test_two_tautomers_are_two_members_and_two_subjects() -> None:
-    """`compound_id` deliberately collapses tautomers; a subject must not.
+    """Two tautomers are two members and two subjects.
 
-    `core.chem.compound_id` hashes the *standardized* SMILES — salts stripped, charges neutralized,
-    one tautomer per set — because it is the knowledge-graph join key and "is this the same
-    substance" is the question it answers. `Subject.subject_id` hashed that id first, so for every
-    `SpeciesDistribution` (whose members are by definition species that differ only in the ways
-    standardization erases) two different enumerations produced one `subject_id`. Measured on
-    malonic acid: `{H2A, HA-}` at pH 4 and `{H2A, A2-}` at pH 9 both hashed to
-    `sub_3b69df0cbdef7041`, and since `subject_member`'s key is `(subject_id, ordinal)`, publishing
-    the second **overwrote** the first's members — the store then said both runs were about the
-    pH-9 set, and `GROUP BY subject_id` grouped two incomparable calculations.
-
-    The member's own SMILES is what identifies a species, so that is what the hash reads first.
+    `core.chem.compound_id` deliberately collapses tautomers (standardized SMILES), but a
+    `SpeciesDistribution` exists to tell such species apart, so `Subject.subject_id` hashes each
+    member's own SMILES first. Otherwise two enumerations share a `subject_id` and the second
+    overwrites the first's members.
     """
     ph4 = _distribution([("OC(=O)CC(=O)O", "H2A", 0.0, 0.6), ("[O-]C(=O)CC(=O)O", "HA-", 0.4, 0.4)])
     ph9 = _distribution(
@@ -1275,12 +1200,9 @@ def test_two_tautomers_are_two_members_and_two_subjects() -> None:
 
 
 def test_a_reaction_between_tautomers_attaches_each_energy_to_its_own_member() -> None:
-    """The same collapse, one function further on: `_member_for` matched on `compound_id` first.
+    """A reaction between tautomers attaches each energy to its own member.
 
-    Two members that are tautomers of one another carry one `compound_id`, so the coarse branch
-    matched whichever was unclaimed and the exact-SMILES branch was never reached — degenerating
-    to the list-position matching the function exists to prevent. Measured on 2,4-pentanedione with
-    its species listed enol-first: each species' electronic energy landed on the other member.
+    Tautomers share a `compound_id`, so `_member_for` matches the exact SMILES before the coarse id.
     """
     record = project(
         calc_ref="rxn-tautomers",
@@ -1315,19 +1237,11 @@ def test_a_reaction_between_tautomers_attaches_each_energy_to_its_own_member() -
 
 
 def test_a_species_distribution_publishes_the_gap_and_not_a_constant_zero() -> None:
-    """`species[0].relative_kcal` is 0.0 by construction, so publishing it answered nothing.
+    """A species distribution publishes the gap, not a constant zero.
 
-    The producer (`connectors/calc/compose.py`) computes each species' energy relative to the
-    lowest and then sorts the ranking by that number, so element 0 is always the minimum and its
-    relative energy is always exactly zero. Every tautomer, microstate and stereoisomer
-    distribution therefore published one calculation-scope `relative_energy = 0` — carrying the
-    method uncertainty beside it as if a measurement had been made, and naming no species — so
-    "every tautomer set whose gap exceeds 2 kcal/mol" returned nothing, ever.
-
-    What that fact was reaching for is the *discrimination*: how far the runner-up sits above the
-    winner, which is the number a chemist compares against the method uncertainty before reading a
-    ranking as decided. It is published under its own name, because `relative_energy` is registered
-    as a per-conformer quantity and is not what this is.
+    The ranking is sorted by relative energy, so `species[0].relative_kcal` is always 0.0. The
+    useful number is how far the runner-up sits above the winner, compared against method
+    uncertainty, and it has its own property name (`relative_energy` is per-conformer).
     """
     record = project(
         calc_ref="tautomers",
@@ -1359,14 +1273,10 @@ def test_a_single_species_distribution_publishes_no_gap() -> None:
 
 
 def test_an_unpairable_spectrum_publishes_the_reason_beside_the_missing_intensities() -> None:
-    """The points already go short; without this the record says nothing about why.
+    """An unpairable spectrum publishes the reason beside the missing intensities.
 
-    `_thermochemistry` emits an `ir_intensity` point only where the payload has one, and a result
-    whose intensities could not be paired with its modes carries `None` for every mode — so a
-    consumer of the result store saw a wavenumber series with no intensity series and no reason for
-    it. A calculation that produced no spectrum is the open-ended emitted assertion `FlagFact` is
-    for: most thermochemistry raises none, and enumerating it as a property would put a 0..1 column
-    on every row for the exceptional case.
+    Intensity points are emitted only where present; a `FlagFact` says why they are all absent,
+    without a property column on every row for the exceptional case.
     """
     payload: dict[str, Any] = {
         "smiles": "O=C=O",

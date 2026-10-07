@@ -1,24 +1,9 @@
-"""What an xTB job may be asked to do — the request half of this bundle's durable contract.
+"""What an xTB job may be asked to do: the request half of this bundle's durable contract.
 
-**A leaf module, and that is the whole point.** These models are named by `connector.yaml`'s
-`params_model`, and `connectors/jobs.py` resolves that name by *importing* it — on every
-`build_langgraph_agent`, in the chat service's own process, and again in `make connector-validate`.
-So whatever this module imports, the chat service imports too.
-
-They used to sit beside the *result* types, which named four science modules and, through them,
-`tblite` — the compiled quantum-chemistry library. Measured on `main` at the time, building the
-enabled job tools pulled **`tblite` and fifteen science modules** into the agent's process: the
-entire quantum-chemistry closure this bundle exists to keep out of it (D-114), let back in through
-the one manifest field that resolves an import. Nothing failed; the chat pod simply carried a
-compiled QM library it never called.
-
-So the split here is not stylistic. Requests live in this module and import pydantic and config
-only; results live in `connectors/calc/results.py`. That weight is gone —
-`D-2026-08-16-the-physics-leaves-the-cache-stays` took the engines out of this repository entirely
-— and the split stays anyway, because these shapes are pinned by workflow histories in flight and
-because a boundary that only holds while nothing heavy exists is not a boundary.
-`cli/validate_connectors.py` enforces it rather than trusting it, and
-`tests/test_connector_isolation.py` asserts it in a fresh interpreter (D-118).
+A leaf module: `connector.yaml`'s `params_model` names these models and `connectors/jobs.py` imports
+them in the chat service's process, so whatever this module imports, the chat service imports too
+(D-118). It imports pydantic and config only; results live in `connectors/calc/results.py`.
+`cli/validate_connectors.py` and `tests/test_connector_isolation.py` enforce it.
 """
 
 from typing import Annotated, Literal
@@ -27,16 +12,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from chemclaw.core.model_prose import ModelProse
 
-# What a caller has to be told about `symmetry_numbers` to supply it correctly, written once
-# because the two reaction-shaped specs advertise the identical contract. It is the *only* field
-# here carrying a description, and deliberately so: every other one is self-evident from its name
-# and type, while this one is a physical quantity whose omission silently costs the free energy.
-# A plain `dict[str, int]` keeps this module leaf — no `chemclaw.science.*` import is needed to
-# state it (D-118).
-# What a caller has to be told to use a geometry handle, written once because three specs take one
-# (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Every field here that carries a description
-# does so because a model cannot infer it from the name and the type, and this is the clearest case:
-# the argument is a string, and *which* strings are valid is the whole of what has to be said.
+# Field descriptions shared by several specs. A field carries a description only when a model cannot
+# infer it from name and type: which strings are valid geometry handles, and what a symmetry number
+# is and what omitting it costs.
 _STRUCTURE_ID_DESCRIPTION = ModelProse(
     "A specific 3D geometry to start from, as `structure_id` — the `st_...` address reported by "
     "optimize_geometry, sample_conformers, scan_coordinate and compute_thermochemistry. Use it to "
@@ -68,40 +46,21 @@ class BondCleavageSpec(BaseModel):
     fragments: list[str] = Field(min_length=2, max_length=2)
 
 
-# A model rather than four bare indices, for the reason `BondCleavageSpec` states and one more. The
-# stated one: a positional payload is one field-order change away from computing a different bond
-# than the caller named. The additional one is measured — an atom index is not a name at all.
-# `(4, 5)` is the amide C-N of `c1ccc(NC(C)=O)cc1` and an aromatic *ring* bond of
-# `CC(=O)Nc1ccccc1`, the same compound rewritten, really bonded, in range. A scan driven from a
-# stale index therefore runs and reports a plausible barrier for a question nobody asked.
+# A model rather than four bare indices, because an atom index is not a name: the same indices pick
+# a different bond once the SMILES is rewritten. `torsion_id` is derived from the molecule; the job
+# recomputes it and refuses a mismatch, so it checksums the indices. Mirrors
+# `science/calc/models.py::Torsion` without importing it (this module is a leaf).
 #
-# `torsion_id` closes that: a handle derived from the molecule rather than from the order its atoms
-# happen to appear in. The job recomputes it from the structure it is about to calculate and
-# refuses a mismatch, so the handle is a checksum on the indices rather than decoration.
-#
-# `science/calc/models.py::Torsion` is the same shape inside the calculation. Two files by rule:
-# this module is a leaf the chat service imports on every agent build and may not import `science`
-# (D-118).
-#
-# **The rationale is here rather than in the docstring, and that is not a style choice.** Pydantic
-# publishes a model's docstring as its JSON-schema `description`, so every word of it is bound to
-# the model on every turn — this nested pair cost ~400 tokens of the agent's static prefix, which
-# `tests/test_context_floor.py` refuses. What a caller needs is in the tool's own description; what
-# a maintainer needs is here.
+# Rationale lives in comments, not docstrings, because pydantic publishes a docstring as the schema
+# `description`, which costs tokens on every turn (`tests/test_context_floor.py`).
 class TorsionSpec(BaseModel):
     """The bond to rotate, exactly as `chem`'s `enumerate_torsions` reported it."""
 
-    # No per-field descriptions, deliberately: this whole model is *copied* from an
-    # `enumerate_torsions` entry rather than assembled, so prose telling a model how to fill each
-    # field would be tokens spent teaching it to do the one thing the tool tells it not to. The
-    # tool's own description says where the value comes from; the schema says only its shape.
+    # No per-field descriptions: this model is copied from an `enumerate_torsions` entry, not
+    # assembled.
     torsion_id: str = Field(min_length=1)
-    # 0 or 4, mirroring `science/calc/models.py::Torsion`: `enumerate_torsions` reports an **empty**
-    # list for a rotor whose rotating end carries only hydrogens, because a dihedral through one
-    # needs a hydrogen index and that means something only inside an explicit-H numbering. Requiring
-    # four here made the copy-the-entry-through instruction impossible to follow for exactly the
-    # rotors whose barriers are worth asking about — an amide N-H, a carboxylic O-H — and the
-    # composite builds the dihedral itself (`compose._rotor_dihedral`).
+    # 0 or 4: `enumerate_torsions` reports an empty list for a rotor whose rotating end carries only
+    # hydrogens, and the composite builds that dihedral itself (`compose._rotor_dihedral`).
     atoms: list[int] = Field(min_length=0, max_length=4)
     bond: list[int] = Field(min_length=2, max_length=2)
     label: str = Field(min_length=1)
@@ -155,11 +114,8 @@ class ScanJobSpec(BaseModel):
     structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
-# Distinct from `ScanJobSpec`, which drives any internal coordinate and reports points. This one is
-# about a torsion specifically, and everything it adds follows from that: the bond is named rather
-# than indexed, the scan covers one *period* rather than always 360 degrees, the wells are released
-# from their constraint into real rotamers, and the barriers between them are directional and carry
-# a half-life. In a comment rather than the docstring for the schema-size reason above.
+# Unlike `ScanJobSpec`, specific to a torsion: the bond is named, the scan covers one period, wells
+# are released into real rotamers, and barriers are directional with a half-life.
 class RotationJobSpec(BaseModel):
     """A durable rotational profile about one named bond."""
 
@@ -168,16 +124,13 @@ class RotationJobSpec(BaseModel):
     torsion: TorsionSpec
     solvent: str | None = None
     temperature_k: float | None = None
-    # The cost knob: every point is a constrained optimization, so halving this doubles the
-    # profile. The maxima are refined regardless, so a smaller step buys resolution of the *wells*
-    # rather than of the barrier.
+    # The cost knob: each point is a constrained optimization. Maxima are refined regardless, so a
+    # smaller step resolves the wells rather than the barrier.
     step_degrees: float | None = Field(default=None, gt=0.0, le=120.0)
     level: Literal["quick", "standard", "thorough"] = "quick"
-    # The short form of `_STRUCTURE_ID_DESCRIPTION`, and the one place that shared string is not
-    # reused. This tool's schema is the second largest on the agent's surface — nested models are
-    # expensive — and `tests/test_context_floor.py` refuses a tool over 900 tokens rather than
-    # letting the cost land in a bill nobody reads. What the long version adds is *where* handles
-    # come from, which this tool's own description already says.
+    # A short form of `_STRUCTURE_ID_DESCRIPTION`: this schema is near the per-tool token ceiling
+    # `tests/test_context_floor.py` enforces, and the tool description already says where handles
+    # come from.
     structure_id: str | None = Field(
         default=None,
         description="A conformer to profile in, as `st_...`; a barrier depends on which one.",
@@ -218,12 +171,8 @@ class MicrostatePkaJobSpec(BaseModel):
     temperature_k: float | None = None
     effort: Literal["quick", "normal", "extensive"] = "quick"
 
-    # **No `structure_id`, and its absence is the point.** Every other geometry-taking spec here
-    # accepts one so a caller can carry a chosen conformer forward; this job's *first* act is a
-    # metadynamics conformer search, which re-samples whatever it is handed. A starting geometry
-    # therefore survives into nothing the answer depends on, and offering the argument would
-    # advertise a control that does not control anything — while costing every turn the
-    # description that explains it.
+    # No `structure_id`: this job starts with a conformer search that re-samples whatever it is
+    # handed, so a starting geometry would control nothing.
 
 
 class ComplexJobSpec(BaseModel):
@@ -234,9 +183,8 @@ class ComplexJobSpec(BaseModel):
     smiles_b: str = Field(min_length=1)
     solvent: str | None = None
     effort: Literal["quick", "normal", "extensive"] = "quick"
-    # Both or neither: a search that starts from one chosen conformer and one fresh embedding is
-    # not a comparison anybody asked for, and silently pairing them is how a number that means
-    # nothing gets reported as a binding energy.
+    # Both or neither: pairing a chosen conformer with a fresh embedding is not a meaningful
+    # comparison.
     structure_id_a: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
     structure_id_b: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
@@ -316,10 +264,8 @@ class SpeciesRankingJobSpec(BaseModel):
     solvent: str | None = None
     temperature_k: float | None = None
     level: Literal["quick", "standard", "thorough"] = "standard"
-    # Its own description, shorter and — the part that matters — *true here*. The reaction specs'
-    # text says the job "reports no free energy at all" for a species left out, which is their
-    # behaviour and not this one's: a ranking has no useful E-only substitute above `quick`, so it
-    # ranks anyway and warns. Reusing that string would have been the more wrong of the two.
+    # Its own description, because the behaviour differs from the reaction specs': a ranking with a
+    # species left out still ranks above `quick`, and warns.
     symmetry_numbers: dict[str, int] | None = Field(
         default=None,
         description=(
@@ -364,9 +310,8 @@ class SpeciesSolventScreenJobSpec(BaseModel):
     )
     temperature_k: float | None = None
     level: Literal["quick", "standard", "thorough"] = "standard"
-    # One map covers the whole screen: the same species appear in every medium, and a rotational
-    # symmetry number is a property of the molecule rather than of what surrounds it. It does not
-    # cancel across the media either, since every medium ranks the same set.
+    # One map covers the whole screen: a symmetry number is a property of the molecule, not the
+    # medium.
     symmetry_numbers: dict[str, int] | None = Field(
         default=None,
         description=(
@@ -410,10 +355,8 @@ class BondSurveyJobSpec(BaseModel):
     level: Literal["quick", "standard", "thorough"] = "quick"
 
 
-# What an xTB job may be asked to do, discriminated on `kind`. A closed, typed union
-# rather than a free-form request is the same boundary rule the proposal sets for the
-# expert escape hatch: a model-authored payload can select among calculations we
-# defined, and can never describe one we did not.
+# Discriminated on `kind`: a model-authored payload can select among calculations we defined and can
+# never describe one we did not.
 XtbJobSpec = Annotated[
     ReactionJobSpec
     | SolventScreenJobSpec

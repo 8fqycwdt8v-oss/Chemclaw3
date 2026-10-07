@@ -1,35 +1,14 @@
-"""The three M12 re-validation harnesses, and the probe corpus they run, where they are pure.
+"""The M12 re-validation harnesses and their probe corpus, where they are pure.
 
-Everything these suites *measure* needs a running front door, a model credential and — for two of
-them — a stack configured a particular way. That half is `make live-plan-gate`,
-`make live-degradation` and `make live-routing`. What this file covers is the other half, and it is
-the half that can be wrong silently:
+What the suites measure needs a live stack (`make live-plan-gate`, `make live-degradation`). This
+file covers what can be wrong silently:
 
-* the **scoring**, which is a pure function over a recorded run in all three suites, deliberately —
-  a scoring bug must be fixable without re-running the measurement, which is the property
-  `--regrade` established for the corpus run;
-* the **wire reading**, driven through `httpx.MockTransport` exactly as `tests/test_live_probes.py`
-  drives it. That is not a mock of the thing under test: the SSE bytes are the real contract, and
-  feeding exact frames is what lets a test assert that a plan-gate refusal is told apart from a
-  broken tool, or that a `capability_degraded` frame arriving *after* the first token is caught;
-* the **corpus as a declaration** — the same gating `tests/test_live_probes.py` applies to
-  `data/evals/probes/`: duplicate ids across the directory are fatal, an unknown key is rejected,
-  every `expects_tools` name exists on the agent surface.
-
-**The routing suite is gone** (D-2026-08-15), with the specialist team it measured. What it
-established is worth keeping in view here, because it is the reason this file no longer covers a
-third suite: two of its three live findings were defects in the *reading* rather than in the system
-— the `agent` attribution named the tool node instead of the specialist, and the cost column was
-silently `None` for every turn because the reader gated on this process's own `session_store`
-— and **both had passing unit tests**. A suite that grades a live system can be wrong in ways its
-own unit tests cannot see. Both findings have outlived their subjects: the attribution went in
-`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` and the cost column on
-2026-08-27, its fixed reader never having acquired a caller — see
-`tests/test_live_probes.py::test_the_harness_makes_no_token_cost_claim_it_cannot_take`.
-
-The plan-gate and degradation suites remain unexecuted against a live model. What each of these
-tests still owns is the half that can be wrong silently: the scoring, the wire reading, and the
-corpus as a declaration.
+* the scoring, a pure function over a recorded run, so a scoring bug is fixable without
+  re-running the measurement;
+* the wire reading, through `httpx.MockTransport` with exact SSE frames, so a plan-gate refusal is
+  told apart from a broken tool and a late `capability_degraded` frame is caught;
+* the corpus as a declaration: duplicate ids are fatal, unknown keys are rejected, and every
+  `expects_tools` name exists on the agent surface.
 """
 
 from __future__ import annotations
@@ -116,12 +95,10 @@ def _run_one(probe: Probe, *events: dict[str, object]) -> ProbeOutcome:
 
 
 def test_a_scripted_probe_is_refused_by_the_single_question_runner() -> None:
-    """`run_probe` would ask only the first question of a three-turn conversation.
+    """A scripted probe is refused by the single-question runner.
 
-    The loud refusal is the point. A harness that silently ran one turn of a scripted probe would
-    report it as answered while the turns carrying the actual assertion never happened — the exact
-    shape of the coverage lie `cli/live_storm.FAMILIES` was added to stop after a run printed
-    "17/17 checks passed" for a matrix two families short.
+    `run_probe` would ask only the first question and report the probe answered while the turns
+    carrying the assertion never happened.
     """
 
     async def go() -> None:
@@ -133,12 +110,10 @@ def test_a_scripted_probe_is_refused_by_the_single_question_runner() -> None:
 
 
 def test_a_plan_refusal_is_not_counted_as_a_broken_tool() -> None:
-    """The gate working and the tool falling over must not land in the same list.
+    """A plan refusal is not counted as a broken tool.
 
-    They arrive on the stream as the same event type — `announce_tool_failures` is attached
-    innermost, so it sees `PlanNotApprovedError` raw and announces it exactly as it announces a
-    database outage. Folding them together would make a correctly-gated turn read as a turn whose
-    tools broke, which is precisely inverted: one is the gate holding, the other is a fault.
+    Both arrive as `tool_failed` (`announce_tool_failures` sees `PlanNotApprovedError` raw); folding
+    them together would report the gate holding as a fault.
     """
     outcome = _run_one(
         _probe(),
@@ -152,21 +127,11 @@ def test_a_plan_refusal_is_not_counted_as_a_broken_tool() -> None:
 
 
 def test_the_classifier_reads_the_discriminator_and_not_the_refusal_prose() -> None:
-    """Reword the refusal and the tally must not move; drop the field and it must.
+    """The classifier reads the `reason` discriminator, not the refusal prose.
 
-    This is the property the substring match could not have: it classified on a sentence written
-    for chemists, so improving that sentence would have moved every gated turn from `plan_refusals`
-    to `tools_failed` — the control holding, reported as the tools falling over — and nothing here
-    would have gone red, because the tests pinned the same copy of the same phrase. Both halves are
-    asserted, because either alone is satisfiable by the old behaviour: the first frame is worded
-    nothing like the gate and must still count as a refusal, the second is worded exactly like it
-    and must not.
-
-    The second half is also the deliberate consequence worth stating: classification is the
-    *producer's*, so an unstamped `tool_failed` is an ordinary failure whatever it says. A front
-    door too old to stamp the field would be scored as broken tools rather than as refusals — loud
-    and in the direction that under-credits the gate, which is the safe way for a harness to be
-    wrong about a deployment it was not built against.
+    Rewording the refusal must not move the tally, and dropping the field must. An unstamped
+    `tool_failed` is an ordinary failure whatever it says, so an older front door under-credits the
+    gate, which is the safe direction to be wrong.
     """
     reworded = _run_one(
         _probe(),
@@ -195,17 +160,11 @@ def test_the_classifier_reads_the_discriminator_and_not_the_refusal_prose() -> N
 
 
 def test_every_gate_is_scored_as_the_control_working_not_as_a_broken_tool() -> None:
-    """Four of the five gates were scored as faults, which is the same defect one layer out.
+    """Every gate is scored as the control working, not as a broken tool.
 
-    `core/turn_signals.RefusalReason` names five: `plan_gate`, `dry_run`, `undeclared_write`,
-    `repeat` and `authz`. This reader split only the first off `tools_failed`, so a dry run the
-    chemist switched on, an agent refusing a tool its profile does not hold, the repeat guard and
-    an authorization denial all scored as tools falling over — and each set `failed_loudly`, which
-    is the harness's headline finding.
-
-    The set is read from the type rather than restated, so a sixth gate added next year fails here
-    instead of being silently scored as a fault. `plan_gate` keeps its own list because
-    `_plan_gate_findings` asks specifically what the plan gate held.
+    The gates are read from `core/turn_signals.RefusalReason` rather than restated, so a new one
+    fails here instead of being scored as a fault. `plan_gate` keeps its own list because
+    `_plan_gate_findings` asks what the plan gate held.
     """
     from typing import get_args
 
@@ -236,11 +195,10 @@ def test_every_gate_is_scored_as_the_control_working_not_as_a_broken_tool() -> N
 
 
 def test_a_turn_held_entirely_by_gates_is_not_reported_as_having_failed_loudly() -> None:
-    """The consequence of the split, at the field the harness actually reports.
+    """A turn held entirely by gates is not reported as having failed loudly.
 
-    `failed_loudly` reads `tools_failed`, so scoring a refusal there did not merely mislabel a
-    list — it made a correctly-gated turn the harness's loudest finding. A turn where every
-    state-changing call was held by a dry run is a turn where the control worked.
+    `failed_loudly` reads `tools_failed`, so a refusal there would make a correctly gated turn the
+    harness's loudest finding.
     """
     outcome = _run_one(
         _probe(),
@@ -257,19 +215,11 @@ def test_a_turn_held_entirely_by_gates_is_not_reported_as_having_failed_loudly()
 
 
 def test_the_plan_gate_reason_is_the_one_the_wire_actually_carries() -> None:
-    """The declaration-versus-surface check for the one value this harness copies.
+    """`PLAN_GATE_REASON` matches the value the wire actually carries.
 
-    `PLAN_GATE_REASON` is a literal so that loading a probe run does not build the agent layer.
-    That is only safe while something asserts the literal still matches what is emitted — if it
-    stopped matching, every plan-gate refusal would read as a broken tool, and both the "refused
-    before approval" and "executed after approval" findings would flip at once.
-
-    Two surfaces, because the copy has to agree with both: the gate's own constant, and the closed
-    set `ToolFailedEvent.reason` declares — a `Literal` pydantic validates, so a value the event
-    could never carry fails here rather than in a live run. This replaces a check that the
-    *sentence* still contained a particular phrase, which is what made prose written for chemists
-    load-bearing for a metric: the phrase could be improved by anyone, and the improvement would
-    have silently reclassified every gated turn while this file stayed green.
+    It is a literal so loading a run does not build the agent layer, which is safe only while this
+    checks it against the gate's constant and the `ToolFailedEvent.reason` `Literal`. A mismatch
+    would flip both plan-gate findings at once.
     """
     assert PLAN_GATE_REASON == GATE_REASON
     assert ToolFailedEvent(tool="t", message="m", reason=PLAN_GATE_REASON).reason == GATE_REASON
@@ -280,9 +230,8 @@ def _plan_gate_transport(
 ) -> httpx.MockTransport:
     """A front door that serves a scripted conversation: N turns, N plans, one decision.
 
-    The plan route is served from a queue rather than from state, so a test can script the exact
-    sequence DARK-1 is about — the same session reporting an approved plan and then a *different*
-    unapproved one — without reimplementing the gate to produce it.
+    The plan route serves from a queue, so a test can script an approved plan followed by a
+    different unapproved one without reimplementing the gate.
     """
     remaining_turns = list(turns)
     remaining_plans = list(plans)
@@ -315,11 +264,8 @@ def _plan(hash_: str, items: list[str], *, approved: bool = False) -> dict[str, 
 def _refused(tool: str) -> dict[str, object]:
     """A `tool_failed` frame as the front door emits one for a plan-gate refusal.
 
-    Carries the refusal sentence *and* the `reason` discriminator, because that is the frame the
-    wire holds: `api/graph_stream` stamps the reason and the sentence still reaches the chemist.
-    The classifier reads only the discriminator — which is the point, and is why the sentence is
-    still built from `plan_approval_refusal` rather than written out here. A test whose fixture is
-    a hand-typed sentence would keep passing after the gate stopped emitting one.
+    Carries both the refusal sentence (built from `plan_approval_refusal`, not hand-typed) and the
+    `reason` discriminator, which is all the classifier reads.
     """
     return {
         "type": "tool_failed",
@@ -333,7 +279,7 @@ def _healthy_run() -> PlanGateRun:
     """The conversation the gate is supposed to produce, driven over the wire.
 
     Three turns: a refused write, an approved one that runs, and a changed plan that is re-gated.
-    The plan route is read *after* each turn, so `plans[1]` is the approved plan the third turn then
+    The plan route is read after each turn, so `plans[1]` is the approved plan the third turn
     departs from.
     """
     probe = _probe(
@@ -396,11 +342,9 @@ def test_the_whole_plan_gate_conversation_passes_when_the_gate_holds() -> None:
 
 
 def test_dark_1_itself_fails_the_suite_when_the_approval_outlives_its_plan() -> None:
-    """The live defect, replayed: a changed plan whose write runs under the earlier decision.
+    """An approval outliving its plan fails the suite: the changed plan's write must not run.
 
-    This is the failure the whole suite exists for — approve a four-item plan, ask a completely
-    different question, and watch `compute_xtb_energy` and a knowledge-graph write run autonomously.
-    Scored from a recorded run rather than from a live one so the assertion holds on a diff.
+    Scored from a recorded run so the assertion holds on a diff.
     """
     probe = _probe(
         follow_ups=[
@@ -453,12 +397,10 @@ def test_dark_1_itself_fails_the_suite_when_the_approval_outlives_its_plan() -> 
 
 
 def test_a_turn_that_never_attempted_a_write_is_a_miss_not_a_pass() -> None:
-    """A gate nothing tested is a gate nothing measured.
+    """A turn that never attempted a write is a miss, not a pass.
 
-    The tempting reading — "no state-changing call ran before approval, so the gate held" — is
-    wrong in the one direction that matters: it is also true of a deployment with no gate attached
-    at all, and of a model that simply never planned a write. Scoring it green would make the suite
-    pass hardest exactly where it proves least.
+    "No state-changing call ran before approval" is also true with no gate at all, or when the model
+    never planned a write.
     """
     probe = _probe(follow_ups=[Turn(message="go", before="approve_plan").model_dump()])
     run = PlanGateRun(
@@ -489,11 +431,10 @@ def test_a_turn_that_never_attempted_a_write_is_a_miss_not_a_pass() -> None:
 
 
 def test_an_announced_but_refused_call_does_not_count_as_having_executed() -> None:
-    """The subtraction that makes the "approved plan executes" finding mean anything.
+    """An announced but refused call does not count as having executed.
 
-    A refused call still announces itself — the gate raises inside the tool boundary, after the
-    model asked for it — so a check reading `tools_called` alone would report the defect and the fix
-    identically.
+    A refused call still announces itself, so reading `tools_called` alone would report the defect
+    and the fix identically.
     """
     probe = _probe(follow_ups=[Turn(message="go", before="approve_plan").model_dump()])
     run = PlanGateRun(
@@ -526,20 +467,11 @@ def test_an_announced_but_refused_call_does_not_count_as_having_executed() -> No
 
 
 def test_a_write_another_gate_held_is_not_scored_as_a_write_that_ran() -> None:
-    """The subtraction has to cover every gate the stream can name, not only the plan gate.
+    """A write another gate held is not scored as a write that ran.
 
-    `_state_changing` subtracted `plan_refusals` alone, from when that was the only refusal list
-    `run_turn` produced. Once the other four gates (`dry_run`, `undeclared_write`, `repeat`,
-    `authz`) got their own list, a write one of them held was announced on the stream, absent from
-    `plan_refusals`, and counted as having executed — so this exact run reported
-
-        the approved plan executes        ok=True   ran ['record_knowledge_note']
-        a changed plan is re-gated (DARK-1) ok=False ran ['record_knowledge_note'] …
-
-    with **nothing written on either turn**: a green on the one assertion that proves the approval
-    had an effect, and a manufactured report of the bypass this whole suite exists to catch. Both
-    findings say what they measured now — the approval is unproven because the write never got
-    through, and the binding held.
+    The subtraction covers every refusal list (`dry_run`, `undeclared_write`, `repeat`, `authz`),
+    not only `plan_refusals`; otherwise a held write would score the approval as proven and
+    manufacture a bypass report.
     """
     probe = _probe(
         follow_ups=[
@@ -697,20 +629,11 @@ def test_the_outage_announced_before_the_first_token_passes() -> None:
 
 
 def test_an_outage_announced_after_the_answer_has_started_fails() -> None:
-    """The regression this suite exists to catch, and which no existing signal could see.
+    """An outage announced after the answer has started fails.
 
-    Every field the corpus run reads is identical between this stream and the passing one above —
-    `degraded` names the same capability, `failed_loudly` reads the same, the turn answers. Only the
-    position differs, and to the model a late announcement is indistinguishable from none: it has
-    already planned against a surface it will not get.
-
-    `failed_loudly` is **false** on both, and the sameness is the point rather than the value. It
-    used to be true on both, for a reason that turned out to be a defect one layer down: `degraded`
-    counted as a turn failure, so every turn of any broker-less deployment was loudly failed and the
-    silent-death signal could not fire anywhere
-    (`D-2026-08-16-an-announcement-is-not-a-failure`). Separating them left this pair *more*
-    distinguishing, not less — the ordering finding is now the only thing that tells these two
-    streams apart, which is exactly what this suite was built to say.
+    Every other field matches the passing stream; only the position differs, and a late announcement
+    comes after the model has already planned against the surface. `failed_loudly` is false on both,
+    because an announcement is not a failure, so ordering is the only thing distinguishing them.
     """
     outcome = _degraded_outcome(
         {"type": "tool_call", "tool": "compute_reaction_energy", "arguments": "{}"},
@@ -726,11 +649,10 @@ def test_an_outage_announced_after_the_answer_has_started_fails() -> None:
 
 
 def test_a_turn_with_no_degradation_reports_the_ordering_as_untaken() -> None:
-    """No event means no ordering to read — which is a miss, not a vacuous pass.
+    """A turn with no degradation event reports the ordering as untaken, a miss.
 
-    This suite is run with the broker deliberately stopped, so a turn that announces nothing is
-    either a front door that stopped probing Temporal or a lane that was misconfigured. Both are
-    findings; neither is a green check.
+    The suite runs with the broker stopped, so no announcement means the front door stopped probing
+    Temporal or the lane was misconfigured.
     """
     outcome = _degraded_outcome(
         {"type": "tool_call", "tool": "compute_reaction_energy", "arguments": "{}"},
@@ -770,11 +692,10 @@ def test_an_answer_with_no_token_stream_still_gives_the_ordering_something_to_re
 
 
 def test_the_durable_launcher_must_actually_have_been_reached() -> None:
-    """A turn that answered from memory satisfies the ordering check and proves nothing.
+    """The durable launcher must actually have been reached.
 
-    The third finding is what stops that: `capability_degraded` arrives on *every* turn when the
-    broker is down, so without this the suite would pass on a question the model never tried to
-    compute.
+    `capability_degraded` arrives on every turn when the broker is down, so a turn answering from
+    memory would otherwise pass the ordering check.
     """
     outcome = _run_one(
         _probe(expects_tools=["compute_reaction_energy"]),
@@ -814,12 +735,10 @@ def test_every_declared_suite_has_its_probe_file() -> None:
 
 
 def test_the_m12_directory_is_invisible_to_the_corpus_run() -> None:
-    """`load_probes` globs one level, and these probes must not join the corpus run.
+    """The `m12` directory is invisible to the corpus run.
 
-    A scripted conversation asked as a single question, and a routing key graded against a
-    `direction`, would both change what `make live-probes` measures without changing a word of what
-    it reports. The subdirectory is what keeps the two runs separate, so it is asserted rather than
-    assumed.
+    `load_probes` globs one level; scripted conversations joining `make live-probes` would change
+    what it measures without changing what it reports.
     """
     corpus = {probe.id for probe in load_probes(str(M12_DIR.parent))}
     m12 = {probe.id for probe in load_probes(str(M12_DIR))}
@@ -870,12 +789,10 @@ def test_the_plan_gate_probe_scripts_an_approval_and_a_plan_change() -> None:
 
 
 def test_the_degradation_probe_carries_the_mock_selector_that_makes_it_runnable_offline() -> None:
-    """`[[d-collide]]` is what lets this suite run with zero LLM calls.
+    """The degradation probe carries the `[[d-collide]]` selector, so it runs with no LLM calls.
 
-    `cli/mock_llm` picks a behaviour by the `[[name]]` marker inside the turn's message, and
-    `storm_behaviours.d-collide` is the durable launch this probe needs. Carrying it inside the
-    question rather than beside it is `cli/live_storm.storm`'s rule, for its reason: two places
-    that can disagree about which scenario a turn ran is how a harness grades the wrong thing.
+    `cli/mock_llm` picks a behaviour by the marker inside the message; carrying it in the question
+    leaves one place to say which scenario a turn ran.
     """
     from chemclaw.cli.storm_behaviours import BEHAVIOURS
 

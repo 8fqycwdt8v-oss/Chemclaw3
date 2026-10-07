@@ -1,41 +1,15 @@
-"""Agent tools that start the two durable subsystems nothing could reach (gaps RCH-1, RCH-2).
+"""Agent tools that start core-owned durable workflows and report any durable job's status.
 
-`DevelopmentReportWorkflow` (all of Phase 5b) was built, tested, and registered on the
-background worker with **no caller anywhere** — no agent tool, no HTTP route, no Schedule — so
-the only way to start it in a running deployment was the Temporal CLI. This is the missing
-adapter, in the thin shape the QM launcher established (D-002): authorize → stamp the ambient
-actor → deterministic workflow id → return the id immediately. Nothing here *stores* durable state
-and the agent never blocks; completion reaches the chat through the existing push-back channel
-(F3-T3).
+Each launcher is a thin adapter: authorize, stamp the ambient actor, derive a deterministic
+workflow id, return it immediately. Nothing here stores durable state and the agent never
+blocks; completion reaches the chat through the push-back channel. The ids and reuse policies
+written here decide who rejoins whose run, so read `_report_id` before changing what goes into
+an id.
 
-It does, however, **define** durable identity, and that is not a lesser thing than storing it: the
-workflow ids for three workflows and the reuse policy that decides whether a repeat re-executes or
-rejoins are all written here, so "who gets whose run" is settled in this module. `_report_id` is
-where that is subtle enough to argue about; read it before changing what goes into an id.
-
-**This shape is superseded and this module is shrinking.** The BO campaign that used to be its
-second tool now lives in the `bo` connector bundle, declared as one `jobs:` entry over the
-generic `ConnectorJobWorkflow` (D-111) — which is where a *new* durable capability goes.
-
-The report deliberately did *not* follow it into a bundle (D-115): its dependency closure — the
-graph, the retrievers, the embedding index — is what core keeps for `gather_evidence` anyway, so
-the isolation a bundle exists to buy would be zero, and all that would remain is churn. What it
-*did* adopt is the `ConnectorJobResult` envelope, because that is what `get_durable_job_status`
-reads: without it the report was the one durable job a chemist could poll to `completed` and then
-have no tool that hands over the answer.
-
-`get_durable_job_status` stays here for good: it is generic over every durable job,
-connector-owned or not, and it is the only *status tool* — the DFT job was the last one with
-one of its own; D-118 made it a connector job, `agents/job_status.py` is gone, and so is the
-envelope-shaped exception this tool made for it.
-
-It is **not** the only place a finished job's result is collected, and the sentence that said so
-was wrong in a way that showed: three call sites collect one — this tool,
-`chemclaw.agent.job_results` (the mid-turn resume), and the in-turn wait in
-`chemclaw.connectors.jobs`, which is a different subsystem and cannot route through an agent
-tool. What is genuinely single is the *decode*:
-`chemclaw.durable.connector_job.envelope_from_result` is the one place raw becomes an envelope or
-an error, and all three go through it.
+A new durable capability belongs in a connector bundle as a `jobs:` entry, not here. The report
+stays in core because its dependencies are what core already carries for `gather_evidence`.
+`get_durable_job_status` is generic over every durable job; decoding a result is
+`durable.connector_job.envelope_from_result`'s job.
 """
 
 import asyncio
@@ -74,14 +48,9 @@ from chemclaw.durable.hypothesis_tournament import (
 )
 from chemclaw.durable.job_record import JobRecordSearch, lookup_job_record, search_job_records
 
-# Importing the workflow *types* to launch them is deliberate and bounded
-# (D-2026-08-17-a-workflow-type-is-a-launch-contract-not-a-durability-leak): it is what makes
-# `start_workflow`'s argument type-checked at the one site that decides durable identity, and it
-# costs 10 modules and no third-party package here, because both closures are what core already
-# carries for `gather_evidence`. It is allowed only while that stays true — a *bundle's* workflow
-# is reached by name across its own queue instead, and
-# `tests/test_layering.py::test_the_agent_layer_imports_no_bundle_workflow` is what keeps the two
-# cases apart.
+# Importing workflow types type-checks `start_workflow` at the site that decides durable identity.
+# Allowed only for core workflows; a bundle's workflow is reached by name (enforced by
+# `tests/test_layering.py`).
 from chemclaw.durable.memory_jobs import (
     CampaignSynthesisWorkflow,
     OptimizationCampaignWorkflow,
@@ -110,16 +79,11 @@ class DurableJobStatus(BaseModel):
     status: str
     summary: str | None = None
     result: dict[str, Any] = Field(default_factory=dict)
-    # The calculations this run rested on, as `record_knowledge_note` takes them (D-2026-08-21).
-    # That tool's docstring has said "get them from a job's result envelope" since D-133 against an
-    # envelope that carried none, so a note drafted from a calculation the agent had just run could
-    # not cite it. Empty for a job that recorded none — a report, or a run from before the refs
-    # were captured — which is the honest reading either way.
+    # The calculations this run rested on, in the form `record_knowledge_note` takes. Empty for a
+    # job that recorded none.
     calc_refs: list[str] = Field(default_factory=list)
-    # Why the run was asked for, when the answer came from the durable record (D-157). Empty on the
-    # live-Temporal path, which reads the workflow's result rather than the record — the launching
-    # turn is right there in the conversation, so restating its own reason back to the model would
-    # be noise; months later, when only the record survives, it is the whole point.
+    # Why the run was asked for, when the answer came from the durable record. Empty on the
+    # live-Temporal path, where the launching turn is still in the conversation.
     rationale: str = ""
 
 
@@ -135,45 +99,17 @@ _TERMINAL = {
 
 
 def _report_id(request: ReportRequest) -> str:
-    """A deterministic id for a report request, so re-asking is idempotent (D-011 discipline).
+    """A deterministic id for a report request, so re-asking is idempotent.
 
-    Keyed on the title, the section specs **and the requester's entitlement**. The last part is not
-    idempotency, it is access control, and leaving it out was a cross-user data exposure the moment
-    `retrieve_section` began reading entitlement-gated sources as the requester.
+    Keyed on title, sections, the requester and their roles. The entitlement half is access
+    control: `job_status()` applies no owner check, and sections read entitlement-gated sources, so
+    an id two principals could derive would let one collect a report built from the other's corpus.
+    Idempotency is therefore per actor.
 
-    Sharing one run across chemists is only sound while the run reads the same corpus for everyone.
-    It no longer does. Alice holding `chemclaw.sharedrive.reader` launches a report and the gated
-    share's documents land in the draft; Bob asks for the same title and sections, gets the same id
-    from `WorkflowAlreadyStartedError`, and `job_status()` — which applies no actor check, and which
-    `find_past_jobs` explicitly points people at with other people's job ids — hands him a completed
-    report built from a corpus his AD group excludes him from. The mirror case is the defect this
-    was all meant to fix: Bob first, and Alice silently receives the narrowed sweep.
-
-    The roles are what the corpus actually depends on; the actor is in the key as well, because it
-    is what the draft is attributed to. So idempotency is **per actor**: the same chemist asking
-    twice gets one run, and two chemists with identical entitlements get two. An earlier version of
-    this paragraph claimed the second pair still share a run — measured false, since `requested_by`
-    is in the payload below. Sharing across actors would be the cheaper answer and it is not
-    available: the id is what `job_status()` hands a report out by, and that call applies no actor
-    check, so an id two principals can both derive is an id either can collect.
-
-    **The model-written half is canonicalised; the entitlement half is not.** The requester of this
-    tool is an LLM emitting a section list, and it reorders and re-cases freely, so a byte-exact
-    key made "re-asking is idempotent" true only for a byte-identical request: measured, swapping
-    two sections, re-casing the title, re-casing a heading and a trailing space on a query each
-    produced a *different* id and therefore a second unbounded multi-section research run — the
-    cost `CORE_EXPENSIVE_ACTIONS` gates this tool to avoid. Title, headings and queries are
-    therefore whitespace-collapsed and casefolded, and the section list is sorted.
-
-    What that costs is real and small: two requests differing only in casing or section order share
-    one run, so the *first* requester's casing and ordering are what the draft renders. The second
-    is not misled — `get_durable_job_status` reports the run's own summary, which names the title
-    actually drafted — and a recorded draft is edited by a chemist after the fact, not before.
-
-    `requested_by`, `requested_roles` and `memory_layer` are deliberately left byte-exact, and that
-    is the same argument as the paragraph above rather than a separate one: they are not free text
-    a model composes. Folding two spellings of a principal or a role together is precisely the
-    cross-actor merge this key exists to prevent, and `memory_layer` is a closed set.
+    The model-written half (title, headings, queries) is whitespace-collapsed and casefolded and the
+    sections sorted, so trivial rewordings do not launch a second expensive run; the first
+    requester's casing is what renders. `requested_by`, `requested_roles` and `memory_layer` stay
+    byte-exact, since folding them would merge actors.
     """
     payload = [
         canonical_text(request.title),
@@ -210,17 +146,14 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         The job id to poll for progress.
     """
     authorize_trigger("request_development_report")
-    # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user. Its
-    # result travels on the request rather than being discarded — see `ReportRequest.requested_by`.
+    # `require_actor`: under Entra, refuse durable work with no user. The result travels on the
+    # request as `ReportRequest.requested_by`.
     request = ReportRequest(
         title=title,
         sections=sections,
         requested_by=require_actor(),
         requested_roles=sorted(get_current_roles()),
-        # This tool only ever runs inside a turn, where the front door has bound the id — so the
-        # run's own log lines and its recorded draft join back to the conversation that asked.
-        # `or ""` rather than a minted id: a launch outside a turn is unjoined, and saying so is
-        # the point (`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`).
+        # Joins the run's logs and draft back to the asking turn; empty (not minted) outside a turn.
         correlation_id=get_current_correlation_id() or "",
         # The conversation the finished draft is shown in, as a document artefact.
         session_id=get_current_session_id() or "",
@@ -236,29 +169,19 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
         )
     except WorkflowAlreadyStartedError:
-        # Same report already running or completed: hand back the existing id rather than
-        # redrafting it (the QM tool's idempotency contract, applied here). Deliberately no
-        # `job_started` signal: this run already existed (and may already be finished), so
-        # announcing a start would be false. The generated connector-job launcher skips the
-        # announcement on a duplicate for exactly the same reason.
+        # Already running or completed: return the existing id, and send no `job_started` signal,
+        # since announcing a start would be false.
         return workflow_id
     record_job_started(handle.id, "report")
     return handle.id
 
 
-# The four corpus-scanning jobs this tool can start, by the word a chemist would use.
-#
-# **They exist here because D-2026-08-25 took their Schedules away and left nothing behind.** That
-# decision was right — each of these writes knowledge, and knowledge arriving on a timer is
-# knowledge nobody asked for — but the change removed the trigger without adding one, so all four
-# became unreachable code whose docstrings claimed they were "started on demand". That is the
-# defect this module's own header was written about: a durable workflow registered on the worker
-# with no caller anywhere. This is the adapter, in the same thin shape.
+# The four corpus-scanning jobs this tool can start, by the word a chemist would use. They write
+# knowledge, so they run on demand rather than on a Schedule.
 MemoryJobKind = Literal["campaign", "playbook", "optimization", "observation-promotion"]
 
-# Typed as the no-argument workflow method Temporal's own overload takes, rather than as the four
-# classes: a bare dict of heterogeneous workflow types degrades to `type[object]` and `.run` stops
-# type-checking, which is how the launcher would silently accept something that is not a workflow.
+# Typed as Temporal's no-argument workflow method so `.run` keeps type-checking; a dict of
+# heterogeneous classes would degrade to `type[object]`.
 _MEMORY_JOBS: dict[MemoryJobKind, MethodAsyncNoParam[Any, list[str]]] = {
     "campaign": CampaignSynthesisWorkflow.run,
     "playbook": PlaybookDistillationWorkflow.run,
@@ -306,9 +229,7 @@ async def synthesize_memory(  # noqa: D417 - `runtime` is deliberately not in `A
         recorded, which may be empty when the corpus supports nothing new.
     """
     authorize_trigger("synthesize_memory")
-    # `require_actor` before anything durable starts, the core rule (F4-T3): these write notes
-    # into the knowledge repository, and a note with no author behind it is exactly what the gate
-    # exists to prevent.
+    # `require_actor` before anything durable starts: these jobs write attributed notes.
     actor = require_actor()
     client = await connect()
     # The tool call's own id is what is identical on a replay and different between two
@@ -322,10 +243,8 @@ async def synthesize_memory(  # noqa: D417 - `runtime` is deliberately not in `A
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
         )
     except WorkflowAlreadyStartedError:
-        # Today's run of this kind already exists — see `_memory_job_id` for why a day is the unit.
-        # Hand back its id rather than starting a second full-corpus scan, and deliberately no
-        # `job_started` signal: this run already existed and may already have finished, so
-        # announcing a start would be false. Same contract as the report launcher above.
+        # Today's run of this kind already exists (see `_memory_job_id`): return its id, with no
+        # `job_started` signal.
         return workflow_id
     logger.info("memory synthesis %s started by %s as %s", kind, actor, handle.id)
     record_job_started(handle.id, "memory-synthesis")
@@ -333,37 +252,13 @@ async def synthesize_memory(  # noqa: D417 - `runtime` is deliberately not in `A
 
 
 def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False, discriminator: str = "") -> str:
-    """A deterministic id for one kind's synthesis, keyed on the **UTC date**.
+    """A deterministic id for one kind's synthesis, keyed on the UTC date.
 
-    There is no request to key on: the input is the whole corpus as it stands, so two chemists
-    asking the same morning want the same answer and must not each pay a full re-scan — nor write
-    one finding twice, which is what `memory.ids.with_id`'s anchor can produce when a cluster grows
-    between two runs.
-
-    A day is the unit because a day is what the retired Schedule used
-    (`memory_synthesis_schedule_minutes` defaulted to 1440), so the cadence a deployment already
-    reasoned about is preserved and only the *trigger* moved from a clock to a person.
-
-    The cost of the daily unit is stated rather than hidden: a second ask on the same day
-    rejoins the first run, so an ingest landing between the two is not picked up. `fresh` is the
-    escape hatch for exactly that — it makes the run really re-mine. The caller opts in, because
-    the default has to stay the shared scan: "mine after this afternoon's import" was the tool's
-    own recommended use, and it silently returned the morning run's id.
-
-    **`fresh` used to read the clock, and that made it the one launcher in this tree that a replay
-    duplicates.** The suffix was `strftime('%H%M%S')`, so a tool killed mid-call and re-run on
-    resume — which
-    `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` measured happens
-    with the original arguments — minted a *different* workflow id and started a second
-    full-corpus mining run. Expensive rather than corrupting, because the notes both runs write
-    carry cluster-anchored ids and collide, but it is the only id here that is not a function of
-    its inputs, which is the property every other launcher has deliberately.
-
-    `discriminator` is that function instead: the caller passes something that is identical on a
-    replay of one ask and different between two genuine ones, which is what the tool call's own id
-    is. Empty falls back to the clock, preserving the old behaviour for a caller that has nothing
-    better — and `agent/durable_tools.py`'s tool passes the runtime's id, so the agent path never
-    takes that arm.
+    The input is the whole corpus, so same-day asks share one scan and do not write a finding twice.
+    The cost is that a second ask the same day misses data ingested in between; `fresh` forces a
+    real re-mine. `discriminator` makes a fresh id a function of its inputs — the tool call id is
+    the same on a replay and different between asks — so a resumed call rejoins rather than
+    duplicates. Empty falls back to the clock.
     """
     day = datetime.now(UTC).date().isoformat()
     if not fresh:
@@ -414,42 +309,13 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
             connector envelope — the id belongs to a workflow no tool advertises, and reporting it
             as completed with an empty result would say a calculation is done while withholding it.
     """
-    # **Why the second case exists, in a comment rather than in the docstring**: Pydantic and
-    # `convert_to_openai_tool` publish this docstring as the tool's schema description, so every
-    # word of it is re-sent on every model call. The history below is for a reader of this file:
-    # the case used to degrade to a bare status, because the DFT job returned its own typed result
-    # and had its own status tool (`agents/job_status.py`). D-118 made it a connector job, so every
-    # durable job this system hands an id for returns the envelope. That tier is gone entirely now
-    # (`D-2026-08-26-semiempirical-is-the-whole-tier`), which is the sharper reason this paragraph
-    # does not belong in the model's context: it was describing a system the model cannot reach.
+    # Every durable job returns the connector envelope, so a completed status decodes through
+    # `completed_job_status`.
     status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
-    # Framed **here**, in the `@tool`, and not in `job_status` below — which is the same mistake in
-    # the same shape as the one this fixes. `job_status` is also the whole body of the front door's
-    # `GET /jobs/{id}`, so framing inside it put envelope markup into an HTTP response that
-    # `GET /jobs` returns raw for the same row, breaking the property that module's docstring
-    # claims: a chemist polling in chat and one refreshing a page cannot disagree about a run. The
-    # envelope belongs to the model's context, so it belongs at the model's edge — which is exactly
-    # where `find_past_jobs` puts it, framing on top of a raw `search_job_records`.
-    #
-    # Both free-text fields, for `_framed_free_text`'s stated reason: they are the two columns of
-    # `job_records` a person (or their model) wrote, read back months later in somebody else's
-    # turn.
-    #
-    # And the third field, which is the one the two framed ones made look safe. `result` is the
-    # job's own `ConnectorJobResult.data` — for a BO campaign, `CampaignResult.model_dump()`, whose
-    # `Observation.params` keys and categorical values are strings the *requester* chose in the
-    # campaign spec, and whose `provenance` is a free string. So the same sentence a launcher
-    # interpolates into `summary` — framed here, on the argument that a first-party template is not
-    # a first-party string — sat unescaped one field over, carrying a live closing delimiter into
-    # whoever polls the id. `find_past_jobs` hands every chemist everybody's ids and this tool
-    # applies no owner check, deliberately (D-2026-08-01-a-running-job-has-no-owner: an id is
-    # `hash([connector, job, payload])`, so a run genuinely has more than one requester); an open
-    # read is exactly why the text on it has to be neutralised.
-    #
-    # **Defanged rather than framed**, which is the `_framed_content` distinction one shape further
-    # in: an envelope wraps a span of text, and this is a structured payload with no span to wrap
-    # and no id to attribute beyond the one the two fields beside it already carry. The delimiter
-    # is neutralised; the citation frame stays where a citation can use it.
+    # Neutralised here at the model's edge, not in `job_status`, which also serves `GET /jobs/{id}`
+    # where markup would be noise. `rationale` and `summary` are framed (people and models wrote
+    # them, and `find_past_jobs` exposes every id to everyone). `result` is defanged rather than
+    # framed: it is structured but carries requester-chosen strings, with no span to wrap.
     return status.model_copy(
         update={
             "summary": _framed_free_text(status.summary or "", job_id) or None,
@@ -462,45 +328,23 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
 async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobStatus:
     """One durable job's status, from Temporal while it remembers and the record afterwards.
 
-    The tool above and the front door's `GET /jobs/{id}` are the same question asked by different
-    surfaces, so they are one function: a chemist polling in chat and a chemist refreshing a page
-    must not be able to get different answers about the same run.
-
-    `wait_seconds` is where the two surfaces legitimately differ, and it is a parameter for that
-    reason rather than a fork: a poll from the *model* costs a whole conversation turn — connector
-    open, graph compile, model call — so answering `running` for a job finishing two seconds later
-    spends another full turn learning what a short long-poll would have delivered now. The tool
-    passes `job_status_wait_seconds`; the HTTP route passes nothing, because a browser's poll is
-    cheap and holding its request open is not. The wait is Temporal's own long-poll
-    (`handle.result()`), not a sleep loop.
-
-    **A run nothing has started reads `queued`, on both surfaces.** Temporal calls a workflow
-    RUNNING from the moment it is accepted, so a run on a queue nothing polls — every queued tool
-    call on a lane with no interactive worker — read `running` here for as long as it existed, and
-    the model told the chemist "the job is still running" about work no process had touched. A
-    RUNNING run that no worker has started reads `queued`, with the reason as its summary
-    (`_not_started_reason`). This used to be a flag only the tool set, because `Chemclaw3_ui`'s
-    `jobReconcile.terminalEventFrom` treated every status but `running` as an ending and would have
-    closed a waiting job's card as failed; the UI now names the endings instead (Chemclaw3 #514),
-    so the flag was a difference between the two surfaces with no reason left, and it is gone.
+    Shared by the tool and `GET /jobs/{id}` so chat and UI cannot disagree about a run.
+    `wait_seconds` is a Temporal long-poll, used by the tool because a model poll costs a whole
+    turn; the HTTP route passes nothing. A RUNNING run that no worker has started reads `queued`,
+    with the reason as its summary.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
     try:
         description = await handle.describe()
     except RPCError as exc:
-        # **NOT_FOUND only.** The rationale below is sound for "Temporal has never heard of this
-        # id" and for nothing else, and `RPCError` carries `.status` while this code never read it:
-        # UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED and PERMISSION_DENIED all arrived here
-        # and were reported to a chemist as "no durable job with id …". A broker rolling during a
-        # poll told them their running campaign did not exist.
+        # NOT_FOUND only: any other RPC status is an outage and must not read as "no such job".
         if exc.status is not RPCStatusCode.NOT_FOUND:
             raise SubsystemUnavailableError(
                 f"the durable subsystem did not answer for job {job_id!r} ({exc.status.name})"
             ) from exc
-        # Temporal has never heard of this id — which, for a job that genuinely ran, means its
-        # history has aged out rather than that it never existed. Ask the durable record before
-        # telling a chemist their campaign does not exist.
+        # An unknown id usually means the history aged out; consult the durable record before saying
+        # the job does not exist.
         recorded = await _recorded_status(job_id)
         if recorded is None:
             raise ValueError(f"no durable job with id {job_id!r}") from exc
@@ -512,31 +356,19 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
         except TimeoutError:
             return await _still_open(client, job_id)
         except Exception:
-            # The run reached a terminal state that is not success while we waited (failed,
-            # cancelled, timed out) — `handle.result()` raises for those. Re-describe once and
-            # report the state by the same mapping the no-wait path uses.
+            # The run ended unsuccessfully while we waited (`handle.result()` raises); re-describe
+            # once and report it via the no-wait mapping.
             refreshed = await handle.describe()
             ended = _TERMINAL.get(refreshed.status, "running") if refreshed.status else "running"
             return DurableJobStatus(job_id=job_id, status=ended)
         return completed_job_status(job_id, result)
     if status == "running":
-        # Still going, and this is the branch a `wait_seconds=0` caller falls into — the front
-        # door's `GET /jobs/{id}` passes nothing, so it is the normal path. It used to fall through
-        # to the clause below, where `failed_job_reason` calls `handle.result()`: on a *closed*
-        # execution that is a history read, and on a RUNNING one it is Temporal's unbounded
-        # long-poll. Measured on 2026-08-28 against a live broker, `job_status(wait_seconds=0)`
-        # blocked for over 15 s on a running workflow and would have blocked for the life of the
-        # job. `job_status_wait_seconds` is `ge=0`, so a deployment that set it to 0 hung the agent
-        # tool the same way.
+        # Still running: return before `failed_job_reason`, whose `handle.result()` would be an
+        # unbounded long-poll on an open execution.
         return _open_status(job_id, await _not_started_reason(client, description))
     if status != "completed":
-        # A status word alone was everything the model got for a failed run — measured,
-        # `summary=None, result={}`. Both of the other two collectors render the cause, and this is
-        # the one the tool's own docstring tells the model to poll, so for a job that outlived its
-        # turn with a dropped push-back it is the *only* one. `failed_job_reason` is that same walk,
-        # extracted so there is one answer to "why did it fail" rather than three — and it is safe
-        # here precisely because the guard above has already excluded the one status for which its
-        # `handle.result()` is a wait rather than a read.
+        # Render the failure cause, not just the status word, via the shared `failed_job_reason`;
+        # safe because open runs returned above.
         return DurableJobStatus(
             job_id=job_id, status=status, summary=await failed_job_reason(handle) or None
         )
@@ -564,19 +396,13 @@ async def _not_started_reason(
 ) -> str | None:
     """Why an open run is not running yet, or None when something has it (or it cannot be told).
 
-    **A started activity is running, whatever else is true** — it may be on another queue than the
-    workflow's, so the workflow's own pollers say nothing about it. Short of that, two states are
-    waiting rather than running:
+    A started activity means running. Otherwise two states are waiting:
 
-    * a queued tool call whose activity is scheduled and not started is waiting for a slot — the
-      same reading `connectors/queued.py::_progress` gives the turn's card, so the card and this
-      answer cannot disagree;
-    * a run whose own task queue has no poller has not been, and cannot be, advanced by anything.
-      A live lane ran exactly so: `connector-calc-interactive` had no poller, and every
-      `predict_pka` waiting on it read `running` until it timed out.
+    * a queued tool call whose activity is scheduled but not started is waiting for a slot (the
+      same reading `connectors/queued.py::_progress` gives the turn's card);
+    * a run whose task queue has no poller cannot be advanced by anything.
 
-    A queue that could not be asked keeps `running`: the status this tool always gave, and not a
-    claim about the run that a failed RPC is evidence for.
+    If the queue cannot be asked, the answer stays `running`.
     """
     pending = description.raw_description.pending_activities
     started = PendingActivityState.PENDING_ACTIVITY_STATE_STARTED
@@ -609,17 +435,8 @@ async def _not_started_reason(
 async def _recorded_status(job_id: str) -> DurableJobStatus | None:
     """The stored record for `job_id` as a status, or None when nothing was recorded.
 
-    **This used to hardcode `"completed"`**, on the stated reasoning that "the record is only ever
-    written for a run that completed (the workflow raises before reaching the write otherwise)".
-    That was true and stopped being true on 2026-08-27, when the failure path started writing a row
-    of its own — precisely so a failed job would stop being invisible. Left as it was, the fix would
-    have made this surface *wrong* rather than merely silent: a failed job whose Temporal history
-    had aged out would report as **completed, with an empty summary**, which is worse than the
-    "failed, no reason" it replaced. The record now says which it was, so read it.
-
-    `failure_reason` is surfaced as the summary for a failed row for the same reason
-    `failed_job_reason` exists on the live path: the state word without the cause is the answer
-    nobody can act on, and this is the branch that serves a run the broker has already forgotten.
+    Records are written for failed runs too, so the record's own state is reported, with
+    `failure_reason` as the summary of a failed row.
     """
     record = await lookup_job_record(job_id)
     if record is None:
@@ -629,10 +446,7 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
         status=record.state,
         summary=record.summary or (record.failure_reason or None),
         calc_refs=record.calc_refs,
-        # Projected on the way out as well as on the way in, and the difference is *old rows*: a
-        # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer
-        # search collected here would still spend a context window on coordinates. The projection
-        # is idempotent, so applying it to a record already written without them costs a walk.
+        # Projected on the way out too, for old rows that still hold whole geometries; idempotent.
         result=readable_in_this_session(without_geometry(record.result)),
         rationale=record.rationale,
     )
@@ -641,18 +455,8 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
 def _framed_free_text(text: str, job_id: str) -> str:
     """One free-text field of a past run, wrapped as data and attributed to the run that wrote it.
 
-    `find_past_jobs` is the one tool whose whole purpose is to return **other people's** text, and
-    a job record is never PR-gated: chemist A types a rationale into a launcher and it reaches
-    chemist B's model turn verbatim, months later, as tool output. That is the stored, cross-user
-    form of the indirect prompt-injection vector `expand_note` and `gather_evidence` already frame a
-    note body against, so it gets the same envelope rather than a second mechanism.
-
-    Empty stays empty: an envelope around nothing is context spent to say nothing. `rationale` is
-    `min_length=1` where records are written, but a summary is optional and both are read back out
-    of a database column, so the guard is applied to whatever is passed rather than to one field.
-
-    The envelope's source id is the `job_id` — the run *is* the source here, and it is the id a
-    citation of a past run should point at (and the one `get_durable_job_status` takes).
+    `find_past_jobs` returns other people's text verbatim, months later, so it is framed like a note
+    body. Empty stays empty. The envelope's source id is the `job_id`, the id a citation points at.
     """
     return frame_untrusted(text, note_id=job_id) if text else ""
 
@@ -690,35 +494,10 @@ async def find_past_jobs(text: str = "", connector: str = "") -> JobRecordSearch
         concluding a run has not happened**: the search is capped, so an empty or a full list is
         not proof of absence.
     """
-    # Two fields are framed and four are not, and both halves of that are deliberate.
-    #
-    # `rationale` is prose a person (or their model) wrote to justify a run — untrusted by
-    # construction. `summary` is the subtler one: the sentence is composed by first-party connector
-    # code, which reads as trusted until you look at what it interpolates — `spec.objective_name`,
-    # `request.title`, `' + '.join(spec.reactants)` — all model-authored strings echoed verbatim. A
-    # first-party template is not a first-party string, so framing the reason and not the summary
-    # would leave the vector open through the neighbouring field. (This is the inconsistency
-    # BACKLOG notes at `gather_evidence`, which frames a chunk's `content` and not its `source`;
-    # the point of naming it here is to not repeat it.)
-    #
-    # The other four carry no free text and framing them would cost more than it buys. `job_id` and
-    # `note_id` exist to be handed straight back to `get_durable_job_status` and `expand_note`, so
-    # wrapping them would break the follow-up call this tool's whole docstring points at — and they
-    # are generated (`<connector>-<job>-<hash>`) or slug-validated (`Note.id` is
-    # `^[A-Za-z0-9][A-Za-z0-9_.-]*$`), a charset with no `<` in it. `connector` and `job` are
-    # manifest names matched against `^[a-z][a-z0-9_-]*$`, and `completed_at` is a `datetime`.
-    # Framing the structured half of a hit would spend the model's ability to read it on nothing.
-    #
-    # Nothing is said about the envelope in the docstring above, which is the model-facing text:
-    # the system prompt is the single place that vouches for the delimiter, and a per-tool
-    # restatement is exactly the drift `test_instructions_name_the_exact_delimiter_framing_uses`
-    # exists to catch. Framing is also applied *here* rather than in `search_job_records`, because
-    # the front door's `GET /jobs` reads that same function for a human UI, where an envelope is
-    # noise; the envelope belongs to the model's context, so it belongs to the agent layer.
-    #
-    # The framing is applied to the *hits* and the page's own flags are carried through untouched:
-    # `hits_truncated` and `records_kept` are this system's own statements about its own store, not
-    # anybody's free text, and a `verdict` is derived from them.
+    # Frame `rationale` and `summary` (summaries interpolate model-authored strings); leave
+    # `job_id`, `note_id`, `connector`, `job` and `completed_at`, which are restricted charsets or
+    # datetimes and must be passable straight back to follow-up tools. Framing happens here, not in
+    # `search_job_records`, which also serves the HTTP UI. Page flags pass through untouched.
     found = await search_job_records(text, connector)
     return found.model_copy(
         update={
@@ -738,11 +517,8 @@ async def find_past_jobs(text: str = "", connector: str = "") -> JobRecordSearch
 def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
     """Decode a finished durable job's raw result into the status this system reports.
 
-    This is the agent layer's share of that job: `envelope_from_result` does the decode — the
-    same one `chemclaw.connectors.jobs` needs for its in-turn wait — and this wraps it in the
-    status model only the agent reports. The two waiters here are `get_durable_job_status`, which
-    polls, and `chemclaw.agent.job_results`, the mid-turn resume that waits on the handle instead;
-    what they must do with the answer is identical.
+    `envelope_from_result` decodes; this wraps it in the agent's status model for both waiters
+    (`get_durable_job_status` and `agent.job_results`).
 
     Args:
         job_id: The job the result belongs to, for the status and for the error message.
@@ -766,12 +542,9 @@ def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
 def readable_in_this_session(result: Any) -> Any:
     """A job result with a report artefact's id only where that artefact can be opened.
 
-    A development report run is shared by every session that asks for the same report — the run's
-    id deliberately leaves the session out — and the artefact is written into the session that
-    started it, alone. So the id travels with the session it belongs to (`EXHIBIT_SESSION`), and a
-    status read anywhere else (another session's poll, `GET /jobs/{id}`, which has no session) gets
-    the note and no `exhibit_id`, rather than a link that answers 404 there. The session key itself
-    is dropped everywhere: it is a session id, and this result reaches any signed-in caller.
+    A report run is shared across sessions but its artefact lives in the starting session, so the
+    id is kept only when read in that session (`EXHIBIT_SESSION`). The session key itself is always
+    dropped, since the result reaches any signed-in caller.
     """
     if not isinstance(result, dict) or EXHIBIT_SESSION not in result:
         return result
@@ -784,22 +557,14 @@ def readable_in_this_session(result: Any) -> Any:
 async def cancel_job(job_id: str) -> bool:
     """Ask Temporal to cancel a running job; False when the id is unknown to it.
 
-    Cancellation is cooperative — Temporal delivers it to the workflow, which unwinds through its
-    own teardown — so this returns once the request is *delivered*, not once the run has stopped.
-    Poll `job_status` for the outcome.
-
-    Deliberately **not** an agent tool. Stopping work a person asked for is a decision about that
-    person's work, and the agent already has every incentive to tidy up after itself; the same
-    reasoning keeps the plan gate and the proposal sign-off off the tool surface (D-005).
+    Cooperative: returns once the request is delivered; poll `job_status` for the outcome. Not an
+    agent tool — stopping a person's work is that person's decision.
     """
     client = await connect()
     try:
         await client.get_workflow_handle(job_id).cancel()
     except RPCError as exc:
-        # `False` means "Temporal does not know this id", and the route turns it into a 404. Any
-        # other status is an outage, and reporting it as a nonexistent job is the worst available
-        # answer: an operator cancelling a runaway DFT run during a broker roll was told the run
-        # did not exist, stopped trying, and the cluster kept burning.
+        # `False` means unknown id (the route's 404); any other status is an outage and is raised.
         if exc.status is not RPCStatusCode.NOT_FOUND:
             raise SubsystemUnavailableError(
                 f"the durable subsystem did not answer the cancel for job {job_id!r} "
@@ -812,10 +577,8 @@ async def cancel_job(job_id: str) -> bool:
 def _tournament_id(request: TournamentRequest) -> str:
     """A deterministic workflow id, so re-asking the same question rejoins the run.
 
-    The actor and roles are in the key for the reason `_report_id` records: `job_status()` applies
-    no owner check, so two principals with different entitlements colliding on one id means one
-    collects the other's work. The question and context are model-authored text and go through
-    `canonical_text`; the entitlement half stays byte-exact.
+    Actor and roles are in the key for `_report_id`'s reason; question and context go through
+    `canonical_text`, the entitlement half stays byte-exact.
     """
     payload = [
         canonical_text(request.question),

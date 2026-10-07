@@ -1,12 +1,8 @@
 """The four-repo lane and `processes.sh` must never both start one server.
 
-`infra/live/e2e-full-stack/up.sh` calls `infra/live/processes.sh up`, and the two keep pidfiles in
-different run dirs. So a fleet server both scripts start is one `processes.sh` cannot recognise as
-its own: its `running` check is false while the port is already served, and its collision guard
-kills the lane at boot. That happened twice — `rxnpredict`, then `props` the day core gained a
-`props` manifest — each time behind a comment in `up.sh` that enumerated `processes.sh`'s set and
-had gone stale. The rule is derived here from the same test `processes.sh::fleet_bundle_names`
-makes, so a new core manifest turns this red instead of the lane.
+The two keep pidfiles in different run dirs, so a server both start is one `processes.sh` cannot
+recognise, and its collision guard kills the lane at boot. The rule is derived from the same test
+`processes.sh::fleet_bundle_names` makes, so a new core manifest turns this red instead of the lane.
 """
 
 from __future__ import annotations
@@ -69,10 +65,7 @@ def _function(name: str) -> str:
 def test_up_checks_no_derived_bundle_s_credential_by_a_hardcoded_name() -> None:
     """A fleet bundle's credential check is derived, like its start, never a literal in `up()`.
 
-    `start_props` moving to `processes.sh` took its credential check with it, and the literal list
-    left behind (`chem`, `safety`) silently skipped `props`, `rxnpredict` and every later bundle.
-    `calc` is exempt by name: the literal check is of the *backend* on `calc_server_url`, which is
-    not a connector, while core's `calc` bundle is served by this repository's own process.
+    `calc` is exempt: its literal check is of the backend on `calc_server_url`, not a connector.
     """
     body = _function("up")
     assert "check_fleet_bundle_credentials" in body, f"{_UP}'s `up()` checks no fleet credential"
@@ -130,10 +123,8 @@ def _rxnpredict_lane_defaults() -> dict[str, str]:
 def test_the_lane_starts_rxnpredict_with_its_deterministic_doubles() -> None:
     """`rxnpredict` comes up with a working forward and conditions surface, not an empty one.
 
-    `up.sh`'s own `start_rxnpredict` set `fake_a`/`fake_c`; when `start_fleet_bundles` took the
-    server over, the defaults went with the deleted function, and a fleet checkout with no ML extras
-    then answers `/healthz` 200 with no predictor registered — every call fails while the lane reads
-    green. This runs the fleet's own registration and readiness check under the lane's environment.
+    Without its deterministic doubles a checkout with no ML extras answers `/healthz` with no
+    predictor registered. Runs the fleet's own registration and readiness under the lane's env.
     """
     defaults = _rxnpredict_lane_defaults()
     assert set(defaults) == {
@@ -196,10 +187,8 @@ def _stand_in_export(forward: str, conditions: str) -> str:
 def test_the_lane_says_its_rxnpredict_doubles_are_stand_ins() -> None:
     """A double the lane starts is named a stand-in, and real weights are not.
 
-    The doubles answer every input with the same products, and a real model on the lane presented
-    one as a forward prediction that "confirms" a product. Core only says so when the deployment
-    names the connector (`agent/tool_framing.py::stand_in_notice`), so the lane has to name it
-    whenever it is what the lane started — and only then.
+    The doubles answer every input with the same products, and core only says so when the
+    deployment names the connector (`agent/tool_framing.py::stand_in_notice`).
     """
     defaults = _rxnpredict_lane_defaults()
     assert (
@@ -216,11 +205,8 @@ def test_the_lane_says_its_rxnpredict_doubles_are_stand_ins() -> None:
 def test_the_labeller_the_lane_starts_is_ready_on_a_fleet_checkout_without_its_models() -> None:
     """`rxnlabel` comes up ready from a plain fleet checkout, and says which labeller it is.
 
-    The lane starts it from the fleet's own workspace interpreter, which installs no `models`
-    extra by default — so the question that matters is whether that server passes its own readiness
-    probe (it labels a fixture end to end) rather than refusing traffic, and that the version it
-    stamps rows with names the mapper's state, so a row labelled without one goes stale the day
-    weights arrive.
+    Its readiness probe labels a fixture end to end, and the stamped version names the mapper's
+    state so rows labelled without one go stale when weights arrive.
     """
     interpreter, reason = sibling_python("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     if interpreter is None:

@@ -1,12 +1,7 @@
 """The vector-store seam: the reference store, the Qdrant adapter, and provider selection.
 
-No database and no Qdrant server. The adapter is exercised against a fake client injected through
-its own seam — the construction `tests/test_warehouse_retriever.py` uses for a warehouse, and the
-reason `qdrant-client` is not a dependency of this repository.
-
-What is *not* covered here, stated rather than implied: nothing has run against a real Qdrant. The
-fake agrees with the adapter about the calls, which is a different claim from the server agreeing
-with them. `docs/planning/BACKLOG.md` carries the row.
+No database and no Qdrant server: the adapter runs against a fake client injected through its own
+seam, so `qdrant-client` is not a dependency. Nothing here has run against a real Qdrant.
 """
 
 from typing import Any
@@ -58,20 +53,16 @@ def test_the_reference_store_satisfies_the_protocol() -> None:
     assert isinstance(QdrantVectorStore(client=_FakeClient()), VectorStore)
 
 
-# The chunking these fixtures are cut under. `ChunkRecord` gained a required `chunking_key` in
-# D-2026-08-08-a-derived-index-must-record-what-derived-it: a chunk row's identity is
-# `(doc_id, chunking_key, ordinal)`, because `doc_id` is a content hash shared across shares
-# while the cutting is per-share. These fixtures exercise the point-id contract, which is
-# indifferent to the value — so one constant, named, rather than a literal at each site.
+# The chunking these fixtures are cut under. A chunk's identity is
+# `(doc_id, chunking_key, ordinal)`; these fixtures are indifferent to the value, so it is one named
+# constant.
 _CHUNKING = "2000:200"
 
 
 async def test_a_search_ranks_by_similarity_and_drops_non_matches() -> None:
     """Best first, and a vector orthogonal to the query is not a hit at all.
 
-    The `> 0` floor every index in this repository applies: without it a nearest-neighbour search
-    returns the k nearest unconditionally, so a narrow corpus surfaces unrelated documents as cited
-    evidence.
+    Without the `> 0` floor a narrow corpus would surface unrelated documents as cited evidence.
     """
     store = InMemoryVectorStore()
     await store.upsert(
@@ -97,11 +88,9 @@ async def test_an_identical_vector_scores_one_and_does_not_raise() -> None:
 
 
 async def test_a_scope_narrows_before_the_cut_rather_than_after_it() -> None:
-    """The property the whole design rests on: filter first, *then* take the top k.
+    """A scope filters before the top-k cut, not after it.
 
-    Post-filtering returns nothing here — the single nearest vector belongs to the excluded group,
-    so a k=1 search followed by a filter yields an empty list while the correct answer is the best
-    point that is actually eligible.
+    Here the nearest vector is excluded, so post-filtering a k=1 search would return nothing.
     """
     store = InMemoryVectorStore()
     await store.upsert(
@@ -162,12 +151,9 @@ async def test_a_zero_query_vector_matches_nothing_rather_than_ordering_over_nan
 
 
 def test_a_point_id_round_trips_through_the_whole_catalogue_key() -> None:
-    """The address is `(doc_id, chunking_key, ordinal)` — the chunk's primary key, all of it.
+    """A point id round-trips the whole key `(doc_id, chunking_key, ordinal)`.
 
-    **The chunking is not optional here.** This index shipped keyed on `(doc_id, ordinal)` the same
-    day `document_chunks` gained `chunking_key`; neither change was wrong alone, and together two
-    cuttings of one document collided on a single point, so re-tuning `chunk_chars` would have had
-    the finer cutting silently overwrite the coarser's vectors.
+    Without the chunking, two cuttings of one document would collide on a single point.
     """
     assert parse_point_id(point_id("doc-abc", "c1800o200", 3)) == ("doc-abc", "c1800o200", 3)
     # `rpartition` on `#`, so a doc id carrying one still parses.
@@ -238,11 +224,8 @@ class _FakeResponse:
 class _FakeModels:
     """The `qdrant_client.models` names this adapter builds with, as plain recording objects.
 
-    The other half of the fake, and the reason these tests *run* rather than skip: the adapter
-    reaches for the vendor namespace through `_models()`, so patching that one function is enough
-    to exercise every line of it on a machine with no `qdrant-client` installed. Skipping instead
-    would leave the adapter's own logic — the payload it writes, the filter it builds, the error
-    type it raises — asserted by nothing, which is the state the seam exists to avoid.
+    The adapter reaches the vendor namespace through `_models()`, so patching it exercises the
+    adapter's payloads, filters and errors without `qdrant-client` installed.
     """
 
     class PointStruct:
@@ -380,11 +363,9 @@ def test_the_databricks_provider_builds_the_databricks_store(
 def test_databricks_will_not_accept_the_shipped_qdrant_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The emptiness check above cannot catch this: the field has a non-empty default.
+    """Databricks will not accept the shipped Qdrant default URL.
 
-    `vector_store_url` ships as Qdrant's `http://localhost:6333`, so a deployment that selected
-    `databricks` and forgot the workspace URL passed startup and failed inside a worker — the exact
-    outcome that validator exists to prevent.
+    `vector_store_url` has a non-empty default, so an emptiness check cannot catch a forgotten URL.
     """
     from chemclaw.core.config.store import StoreSettings
 
@@ -393,12 +374,10 @@ def test_databricks_will_not_accept_the_shipped_qdrant_url(
 
 
 def test_no_provider_but_qdrant_may_keep_qdrants_default_url() -> None:
-    """The check above cannot be keyed to one vendor's name once any adapter can be selected.
+    """No provider but Qdrant may keep Qdrant's default URL.
 
-    It was, and opening the provider to a `module:callable` reopened exactly the hole it exists to
-    close: a site's own store selected without `vector_store_url` inherits Qdrant's
-    `http://localhost:6333`, validates clean, and answers every search from a server it was never
-    pointed at.
+    A `module:callable` provider selected without a URL would otherwise validate and query a server
+    it was never pointed at.
     """
     from chemclaw.core.config.store import StoreSettings
 
@@ -411,11 +390,10 @@ def test_no_provider_but_qdrant_may_keep_qdrants_default_url() -> None:
 def test_databricks_needs_the_endpoint_that_serves_its_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An index is addressed by a pair, and the client cannot derive one half from the other.
+    """Databricks needs the endpoint that serves its index.
 
-    The same stance the URL check above takes: a provider selected without the address it needs is
-    a misconfiguration that can be caught at deploy time, and the alternative is a client library's
-    "index not found" surfacing from inside a worker hours later.
+    An index is addressed by a pair the client cannot derive, so a missing half is caught at deploy
+    time rather than as "index not found" in a worker.
     """
     from chemclaw.core.config.store import StoreSettings
 
@@ -430,16 +408,11 @@ def test_databricks_needs_the_endpoint_that_serves_its_index(
 def test_a_vector_database_this_repository_never_heard_of_attaches_with_no_core_edit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The generality claim, exercised: `module:callable` is a provider too.
+    """A vector database this repository never heard of attaches with no core edit.
 
-    A vector database is a database this system does not own, so it attaches the way the warehouse
-    ELN and the result store do — late-bound through `chemclaw.core.connect`
-    (`D-2026-08-26-the-driver-s-signature-is-the-schema`). Before this, the provider was a closed
-    `Literal` and an `if`-chain, so a fourth store — Milvus, Weaviate, LanceDB, somebody else's
-    pgvector server — was two edits inside `core` before a line of adapter existed.
-
-    The adapter below is this test's own module attribute, which is exactly what a site's would be
-    to this repository: a name it has never seen.
+    A `module:callable` provider is late-bound through `chemclaw.core.connect`, like the warehouse
+    ELN and the result store. The adapter is this test module's own attribute, a name the repository
+    has never seen.
     """
     from chemclaw.core.config.store import StoreSettings
 
@@ -465,11 +438,10 @@ def test_a_provider_that_is_neither_shipped_nor_a_reference_is_refused() -> None
 
 
 def test_every_shipped_provider_name_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two declarations, held in step: `core` names the words, `retrieval` maps them.
+    """Every shipped provider name accepted by `core` resolves in `retrieval`.
 
-    `core.config.store` accepts the shipped names without knowing what they resolve to, because
-    `core` imports no sibling. A name accepted there and missing from the registry would fail at the
-    first search — in a worker, on a question, rather than here.
+    `core` imports no sibling, so the two declarations are held in step here rather than failing at
+    the first search.
     """
     from chemclaw.core.config.store import _SHIPPED_VECTOR_STORES
     from chemclaw.retrieval.vectors.registry import SHIPPED
@@ -504,12 +476,8 @@ def test_the_pgvector_width_check_is_inert_for_an_external_store(
 def test_every_chunk_is_filed_under_its_document_not_under_itself() -> None:
     """A chunk's group is its `doc_id`, because eligibility is decided per document.
 
-    **The bug this exists for.** `VectorPoint.group` defaults to the point's own id, which is right
-    for anything embedded whole and silently wrong for a chunk. Two places built these points — the
-    crawl's `upsert` and the re-embedding drain's `store_embeddings` — and only the first passed the
-    group, so a re-embedded chunk was filed under `doc-abc#3` instead of `doc-abc`. It would still
-    answer unfiltered questions and would vanish from every *filtered* one, with nothing raised
-    anywhere. One builder now, so a second caller has nowhere to differ.
+    `VectorPoint.group` defaults to the point's own id, which would make a chunk vanish from every
+    filtered search. One builder serves both the crawl and the re-embedding drain.
     """
     chunks = [
         ChunkRecord(
@@ -588,14 +556,10 @@ class _RecordingStore:
 async def test_an_unfiltered_search_is_still_scoped_to_its_own_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A search must never go to the store unscoped, even with no tag and no date window.
+    """A search is always scoped to its own source, even with no tag and no date window.
 
-    **The bug this exists for.** Every enabled share writes into one collection, so a scope of
-    `None` takes the top-k across *all* of them; `_resolve` then drops the other sources' hits
-    (their citation resolves to NULL) and the caller silently receives fewer than `top_k`, or none.
-    The pgvector index never had it — `_ELIGIBLE` carries `f.source = %(src)s` inside the ranking
-    statement. The fast path that skipped the scope query for an unfiltered search skipped the one
-    restriction that is *always* present.
+    Every share writes into one collection, so an unscoped top-k would be filled with other sources'
+    hits that `_resolve` then drops, returning fewer than `top_k`.
     """
     store = _RecordingStore()
     index = ExternalVectorDocumentIndex(store)
@@ -643,21 +607,10 @@ def test_the_api_key_is_registered_for_redaction(monkeypatch: pytest.MonkeyPatch
 def test_the_qdrant_client_refuses_the_ambient_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     """`trust_env=False` reaches the httpx client `AsyncQdrantClient` builds for itself.
 
-    This store is not the LLM seam, so no prompt and no bearer is on it; what is on it is embedded
-    note text and the query vectors. A proxy variable on the pod would carry both off-address, past
-    `core/netguard.py`, which sees only the dial to the proxy, and past a NetworkPolicy when the
-    proxy is a loopback sidecar.
-
-    **This assertion is a shape and the effect behind it was measured elsewhere, deliberately.**
-    `qdrant_client` is not in this closure — `pgvector` is the shipped provider — so nothing here
-    can construct a real client. Observed 2026-09-12 in a scratch venv on qdrant-client 1.19.0,
-    construction only, no server and no I/O: the client's internal `httpx.AsyncClient` carries
-    `trust_env=True` by default and `False` when this keyword is passed, because
-    `AsyncQdrantClient` forwards its extra keywords through `AsyncApiClient` into `AsyncClient(**
-    kwargs)`. The same forwarding is why a caller-supplied `http_client` is a `TypeError` and is
-    therefore not the fix. What this test holds is the half that can go stale by edit here: that
-    the keyword is still sent, and sent unconditionally rather than only where a private CA is
-    configured — the mistake the `verify` keyword below exists to avoid making twice.
+    Embedded note text and query vectors travel on this client, and an ambient proxy would carry
+    them past `core/netguard.py`. `AsyncQdrantClient` forwards extra keywords into its
+    `httpx.AsyncClient`. `qdrant_client` is not installed here, so this asserts the keyword is sent,
+    unconditionally.
     """
     stub = _StubModule()
     monkeypatch.setattr(qdrant_module, "register_secret_env", lambda name: None)
@@ -675,11 +628,10 @@ def test_the_qdrant_client_refuses_the_ambient_proxy(monkeypatch: pytest.MonkeyP
 
 
 def test_no_private_ca_means_no_verify_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default path uses only keywords the client certainly accepts.
+    """No private CA means no `verify` keyword.
 
-    `verify` is forwarded to httpx rather than being part of the constructor's own signature, and
-    nothing here has run against a real client — so passing it unconditionally would risk failing
-    every deployment, including those that never needed a private CA.
+    `verify` is forwarded to httpx rather than being in the constructor's own signature, so the
+    default path passes only keywords the client certainly accepts.
     """
     stub = _StubModule()
     monkeypatch.setattr(qdrant_module, "register_secret_env", lambda name: None)
@@ -738,18 +690,11 @@ class _FakeConnection:
 async def test_the_catalogue_is_consulted_even_when_nothing_is_filtered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_eligible_cuttings` has no fast path, because the source is always a restriction.
+    """`_eligible_cuttings` is consulted even when nothing is filtered.
 
-    The stronger half of the source-scoping fix. The sibling test above pins that `search_dense`
-    forwards whatever scope it is given; this one pins that a scope is actually *computed* for an
-    unfiltered query — the exact short-circuit that shipped the bug, and the one a future
-    optimization would be tempted to reintroduce.
-
-    It also pins the *shape* of what is computed, which the sibling cannot: a stubbed
-    `_eligible_cuttings` returns whatever the stub was written to return, so when the points moved
-    to `doc_id@chunking_key` and this query kept selecting bare doc ids, both sibling tests stayed
-    green while every real dense search returned nothing. The scope must be spelled in `group_key`
-    terms and must carry the chunking, because that is what the points are filed under.
+    The source is always a restriction, so there is no fast path. The scope is spelled in
+    `group_key` terms and carries the chunking, because that is what points are filed under; a
+    stubbed scope could not show that.
     """
     executed: list[str] = []
     index = ExternalVectorDocumentIndex(_RecordingStore())
@@ -764,12 +709,10 @@ async def test_the_catalogue_is_consulted_even_when_nothing_is_filtered(
 
 
 async def test_a_re_chunk_reclaims_the_superseded_cutting_s_vectors() -> None:
-    """The catalogue deletes the old cutting's rows; the store must lose their points too.
+    """A re-chunk reclaims the superseded cutting's vectors.
 
-    `PostgresDocumentIndex.upsert` drops the previous cutting at the end of its transaction, and
-    with the vectors in another system those points would otherwise stay forever — unreachable,
-    since every search resolves through the catalogue, but never reclaimed. Re-tuning `chunk_chars`
-    on a large share would leave a second full copy of the corpus in the vector database.
+    The catalogue drops the old cutting's rows; without deleting their points the vector database
+    would keep a second full copy of the corpus.
     """
 
     class _Deleting(_RecordingStore):
@@ -796,15 +739,10 @@ def test_the_base_index_forgets_nothing_because_its_vectors_were_in_the_rows() -
 def test_the_store_is_built_once_per_process_and_not_once_per_tool_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A client with a connection pool and no `close` may be built once, and only once.
+    """The store is built once per process, not once per tool call.
 
-    Nothing in `retrieval/vectors/` has a `close` or an `aclose`, and there is nowhere to call one
-    from: a store is reached from a retrieve half, and `active_retrieve_sources()` builds a fresh
-    half inside every `gather_evidence` body — measured, 100 constructions for 100 sweeps. So each
-    tool call opened a new `AsyncQdrantClient` (its own httpx pool) or a new Databricks client and
-    dropped it unreferenced, with its sockets held until a collection nobody schedules.
-
-    Counted rather than argued: 100 resolutions of the configured store must construct one.
+    The clients hold connection pools and have no `close` to call, and a retrieve half is built for
+    every `gather_evidence`. 100 resolutions of the configured store must construct one.
     """
     built: list[object] = []
 
@@ -827,11 +765,10 @@ def test_the_store_is_built_once_per_process_and_not_once_per_tool_call(
 def test_a_reconfigured_store_is_rebuilt_rather_than_served_from_the_last_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The control on the key: the memo is per *configuration*, not per process outright.
+    """A reconfigured store is rebuilt rather than served from the last configuration.
 
-    The same trade `core.embeddings._openai_client` makes — a test that swaps `Settings`, or a
-    deployment that rotates the store's address, must get a client built for what is configured
-    now rather than the one built for what was configured before.
+    The memo is keyed by configuration, so a swapped `Settings` gets a client for what is configured
+    now.
     """
     built: list[object] = []
 

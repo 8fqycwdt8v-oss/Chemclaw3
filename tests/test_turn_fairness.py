@@ -1,20 +1,9 @@
 """One chemist may not hold the whole replica.
 
-The admission semaphore (`service_max_concurrent_turns`) is actor-blind, so before this cap existed
-one principal opening that many sessions took every permit on the pod and every other chemist was
-shed `at_capacity`. `chemclaw.api.detach` carries the measurement from the hang-up direction — one
-POST-and-hang-up per permit — and the fix applied there returns the *permit* at a detach, which
-addresses that variant and not the general one: a client that keeps reading holds its permits for
-the whole run.
-
-What these tests pin is the pair, in both directions. A cap that refuses the actor at its limit and
-*also* refuses everybody else is not a fairness guard, it is the outage it was meant to prevent — so
-every case here that asserts a refusal asserts a second actor being served in the same breath.
-
-None of this needs Postgres, and that absence is the design rather than a gap: the cap is
-per-process (SCALE-1 keeps admission per-process), so there is no cross-replica behaviour an
-integration test could reach. With the in-memory store `front.turn_claims` is `None` and the
-in-process lease is the whole mechanism.
+The admission semaphore is actor-blind, so a per-actor cap stops one principal taking every
+permit. A cap that refuses the actor and also everybody else is the outage it should prevent, so
+every refusal asserted here is paired with a second actor being served. No Postgres: the cap is
+per process, and with the in-memory store the in-process lease is the whole mechanism.
 """
 
 import asyncio
@@ -38,9 +27,8 @@ BOB = Principal(oid="bob", upn="b@corp", roles=frozenset())
 class _ParkedTurn(ScriptedTurn):
     """A turn that starts, streams one piece, and then waits to be let go.
 
-    Parking *inside* the stream is what makes the lease observable: the turn has been admitted, has
-    taken its permit and its slot, and is still running — which is the state a concurrency cap is
-    about. A turn that merely answered slowly would race the assertion.
+    Parking inside the stream keeps the turn admitted and running, the state a concurrency cap is
+    about.
     """
 
     def __init__(self) -> None:
@@ -64,9 +52,7 @@ async def _hold_turns(
 ) -> list[asyncio.Task[httpx.Response]]:
     """Start `count` turns for `principal`, each on its own session, and wait until all are live.
 
-    One turn per session because the session's line already forbids two, so a per-actor cap can
-    only ever be reached across sessions — which is also why this helper exists rather than a loop
-    over one session id.
+    One per session, since a session's line already forbids two concurrent turns.
     """
     _as(app, principal)
     held: list[asyncio.Task[httpx.Response]] = []
@@ -95,12 +81,8 @@ async def _drain(held: list[asyncio.Task[httpx.Response]]) -> None:
 async def _expect_refused(client: httpx.AsyncClient, session_id: str) -> httpx.Response:
     """POST a turn that must be refused, and fail fast rather than hang if it is not.
 
-    A working cap answers from a dict scan, so this returns in milliseconds. A *broken* cap admits
-    the turn, which then parks on `_ParkedTurn.release` and blocks this await until the suite-wide
-    timeout — and that timeout's own epilogue says "these assertions never ran … nothing above is
-    evidence about the code under test", so the shipped diagnostic for the one defect these tests
-    exist to catch is a message that disclaims itself. Bounding it here turns that into a named
-    failure on the line that meant it.
+    A broken cap admits the turn, which parks and would otherwise block until the suite timeout;
+    bounding it gives a named failure here.
     """
     try:
         return await asyncio.wait_for(
@@ -113,11 +95,9 @@ async def _expect_refused(client: httpx.AsyncClient, session_id: str) -> httpx.R
 
 
 def test_an_actor_at_the_cap_is_refused_while_another_actor_is_admitted(monkeypatch: Any) -> None:
-    """The case the whole change exists for — and both halves are the test.
+    """An actor at the cap is refused while another actor is admitted.
 
-    Alice at her cap is refused; bob, on the same pod with permits to spare, is served. Asserting
-    only the refusal would pass just as well against a guard that had simply filled the pod, which
-    is the behaviour being replaced rather than the one being added.
+    Asserting only the refusal would also pass for a guard that simply filled the pod.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 2)
     agent = _ParkedTurn()
@@ -154,12 +134,10 @@ def test_an_actor_at_the_cap_is_refused_while_another_actor_is_admitted(monkeypa
 
 
 def test_a_finished_turn_frees_the_actors_slot(monkeypatch: Any) -> None:
-    """The release half, and the guard on `_start_turn_lease` carrying `actor` across its restamp.
+    """A finished turn frees the actor's slot, and the started lease still carries the actor.
 
-    That restamp runs at the hand-off, so an `actor` dropped there would leave every lease
-    anonymous from the moment a turn actually streams — the cap would count nothing and still read,
-    in review, exactly as it does now. Asserting the live lease carries the actor is what makes the
-    freeing assertion below mean something.
+    `_start_turn_lease` restamps the lease at hand-off; dropping `actor` there would leave the cap
+    counting nothing.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 2)
     agent = _ParkedTurn()
@@ -168,10 +146,8 @@ def test_a_finished_turn_frees_the_actors_slot(monkeypatch: Any) -> None:
         app = _app(agent, owner_store=_FakeOwnerStore())
         async with asgi_client(app) as client:
             held = await _hold_turns(app, client, ALICE, 2)
-            # **Wait for a *started* lease before reading `actor`.** At claim time the field is
-            # already "alice", so asserting it on a reservation passes whether or not
-            # `_start_turn_lease` carried it across the restamp — which is the thing this test
-            # says it pins. A finite deadline is what "the restamp ran" looks like from here.
+            # Wait for a started lease before reading `actor`: the reservation already carries it,
+            # so only a started lease shows the restamp kept it.
             async with asyncio.timeout(10):
                 while not any(
                     lease.deadline != float("inf") for lease in app.state.active_turns.values()
@@ -204,13 +180,10 @@ def test_a_finished_turn_frees_the_actors_slot(monkeypatch: Any) -> None:
 
 
 def test_a_double_submit_to_one_session_joins_its_line_not_429(monkeypatch: Any) -> None:
-    """A second POST to a *running* session waits in its line; the per-actor cap does not refuse it.
+    """A second POST to a running session waits in its line; the per-actor cap does not refuse it.
 
-    This pins `besides=session_id`. Without it the answer a UI sees for a double-submit would be a
-    function of how many other sessions the chemist has open — a place in line below the cap, a 429
-    at it — for one unchanged user action. The line itself
-    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`) is what replaced the 409 this
-    test used to pin; it holds one place per sender, so the retry is bounded there instead.
+    Pins `besides=session_id`, so a double-submit's answer does not depend on how many other
+    sessions the chemist has open.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 2)
     agent = _ParkedTurn()
@@ -237,15 +210,11 @@ def test_a_double_submit_to_one_session_joins_its_line_not_429(monkeypatch: Any)
 
 
 def test_the_actor_cap_is_off_in_code(monkeypatch: Any) -> None:
-    """0 is the code default, and `chemclaw.cli.live_storm` is the concrete reason.
+    """The actor cap is off in code by default.
 
-    That instrument's family A sweeps the *admission* cap end to end, driving 48 concurrent turns
-    from one credential at each value; an on-by-default per-actor cap converts those sheds into
-    429s and breaks the
-    one tool that validates admission control. The chart carries the production posture instead
-    (D-142/REV-16), which `tests/test_deploy_chart.py` holds, and which
-    `core/config/__init__.py` refuses outright at startup when it is not strictly below the pod
-    cap.
+    `chemclaw.cli.live_storm` drives many concurrent turns from one credential to sweep the
+    admission cap, which an on-by-default per-actor cap would break. The chart carries the
+    production setting, and startup refuses a cap not strictly below the pod cap.
     """
     from chemclaw.core.config.service import ServiceSettings
 
@@ -285,12 +254,11 @@ def test_one_actor_can_still_fill_the_pod_when_the_cap_is_off(monkeypatch: Any) 
 
 @pytest.mark.parametrize("label", ["actor", "oid", "session"])
 def test_the_refusal_counter_refuses_an_identity_label(label: str) -> None:
-    """The one label that must never exist on this counter, held mechanically.
+    """The refusal counter refuses an identity label.
 
-    `/metrics` is unauthenticated and an `oid` is a caller-chosen, unbounded key — minting them is
-    precisely how one would route around a per-principal limit — so a labelled series here would
-    stop counting at the cardinality cap exactly when it mattered. The identity belongs in the
-    WARNING beside the increment, and nowhere else.
+    `/metrics` is unauthenticated and an `oid` is an unbounded caller-chosen key, so a labelled
+    series would hit the cardinality cap when it mattered. The identity goes in the WARNING log
+    only.
     """
     from chemclaw.core.metrics import _COUNTER_LABELS, _COUNTERS, METRICS
 
@@ -303,20 +271,12 @@ def test_the_refusal_counter_refuses_an_identity_label(label: str) -> None:
 def test_the_refusal_carries_retry_after_because_the_client_splits_429_on_it(
     monkeypatch: Any,
 ) -> None:
-    """Without this header the shipped UI tells the chemist their usage budget is gone, for ever.
+    """The refusal carries `Retry-After`, because the client splits 429 on it.
 
-    `Chemclaw3_ui`'s `errorFromStatus` branches 429 on the **presence** of `Retry-After`: with one
-    it raises a transient `rate_limited` banner carrying a countdown, and without one it raises
-    `budget_exhausted` — "The usage budget for this service is exhausted." — which locks the
-    composer and which that module's own comment says nothing in the UI clears. Both of those
-    sentences would be false here: the cap lifts the moment one of the caller's own turns ends.
-
-    A machine-readable `code` is not an alternative. `streamTurn.ts` calls `errorFromStatus` with
-    four arguments and the discriminator is the fifth, so the code is dropped before it is read —
-    which means the header is the only channel that reaches a client already deployed.
-
-    The value is `service_turn_admission_timeout_seconds` rather than a number chosen here: it is
-    already this system's answer to how long waiting for a turn permit is reasonable.
+    `Chemclaw3_ui`'s `errorFromStatus` treats a 429 without `Retry-After` as an exhausted usage
+    budget that locks the composer, while this cap lifts as soon as one of the caller's turns ends.
+    The header is the only channel a deployed client reads. Its value is
+    `service_turn_admission_timeout_seconds`.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 5.0)
@@ -354,13 +314,10 @@ def test_the_refusal_carries_retry_after_because_the_client_splits_429_on_it(
 
 
 def test_the_refusal_actually_increments_its_counter(monkeypatch: Any) -> None:
-    """Delete the increment and this goes red; nothing else in the suite did.
+    """The refusal actually increments its counter.
 
-    The shipped dashboard panel reads `chemclaw_turns_refused_actor_cap_total` against
-    `chemclaw_turns_shed_total`, and its own description says a flat zero has to be
-    distinguishable from "the cap is off". Asserting only that the counter is *declared* — which is
-    what this file did first — leaves the panel reading zero for ever if the call site is dropped,
-    which is the one failure a metric cannot report about itself.
+    The dashboard reads it against `chemclaw_turns_shed_total`; a dropped call site would read zero
+    forever, which a metric cannot report about itself.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -387,18 +344,11 @@ def test_the_refusal_actually_increments_its_counter(monkeypatch: Any) -> None:
 
 
 def test_a_reservation_that_never_starts_its_lease_ages_out_of_the_actor_count() -> None:
-    """The half of the expiry argument that was false until it was driven.
+    """A reservation that never starts its lease ages out of the actor count.
 
-    `TurnLease.actor`'s docstring justifies deriving the count from the lease map because a lease
-    expires and a counter does not. That is true of a *started* lease and was not true of a
-    reservation: `_claim_turn_slot` stamps `deadline=math.inf` and only `post_message`'s `finally`
-    ends it, so a handler parked on one of the reservation phase's three store round trips — none
-    of which carries a statement timeout — held the slot with no expiry at all. Inherited by the
-    per-actor count, one wedged store call refused that chemist on *every* session until the pod
-    restarted, which is exactly the brick the design claims to avoid.
-
-    So an un-started reservation ages from `claimed_at`, at the width `_start_turn_lease` would
-    have stamped. The session's own 409 keeps reading `deadline` and is deliberately unchanged.
+    A reservation has `deadline=math.inf` and ends only in `post_message`'s `finally`, so a wedged
+    store call would hold the slot forever and refuse that chemist on every session. An un-started
+    reservation therefore ages from `claimed_at`; the session's own 409 still reads `deadline`.
     """
     from chemclaw.api.state import _actor_turns_in_flight, _claim_turn_slot
 
@@ -423,17 +373,10 @@ def test_a_reservation_that_never_starts_its_lease_ages_out_of_the_actor_count()
 
 
 def test_the_cap_is_inert_under_the_shared_dev_principal(monkeypatch: Any) -> None:
-    """With one oid for everybody, "per actor" would mean "per pod" — so the guard stands down.
+    """The cap is inert under the shared dev principal.
 
-    `entra_required=False` hands every caller the same `Principal`, which is exactly the shape this
-    cap must not act on: it would stop dividing the replica between chemists and start capping the
-    replica itself at this number, so the first client to reach it would refuse every other client.
-    That is the starvation the guard exists to prevent, inverted, and the configuration is
-    reachable — `service_allow_insecure` permits it, and a deployment fronting the API with one
-    service credential for many humans has the same shape with no such switch.
-
-    Driven rather than reasoned: this was found by `tests/test_detach.py`, which serves a real
-    uvicorn under the dev principal and went red the moment the guard learned to stand down.
+    With one oid for every caller, "per actor" would mean "per pod", and the first client to reach
+    the cap would refuse everyone else.
     """
     from chemclaw.api.auth import _DEV_PRINCIPAL_OID
 
@@ -465,12 +408,10 @@ def test_the_cap_is_inert_under_the_shared_dev_principal(monkeypatch: Any) -> No
 
 
 def test_the_retry_hint_is_jittered_and_never_zero(monkeypatch: Any) -> None:
-    """Both properties, because a mutation removing them killed no test.
+    """The retry hint is jittered and never zero.
 
-    The jitter is the whole reason this is not a constant: every client refused by this guard is
-    handed the same hint, and without a spread they re-converge on one cadence and arrive together
-    at the pod that just refused them. The ceiling is why `Retry-After: 0` — which means "retry
-    immediately", turning a hint into a spin — cannot be produced from a sub-second setting.
+    Without jitter refused clients re-converge and arrive together; `Retry-After: 0` would turn the
+    hint into a spin.
     """
     from chemclaw.api.routes.turns import _retry_after_hint
 
@@ -487,12 +428,10 @@ def test_the_retry_hint_is_jittered_and_never_zero(monkeypatch: Any) -> None:
 def test_the_refusal_names_the_measured_count_not_the_configured_cap(
     monkeypatch: Any, caplog: Any
 ) -> None:
-    """Deleting the log line killed no test, and the line is where attribution lives.
+    """The refusal log names the measured count, not the configured cap.
 
-    The counter carries no actor label by design, so this record is the only place a refusal is
-    tied to a principal. It reports `held` rather than `actor_cap` on purpose: the predicate is
-    `>=`, so a count *above* the cap is legitimate and is the one observable symptom of a lease
-    outliving its turn — logging the configured number in its place would hide exactly that.
+    The log is the only place a refusal is tied to a principal. The predicate is `>=`, so a count
+    above the cap is the visible symptom of a lease outliving its turn.
     """
     import logging
 

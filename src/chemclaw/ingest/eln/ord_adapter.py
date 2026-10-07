@@ -1,19 +1,13 @@
-"""A concrete adapter for native Open Reaction Database messages (plan step 4.3, second source).
+"""A concrete adapter for native Open Reaction Database messages.
 
-The **structured-recipe** counterpart to `chemclaw.ingest.eln.json_adapter`: it reads
-human-readable ORD
-`Reaction` JSON (`*.json` in `settings.ord_export_dir`) and maps it into the same canonical
-`OrdReaction`. Where the free-text adapter recovers a procedure from prose, ORD already
-records it structurally — ordered `inputs` (with `addition_order`/`addition_time`),
-`conditions`, and a `workups[]` sequence — so this adapter produces genuinely
-**component-linked** steps: each addition and workup step knows exactly which species it
-introduces, which prose segmentation cannot.
+Reads human-readable ORD `Reaction` JSON (`*.json` in `settings.ord_export_dir`) into the canonical
+`OrdReaction`. ORD records the procedure structurally (ordered `inputs` with
+`addition_order`/`addition_time`, `conditions`, `workups[]`), so steps here are component-linked,
+which prose segmentation cannot achieve.
 
-Only the subset Chemclaw consumes is read (structures, roles, amounts, headline
-temperature + yield, the step sequence, the free-text procedure note). ORD JSON exported via
-protobuf uses camelCase field names, while pbtxt-derived JSON uses snake_case; `_get` accepts
-either so both round-trip. Nothing above this adapter knows ORD's shape (G6). One adapter per
-source: this and the free-text adapter share only the `ElnAdapter` contract, not code.
+Only the subset Chemclaw consumes is read. `_get` accepts both camelCase (protobuf JSON) and
+snake_case (pbtxt-derived) field names. Shares only the `ElnAdapter` contract with the free-text
+adapter.
 """
 
 import asyncio
@@ -51,21 +45,13 @@ from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
 
-# The source name a refusal is filed under when nobody says otherwise — a *fallback* for an
-# adapter built by hand (the CLI's one-shot import, and tests), not this adapter's identity.
-#
-# **Every deployment path is told its name.** The ledger's `source` says whose data quality a row
-# is a statement about, and the eviction cap is per source, so two ORD sources filing under one
-# name would share a bucket and mis-attribute each other's refusals. This used to be a constant
-# with no way in: the ingest half was built from `manifest.config` alone and never told which
-# source it was, which made a hardcoded string the only thing that could be right — and only while
-# exactly one manifest named this adapter. `registry._build_ingest_half` now passes the manifest's
-# name, the same rule it already stated for a retrieve half and for a commitments half.
+# The source name a refusal is filed under when no name is passed — a fallback for hand-built
+# adapters (CLI one-shot import, tests). Deployments pass the manifest's name via
+# `registry._build_ingest_half`, so two ORD sources keep separate ledgers and eviction caps.
 DEFAULT_LEDGER_SOURCE = "eln-ord"
 
-# ORD reaction-role -> our Role subset. Roles outside the subset (WORKUP,
-# INTERNAL_STANDARD, AUTHENTIC_STANDARD) collapse to REAGENT: they are auxiliary species,
-# and the reaction-input role only needs to be a valid non-product for the schema.
+# ORD reaction-role -> our Role subset. WORKUP, INTERNAL_STANDARD and AUTHENTIC_STANDARD collapse to
+# REAGENT: auxiliary species that only need to be a valid non-product.
 _ROLES: dict[str, Role] = {
     "REACTANT": Role.REACTANT,
     "REAGENT": Role.REAGENT,
@@ -74,9 +60,8 @@ _ROLES: dict[str, Role] = {
     "PRODUCT": Role.PRODUCT,
 }
 
-# ORD ReactionWorkup.type -> step label. Types absent here (WAIT, TEMPERATURE, STIRRING,
-# ADDITION, PH_ADJUST, DISSOLUTION, CUSTOM, ...) are ordinary process steps, not the
-# distinctive purification/isolation actions, so they default to WORKUP.
+# ORD ReactionWorkup.type -> step label. Unlisted types (WAIT, TEMPERATURE, STIRRING, ...) are
+# ordinary process steps and default to WORKUP.
 _WORKUP_KINDS: dict[str, StepKind] = {
     "FILTRATION": StepKind.PURIFICATION,
     "DISTILLATION": StepKind.PURIFICATION,
@@ -93,9 +78,8 @@ _TO_MG: dict[str, float] = {"KILOGRAM": 1e6, "GRAM": 1e3, "MILLIGRAM": 1.0, "MIC
 _TO_MMOL: dict[str, float] = {"MOLE": 1e3, "MILLIMOLE": 1.0, "MICROMOLE": 1e-3, "NANOMOLE": 1e-6}
 _TO_ML: dict[str, float] = {"LITER": 1e3, "MILLILITER": 1.0, "MICROLITER": 1e-3, "NANOLITER": 1e-6}
 
-# The keys ORD's `Amount` may carry. It is a `oneof` over `mass | moles | volume | unmeasured`,
-# plus the flag that qualifies a volume, and every one of them is read — an amount this adapter can
-# *see* and cannot read is refused by name below rather than becoming no amount at all.
+# The keys ORD's `Amount` may carry (a `oneof` over `mass | moles | volume | unmeasured`, plus the
+# volume qualifier). All are read; anything else is refused by name rather than becoming no amount.
 _AMOUNT_KINDS = frozenset({"mass", "moles", "volume", "unmeasured", "volume_includes_solutes"})
 
 
@@ -108,7 +92,7 @@ _NAME_KINDS = frozenset({"NAME", "IUPAC_NAME"})
 
 
 class OrdFormatError(ElnMappingError):
-    """A file did not match the ORD `Reaction` JSON shape (G4)."""
+    """A file did not match the ORD `Reaction` JSON shape."""
 
 
 class OrdJsonAdapter:
@@ -117,9 +101,8 @@ class OrdJsonAdapter:
     def __init__(self, export_dir: str | None = None, name: str | None = None) -> None:
         """Read from the given directory, or the configured `ord_export_dir`.
 
-        `name` is the data source this adapter *is*, passed by the registry from the manifest and
-        used as the rejection ledger's `source`. See `DEFAULT_LEDGER_SOURCE` for what an omitted
-        one means.
+        `name` is the data source this adapter is, used as the rejection ledger's `source`; see
+        `DEFAULT_LEDGER_SOURCE`.
         """
         self._dir = Path(export_dir if export_dir is not None else settings.ord_export_dir)
         self._source = name or DEFAULT_LEDGER_SOURCE
@@ -129,56 +112,24 @@ class OrdJsonAdapter:
     ) -> list[RawEntry]:
         """Return ORD messages created at or after `since`, oldest first.
 
-        A file that cannot be read/parsed at all, or that carries no usable creation
-        timestamp, is skipped (not raised): one broken file must not abort the batch (the
-        same skip-and-continue stance as the free-text adapter). Such a file never reaches
-        the sync report, so it is logged at WARNING here. Mapping failures on an
-        otherwise-readable message surface later, per-entry, through the sync report.
+        An unreadable file, or one without a usable creation timestamp, is skipped with a WARNING
+        and written to the rejection ledger, as is a late arrival (created before `since`, arrived
+        after it); neither becomes a `RawEntry`, so this is the only place they can be recorded.
+        Mapping failures are recorded by `durable/eln_sync.py` from what `sync_entries` actually
+        refused, since this fetch does not know the run's cursor or chunk limit.
 
-        A message whose creation time predates `since` but whose file *arrived* after it is a late
-        arrival: it is filtered out here and on every later run, so it is reported in one
-        aggregated WARNING (`warn_late_arrivals`) instead of vanishing silently.
-
-        **The refusals only this fetch can see are recorded in the rejection ledger**, so a chemist
-        asking about a record that never arrived gets the reason instead of "I have no such record"
-        (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`). Those are the two above:
-        a file this adapter could not read, and a file that arrived too late to ever be fetched.
-        Neither becomes a `RawEntry`, so nothing downstream can know they existed — which is the
-        whole reason the recording happens here.
-
-        **A message that cannot be *mapped* is recorded by the sync instead**, and that is a fix
-        rather than a division of labour (`D-2026-08-29-a-bound-derived-twice-is-two-bounds`). This
-        fetch is handed the *floor* — `since` minus the overlap window — and knows neither the run's
-        cursor nor the chunk limit, so a pre-flight here can only guess which entries its caller
-        will actually process. It guessed `entries[:eln_sync_batch_size]` and was short by the size
-        of the overlap window on every chunk that had one, losing the ledger row for entries the
-        drain refused and whose cursor it had already advanced past. `durable/eln_sync.py` records
-        what `sync_entries` actually refused, which is the same set by construction and costs no
-        second mapping pass at all.
-
-        **The directory read runs off the event loop**, for the reason and with the measurement
-        `JsonExportAdapter.fetch_new_entries` states — the same defect in the same shape, and ORD
-        messages are the heavier files: measured 2026-09-06 with a 1 ms heartbeat on the same loop,
-        a 10,000-message directory blocked it for **937.4 ms**, the worst gap equal to the whole
-        scan.
-
-        **`limit` is accepted and ignored for the reason the free-text adapter gives**: this scan
-        is ordered by filename and a message's window is inside the payload, so breaking it at
-        `limit` returns an arbitrary subset and the cursor then advances past the entries the break
-        discarded. The quadratic re-read across a chunked drain stays, and is bounded by the
-        directory rather than by the corpus.
+        The directory read runs in a thread, off the worker's event loop. `limit` is ignored for the
+        reason `JsonExportAdapter.fetch_new_entries` gives.
 
         Args:
             since: The window floor; messages at or after it are returned.
             limit: Accepted for the protocol and unused — see above.
-            report_late_arrivals: Whether `since` is the *run's* floor, so a file behind it
-                that arrived after it may be reported as one no scheduled run will fetch.
-                False on a continuation chunk — see `is_late_arrival`.
+            report_late_arrivals: Whether `since` is the run's floor, so a late-arriving file behind
+            it may be reported. False on a continuation chunk — see `is_late_arrival`.
         """
         entries, late, refused = await asyncio.to_thread(self._scan, since, report_late_arrivals)
-        # The source, not the format: this is the one line reporting files that are silently never
-        # ingested, and a deployment running two ORD drop directories got two identical lines
-        # naming neither.
+        # Named by the source, not the format, so two ORD drop directories log distinguishable
+        # lines.
         warn_late_arrivals(logger, self._source, late)
         await record_refusals(self._source, refused)
         return entries
@@ -189,15 +140,12 @@ class OrdJsonAdapter:
         """The whole blocking read, in one synchronous function so one thread can hold it.
 
         Args:
-            report_late_arrivals: whether `since` is the *run's* floor, so a file behind it
-                that arrived after it is one no scheduled run will fetch. False on a continuation
-                chunk, whose floor has already moved past files this same drain ingested — see
-                `is_late_arrival`.
+            report_late_arrivals: whether `since` is the run's floor — see `is_late_arrival`.
             since: the window floor; messages at or after it are returned.
 
         Returns:
-            The entries in the window oldest first, the names of the late arrivals, and the
-            refusals to file — the three things the caller has to do something asynchronous with.
+            The entries in the window oldest first, the names of the late arrivals, and the refusals
+            to file.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
@@ -214,21 +162,15 @@ class OrdJsonAdapter:
                     refused[path.stem] = f"{path.name} is not a JSON object, so it is not a record"
                     continue
                 created = _created_at(payload)
-                # ORD's own `record_modified` list, if the exporter populates it: the record is
-                # amended in place and `record_created` does not move, so creation time alone can
-                # never bring a correction back into the fetch window.
+                # ORD's own `record_modified` list: an amended record keeps `record_created`, so
+                # creation time alone would never re-fetch a correction.
                 modified = _modified_at(payload)
                 entry_id = entry_id_or_stem(
                     _get(payload, "reaction_id", "reactionId"), path, "reaction_id"
                 )
-            # `UnicodeDecodeError` is listed explicitly and is not covered by anything else here.
-            # It derives from `ValueError`, not from `OSError`, and `json.JSONDecodeError` is a
-            # *sibling* subclass rather than a parent — so one export written by a tool that emitted
-            # latin-1 aborted the whole batch, contradicting this method's own skip-and-continue
-            # contract and losing every later file in the directory along with it.
-            # `ElnMappingError` rather than `OrdFormatError`: the parent is what a scan-time
-            # mapping refusal is, and `entry_id_or_stem` raises the parent so one rule can serve
-            # both file-drop adapters.
+            # `UnicodeDecodeError` must be listed: it is neither an `OSError` nor a
+            # `JSONDecodeError`, and a non-UTF-8 file would otherwise abort the batch.
+            # `ElnMappingError` covers `entry_id_or_stem`'s refusal.
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ElnMappingError) as exc:
                 logger.warning("skipping ORD export %s: %s", path.name, exc)
                 # The file stem is the only id there is: the payload never parsed, so nothing in
@@ -261,9 +203,9 @@ class OrdJsonAdapter:
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one ORD message to the canonical `OrdReaction` (structured, step-linked).
 
-        Any shape violation becomes an `OrdFormatError`, so the sync treats one bad message
-        as a rejection rather than a crash (G4). `TypeError` is caught alongside because a
-        quantity whose `value` is an object/list fails inside `float`, not as a ValueError.
+        Any shape violation becomes an `OrdFormatError`, so the sync rejects the message rather than
+        crashing. `TypeError` is caught too, since an object where a number belongs fails inside
+        `float`.
         """
         try:
             return _build(raw)
@@ -293,14 +235,10 @@ def _build(raw: RawEntry) -> OrdReaction:
         temperature_c=temperature_c,
         yield_percent=yield_percent,
         purity_percent=purity_percent,
-        # **No `performed_at`, deliberately** — see `json_adapter._build` for the argument. An
-        # ORD record's only date is `provenance.record_created.time`, which is when the record was
-        # written; mapping it here filled the field while leaving `date_source` claiming the source
-        # had stated an experiment date. `adapter.DatedIngest` supplies both together.
-        #
-        # ORD models impurity profiles only indirectly (as further products or analyses), so
-        # `impurities` stays empty here rather than guessing which co-product was unwanted — a
-        # fabricated impurity profile would be worse than an absent one.
+        # No `performed_at`: ORD's only date is when the record was written; `adapter.DatedIngest`
+        # supplies it with `date_source="entry"`.
+        # ORD models impurities only indirectly, so `impurities` stays empty rather than guessing
+        # which co-product was unwanted.
         provenance=_provenance(payload),
         steps=_steps(reaction_inputs, temperature_c, payload),
         procedure_text=_procedure_text(payload),
@@ -369,8 +307,7 @@ def _workup_step(workup: dict[str, Any], index: int) -> ReactionStep:
 def _inputs(payload: dict[str, Any]) -> list[tuple[dict[str, Any], list[Species]]]:
     """Parse the `inputs` map into (raw ReactionInput, its components) pairs.
 
-    The pair is kept so `_steps` can read each input's `addition_order`/`addition_time`
-    while `_build` flattens the components into the reaction's input list.
+    The raw input is kept so `_steps` can read `addition_order`/`addition_time`.
     """
     raw_inputs = payload.get("inputs")
     if not isinstance(raw_inputs, dict) or not raw_inputs:
@@ -398,13 +335,9 @@ def _components(reaction_input: dict[str, Any], default_role: Role = Role.REAGEN
 def _species(compound: dict[str, Any], role: Role, *, charged: bool = True) -> Species:
     """One ORD `Compound` as a structured `Component`, or as the name the source gave it.
 
-    A structure when any identifier resolves to one (`_smiles`); otherwise an
-    `UnstructuredComponent` carrying the source's own `NAME` verbatim, which makes the reaction
-    citation-only (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`). Only a
-    compound with neither — nothing this record could show a reader — is still refused.
-
-    `charged=False` for a product: ORD's `ProductCompound` records measurements, not a charge, and
-    this adapter has never read an amount off one.
+    A structure when any identifier resolves (`_smiles`); otherwise an `UnstructuredComponent`
+    carrying the source's `NAME` verbatim, making the reaction citation-only. A compound with
+    neither is refused. `charged=False` for a product, which records measurements, not a charge.
     """
     common: dict[str, Any] = {"role": role}
     if charged:
@@ -413,9 +346,8 @@ def _species(compound: dict[str, Any], role: Role, *, charged: bool = True) -> S
             mass_mg=amount.mass_mg,
             amount_mmol=amount.amount_mmol,
             volume_ml=amount.volume_ml,
-            # Not under the key `amount`: no amount was recorded, and the charge row already says
-            # so. What this adds is the source's reason — "the amount was deliberately not
-            # measured, and here is how it was charged instead".
+            # Not under `amount`: no amount was recorded. This carries the source's reason it was
+            # deliberately not measured.
             attributes=({"amount_unmeasured": amount.unmeasured} if amount.unmeasured else {}),
         )
     smiles = _smiles(compound)
@@ -450,43 +382,16 @@ def _outcomes(payload: dict[str, Any]) -> tuple[list[Species], float | None, flo
 def _headline_product(products: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The one product the reaction's `yield_percent`/`purity_percent` are about, or `None`.
 
-    **The source's own marking beats a positional one, which is why this function exists.** This
-    used to be "the first product that states a YIELD", and with several products that is a
-    position in an export's array being read as a claim about chemistry: an ORD record listing the
-    des-ethyl by-product at 12% ahead of the desired ester at 85% transcribed the reaction's yield
-    as 12% — into `conditions.yield_percent`, the number every comparison renders, and into the
-    body's `- yield:` bullet. `record.py::_principal_product` already refuses to *name* a compound
-    in exactly this situation ("a wrong `compound_smiles` is worse than none: it is what a
-    by-compound search would return, and it would look right"); the number carried no such guard,
-    so the record named no product while confidently asserting one product's figure. A chemist
-    reads that figure as precedent.
+    The source's marking beats position: array order is not a claim about chemistry, and reading a
+    by-product's yield as the reaction's would mislead as precedent. In order:
 
-    `ProductCompound.is_desired_product` is ORD's field for this and this adapter ignored it
-    entirely. Reading it is a **transcription** — the source stating which compound the run was
-    for — while ordering by array position is an *inference* this seam has no standing to make, and
-    `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` is the rule that separates the two.
+    - a product with `is_desired_product` exactly JSON `true` (a transcription, not an inference);
+    - the only product, when there is one;
+    - the only product the source measured (YIELD or PURITY);
+    - otherwise `None`, and the record carries no headline figures.
 
-    Only an actual JSON `true` is a marking; an explicit `false` and an absent field are both
-    "unmarked", which is what ORD's own default means, and any other value falls through to the
-    rules below rather than being coerced — the failure mode of that strictness is `None`, never a
-    wrong number.
-
-    Unmarked, the honest answers in order:
-
-    - **one product** — unambiguous by construction, and the overwhelmingly common export;
-    - **exactly one product the source measured** — a YIELD *or* a PURITY: the others are
-      by-products the source did not measure, so there is still only one candidate. The screen was
-      YIELD alone for one release, which made that argument false for the record that states only a
-      purity: two products, one carrying 99.2% and no yield anywhere, and the transcription stored
-      neither figure where it used to store the purity;
-    - **anything else** — `None`, and the record carries no headline yield. A reader then sees that
-      the figure was not recorded, which is true, rather than a figure belonging to a compound
-      nobody chose.
-
-    One product decides **both** figures rather than each being resolved on its own. Read
-    separately, a two-product record where A states the YIELD and B the PURITY produced a headline
-    pair describing two different compounds — the same fabrication one level down, and harder to
-    see because each half is individually a real measurement.
+    One product decides both figures, so a yield and a purity never describe two different
+    compounds.
     """
     marked = [p for p in products if _get(p, "is_desired_product", "isDesiredProduct") is True]
     if len(marked) == 1:
@@ -520,28 +425,15 @@ def _identifiers(compound: dict[str, Any]) -> list[tuple[str, str]]:
 def _smiles(compound: dict[str, Any]) -> str | None:
     """Resolve a compound to SMILES from any identifier ORD allows, or `None` when none resolves.
 
-    ORD's `CompoundIdentifier` is a union — a real submission may carry `INCHI` or only a `NAME`,
-    and requiring `SMILES` discarded whole reactions over one component. Measured against the
-    public corpora: of 10,011 ORD records, **5,761 were refused**, all of them the Perera
-    Suzuki–Miyaura flow set (Science 2018, 359, 429), whose second coupling partner the source
-    spreadsheet publishes only as a `NAME`. That is 57% of a real corpus lost, including the yield
-    data on components that *were* resolvable.
-
-    The order is by decreasing certainty, and every step is an exact lookup:
+    Requiring `SMILES` would discard real records that carry only `INCHI` or `NAME`. In decreasing
+    certainty, each an exact lookup:
 
     1. `SMILES` — the structure, stated.
-    2. `INCHI` — also the structure, in another notation. RDKit is already a dependency and the
-       conversion is exact, so refusing it was never a safety property, only a missing branch.
-    3. `NAME` / `IUPAC_NAME` — resolved through `chemclaw.core.reagents`, the same table
-       `resolve_compound` serves the agent from. It returns `None` on an unknown spelling rather
-       than guessing, which is what keeps this a lookup and not an inference.
+    2. `INCHI` — the structure in another notation, converted exactly by RDKit.
+    3. `NAME` / `IUPAC_NAME` — resolved through `chemclaw.core.reagents`, which returns `None` on an
+       unknown spelling rather than guessing.
 
-    `None` when nothing resolves, and `_species` decides what that means. Refusing to invent a
-    structure is still the point (a fabricated one propagates silently into a fingerprint index, a
-    similarity hit and eventually a note citing it); what changed is what happens to the *record*.
-    That refusal cost the whole reaction — 5,760 of 10,011 seeded records, yields and conditions
-    included — and since `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` a
-    compound the source only names is carried as that name and the reaction lands citation-only.
+    A structure is never invented; `_species` carries an unresolved compound as its name.
     """
     identifiers = _identifiers(compound)
     for wanted in ("SMILES",):
@@ -576,10 +468,8 @@ def _label(species: Species) -> str:
 def _role(compound: dict[str, Any], default: Role) -> Role:
     """Map a compound's ORD `reaction_role` to our subset (defaulting only when unstated).
 
-    A *stated* role outside the subset (WORKUP, INTERNAL_STANDARD, AUTHENTIC_STANDARD)
-    collapses to REAGENT, per the `_ROLES` rationale: an auxiliary species must never read
-    as a true REACTANT — `chemclaw.memory.chains` keys causal product→reactant edges on REACTANT,
-    so mis-labeling an internal standard would fabricate handoffs that never happened.
+    A stated role outside the subset collapses to REAGENT, never REACTANT: `chemclaw.memory.chains`
+    keys product->reactant edges on REACTANT, so a mislabelled standard would fabricate handoffs.
     """
     name = str(_get(compound, "reaction_role", "reactionRole") or "").upper()
     if not name:
@@ -590,9 +480,7 @@ def _role(compound: dict[str, Any], default: Role) -> Role:
 def _percentage(product: dict[str, Any], measurement_type: str) -> float | None:
     """Read the first `ProductMeasurement` of `measurement_type` as a percentage, if present.
 
-    Generalized from the YIELD-only reader so PURITY rides the identical path (gap KNW-2, DRY):
-    ORD models both as a `ProductMeasurement` with a `percentage`, so one reader is correct for
-    both and a third measurement type costs one call site.
+    ORD models YIELD and PURITY alike, so one reader serves both.
     """
     wanted = measurement_type.upper()
     for measurement in _as_list(product.get("measurements")):
@@ -609,30 +497,19 @@ class _Charged(NamedTuple):
     mass_mg: float | None
     amount_mmol: float | None
     volume_ml: float | None
-    #: The source's own statement that the amount was deliberately *not* measured, as the
-    #: `UnmeasuredAmount.type` it gave — carried into `Component.attributes`, since "saturated" or
-    #: "catalytic" is a fact about this charge and not a quantity.
+    #: The source's statement that the amount was deliberately not measured (its
+    #: `UnmeasuredAmount.type`), carried into `Component.attributes`.
     unmeasured: str | None
 
 
 def _amount(amount: dict[str, Any]) -> _Charged:
     """Convert an ORD `Amount` to what this record keeps of it, in mg, mmol and mL.
 
-    **It must not answer "no amount" to an `Amount` it can see.** This read `mass` and `moles` only,
-    and ORD's `Amount` is a `oneof` over `mass | moles | volume | unmeasured` — a neat liquid
-    reactant charged by volume is the ordinary case, and a solvent is almost always one. Driven on a
-    two-reactant charge of 9.3 g (as 10 mL) plus 40 g: the record carried `(None, None)` for the
-    volumetric one, `record._scale` reported **"40 g of reactants charged"** for a 49.3 g charge,
-    and `_charge_line` said "amount not recorded" for a species whose amount the source *had*
-    recorded. Under-reporting scale is the direction `record._scale` argues matters — it makes a
-    pilot batch read as a bench run — and this reproduced it by a kind that reader does not see.
-
-    `unmeasured` is read rather than raised on, because a catalytic or saturated charge is a real
-    ORD statement and refusing the reaction over one would lose a good record; it is carried as an
-    attribute so the charge sheet can say the source declared it unmeasured instead of implying
-    nobody wrote it down. An `Amount` carrying **none** of the four kinds is refused by name: after
-    this, an unread kind can only be one ORD added since, and silently dropping it is the defect
-    above with a different key.
+    Every kind of the `oneof` is read: a volumetric charge (neat liquids, solvents) must not become
+    "no amount", which would under-report the record's scale. `unmeasured` is carried as an
+    attribute rather than refused, since a catalytic or saturated charge is a real statement. An
+    `Amount` with none of the known kinds is refused by name, so a kind ORD adds later is never
+    silently dropped.
     """
     if not isinstance(amount, dict):
         return _Charged(None, None, None, None)
@@ -717,10 +594,8 @@ def _provenance_msg(payload: dict[str, Any]) -> dict[str, Any]:
 def _modified_at(payload: dict[str, Any]) -> datetime | None:
     """The newest `provenance.record_modified[*].time.value`, or None when the record has none.
 
-    ORD models amendments as a *list*, so the newest entry is the one that decides whether this
-    record has changed since the sync last looked. Unparseable members are ignored rather than
-    raised: an exporter that writes a malformed modification stamp should not make the whole
-    record unreadable, and the overlap replay still catches the change on its own timescale.
+    Unparseable members are ignored rather than raised, so a bad stamp does not make the record
+    unreadable; the overlap replay still catches the change.
     """
     records = _get(_provenance_msg(payload), "record_modified", "recordModified")
     if not isinstance(records, list):
@@ -741,9 +616,8 @@ def _modified_at(payload: dict[str, Any]) -> datetime | None:
 def _created_at(payload: dict[str, Any]) -> datetime:
     """Parse the ORD record's creation time (`provenance.record_created.time.value`) as UTC.
 
-    ORD stamps creation under `provenance`; a naive timestamp is read as UTC (see the
-    free-text adapter for the same rationale). A missing/unparseable time raises
-    `OrdFormatError`, so `fetch_new_entries` skips the file rather than mis-ordering it.
+    A naive timestamp is read as UTC. A missing or unparseable time raises `OrdFormatError`, so the
+    file is skipped rather than mis-ordered.
     """
     created = _get(_provenance_msg(payload), "record_created", "recordCreated") or {}
     time = created.get("time") if isinstance(created, dict) else None
@@ -759,8 +633,7 @@ def _created_at(payload: dict[str, Any]) -> datetime:
 def _addition_order(pair: tuple[dict[str, Any], list[Species]]) -> tuple[int, str]:
     """Sort key for input additions: ORD `addition_order` first, then component SMILES (or name).
 
-    An input without an explicit order sorts last (a large sentinel) but stays deterministic
-    via the SMILES tiebreak, so charge order is stable run to run.
+    Inputs without an order sort last, deterministically, so charge order is stable run to run.
     """
     raw_input, components = pair
     order = _get(raw_input, "addition_order", "additionOrder")

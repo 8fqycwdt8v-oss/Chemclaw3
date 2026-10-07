@@ -1,25 +1,15 @@
 """The deterministic verdicts a drafted design has to survive.
 
-**These are computed, never asserted.** Nothing here asks a model whether its own protocol is
-sound; every function reads the design and answers from arithmetic, RDKit, or the request's own
-stated limits. That is the whole reason this file exists rather than a paragraph in a `SKILL.md`:
-a prompt can ask for a hazard screen and a prompt can be ignored, while
-`evidence_present` returning a blocker stops the draft from being stored at all.
+Computed, never asserted: every function answers from arithmetic, RDKit or the request's own
+stated limits, never by asking a model. A prompt can be ignored; a blocker stops the draft from
+being stored. Each check is a pure `ExperimentDesign -> ProtocolCheck` run by `run_checks`, so
+a new one is a function plus a row in `_CHECKS`.
 
-Each check is a pure `ExperimentDesign -> ProtocolCheck` and they are run as a set by `run_checks`,
-so a new one is a function plus a row in `_CHECKS` and nothing else moves.
-
-**Severity is per case, not per check**, which is the thing to read before adding one.
-`charge_is_consistent` is a `blocker` when the table names no limiting reagent or its equivalents
-contradict its amounts, and a `warning` when there is no table yet — the same function, two
-severities, because the question "is this misleading" has different answers on its branches.
-
-A `blocker` is for the cases where storing the design would be storing something misleading: a
-structure nobody can read, a charge table nobody can weigh out, an arm setting a level the factor
-does not declare, a plate that does not fit, a reagent the chemist forbade, no followable evidence
-at all. A `warning` is a judgment about a specific piece of work that this file is not entitled to
-make: a missing control, an unmeasured objective, an unscreened hazard, a temperature outside the
-band a unit mistake leaves.
+Severity is per case, not per check. A `blocker` is for designs whose storage would be
+misleading: an unreadable structure, a charge table nobody can weigh out, an undeclared level, a
+plate that does not fit, a forbidden reagent, no followable evidence. A `warning` is a judgment
+about specific work this module is not entitled to make: a missing control, an unmeasured
+objective, an unscreened hazard, an implausible setpoint.
 """
 
 from __future__ import annotations
@@ -45,20 +35,15 @@ from chemclaw.protocols.models import (
 )
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
-#: Temperature outside this band is almost always a unit mistake (a Kelvin value typed into a
-#: Celsius field reads as 353 °C) rather than a real setpoint. A warning, not a blocker: sub-zero
-#: cryogenic work and high-temperature flow chemistry both live outside a narrow band.
+#: Temperature outside this band is almost always a unit mistake (Kelvin typed as Celsius). A
+#: warning, not a blocker: cryogenic and high-temperature flow work live outside it.
 _TEMPERATURE_BAND_C = (-100.0, 300.0)
 
 #: Above this, a "time" is almost certainly minutes typed into an hours field.
 _MAX_PLAUSIBLE_HOURS = 336.0
 
-#: The rest of the bands a unit mistake leaves, each on a field the check's docstring already
-#: claimed to cover and none of which it read. Measured: a step at 5000 °C for a million hours, a
-#: 1000 M concentration (millimolar typed into a molar field), 10^6 bar, pH -50, a tonne of solid,
-#: a swimming pool of solvent and 500 equivalents all passed as "setpoints and amounts are in
-#: range". The models accept every one of them, and correctly so — only inf and NaN are refused
-#: there, because a bound belongs in a check a chemist can see and overrule, not in a parser.
+#: The other bands a unit mistake leaves. The models accept any finite value; a bound belongs in a
+#: check a chemist can see and overrule, not in a parser.
 _MAX_MOLAR = 100.0
 _MAX_BAR = 1000.0
 _PH_BAND = (-2.0, 16.0)
@@ -68,43 +53,27 @@ _MAX_VOLUME_ML = 20_000.0
 
 #: How far above the *declared* scale a charge may go before it reads as a unit mistake.
 #:
-#: **The two constants above are a bench bound wearing a unit-mistake badge, and at kilo scale the
-#: badge is wrong.** They say 1 kg and 20 L, which is a fine description of what a discovery
-#: chemist charges and a false one for a 20 kg campaign in a 250 L reactor — the opening probe of
-#: `data/evals/probes/process-chemistry.yaml`. A protocol at that scale still *stored*, because
-#: this check is a warning rather than a blocker; what it did was report every real charge on it as
-#: a suspected unit error. A warning that fires on correct input is worse than no warning, because
-#: it is the one that teaches a chemist to stop reading warnings — and this check sits beside
-#: `charge_is_consistent` and `limiting_is_limiting`, which they then stop reading too.
-#:
-#: So the bound moves with `request.scale` when the chemist stated one, and the defaults above are
-#: what "no scale stated" means. The multiplier is deliberately loose because the thing being
-#: caught is an *order-of-magnitude slip*, not an unusual recipe: a charge 1,000x the batch scale
-#: is a thousandfold unit error, while 30x is a solvent charged by mass and 5x is an antisolvent.
-#: Anything tighter starts arguing with process chemistry, which is not this function's business.
+#: The fixed bounds above describe bench work; at kilo scale they would flag every real charge,
+#: and a warning that fires on correct input teaches chemists to stop reading warnings. So the
+#: bound scales with `request.scale` when one is stated. Loose on purpose: it catches an
+#: order-of-magnitude slip, not an unusual recipe.
 _SCALE_MASS_MULTIPLE = 1_000.0
 
-#: Litres of any one charge per kilogram of declared scale, for the same purpose.
-#:
-#: Process volumes run 5-20 L/kg and a wash or a crystallisation liquor can double that, so 100 is
-#: several times the widest real number and still three orders below a mL/L slip.
+#: Litres of any one charge per kilogram of declared scale: several times the widest real process
+#: volume, still orders below a mL/L slip.
 _SCALE_VOLUMES_PER_KG = 100.0
 
-#: The density assumed to read a *volume* scale as a mass one, and the only physical assumption in
-#: this module. Water, because the alternative is refusing to widen the mass band for a protocol
-#: whose scale the chemist stated in litres — which is most of them, above a few kilos.
+#: The density assumed to read a volume scale as a mass one, the only physical assumption here.
+#: Water, so a scale stated in litres can still widen the mass band.
 _ASSUMED_DENSITY_KG_PER_L = 1.0
 
 
 def _plausibility_bands(design: ExperimentDesign) -> tuple[float, float, str]:
     """The mass (mg) and volume (mL) ceilings for this design, and how they were arrived at.
 
-    Returns the defaults unchanged when the request states no scale, states one this module cannot
-    read ("a 96-well plate", "pilot"), or states one in a dimension that fixes neither bound (mol,
-    with no molar mass to spend it against). **Never tightens**: both are `max`ed against the bench
-    defaults, so declaring a 5 g scale cannot start failing a charge that passes today. The band is
-    here to catch a slip, and a check that grew teeth on a quiet Tuesday is how a warning becomes
-    noise in the other direction.
+    Returns the defaults when the request states no readable scale or one in a dimension that fixes
+    neither bound (mol). Never tightens: both are `max`ed against the bench defaults, so declaring a
+    scale cannot fail a charge that passes without one.
     """
     quantity = parse_quantity(design.request.scale.value)
     if quantity is None:
@@ -136,16 +105,9 @@ def _fail(check_id: str, severity: CheckSeverity, detail: str) -> ProtocolCheck:
 def _all_charge_lines(design: ExperimentDesign) -> list[ChargeLine]:
     """Every charge line in the design.
 
-    A function rather than `design.base.charge` inline, because there is exactly one charge table
-    today and four checks read it through this seam.
-
-    **It is a seam, not a guarantee, and the docstring used to claim the second.** It said a
-    per-arm override "lands here and none of them changes" — while `charge_is_consistent` (the
-    blocker whose whole subject is the charge table) and `is_a_protocol` both read
-    `design.base.charge` directly. Either could still be blind to an override this function
-    started returning. The two are left as they are, because `charge_is_consistent` needs the
-    per-arm question answered deliberately rather than inherited, and this sentence is now what a
-    reader is told instead of a promise nothing kept.
+    A seam over the one charge table that several checks read. `charge_is_consistent` and
+    `is_a_protocol` read `design.base.charge` directly, so a per-arm override added here would not
+    reach them automatically.
     """
     return list(design.base.charge)
 
@@ -153,20 +115,10 @@ def _all_charge_lines(design: ExperimentDesign) -> list[ChargeLine]:
 def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
     """Every `(where, smiles)` the design names, so one pass can check them all.
 
-    **The reaction SMILES is deliberately NOT in here, and putting it in was a measured mistake.**
-    It reads like the one structure a design always has, so it was added to close a hole in
-    `components_resolve`. Two things broke at once. `forbidden_absent` reads this same set, and a
-    precedent's record form carries the *old* solvent in its agent slot — so the canonical
-    "get me out of DMF" design, whose own solvent is 2-MeTHF, was refused at intake with "the
-    design uses reagents the request forbids: DMF", permanently and with no way to state both the
-    precedent and the exclusion. And an agent block is routinely written as a *name* rather than a
-    structure, so `CCO.CC(=O)Cl>DMF>CCOC(C)=O` became a blocker while `A>B>C>D` and
-    `Suzuki coupling` passed, because the gate was triggered by counting `>`.
-
-    The distinction the hole and the fix both missed: `reaction_smiles` says what is being *asked
-    for*; this set says what the design *does*. `atom_balance` reads the reaction on its own terms
-    and reports an unreadable species as a failed warning, which is the right severity for a field
-    that is free text by declaration (`models.py`: "Empty for an ask that is not one").
+    The reaction SMILES is deliberately excluded: it says what is being asked for, not what the
+    design does. A precedent's record form carries the old solvent in its agent slot (which would
+    trip `forbidden_absent`), and agents are often written as names. `atom_balance` reads the
+    reaction on its own terms.
     """
     asked = [
         (f"request component {component.name_as_written!r}", component.smiles)
@@ -179,16 +131,9 @@ def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
 def used_structures(design: ExperimentDesign) -> list[tuple[str, str]]:
     """Every `(where, smiles)` the design *does*, as opposed to the ones the ask names.
 
-    The same distinction `_structures` draws for `reaction_smiles`, one field further in — and
-    missing it left the identical defect in place. A `RequestedComponent` is "one species the
-    chemist **named**", and what a process chemist names first is the incumbent they want replaced,
-    so the canonical "get me out of DMF" design — solvent `2-MeTHF`, `forbidden=["DMF"]`, DMF listed
-    as the named component — was refused by `forbidden_absent` with "the design uses reagents the
-    request forbids: DMF". `draft_experiment_protocol` raises on any blocker, so that design could
-    never be stored and there was no way to state both the incumbent and the exclusion.
-
-    `components_resolve` still reads the ask, because whether a name the chemist typed resolves is
-    exactly its question.
+    A requested component is often the incumbent the chemist wants replaced ("get me out of DMF"),
+    so the exclusion checks read this set, not the ask. `components_resolve` still reads the ask,
+    because whether a typed name resolves is exactly its question.
     """
     found: list[tuple[str, str]] = []
     for line in _all_charge_lines(design):
@@ -203,20 +148,8 @@ def used_structures(design: ExperimentDesign) -> list[tuple[str, str]]:
 
 def components_resolve(design: ExperimentDesign) -> ProtocolCheck:
     """Every structure the design names parses whole."""
-    # **`_parses` alone, and the `canonical == smiles` conjunction this replaced is the defect
-    # worth remembering.** `canonical_smiles` is lenient in a way that is not "returns the input
-    # unchanged": RDKit stops at whitespace and at a non-ASCII edge, so `"CCO junk"` canonicalises
-    # to `"CCO"` — a *different, smaller molecule*, successfully. The old test asked whether the
-    # string came back unchanged, which is false for exactly that class, so the blocker never
-    # consulted the strict parser on the inputs it was written for and reported `'1 structures
-    # parse'` about a structure that does not. Measured: `"CCO junk"`, `"CCO 1"`, `"CC°"` and
-    # `"°C"` all passed. It is the same silent truncation `require_molecule`'s docstring records
-    # for `screen_hazards("CCO junk")`, one layer up.
-    #
-    # Asking `require_molecule` directly instead cannot fail open, and measurement says it does not
-    # fail *closed* either: the only inputs where the lenient and strict parsers disagree in the
-    # other direction are over `molecule_max_atoms`/`molecule_max_smiles_length`, which both
-    # already reject.
+    # The strict parser alone: `canonical_smiles` is lenient and truncates at whitespace or a
+    # non-ASCII character (`"CCO junk"` -> `"CCO"`), so it cannot say whether the input parses.
     bad = [where + f": {smiles!r}" for where, smiles in _structures(design) if not _parses(smiles)]
     if bad:
         return _fail(
@@ -226,10 +159,8 @@ def components_resolve(design: ExperimentDesign) -> ProtocolCheck:
         )
     named_without_structure = [c.name_as_written for c in design.request.components if not c.smiles]
     if named_without_structure:
-        # A *failed* warning: this is a finding, and `render_markdown` and `summarise` both list
-        # only failed checks, so an `_ok` here put "checked and fine" in front of a reader about a
-        # species nobody resolved. That is the defect `_unreadable`'s docstring describes as fixed,
-        # in four other places in this file.
+        # A *failed* warning: only failed checks are listed to a reader, and an unresolved species
+        # is a finding.
         return _fail(
             "components_resolve",
             "warning",
@@ -247,42 +178,21 @@ def _parses(smiles: str) -> bool:
 
 
 #: How far a stated amount may sit from the one its equivalents imply, as a fraction of the implied
-#: figure. A twentieth: the two are statements of the same fact, and an ordinary two-decimal entry
-#: at a catalyst loading is about 2% off, so 5% clears the rounding a chemist writes with room to
-#: spare while a mis-written digit does not fit inside it.
+#: figure: clears ordinary rounding with room to spare while a mis-written digit does not fit.
 _AGREEMENT_FRACTION = 0.05
 
-#: The floor under that fraction, in mmol — half a unit in the third decimal, which is the precision
-#: a mmol column realistically carries. Without it a sub-milligram line has a tolerance smaller than
-#: the column it is written in, and every correctly-rounded trace charge is a blocker.
+#: The floor under that fraction, in mmol (half a unit in the third decimal), so a correctly
+#: rounded trace charge is never a blocker.
 _AGREEMENT_FLOOR_MMOL = 0.0005
 
 
 def _agreement_tolerance(implied_mmol: float) -> float:
     """How far a stated amount may sit from the one its equivalents imply.
 
-    **A flat 2% of the line's own figure blocked ordinarily-rounded catalyst lines.** The tolerance
-    scaled with the line, so for anything under about 0.25 mmol a two-decimal entry could not clear
-    it: 250 mg of a 182 g/mol aryl halide is 1.37 mmol, 5 mol% Pd is 0.0685 mmol, a chemist writes
-    `0.07`, and that was a *blocker* — which refuses the draft outright. Swept across the usual
-    scales and loadings, 4 of 18 correct tables were refused, every one of them a normal catalyst or
-    ligand line at a non-round limiting scale.
-
-    **The first fix for that read the precision back out of the written figure, and it cannot be
-    read back out of a float.** `Decimal(repr(0.10))` is `Decimal('0.1')` — a Python float carries
-    no trailing zero — so "the precision of the figure as it was typed" was recovered correctly for
-    `0.07` and wrong by a factor of ten for every figure whose last typed digit is `0`. Measured
-    against the function's own worked example: a catalyst written `0.10` against an implied `0.0685`
-    is 46% out, and it **passed**, on a tolerance of 0.05 mmol. The docstring asserted that same
-    line fails "six times the slack". A blocker that fails open in exactly the regime it was written
-    for is worse than the false refusal it replaced, because nothing on the page says so.
-
-    So the tolerance is derived from the *implied* amount and from nothing the chemist typed: a
-    twentieth of it, floored at half a unit in the third decimal. Neither term can be moved by how a
-    figure was rounded, which is what makes the rule the same rule for every line in the table.
-    `tests/test_protocol_checks.py::test_the_agreement_tolerance_over_the_scales_a_bench_uses`
-    is the sweep — fifteen tables across four scales and five loadings, each with the verdict a
-    chemist would give.
+    A twentieth of the *implied* amount, floored at half a unit in the third decimal. Derived from
+    nothing the chemist typed: a tolerance on the line's own figure blocks rounded catalyst lines,
+    and a float cannot carry the typed precision (`0.10` is `0.1`). The sweep in
+    `tests/test_protocol_checks.py` holds the verdicts across bench scales and loadings.
     """
     return max(_AGREEMENT_FRACTION * abs(implied_mmol), _AGREEMENT_FLOOR_MMOL)
 
@@ -308,12 +218,8 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
             f"the limiting reagent {reference.component!r} is listed at "
             f"{reference.equivalents} equivalents; by definition it is 1.0",
         )
-    # `not` rather than `is None`, and that is the fix for a measured hole: `amount_mmol` is
-    # `ge=0.0`, so a limiting reagent at exactly `0.0` was neither `None` nor caught below — the
-    # `reference.amount_mmol > 0` guard inside the comprehension emptied the disagreement list, and
-    # a table where every mmol figure contradicted its equivalents returned a *passing* blocker
-    # reading "limiting reagent 'SM' at 0 mmol". Zero is the same fact as absent for this check:
-    # there is no scale to turn an equivalent into a weight against.
+    # `not` rather than `is None`: a limiting reagent at `0.0` gives no scale to weigh against, the
+    # same as absent.
     if not reference.amount_mmol:
         return _fail(
             "charge_is_consistent",
@@ -322,18 +228,16 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
             f"({reference.amount_mmol!r}), so no other line's equivalents can be turned into a "
             "weight",
         )
-    # Equivalents and amounts are two statements of the same fact, and a table where they disagree
-    # is one a chemist will weigh out wrong. The tolerance is a twentieth of the *implied* figure,
-    # floored — derived from nothing the chemist typed, see `_agreement_tolerance`.
+    # Equivalents and amounts are two statements of one fact; a table where they disagree will be
+    # weighed out wrong. See `_agreement_tolerance`.
     disagreements = [
         f"{line.component!r}: {line.equivalents} eq implies "
         f"{line.equivalents * reference.amount_mmol:.4g} mmol, table says {line.amount_mmol:.4g}"
         for line in lines
         if line.equivalents is not None
         and line.amount_mmol is not None
-        # The relative slack on the comparison itself, not on the chemistry: `0.075 * 1.0` is
-        # 0.07500000000000001 in binary, so a table sitting exactly on its tolerance was refused by
-        # a rounding error in the check rather than by anything in the table.
+        # Relative slack on the float comparison itself, so a table exactly on its tolerance is not
+        # refused by binary rounding.
         and abs(line.equivalents * reference.amount_mmol - line.amount_mmol)
         > _agreement_tolerance(line.equivalents * reference.amount_mmol) * (1 + 1e-9)
     ]
@@ -354,30 +258,11 @@ def charge_is_consistent(design: ExperimentDesign) -> ProtocolCheck:
 def limiting_is_limiting(design: ExperimentDesign) -> ProtocolCheck:
     """The line marked limiting is the one that actually runs out first.
 
-    `charge_is_consistent` enforces that the reference sits at 1.0 equivalents and that every other
-    line's amount agrees with its equivalents. Neither says the reference is the *minimum*, so a
-    perfectly self-consistent table can name the wrong one: acid at 1.0 eq / 1.0 mmol marked
-    limiting beside an amine at 0.5 eq / 0.5 mmol passed with no blockers, while the amine caps the
-    reaction at 0.5 mmol. The run sheet then names the wrong reference and every yield stated
-    against it is over-reported twofold.
-
-    A `warning` rather than a blocker, and the severity is the argument: the roles are declared by
-    whoever wrote the table, and a deliberately sub-stoichiometric reagent whose yield is reported
-    on the other partner is unusual rather than impossible. That is precisely this file's own
-    definition of a warning — a judgment about a specific piece of work it is not entitled to make —
-    and `forbidden_absent` is the standing reminder of what a blocker firing on correct work costs.
-
-    Only `starting-material` and `reagent` lines are weighed. A catalyst, a ligand, an additive, a
-    base or a solvent below one equivalent is the normal case, not a finding.
-
-    **`role` defaults to `UNKNOWN`, so on an unlabelled table this check weighs nothing** — and it
-    used to report that as `'acid' is the smallest stoichiometric charge`, which is a claim about a
-    comparison that never happened. Measured on the docstring's own example with the roles left at
-    their default: `passed=True`, with the wrong reagent marked limiting and every yield stated
-    against it over-reported twofold. The finding is not a reason to delete the check — it catches
-    exactly that fault the moment the table says what its lines are — but a passing verdict has to
-    say what it looked at, so a chemist reading "nothing here is labelled" knows to label it rather
-    than reading a clearance that was never granted.
+    `charge_is_consistent` does not check that the reference is the *minimum*, so a self-consistent
+    table can name the wrong one and over-report every yield stated against it. A warning, since a
+    deliberately sub-stoichiometric reagent is unusual rather than impossible. Only
+    `starting-material` and `reagent` lines are weighed. On an unlabelled table (`role` defaults to
+    `UNKNOWN`) nothing is weighed, and the passing verdict says so.
     """
     lines = design.base.charge
     limiting = [line for line in lines if line.limiting]
@@ -428,15 +313,9 @@ def limiting_is_limiting(design: ExperimentDesign) -> ProtocolCheck:
 
 def atom_balance(design: ExperimentDesign) -> ProtocolCheck:
     """No expected product contains an element nothing charged supplies."""
-    # The same rule `ingest.eln.validate.validate_ord` applies to a recorded reaction, asked of a
-    # proposed one. Counts are deliberately not compared, for that function's reason: there are no
-    # stoichiometric coefficients here either, so a dimerization would fail a per-molecule count.
-    # **Both forms, because this tree emits both.** `ingest.eln.ord.reaction_smiles()` produces the
-    # record form `reactants>agents>products`, so an agent copying a precedent's reaction across
-    # brings a three-part string whenever that run had a solvent or a catalyst — and a `">>" not
-    # in reaction` guard skipped the check silently on exactly those. Splitting on `>` handles both:
-    # `a>>c` is three parts with an empty middle, `a>b>c` is three parts with agents in it. Agents
-    # supply elements (they are in the flask), so they join the input side.
+    # The element-balance rule `ingest.eln.validate.validate_ord` applies to a recorded reaction.
+    # Counts are not compared (no stoichiometric coefficients). Both `a>>c` and the record form
+    # `a>b>c` are accepted by splitting on `>`; agents supply elements, so they join the inputs.
     reaction = design.request.reaction_smiles.strip()
     parts = reaction.split(">")
     if len(parts) != 3:
@@ -477,11 +356,8 @@ def atom_balance(design: ExperimentDesign) -> ProtocolCheck:
 def _unreadable(smiles: str) -> ProtocolCheck:
     """The verdict when a species in the reaction cannot be read.
 
-    A **failed** warning rather than a passing one, which is the second half of the same defect as
-    `components_resolve`'s: returning `_ok` here put "checked and fine" in front of a reader about a
-    balance nobody could compute, and `render_markdown` lists only failed checks — so the sentence
-    naming the unreadable species never reached the page. The severity stays a warning, because a
-    structure this check cannot read is `components_resolve`'s blocker to raise, not this one's.
+    A **failed** warning, so the sentence naming the species reaches the page. Not a blocker: an
+    unreadable structure is `components_resolve`'s blocker to raise.
     """
     return _fail("atom_balance", "warning", f"could not read {smiles!r}; balance not checked")
 
@@ -495,11 +371,7 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
     """Every arm sets levels its factors declare, and sets all of them."""
     declared = {f.name: {level.label for level in f.levels} for f in design.factors}
     if not design.factors:
-        # **Not an early return, because "no factors" is the case where every level an arm sets is
-        # undeclared.** The exit came first and exempted exactly that: two arms setting `solvent`
-        # and `ligand` with no factor declared passed a blocker whose subject is "an arm setting a
-        # level the factor does not declare", and `render`'s run sheet — which builds its columns
-        # from `design.factors` — then dropped those values from the sheet the chemist runs from.
+        # Not an early return: with no factors declared, every level an arm sets is undeclared.
         stray = sorted({name for arm in design.arms for name in arm.levels})
         if stray:
             return _fail(
@@ -516,16 +388,10 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
         if unknown:
             problems.append(f"{arm.arm_id} sets undeclared factor(s): {', '.join(unknown)}")
         if arm.control:
-            # **A control is outside the factor *space*, and this check is about the factor
-            # *vocabulary*.** The exemption is real for the two rules below it — a control may hold
-            # a level no factor declares (`ligand="none"`) and may leave factors unset, which is
-            # what makes it a control — and it was wrong for the rule above, in both branches. The
-            # run sheet builds its columns from `design.factors` (`render.factor_names`), so a
-            # level filed under a name nothing declares is stored in the document and read by
-            # nothing: a negative control carrying `no_catalyst="omitted"` rendered identically to
-            # the arm beside it apart from its tag, and the instruction that made it a control
-            # reached no page. `ProtocolArm`'s docstring already says a control that genuinely
-            # differs says so in `note`; this is what makes that true rather than hoped for.
+            # A control may hold a level outside the factor *space* and may leave factors unset, but
+            # its level names must still be declared factors: the run sheet builds its columns from
+            # `design.factors`, so an undeclared name would reach no page. A control that differs
+            # otherwise says so in `note`.
             continue
         for name, label in arm.levels.items():
             if name in declared and label not in declared[name]:
@@ -546,11 +412,8 @@ def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
 
 def arms_are_distinct(design: ExperimentDesign) -> ProtocolCheck:
     """No two non-replicate arms set the same conditions."""
-    # **The setpoints are part of the conditions, and leaving them out made the remedy impossible.**
-    # Keyed on `levels` alone, three arms differing only in temperature collided, and the message
-    # told the chemist to mark one `replicate_of` the other — which the model validator refuses,
-    # because they run different conditions. The advice and the refusal were each right about a
-    # different definition of "the same conditions"; this is the one both now use.
+    # Setpoints are part of the conditions: arms differing only in temperature are not duplicates,
+    # and `replicate_of` would refuse them.
     seen: dict[tuple[Any, ...], str] = {}
     duplicates: list[str] = []
     for arm in design.arms:
@@ -576,12 +439,8 @@ def layout_fits(design: ExperimentDesign) -> ProtocolCheck:
     """The plate holds every arm, once, in a known format."""
     layout = design.layout
     if layout is None:
-        # **The design's own shape, not `request.mode`.** `mode` is a field of the *ask*, and
-        # nothing ties it to what was actually drafted, so a 96-arm design whose ask still said
-        # `single` switched this blocker off entirely and reported "a single experiment needs no
-        # layout" over ninety-six arms. One mis-set enum on the intake disabled the plate-fits
-        # blocker and the controls warning on a real plate. `summarise` had this same defect and
-        # was fixed the same way: read the design.
+        # The design's own shape, not `request.mode`: the ask's mode is not tied to what was
+        # drafted.
         if not design.is_plate:
             return _ok("layout_fits", "blocker", "a single experiment needs no layout")
         return _ok("layout_fits", "warning", "no plate layout")
@@ -596,15 +455,8 @@ def layout_fits(design: ExperimentDesign) -> ProtocolCheck:
     labels = [w.label for w in layout.wells]
     if len(set(labels)) != len(labels):
         return _fail("layout_fits", "blocker", "two arms are placed in the same well")
-    # **Counted, not set-compared, because "once" is half of what this blocker claims.** The
-    # docstring says the plate holds every arm *once*; a set could only ever see an arm that is
-    # missing, never one placed twice. Measured: three wells over two arms with A1 in two of them
-    # passed as `3 of 96 wells used`, and `run_sheet_rows` — which keys wells by arm — then dropped
-    # a well, so the chemist's run sheet started at run 2 and put A1 at the wrong position.
-    # `Counter` rather than `list.count` in a comprehension — the O(n²) shape `diff._labelled`
-    # carried, kept out of a second place for the same reason and with the same honest weight: at
-    # this list's ceiling (1536 wells) that scan is 22 ms, not the 46 s measured before the
-    # ceilings existed.
+    # Counted, not set-compared: "every arm once" must catch an arm placed twice as well as one
+    # missing.
     occupants = Counter(w.arm_id for w in layout.wells)
     twice = sorted(arm for arm, n in occupants.items() if n > 1)
     if twice:
@@ -627,11 +479,8 @@ def layout_fits(design: ExperimentDesign) -> ProtocolCheck:
     orders = sorted(w.run_order for w in layout.wells)
     if orders != list(range(1, len(orders) + 1)):
         return _fail("layout_fits", "blocker", "run order is not 1..n over the wells")
-    # **The plate's own shape and each well's position, because only `place()` is trusted.**
-    # `POST /protocols/{id}/revisions` accepts a whole `PlateLayout` from a browser, so nothing
-    # guarantees the layout came from `place()` at all. Measured before this: a layout declaring
-    # `plate_format=96` with `rows=1, columns=2` and wells at row 98 labelled `ZZ99` passed a
-    # *blocker* whose docstring says "the plate holds every arm, once, in a known format".
+    # Check the plate's own shape and each well's position: a layout can arrive whole from the API,
+    # so only `place()` output is trusted.
     rows, columns = plate_shape(layout.plate_format)
     if (layout.rows, layout.columns) != (rows, columns):
         return _fail(
@@ -681,15 +530,9 @@ def controls_present(design: ExperimentDesign) -> ProtocolCheck:
 
 def evidence_present(design: ExperimentDesign) -> ProtocolCheck:
     """The design cites at least one precedent and at least one tool."""
-    # The blocker that makes "use the record and the tools" a property of the code. A protocol
-    # citing neither is a guess, and storing it would put a guess in the same table, with the same
-    # shape and the same UI treatment, as one argued from 40 runs and a hazard screen.
-    # **A citation counts only when it is followable**, which is the difference between this check
-    # and a word count. `kind="tool"` without a `tool` name and `kind="precedent"` without a `ref`
-    # are two sentences a model can write about work it did not do — measured, they cleared this
-    # blocker between them — and neither gives a chemist anything to open. `hazard_screen_ran` was
-    # already written this way (it reads `ref.tool` against three named tools); this is the same
-    # rule one level up.
+    # The blocker that makes "use the record and the tools" a property of the code: a design citing
+    # neither is a guess. A citation counts only when followable (`kind="tool"` names a tool,
+    # `kind="precedent"` carries a `ref`), so a chemist has something to open.
     cited = {ref.kind for ref in design.evidence if _is_followable(ref)}
     unfollowable = [ref.summary for ref in design.evidence if not _is_followable(ref)]
     kinds = cited
@@ -699,11 +542,7 @@ def evidence_present(design: ExperimentDesign) -> ProtocolCheck:
             "evidence_present",
             "blocker",
             (
-                # **The message has to say which of the two failures this is.** Citations that
-                # exist but are unfollowable produce the same empty `kinds` as no citations at all,
-                # and this branch said "this design cites nothing" over two supplied references —
-                # sending the model back to re-run five search tools when the fix was one empty
-                # field. The passing branch already knew how to describe it.
+                # Say which failure this is: unfollowable citations, not missing ones.
                 f"{len(unfollowable)} citations are supplied but none is followable: "
                 + "; ".join(unfollowable[:3])
                 + ". A `precedent` needs its `ref` and a `tool` needs its `tool` name — without "
@@ -797,10 +636,7 @@ def quantities_are_plausible(design: ExperimentDesign) -> ProtocolCheck:
             problems.append(f"{label}: {points.pressure_bar} bar is over {_MAX_BAR:.0f} bar")
         if points.ph is not None and not _PH_BAND[0] <= points.ph <= _PH_BAND[1]:
             problems.append(f"{label}: pH {points.ph} is outside {_PH_BAND[0]}..{_PH_BAND[1]}")
-    # **A step's own temperature and duration, which nothing read.** The docstring said "setpoints
-    # and amounts", and a step reading "heat to 5000 °C for 1 000 000 h" passed as "setpoints and
-    # amounts are in range" — a step's temperature is the number a chemist actually sets the block
-    # to, so it is exactly as much a setpoint as the body's.
+    # A step's own temperature and duration are setpoints too.
     for index, step in enumerate(design.base.steps, start=1):
         if step.temperature_c is not None and not low <= step.temperature_c <= high:
             problems.append(f"step {index}: {step.temperature_c} °C is outside {low}..{high}")
@@ -844,18 +680,8 @@ def forbidden_absent(design: ExperimentDesign) -> ProtocolCheck:
     forbidden = [f.strip() for f in design.request.forbidden if f.strip()]
     if not forbidden:
         return _ok("forbidden_absent", "blocker", "nothing forbidden")
-    # **Both sides go through the reagent table, and that is the fix rather than a refinement.**
-    # The first version compared `canonical_smiles(term)` against the design's canonical SMILES —
-    # but `canonical_smiles("DMF")` is the string `"DMF"`, because RDKit cannot read a name, so the
-    # structure half could never fire for a reagent a chemist named. It worked only when the
-    # exclusion was itself written as a SMILES, which is not how anybody writes an exclusion.
-    # Measured: forbidding "DMF" let a design charging `N,N-dimethylformamide` — the same molecule,
-    # same structure — through a *blocker*.
-    #
-    # `core.reagents.resolve_compound_name` is the one entry point this tree already has for
-    # "give me the canonical form of whatever was typed", name or SMILES, and it returns `None`
-    # rather than guessing. So both the exclusion and every species the design names are reduced to
-    # a structure where one is known, and the written names are still compared beside it for the
+    # Both sides go through `core.reagents.resolve_compound_name`, so forbidding "DMF" also catches
+    # `N,N-dimethylformamide` (RDKit cannot read a name). The written names are still compared for
     # reagents the table does not carry.
     names = {n.strip().lower() for n in _used_species(design) if n.strip()}
     structures = {_identity(value) for value in (*names, *(s for _, s in used_structures(design)))}
@@ -874,10 +700,8 @@ def forbidden_absent(design: ExperimentDesign) -> ProtocolCheck:
 def _identity(value: str) -> str:
     """The canonical structure behind a name or a SMILES, or the lower-cased text when neither.
 
-    The falling-back branch is what keeps this usable for the reagents the curated table does not
-    carry — a site's internal code name, a fragment nobody has drawn — where the written spelling
-    is the only identity there is. `resolve_compound_name` never guesses, so an unrecognised name
-    reaching this branch is a miss rather than a fabricated structure.
+    The fallback keeps reagents the curated table lacks (internal codes) usable by spelling;
+    `resolve_compound_name` never guesses, so a miss is never a fabricated structure.
     """
     resolved = resolve_compound_name(value.strip())
     return resolved.smiles if resolved is not None else value.strip().lower()
@@ -886,19 +710,9 @@ def _identity(value: str) -> str:
 def _used_species(design: ExperimentDesign) -> list[str]:
     """Every human-readable species name the design *uses*.
 
-    Deliberately not the ask's own `components`: see `used_structures` for the measured failure
-    that inclusion caused. What a chemist names in the ask is frequently the thing they are trying
-    to get rid of.
-
-    **The solvent is in here, and its absence made the blocker unable to catch the commonest
-    exclusion there is.** A process chemist's hard exclusion is nearly always a solvent — an ICH
-    class-2 solvent, or one the plant cannot handle — and `Setpoints.solvent` was the one field
-    this function did not read. Measured: a design forbidding DMF and *running in DMF* reported
-    `1 exclusions honoured`, while the rendered protocol printed `- **Solvent:** DMF`. The per-arm
-    override is the same hole one level down.
-
-    A step's `components` are here for the same reason: a procedure reading "charge SM and DMF"
-    names a reagent, whether or not the charge table lists it.
+    Not the ask's `components` (see `used_structures`). Includes the solvent and its per-arm
+    override (the commonest hard exclusion) and each step's components, since a procedure can name a
+    reagent the charge table omits.
     """
     names = [line.component for line in _all_charge_lines(design)]
     names += [level.label for factor in design.factors for level in factor.levels]
@@ -910,22 +724,15 @@ def _used_species(design: ExperimentDesign) -> list[str]:
 
 def coverage_is_stated(design: ExperimentDesign) -> ProtocolCheck:
     """A screen either covers its factor grid or says how much of it it covers."""
-    # **`campaign` is the exemption; `single` is not.** A campaign is allowed to ship a first round
-    # that does not cover its factor space — that is what the enum distinguishes screen from
-    # campaign *for*. Reading `== "screen"` made every other mode an exemption too, so a design with
-    # factors and ninety-six arms whose ask still said `single` reported "not a fixed screen". The
-    # exemption is now named rather than inferred, and the shape decides the rest.
+    # Only `campaign` is exempt: a campaign may ship a first round that does not cover its factor
+    # space. The shape decides the rest.
     if design.request.mode == "campaign" or not design.factors:
         return _ok("coverage_is_stated", "note", "not a fixed screen")
     full = 1
     for factor in design.factors:
         full *= len(factor.levels)
-    # **Distinct level combinations, not arms.** Counting arms compared a number to a product of
-    # level counts, so four arms covering two of four combinations reported "full grid: 4 of 4
-    # combinations" — and `render_markdown` prints that sentence to the chemist. A declared level
-    # that is never run is exactly what this check exists to make somebody say out loud, and on
-    # that input it stated the opposite, as a passing note nobody questions. An arm that leaves a
-    # factor unset covers no combination of the grid, so it is not counted as one.
+    # Distinct level combinations, not arms: arms can repeat a combination. An arm leaving a factor
+    # unset covers no combination.
     names = [factor.name for factor in design.factors]
     covered = {
         tuple(arm.levels.get(name, "") for name in names)
@@ -935,13 +742,8 @@ def coverage_is_stated(design: ExperimentDesign) -> ProtocolCheck:
     real = len([combination for combination in covered if all(combination)])
     if real >= full:
         return _ok("coverage_is_stated", "note", f"full grid: {real} of {full} combinations")
-    # **Passing, and the sentence reaches the page anyway** — `render_markdown` now lists every
-    # `note`, not only failed checks. Flipping this to `_fail` was the wrong half of the fix: a
-    # fractional factorial is a deliberate, textbook design and `generate_screening_design` emits
-    # them, so every correct reduced plate reported a failed check it could not clear — the check
-    # reads only factors and arms, and nothing in `ExperimentDesign` records the confounding
-    # statement it asks for. That is this file's own `_REQUEST_STAGE` warning, one severity down:
-    # a check that fires on the normal path is one a reader learns to ignore.
+    # Passing, but the note still reaches the page: a fractional factorial is a deliberate design
+    # and nothing in `ExperimentDesign` records the confounding statement a failure would ask for.
     return _ok(
         "coverage_is_stated",
         "note",
@@ -975,31 +777,15 @@ def no_documented_failure(
 ) -> ProtocolCheck:
     """Nothing this design rests on has already been recorded as having failed.
 
-    **The gap this closes is the one the 2026-09-13 audit called the most concrete in the system**:
-    `forbidden_absent` tests what the chemist *typed* into `request.forbidden`, and nothing tested
-    what the corpus *knows*. So a design could cite a playbook and repeat a documented
-    `failure-mode` note sitting in the same graph — the memory was written, indexed, retrievable,
-    and consulted by nobody at the moment it would have mattered.
-
-    A `note` rather than a `blocker`, deliberately. A recorded failure is evidence and not a
-    verdict: `failure_note` carries a `confidence` precisely because a single failed run is not a
-    refutation of a general rule, the same reagent appears in routes that have nothing to do with
-    each other, and a chemist deliberately re-running something that failed — to characterise it,
-    or because a condition changed — is ordinary work rather than a mistake. Blocking that would
-    teach people to stop citing their evidence, which costs more than it saves.
-
-    **Pure over what the caller supplies, because the harness is synchronous and the corpus is
-    not.** Reading the graph is `async`, every check here is `(design) -> ProtocolCheck`, and making
-    the harness async to reach one corpus would put I/O behind fifteen functions that are all
-    arithmetic today. So the caller does the lookup (`memory/failure.failures_against`) and this
-    decides — the same division `forbidden_absent` already has, where the request supplies the
-    exclusions and the check applies them.
+    `forbidden_absent` tests what the chemist typed; this tests what the corpus knows, so a design
+    cannot silently repeat a documented `failure-mode` note. A `note`, not a blocker: a recorded
+    failure is evidence with a confidence, and deliberately re-running a failure is ordinary work.
+    Pure over what the caller supplies, because checks are synchronous and the corpus is not.
 
     Args:
         design: The design being checked.
-        failures: What `failures_against` found for this design's citations and structures. Empty
-            means either that nothing was found or that nobody looked, which this cannot tell apart
-            and does not try to: see `run_checks` for why that is the caller's honesty to keep.
+        failures: What `failures_against` found. Empty means nothing was found *or* nobody looked;
+            this cannot tell them apart (see `run_checks`).
 
     Returns:
         A passing `note` when nothing bears on it, and a failing one naming what to read.
@@ -1024,23 +810,10 @@ def precedent_consulted(
 ) -> ProtocolCheck:
     """The record holds runs like this one, and this design cites none of them.
 
-    **Advisory, and it does not touch `evidence`.** A citation is a claim the chemist makes about
-    what a decision rests on; a search hit is a thing that exists. Writing a hit into `evidence`
-    would forge the first out of the second, and `evidence_present` would then pass on a design
-    nobody had actually grounded — a check satisfying itself, which is worse than the gap it
-    closes. So this names ids to go and read and stops there.
-
-    A `note`, for the same reason `no_documented_failure` is one: a structurally similar reaction
-    is not automatically relevant. A Tanimoto neighbour can share a scaffold and nothing else, the
-    chemist may have read it and judged it inapplicable, and a deliberate re-run under changed
-    conditions is ordinary work. Blocking on it would teach people to cite noise.
-
-    **The empty case is silence, not a pass claiming a negative.** `UncitedPrecedent` carries no
-    "nothing found" arm because the three reasons a search returns nothing — nobody looked, the
-    index is empty or mid-rebuild, the record genuinely holds nothing — are what
-    `FingerprintSearch.verdict` exists to keep apart, and a check that flattened them into "no
-    precedent" would be the `ScreenResult.verdict` lesson repeated. The caller passes only hits it
-    is willing to stand behind; everything else arrives here as `()`.
+    Advisory, and it never writes into `evidence`: turning a search hit into a citation would let
+    `evidence_present` pass on a design nobody grounded. A `note`, since a structural neighbour is
+    not automatically relevant. An empty input is silence, not a claimed negative: the caller passes
+    only hits it stands behind.
 
     Args:
         design: The design being checked.
@@ -1072,17 +845,12 @@ def precedent_consulted(
 _MAX_NAMED_PRECEDENT = 3
 
 
-#: How many failures to name before the detail is itself the problem. A design citing more than a
-#: handful of refuted notes has one thing wrong with it, not five, and the count still reports the
-#: rest.
+#: How many failures to name; the count still reports the rest.
 _MAX_NAMED_FAILURES = 3
 
 
-# **`no_documented_failure` is in here and is the one entry `run_checks` calls differently**,
-# because it is the only check whose input is not the design. Registered rather than appended so
-# `tests/test_protocol_checks.py::test_check_ids_matches_what_run_checks_actually_produces` still
-# holds the registry to what is produced, in both directions — a check outside `_CHECKS` would be a
-# verdict the id test cannot see.
+# Corpus-fed checks are registered here too, so the id test holds the registry to what
+# `run_checks` produces in both directions.
 _CHECKS: tuple[Callable[..., ProtocolCheck], ...] = (
     is_a_protocol,
     components_resolve,
@@ -1103,28 +871,13 @@ _CHECKS: tuple[Callable[..., ProtocolCheck], ...] = (
     coverage_is_stated,
 )
 
-#: The checks that mean anything about a design holding only the structured ask. Everything else is
-#: a question about a procedure that does not exist yet.
+#: The checks that mean anything about a design holding only the structured ask; the rest are
+#: questions about a procedure that does not exist yet.
 #:
-#: **Two stages rather than one, because the first version reported a blocker a request could not
-#: possibly satisfy.** A structured ask has no evidence, no charge table and no arms, so
-#: `evidence_present` failed at `blocker` severity on every intake — and a blocker that fires on the
-#: normal path is a blocker whoever reads it learns to ignore, which is precisely the property the
-#: one real blocker (`evidence_present` on a *draft*) depends on. What applies at the request stage
-#: is the one check that is about the ask itself: a species the chemist named that will not resolve.
-#:
-#: **`forbidden_absent` used to be the second of that pair, and it was the same mistake one field
-#: over.** The reasoning was "an exclusion the ask contradicts", but an ask that names a species and
-#: forbids it is not a contradiction — it is how every solvent-replacement request is phrased. A
-#: chemist asking to get out of DMF names DMF as the incumbent and forbids it in one sentence, and
-#: that ask reported a *blocker* saying "the design uses reagents the request forbids: DMF" over a
-#: design running in 2-MeTHF. The exclusion is still a blocker where it means something — on a
-#: design that actually *uses* the species, at the protocol stage, which is the only place a chemist
-#: can be harmed by it.
-#:
-#: `precedent_consulted` joins that pair on the same argument: `ExperimentRequest.reaction_smiles`
-#: is part of the ask, so what the record already holds like it is knowable before there is a
-#: procedure — which is the moment it is cheapest to read.
+#: A blocker that fires on every intake teaches readers to ignore blockers, so only checks about
+#: the ask itself apply here. `forbidden_absent` is not one: an ask naming the incumbent it
+#: forbids is how a replacement request is phrased, and the exclusion bites on the protocol. The
+#: precedent and failure checks apply because the ask already names a reaction and reagents.
 _REQUEST_STAGE: frozenset[str] = frozenset(
     {"components_resolve", "no_documented_failure", "precedent_consulted"}
 )
@@ -1139,44 +892,22 @@ def run_checks(
 ) -> list[ProtocolCheck]:
     """Every check that means something at this stage, in reading order.
 
-    At the `request` stage the protocol-only checks are reported as passing `note`s naming what
-    they are waiting for, rather than being omitted: a UI that showed every check on a draft and two
-    on a request would look like the checks had been skipped.
+    At the `request` stage the protocol-only checks are reported as passing notes naming what they
+    wait for, rather than omitted, so a request does not look under-checked.
 
-    **`failures` is the one input that does not come from the design**, and it is a parameter rather
-    than a lookup because this function is synchronous and reading the corpus is not. The caller
-    asks `memory/failure.failures_against` and passes what it found.
-
-    That leaves an honesty problem this cannot solve and should not hide: an empty `failures` means
-    *either* that nothing bears on the design *or* that nobody looked, and the check reports the
-    same passing note for both. A caller that skips the lookup therefore publishes a clean bill the
-    corpus never gave — so the lookup belongs with the caller that has the corpus, and
-    `no_documented_failure` says so in as many words rather than implying a guarantee.
-
-    Both corpus checks run at **both** stages, unlike the protocol-only ones: a structured ask
-    already names reagents and can already cite evidence, so a failure bearing on it — and a
-    precedent the record already holds — are knowable before there is a procedure, which is the
-    moment they are cheapest to act on. (This said "it runs at both stages, unlike every other
-    protocol-only check" after `precedent_consulted` had joined it in `_REQUEST_STAGE`, which the
-    set's own comment ten lines below states.)
-
-    `precedent` is the second input of that kind and arrives on the same terms, which is why the
-    dispatch below is a mapping rather than a chain of identity tests: there is now a *class* of
-    checks the caller feeds from a corpus, and the next one should not need this function edited in
-    two places to be wired up.
+    `failures` and `precedent` come from the corpus, not the design: this function is synchronous,
+    so the caller does the lookup and passes what it found. An empty `failures` cannot distinguish
+    "nothing bears on it" from "nobody looked", so a caller that skips the lookup publishes a clean
+    bill the corpus never gave. Both corpus checks run at both stages; the dispatch is a mapping so
+    a further corpus-fed check needs no edit here.
     """
     supplied: dict[Callable[..., ProtocolCheck], Sequence[Any]] = {
         no_documented_failure: failures,
         precedent_consulted: precedent,
     }
 
-    # **The stage gate is asked first, and that ordering is the whole reason `_REQUEST_STAGE`
-    # means anything.** It shipped the other way round — `check in supplied` tested before the
-    # stage — so a supplied check ran at both stages whatever `_REQUEST_STAGE` said, and the two
-    # names added to that set were dead configuration producing the right behaviour by accident.
-    # Driven: cutting `_REQUEST_STAGE` back to `{"components_resolve"}` left five tests green,
-    # including `test_the_failure_check_runs_at_the_request_stage_too`, which exists to pin exactly
-    # this. Gating first makes that set the mechanism its own comment claims it is.
+    # The stage gate is asked first; otherwise a supplied check would run at both stages whatever
+    # `_REQUEST_STAGE` says.
     def run_one(check: Callable[..., ProtocolCheck]) -> ProtocolCheck:
         """One check, stage-gated first and only then dispatched."""
         if stage != "protocol" and check.__name__ not in _REQUEST_STAGE:

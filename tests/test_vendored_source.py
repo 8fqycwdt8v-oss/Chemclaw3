@@ -1,12 +1,8 @@
-"""The vendored dataset source (STO-14) — D-089's one sanctioned escalation.
+"""The vendored dataset source: a pinned, checksummed corpus shipped in the image.
 
-D-089 said: no external data sources. `tests/test_no_egress.py` enforces it, and holds this source
-to the same standard rather than exempting it — the two tests there assert that this module can
-make no request and that a shipped dataset declares its provenance.
-
-What these tests cover is the other half: that a corpus arriving this way is *pinned* — checksummed
-against a manifest, refused when it drifts, and never silently degrading into something a reader
-would mistake for curated knowledge.
+`tests/test_no_egress.py` holds this source to the no-egress rule. These tests cover the other
+half: a corpus is checksummed against its manifest, refused when it drifts, and never silently
+degrades into something a reader would mistake for curated knowledge.
 """
 
 import hashlib
@@ -105,19 +101,12 @@ def test_a_dataset_that_does_not_match_its_manifest_is_refused(tmp_path: Path) -
 def test_a_corpus_that_is_not_utf8_is_named_bad_data_rather_than_escaping_as_a_decode_error(
     tmp_path: Path,
 ) -> None:
-    """The one failure `_BAD_DATA_TYPES` exists for, and the one shape it could not match.
+    """A non-UTF-8 corpus is named bad data rather than escaping as a decode error.
 
-    `_read_records` caught `OSError` around `read_bytes` and nothing around `data.decode("utf-8")`,
-    so a latin-1 `records.csv` left this module as a bare `UnicodeDecodeError` — past this module's
-    own promise to "say precisely what is wrong with it", and past
-    `durable/publish._BAD_DATA_TYPES`, which matches by class *name* and lists
-    `VendoredDatasetError` precisely because "a retry re-reads the same bytes from the same image
-    layer". Driven with a latin-1 corpus **whose checksum matched**: `UnicodeDecodeError` out of the
-    loader, classified retryable, so Temporal burned `activity_max_attempts` against immutable image
-    bytes. The checksum passing is what makes it certainly permanent.
-
-    The byte and its offset are asserted because "not UTF-8" over a 40 MB corpus is not something an
-    operator can act on.
+    `durable/publish._BAD_DATA_TYPES` matches by class name and lists `VendoredDatasetError` because
+    a retry re-reads the same image bytes; a bare `UnicodeDecodeError` would be retried pointlessly.
+    The checksum matching is what makes it certainly permanent. The byte and offset are asserted so
+    an operator can act on it.
     """
     rows = "name,smiles,role\nac\xe9tonitrile,CC#N,solvent\n"
     directory = tmp_path / "d"
@@ -152,12 +141,10 @@ def test_a_corpus_that_is_not_utf8_is_named_bad_data_rather_than_escaping_as_a_d
 
 
 def test_a_manifest_that_is_not_utf8_is_named_the_same_way(tmp_path: Path) -> None:
-    """The sibling site two functions up, which had the same gap and no test either.
+    """A non-UTF-8 manifest is named bad data the same way.
 
-    `_read_manifest` enumerated `OSError` and `json.JSONDecodeError` — a `ValueError` *sibling* of
-    the decode error rather than its parent — so the same bytes in the manifest escaped as an
-    unclassified `UnicodeDecodeError` too. Both call sites are in one commit because the sweep for
-    the shape is what the fix is; fixing only the one that was reported leaves the other.
+    `json.JSONDecodeError` is a sibling of the decode error, not its parent, so it must be caught
+    explicitly.
     """
     directory = tmp_path / "d"
     directory.mkdir(parents=True)
@@ -169,13 +156,10 @@ def test_a_manifest_that_is_not_utf8_is_named_the_same_way(tmp_path: Path) -> No
 def test_a_row_whose_text_cell_is_empty_is_dropped_out_loud(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The checksum proves these bytes are what was reviewed; the loader then served fewer rows.
+    """A row whose text cell is empty is dropped, and the drop is logged with its count.
 
-    Measured: three rows in, two loaded, and **no log, no count and no error** — the one loss
-    this module's own provenance argument cannot explain away: nothing about the file was wrong.
-    Still dropped rather than refused: a row with no text has nothing to retrieve, and one blank
-    line must not cost a corpus its whole load. What changes is that it says so, with the count,
-    which is what makes "the corpus is short" answerable.
+    A row with no text has nothing to retrieve and must not cost the whole load, but a silent loss
+    would leave a short corpus unexplained.
     """
     import logging
 
@@ -215,13 +199,11 @@ def test_a_manifest_naming_a_column_the_file_lacks_is_refused(tmp_path: Path) ->
 
 
 def test_a_missing_dataset_costs_its_own_leg_of_the_sweep_and_no_other(tmp_path: Path) -> None:
-    """An uninstalled corpus must not break every query in the process, nor answer one.
+    """A missing dataset fails only its own leg of the sweep.
 
-    This asserted `== []` and a WARNING, which made an uninstalled corpus indistinguishable from an
-    installed one holding no match. Worse, `_load` cached that empty for the life of the process,
-    so the warning fired once and every later query was silent. The sweep's branch is where a dead
-    source belongs: `sources_failed` names it, the healthy leg beside it keeps answering, and
-    `gather_evidence` raises only when nothing at all could be asked.
+    An empty result would be indistinguishable from an installed corpus with no match. Instead
+    `sources_failed` names it, healthy legs keep answering, and `gather_evidence` raises only when
+    nothing could be asked.
     """
     import asyncio
 
@@ -304,17 +286,10 @@ def test_it_is_not_enabled_by_default() -> None:
 
 
 def test_a_mirrored_corpus_must_name_who_refreshes_it_and_how_often(tmp_path: Path) -> None:
-    """A snapshot with no owner and no cadence goes stale with nobody knowing it has.
+    """A mirrored corpus must name who refreshes it and how often.
 
-    The rule is the fleet's — `Chemclaw3-mcp`'s `MODULES.md` states it as an open question and
-    neither repository enforced it: "a stale patent index that nobody knows is stale is worse than
-    no patent index". Enforced at *load*, because a review that has to remember a rule is exactly
-    the control this repository keeps finding gone
-    (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`).
-
-    Driven through `_read_manifest`, which is the function every path into a vendored corpus goes
-    through, rather than through the model — a validator nothing calls on the loading path would
-    pass this test and refuse nothing.
+    A snapshot with no owner and no cadence goes stale unnoticed. Enforced at load through
+    `_read_manifest`, the function every path into a vendored corpus goes through.
     """
     directory = _dataset(tmp_path / "d")
     manifest = json.loads((directory / "dataset.json").read_text(encoding="utf-8"))
@@ -333,11 +308,10 @@ def test_a_mirrored_corpus_must_name_who_refreshes_it_and_how_often(tmp_path: Pa
 
 
 def test_first_party_content_may_not_claim_an_upstream_it_does_not_have(tmp_path: Path) -> None:
-    """The other direction, and it is not symmetry for its own sake.
+    """First-party content may not claim an upstream it does not have.
 
     A refresh owner on a corpus with no upstream sends the next reader looking for a feed that does
-    not exist — which is the same failure as a missing one, costing somebody an afternoon instead of
-    shipping a stale answer. The shipped `data/vendored` corpus is first-party and names neither.
+    not exist. The shipped `data/vendored` corpus is first-party and names neither.
     """
     directory = _dataset(tmp_path / "d")
     manifest = json.loads((directory / "dataset.json").read_text(encoding="utf-8"))

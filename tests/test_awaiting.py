@@ -1,13 +1,8 @@
 r"""The durable wait: a question that outlives the turn that asked it.
 
-Driven against a real broker rather than by calling the workflow body, because every property worth
-asserting here is a property of *time and concurrency* — a deadline, an escalation, a signal racing
-an expiry — and none of them exists when the body is called as a function. The time-skipping server
-is the right instrument: the escalation timer is days long and the deadline is weeks.
-
-Before this workflow existed, `grep -rn "workflow.signal\\|wait_condition\\|workflow.update" src/`
-returned zero hits. `test_the_tree_still_has_exactly_one_durable_wait` pins that this stayed one
-primitive rather than becoming one per caller, which is the whole argument for building it.
+Driven against a real broker, because the properties are about time and concurrency (deadlines,
+escalation, a signal racing an expiry). The time-skipping server suits the days-long timers.
+`test_the_tree_has_exactly_one_durable_wait` keeps it one primitive for every caller.
 """
 
 import asyncio
@@ -58,10 +53,8 @@ class _Projection:
 def _field(payload: object, name: str) -> str:
     """One field off an activity argument, whichever shape the converter handed over.
 
-    The stand-ins below declare `object`, so the pydantic converter leaves a mapping alone and
-    passes a model through as itself. Reading both is cheaper than importing the workflow's private
-    input models into a test, and it is the difference between asserting the sequence and asserting
-    an empty string.
+    The stand-ins declare `object`, so a mapping or a model may arrive; reading both avoids
+    importing the workflow's private input models.
     """
     if isinstance(payload, dict):
         return str(payload.get(name, ""))
@@ -71,9 +64,8 @@ def _field(payload: object, name: str) -> str:
 async def _started(handle: WorkflowHandle[Any, Any], *, tries: int = 200) -> None:
     """Block until `handle` names a run the server has actually started.
 
-    A child workflow is started by the parent's *next* workflow task, so a terminate sent the
-    instant the parent starts can land before the child exists — and a close policy would have
-    nothing to act on. Polled rather than slept on so the wait is as short as the box allows.
+    A child starts on the parent's next workflow task, so a terminate sent at once could precede it.
+    Polled, not slept.
     """
     for _ in range(tries):
         try:
@@ -87,10 +79,8 @@ async def _started(handle: WorkflowHandle[Any, Any], *, tries: int = 200) -> Non
 async def _cancelled(handle: WorkflowHandle[Any, Any], *, tries: int = 200) -> None:
     """Block until `handle` has left `RUNNING`, so a status read cannot race the policy.
 
-    A close policy is applied by the server *after* the parent closes, so all three arms below need
-    one grace before they are read. Bounded on the cancelled arm because it is the slowest of the
-    three to reach its terminal state — a terminate is immediate and an abandon changes nothing —
-    so any policy the server was going to apply has been applied by then.
+    The server applies a close policy after the parent closes; the cancelled arm is the slowest, so
+    waiting on it covers the others.
     """
     for _ in range(tries):
         if (await handle.describe()).status != WorkflowExecutionStatus.RUNNING:
@@ -130,12 +120,9 @@ class _ParentOfAWait:
 class _ParentOfAWaitWithASession:
     """`_ParentOfAWait` under `REQUEST_CANCEL`, with a session so the push-back actually runs.
 
-    A separate definition rather than another argument on the first, because the two measure
-    different things and sharing one would make each arm's fixture read as the other's: that one
-    varies the *close policy* over a sessionless wait, this one fixes the policy at the only one
-    that reaches the cleanup clause and varies where in the wait the cancellation lands. The session
-    is the whole point — `_push` returns early without one, so the push-back window this opens does
-    not exist for a sessionless wait.
+    Separate from the first definition: that one varies the close policy over a sessionless wait,
+    this one fixes the policy and varies where the cancellation lands. `_push` returns early without
+    a session.
     """
 
     @workflow.run
@@ -165,11 +152,8 @@ def _worker(client: Client, projection: _Projection) -> Worker:
     async def open_activity(payload: object) -> str:
         """Stands in for the projection, and must honour its contract.
 
-        The real activity owns the clamp against `awaiting_max_days` and *returns* the deadline the
-        workflow schedules its timers against — one place, on the path every caller takes, because
-        clamping at each launch site reached two of three. A stub that returned `None` made the
-        workflow fail on the first line that used the value, which is the stub being wrong rather
-        than the workflow: a recorder still has to answer what it is asked for.
+        The real activity clamps to `awaiting_max_days` and returns the deadline the workflow
+        schedules against, so the stub must return one too.
         """
         projection.opened.append(_field(payload, "request_id"))
         request: Any = payload["request"] if isinstance(payload, dict) else payload.request  # type: ignore[attr-defined]
@@ -238,10 +222,8 @@ async def test_a_wait_returns_the_answer_that_arrives() -> None:
 async def test_the_first_answer_wins_and_later_ones_are_ignored() -> None:
     """A second signal cannot overwrite a delivered answer.
 
-    Ignored rather than rejected, and the reason is structural: a signal has no reply channel, so
-    raising would fail the workflow task and retry the send forever. The caller is told `409` by
-    `POST /pending/{id}/answer`, which reads the store — this asserts the half that has to hold even
-    when somebody reaches the broker directly.
+    Ignored rather than rejected: a signal has no reply channel, so raising would retry forever.
+    `POST /pending/{id}/answer` returns 409; this holds even for a direct broker signal.
     """
     async with await start_env_or_skip() as env:
         client = pydantic_client(env)
@@ -298,9 +280,8 @@ async def test_a_deadline_that_passes_is_an_outcome_and_not_a_failure() -> None:
 async def test_an_answer_arriving_mid_interval_is_seen_immediately() -> None:
     """The reminder interval is a timeout on the wait, not a polling tick.
 
-    Written because the obvious implementation — sleep for the interval, then check — would hold a
-    delivered answer for up to a day before acting on it, and would look correct in every test that
-    only asserted the final state.
+    Sleep-then-check would hold a delivered answer for up to an interval while every final-state
+    assertion still passed.
     """
     async with await start_env_or_skip() as env:
         client = pydantic_client(env)
@@ -328,9 +309,8 @@ async def test_an_answer_arriving_mid_interval_is_seen_immediately() -> None:
 def test_asking_the_same_question_of_the_same_people_is_one_wait() -> None:
     """The request id is derived from the ask, so two askers join one wait rather than opening two.
 
-    Keyed on the question and its routing and **not** on the session or correlation id, which change
-    per turn: two chemists asking the lab for the same measurement should be one request in the
-    lab's inbox, exactly as two identical calculations share one cache row (D-011).
+    Keyed on the question and routing, not the per-turn session or correlation id — like a shared
+    cache row (D-011).
     """
     first = AwaitRequest(kind="measurement", subject="assay lot 42", asked_of="qc-team")
     same = AwaitRequest(
@@ -350,10 +330,8 @@ def test_asking_the_same_question_of_the_same_people_is_one_wait() -> None:
 def test_the_tree_has_exactly_one_durable_wait() -> None:
     """One primitive with several callers, not one shape per caller.
 
-    The whole case for building this was that a BO round awaiting plates, a gate awaiting a
-    committee and an effect awaiting an approval are the same object. That case is only kept if the
-    second caller reuses the first: a `wait_condition` appearing in another module is a second
-    deadline, a second escalation and a second set of race conditions to get right.
+    A `wait_condition` elsewhere would be a second deadline, escalation and set of races to get
+    right.
     """
     waiting = sorted(
         path.relative_to(SRC).as_posix()
@@ -369,9 +347,8 @@ def test_the_tree_has_exactly_one_durable_wait() -> None:
 def test_the_answer_carries_no_authorization() -> None:
     """`Answer` has no roles field, and the route is what decides who may answer.
 
-    An absence pinned, for the reason `D-2026-08-28-roles-do-not-cross-the-durable-boundary-
-    unsigned` gives: a signal is unsigned, so anything a workflow lifts out of one and treats as an
-    entitlement is a forgery channel with an audit trail that names the impersonated user.
+    A signal is unsigned (`D-2026-08-28-roles-do-not-cross-the-durable-boundary-unsigned`), so any
+    entitlement lifted from one would be a forgery channel.
     """
     from chemclaw.durable.awaiting import Answer
 
@@ -388,9 +365,7 @@ def test_the_answer_carries_no_authorization() -> None:
 def test_the_migration_refuses_an_unattributed_answer() -> None:
     """The schema will not store `answered` without a timestamp and an actor.
 
-    Asserted over the SQL because it is a constraint rather than code: a row reading "somebody
-    answered at some point" is worse in an audit than no row, which is the rule `note_proposals`
-    already applies to a decision.
+    Asserted over the SQL: an unattributed answer is worse in an audit than no row.
     """
     sql = (
         Path(__file__).resolve().parents[1] / "infra" / "sql" / "076_pending_requests.sql"
@@ -400,16 +375,10 @@ def test_the_migration_refuses_an_unattributed_answer() -> None:
 
 
 async def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_through() -> None:
-    """`awaiting_max_days` had no test, which is why the clamp reached two of three launch sites.
+    """The deadline ceiling is applied by the activity every caller goes through.
 
-    It was first applied at each caller. `agent/pending_tools.py` and `connectors/jobs.py` got it;
-    `connectors/bo/workflows.py` passed `bo_measurement_deadline_days` straight through, so a
-    mis-set value opened a ten-year run on the broker — the thing the ceiling exists to prevent —
-    while two docstrings went on saying the value was clamped.
-
-    It now lives in `open_pending_request_activity`, which every wait goes through, and the workflow
-    takes `due_at` from that activity's *result* so a replay reads the deadline the original
-    execution used. This drives the activity directly: a caller cannot skip it, so neither can this.
+    `open_pending_request_activity` clamps to `awaiting_max_days`, and the workflow takes `due_at`
+    from its result so a replay reads the original deadline. Driven directly: no caller can skip it.
     """
     from chemclaw.durable.awaiting import (
         AwaitRequest,
@@ -459,38 +428,11 @@ async def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes
 def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
     """A parent that ends *other* than by completing must not strand its wait `waiting` forever.
 
-    `execute_child_workflow` defaults to `ParentClosePolicy.TERMINATE`, and a terminate never
-    resumes workflow code — so the wait's `except asyncio.CancelledError` clause, the whole reason
-    the detached settle in `_settle` exists, was unreachable at every call site that started one.
-    The projection row therefore stayed `waiting` with a `due_at` nothing would ever act on:
-    permanently in every entitled person's inbox, and permanently unanswerable, because
-    `POST /pending/{id}/answer` reads `waiting`, signals a workflow that is gone, and turns the
-    failure into a 503 telling the caller to try again. `pending_requests` is in
-    `retention._NOT_PRUNED`, so nothing collects it either — one immortal ghost per dead parent.
-
-    Measured over all three policies rather than asserting the chosen one, because the obvious
-    answer is the wrong one. `ABANDON` — "let the wait outlive the parent and expire on its own
-    deadline" — leaves the child `RUNNING`, so a live, answerable question about work that no
-    longer exists stays in the inbox for up to `awaiting_max_days`: 90 days of somebody being asked
-    to do something pointless. `TERMINATE`, the default, never resumes workflow code at all.
-    `REQUEST_CANCEL` is the only one that reaches `run`'s `except asyncio.CancelledError`, which is
-    what the module wrote its detached settle for.
-
-    **What is asserted is the child's status, and deliberately not that the settle landed.** The
-    settle is scheduled from a workflow that is already cancelling, so whether the server dispatches
-    it before the run closes is a race — driven here it landed on some passes and not others, with
-    a 15 s grace. Asserting it would be a flaky test making a claim the code does not guarantee.
-    `CANCELED` versus `TERMINATED` is the deterministic half and the one that discriminates: it
-    says the wait got the chance to settle, which is exactly what the policy buys and what the
-    default denied it. That the settle can still be missed is a real gap in the wait, wider than
-    this policy, and it belongs in its own finding rather than in a assertion that flakes.
-
-    All three in **one** environment, terminated together: three separate environments was the
-    first shape and paid the startup three times over.
-
-    Real-time rather than time-skipping: this is a test about a wall-clock broker event on runs
-    that must still be `RUNNING` when it arrives, and the time-skipping server fast-forwards an
-    idle workflow straight to its own timeout instead.
+    A stranded row stays in every entitled inbox, unanswerable, and is never pruned. Measured over
+    all three close policies: `TERMINATE` (the default) never resumes workflow code, `ABANDON`
+    leaves a live question about dead work for up to `awaiting_max_days`, and only `REQUEST_CANCEL`
+    reaches `run`'s cleanup. The asserted fact is `CANCELED` vs `TERMINATED`, not that the settle
+    landed, which is a dispatch race. One real-time environment for all three arms.
     """
     from temporalio import activity
 
@@ -581,36 +523,16 @@ def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
 def test_a_cancellation_arriving_before_the_timer_still_settles_the_row() -> None:
     """The wait's cleanup must cover every `await` it makes, not only the one it spends its life in.
 
-    `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`. The sibling test
-    above establishes that `REQUEST_CANCEL` is the only policy that reaches `run`'s
-    `except` clause at all. What it does not establish — and said out loud it was not asserting — is
-    that the clause is reachable from wherever the wait happens to be. It was not, in two ways, and
-    both leave the permanent ghost that test's docstring describes: a `pending_requests` row stuck
-    `waiting`, in every entitled person's inbox, unanswerable because the run it names is gone, and
-    never collected because `pending_requests` is in `retention._NOT_PRUNED`.
+    `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`. Two arms:
 
-    **The `try` started at the wait, and the row is written before it.**
-    `open_pending_request_activity` is what creates the `waiting` row, and it sat *above* the
-    `try` — so a cancellation landing while it was in flight committed the row and attempted no
-    settle. Measured against a real broker with 12 parents terminated the instant their children
-    existed: 12 rows opened, **10** settled, every child `CANCELED`. The deterministic form is the
-    first arm here — the open activity blocks on an event, the parent is terminated while it is
-    held, and the settle is asserted.
+    - The open activity writes the `waiting` row, so the `try` must enclose it; the first arm
+      cancels
+      while the open is held and asserts the settle.
+    - Inside an activity a cancellation arrives as `ActivityError(cause=CancelledError)`, which
+      `notify_session_best_effort` must not swallow; the second arm asserts both the status and the
+      settle.
 
-    **A cancellation does not always arrive as `asyncio.CancelledError`.** Blocked on
-    `wait_condition` it does, which is why the loss looked like a dispatch race — it was measured at
-    0 in six runs of 12 and 39 children once every child was *past* the open. Blocked inside an
-    activity it is `ActivityError(cause=CancelledError)`, which the clause did not name.
-
-    **And `notify_session_best_effort` caught exactly that pair and carried on**, which is worse
-    than losing a settle: the child went back to waiting on its seven-day timer and was still
-    `RUNNING` 30 s after its parent was terminated, with a live, answerable question about work that
-    no longer exists. That is the second arm, and it asserts the status as well as the settle,
-    because "cancelled but unsettled" and "never cancelled at all" are different failures.
-
-    The two arms share one environment and one worker, for the reason the sibling gives: three
-    environments paid the startup three times over. Real-time rather than time-skipping, because the
-    subject is a wall-clock broker event on runs that must still be `RUNNING` when it arrives.
+    One real-time environment and worker for both.
     """
     from temporalio import activity
 
@@ -704,25 +626,11 @@ def test_a_cancellation_arriving_before_the_timer_still_settles_the_row() -> Non
 
 
 def test_every_wait_started_as_a_child_names_a_parent_close_policy() -> None:
-    """The policy above is only worth measuring if the call sites actually carry it.
+    """Every wait started as a child names a parent close policy.
 
-    A `parent_close_policy` is a *start option*, so the wait cannot set its own: it is chosen by
-    whoever starts it, and omitting it silently selects the one policy that strands the row. There
-    is nothing at the wait's end that can notice, which is what makes this worth a scan.
-
-    Matched on the two names appearing in one file rather than on the shape of the call, because a
-    substring spanning a line break is a guard that goes quiet the first time somebody reformats
-    the module — passing while asserting nothing, which is the failure mode this whole review kept
-    finding. The floor below is the other half of that: an empty scan is a subset of everything.
-
-    **Scoped to the whole package, because scoping it to `durable/` is what let the longest wait in
-    the tree ship without the option.** The first version of this scan walked `durable/` alone and
-    said so in a paragraph that then named the caller it was not reading —
-    `connectors/bo/workflows.py::_measure`, whose wait is a fortnight long, so a parent that dies
-    there strands the longest-lived row of any of them. A rule that names its own exception in prose
-    is not a rule, and a bundle is exactly where the next caller will be written: the wait is one
-    primitive with several callers by design, and where a caller lives is not a property this
-    guard should care about.
+    The policy is a start option chosen by the caller, and omitting it silently picks the one that
+    strands the row. Matched on both names appearing in one file (robust to reformatting), with a
+    floor so an empty scan fails, over the whole package since callers live in bundles too.
     """
     starters = [
         path
@@ -747,25 +655,13 @@ def test_every_wait_started_as_a_child_names_a_parent_close_policy() -> None:
 
 
 def test_a_re_ask_of_an_answered_question_opens_through_the_activity() -> None:
-    """The same question again is an ordinary act, and it used to fail the workflow.
+    """A re-ask of an answered question opens through the activity.
 
     `D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`. `request_id_for` keys
-    on `(kind, subject, asked_of)` alone and `durable/awaiting.open_wait` sets
-    `WorkflowIDReusePolicy.ALLOW_DUPLICATE` — named here as the launcher rather than as
-    `request_external_input`, which is one of its two callers and has not owned that decision since
-    the launch idiom moved into one function — so re-asking a standing question — the monthly
-    stability pull, the next campaign round's measurement, a re-launched approval — mints the same
-    id on purpose. Meeting an `answered` row, `pending_store._OPEN` wrote nothing and this activity
-    raised a **non-retryable** `ApplicationError`: the ask failed, and with it the workflow that
-    made it (`ConnectorJobWorkflow._approve_effect` turns a failed approval into a refused job).
-
-    The answer is archived now, so the reopen is allowed and the activity returns the deadline it
-    was asked for. **Driven through the activity rather than the store**, because the store's own
-    test covers the five shapes of the upsert and what this adds is that nothing between the two
-    still refuses: the raise was here, not there.
-
-    What the old test asserted — that the previous cycle's attribution survives — is asserted here
-    too, in its new place.
+    on `(kind, subject, asked_of)` and `open_wait` allows duplicates, so re-asking a standing
+    question mints the same id; the answered row is archived and the reopen returns the requested
+    deadline. Driven through the activity, since that is where a refusal would sit. The previous
+    cycle's attribution survives.
     """
     from chemclaw.core.db import connect
     from chemclaw.durable import pending_store
@@ -834,24 +730,10 @@ def test_the_launch_idiom_joins_an_open_wait_and_reopens_a_settled_one(
 ) -> None:
     """`open_wait`'s three coupled decisions, run rather than described.
 
-    **This function had no test at all.** Every caller's test patches `open_wait` away — the
-    runner's escalation suite says so in its own fixture docstring ("patched at `runner.open_wait`
-    rather than at the Temporal client, because the seam under test is the request the runner
-    *builds*"), which is right about that seam and leaves this one unexecuted. So the three
-    decisions its docstring argues for — the deterministic id, `ALLOW_DUPLICATE`, and the
-    already-started catch — were prose over a code path nothing ran.
-
-    The third arm is the one the argument turns on and the one no other test can reach. A wait that
-    nobody answers *expires*, and expiry completes the workflow **normally**, so under
-    `REJECT_DUPLICATE` or `ALLOW_DUPLICATE_FAILED_ONLY` a lapsed question would be unaskable
-    forever — the monthly stability pull, the next campaign round's measurement. Here the wait is
-    settled by an answer rather than by an expiry, which is the same completed state and far
-    cheaper to reach: the re-ask must mint the same id and come back `True`, having genuinely
-    started a second run.
-
-    The second arm is the join: while a wait is open, asking again is the same question, and the
-    `False` is what stops the caller putting a second start notice in front of whoever is already
-    being asked.
+    Callers' tests patch `open_wait` away, so this is its only test: a deterministic id,
+    `ALLOW_DUPLICATE`, and the already-started catch. Joining: while a wait is open, asking again
+    returns `False`. Reopening: a completed wait (expiry or answer) must accept the same id again
+    and return `True`, or a lapsed question becomes unaskable.
     """
 
     async def _run() -> None:
@@ -894,11 +776,8 @@ def test_the_launch_idiom_joins_an_open_wait_and_reopens_a_settled_one(
                     "`open_wait` states ALLOW_DUPLICATE rather than leaning on the SDK default"
                 )
                 assert reopened_id == first_id, "the re-ask is the same question and the same id"
-                # And a *second run* genuinely exists under that id: the same id was `COMPLETED` a
-                # moment ago, so `RUNNING` is the fact `True` is claiming. Asserted through
-                # `describe` rather than through the projection recorder, because the recorder is
-                # driven by an activity the worker may not have dispatched yet — that is a race
-                # about this test's teardown rather than anything about the launch.
+                # A second run genuinely exists under that id; asserted via `describe` rather than
+                # the projection recorder, whose activity may not have been dispatched yet.
                 described = await client.get_workflow_handle(first_id).describe()
                 assert described.status == WorkflowExecutionStatus.RUNNING, (
                     f"the re-ask returned True and started nothing: {described.status}"

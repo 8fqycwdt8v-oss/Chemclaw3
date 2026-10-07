@@ -1,35 +1,21 @@
 """The storm's behaviour catalogue — what the mock model does, per scenario family.
 
-Kept beside the mock rather than inside it because these are the *test's* content and the mock is
-its mechanism: adding a scenario should not mean editing a server. Each behaviour is named, and the
-storm selects one by putting `[[name]]` in the turn's message, so a scenario and the behaviour it
-asserts against cannot drift apart.
-
-Eight families, and the split is the point — "it held up under load" and "it held up under a model
-behaving badly" are different claims, and only one of them was ever testable with a real model:
+The test's content, kept apart from the mock's mechanism. The storm selects a behaviour by putting
+`[[name]]` in the turn's message, so a scenario and the behaviour it asserts against cannot drift.
 
 * **A volume** — cheap, realistic turns, used to find where admission control bends.
 * **C shapes** — the same call delivered whole, fragmented, and in parallel.
 * **D durable** — real connector jobs, including deliberate idempotency collisions.
 * **F adversarial** — what a real model will not reliably do: malformed arguments, an unknown tool,
-  an empty function name (the STREAM-1 shape), a 100 KB argument document, forty parallel calls,
-  a turn with no prose, and an unbounded tool loop.
+  an empty function name, a 100 KB argument document, forty parallel calls, a turn with no prose,
+  and an unbounded tool loop.
 * **H edges** — pathological chemistry, semantically impossible arguments, and unicode driven
   through the real tools and the real database.
 
-Families B (tool-path truth) and G (limits) need no behaviour of their own: B is a cross-check over
-`audit_events` after the others, and G attacks the front door's own limits rather than the model.
-**E (chaos) borrows** — it kills processes around `a-cheap`, `f-slow` and a directly-launched
-durable job rather than asking the model for anything new.
-
-Every behaviour here is reached by some check in `cli/live_storm.py`, and
-`tests/test_live_storm.py::test_every_declared_behaviour_is_reached_by_some_check` is what makes
-that a fact rather than a hope. It was written because the sentence above it was **false when it
-was first written**: six behaviours — `a-retrieval`, `d-status`, `f-slow`, `h-bad-smiles`,
-`h-injection`, `h-unicode` — were declared and asserted by nothing while the run reported "17/17
-checks passed", and after four of them were wired the same claim was made again with two still
-dead. Confident prose about coverage is what this repository has learned not to trust, including
-its own; a test is the only form of it that stays true.
+B (tool-path truth) and G (limits) need no behaviour; E (chaos) reuses `a-cheap`, `f-slow` and a
+directly launched job.
+`tests/test_live_storm.py::test_every_declared_behaviour_is_reached_by_some_check` holds that every
+behaviour here is asserted by some check in `cli/live_storm.py`.
 """
 
 from __future__ import annotations
@@ -38,39 +24,14 @@ import time
 
 from chemclaw.cli.mock_llm import Behaviour, ToolCall
 
-# The reaction the durable family launches. The workflow id is a hash of the payload
-# (`connectors.jobs.job_workflow_id`), so many sessions launching *this* simultaneously is the
-# idempotency collision the D-011 guarantee is about — and the only honest way to check it is to
-# count what the database did, not to read a summary.
+# The reaction the durable family launches. The workflow id is a hash of the payload, so many
+# sessions launching it at once is an idempotency collision, checked by counting database rows.
 #
-# **The temperature varies per run, and that is load-bearing rather than decorative.** With a fixed
-# payload the *second* storm against one database finds the answer already cached: it launches
-# nothing, computes nothing, and satisfies every "at most one run" bound with zero. Measured — a
-# storm on 2026-08-04 reported "0 distinct workflow id(s) across 12 turns; calculation_results
-# 113 → 113" as a pass. `cli/live_jobs.py` documents this failure at length and designs
-# `_RUN_TEMPERATURE_K` against it; the storm inherited the hazard without the fix.
-#
-# A real physical input rather than a nonce, for the same reason: any temperature in this range is
-# a question a chemist could ask, and the answer genuinely changes with it. Constant within the
-# process, so all twelve simultaneous launches still derive the identical id — which is the whole
-# point of the family.
-#
-# **The period must outlast the longest run that will use it, and the first version's did not.**
-# `% 719` gives 719 distinct temperatures on a one-second grid, so a value recurs every ~12 minutes
-# — invisible in a single storm and unmissable in a soak: 6 of 81 rounds failed this family with
-# "0 job_records row(s) written", spaced 12 rounds apart at a ~58 s round. Nothing was broken. The
-# payload had been computed in an earlier round, `ALLOW_DUPLICATE_FAILED_ONLY` correctly rejoined
-# the completed run rather than recomputing it, and no new record was written — D-011 working, read
-# as a failure. 100,000 values on a 10-µK grid puts the period at 27.8 hours, past any soak that
-# fits in this container, and keeps every value a temperature a chemist could ask about. The same
-# modulus is now in all three copies (it had landed in this one only) and `tests/test_run_jitter.py`
-# evaluates each expression across a 24-hour window so a fourth copy cannot get a smaller one.
-#
-# **The base temperature differs per harness and must.** Each grid spans base + [0, 1) K, so two
-# copies sharing a base share the whole set — which is what happened when `cli/live_jobs.py` took
-# this modulus and kept 298.15, giving two independent harnesses byte-identical payloads and one
-# workflow id. This one keeps 298.15; `live_jobs` is 301.15 and `live_storm` 300.0, and
-# `tests/test_run_jitter.py` asserts the union is disjoint rather than trusting the arithmetic.
+# The temperature varies per run so a second storm against one database does not find the answer
+# cached and pass every "at most one run" bound with zero; it is constant within the process so all
+# simultaneous launches share one id. 100,000 values on a 10-µK grid give a 27.8-hour period, longer
+# than any soak. Each harness uses a different base (here 298.15, `live_jobs` 301.15, `live_storm`
+# 300.0) so their grids are disjoint; `tests/test_run_jitter.py` asserts both properties.
 _COLLISION_TEMPERATURE_K = 298.15 + (int(time.time()) % 100_000) / 100_000.0
 _COLLISION_PAYLOAD: dict[str, object] = {
     "kind": "reaction",
@@ -110,11 +71,8 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="c-fragmented",
-        # The hypothesis under test. The Responses client puts the name on *every* fragment, so a
-        # reader that treats "name and arguments" as a complete call sees N calls where there is
-        # one. Nothing reassembles fragments any more — `graph_stream` reads whole `tool_call`s and
-        # the reassembler that read chunks was deleted as unreachable — so this measures whether
-        # the shipped path emits one event or N carrying partial documents.
+        # The Responses client puts the name on every fragment; this checks the shipped path emits
+        # one call event, not N carrying partial documents.
         calls=[ToolCall(tool="find_notes", arguments={"text": "buchwald amination"}, fragments=8)],
         text="One call, arguments delivered in eight fragments.",
     ),
@@ -151,33 +109,21 @@ BEHAVIOURS: list[Behaviour] = [
     # ---------------------------------------------------------------- F · adversarial
     Behaviour(
         name="f-malformed-json",
-        # JSON-shaped and **unclosable**, not merely truncated. This is the only argument document
-        # that actually reaches `AIMessage.invalid_tool_calls`, which is the field
-        # `PromoteInvalidToolCalls` exists to read — so it is the only one that exercises it.
-        #
-        # It used to be `'{"text": "unterminated'`, and that check could never pass. LangChain runs
-        # a streamed call's fragments through `parse_partial_json`, which closes an unterminated
-        # string and an unclosed brace, so a truncated document arrives as an ordinary valid call
-        # long before anything here sees it. Measured, on the exact two payloads:
+        # JSON-shaped and unclosable, not merely truncated: LangChain's `parse_partial_json` repairs
+        # a truncated document into a valid call, so only an unclosable one reaches
+        # `AIMessage.invalid_tool_calls` and exercises `PromoteInvalidToolCalls`.
         #
         #     '{"text": "unterminated'  -> repaired to {'text': 'unterminated'}
         #     '{"text": }'              -> JSONDecodeError -> invalid_tool_calls
-        #
-        # `agent/model_calls.py` states this and even corrects an earlier draft of its own docstring
-        # for the same confusion. So the old behaviour asserted an outcome the system is documented
-        # and measured never to produce, while the reachable case went untested — a permanently red
-        # check *and* a blind spot over the middleware written for exactly this.
         calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": }')],
         text="",
         adversarial=True,
     ),
     Behaviour(
         name="f-cut-off",
-        # The truncation `f-malformed-json` stopped testing when it moved to an unclosable document:
-        # a stream cut mid-string, **and** the provider saying so. `parse_partial_json` completes
-        # the document to `{"text": "suzuki coup"}`, a valid call; only `finish_reason: length`
-        # says it was cut, and the call must be refused rather than run on the guess
-        # (`D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run`).
+        # A stream cut mid-string with `finish_reason: length`. `parse_partial_json` completes it to
+        # a valid call; only the finish reason says it was cut, and the call must be refused, not
+        # run.
         calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": "suzuki coup')],
         text="",
         finish_reason="length",
@@ -185,9 +131,8 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="f-wrong-argument",
-        # LOAD-1 itself, reproduced deliberately: `find_notes` takes `text`, not `query`. Every
-        # measurement in the 2026-07 load test died here without anyone noticing, so the storm
-        # asserts it is *visible* now rather than trusting that it would be.
+        # A wrong argument name (`find_notes` takes `text`, not `query`); the storm asserts the
+        # failure is visible.
         calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"query": "benzene"}')],
         text="",
         adversarial=True,
@@ -200,9 +145,7 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="f-empty-name",
-        # The STREAM-1 shape: `String should have at least 1 character` on a tool_use name, which
-        # failed 30 of 150 live turns in July and was closed by D-123's `AgentPool`. Nothing has
-        # re-exercised it since, because a real model does not emit it on request.
+        # An empty tool name, which a real model does not emit on request.
         calls=[ToolCall(tool="", arguments={"text": "x"})],
         text="",
         adversarial=True,
@@ -227,8 +170,8 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="f-no-text",
-        # The `empty_answer` guard added earlier today: tools ran, nothing was written. Before that
-        # guard this turn produced an empty answer and no error at all.
+        # Tools ran and nothing was written: the `empty_answer` guard must report it rather than
+        # return an empty answer with no error.
         calls=[ToolCall(tool="find_notes", arguments={"text": "silent"})],
         text="",
     ),
@@ -263,22 +206,16 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="h-impossible-args",
-        # Valid JSON, valid types, and impossible to answer: the symmetry-number map names species
-        # the equation does not contain. `_checked_symmetry_numbers` refuses exactly this, and it
-        # was found the only way such things are found — a chaos payload in `cli/live_jobs.py`
-        # inherited the wrong map, the job rejected it correctly, and the lane read as a system
-        # fault until someone looked. The missing negative in this family was the shape that is
-        # *well-formed and wrong*: a schema check passes it, so the only thing standing between it
-        # and a plausible answer is the tool's own domain validation.
+        # Well-formed and wrong: the symmetry-number map names species the equation does not
+        # contain. A schema check passes it, so only `_checked_symmetry_numbers`' domain validation
+        # stands between it and a plausible answer.
         calls=[
             ToolCall(
                 tool="compute_reaction_energy",
                 arguments={
                     "params": {
                         "kind": "reaction",
-                        # Balanced on purpose, so the symmetry map is the *only* thing wrong with
-                        # it. An unbalanced equation would also be refused, and the check would
-                        # then pass for a reason other than the one it names.
+                        # Balanced on purpose, so the symmetry map is the only thing wrong with it.
                         "reactants": ["N#N", "[H][H]", "[H][H]", "[H][H]"],
                         "products": ["N", "N"],
                         "level": "quick",
@@ -293,14 +230,10 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="h-size-billed",
-        # The only behaviour whose bill follows the request, and it exists so the estimator
-        # calibration has something to calibrate against. Every other entry here names a constant
-        # `input_tokens`, so `billed / estimated` is always far below 1 and `_Calibration.ratio()`
-        # clamps to 1.0 — which means the EWMA, `agent_context_calibration_max_factor` and the
-        # tightening branch that two merged budget decisions rest on were exercised by no lane
-        # measurement anywhere, only by unit tests with hand-fed numbers. At 0.5 tokens per
-        # character the bill runs roughly twice the chars/4 estimator, so a lane that drives this
-        # sees the ratio move above 1 and the budget tighten, which is the behaviour under test.
+        # The one behaviour whose bill follows the request (0.5 tokens per character, about twice
+        # the chars/4 estimate), so a lane driving it moves the calibration ratio above 1 and
+        # exercises the EWMA, `agent_context_calibration_max_factor` and budget tightening. Every
+        # other entry bills a constant.
         calls=[ToolCall(tool="find_notes", arguments={"text": "calibration"})],
         text="Billed by size, so the estimator has something to be wrong about.",
         input_tokens=None,
@@ -308,13 +241,9 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="h-oversize",
-        # The endpoint refusing a request outright — the one request-level failure that unlocks a
-        # label nothing else can reach. `llm_provider._is_context_length` decides whether a turn is
-        # recorded as `context_length` and whether it fails over, and until this entry existed no
-        # lane could produce the 400 it classifies: `Behaviour.http_status` injects a failure per
-        # *behaviour*, and every such injection lands on the generic `error` label instead.
-        # Deliberately not accompanied by 401 or 404 entries — measured, both of those also land on
-        # `error`, so they would add lane time and no reachable path.
+        # The endpoint refusing the request outright: the only way a lane produces the 400 that
+        # `llm_provider._is_context_length` classifies as `context_length`. Per-behaviour
+        # `http_status` injection lands on the generic `error` label, as 401 and 404 would.
         calls=[ToolCall(tool="find_notes", arguments={"text": "over the endpoint's limit"})],
         text="",
         input_tokens=None,

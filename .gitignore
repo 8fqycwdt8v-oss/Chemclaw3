@@ -252,9 +252,9 @@ Thumbs.db
 
 # The live lane's working directory (`infra/live/`). Holds the pgvector and Temporal CLI clones it
 # builds, the dev server's SQLite file, and one log plus one pid file per running process — all of
-# it machine-local state for a stack that is started and stopped, never source. The lane's *output*
-# is not here: `make live-jobs` writes its report to `tasks/live-test/transcripts/`, which is
-# committed, because a live result nobody can read back later is a claim rather than evidence.
+# it machine-local state for a stack that is started and stopped, never source. The lane's output
+# lands here too (`live_probe_transcript_dir`, the storm and leak-probe reports): a run worth
+# keeping is copied out deliberately and cited from an ADR or a PR.
 .live/
 
 # mutmut copies the tree here to run mutants against it (`make mutants`); it is regenerated

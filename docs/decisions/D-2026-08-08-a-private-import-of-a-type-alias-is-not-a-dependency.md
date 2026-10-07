@@ -2,6 +2,8 @@
 
 **Status:** accepted
 
+**Superseded-by:** [D-2026-09-07-a-borrowed-helper-is-declared-because-copying-it-drifts](D-2026-09-07-a-borrowed-helper-is-declared-because-copying-it-drifts.md) (in part)
+
 ## Context
 
 The 2026-08-08 hardening campaign carried an open item from its enforcement lane: *pin

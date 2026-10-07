@@ -1,32 +1,12 @@
 """Every core activity bounds the wait for a worker, not just the run once one has it.
 
-`start_to_close_timeout` is the only timeout the durable layer used to set, and it is not a bound on
-a call: it starts counting when a worker *picks the task up*, so a queue nobody polls — the
-background fleet scaled to zero, a rolling update, a queue named in config but served by no pod —
-is an activity that never times out and a workflow that never ends. Most of these workflows are
-Temporal Schedules under `ScheduleOverlapPolicy.SKIP`, so one wedged run skips every subsequent
-fire of that job family, indefinitely, and a skipped fire is an error nowhere.
+`start_to_close_timeout` counts from pickup, so an unpolled queue would leave an activity, and a
+Schedule under `SKIP` overlap, wedged forever. Core activities bound the wait at core's scale;
+connector bundles use `connector_queue_wait_timeout()`, generous enough for real backpressure but
+finite, so "nothing serves this queue" is distinguishable from "busy".
 
-**The rule now covers connector bundles too, at their own scale.**
-`D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait` scoped it to `durable/` and argued
-the exclusion: on a bundle queue a wait genuinely is backpressure, since a CREST search holds its
-slot for hours and the next one behind it is working as designed. That argument is right and it is
-not an argument for *no* bound — which is what the three bundles shipped, leaving a queued job
-bounded only by the parent wrapper's five-hour execution ceiling, a failure delivered to no
-workflow code and naming neither the queue nor the reason. So the bundles pass
-`connector_queue_wait_timeout()` instead of core's hour: generous enough that the measured
-backpressure (p50 ~1.04 h, p95 ~1.98 h on `connector-calc` at target load) passes through, tight
-enough that "nothing is serving this queue" stops looking like "everything is busy".
-
-The walk covers both trees for one reason: the failure it exists to prevent is a *new* call site
-written without a bound, and a bundle added next year is exactly that. Three assertions naming
-today's three files would have said nothing about the fourth.
-
-Two tests, deliberately of different kinds. The AST walk is the one that scales: it holds the rule
-over every present and future call site, so the next durable job cannot be written without the
-bound. The Temporal run is the one that proves the rule *does* something — that a bounded call
-against an unserved queue fails, and fails with the timeout this is about, rather than merely
-carrying an argument nobody checked.
+An AST walk over `durable/` and `connectors/` holds the rule for every present and future call
+site; a Temporal run proves a bounded call against an unserved queue fails on that bound.
 """
 
 import ast
@@ -64,32 +44,19 @@ with workflow.unsafe.imports_passed_through():
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
 
-# Every tree whose workflows dispatch activities onto a task queue, with the floor each must not
-# fall below. `connectors/` is walked whole rather than as `connectors/*/workflows.py`: a bundle
-# that puts a workflow anywhere else in its package is the same rule and the same failure.
-# **A floor, re-based when it drifts far enough that it stops being one.** It read 30 for `durable`
-# against 41 real dispatch sites — 27% slack, which is a floor that would not notice a third of the
-# tree's scheduling disappearing. Measured on 2026-09-14 at 41 and 7; set at the measurement rather
-# than below it, because the number's whole job is to fail when a walk silently stops finding sites.
+# Every tree whose workflows dispatch activities, with the floor of sites each walk must find.
+# `connectors/` is walked whole, since a workflow anywhere in a bundle is under the same rule. The
+# floor sits at the current count so a walk that silently stops finding sites fails.
 _WORKFLOW_TREES = {"durable": 41, "connectors": 7}
 
-# The two ways a call can bound its queue wait. `schedule_to_start_timeout` is the general one
-# (`durable/publish.py::queue_wait_timeout`, and `light_write_queue_wait_timeout` for the
-# end-of-job writes); `schedule_to_close_timeout` is stricter — it caps every attempt together.
-# **No call site passes the second one today.** The two small writes that did were moved off it,
-# measured: it is a *total*, so on a queue they do not control it was spent on the wait and it
-# capped all five attempts together. It stays accepted here because it does bound the wait, which
-# is the invariant this file exists for; it is not the bound to reach for.
+# The two ways a call can bound its queue wait. `schedule_to_start_timeout` is the one to use;
+# `schedule_to_close_timeout` also bounds the wait but caps all attempts together, so it is
+# accepted here and not recommended.
 _QUEUE_BOUNDS = {"schedule_to_start_timeout", "schedule_to_close_timeout"}
 
-# Every SDK call that puts an activity task on a queue. `execute_local_activity` is deliberately
-# absent (see `_dispatch_calls`).
-#
-# **The `_method`/`_class` forms are the ordinary spelling for a class-bound activity, and this set
-# held only the two bare ones** — so `workflow.execute_activity_method(Cls.act, …)` with nothing
-# but a start-to-close budget walked straight past the scan, which is the same evasion the
-# receiver check was widened to close (`_dispatch_calls` records that measurement).
-# `test_the_scan_sees_a_class_bound_dispatch` drives one rather than trusting this list.
+# Every SDK call that puts an activity task on a queue, including the `_method`/`_class` forms
+# for class-bound activities. `execute_local_activity` is deliberately absent (see
+# `_dispatch_calls`).
 _DISPATCH_NAMES = {
     "execute_activity",
     "execute_activity_method",
@@ -105,26 +72,10 @@ def _dispatch_calls(tree: str) -> list[tuple[str, set[str]]]:
 
     Returns one `(file:line, keyword names)` pair per dispatched activity call.
 
-    `execute_local_activity` is deliberately not walked: a local activity runs inside the workflow
-    worker's own task, is never dispatched to a queue, and Temporal rejects a schedule-to-start
-    timeout on one.
-
-    **One shape is excluded, rather than one shape allow-listed**, and the difference is what makes
-    the rule hold for code nobody has written yet. `durable/interceptor.py` — a Temporal *worker*
-    interceptor — delegates down its chain with `self.next.execute_activity(input)`. That call
-    schedules nothing; it is the SDK handing an already-dispatched activity to the next link, and
-    there is no queue wait to bound, so it is the one receiver this walk skips.
-
-    The walk used to do the opposite: it required the receiver to be the literal name `workflow`,
-    on the grounds that every real dispatch in this tree is written that way (measured: 31 of 31,
-    still true). That is a fact about today's tree, and this rule exists for tomorrow's. Measured
-    against the merged tree, three ordinary spellings walked straight past it, each carrying only a
-    `start_to_close_timeout` and each leaving the suite green: `from temporalio import workflow as
-    wf` then `wf.execute_activity(...)`; `from temporalio.workflow import execute_activity` then a
-    bare `execute_activity(...)`, which is an `ast.Name` and never reached the receiver check at
-    all; and a site under a `durable/` subpackage, which `glob` does not descend into. The floor
-    below cannot see any of them — an unmatched site does not raise the count — so it guards
-    against sites disappearing and is simply orthogonal to a site that was never seen.
+    `execute_local_activity` is not walked: a local activity never waits on a queue, and Temporal
+    rejects a schedule-to-start timeout on one. Any receiver is matched (aliases, bare imports,
+    subpackages) except `self.next`, which is a worker interceptor delegating an already-dispatched
+    activity.
     """
     calls: list[tuple[str, set[str]]] = []
     for path in sorted((_SRC / tree).rglob("*.py")):
@@ -134,11 +85,6 @@ def _dispatch_calls(tree: str) -> list[tuple[str, set[str]]]:
 
 def _dispatch_calls_in(source: str, where: str) -> list[tuple[str, set[str]]]:
     """The walk itself, over one module's text — so a test can drive it on a spelling nobody wrote.
-
-    Split out from the tree walk for one reason: the failure this file guards is a *new* call site
-    written without a bound, and the only honest way to show the matcher sees a spelling is to hand
-    it that spelling. Asserting the names against `dir(temporalio.workflow)` instead would say the
-    names exist, not that this walk matches them.
 
     Args:
         source: One module's text.
@@ -178,13 +124,8 @@ def _dispatch_calls_in(source: str, where: str) -> list[tuple[str, set[str]]]:
 def test_every_dispatched_activity_call_bounds_the_queue_wait(tree: str, floor: int) -> None:
     """No activity anywhere may be scheduled with only a start-to-close budget.
 
-    Parametrised over the trees rather than written twice, so the connector bundles are held to the
-    rule by the same walk that holds core to it — the point of a scan over three assertions is that
-    it also covers the bundle nobody has written yet.
-
-    The floor is asserted beside the rule, because a structural test that matches nothing passes.
-    Narrowing the walk to `workflow.`-receiver calls is exactly the edit that could silently empty
-    it, so the count it must not fall below is stated here rather than trusted.
+    Parametrised over the trees so bundles and core are held by one walk. The floor is asserted too,
+    because a structural test that matches nothing passes.
     """
     calls = _dispatch_calls(tree)
     assert len(calls) >= floor, (
@@ -198,17 +139,8 @@ def test_every_dispatched_activity_call_bounds_the_queue_wait(tree: str, floor: 
 def test_the_scan_sees_a_class_bound_dispatch() -> None:
     """The `_method`/`_class` spellings, driven rather than listed.
 
-    `_DISPATCH_NAMES` held `execute_activity` and `start_activity` only, while
-    `temporalio.workflow` also exports `execute_activity_method`, `execute_activity_class`,
-    `start_activity_method` and `start_activity_class` — and the `_method` form is the *ordinary*
-    way to dispatch a class-bound activity rather than an exotic one. So the walk above could be
-    passed by writing the next durable job in the shape the SDK's own documentation shows, which
-    makes the rule advisory exactly where it is meant to be structural.
-
-    Driven on source text rather than asserted against `dir(temporalio.workflow)`: the question is
-    whether *this walk* matches the spelling, and a name list that agrees with itself is what the
-    receiver check already learned not to trust. The bounded twin is checked in the same breath, so
-    a matcher that flagged everything would not pass this either.
+    The `_method` form is the ordinary way to dispatch a class-bound activity, so the walk must see
+    it. Driven on source text, with a bounded twin so a matcher that flags everything fails too.
     """
     unbounded = """
 class Job:
@@ -240,11 +172,8 @@ async def test_an_activity_nobody_polls_fails_instead_of_waiting_forever(
 ) -> None:
     """A workflow whose activity queue is unserved fails on the queue bound, and says so.
 
-    The worker registers the workflow and **not** its activity, which is what a fleet with no
-    background worker looks like from the server's side: the activity task is dispatched and never
-    claimed. Before the bound this run stayed RUNNING forever; the assertion is both that it ends
-    and that it ends on `SCHEDULE_TO_START`, since a start-to-close expiry would mean the test had
-    proved something else.
+    The worker registers the workflow but not its activity, so the task is never claimed. The run
+    must end, and on `SCHEDULE_TO_START` specifically.
     """
     monkeypatch.setattr(settings, "activity_queue_wait_seconds", 5.0)
 
@@ -274,19 +203,9 @@ def test_the_job_ceiling_funds_exactly_one_worst_case_attempt_at_any_setting(
 ) -> None:
     """One attempt fits, a second cannot, and no ceiling changes it — so nothing may claim it does.
 
-    `Settings._the_job_ceiling_covers_the_activity_it_bounds` said in its own docstring that it
-    keeps `BAD_DATA_RETRY` alive, "so `activity_max_attempts` is a number that can never be
-    reached" is the thing it prevents. Measured at the shipped defaults it prevents no such thing:
-    longest 15,000 s, ceiling 25,200 s, queue wait 10,170 s, one worst-case attempt 25,170 s, 30 s
-    left over against `activity_max_attempts=5`.
-
-    And it is structural rather than a badly chosen value, which is why this is parametrized over
-    three ceilings a decade apart instead of asserting the shipped numbers. A bundle activity's
-    attempt costs `q + w`, and `connector_queue_wait_timeout` is derived as `C - w - a` precisely so
-    that composite fits by construction — so `q + w` is `C - a` whatever `C` is, and the second
-    attempt has `a` to spend. Anything that re-derives the queue wait as a fraction of the ceiling
-    (the shape `connector_queue_wait_timeout` says was reverted for making `q` grow with `C`) moves
-    this ratio, which is the drift worth catching.
+    `connector_queue_wait_timeout` is derived as `C - w - a`, so one attempt's `q + w` is `C - a` at
+    any ceiling and a second attempt has only `a`. Parametrised over ceilings so a re-derivation as
+    a fraction of `C` is caught.
     """
     monkeypatch.setattr(settings, "connector_job_timeout_seconds", ceiling)
     longest, _budget = settings.longest_bundle_activity
@@ -305,20 +224,11 @@ def test_the_job_ceiling_funds_exactly_one_worst_case_attempt_at_any_setting(
 def test_the_fan_out_ceiling_funds_one_worst_case_child_at_any_setting(
     monkeypatch: pytest.MonkeyPatch, ceiling: float
 ) -> None:
-    """The twin of the rule above, on the pair that shipped without it.
+    """The twin of the rule above, for `fan_out` children.
 
-    `fan_out_child_timeout_seconds` bounds a report section and a note publish, and both children
-    passed core's flat `queue_wait_timeout()` — 3,600 s — as their `schedule_to_start` under a
-    3,600 s ceiling. So the composite a child may legally spend was `3,600 + 300 = 3,900` against
-    3,600: the ceiling was *equal to the wait it had to contain*, and the child's own
-    SCHEDULE_TO_START expiry — the failure `ReportSectionWorkflow`'s `except ActivityError`
-    degrades on and `activity_failure_reason` names — could never be reached. Driven on the real
-    broker at 1000:1 the child came back as a bare `ChildWorkflowError`, which `fan_out` drops
-    without a cause.
-
-    Parametrized over three ceilings rather than asserting the shipped numbers, for the reason its
-    twin gives: `fan_out_queue_wait_timeout` is derived as `C - w - a`, so `q + w == C - a` at
-    every ceiling and a re-derivation as a fraction of `C` is what would move it.
+    `fan_out_queue_wait_timeout` is derived as `C - w - a`, so a child's own `SCHEDULE_TO_START`
+    expiry is reachable inside `fan_out_child_timeout_seconds` (and reported with its cause) at
+    every ceiling.
     """
     monkeypatch.setattr(settings, "fan_out_child_timeout_seconds", ceiling)
     longest, _budget = settings.longest_fan_out_activity
@@ -335,10 +245,8 @@ def test_the_fan_out_ceiling_funds_one_worst_case_child_at_any_setting(
 def test_every_fan_out_child_waits_on_the_fan_out_bound_not_on_cores_hour() -> None:
     """Each `fan_out` child's activity passes the derived wait, and the walk says which children.
 
-    The composite above fits by construction only for a call site that *uses* the derived wait, and
-    the defect this closes was precisely that two sites did not. Asserted against the source of the
-    two child workflows rather than by driving them, because what is wrong in the broken shape is a
-    keyword argument's value and nothing about a green run says which timeout was passed.
+    Asserted on the source: the defect is a keyword argument's value, which a green run cannot
+    reveal.
     """
     children = {
         "durable/report_workflow.py": "ReportSectionWorkflow",
@@ -347,10 +255,8 @@ def test_every_fan_out_child_waits_on_the_fan_out_bound_not_on_cores_hour() -> N
     for module, child in children.items():
         text = (_SRC / module).read_text()
         after = text.split(f"class {child}:", 1)[1]
-        # The class body ends at the first line that starts in column 0 again — the next
-        # decorator, def or class. Splitting on the decorator alone ran past the end of the
-        # file when the child is the last decorated thing in its module, which would let a
-        # *different* function's queue bound satisfy the assertion below.
+        # The class body ends at the first line back in column 0, so another function's queue bound
+        # cannot satisfy the assertion.
         body = re.split(r"\n(?=\S)", after, maxsplit=1)[0]
         assert "schedule_to_start_timeout=fan_out_queue_wait_timeout()" in body, (
             f"{child} ({module}) does not bound its queue wait with fan_out_queue_wait_timeout(); "
@@ -365,11 +271,8 @@ def test_every_fan_out_child_waits_on_the_fan_out_bound_not_on_cores_hour() -> N
 class _StubbedRun:
     """Just enough of a workflow context to drive `BoCampaignWorkflow._queue_wait` and a clock.
 
-    The method under test reads exactly two things from the SDK — `workflow.info()` for the run's
-    execution budget and start, and `workflow.now()` for where it is inside that budget — so a
-    stub of those two drives the real arithmetic without a broker. Driving it on the real method
-    rather than re-deriving the recurrence in the test is the point: a test that recomputed
-    `min(queue_bound, remaining)` here would agree with itself forever.
+    The method reads `workflow.info()` and `workflow.now()` only, so stubbing those drives the real
+    arithmetic without a broker.
     """
 
     def __init__(
@@ -390,9 +293,8 @@ class _StubbedRun:
     def dispatch(self) -> float:
         """Take the next activity's queue bound, spend the whole of it, then run the activity.
 
-        The worst case, which is what a ceiling has to fund: every dispatch waits its full
-        allowance and then takes its full start-to-close budget. A real campaign spends less on
-        both, which is why the assertions below are inequalities.
+        The worst case a ceiling must fund: every dispatch waits its full allowance and then runs
+        its full budget.
         """
         wait = self.campaign._queue_wait().total_seconds()
         self.now += timedelta(seconds=wait + settings.bo_activity_timeout_seconds)
@@ -410,24 +312,10 @@ def test_a_campaigns_sequence_of_dispatches_fits_the_ceiling_they_share(
 ) -> None:
     """Six dispatches under one execution ceiling, and the sum has to fit inside it.
 
-    **`connector_queue_wait_timeout` is derived so that `q + w` fits, singular.** Every bundle
-    child passed it unchanged, and `BoCampaignWorkflow` runs six activities for a one-round
-    campaign: propose the seed, evaluate it, propose the round, evaluate it, record the round,
-    record the campaign. Measured at the shipped settings before this: `q` = 10,170 s and a `bo`
-    activity's `w` = 300 s, so 6 x 10,470 = 62,820 s against a 25,200 s ceiling — 2.5x. Two fit,
-    the third breaks it, and the overrun is a `WorkflowExecutionTimedOut`, which reaches no
-    workflow code and names neither the queue nor the reason.
-
-    Parametrised over three ceilings rather than asserting the shipped numbers, for the reason its
-    two siblings above give: the property is structural, and a re-derivation that reintroduced a
-    per-dispatch constant would pass at one ceiling by luck. The lowest is the shipped value; going
-    below `longest_bundle_activity` would test a ceiling `Settings` refuses.
-
-    **All six must fit, not merely "the sum is bounded".** Bounding each dispatch by the whole
-    remaining budget is enough for the sum — but measured that way the first two take 10,170 s each
-    of 25,200 and the campaign stops after three, having proposed a seed and evaluated it. Sharing
-    what is left between the dispatches still to come is what makes the bound usable, and it is
-    what the count in `dispatches_left` is for.
+    A one-round `BoCampaignWorkflow` runs six activities; giving each the full per-dispatch queue
+    wait would overrun the ceiling with an uninformative `WorkflowExecutionTimedOut`. All six must
+    fit: the remaining budget is shared between the dispatches still to come (`dispatches_left`).
+    Parametrised over ceilings because the property is structural; the lowest is the shipped value.
     """
     monkeypatch.setattr(settings, "connector_job_timeout_seconds", ceiling)
     run = _StubbedRun(monkeypatch, ceiling, n_rounds=1)
@@ -449,12 +337,8 @@ def test_a_campaign_never_waits_longer_than_the_queue_wide_bound(
 ) -> None:
     """Sharing the budget must not *lengthen* a wait, which on a short campaign it would.
 
-    The queue-wide bound is `C - 15,000 - 30` (the fleet's longest bundle activity), and a share is
-    `C/n - 300 - 30`, so which one binds depends on the ceiling: at the shipped 25,200 s over six
-    dispatches the share is the tighter, and at a *low* ceiling over few dispatches the queue bound
-    is. 20,000 s with three dispatches is the second case — share 6,337 s against a queue bound of
-    4,970 s — and without the `min` a campaign whose worker is simply absent would sit 1,367 s
-    longer than any other job on the same queue before saying so.
+    At a low ceiling over few dispatches the share exceeds the queue-wide bound, so the `min` keeps
+    a campaign with no worker from waiting longer than any other job on the queue.
     """
     ceiling = 20000.0
     monkeypatch.setattr(settings, "connector_job_timeout_seconds", ceiling)
@@ -475,10 +359,8 @@ def test_a_campaign_that_has_spent_its_ceiling_refuses_to_dispatch_again(
 ) -> None:
     """The end of the recurrence is a stop, not a silent overrun.
 
-    `run` catches this and ends the campaign with the history and the best point it has. The
-    alternative — dispatch anyway — is the failure the whole bound exists to remove: the execution
-    timeout fires mid-activity, is delivered to no workflow code, and the chemist is told nothing
-    about a run that had real evaluations in it.
+    `run` catches this and ends the campaign with its history and best point, instead of an
+    execution timeout firing mid-activity.
     """
     ceiling = settings.connector_job_timeout_seconds
     run = _StubbedRun(monkeypatch, ceiling)
@@ -493,10 +375,8 @@ def test_a_campaign_with_no_execution_ceiling_keeps_the_queue_wide_bound(
 ) -> None:
     """A measured campaign gets no execution timeout, so there is no budget to spend down.
 
-    `child_execution_timeout` returns None for a job that suspends on a person —
-    `bo_measurement_deadline_days` is a fortnight and no wall-clock ceiling can contain it. There
-    is then nothing to divide, and the queue-wide bound is the whole of the answer. Driven a year
-    into the run so a stray elapsed-time subtraction could not pass this.
+    The queue-wide bound is the whole answer. Driven a year into the run so a stray elapsed-time
+    subtraction would fail.
     """
     run = _StubbedRun(monkeypatch, None)
     run.now = run.started + timedelta(days=365)
@@ -507,10 +387,8 @@ def test_a_campaign_with_no_execution_ceiling_keeps_the_queue_wide_bound(
 def test_a_remaining_budget_that_cannot_fund_an_attempt_answers_none() -> None:
     """`None` rather than a zero or negative timedelta, because those are not bounds.
 
-    Temporal takes a `schedule_to_start_timeout` at face value: a non-positive one either fails
-    validation or expires the activity the instant it is scheduled, and both read as "the queue is
-    unserved" about a queue that is fine. The caller has to make a different decision, so the
-    function has to be able to say something different.
+    Temporal would reject or instantly expire a non-positive `schedule_to_start_timeout`, which
+    reads as "queue unserved"; the caller must decide differently.
     """
     overhead = settings.activity_timeout_seconds
     assert remaining_queue_wait_timeout(timedelta(seconds=300 + overhead + 1), 300.0) == timedelta(
@@ -526,23 +404,10 @@ def test_a_long_campaign_dispatches_its_seed_instead_of_refusing_it(
 ) -> None:
     """A campaign with a large round count must run, not fail before doing any work.
 
-    **The regression this pins.** `_queue_wait` divided what was left of the execution ceiling by
-    the campaign's *worst-case total* dispatch count (`3n + 3`) and then asked whether that share
-    could fund a wait plus an attempt. At the shipped 25,200 s ceiling and a 300 s activity budget
-    the share falls under 330 s at 25 rounds, so `propose_initial` — the first activity of the
-    campaign, with the whole ceiling untouched in front of it — raised `CampaignBudgetSpent`
-    instead of running. The seed's dispatches are neither guarded nor wrapped, and with
-    `failure_exception_types=[Exception]` that is a workflow FAILURE whose message is the empty
-    string: every `n_rounds >= 25` campaign, `bo_max_rounds` itself included, died on arrival.
-
-    `dispatches_left`'s own docstring says why that can never be right — "being wrong here is a
-    fairness bug, never a safety one", because each dispatch is measured against what is *left* and
-    so the sum fits whatever the divisor. The share may therefore narrow a wait and must never
-    refuse one.
-
-    Driven on the real method rather than on the arithmetic beside it, and asserted as a *bound the
-    campaign could plainly afford* rather than as a transcribed number: the ceiling is the whole
-    remaining budget, and one attempt plus its overhead is a rounding error against it.
+    Dividing the remaining ceiling by the worst-case total dispatch count (`3n + 3`) made the share
+    too small to fund even the first dispatch at large `n`. The share may narrow a wait but must
+    never refuse one, since each dispatch is measured against what is left. Asserted as a bound the
+    campaign can plainly afford.
     """
     run = _StubbedRun(monkeypatch, settings.connector_job_timeout_seconds, n_rounds=n_rounds)
 
@@ -565,15 +430,8 @@ def test_a_shared_queue_wait_never_falls_below_the_configured_floor(
 ) -> None:
     """Sharing must not hand out a wait too short to survive a worker that is merely slow.
 
-    The share is `C/n - w - a`, which shrinks with the round count while the thing it is waiting
-    for — a `bo` worker rolling, scaled to zero, or slow to pull — does not. Measured at the
-    default ten-round spec the share is 433.6 s against the 10,170 s queue-wide bound every
-    dispatch had before, so a seven-minute worker gap expires `schedule_to_start` and produces
-    exactly the misdiagnosis `connector_queue_wait_timeout`'s docstring warns about.
-
-    The floor is `bo_queue_wait_floor_seconds` and both real bounds still apply above it, which is
-    the second half of the claim: the floor may lengthen a share, never a dispatch past what the
-    remaining budget or the queue can fund.
+    The share `C/n - w - a` shrinks with the round count while worker gaps do not, so it is floored
+    at `bo_queue_wait_floor_seconds`. Both real bounds still apply above the floor.
     """
     run = _StubbedRun(monkeypatch, settings.connector_job_timeout_seconds, n_rounds=10)
     share = remaining_queue_wait_timeout(
@@ -603,11 +461,8 @@ def test_the_floored_share_still_fits_the_ceiling_every_dispatch_shares(
 ) -> None:
     """The floor may not buy a usable wait at the cost of the bound it sits inside.
 
-    Worst case, on the longest campaign this deployment accepts: every dispatch waits its whole
-    allowance and then takes its whole start-to-close budget, until the campaign refuses to
-    dispatch again. The total must still land inside the execution ceiling less one activity's
-    overhead — the same property `test_a_campaigns_sequence_of_dispatches_fits_the_ceiling_they
-    _share` asserts for a short campaign, restated for the case the floor actually binds.
+    On the longest accepted campaign, every dispatch waits and runs its worst case until the
+    campaign refuses to dispatch; the total must still fit the ceiling less one activity's overhead.
     """
     ceiling = settings.connector_job_timeout_seconds
     run = _StubbedRun(monkeypatch, ceiling, n_rounds=settings.bo_max_rounds)
@@ -631,14 +486,10 @@ def test_a_campaign_that_stops_for_budget_can_still_write_its_terminal_record(
 ) -> None:
     """The one write `resume_campaign` keys on must not be refused by a divisor.
 
-    `_cannot_afford_another_dispatch` deliberately does not consume a share, so a campaign that
-    breaks out of its round loop for budget arrives at the terminal `record_campaign_run` with
-    `_dispatches_left` still at `3R + 1`. While affordability was read off that share the terminal
-    write was unaffordable *by construction* — every budget-stopped campaign threw away its
-    `campaign_id`, and with it the `bo_campaigns` row the report and `resume_campaign` both key on.
-
-    Driven at the review's own figures: 1,000 s left funds a 670 s wait plus a 300 s attempt, and
-    the divisor must not be able to take that away.
+    A campaign stopping for budget reaches the terminal `record_campaign_run` with dispatches still
+    counted; if affordability were read off the share, that write — and the `bo_campaigns` row
+    `resume_campaign` keys on — would always be refused. 1,000 s left must fund a 670 s wait plus a
+    300 s attempt.
     """
     ceiling = settings.connector_job_timeout_seconds
     run = _StubbedRun(monkeypatch, ceiling, n_rounds=1)

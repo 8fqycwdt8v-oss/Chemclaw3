@@ -1,9 +1,8 @@
 """A disconnect is a detach, not a stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop).
 
-The turn stream used to read any client disconnect as cancellation, so the Stop button and a
-Wi-Fi handoff were the same event and a long multi-tool turn died with the connection carrying
-it. These tests pin the split from both ends: the `DetachableTurn` pump directly, and the two
-routes — the stream that only detaches, and the explicit stop that actually cancels.
+A client disconnect must not cancel a turn; only the explicit stop does. Pinned from both ends:
+the `DetachableTurn` pump directly, and the two routes (the stream that only detaches, the stop
+that cancels).
 """
 
 import asyncio
@@ -129,11 +128,9 @@ class _SlowAgent(ScriptedTurn):
 class _Served:
     """The app under a real uvicorn server on loopback — the only honest transport here.
 
-    Both `TestClient` and httpx's ASGI transport buffer a response whole and run each request on
-    a loop of its own, so "the client dropped mid-stream" and "a second request while the stream
-    is open" are inexpressible through either: a detach test against them passes whatever the
-    route does. A real socket on the process's one server loop is what the production stack is,
-    and it is the shape `tests/test_verifier.py` already uses for its fake model endpoint.
+    `TestClient` and httpx's ASGI transport buffer a response whole and run each request on its own
+    loop, so "the client dropped mid-stream" and "a second request while the stream is open" cannot
+    be expressed through them.
     """
 
     def __init__(self, app: Any) -> None:
@@ -180,12 +177,10 @@ def _free_port() -> int:
 
 
 def test_a_dropped_stream_still_delivers_the_answer_to_the_transcript() -> None:
-    """End to end through the route: the client vanishes, the turn answers anyway.
+    """A dropped stream still delivers the answer to the transcript.
 
-    The failure this closes was measured in prose all the way down: a 20-minute multi-tool turn
-    died with a network blip, its partial answer lost from the live view *and* the transcript
-    (written only after the answer). Now the pump finishes the turn, `_record_transcript` runs,
-    and a reconnecting client reads the answer from `GET /sessions/{id}/messages`.
+    The pump finishes the turn, `_record_transcript` runs, and a reconnecting client reads the
+    answer from `GET /sessions/{id}/messages`.
     """
     agent = _SlowAgent()
     with _Served(_app(agent)) as served, httpx.Client(base_url=served.base) as client:
@@ -244,9 +239,7 @@ def test_the_stop_route_cancels_a_running_turn(monkeypatch: pytest.MonkeyPatch) 
 class _SlowerThanAdmission(ScriptedTurn):
     """A turn that keeps streaming for longer than a queued turn is willing to wait.
 
-    The gap is what makes the defect observable: while a detached turn holds its admission permit,
-    an honest client's turn is shed rather than merely delayed, so the assertion is on an answer
-    rather than on a latency.
+    The gap makes the defect observable as a shed answer rather than a latency.
     """
 
     def __init__(self) -> None:
@@ -273,22 +266,12 @@ def _hang_up_mid_turn(client: httpx.Client, session_id: str) -> None:
 def test_a_hung_up_client_stops_charging_admission_for_a_turn_nobody_is_watching(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A disconnect must not cost the replica a permit until the turn's 600-second deadline.
+    """A hung-up client stops charging admission for a turn nobody is watching.
 
-    The permit is taken inside the turn generator and released in its `finally`, which since
-    `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` runs at the pump's *true* end rather than
-    when the client goes away. `detach.py` framed that per session — "a session stays 409-locked
-    for exactly as long as a turn is running" — but the permit is not per session: it is the
-    process's shared `service_max_concurrent_turns` semaphore. Measured on the real app at its
-    shipped cap: that many fresh sessions POSTed and hung up left **0** permits free and every
-    other chemist's turn on that replica got `queued` then a shed `error`, for up to
-    `service_turn_timeout_seconds`. It needs no malice — a closed laptop, a Wi-Fi handoff or a UI
-    that retries on disconnect produces it, and the retry *adds* a holder rather than replacing
-    one. Before that ADR a disconnect returned the permit immediately, so the failure was
-    self-limiting.
-
-    Driven over a real socket for the reason `_Served` gives: neither `TestClient` nor httpx's ASGI
-    transport can express "the client dropped mid-stream".
+    The admission permit is the process's shared `service_max_concurrent_turns` semaphore, not a
+    per-session lock, so a detached turn holding it until its deadline would let ordinary hang-ups
+    (a closed laptop, a retrying UI) shed every other chemist's turn. The permit is released at
+    detach. Driven over a real socket (see `_Served`).
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns", 2)
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.5)
@@ -328,26 +311,12 @@ def test_the_in_flight_gauge_counts_demand_and_can_exceed_the_permit_count(
 ) -> None:
     """`chemclaw_turns_in_flight` is leases, not permits — the HPA's signal, named honestly.
 
-    The gauge is bound to `app.state.active_turns` (`api/app.py`), which `_claim_turn_slot`
-    populates at POST — *before* admission — and which a detached turn keeps after `_release_permit`
-    has given its permit back. So the series is `permits held + turns queued for admission + turns
-    running detached`, and `sum(in_flight) / sum(capacity)` is a **demand** ratio that may exceed
-    1.0 rather than an occupancy fraction that cannot.
-
-    Three documents asserted the opposite in the present tense — the HPA template's "the quantity
-    is permits held per pod", `values.yaml`'s occupancy prose and this suite's own HPA test — while
-    `api/detach.py` said the true thing one directory away. Prose is not what settles it, so this
-    drives the state: two turns detached and one live, against a cap of two, must read **3** with
-    every permit but one free.
-
-    Keeping demand rather than switching to a permits gauge is
-    `src/chemclaw/api/detach.py`'s module docstring (an ADR of that name has never existed — this
-    pointer was dangling before the per-actor cap cited it, and
-    `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one` is where the argument is now recorded): the
-    queued term is the leading half
-    of the signal an autoscaler wants, and a detached turn is a turn still spending this pod's CPU,
-    its model tokens and its database connection — the permit came back as fairness to a *waiting
-    client*, not because the work stopped.
+    The gauge reads `app.state.active_turns`, populated at POST before admission and kept by a
+    detached turn after its permit returns: permits held plus queued plus detached. So
+    `in_flight / capacity` is a demand ratio that may exceed 1.0. Driven: two detached and one live
+    turn against a cap of two must read 3. Demand rather than permits is argued in
+    `src/chemclaw/api/detach.py` (`D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`): a detached turn
+    still spends this pod's CPU, tokens and connection.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns", 2)
     agent = _SlowerThanAdmission()
@@ -386,19 +355,12 @@ def test_the_in_flight_gauge_counts_demand_and_can_exceed_the_permit_count(
 
 
 def test_shutdown_waits_for_the_turns_detaching_promised_to_finish() -> None:
-    """A rolling update must not destroy exactly the work detaching exists to preserve.
+    """Shutdown waits for the turns detaching promised to finish.
 
-    A pump task is not an in-flight HTTP request, so uvicorn's own drain cannot see one and
-    nothing in the process did either: on SIGTERM the lifespan `finally` ran immediately —
-    `close_memory_store()`, `close_checkpointer()`, then `db.pooling()` closing the store pool —
-    while detached turns were still mid-flight. Measured against the real `_lifespan` with a real
-    checkpointer: shutdown returned in **0.001 s** with the turn still running, and that turn's
-    next checkpoint write raised `PoolClosed` and booked itself `abandoned`. The client had been
-    told to recover its answer from `GET /sessions/{id}/messages`, and it was not there.
-
-    The chart makes it worse by believing it is handled: `terminationGracePeriodSeconds` is
-    derived as `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS + service.drainSeconds` specifically so "a
-    drain that outlasts it cannot cut one short" — grace the process did not use.
+    A pump task is not an in-flight HTTP request, so uvicorn's drain cannot see it; without waiting,
+    the lifespan `finally` closes the stores and pool under running turns, whose answers then never
+    reach the transcript the client was told to read. The chart's grace period is derived to cover
+    this drain.
     """
 
     async def _run() -> tuple[list[int], bool]:
@@ -427,11 +389,9 @@ def test_shutdown_gives_up_on_a_turn_that_outlasts_the_grace_it_is_given(
 ) -> None:
     """The drain is bounded, and says what it left behind rather than hanging the pod.
 
-    The bound is `service_turn_timeout_seconds` because that is the number the chart's grace period
-    is already derived from — and because a turn's own deadline is measured from when it started,
-    so in a healthy configuration the turn's timeout always fires first and this bound is never the
-    binding one. It exists for the turn whose deadline is not enforceable (a teardown that itself
-    hangs), where the honest outcome is a warning and a shutdown, not a pod that never exits.
+    The bound is `service_turn_timeout_seconds` (what the chart's grace period derives from); a
+    turn's own deadline fires first in a healthy configuration, so this only catches a hung
+    teardown, with a warning and a shutdown.
     """
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
 
@@ -451,10 +411,8 @@ def test_shutdown_gives_up_on_a_turn_that_outlasts_the_grace_it_is_given(
         await turn.stop()
         return elapsed
 
-    # On the module's own logger rather than through `caplog`: `_lifespan` calls
-    # `configure_logging()`, whose `logging.basicConfig(force=True)` removes every root handler —
-    # pytest's capture handler included — so a root-attached capture sees nothing from inside a
-    # lifespan.
+    # On the module's own logger rather than `caplog`: `_lifespan` calls `configure_logging()`,
+    # whose `basicConfig(force=True)` removes pytest's capture handler.
     said: list[str] = []
 
     class _Collect(logging.Handler):
@@ -482,32 +440,18 @@ def test_a_detached_turn_still_holds_its_actors_slot(
 ) -> None:
     """The permit comes back at a detach and the per-actor slot deliberately does not.
 
-    These two guards answer the same event in opposite directions, and the inconsistency is the
-    design rather than an oversight — so it is pinned here, where a later tidy-up would land.
-    The **permit** is fairness to a *waiting client*, and a detached turn has none, so it is
-    released (the test above measures what holding it costs). The **per-actor slot** rations one
-    principal's share of this replica, and a detached turn is still spending that share: it is
-    burning CPU, model tokens and a store connection until the loop cap or
-    `service_turn_timeout_seconds` stops it.
-
-    Releasing the slot on a detach would hand the cap straight back to the case the test above
-    measured — POST and hang up, now unbounded, because each hang-up would free both the permit
-    and the actor's slot while leaving a pump running for the full turn timeout. So a cap that
-    released here would bind only on well-behaved clients, which is the population that was never
-    the problem.
+    The permit is fairness to a *waiting client*, which a detached turn no longer has. The per-actor
+    slot rations one principal's share of the replica, which a detached turn is still spending until
+    the loop cap or turn timeout stops it; releasing it would let POST-and-hang-up bypass the cap.
     """
-    # **One permit, not two.** `asyncio.Semaphore.locked()` is `value == 0`, so with a cap of two
-    # and a single detached turn it reads False whether or not the permit came back — the assertion
-    # below would have passed against a regression. Driven: keeping the permit on detach reddens
-    # the two neighbouring tests and left this one green. At a cap of one it is load-bearing.
+    # One permit, not two: `Semaphore.locked()` is `value == 0`, so with a cap of two this assertion
+    # could not distinguish a returned permit from a kept one.
     monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
     agent = _SlowerThanAdmission()
 
-    # A *named* principal, because the cap deliberately skips the shared dev one: with
-    # `entra_required` false every caller is one oid, so "per actor" would mean "per pod" and one
-    # client would refuse everybody. This app is served by a real uvicorn, so the override has to
-    # be installed on the app object before it starts.
+    # A *named* principal, because the cap skips the shared dev principal (with `entra_required`
+    # off, "per actor" would mean "per pod"). Installed before the real uvicorn starts.
     from chemclaw.api.auth import Principal, require_principal
 
     app = _app(agent)
@@ -519,10 +463,9 @@ def test_a_detached_turn_still_holds_its_actors_slot(
         abandoned = client.post("/sessions").json()["session_id"]
         _hang_up_mid_turn(client, abandoned)
 
-        # The permit came back — polled, because the detach hook runs in the server's own task and
-        # `_hang_up_mid_turn` returns as soon as the socket is closed. At a cap of one this is a
-        # real assertion: `locked()` is `value == 0`, so it can only clear if the permit was
-        # actually released while the turn is still running.
+        # Polled, because the detach hook runs in the server's task and `_hang_up_mid_turn` returns
+        # once the socket closes. At a cap of one, `locked()` clears only if the permit was really
+        # released.
         deadline = time.monotonic() + 10.0
         while served.app.state.turn_semaphore.locked():
             if time.monotonic() > deadline:  # pragma: no cover - only on a real regression

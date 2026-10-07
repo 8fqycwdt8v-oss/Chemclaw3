@@ -1,54 +1,18 @@
 """What travels with an outbound call: the turn's identity, as headers, for one origin.
 
-**Identity stamping is core's, not a connector's**
-(`D-2026-09-14-identity-stamping-is-cores-not-a-connectors`). Everything below reads the turn's
-ambient ContextVars — the actor, the session, the correlation id, the dry-run flag and the W3C
-trace context — and none of that is a fact about connectors. It lived in
-`chemclaw.connectors.identity` because a connector was its first caller, and the cost of that was
-paid by the second one: `chemclaw.ingest.labels.labeller` opens an MCP session to the labelling
-server and could not reach this hook, because `ingest -> connectors` is not an edge
-`tests/test_layering.py` permits. So the one leg of this system that runs for *hours* inside a
-durable activity went out with `Authorization` and nothing else — no actor, no session, no
-correlation id, no `traceparent` — and the module that could have fixed it said so in a comment.
+Reads only the turn's ambient ContextVars (actor, session, correlation id, dry-run flag, W3C trace
+context), so any MCP client can use it, connector or not
+(`D-2026-09-14-identity-stamping-is-cores-not-a-connectors`). Turning a bundle's declared auth
+into an `httpx.Auth` stays in `chemclaw.connectors.identity`.
 
-What stayed in `chemclaw.connectors.identity` is the half that genuinely is a connector's: turning
-a bundle's declared `ConnectorAuth` into an `httpx.Auth`. That reads `connectors.manifest`, which
-is a connector concept; this file reads `core.*` and nothing else.
+A request hook on our own client, not an MCP per-call header callback: over streamable HTTP the
+request is issued by the transport's writer task, which never sees a ContextVar set in
+`call_tool`, while a hook runs in that task. Because transport tasks inherit the context of
+whoever opened the connection, a connection must belong to exactly one turn.
 
-**Why a request hook and not a header-provider callback.** MCP clients typically offer a
-per-call header callback that looks purpose-built for this, and it does not work over streamable
-HTTP. Measured against a live server: the callback *is* invoked, with the right values, and the
-server receives nothing. The reason is that such a callback passes its headers through a
-`ContextVar` set inside `call_tool`, while the HTTP request is actually issued by the MCP
-transport's `post_writer` task — created when the connection opened, so it never sees a variable
-set afterwards. A hook on our own client runs *in* that task and reads the ambient identity there,
-which is why this works where the callback does not. The sibling trap is auth: callback headers are
-absent during `initialize()` entirely, so a credential passed that way 401s at connect — which is
-why a credential is an `httpx.Auth` on the client instead.
-
-**Why this is correct per turn.** The transport's tasks inherit the context of whoever opened
-the connection, so the identity is only truthful if a connection belongs to exactly one turn —
-which is precisely why a turn opens its own `HeldConnectorSession` rather than sharing one
-process-wide, and why the graph itself is compiled per turn (D-2026-08-10). Sharing is not merely
-inaccurate: two concurrent turns over one session misattribute each other's calls.
-
-**The headers are advisory, never authorization.** Audit (`chemclaw.agent.audit`) and the per-tool
-gate (`chemclaw.agent.tool_authz`) run in core, before the call leaves this process; a server may
-log the actor to correlate its own records, and it must never make an access decision on a header's
-word — anything reachable from outside the trust boundary would be trivially spoofable. It is the
-same shape as every other non-Entra transport here (architektur.md §7.2): the downstream runs under
-our service identity while the requesting user's oid travels with the request and is logged, so the
-audit trail can always answer "which real user drove this".
-
-**Which is exactly why `X-Chemclaw-Roles` is gone**
-(`D-2026-08-26-an-entitlement-set-is-not-provenance`). Being advisory is what made it pure cost:
-the sentence above says a server must never decide on it, and correlating records needs the actor
-and the correlation id, not the caller's entitlements — so it had one writer and, measured across
-both repositories, zero readers. Meanwhile it was the one header with no bound: under
-`entra_group_claims_as_roles` it carries every AD group a user is in, to every destination
-including servers this family does not host, and the users it grows longest for are the ones
-`_principal_from_claims` already warns about. What is sent now is the minimum that makes the trail
-joinable.
+The headers are advisory: authorization happens in core before the call leaves, and a server may
+log the actor to correlate records but must never make an access decision on a header. Only the
+minimum that makes the audit trail joinable is sent; the caller's roles are not.
 """
 
 from collections.abc import Awaitable, Callable
@@ -66,19 +30,12 @@ from chemclaw.core.turn_flags import is_dry_run
 # The header contract, as constants so the connector-side reader and this writer cannot drift.
 HEADER_ACTOR = "X-Chemclaw-Actor"
 HEADER_SESSION = "X-Chemclaw-Session"
-# The turn's correlation id, so a connector's own records join to core's audit trail on the same
-# key core uses (REV-11). Without it the trail stopped at this process boundary: `agents.audit`
-# stamps every in-core tool call with a correlation id, and the connector serving that call logged
-# under an id of its own with nothing tying the two together — so "show me everything that happened
-# in this turn" was answerable in core and unanswerable across the four runtimes the turn spans.
+# The turn's correlation id, so a connector's records join to core's audit trail on the same key.
 HEADER_CORRELATION = "X-Chemclaw-Correlation-Id"
 HEADER_DRY_RUN = "X-Chemclaw-Dry-Run"
 
-# The four `X-Chemclaw-*` headers this module mints, named as constants so a connector-side reader
-# and this writer cannot drift. **This is not the list the origin guard strips** — that list is
-# `turn_headers()`'s own keys, because `turn_headers` also emits the W3C trace context and a
-# hand-maintained second list is how four of six got stripped and two did not. See
-# `_strippable_headers`.
+# The four `X-Chemclaw-*` headers this module mints, as constants so readers cannot drift. Not the
+# list the origin guard strips; see `_strippable_headers`.
 STAMPED_HEADERS = (
     HEADER_ACTOR,
     HEADER_SESSION,
@@ -86,9 +43,8 @@ STAMPED_HEADERS = (
     HEADER_DRY_RUN,
 )
 
-# The port an origin means when the URL does not spell one out, so a plain `http` host and the
-# same host written with an explicit `:80` compare equal — the same normalization httpx's own
-# `_same_origin` does before it strips `Authorization`.
+# Default ports, so a host with and without its explicit default port compare as one origin (as in
+# httpx's own `_same_origin`).
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -97,15 +53,9 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 def turn_headers() -> dict[str, str]:
     """The current turn's identity as connector headers, read from the ambient ContextVars.
 
-    Absent context yields an absent header rather than an empty one: off the request path (the
-    CLI, a worker, a test) there genuinely is no actor, and sending `X-Chemclaw-Actor: ""` would
-    let a connector's log claim an anonymous user made the call. The dry-run flag is always
-    sent, because "not a dry run" is a real state a connector may want to see.
-
-    Nothing from the tool call itself appears here. The headers say *who* is calling, never
-    *what* they asked for: the arguments are model-authored, and folding one into a header would
-    put model-controlled text into the transport envelope, where a connector's request log and
-    any intermediary would read it as our own metadata.
+    Absent context yields an absent header, not an empty one, so a log cannot claim an anonymous
+    user. The dry-run flag is always sent. Nothing from the tool call itself is included: arguments
+    are model-authored and must not enter the transport envelope.
 
     Returns:
         The headers to attach to this connector request.
@@ -122,12 +72,8 @@ def turn_headers() -> dict[str, str]:
         # Absent rather than empty for the same reason the actor is: off the request path there is
         # genuinely no turn, and an empty id in a connector's log would read as one that exists.
         headers[HEADER_CORRELATION] = correlation_id
-    # W3C trace context, alongside — not instead of — the correlation id above. The custom header
-    # was the readiness review's tell that the standard one was missing, and the two answer
-    # different questions: a correlation id joins *log lines* after the fact, by grep, and survives
-    # where no collector is configured; `traceparent` joins *spans*, live, so a connector's work
-    # appears inside the turn that asked for it instead of as an orphan trace nobody looks for.
-    # Empty when tracing is off, which is the default, so this adds a boolean read per request.
+    # W3C trace context beside the correlation id: the id joins log lines by grep, `traceparent`
+    # joins spans live. Empty when tracing is off (the default).
     headers.update(trace_headers())
     return headers
 
@@ -135,22 +81,10 @@ def turn_headers() -> dict[str, str]:
 def _strippable_headers() -> frozenset[str]:
     """Every header name `turn_headers()` can produce, for the guard that removes them again.
 
-    **Derived, not restated.** The guard used to walk `STAMPED_HEADERS`, a hand-written tuple of
-    the four `X-Chemclaw-*` names — while `turn_headers()` ends with `headers.update(
-    trace_headers())`, which adds `traceparent`, `tracestate` and `baggage` when tracing is on. So
-    a cross-origin redirect had four of six removed and the trace context copied through to the
-    attacker's origin, carrying this deployment's trace and span ids. A second list that has to be
-    remembered is the defect; asking the producer what it produces cannot drift from it.
-
-    The trace half comes from `trace_header_names()` rather than from `turn_headers()` itself,
-    because the stamp and the strip happen at different moments: `trace_headers()` answers with an
-    empty dict once the span has ended, and a redirect hop whose span closed in between would then
-    carry a `traceparent` nothing removed. The propagator knows its own field names whether or not
-    a span is live.
-
-    Called per stripped request rather than cached, since both halves depend on what this
-    deployment has tracing configured to do. It runs only on the redirect path, which is the path
-    that must not be fast.
+    Derived rather than listed, so the trace headers (`traceparent`, `tracestate`, `baggage`) are
+    stripped along with the `X-Chemclaw-*` ones. The trace half comes from `trace_header_names()`
+    because a span may have ended before the redirect hop. Not cached: it depends on tracing
+    configuration and runs only on the redirect path.
     """
     names = (*STAMPED_HEADERS, *turn_headers(), *trace_header_names())
     return frozenset(name.lower() for name in names)
@@ -164,37 +98,11 @@ def _origin(url: httpx.URL) -> tuple[str, str, int]:
 def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable[None]]:
     """Build the `httpx` request hook that stamps the turn's identity for one connector endpoint.
 
-    Registered on the connector's own client (`chemclaw.connectors.registry`), so it runs inside the
-    task that issues the request — the one place that can see the turn's ambient context (see the
-    module docstring for why a per-call header callback cannot).
-
-    **Bound to the endpoint's origin, and it strips rather than merely skips.** A request hook runs
-    on *every* hop of a redirect chain (httpx `_send_handling_redirects`), and httpx builds the
-    redirected request from the previous request's headers — dropping only `Authorization`, and
-    only cross-origin. So a connector answering `302` toward an origin an attacker controls would
-    otherwise have
-    harvested the caller's Entra object id and full role set, on every turn, from a header set that
-    carries identity and nothing else strips. Declining to *re-add* them on a foreign origin is not
-    enough, because the copied originals arrive anyway; the hook therefore removes them.
-
-    **And it removes everything `turn_headers()` produced, not a list of four.** That function ends
-    with `headers.update(trace_headers())`, so `traceparent`, `tracestate` and `baggage` ride along
-    with the identity — and the guard walked `STAMPED_HEADERS`, which names only the
-    `X-Chemclaw-*` half. See `_strippable_headers`.
-
-    **On the second layer, which exists for some callers and not for the most privileged one.**
-    `registry.connector_http_client` sets `follow_redirects=False`, so a bundle's own client never
-    reaches this branch. `core.mcp_session.short_connect_client` — the client the calc backend
-    uses, which is the hottest and most privileged connection in the system — sets
-    `follow_redirects=True`, and for it this hook is the *only* layer. That is why the strip has to
-    be complete rather than merely present.
-
-    Args:
-        endpoint_url: The connector's effective endpoint URL — the one origin its identity headers
-            may reach.
-
-    Returns:
-        The request hook to install on that connector's client.
+    Registered on the connector's own client so it runs in the task that issues the request. Bound
+    to `endpoint_url`'s origin: httpx runs the hook on every redirect hop and copies the previous
+    request's headers (dropping only `Authorization`), so on a foreign origin the hook removes every
+    header `turn_headers()` produced. `core.mcp_session.short_connect_client` (the calc backend's
+    client) follows redirects, so for it this strip is the only layer.
     """
     allowed = _origin(httpx.URL(endpoint_url))
 

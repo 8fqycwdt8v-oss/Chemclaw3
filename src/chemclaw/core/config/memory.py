@@ -1,9 +1,7 @@
-"""The memory layers (plan Phase 5): playbook and campaign synthesis.
+"""Settings for the memory layers: synthesis, observations, retention and attachments.
 
-One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
-every section into the one config object and owns the env prefix, the `.env` loading and the
-cross-section validators; fields, env names and defaults are exactly as they were when all
-sections shared a single module (D-072 mixins, split per D-156).
+One domain section of the composed `Settings`; the package `__init__.py` flattens the sections and
+owns the env prefix, `.env` loading and cross-section validators.
 """
 
 from pydantic import Field
@@ -18,347 +16,133 @@ class MemorySettings(BaseSettings):
     cadence.
     """
 
-    # The semantic layer distils a playbook only from reactions whose DRFP similarity clears
-    # this floor and that recur across >=2 projects — higher than the search floor, since a
-    # playbook claims "same transformation", not just "related".
+    # DRFP similarity floor for distilling a playbook (reactions must also recur across >=2
+    # projects); above the search floor because a playbook claims "same transformation".
     playbook_similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
-    # The episodic layer groups an *optimization campaign* — repeated runs of the **same
-    # transformation** (a screen varying conditions/reagents) — by DRFP similarity. Higher than
-    # the playbook floor: an optimization series is the same reaction re-run, not merely related
-    # chemistry, so the grouping must be tight to avoid merging distinct transformations.
+    # DRFP similarity for grouping an optimization campaign (the same transformation re-run);
+    # tighter than the playbook floor so distinct transformations are not merged.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
-    # How much memory one block of `memory.similarity`'s pairwise product may hold. **The clustering
-    # is O(n^2) in comparisons and this is what stops it being O(n^2) in *bytes*.** The sparse
-    # product was chosen over a dense `X @ X.T` partly on the argument that it "allocates one entry
-    # per bit-sharing pair rather than an n^2 float64 matrix, which at 10^4 reactions is 800 MB" —
-    # measured, a third to over a half of all DRFP pairs share at least one bit, so the sparse
-    # product is *larger* than the dense matrix it was contrasted with: at 10,000 synthetic
-    # 30-of-2048-bit fingerprints (36% of pairs sharing a bit) the whole-corpus form peaked at
-    # **1,339 MB** of traced allocation, and a real DRFP corpus at 55% is worse. That is the same
-    # quadratic the `memory_corpus_max_reactions` cap was calibrated against a *linear* ~40 kB per
-    # reaction, so the cap no longer bounded the job it was written to bound.
-    #
-    # Blocking the product keeps the peak at this budget plus O(n) for the partition, which is what
-    # makes the cap's arithmetic true again. 64 MB is chosen to be small beside the corpus read
-    # itself (~4 GB at the cap) and large enough that the per-block overhead does not show: measured
-    # at n=10,000, traced peak 1,339 MB -> 57 MB, clusters bit-identical, and wall clock 5.02 s ->
-    # 1.78 s rather than worse, because the whole-corpus form spent its time on the 1.3 GB.
-    # Raise it to trade memory for time if a profile ever shows the blocking costing any; it changes
-    # no result either way.
+    # Memory one block of `memory.similarity`'s pairwise product may hold. The clustering is O(n^2)
+    # in comparisons and the sparse product can exceed a dense matrix, so blocking keeps peak memory
+    # at this plus O(n). Changes no result; raise it to trade memory for time.
     memory_similarity_block_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
-    # Most notes one synthesis run may write (0 = unbounded). The three jobs rescan the whole
-    # corpus with no cursor, so a large import would write a note per cluster in one run. The
-    # window rotates by run date rather than truncating, so the cap bounds the flood without the
-    # tail of the corpus being written *never* — see `_slice_for_this_run`.
+    # Most notes one synthesis run may write (0 = unbounded). The window rotates by run date
+    # (`_slice_for_this_run`), so the cap does not starve the corpus tail.
     memory_max_notes_per_run: int = Field(default=25, ge=0)
-    # Most reactions one `read_corpus` may hold in memory (0 = unbounded). **The bound is memory,
-    # not time**, and that is measured rather than assumed: 10,000 ORD records read in 6.8 s and
-    # **397 MB** of traced peak — about 40 kB of resident `OrdReaction` per entry, because the
-    # miners are whole-corpus algorithms (DRFP fingerprinting, O(n^2) Tanimoto, NetworkX components)
-    # and take a `list`, not a stream. A decade of a real ELN is 500k entries, which is ~20 GB in
-    # one activity's process, so the read does not fail slowly — the pod is killed.
-    #
-    # Hitting the cap makes the read **incomplete** rather than raising, which is a mechanism
-    # `CorpusRead` already has and every miner already honours: a pass that saw part of the corpus
-    # must not be written down as the whole record. So a deployment over the bound gets partial
-    # knowledge that says it is partial, instead of a worker that dies with no note at all.
-    #
-    # **"Says it is partial" is `memory.jobs.PARTIAL_READ_CAVEAT`, and it is in the note's body
-    # rather than in a log**, which it was not when this sentence was first written: the flag
-    # skipped the retirement pass and logged a WARNING, while the note reaching `knowledge/` was
-    # byte-identical to one distilled from the whole record. The caveat names the id risk too — a
-    # truncation that drops a cluster's smallest member mints a different id, on the one run whose
-    # retirement pass is skipped.
-    #
-    # 100,000 is a bound, not a target: ~4 GB at the measured rate, which is a large worker rather
-    # than an impossible one. Lower it to fit the pod; the honest fix is streaming miners, and
-    # `docs/planning/BACKLOG.md` carries that with this measurement as its trigger.
+    # Most reactions one `read_corpus` holds in memory (0 = unbounded); the miners are whole-corpus
+    # and cost ~40 kB per reaction. Hitting it marks the read incomplete: the note carries
+    # `memory.jobs.PARTIAL_READ_CAVEAT` and the retirement pass is skipped. Lower it to fit the pod;
+    # streaming miners are in `docs/planning/BACKLOG.md`.
     memory_corpus_max_reactions: int = Field(default=100_000, ge=0)
-    # How many backfilled notes share one commit (`cli/backfill_corpus`, never the conversational
-    # path). One commit and one push per note is what bounds a backfill. **Two conditions, each
-    # with its own triple, because this comment and `.env.example` shipped quoting one number from
-    # each and disagreeing by 2x** — an operator sizing the knob read whichever file they opened:
-    #
-    #   local bare remote, empty corpus  140.9 ms/note  ->  15.8 at ten to a commit  ->  4.8 at 50
-    #   real remote, 10,000-note corpus  327.3 ms/note  ->  31.6 at ten to a commit  ->  8.5 at 50
-    #
-    # The first is `tests/test_backfill_batching.py`'s own lane; the second is
-    # `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`, and is the one a deployment should
-    # plan against. Batching the *conversational* path
-    # is declined and stays declined (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`): a
-    # queued note is one a chemist cannot read yet. Nobody is mid-turn during a backfill.
-    #
-    # Fifty is where the measured curve flattens; lower it if a single commit touching that many
-    # files is awkward for the notes repository's reviewers.
+    # Backfilled notes per commit (`cli/backfill_corpus` only); one commit and push per note is what
+    # bounds a backfill. Measured against a real remote: 327 ms/note unbatched, ~8.5 at 50, where
+    # the curve flattens. The conversational path is not batched: a queued note is one a chemist
+    # cannot read yet.
     backfill_commit_batch_size: int = Field(default=50, ge=2)
-    # The observations tier (D-161). Off by default and deliberately, though not for the reason
-    # this comment gave: "the first knowledge surface no human signs off before the agent can read
-    # it" stopped being a distinction when
-    # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` made that true of every agent-written
-    # note. What the tier still is, is a pattern across projects that no single run supports, so a
-    # deployment chooses to have one rather than inheriting it (see `memory/observations.py`).
-    # `promote_min_*` are the two thresholds at which an observation is promoted into an ordinary
-    # playbook note — evidence count says the finding is not a coincidence, project count says it
-    # is not one team's local habit, and neither alone does.
-    # `retire_after_days` is how long an observation nothing re-observes stays open; without it the
-    # tier only ever grows and becomes a write-only log.
+    # The observations tier: cross-project patterns no single run supports, opted into per
+    # deployment (`memory/observations.py`). `promote_min_*` (evidence count and project count, both
+    # required) promote an observation into a playbook note; `retire_after_days` closes one nothing
+    # re-observes.
     observations_enabled: bool = False
     observation_promote_min_evidence: int = Field(default=3, ge=1)
     observation_promote_min_projects: int = Field(default=2, ge=1)
     observation_retire_after_days: int = Field(default=30, ge=0)
     observation_max_results: int = Field(default=10, ge=1)
-    # Cadence for the observation lifecycle job (mine, then retire). Daily, because it re-scans
-    # the whole corpus. Promotion is not on this timer — it writes playbook notes nobody asked
-    # for, so it is started on demand (D-2026-08-25; it said "opens pull requests" until
-    # D-2026-09-05 deleted the gate).
+    # Cadence of the observation lifecycle job (mine, then retire); daily since it rescans the
+    # corpus. Promotion writes notes nobody asked for, so it runs on demand only.
     observation_schedule_minutes: float = Field(default=1440.0, gt=0)
-    # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap
-    # SCH-3). Two schedules sharing a cadence would otherwise fire together against one background
-    # worker. 0 disables the spread.
+    # Fraction of a Schedule's interval used as a deterministic per-job phase offset, so equal
+    # cadences do not fire together. 0 disables.
     schedule_jitter_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
-    # Retention windows in days (gap SCH-1). Nothing in the system deleted anything before this,
-    # so every durable table grew for the deployment's lifetime. 0 disables pruning for that
-    # table, which is the default: a retention period is a *policy* decision ("keep for N years,
-    # then dispose, provably"), so a deployment must state it rather than inherit a number
-    # from code. `audit_events`, `calculation_results` and `job_records` are deliberately absent —
-    # see durable/retention.py for why each needs its own design rather than an age cutoff.
+    # Retention windows in days; 0 disables pruning for that table, the default, because retention
+    # is a policy a deployment must state. `audit_events`, `calculation_results` and `job_records`
+    # are absent; durable/retention.py says why each needs its own design.
     retention_enabled: bool = False
     retention_schedule_minutes: float = Field(default=1440.0, gt=0)
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
     retention_session_events_days: int = Field(default=0, ge=0)
     retention_session_messages_days: int = Field(default=0, ge=0)
-    # Artefacts (`session_exhibits`, revisions cascading), dated by their last revision. A window
-    # of its own rather than the conversation's, because an artefact is the part of a session a
-    # chemist is most likely to want kept longer than the chat around it. 0 disables it, like every
-    # window here — and while it is 0, a session holding one is never forgotten by the ownership
-    # sweep either (`durable/retention._OWNERSHIP_DEPENDENCIES`).
+    # Artefacts (`session_exhibits`, revisions cascading), dated by last revision; their own window
+    # because they may be kept longer than the chat. While 0, the ownership sweep also keeps the
+    # session (`durable/retention._OWNERSHIP_DEPENDENCIES`).
     retention_session_exhibits_days: int = Field(default=0, ge=0)
-    # Hours an `exhibit` push row on `session_events` is kept, **consumed or not**. Unlike a job's
-    # push-back, which carries a result nobody else holds and so outlives the window until it is
-    # delivered, an artefact push is a notification: the list route is the source of truth, and a
-    # tab that missed one refetches on focus. Not 0-disabled like the day windows above, because
-    # an unbounded notification queue is not a retention policy anybody chose.
+    # Hours an `exhibit` push row on `session_events` is kept, consumed or not: it is a notification
+    # and the list route is the source of truth. Never unbounded.
     exhibit_push_retention_hours: int = Field(default=24, ge=1)
-    # Stored tool results (`api/tool_results.py`, migration 042) — the highest-volume table this
-    # sweep touches, at up to one row per tool call.
-    #
-    # It was written with a 30-day default first, on the argument that this table holds no *record*
-    # of anything — the answers are in `calculation_results` (D-011) and `job_records` (D-157), so
-    # there is no retention policy to defer and deferring it only means an unbounded table. The
-    # argument is sound and it buys nothing: `retention_enabled` is False by default, so on a
-    # default deployment a number here deletes exactly as much as 0 does. The only deployment the
-    # two differ for is one that switched retention on and did not state this window — and that is
-    # precisely the case `test_retention_is_off_until_a_policy_is_stated` exists to refuse. One
-    # rule for every window is worth more than a default that changes nothing.
-    #
-    # The cost is stated rather than hidden: until an operator sets this, the table grows, and it
-    # grows faster than the two above it. `infra/sql/README.md` says so in its Disposal column.
+    # Stored tool results (`api/tool_results.py`), the highest-volume table swept. 0 like every
+    # window, so it grows until an operator sets it (`infra/sql/README.md` says so).
     retention_tool_results_days: int = Field(default=0, ge=0)
-    # How long a *delivered* result publication is kept. Only delivered rows are ever pruned: a
-    # pending or failed one is the only record that something has not reached its results store,
-    # and deleting that would turn an outage into a silent gap. 0 disables it, like every window
-    # here.
+    # Retention of delivered result publications only; pending or failed rows are the record of what
+    # has not reached its store.
     retention_result_publications_days: int = Field(default=0, ge=0)
-    # The LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`).
-    # They held the same standing as the fingerprint tables in this module's opening complaint —
-    # nothing deleted from them, ever — with one difference that made it easy to miss: they are
-    # created by `AsyncPostgresSaver.setup()` rather than by a migration in `infra/sql`, so they are
-    # not in the schema anybody reviews. Erasure already reached them (`agent/leaver.py`); only
-    # disposal did not, so a deployment that erased no one accumulated every turn's state forever.
-    #
-    # This window disposes of a thread **whole**, when its newest checkpoint is older than the
-    # cutoff. It is not what bounds a thread that is still in use — that is
-    # `checkpoint_retain_per_thread` below, and the two answer different questions: this one is
-    # disposal (a policy a deployment states), that one is deduplication of superseded copies.
-    # This comment used to carry the claim that in-thread pruning is impossible at all;
-    # `D-2026-09-06-a-superseded-checkpoint-is-a-copy-not-a-record` measured it false.
+    # LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`), created
+    # by `AsyncPostgresSaver.setup()` rather than a migration. Disposes of a whole thread once its
+    # newest checkpoint is older than the cutoff; in-thread pruning is
+    # `checkpoint_retain_per_thread`.
     retention_checkpoints_days: int = Field(default=0, ge=0)
-    # How many checkpoints per `(thread_id, checkpoint_ns)` survive one turn's prune. **Not a
-    # retention window, which is why it has a non-zero default and is not gated on
-    # `retention_enabled`.** Every superstep of every turn rewrites the whole `messages` channel, so
-    # a thread stores `O(turns^2)` bytes of *superseded copies of state its newest checkpoint still
-    # holds in full*: measured, a 40-turn thread carrying 139.6 kB of conversation stored 10.3 MB of
-    # `checkpoint_blobs` across 520 `checkpoints` rows. Deleting those copies disposes of no
-    # record — nothing a chemist, the model, `session_fork` or `plan_state` reads changes — so it
-    # is not a policy decision the way "keep a conversation for N years" is, and defaulting it
-    # to 0 would leave every shipped deployment paying the quadratic.
-    #
-    # 3 rather than 1: 1 was measured working, including under concurrent live turns, but a margin
-    # costs ~25 kB a thread and removes the need to reason about a partially-written superstep at
-    # all. 0 disables the prune, which is the escape hatch for a deployment that wants LangGraph
-    # time-travel over a thread's whole history — nothing in `src/` uses it (`aget_state_history`
-    # has no caller and the one `aget_tuple` passes `thread_id` alone), which is what makes the
-    # default safe.
+    # Checkpoints per `(thread_id, checkpoint_ns)` kept after each turn's prune. Not a retention
+    # window: every superstep rewrites `messages`, so older checkpoints are superseded copies and a
+    # thread grows quadratically without this. 3 leaves a margin over a partly written superstep. 0
+    # disables it, for LangGraph time-travel, which nothing in `src/` uses.
     checkpoint_retain_per_thread: int = Field(default=3, ge=0)
-    # How many expired sessions one conversation-prune pass may work
-    # (D-2026-08-05-a-sweep-that-commits-once). The conversation prune costs three round trips per
-    # session — it cannot be one `DELETE`, because whether an expired row may go depends on rows
-    # that are not expiring (D-145) — so the first pass against a deployment that has never pruned
-    # would attempt an unbounded number of them inside one activity, exceed
-    # `retention_timeout_seconds`, and spend an attempt having committed only what it reached.
-    # Capped, each batch commits a bounded amount and reports whether a tail remains. 500 is roughly
-    # a minute of round trips: far more than a steady state produces in a day, far less than a first
-    # pass over a year of history.
-    #
-    # **This bounds a batch, not a pass**, and the two used to be the same thing. Ending the pass
-    # here meant one pass disposed of at most 500 conversations against an arrival rate of 400–1 000
-    # a day, so the backlog grew while every pass reported success; `_prune_expired_rows` now sweeps
-    # again while a branch reports a tail and `retention_timeout_seconds` can still afford another
-    # sweep. So this number bounds one transaction, one set of round trips and one set of row locks,
-    # and the clock bounds the pass.
+    # Expired sessions one conversation-prune batch handles; each costs three round trips because
+    # whether a row may go depends on rows that are not expiring. Bounds one transaction;
+    # `_prune_expired_rows` repeats batches while `retention_timeout_seconds` allows.
     retention_max_sessions_per_pass: int = Field(default=500, gt=0)
-    # The same bound for the age-cutoff branch (`session_events`, `tool_result_blobs`,
-    # `result_publications`), in rows rather than conversations: how many rows one `DELETE` removes
-    # before committing and asking again. Its sibling above counts conversations because that branch
-    # costs three round trips *per session*; this one is a single indexed `DELETE`, so the unit that
-    # decides its cost is the row.
-    #
-    # **What it trades, measured on 300 000 `tool_result_blobs` rows (2.4 GB, PostgreSQL 16.15).**
-    # Unbounded, the `DELETE` takes 11.5 s and is cancelled by a 5 s `statement_timeout` having
-    # removed **0** rows — every attempt, so Temporal exhausts `activity_max_attempts` and the table
-    # never shrinks. At 10 000 the same work commits in 11.04 s across 31 batches, worst batch
-    # 1 385 ms. Too large reproduces that defect exactly, on a schema whose worst row is
-    # `STORAGE EXTERNAL`; too small multiplies round trips against a fixed per-statement cost,
-    # holding the pass open for its whole `retention_timeout_seconds` and disposing of no more.
-    #
-    # It is a setting and not a module constant because the right value follows the deployment's
-    # row size and its `pg_statement_timeout_seconds`, and neither is knowable from here — the
-    # shipped 10 000 is sized against *this* schema's worst row, which is the one thing a site may
-    # not share. There is deliberately no cross-check against that timeout: a row count and a wall
-    # clock have no convertible relationship without a rate, which is why this is a knob rather than
-    # a derived value, and `_prune_by_age`'s own budget is what stops a batch series too slow for
-    # the pass it is inside.
+    # Rows one age-cutoff `DELETE` removes before committing (`session_events`, `tool_result_blobs`,
+    # `result_publications`). Too large and the statement hits `pg_statement_timeout_seconds` having
+    # deleted nothing, every attempt; too small multiplies round trips. Sized against this schema's
+    # worst row; a knob because row size and timeout are deployment facts.
     retention_delete_batch_rows: int = Field(default=10_000, gt=0)
-    # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this
-    # long for its result and continue the *same* turn with it, so "compute this, then reason
-    # about the result" is one exchange. Off by default — holding a turn open holds an admission
-    # permit, so a deployment opts in deliberately. Must stay below
-    # `service_turn_timeout_seconds`, which bounds the whole streamed turn regardless.
+    # Mid-turn durable-job resume: a turn that launches a job waits this long for its result and
+    # continues with it. Off by default since a held turn holds an admission permit; must stay below
+    # `service_turn_timeout_seconds`.
     mid_turn_resume_enabled: bool = False
     mid_turn_resume_timeout_seconds: float = Field(default=60.0, gt=0)
-    # Predicted-vs-actual calibration ledger (gap IDEA-2). Off by default: it needs the
-    # `predictions` table (migration 016), and a deployment without it must not log warnings on
-    # every prediction. `calibration_min_observations` is the floor below which the figures are
-    # reported as not-yet-meaningful — a bias from three points is not a bias.
+    # Predicted-vs-actual calibration ledger; needs the `predictions` table, so off by default.
+    # `calibration_min_observations` is the floor below which figures are reported as not
+    # meaningful.
     calibration_enabled: bool = False
     calibration_min_observations: int = Field(default=8, ge=1)
-    # Ceiling on what one `find_calculations` call can return. The calculation store is never
-    # evicted (D-011), so it is the one table that only grows — a browse query with no cap is a
-    # full scan of it, and every returned row spends the model's context. The tool clamps its own
-    # `limit` to this rather than trusting the argument.
+    # Ceiling on `find_calculations` results; the store is never evicted, and the tool clamps its
+    # `limit` to this.
     calc_find_max_results: int = Field(default=50, ge=1)
-    # Ceiling on how much of one artifact `fetch_artifact` puts into the model's context. The
-    # by-products worth reading are small — an `xtbopt.xyz` is a few kB, a `vibspectrum` under ten
-    # — while a 76-atom Hessian is single-digit megabytes of text that no answer is built by
-    # reading. This is what separates them, since both are text and neither can be refused on type.
+    # Characters of one artifact `fetch_artifact` puts into context: small by-products fit, a large
+    # Hessian does not.
     calc_artifact_max_chars: int = Field(default=20_000, ge=1)
-    # How many characters of one stored calculation's payload `find_calculations` may render. A
-    # *listing* budget, not a payload budget: the same result read by asking for that calculation
-    # directly is unbounded, because then a chemist asked for exactly it.
-    #
-    # It exists because this was the largest unbounded model-facing payload in the system. A stored
-    # `xtb.conformers` row holds every member the search found — 66,520 characters on one 40-atom
-    # molecule — and `calc_find_max_results` is 50, so one call could render ~830,000 tokens: past
-    # every provider's context limit, where the failure is hard rather than graceful. Geometries
-    # project to their addresses first (D-2026-08-21), which is most of the reduction; this catches
-    # whatever is still large, and the record says `result_omitted` rather than cutting silently.
+    # Characters of one stored payload `find_calculations` renders in a listing (fetching that
+    # calculation directly is unbounded). A larger payload is reported as `result_omitted`.
     calc_find_max_result_chars: int = Field(default=4_000, ge=1)
-    # Ceiling on one `calculator_outliers` page. The listing exists to be *read* — a chemist looks
-    # at the worst misses and asks what they have in common — and a hundred rows is not read, it is
-    # scrolled past while spending the model's context.
+    # Ceiling on one `calculator_outliers` page, sized to be read.
     calc_outliers_max_results: int = Field(default=25, ge=1)
-    # Standing-query digests (gap IDEA-1). **On by default since
-    # `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep`, and both
-    # reasons it was off had expired.** The first — "it needs the `subscriptions` table (migration
-    # 017)" — is satisfied by any deployment that has migrated, which is all of them. The second —
-    # "a deployment nobody has subscribed on would just run an empty sweep" — was answered in code
-    # rather than in config: `digest._match_corpus` returns before `load_notes` when there are no
-    # subscriptions, and that early return's own comment says it exists "because a deployment with
-    # no subscriptions was paying for it in full". What is left with no subscribers is one daily
-    # workflow that does a single indexed read and stops.
-    #
-    # `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` is the condition that had to hold
-    # first, and it does: turning this on while nothing could read a digest *lost* matches, because
-    # the acknowledgement advanced a watermark `_is_new` can never re-qualify. `GET /digests` and
-    # the UI's `/review` card are that reader.
-    #
-    # What made this worth changing rather than leaving as an opt-in: `watch_for` is an agent tool
-    # a chemist reaches by asking, it writes the row, and it answers "you'll be told when something
-    # new matches". Off, nothing ever evaluated that row and nothing anywhere said so — so the one
-    # proactive capability in this system reported success and did nothing, on every shipped
-    # deployment. A deployment may still turn it off, and `watch_for` now says so when it has.
+    # Standing-query digests. On by default so a `watch_for` subscription is actually evaluated;
+    # with no subscriptions the daily workflow is one indexed read (`digest._match_corpus` returns
+    # early). `GET /digests` and the UI's `/review` card read them. When off, `watch_for` says so.
     digest_enabled: bool = True
     digest_schedule_minutes: float = Field(default=1440.0, gt=0)
     digest_timeout_seconds: float = Field(default=300.0, gt=0)
-    # Uploaded working files (gap AGT-3). Bounded in both directions: one oversized upload must
-    # not blow a pod's memory, and a chemist uploading all morning must not either. Attachments
-    # are session-scoped working material. Where sessions are durable they are stored in
-    # `session_attachments` and readable from every front-door replica, kept on the conversation's
-    # retention window (D-2026-10-04-an-upload-is-session-state-not-pod-state); otherwise they live
-    # in the pod's memory and are lost with it.
+    # Uploaded working files, bounded per upload and per session. Stored in `session_attachments`
+    # (readable from every replica, on the conversation's retention) where sessions are durable,
+    # otherwise in pod memory.
     attachment_max_bytes: int = Field(default=2_000_000, gt=0)
     attachment_max_per_session: int = Field(default=10, ge=1)
-    # **Two bounds in one number, and which applies depends on the store.** In both stores it is
-    # the per-session byte bound: past it a session's oldest uploads are dropped
-    # (`agent/attachments._uploads_to_drop`), counted as resident bytes in memory and as stored
-    # UTF-8 bytes in Postgres. Only the in-memory store also reads it as the cross-session budget
-    # argued below — a bound on a pod's memory, which the durable store does not spend.
-    #
-    # ...and in the third direction, which the two above do not cover: what every live session's
-    # attachments cost *together*. The store's other bound is `service_max_live_sessions` (1000),
-    # a count — and a count of entries that each hold up to `attachment_max_per_session` parsed
-    # documents is a many-GB ceiling in a pod the chart limits to 1 GiB
-    # (`deploy/helm/chemclaw/values.yaml`, `resources.service.limits.memory`). Measured, ~20 MB of
-    # text is retained per fully-loaded session, so the shipped pod is over its limit at ~25 of
-    # them — 2.5 % of the count bound, reachable inside the shipped rate limit by one authenticated
-    # chemist. This is the bound in the unit that actually kills the pod: past it the
-    # least-recently-used *sessions* lose their attachments (working material, recoverable by
-    # re-uploading), instead of the pod losing every in-flight turn to an OOM kill. 64 MB is 6 % of
-    # the shipped limit and about three fully-loaded sessions; raise it with the pod's memory limit,
-    # not with `service_max_live_sessions`.
-    #
-    # **Bytes as the pod counts them, not characters**, and the difference is not a rounding one:
-    # `agent/attachments._resident_bytes` measures with `sys.getsizeof`, because CPython stores a
-    # string at 1, 2 or 4 bytes per codepoint and a `len()` budget therefore permitted 128 MB
-    # resident on CJK text and 256 MB on astral. The sizing above is what a *byte* bound buys.
-    #
-    # It is deliberately **smaller than `document_max_expanded_bytes`** (64 MiB), which is what one
-    # parsed upload may weigh: that ceiling is sized against the *parse*, which happens twice
-    # concurrently at most, while this one is sized against what is *retained* for every live
-    # session at once. The consequence — a single attachment can outweigh the whole store — is held
-    # by `InMemoryAttachmentStore.add`, which drops that session's older files first, and by
-    # `core/bounded.py`, which no longer empties the map for an entry that cannot fit it.
+    # Per-session attachment byte bound in both stores (oldest uploads dropped,
+    # `agent/attachments._uploads_to_drop`). The in-memory store also uses it as the cross-session
+    # budget, evicting least-recently-used sessions' attachments rather than OOM-killing the pod;
+    # raise it with the pod's memory limit. Bytes as resident (`sys.getsizeof`), not characters.
+    # Smaller than `document_max_expanded_bytes`; a single larger file drops that session's older
+    # ones first.
     attachment_store_max_bytes: int = Field(default=64_000_000, gt=0)
-    # Parsing an upload is CPU-bound work over untrusted bytes in third-party libraries, so it runs
-    # in a worker thread with these two bounds rather than inline on the request's event loop
-    # (`chemclaw.agent.attachments.parse_attachment_off_loop`). The concurrency cap is what keeps
-    # a burst of hostile uploads from occupying the whole default thread pool — the same pool
-    # `chemclaw.api.auth` validates every bearer token in — so it is deliberately small: the front
-    # door runs one uvicorn worker, and parsing is not what the pod is for. Past the cap an upload
-    # waits `attachment_parse_queue_seconds` for a slot and is then shed (503, retryable) — the
-    # turn admission's queue-briefly-then-shed discipline, and for the same reason: shedding at
-    # the cap itself punishes the ordinary burst (four spreadsheets dropped on the UI at once
-    # measured as two 200s and two 503s) while doing nothing extra against a sustained flood.
-    # Queueing is safe here only because a waiter holds a future rather than a thread.
-    #
-    # **The timeout bounds the work, and for a long time it did not.** These three lines used to
-    # end "Python cannot kill one, so a parse past this limit is refused to its client while the
-    # thread runs to completion against the cap" — which was an accurate description of a liveness
-    # bug, written as though it were a design. A slot is released by its thread's completion
-    # callback, so a parse that never terminates held its slot for the life of the process: driven
-    # at this cap of 2, both callers were freed at their timeout, `in_flight` stayed at 2 five
-    # seconds later, and every later upload was shed. The replica's upload path was down for good.
-    # The parse now runs in a `forkserver` child that is killed on this deadline
-    # (`chemclaw.ingest.documents.isolate`), so the thread ends and the slot comes back — measured
-    # at 10 ms per parse once the forkserver is warm, against 0.97 s for a fresh interpreter.
+    # Parsing an upload is CPU-bound work over untrusted bytes, so it runs off the event loop
+    # (`chemclaw.agent.attachments.parse_attachment_off_loop`) under a small concurrency cap that
+    # keeps the default thread pool (also used for token validation) free. Past the cap an upload
+    # waits `attachment_parse_queue_seconds`, then is shed with 503. The timeout kills the parse: it
+    # runs in a `forkserver` child (`chemclaw.ingest.documents.isolate`), so the slot always comes
+    # back.
     attachment_parse_timeout_seconds: float = Field(default=30.0, gt=0)
     attachment_parse_queue_seconds: float = Field(default=10.0, ge=0)
     attachment_max_concurrent_parses: int = Field(default=2, ge=1)
-    # What the caller waits *beyond* the parse deadline before giving up on its own worker thread.
-    # The thread enforces the deadline itself, so this is a backstop over the one thing that
-    # enforcement cannot see: the forkserver's first start, which happens before the child's clock
-    # begins and measured **0.86 s** on this tree. Five seconds is that with room, and it is the
-    # margin rather than a second parse budget — if this is ever what fires, the thread is still
-    # bounded and the slot still comes back.
+    # How long the caller waits beyond the parse deadline before abandoning its worker thread;
+    # covers the forkserver's first start, which precedes the child's clock.
     attachment_parse_reap_grace_seconds: float = Field(default=5.0, ge=0)

@@ -1,13 +1,8 @@
 """What a binding is checked for before a single row is read, and that the shipped one passes.
 
-The engine's promise is that a site's schema is configuration. That is only worth having if a
-mistake in the configuration is caught the way a mistake in code would be — at startup, naming the
-line, offline. So these tests are mostly about *rejection*: the binding that would have failed on
-row 40,000 must fail on load instead.
-
-The last group closes the loop the other way, on the manifest this repository actually ships: its
-binding parses, every path in it resolves against a realistic row, and it is discovered without
-being enabled.
+A site's schema is configuration, so a mistake in it must fail at load, offline, naming the line —
+not on row 40,000. Most tests here are about rejection; the last group checks the shipped manifest
+parses, resolves against a realistic row, and is discovered without being enabled.
 """
 
 import ast
@@ -34,11 +29,9 @@ from chemclaw.ingest.eln.warehouse.expr import (
 _SOURCES = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "ingest" / "sources"
 _MANIFEST = _SOURCES / "eln-databricks" / "datasource.yaml"
 
-# Every shipped warehouse manifest, with a row shaped the way that site's schema is. A worked
-# example a binding author copies is held to the same two checks as a hand-written one, and the
-# *casing* matters, because every path here is an exact-case lookup on the row the driver
-# returned: Spark gives back the schema's own case, while a warehouse that folds unquoted
-# identifiers up wants the binding written in capitals.
+# Every shipped warehouse manifest, with a row shaped the way that site's schema is. Casing matters:
+# every path is an exact-case lookup on the row the driver returned (Spark keeps the schema's case;
+# a warehouse that folds unquoted identifiers up wants capitals).
 _SHIPPED_WAREHOUSES: list[tuple[str, dict[str, Any]]] = [
     (
         "eln-databricks",
@@ -233,10 +226,8 @@ def test_every_path_in_the_shipped_manifest_resolves_against_a_realistic_row(
 ) -> None:
     """The worked example is worked — not a plausible-looking file nobody ever ran.
 
-    A shipped example whose paths do not resolve is worse than none: it is the thing a binding
-    author copies, and it would teach a shape that silently yields nothing. The row is written out
-    per source rather than derived from the binding, because a derived row resolves by construction
-    and would assert nothing at all.
+    The row is written out per source rather than derived from the binding, because a derived row
+    resolves by construction and would assert nothing.
     """
     manifest = yaml.safe_load((_SOURCES / source / "datasource.yaml").read_text(encoding="utf-8"))
     binding = load_binding(manifest["config"]["binding"])
@@ -255,11 +246,8 @@ def test_every_path_in_the_shipped_manifest_resolves_against_a_realistic_row(
 def test_a_connection_block_may_name_any_driver_s_own_keywords() -> None:
     """The model declares `driver:` and nothing else, so a vendor's words are the driver's business.
 
-    This used to be a model enumerating one warehouse's connection fields, which meant the *second*
-    driver had to redefine three of them and refuse two more, and the result-sink seam refused to
-    reuse the model at all. Three databases with three unrelated vocabularies load here — that is
-    the whole claim of `D-2026-08-26-the-driver-s-signature-is-the-schema`, and what checks a key is
-    real is the driver's own signature, bound offline by `make datasource-validate`.
+    Three databases with unrelated vocabularies load here; what checks a key is real is the driver's
+    own signature, bound offline by `make datasource-validate`.
     """
     for connection in (
         {"driver": "acme.pg:Postgres", "host": "db", "port": 5432, "sslmode": "require"},
@@ -272,12 +260,10 @@ def test_a_connection_block_may_name_any_driver_s_own_keywords() -> None:
 
 
 def test_a_pasted_secret_in_an_env_key_is_refused_whatever_the_key_is_called() -> None:
-    """The realistic mistake, caught for a keyword this repository has never seen.
+    """A pasted secret is refused for a keyword this repository has never seen.
 
-    A `*_env` key holds the NAME of an environment variable. The check cannot be a list of known
-    credential fields — the whole point is that the credential words are the driver's — so it is the
-    suffix that triggers it, and a driver inventing `service_account_key_env` is covered on the day
-    it is written.
+    A `*_env` key holds the NAME of an environment variable. The credential words are the driver's,
+    so the suffix triggers the check rather than a list of known fields.
     """
     binding = _ingest()
     binding["connection"] = {"driver": "acme.vec:Milvus", "service_account_key_env": "sk-live-1"}
@@ -290,16 +276,9 @@ def test_a_pasted_secret_in_an_env_key_is_refused_whatever_the_key_is_called() -
 def test_an_env_key_left_blank_is_refused_rather_than_dropped(written_as: str | None) -> None:
     """A key present and empty is a credential the author meant to supply, not one they omitted.
 
-    `access_token_env:` with nothing after it is YAML `None`, and `access_token_env: ""` is the
-    empty string; both were accepted by every validator and then made the credential *vanish* —
-    `connect_options` omitted the keyword entirely, so the driver was constructed without it. What
-    that reaches depends only on the driver's signature, and both outcomes are worse than a refused
-    manifest: a client whose credential has a default (`api_key: str = ""`, the ordinary vendor
-    shape) attaches **anonymously**, and one whose credential is required raises a bare `TypeError`
-    out of the constructor — which is not in `durable/publish`'s non-retryable list, so a
-    permanently broken manifest is retried by every job that touches it. That is the exact failure
-    the signature check beside it was added to prevent, and the signature check cannot see this one:
-    it binds the stripped name as `""` before the omission happens.
+    Dropping it would construct the driver without the keyword: a defaulted credential attaches
+    anonymously, and a required one raises a bare `TypeError` that `durable/publish` would retry
+    forever. The signature check cannot see this case, so the binding refuses it.
     """
     binding = _ingest()
     binding["connection"] = {"driver": "acme.vec:Milvus", "access_token_env": written_as}
@@ -309,13 +288,10 @@ def test_an_env_key_left_blank_is_refused_rather_than_dropped(written_as: str | 
 
 
 def test_a_blank_env_key_fails_where_the_options_are_built_too() -> None:
-    """The same rule at the second gate, for the manifest no CI run ever bound.
+    """The same rule at the second gate, for a mounted manifest no CI run ever bound.
 
-    A deployment mounts its own source directory, so the credentials are re-checked where they are
-    actually resolved rather than only where a manifest loads. Asserted against `connect_options`
-    because that is the function the credential used to disappear inside: it returned the address
-    keys and nothing else, and every later step — the signature check included — then saw a block
-    that looked complete.
+    Credentials are re-checked in `connect_options`, where they are actually resolved, not only
+    where a manifest loads.
     """
     from chemclaw.core.connect import connect_options
 
@@ -329,12 +305,11 @@ def test_a_blank_env_key_fails_where_the_options_are_built_too() -> None:
 
 
 def test_a_connection_key_the_driver_will_not_take_is_caught_offline() -> None:
-    """The gate that replaced `extra="forbid"`: bound against the callable, with nothing connected.
+    """A connection key the driver will not take fails offline, bound against the callable.
 
-    `ConnectionBinding` cannot reject an unknown key, because it does not know what any driver
-    accepts. `make datasource-validate` does know — it resolves the driver and binds the block
-    against its signature — so a `role:` copied over from another vendor's manifest fails in CI
-    rather than as a `TypeError` in a worker on the first sync.
+    `ConnectionBinding` cannot know what a driver accepts; `make datasource-validate` binds the
+    block against the driver's signature, so a key copied from another vendor fails in CI, not in a
+    worker.
     """
     from chemclaw.cli.validate_datasources import _check_connection
     from chemclaw.ingest.sources.manifest import DataSourceManifest
@@ -360,14 +335,11 @@ def test_a_connection_key_the_driver_will_not_take_is_caught_offline() -> None:
 
 
 def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_time() -> None:
-    """The gate sees the manifests this repository ships; a deployment mounts its own.
+    """A deployment's mounted manifest gets the signature check again where the driver is built.
 
-    So the signature check runs again where the driver is actually built. The error class is the
-    point rather than the message: `BindingError` is a `ChemclawError`, which `durable/publish`
-    lists as non-retryable *by exact class name*, while the bare `TypeError` a constructor raises is
-    not on that list — a permanently broken mounted manifest would have been retried by every job
-    that touched it. The model this block replaced failed such a key as a `ValidationError`, so
-    keeping it non-retryable is what makes the trade like-for-like.
+    The error class is the point: `BindingError` is non-retryable by class name in
+    `durable/publish`, while a constructor's bare `TypeError` would be retried by every job touching
+    the manifest.
     """
     from chemclaw.core.connect import open_connection
 
@@ -383,17 +355,11 @@ def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_tim
 
 
 def test_a_driver_whose_signature_cannot_be_read_still_fails_as_this_seams_error() -> None:
-    """A C `connect` has no introspectable signature, and the check for one raised past the seam.
+    """A C `connect` with no introspectable signature still fails as this seam's error.
 
-    `inspect.signature` answers a callable it cannot read with `ValueError`, not `TypeError` —
-    `sqlite3.connect` and `duckdb.connect` both do it, and a DuckDB export is one of the databases
-    `core/connect.py`'s generality claim names. `signature_mismatch` caught only `TypeError`, so
-    that `ValueError` left `open_connection` unnamed: past the `error` parameter that exists so a
-    broken binding fails this seam as `BindingError` and the publish seam as `SinkConnectionError`,
-    and out of `make datasource-validate` as a traceback naming neither the manifest nor the driver.
-
-    Both halves are asserted, because "it opens" alone would pass on a check that had been deleted:
-    a keyword the driver *does* refuse must still be refused, by the constructor if not offline.
+    `inspect.signature` raises `ValueError` for such callables (`sqlite3.connect`,
+    `duckdb.connect`), which must not escape `open_connection` unnamed. Both halves are asserted: it
+    opens, and a keyword the driver refuses is still refused, by the constructor if not offline.
     """
     from chemclaw.core.connect import open_connection, signature_mismatch
 
@@ -423,9 +389,8 @@ def test_construct_validation_catches_a_binding_that_binding_alone_cannot(
 ) -> None:
     """`--construct` closes the gap between "the kwargs fit" and "the config makes sense".
 
-    A whole binding document arrives under one `binding=` keyword, so `signature().bind()` sees a
-    keyword it accepts and nothing more. Without this, a mistyped column path in a mounted manifest
-    would pass every gate and fail in a worker.
+    A whole binding arrives under one `binding=` keyword, so signature binding alone would pass a
+    mistyped column path.
     """
     from chemclaw.cli.validate_datasources import validate_datasources
     from chemclaw.ingest.sources import registry
@@ -481,9 +446,7 @@ def test_both_halves_accept_the_same_config_keywords() -> None:
 def test_a_template_renders_a_falsy_value_rather_than_dropping_it() -> None:
     """`0` is a value the source recorded, not an absent one.
 
-    The distinction matters in a provenance string, which is the line a reviewer follows back to the
-    original record: an id of `0` rendering as empty would produce a citation pointing at nothing,
-    and it would do it only for the rows whose ids happen to be falsy.
+    In a provenance string an id of `0` rendered as empty would cite nothing.
     """
     from chemclaw.ingest.eln.warehouse.expr import render_template
 
@@ -493,12 +456,9 @@ def test_a_template_renders_a_falsy_value_rather_than_dropping_it() -> None:
 
 
 def test_a_numeric_site_vocabulary_maps_rather_than_rejecting_every_row() -> None:
-    """A transform's options are untyped, so YAML's scalar rules decide what a map key becomes.
+    """A numeric site vocabulary maps rather than rejecting every row.
 
-    A site with numeric material-type codes writes `map: {1: reactant}` and gets an *integer* key.
-    Comparing the row's text against that matched nothing, so every row was rejected — and the
-    message said `no entry for '1'; known: [1, 2]`, showing the key apparently present. Both sides
-    are compared as text now, which is what makes a numeric vocabulary work at all.
+    YAML makes `map: {1: reactant}` an integer key, so both sides are compared as text.
     """
     numeric = [{"value_map": {"map": {1: "reactant", 2: "solvent"}}}]
 
@@ -509,9 +469,8 @@ def test_a_numeric_site_vocabulary_maps_rather_than_rejecting_every_row() -> Non
 def test_a_yaml_boolean_map_key_is_refused_with_the_fix_named() -> None:
     """`ON`/`OFF`/`YES`/`NO`/`Y`/`N` are YAML booleans, and the spelling is gone before we see it.
 
-    Unrecoverable rather than merely wrong: `True` and `1` are also the same dict key in Python, so
-    a map carrying both loses an entry before any of this code runs. Refused at load, naming the
-    line to quote, instead of failing every row against a file that reads correctly.
+    `True` and `1` are also the same dict key, so the map may already have lost an entry. Refused at
+    load, naming the line to quote.
     """
     with pytest.raises(BindingError, match="boolean key"):
         load_binding(
@@ -532,11 +491,9 @@ def test_a_yaml_boolean_map_key_is_refused_with_the_fix_named() -> None:
 
 
 def test_a_regex_transform_is_compiled_when_the_binding_loads() -> None:
-    """An unbalanced bracket must not wait for the first row of the first sync to be discovered.
+    """A regex transform is compiled, and its `group:` checked, when the binding loads.
 
-    The `group:` check is the same argument one step further out: a group the pattern does not have
-    only raises on the first row that *matches*, which can be days later and on a subset of the
-    corpus.
+    Otherwise an unbalanced bracket or missing group surfaces only on the first matching row.
     """
     binding = _ingest()
     binding["ingest"]["reaction"]["reaction_id"]["transform"] = [{"regex": {"pattern": "["}}]
@@ -553,19 +510,11 @@ def test_a_regex_transform_is_compiled_when_the_binding_loads() -> None:
 def test_a_pattern_that_cannot_finish_stops_on_a_wall_clock_instead_of_on_the_activity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one transform whose cost is a function of nothing this repository chose.
+    """A catastrophic pattern stops on the per-cell wall clock instead of the activity deadline.
 
-    A site writes the pattern; the subject is a free-text warehouse column. `re` has no timeout at
-    any layer, so before this the only bound on `(a+)+$` against a long cell was the ingest
-    activity's `start_to_close` — after which the retry ran the identical pattern over the
-    identical page.
-
-    **The assertion separates two outcomes rather than two speeds** (`tasks/lessons.md` rule 59).
-    The passing case returns at the budget; the defect does not return at all — driven,
-    `re.search("(a+)+$", "a" * 3000 + "b")` was still running when a 120 s alarm killed it, so its
-    duration is not a number anybody has. The bound is therefore a generous multiple of the budget
-    and still at least three orders of magnitude from the defect, which is what keeps it from
-    reddening the gate on a loaded box.
+    The site writes the pattern and the subject is free text, so the engine's timeout is the only
+    bound. The assertion separates "returns at the budget" from "never returns", so the bound is a
+    generous multiple of the budget to stay stable on a loaded box.
     """
     monkeypatch.setattr(settings, "eln_regex_timeout_seconds", 0.05)
     catastrophic = [{"regex": {"pattern": "(a+)+$"}}]
@@ -582,22 +531,11 @@ def test_a_pattern_that_cannot_finish_stops_on_a_wall_clock_instead_of_on_the_ac
 
 
 def test_no_handler_on_the_ingest_path_catches_a_pattern_that_cannot_finish() -> None:
-    """The assertion the first version of this fix needed and did not have.
+    """No exception handler on the ingest path catches `PatternBudgetError`.
 
-    `PatternBudgetError` descended from `ChemclawError` and its docstring claimed to escape the
-    per-entry handler because it was not an `ElnMappingError`. That claim was checked against the
-    `ElnMappingError` arm in `src/chemclaw/ingest/eln/warehouse/adapter.py` — the wrong handler.
-    A transform runs under
-    `ingest/eln/sync.py`'s `except (ChemclawError, ValidationError)`, one layer further out, which
-    caught it by construction. Driven on the real `sync_entries` with a `(a+)+$` transform over ten
-    entries at a 0.05 s budget: nothing escaped, all ten were booked as data refusals, and the page
-    cost `rows x budget` — the exact outcome the class exists to prevent, shipped under a green
-    test that asserted the wrong non-membership.
-
-    **So this walks the handlers instead of naming one.** Every `except` clause under
-    `ingest/eln/` is resolved to the classes it actually catches, and none of them may be a base of
-    `PatternBudgetError`. A handler added or widened later reds this, which naming a single module
-    never could.
+    Every `except` clause under `ingest/eln/` is resolved to the classes it catches, and none may be
+    a base of `PatternBudgetError`; otherwise a page would book each slow row as a data refusal and
+    cost `rows x budget`. Walking all handlers catches one added or widened later.
     """
     import importlib
 
@@ -629,12 +567,10 @@ def test_no_handler_on_the_ingest_path_catches_a_pattern_that_cannot_finish() ->
 
 
 def test_a_pattern_that_cannot_finish_is_still_refused_once_rather_than_retried() -> None:
-    """The retry half, which leaving the error hierarchy does not cover on its own.
+    """A pattern that cannot finish is refused once rather than retried.
 
-    `durable/publish._BAD_DATA_TYPES` is what Temporal reads as `non_retryable_error_types`, and it
-    matches the outermost failure's class **name** — so a type's ancestry buys it nothing either
-    way. Listed although it is no longer a `ChemclawError`, because the pattern is the same string
-    in the manifest on the next attempt and the page is the same page: a retry is the stall again.
+    `durable/publish._BAD_DATA_TYPES` matches the failure's class name, and a retry would run the
+    same pattern over the same page.
     """
     from chemclaw.durable.publish import _BAD_DATA_TYPES
 
@@ -645,17 +581,11 @@ def test_a_pattern_that_cannot_finish_is_still_refused_once_rather_than_retried(
 
 
 def test_a_repeat_count_too_large_to_expand_is_refused_before_it_is_compiled() -> None:
-    """The cost the engine swap brought with it, which the first version of this change did not see.
+    """A repeat count too large to expand is refused before it is compiled.
 
-    `re.compile` is O(1) on a bounded repeat; `regex` **expands** one. Measured: `re.compile` is
-    ~0.1 ms flat for every count, while `regex.compile` is 2.9 ms at `a{10000}`, 34 ms at
-    `a{100000}`, **431 ms and 290 MB** at `a{1000000}`, and did not finish in two minutes at
-    `a{100000000}`. That runs at binding load, on manifest text nobody here wrote, outside
-    `eln_regex_timeout_seconds` (which bounds a *match*) and outside every Temporal deadline — so a
-    `datasource.yaml` could take an ingest worker down before a single row was read. Under `re`
-    that pattern was free, which is why this guard arrived with the second engine and not before.
-
-    The scan is the guard rather than a compile, because compiling is the thing being guarded.
+    `regex` expands bounded repeats at compile time (unlike `re`), so a huge `{n}` in a manifest
+    could exhaust an ingest worker at binding load, outside every match timeout and Temporal
+    deadline. The guard is a scan, because compiling is the thing being guarded.
     """
     binding = _ingest()
     binding["ingest"]["reaction"]["reaction_id"]["transform"] = [
@@ -687,12 +617,10 @@ def test_a_repeat_count_too_large_to_expand_is_refused_before_it_is_compiled() -
 def test_the_expansion_guard_sees_what_a_per_quantifier_scan_did_not(
     pattern: str, because: str
 ) -> None:
-    """Each shape was accepted by the first scan and each reaches `regex.compile` unbounded.
+    """The expansion guard sees nested repeats and patterns that hide a `[` in a comment.
 
-    The first scan checked one `{n,m}` at a time and treated every `[` as opening a class, so a
-    `[` in a comment hid everything after it and nested bounded repeats — which `regex` expands
-    multiplicatively — passed with every individual count under the limit. Timed, because a
-    refusal that compiled first is not a guard.
+    `regex` expands nested bounded repeats multiplicatively, so per-quantifier limits are not
+    enough. Timed, because a refusal that compiled first is not a guard.
     """
     binding = _ingest()
     binding["ingest"]["reaction"]["reaction_id"]["transform"] = [{"regex": {"pattern": pattern}}]
@@ -730,12 +658,10 @@ def test_the_expansion_guard_sees_what_a_per_quantifier_scan_did_not(
 def test_the_expansion_guard_does_not_refuse_a_pattern_a_binding_would_write(
     pattern: str, because: str
 ) -> None:
-    """A guard that fires on correct input reads as a working one (`tasks/lessons.md` rule 96).
+    """The expansion guard does not refuse a pattern a binding would write.
 
-    The two cases worth paying for are the two ways a `{` is not a quantifier — a backslash escape
-    and a character class — because a bare scan over the whole pattern refuses `[{]{1}` and an
-    escaped brace pair, both of which every engine reads as literals. The scan tracks exactly
-    those two and nothing else.
+    An escaped brace and a brace in a character class are literals, not quantifiers; the scan tracks
+    exactly those two cases.
     """
     binding = _ingest()
     binding["ingest"]["reaction"]["reaction_id"]["transform"] = [{"regex": {"pattern": pattern}}]
@@ -746,11 +672,10 @@ def test_the_expansion_guard_does_not_refuse_a_pattern_a_binding_would_write(
 
 
 def test_an_ordinary_pattern_still_reads_its_group_under_the_bounded_engine() -> None:
-    """The engine swap is not allowed to cost the feature, which is the other half of the trade.
+    """An ordinary pattern still reads its group under the bounded engine.
 
-    `regex` is a superset of `re` in its default version, and this is the assertion that says so
-    for the shapes a binding actually writes — a group, an alternation, a bounded quantifier and a
-    character class — rather than leaving it to the library's own claim.
+    Covers the shapes bindings write — a group, an alternation, a bounded quantifier and a character
+    class.
     """
     assert apply_transforms("L-40127 batch", [{"regex": {"pattern": r"L-(\d+)", "group": 1}}]) == (
         "40127"
@@ -773,12 +698,10 @@ def test_an_ordinary_pattern_still_reads_its_group_under_the_bounded_engine() ->
 
 
 def test_the_server_embed_function_is_checked_like_every_other_interpolated_name() -> None:
-    """The one field `sql.py` writes into the statement text that this validator used to skip.
+    """The server embed function is checked like every other interpolated name.
 
-    `vector_statement` renders it as `f"{fn}({placeholder}, {placeholder})"`, so a value that is not
-    an identifier closes the call and continues the query — and unlike a relation or a column, this
-    is a field a site author fills in rather than a reviewer. A dotted name still passes, because
-    the real Cortex embedder is one.
+    `vector_statement` renders it into the SQL text as `fn(...)`, so a non-identifier could inject
+    SQL. A dotted name still passes, because the real Cortex embedder is one.
     """
 
     def _with(function: str) -> dict[str, Any]:
@@ -806,14 +729,8 @@ def test_the_server_embed_function_is_checked_like_every_other_interpolated_name
 def test_a_non_finite_number_is_bad_data_rather_than_a_measurement(written_as: Any) -> None:
     """`'number'` refuses NaN and ±Infinity, whichever side of the column they arrive on.
 
-    A Spark `DOUBLE` holds NaN as a value (missingness arrives as `None`), so this is the source
-    saying something that is not a measurement — the same case as the boolean this transform
-    already refuses, and it must reach the rejection ledger with a reason rather than the row.
-
-    It reached neither before: `float("NaN")` is a float, so a NaN travelled to
-    `reaction_records.conditions` and `jsonb` refused it as `InvalidTextRepresentation` — a
-    `psycopg` error that is neither `ChemclawError` nor `ValidationError`, so it aborted the sync
-    pass instead of rejecting the entry.
+    A NaN is not a measurement; it must reach the rejection ledger with a reason rather than reach
+    `jsonb`, whose `psycopg` error would abort the whole sync pass.
     """
     with pytest.raises(TransformError, match="not a measurement"):
         apply_transforms(written_as, [{"number": {}}])
@@ -841,20 +758,9 @@ _SLOW_BUT_COMPLETING = {"regex": {"pattern": r"a*a*a*$"}}
 def _a_cell_this_machine_finishes() -> tuple[str, float]:
     """The longest of a fixed ladder of cells whose warm cost is well inside the per-cell budget.
 
-    **Sized against the machine rather than written down, because the written-down size was a
-    coin-flip on a shared runner.** The constant was `"a" * 6000`, measured at 165 ms against the
-    shipped 0.25 s per-cell timeout — a margin of 1.5x. Every test below needs this cell to be
-    *slow and completing*: slow enough that a few of them spend a page budget, and completing so
-    the per-cell arm does not fire first. At 1.5x, a runner 1.6x slower than the box that measured
-    it fires the per-cell arm instead, which is what CI did on 2026-09-22: the page test read
-    `PatternBudgetError("did not finish within 0.25s on one 6001-character cell")` where it wanted
-    the page refusal, on a commit whose diff touches nothing in `ingest/eln`.
-
-    The cost of `a*a*a*$` is superlinear in the cell length, so one step down the ladder buys a
-    large factor. `_MARGIN` is the fraction of the per-cell budget the chosen cell may cost; at
-    0.3 a machine has to be more than three times slower than the one that sized the cell before
-    the wrong arm can fire, and the ladder's floor keeps the page tests meaningful by refusing to
-    pick a cell that is merely fast.
+    Sized against this machine rather than fixed, so a slow runner does not fire the per-cell arm
+    where the page tests need a slow-but-completing cell. `_MARGIN` is the fraction of the per-cell
+    budget the chosen cell may cost; the ladder's floor refuses a cell that is merely fast.
     """
     budget = settings.eln_regex_timeout_seconds
     for length in (6000, 4000, 2500, 1500, 1000):
@@ -887,20 +793,11 @@ _HONEST = {"regex": {"pattern": r"(\d{3,6})"}}
 
 
 def test_a_page_of_slow_but_completing_cells_is_refused_before_the_activity_deadline() -> None:
-    """The bound the per-cell one does not compose into.
+    """A page of slow but completing cells is refused before the activity deadline.
 
-    **The row behind this described the accumulation as timeouts adding up, and they cannot.**
-    `PatternBudgetError` is in `durable/publish._BAD_DATA_TYPES`, so a cell that *exceeds* the
-    per-cell budget ends the page after one cell, non-retryably. The reachable case is a pattern
-    that
-    is slow and completes: measured, `a*a*a*$` over a 6,000-character cell is 165 ms with no
-    refusal,
-    and twenty such cells across the shipped 100-entry batch is 330 s — past
-    `eln_sync_timeout_seconds`, past the heartbeat, and `map_to_ord` is synchronous CPU work no
-    asyncio timer interrupts, so the retry runs the identical page.
-
-    Driven at a small budget rather than the shipped one, because the property is the ratio and not
-    the number: a test that spent 150 s proving a 150 s bound would be the slowest in the suite.
+    Per-cell timeouts do not add up (the first ends the page), but many slow completing cells can
+    exceed `eln_sync_timeout_seconds`, and synchronous mapping is not interruptible. Driven at a
+    small budget because the property is the ratio, not the number.
     """
     apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])  # warm the compile cache
     spent = time.perf_counter()
@@ -929,28 +826,11 @@ def test_a_page_of_slow_but_completing_cells_is_refused_before_the_activity_dead
 
 
 def test_an_honest_page_is_nowhere_near_the_budget() -> None:
-    """The trade the row named — refusing an honest slow pattern against bounding total work.
+    """An honest page stays far cheaper than one pathological cell.
 
-    It is settled by a ratio rather than argued. An honest cell measures 0.0024 ms warm against a
-    0.25 s per-cell ceiling, so a whole honest page of 2,000 cells is 0.0048 s where the shipped
-    page budget is 150 s — ~31,000x of headroom, and the pathological pattern is ~68,000x an honest
-    one.
-
-    **The bar was `budget / 20` and a review pointed out it cannot fail**: 7.5 s against a measured
-    0.0048 s needs a 1,500x regression before it reds, so it held nothing. It is now stated against
-    the *pathological* cell, which is the comparison the argument actually rests on — an honest page
-    must stay cheaper than one bad cell — and which moves with the machine rather than with a
-    setting.
-
-    **The bad cell here is the *longest* this machine can run, not the one `_SLOW_CELL` sizes down
-    for the arm-ordering tests.** Those shrink their cell so the page arm fires before the per-cell
-    one; this test is about the ratio between a real binding's pattern and a pathological one, and
-    shrinking the pathological side is what quietly inverts it — driven, a 1,000-character bad cell
-    costs 4.8 ms against 5.2 ms for 2,000 honest ones, and the assertion then reads as a regression
-    in the honest path when nothing about it moved. So it takes the longest rung that completes
-    inside the per-cell budget, and skips below 2,500 characters rather than measuring something
-    else: at 2,500 the bad cell is 27.5 ms against the honest page's 5.2 ms here, which is still a
-    ratio worth asserting.
+    The bad cell is the longest this machine runs inside the per-cell budget, not `_SLOW_CELL`:
+    shrinking the pathological side would invert the ratio being asserted. Below 2,500 characters
+    the test skips rather than measure something else.
     """
     cells = 2000
     apply_transforms("batch 4471 of 12", [_HONEST])  # warm the compile cache; see `_HONEST`
@@ -987,18 +867,10 @@ def test_an_honest_page_is_nowhere_near_the_budget() -> None:
 
 
 def test_the_page_budget_does_not_charge_what_happens_between_matches() -> None:
-    """It bounds *matching* time, and the first version bounded a wall clock instead.
+    """The page budget charges matching time, not the wall clock between matches.
 
-    `pattern_budget` is opened around the page loop — a loop whose body awaits five stores per
-    entry, and in `durable/memory_jobs.read_corpus` every `fetch_new_entries` of every page of every
-    source.
-    A `monotonic()` deadline there bills Postgres and the source to a budget named for the regex
-    engine: driven, **1.13 ms** of actual matching exhausted a 500 ms budget, and the refusal then
-    told the site to simplify patterns costing microseconds.
-
-    Worse than a wrong message. `PatternBudgetError` is non-retryable by name, so a page that used
-    to reach `eln_sync_timeout_seconds` and be *retried* would fail permanently at half of it,
-    with no cursor advanced. This is the arm that keeps the accumulator an accumulator.
+    The page loop awaits stores and source fetches; billing those to a regex budget would refuse
+    cheap patterns and, being non-retryable, fail a page permanently that should have been retried.
     """
     apply_transforms("batch 4471 of 12", [_HONEST])
     matched = 0.0
@@ -1014,21 +886,16 @@ def test_the_page_budget_does_not_charge_what_happens_between_matches() -> None:
 
 
 def test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent() -> None:
-    """The refusal must not claim no transform exceeded its ceiling when one was never let try.
+    """A pattern cut short by the page is not reported as innocent.
 
-    A clamped search is given exactly what the page had left, so it times out at the instant the
-    page runs dry — which made the "pattern is at fault" arm unreachable. Driven over 39 clamped
-    remainings against `(a+)+$`, it fired **0** times, so every catastrophic pattern was reported
-    under a sentence asserting the page's aggregate cost was the whole story.
+    A clamped search times out exactly when the page runs dry, so the refusal must still name the
+    pattern when it was the one running.
     """
     catastrophic = {"regex": {"pattern": r"(a+)+$"}}
     apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
 
-    # The page must be *nearly* spent when the catastrophic pattern runs, or it is handed a clamp
-    # big enough to blow its own ceiling and the unclamped arm fires instead — which is the other
-    # test. Sized from the measured cell cost rather than from a fixed budget and a fixed count,
-    # because those two encode a machine speed: three cells at 0.45s only drains the page on a box
-    # where a cell costs ~150ms.
+    # The page must be nearly spent when the catastrophic pattern runs, or its clamp is large enough
+    # for the unclamped arm to fire instead. Sized from the measured cell cost, not a fixed budget.
     with pytest.raises(PatternBudgetError) as refused:
         with pattern_budget(3.5 * _SLOW_CELL_COST):
             for _ in range(3):
@@ -1046,10 +913,7 @@ def test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent() -> None:
 def test_a_spent_page_never_offers_the_engine_a_negative_timeout() -> None:
     """`regex` reads a negative `timeout` as *no* timeout, which would disable the bound entirely.
 
-    Measured: `regex.search(text, timeout=-1.0)` completes in 0.17 s with no `TimeoutError`, where
-    `timeout=0.0` raises immediately. `_cell_budget`'s `remaining <= 0.0` arm is the only thing
-    keeping a negative out, and nothing pinned it — a later simplification to a bare
-    `min(cell, remaining)` would pass every other test in this file with the page bound gone.
+    `_cell_budget`'s `remaining <= 0.0` arm keeps a negative out; this pins it.
     """
     assert _cell_budget()[0] > 0.0, "no page open should give the per-cell budget, not a negative"
 
@@ -1068,19 +932,10 @@ def test_a_spent_page_never_offers_the_engine_a_negative_timeout() -> None:
 
 
 def test_the_two_refusals_name_different_causes() -> None:
-    """One names a pattern to rewrite; the other names a page that cost too much in aggregate.
+    """One refusal names a pattern to rewrite; the other names a costly page.
 
-    They are not interchangeable: the per-cell refusal tells a site its pattern is catastrophic,
-    which
-    is false of a binding whose every transform stayed inside the ceiling.
-
-    **The claim this docstring made about its own arms was false, and a review caught it.** It said
-    the pattern arm was "driven with both budgets open, so the clamped-cell path is the one under
-    test" — but at a 30 s page budget `_cell_budget` returns the per-cell 0.25 s and reports
-    `page_bound=False`, so it drove exactly the *unclamped* path it claimed to avoid. The clamped
-    case has its own test now
-    (`test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent`), and this one asserts the
-    unclamped arm while saying so.
+    This drives the unclamped per-cell arm; the clamped case is
+    `test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent`.
     """
     with pytest.raises(PatternBudgetError, match="did not finish within") as cell:
         with pattern_budget(30.0):
@@ -1095,12 +950,7 @@ def test_the_two_refusals_name_different_causes() -> None:
 
 
 def test_a_page_refusal_quotes_the_budget_actually_in_force() -> None:
-    """It read `settings.eln_regex_page_budget_seconds` first and said 150 s at a 2 s budget.
-
-    A refusal carrying a number that is not the one that bound it is the defect class this
-    repository
-    keeps finding in its own prose, arriving in a message a site will act on.
-    """
+    """A page refusal quotes the budget actually in force, not the configured default."""
     with pytest.raises(PatternBudgetError, match="whole 0.4s matching budget"):
         with pattern_budget(0.4):
             for _ in range(500):
@@ -1108,11 +958,10 @@ def test_a_page_refusal_quotes_the_budget_actually_in_force() -> None:
 
 
 def test_a_nested_budget_keeps_the_outer_deadline() -> None:
-    """`sync_entries` opens one and calls `_replay_record_ids`, which maps entries of its own.
+    """A nested budget keeps the outer deadline.
 
-    A nested budget that started over would make the page bound `pages x budget` — the same
-    multiplying failure the per-cell bound has, one layer out. Re-entrancy is asserted rather than
-    assumed because it is the difference between a bound and a suggestion.
+    `sync_entries` opens one and calls `_replay_record_ids`, which maps entries too; restarting
+    would make the bound `pages x budget`.
     """
     with pattern_budget(0.3):
         with pytest.raises(PatternBudgetError, match="spent their whole 0.3s"):
@@ -1122,12 +971,9 @@ def test_a_nested_budget_keeps_the_outer_deadline() -> None:
 
 
 def test_no_budget_open_leaves_the_per_cell_bound_exactly_as_it_was() -> None:
-    """Every caller that maps a single entry outside a page is unchanged.
+    """With no budget open, the per-cell bound is the only one reachable.
 
-    The page bound is additive: with no page open, `_cell_budget` returns the per-cell setting and
-    the
-    per-cell refusal is the only one reachable. This is the arm that says the change cannot make a
-    one-off mapping stricter than it was.
+    The page bound is additive, so a one-off mapping is no stricter than before.
     """
     with pytest.raises(PatternBudgetError, match="did not finish within"):
         apply_transforms("a" * 4000 + "b", [{"regex": {"pattern": r"(a+)+$"}}])
@@ -1154,25 +1000,9 @@ def _called_names(node: ast.AST) -> set[str]:
 def _modules_mapping_entries_in_a_loop() -> list[str]:
     """Every first-party module with a loop that **reaches a mapper**, directly or via a helper.
 
-    "Inside" matters, and the first version of this guard got it wrong: pairing any `map_to_ord`
-    call
-    with any loop in the same file also caught `durable/eln_sync.py` (a per-entry heartbeating
-    *wrapper*, which runs under its caller's budget) and `ingest/eln/adapter.py` (which declares the
-    protocol) — two modules that map one entry at a time and need no page bound at all. A guard that
-    over-matches is a guard somebody silences.
-
-    **`ingest/eln/validate.py` was in that list and should not have been.** It was written down as a
-    third over-match and is a genuine page-mapping caller: it opens a `pattern_budget()` and the
-    guard's live set names it. The sentence outlived the fix, so for a while this file said
-    `validate.py` "needs no page bound at all" two functions away from an assertion requiring four
-    callers including it.
-
-    **Lexical-only was blind to `ingest/labels/corpus.py`**, whose page loop calls `_record`, which
-    reaches `apply_transforms` two helpers down — so the reaction-corpus drain ran up to a thousand
-    rows of site patterns with no page bound while this guard was green. So a loop now counts when
-    it calls a module-local function that reaches a mapper (closed to a fixpoint), and
-    `apply_transforms` is a mapper beside `map_to_ord`. A module that *defines* a mapper is where
-    the per-entry work lives, not a page caller, and is skipped.
+    A loop counts when it calls `map_to_ord`/`apply_transforms` or a module-local function that
+    reaches one (closed to a fixpoint). Modules that *define* a mapper hold per-entry work, not a
+    page loop, and are skipped; per-entry wrappers run under their caller's budget.
     """
     source_root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     found = []
@@ -1206,18 +1036,11 @@ def _modules_mapping_entries_in_a_loop() -> list[str]:
 
 
 def test_every_module_that_maps_entries_in_a_loop_enters_the_page_budget() -> None:
-    """Derived, because the alternative was measured to fail on two drivers out of three.
+    """Every module that maps entries in a loop enters the page budget.
 
-    `agent/turn_ambient.turn_caps` exists because four per-turn ambients opened by hand in three
-    drivers were opened correctly in one of them, and the test that "proved" it called the opener in
-    its own helper. This is the same shape: a page bound is only a bound where the page opens it,
-    and
-    a behavioural test per caller covers the callers somebody thought of.
-
-    It does not check *placement* — a module could still open one budget per entry, which is why
-    `cli/live_data.py` carries a comment saying why it does not — but it makes a new page loop with
-    no
-    budget a red test rather than a gap nobody measures.
+    Derived rather than one behavioural test per caller, which covers only the callers somebody
+    thought of. It does not check placement (one budget per entry would pass), but a new page loop
+    with no budget goes red.
     """
     source_root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     missing = [
@@ -1235,10 +1058,8 @@ def test_every_module_that_maps_entries_in_a_loop_enters_the_page_budget() -> No
 def test_that_guard_is_measuring_the_callers_and_not_the_definitions() -> None:
     """The guard above would pass vacuously on an empty set, so this pins what it found.
 
-    A `def map_to_ord` is not a caller, and the adapters that define it must not need a budget — the
-    budget belongs to whoever maps a *page* of entries. Requiring the five measured callers is what
-    makes the assertion above a measurement rather than a tautology — "three", then "four", here
-    was the same stale count the docstring above carried.
+    Adapters that define `map_to_ord` are not callers; requiring the known callers makes the guard a
+    measurement rather than a tautology.
     """
     callers = _modules_mapping_entries_in_a_loop()
 

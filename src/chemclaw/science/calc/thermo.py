@@ -1,50 +1,9 @@
-"""The statistical mechanics that stayed behind: RRHO over a Hessian, Boltzmann over an ensemble.
+"""The statistical mechanics that stays here: RRHO over a Hessian, Boltzmann over an ensemble.
 
-Two pieces of arithmetic, one argument. `D-2026-08-16-the-physics-leaves-the-cache-stays` split
-`calc` by **composability**, and the line it drew runs straight through thermochemistry: the second
-derivatives cost minutes and are a *primitive* the server caches under its own key, while turning
-them into a free energy is a page of partition functions costing milliseconds and depending on the
-temperature. Ship the composite and every repeat recomputes a Hessian to answer a question about
-298 K versus 310 K; ship the primitive and compose here, and the second question is a cache hit
-plus a millisecond. The same shape holds for a CREST search: sampling conformational space is the
-expensive, cached half, and weighting the members it found is arithmetic that depends on a
-temperature the search never saw.
-
-So neither of these is physics that failed to move. They are the halves that had to stay for the
-cache to be worth keeping, and they need no binary, no tblite and no crest — only numpy over what
-came back over the wire.
-
-Two deliberate choices about the physics, carried over unchanged because they are the numbers'
-meaning rather than their implementation:
-
-**Quasi-RRHO entropy (Grimme 2012).** A harmonic oscillator's entropy diverges as its frequency
-goes to zero, and the lowest modes are exactly where the harmonic approximation is worst — so a
-5 cm^-1 mode from a floppy molecule can contribute several kcal/mol of nonsense to G. Each mode's
-entropy is a Head-Gordon-damped mixture of the harmonic and free-rotor expressions, weighted
-1/(1 + (w0/w)^4) — so `rrho_cutoff_cm` is the frequency at which the two contribute equally rather
-than a threshold anything switches at. **It is a choice and its size is measured**: at the shipped
-w0 = 50 cm^-1, `xtb`'s own `--sthr` default, a flexible molecule's -T·S sits ~1.1 kcal/mol above
-what 25 cm^-1 gives and ~0.8 below Grimme's published 100 — see
-`tests/test_calc_thermo.py::test_the_qrrho_cutoff_is_the_one_xtb_uses_and_the_choice_is_worth_a_kcal`
-and `core/config/calculators.py` for why this deployment takes xtb's number.
-
-**The standard state follows the phase, and is not a knob.** A free energy is only a quantity once
-its reference state is named, and the two conventions differ by RT ln(RT c0/P0) = 1.894 kcal/mol per
-mole of species at 298.15 K — a factor of 24.47 in K per unit of Δn. The gas-phase convention is
-1 atm; the one a chemist means by "ΔG in THF" is 1 mol/L. Which applies is decided by the medium the
-Hessian was taken in (`HessianPayload.solvent`), because the electronic energy came out of an ALPB
-implicit-solvent SCF: the phase is a property of the calculation, not a caller's preference, and a
-"gas standard state in solution" is a hybrid of two references that describes nothing. It cancels
-exactly for Δn = 0, which is why every tautomer, protomer and stereoisomer ranking in this tree is
-unaffected, and why a dissociation, an association or a BDFE was wrong by 1.894·Δn without it.
-
-**The rotational symmetry number is an input, not a guess.** It shifts the entropy by exactly
-R ln(sigma) — 1.4 cal/mol/K for a C2 axis, 4.9 for benzene — and deriving it needs point-group
-detection this layer does not do. It defaults to 1, and a caller that leaves it unstated is told so
-rather than served a free energy that is wrong by RT ln(sigma). The error does **not** cancel within
-a balanced reaction unless both sides carry the same symmetry, and for the chemistry that matters
-they do not: every hydrogenation has H2 (sigma 2) on one side only, and anything aromatic carries
-benzene's sigma 12.
+Both depend on a temperature the cached server primitives never saw, so a new temperature is a cache
+hit plus arithmetic. Entropy is quasi-RRHO (Grimme 2012, damped at `rrho_cutoff_cm`); the standard
+state follows the phase (1 atm gas, 1 mol/L in solvent, 1.894 kcal/mol apart per species at 298.15
+K); the rotational symmetry number is an input, defaulting to 1 and reported when unstated.
 """
 
 import base64
@@ -74,21 +33,9 @@ from chemclaw.science.calc.models import (
     WeightedValue,
 )
 
-# The constants this module computes over.
-#
-# **`HARTREE_TO_KCAL` is imported rather than declared.** Every energy the server returns is in
-# Hartree and every difference a chemist reads is in kcal/mol, so it is the one conversion every
-# composite here and in `connectors/calc/compose.py` needs — and it was written out three times,
-# here, in `core/units.py` and in `publish/properties.py`, with the middle copy 1.5e-08 low.
-# `core.units` is the one definition. The `as HARTREE_TO_KCAL` above is the explicit re-export form
-# `mypy --strict` requires, and it is a re-export on purpose: `connectors/calc/compose.py` has read
-# this name from this module since before the constant had one home, and moving that import is
-# that file's change to make.
-#
-# The rest are SI (CODATA 2018 / SI 2019). Everything internal is SI; only the reported fields are
-# in the units a chemist reads. `_PLANCK`, `_BOLTZMANN` and `_AVOGADRO` are exact by definition
-# since the 2019 redefinition, which is why R is derived from two of them below rather than typed
-# out a third time.
+# Constants. `HARTREE_TO_KCAL` is re-exported from `core.units` (its one definition) because
+# `connectors/calc/compose.py` imports it from here. The rest are SI (CODATA 2018 / SI 2019);
+# everything internal is SI, and h, kB and N_A are exact, so R is derived below.
 _PLANCK = 6.62607015e-34  # J s
 _BOLTZMANN = 1.380649e-23  # J/K
 _AVOGADRO = 6.02214076e23  # 1/mol
@@ -97,11 +44,7 @@ _HARTREE_J = 4.3597447222071e-18
 _AMU_KG = 1.66053906660e-27
 _J_PER_MOL_TO_KCAL = 1.0 / (JOULE_PER_CALORIE * 1000.0)
 
-# The molar gas constant, in J/(mol K) and in the cal/(mol K) a conformational entropy is reported
-# in. **One definition and one derivation, because two literals disagreed**: `8.314462618` here
-# against `1.987204258640832` there, the second being the *untruncated* R/4.184. The gap was
-# rel 1.8e-11 and harmless, and it is the shape that stops being harmless the moment somebody
-# retypes one of them from a different table.
+# The molar gas constant in J/(mol K) and in cal/(mol K), each derived once rather than typed.
 _GAS_CONSTANT = _BOLTZMANN * _AVOGADRO
 _GAS_CONSTANT_CAL = _GAS_CONSTANT / JOULE_PER_CALORIE
 
@@ -116,9 +59,7 @@ _IR_TO_KM_PER_MOL = 42.2561
 # and has one rotational degree of freedom fewer.
 _LINEAR_INERTIA_RATIO = 1e-4
 
-# The 1 mol/L solution standard state, in mol/m^3. Not a setting: it is the definition of the
-# solution standard state, the same way 1 atm is the definition of the gas one, and a deployment
-# that could move it would be publishing free energies nobody else's number can be compared with.
+# The 1 mol/L solution standard state, in mol/m^3; a definition, not a setting.
 _MOLAR_STANDARD_CONCENTRATION = 1000.0
 
 
@@ -134,9 +75,8 @@ class ThermoSettings(BaseModel):
     """
 
     temperature_k: float = Field(default_factory=lambda: settings.xtb_thermo_temperature_k, gt=0)
-    # The **gas-phase** reference pressure, and only that. A calculation in an implicit solvent is
-    # quoted at the 1 mol/L standard state instead, whose reference pressure is c0·R·T and is
-    # therefore derived rather than configured — see `_reference_pressure` and the module docstring.
+    # The **gas-phase** reference pressure only; in solution the pressure is c0·R·T, derived in
+    # `_reference_pressure`.
     pressure_pa: float = Field(default_factory=lambda: settings.xtb_thermo_pressure_pa, gt=0)
     # Rotational symmetry number. 1 unless the caller knows better; see the module docstring for
     # why it is not derived.
@@ -147,12 +87,8 @@ class ThermoSettings(BaseModel):
 def unpack_npy(encoded: str) -> np.ndarray:
     """Decode one base64 `.npy` blob from a `HessianPayload` into an array.
 
-    `.npy` rather than a JSON list because a drug-sized Hessian is megabytes — 33 atoms is 99x99
-    doubles — and because it is self-describing, so the (3N, 3N) shape cannot be lost in transit and
-    silently reshaped into something that still diagonalizes.
-
-    `allow_pickle=False` because these bytes crossed a network and may have come out of a database:
-    pickle deserialization is arbitrary code execution, and nothing here needs it.
+    `.npy` is compact and self-describing, so the (3N, 3N) shape survives transit.
+    `allow_pickle=False` because the bytes crossed a network and pickle is code execution.
     """
     return np.asarray(np.load(io.BytesIO(base64.b64decode(encoded)), allow_pickle=False))
 
@@ -163,30 +99,16 @@ def _atomic_masses(elements: list[int]) -> np.ndarray:
     return np.array([table.GetAtomicWeight(number) for number in elements])
 
 
-#: Below this wavenumber (cm^-1) the server has projected the mode out as a translation or a
-#: rotation. xtb writes those rows as exact zeros; the tolerance is for float formatting, not for
-#: a real mode, the softest of which are two orders above it.
+#: Below this wavenumber (cm^-1) the server has projected the mode out as a translation or
+#: rotation (written as exact zeros); the tolerance covers float formatting only.
 _EXTERNAL_MODE_CM = 0.01
 
 
 class IntensityAlignmentError(ValueError):
     """The server's intensities cannot be paired with this projection's modes.
 
-    **A separate class because the failure is confined to the spectrum, and it used to take the
-    whole result down.** Pairing needs both sides to agree on how many modes are external, and they
-    decide it by different criteria (see `_align_intensities`) — so a geometry inside the
-    ~2.3-degree window where they disagree raised out of `thermochemistry_from_hessian`, and a
-    caller got **no** G, H, S or `is_minimum` for a Hessian whose thermochemistry was entirely
-    correct. The intensities feed the spectrum and nothing else: not one term of the partition
-    function reads them.
-
-    So the fail-loud stays and moves to the field it is about.
-    `ThermochemistryResult.spectrum_unavailable` carries this message and every
-    `VibrationalMode.ir_intensity_km_per_mol` is `None`, which is a statement rather than the silent
-    zero-intensity spectrum this module already refuses to produce one branch further down.
-
-    A `ValueError` still, so a direct caller of `_align_intensities` — and the messages a model
-    reads — are unchanged.
+    Confined to the spectrum (`spectrum_unavailable`), since no thermochemistry term reads an
+    intensity.
     """
 
 
@@ -198,23 +120,9 @@ def _align_intensities(
 ) -> np.ndarray:
     """Pair the server's intensities with this projection's modes, by wavenumber where possible.
 
-    xtb lists all 3N entries with the translations and rotations first — measured against xtb 6.7.1
-    itself, on water, a planar-ammonia saddle and CO2, so the ordering is not an assumption.
-
-    **Counting was never sufficient, and the sentence that stood here claimed otherwise.** It said a
-    disagreement "fails loudly instead", and that check cannot fire: how many modes are external is
-    a judgement about the molecule, and the two sides make it by different criteria — xtb tests
-    unmassed inertia against an absolute threshold, `_is_linear` tests mass-weighted moments against
-    a relative one. Measured over a real O-C-O bend, they agree at 180.0 deg and at 175.0 deg and
-    disagree at **179.0 deg**, where xtb projects out six and this side expects four of nine. The
-    subtraction then yields five, which is neither negative nor suspicious, so nothing raised and
-    the 2593 cm^-1 stretch's intensity was reported against the band below it — every band shifted,
-    silently, on the geometry a scan point looks like.
-
-    So when the server says which wavenumber each entry belongs to, that is what is used: the
-    external rows it zeroed are dropped by value, and what remains must then match this projection's
-    mode count or the mismatch really does fail loudly. Without the field — a row cached before the
-    server sent it — the old subtraction stands, because it is the only thing available.
+    xtb and `_is_linear` judge linearity differently near 180 degrees, so counting alone could shift
+    every band. With server wavenumbers the zeroed external rows are dropped by value and the
+    remainder must match or it raises; older rows fall back to subtraction.
     """
     if wavenumbers_cm is not None:
         if len(wavenumbers_cm) != intensities.size:
@@ -244,9 +152,7 @@ def _align_intensities(
 def _inertia(masses: np.ndarray, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Principal moments of inertia (amu Angstrom^2, ascending) and their axes as columns.
 
-    One definition for the two places the molecule's rotations matter — the entropy and the
-    projection that separates rotation from vibration — so "is this molecule linear" cannot be
-    answered one way in one place and another way in the other.
+    One definition for the entropy and the projection, so linearity is judged the same way in both.
     """
     relative = positions - np.average(positions, axis=0, weights=masses)
     tensor = np.zeros((3, 3))
@@ -264,16 +170,8 @@ def _is_linear(moments: np.ndarray) -> bool:
 def _vibrational_basis(masses: np.ndarray, positions: np.ndarray) -> np.ndarray:
     """An orthonormal basis of the *vibrational* subspace, in mass-weighted coordinates.
 
-    Builds the mass-weighted translations and rotations and returns their orthogonal complement.
-    Diagonalizing the Hessian inside that complement is what makes every eigenvalue a vibration —
-    the alternative, discarding the six smallest eigenvalues afterwards, silently discards a real
-    low-frequency mode whenever one is smaller than a translational residual.
-
-    Rotations are built about the **principal axes** and kept by their moment of inertia, which is
-    what makes a linear molecule come out with 3N-5 modes instead of 3N-6. Filtering the raw x/y/z
-    rotations by singular value instead does not work: an optimized "linear" molecule is bent by a
-    fraction of a degree, so its null rotation has a small but perfectly ordinary singular value and
-    survives the cut — measured on CO2, which lost a real mode that way.
+    The complement of translations and rotations (about the principal axes, kept by moment), so
+    every eigenvalue is a vibration and a near-linear molecule gets 3N-5 modes.
     """
     count = len(masses)
     root_mass = np.sqrt(masses)
@@ -299,8 +197,8 @@ def _normal_modes(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (wavenumbers in cm^-1, mass-weighted eigenvectors as columns).
 
-    A negative wavenumber encodes an imaginary frequency (a negative Hessian eigenvalue). Modes come
-    out sorted by wavenumber, so imaginary modes are first.
+    A negative wavenumber encodes an imaginary frequency; modes are sorted ascending, imaginary
+    first.
     """
     if len(masses) == 1:
         return np.zeros(0), np.zeros((3, 0))
@@ -322,9 +220,8 @@ def _ir_intensities(
 ) -> np.ndarray:
     """IR intensities in km/mol for each normal mode.
 
-    The mode's Cartesian displacement per unit normal coordinate is the mass-weighted eigenvector
-    divided by the square root of the mass, so the dipole derivative with respect to the normal
-    coordinate follows directly from the Cartesian one.
+    A mode's Cartesian displacement per unit normal coordinate is the mass-weighted eigenvector over
+    the square root of the mass, which converts the Cartesian dipole derivative.
     """
     if vectors.shape[1] == 0:
         return np.zeros(0)
@@ -336,7 +233,7 @@ def _ir_intensities(
 def _translational(mass_amu: float, temperature: float, pressure: float) -> tuple[float, float]:
     """(energy, entropy) of translation per mole, in J/mol and J/(mol K).
 
-    Entropy is Sackur-Tetrode at the given pressure; the energy is equipartition.
+    Sackur-Tetrode at the given pressure; equipartition energy.
     """
     mass = mass_amu * _AMU_KG
     partition = (2 * math.pi * mass * _BOLTZMANN * temperature / _PLANCK**2) ** 1.5 * (
@@ -348,12 +245,8 @@ def _translational(mass_amu: float, temperature: float, pressure: float) -> tupl
 def standard_state_for(solvent: str | None) -> StandardState:
     """Which reference state a free energy computed in this medium is quoted at.
 
-    One definition, because two layers need the answer and must not disagree about it: the RRHO
-    arithmetic below evaluates the translational partition function at the matching pressure, and
-    `connectors/calc/compose.py` stamps the same string onto every reaction, screen and ranking it
-    publishes. A composite that re-derived the rule could quote a species at 1 atm while the
-    thermochemistry it differenced was computed at 1 M — the two numbers would differ by
-    1.894 kcal/mol and nothing would say which.
+    One definition shared by the RRHO arithmetic and `connectors/calc/compose.py`, so a label and
+    the number it labels cannot disagree.
     """
     return "gas-1atm" if solvent is None else "solution-1M"
 
@@ -361,17 +254,8 @@ def standard_state_for(solvent: str | None) -> StandardState:
 def _reference_pressure(spec: ThermoSettings, solvent: str | None) -> tuple[float, StandardState]:
     """The pressure the translational partition function is evaluated at, and what to call it.
 
-    The only place the standard state enters the arithmetic, because the only pressure-dependent
-    term is Sackur-Tetrode's volume factor. A gas-phase calculation keeps the configured 1 atm; one
-    in an implicit solvent is quoted at 1 mol/L, whose ideal-gas reference pressure is c0·R·T —
-    2.479 MPa at 298.15 K, i.e. 24.47 times 1 atm, so the entropy falls by R ln(24.47) and G rises
-    by 1.894 kcal/mol per species.
-
-    **Derived from the medium rather than asked for**, and that is the fix: the electronic energy
-    came back from an ALPB SCF, so `hessian.solvent` already says which phase this free energy is
-    about. A knob would have been a knob nobody sets — the shape this repository has named as a
-    defect often enough — and would have let one composite quote a species at 1 atm while another
-    quoted the same species in the same solvent at 1 M.
+    1 atm in the gas phase; c0·R·T (2.479 MPa at 298.15 K) in an implicit solvent, derived from
+    `hessian.solvent`.
     """
     state = standard_state_for(solvent)
     if state == "gas-1atm":
@@ -384,8 +268,7 @@ def _rotational(
 ) -> tuple[float, float]:
     """(energy, entropy) of rotation per mole, in J/mol and J/(mol K).
 
-    Handles the monatomic (no rotation) and linear (two degrees of freedom) cases from the principal
-    moments themselves rather than from a separate structural test.
+    Monatomic and linear cases are read from the principal moments themselves.
     """
     if len(masses) == 1:
         return 0.0, 0.0
@@ -405,10 +288,8 @@ def _vibrational(
 ) -> tuple[float, float, float]:
     """(zero-point energy, thermal energy, entropy) per mole from the real modes.
 
-    Imaginary modes are skipped — they contribute nothing physical, and including one would be a way
-    of pretending a saddle point is a minimum. Entropy uses Grimme's quasi-RRHO interpolation toward
-    a free rotor below `cutoff_cm`; energy and ZPE stay harmonic, which is the published form of the
-    approximation.
+    Imaginary modes are skipped. Entropy uses Grimme's quasi-RRHO interpolation below `cutoff_cm`;
+    energy and ZPE stay harmonic, as published.
     """
     zero_point = thermal = entropy = 0.0
     for wavenumber in wavenumbers:
@@ -440,32 +321,17 @@ def thermochemistry_from_hessian(
 ) -> ThermochemistryResult:
     """RRHO thermochemistry over a Hessian the server computed — the arithmetic, and only that.
 
-    Every caller goes through here, so the quasi-RRHO treatment and the symmetry handling have
-    exactly one implementation regardless of which backend produced the matrix. `structure` should
-    be the geometry the Hessian was taken at; if it is not a converged minimum the result says so
-    through `is_minimum` rather than refusing, because "this geometry is a saddle point" is a useful
-    answer and often the question.
-
-    **And "not a minimum" now covers the case with no imaginary mode in it.** A geometry that is not
-    stationary at all produces small spurious modes that `_vibrational` drops from a sum it takes
-    over positive wavenumbers only, so its zero-point energy is too low with nothing in the
-    frequencies to show it. `HessianPayload.max_gradient_hartree_per_angstrom` is the evidence the
-    server sends for exactly that, and it is read here against
-    `xtb_stationary_gradient_tolerance` — reported through `is_stationary`, and folded into
-    `is_minimum`, because a result that claims to be a minimum on evidence it has not got is the
-    silent failure this whole model is arranged against.
-
-    Synchronous and CPU-bound (an eigendecomposition of a 3N x 3N matrix), so a caller on an event
-    loop hands it to `asyncio.to_thread` — the same treatment the embedding used to get.
+    A non-minimum is reported via `is_minimum`, which also folds in the server's gradient check
+    (`is_stationary`), since a non-stationary geometry can lack imaginary modes. CPU-bound: call
+    through `asyncio.to_thread`.
     """
     masses = _atomic_masses(structure.elements)
     _, positions = structure.arrays()
     matrix = unpack_npy(hessian.hessian_npy)
     wavenumbers, vectors = _normal_modes(matrix, masses, positions)
     electronic = hessian.electronic_energy_hartree
-    # `None` means "this result carries no spectrum, and here is why" — see
-    # `IntensityAlignmentError`. Every term below is computed from the wavenumbers and the geometry,
-    # so a pairing that cannot be trusted costs the bands and nothing else.
+    # `None` means this result carries no spectrum (see `IntensityAlignmentError`); nothing else
+    # depends on intensities.
     intensities: np.ndarray | None
     spectrum_unavailable: str | None = None
     if hessian.ir_intensities is not None:
@@ -482,9 +348,8 @@ def thermochemistry_from_hessian(
     elif hessian.dipole_derivatives_npy is not None:
         intensities = _ir_intensities(unpack_npy(hessian.dipole_derivatives_npy), vectors, masses)
     else:
-        # Unreachable through the server, which always populates one of the two. Stated rather than
-        # assumed, because a Hessian with neither would silently produce a spectrum of
-        # zero-intensity bands instead of failing.
+        # Unreachable through the server, but a Hessian with neither would otherwise yield a
+        # spectrum of zero-intensity bands.
         raise ValueError(
             f"the Hessian for {structure.smiles or structure.structure_id} carries neither IR "
             "intensities nor dipole derivatives, so no spectrum can be derived from it"
@@ -496,9 +361,8 @@ def thermochemistry_from_hessian(
     )
 
     temperature = spec.temperature_k
-    # The reference state is the medium's, not the caller's — see `_reference_pressure`. Everything
-    # below is unchanged in the gas phase and shifted by exactly RT ln(RT c0/P0) per species in
-    # solution, which is the term that does *not* cancel across a reaction with Δn != 0.
+    # The reference state is the medium's (see `_reference_pressure`); in solution every species
+    # shifts by RT ln(RT c0/P0), which does not cancel when Δn != 0.
     pressure, standard_state = _reference_pressure(spec, hessian.solvent)
     translation_energy, translation_entropy = _translational(
         float(masses.sum()), temperature, pressure
@@ -530,24 +394,15 @@ def thermochemistry_from_hessian(
         for value in wavenumbers
         if value < -settings.xtb_imaginary_threshold_cm
     ]
-    # **The other way of not being a minimum**, and the one the frequencies cannot show. A Hessian
-    # describes the surface *around* a point, and only at a stationary point do its eigenvalues mean
-    # frequencies — so the server reports the gradient it already had beside every matrix, and this
-    # is where that evidence is read. `None` is "not assessed" (the `xtb` binary backend reports no
-    # gradient, and a cache row written before the field existed carries none), which must stay a
-    # different answer from "it is stationary".
-    #
-    # It matters most where it is least visible: away from a stationary point the spurious modes
-    # are small and often *not* imaginary, so `_vibrational` silently drops them from a sum taken
-    # over positive wavenumbers only, and the zero-point energy comes out quietly too low rather
-    # than obviously wrong.
+    # The other way of not being a minimum: away from a stationary point the spurious modes are
+    # often not imaginary, so the frequencies cannot show it. `None` means not assessed (no gradient
+    # reported), which stays distinct from stationary.
     gradient = hessian.max_gradient_hartree_per_angstrom
     stationary = (
         None if gradient is None else gradient <= settings.xtb_stationary_gradient_tolerance
     )
-    # The *most negative* imaginary mode is the first, since modes are sorted ascending and an
-    # imaginary frequency is reported as negative — so index 0 is the steepest downhill direction,
-    # not the softest one. That is the direction to escape along.
+    # Index 0 is the most negative imaginary mode (modes sort ascending): the steepest downhill
+    # direction to escape along.
     displacement = (
         (vectors[:, 0] / np.repeat(np.sqrt(masses), 3)).reshape(-1, 3).tolist()
         if imaginary
@@ -572,10 +427,8 @@ def thermochemistry_from_hessian(
                 wavenumber_cm=round(float(wavenumber), 1),
                 ir_intensity_km_per_mol=None if band is None else round(float(band), 2),
             )
-            # `strict=True` rather than indexing by position, which is what this used to be and is
-            # worth keeping: length agreement is the property `_align_intensities` exists to
-            # establish, and an intensity array *longer* than the mode set would be silently
-            # truncated here — the same off-by-one band shift that function refuses.
+            # `strict=True`: an intensity array longer than the mode set must fail, not be silently
+            # truncated.
             for wavenumber, band in zip(wavenumbers, per_mode, strict=True)
         ],
         mode_count=len(wavenumbers),
@@ -595,15 +448,7 @@ def thermochemistry_from_hessian(
 def displaced_along(structure: Structure, direction: list[list[float]]) -> Structure:
     """Push `structure` along `direction`, scaled so the largest atom moves a fixed step.
 
-    The escape from a saddle point, and the only geometry this repository still *builds*: a plain
-    gradient optimization converges to the nearest stationary point, which is not always a minimum
-    — the common case is a force field handing over an eclipsed methyl and a Cartesian optimizer
-    preserving that symmetry all the way down onto the rotational saddle. Measured on ethyl
-    acetate, an ordinary ester, the optimizer settles at a -42 cm^-1 mode.
-
-    Normalizing on the largest single-atom motion rather than on the vector norm keeps the kick the
-    same physical size whether the mode is localized on one methyl or spread over the whole
-    molecule.
+    The escape from a saddle point, sized the same whether the mode is localized or spread out.
     """
     step = np.asarray(direction)
     step = settings.xtb_imaginary_kick_angstrom * step / np.abs(step).max()
@@ -620,11 +465,7 @@ def displaced_along(structure: Structure, direction: list[list[float]]) -> Struc
 def rt_kcal(temperature_k: float) -> float:
     """`RT` in kcal/mol — the energy scale every Boltzmann question here is asked in.
 
-    One function because three call sites need the same number and two of them had already written
-    the same expression: a populations weight, a macrostate sum, and "how many microstates are close
-    enough to matter". The third is the reason it is public — `connectors/calc/compose.py` counted
-    near-degenerate microstates against a *constant* 0.5925, which is RT at 298.15 K and silently
-    wrong at any other temperature the caller asks for.
+    Public so callers never hard-code RT at 298.15 K for a temperature the caller chose.
     """
     return _GAS_CONSTANT_CAL * temperature_k / 1000.0
 
@@ -632,14 +473,8 @@ def rt_kcal(temperature_k: float) -> float:
 def rate_from_barrier(barrier_kcal: float, temperature_k: float) -> float:
     """The Eyring rate constant, in s^-1, for a free-energy barrier in kcal/mol.
 
-    `k = (kB T / h) exp(-dG‡ / RT)`, with the transmission coefficient at 1 — the convention every
-    tabulated barrier in the literature is quoted under, so a computed number and a measured one
-    can be compared without a conversion nobody states.
-
-    Arithmetic over a result rather than a calculation, which is why it lives here beside the RRHO
-    and Boltzmann halves rather than behind the wire: it needs no binary, and it is what the model
-    would otherwise be asked to do in its head at the exact point where one kcal/mol is a factor
-    of five.
+    `k = (kB T / h) exp(-dG‡ / RT)` with transmission coefficient 1, the convention tabulated
+    barriers use, so the model need not do the exponential in its head.
     """
     exponent = -barrier_kcal * 1000.0 / (_GAS_CONSTANT_CAL * temperature_k)
     return (_BOLTZMANN * temperature_k / _PLANCK) * math.exp(exponent)
@@ -650,19 +485,8 @@ def half_life_from_barrier(
 ) -> Interconversion:
     """How long a rotamer survives at `temperature_k`, with the band the method's error implies.
 
-    `t½ = ln2 / k` for a first-order process, which an interconversion is. The band is the same
-    arithmetic at `barrier ± uncertainty`: a *lower* barrier is a *shorter* half-life, so the
-    fastest end comes from the minus side.
-
-    Args:
-        barrier_kcal: The free-energy barrier out of the populated well, in kcal/mol.
-        temperature_k: The temperature the lifetime is quoted at — the process temperature, not
-            298 K, when the question is whether something racemizes during manufacture.
-        uncertainty_kcal: The method's uncertainty; the configured semiempirical value by default.
-
-    Returns:
-        The rate, the half-life, and the shortest and longest half-life the barrier's uncertainty
-        allows.
+    `t½ = ln2 / k`; the band is the same at `barrier ± uncertainty_kcal` (default: the configured
+    semiempirical value). Quote it at the process temperature when the question is racemization.
     """
     band = settings.xtb_reaction_uncertainty_kcal if uncertainty_kcal is None else uncertainty_kcal
     rate = rate_from_barrier(barrier_kcal, temperature_k)
@@ -684,15 +508,7 @@ def boltzmann_populations(
 ) -> list[float]:
     """Normalized populations from relative energies in kcal/mol, weighted by degeneracy.
 
-    Extracted from `ensemble_from_members`, where it was inline, once a third caller appeared: a
-    free-energy-weighted ensemble and a Boltzmann-averaged property both need exactly this and must
-    agree with it to the last digit — an ensemble whose populations sum to one under one convention,
-    averaged over by a property using another, is two answers to one question.
-
-    **Degeneracy multiplies the weight, and it is not bookkeeping.** Each conformer stands for `g`
-    rotamers that are equally populated, so it carries `g` times the statistical weight. Measured on
-    n-butane, ignoring it puts the anti conformer at 73% against CREST's own reported 59.1%; with
-    it, 59.2%.
+    Each conformer stands for `g` equally populated rotamers.
     """
     rt = rt_kcal(temperature_k)
     smallest = min(relative_kcal)
@@ -707,9 +523,8 @@ def boltzmann_populations(
 def ensemble_entropy(populations: Sequence[float], degeneracies: Sequence[int]) -> float:
     """Conformational entropy in cal/(mol K) from a population distribution.
 
-    `S = -R sum p ln(p/g)`: each conformer stands for `g` equally populated rotamers, so the sum
-    runs over *states* rather than over conformers. Reproduces CREST's own reported ensemble entropy
-    for n-butane to three figures, which is the check that the two count the same thing.
+    `S = -R sum p ln(p/g)`: the sum runs over states, each conformer standing for `g` rotamers.
+    Matches CREST's reported ensemble entropy for n-butane.
     """
     return -_GAS_CONSTANT_CAL * sum(
         population * math.log(population / degeneracy)
@@ -723,28 +538,9 @@ def macrostate_free_energy_kcal(
 ) -> float:
     """The ensemble's free energy relative to its lowest member: `-RT ln sum_i g_i exp(-dE_i/RT)`.
 
-    Always <= 0 — a macrostate is never less stable than its best microstate — and it is an
-    *identity* rather than a correction: the free energy of a state made of interconverting
-    microstates is exactly this, and an equilibrium constant between two such states is the ratio of
-    their partition functions. That is why a pKa is computed through this and not through
-    `ConformerEnsemble.ensemble_correction_kcal`, which sits beside it and answers a different
-    question.
-
-    **How the two differ, stated once so nobody "unifies" them.** `ensemble_correction_kcal` is
-    `-T*S_conf` over the same populations, which is the entropy term added to the *lowest* member's
-    free energy — the standard thermochemical treatment, and what `thermochemistry` reports. This
-    one also carries the Boltzmann-averaged energy above that member, so the two agree only when one
-    conformer holds the whole population. For a thermochemistry result either is defensible; for an
-    acid/base equilibrium the sum over microstates is not optional, because the deprotonated
-    macrostate genuinely *is* the sum of every site that carries population — two sites within RT of
-    each other make the conjugate base more stable than the better of them by up to RT ln 2, and
-    that shift is a real 0.5 pKa unit at 298 K.
-
-    Takes energies relative to the lowest member, in kcal/mol, exactly as `boltzmann_populations`
-    does — the same convention by construction, so the two cannot drift apart on degeneracy or on
-    which member is the reference. Where the microstate energies are Gibbs free energies rather than
-    electronic ones, the formula is unchanged and the result is a free energy of free energies,
-    which is what it should be.
+    Always <= 0. An identity rather than a correction, which is why pKa uses it; unlike
+    `ensemble_correction_kcal` (`-T*S_conf` on the lowest member) it includes the Boltzmann-averaged
+    energy above the lowest member.
     """
     rt = rt_kcal(temperature_k)
     smallest = min(relative_kcal)
@@ -760,16 +556,7 @@ def free_energy_populations(
 ) -> list[float]:
     """Populations from Gibbs free energies rather than from electronic energies.
 
-    **A different treatment, not a better one, and the result must say which ran.** Weighting by G
-    carries the zero-point, thermal and entropic differences between conformers, which is the right
-    distribution when those differ — a conformer with a low electronic energy and a stiff, ordered
-    geometry is over-weighted by E alone. It costs one Hessian per member, which is why
-    `ensemble_from_members` weights by E and this stands beside it rather than replacing it; D-101
-    states the trade as "one Hessian per member, half an hour each at 76 atoms".
-
-    Same convention as `boltzmann_populations` by construction — it *is* that function over a
-    different energy — so the two cannot drift into disagreeing about degeneracy or about the
-    reference state.
+    A different treatment, not a better one (one Hessian per member); callers report which ran.
     """
     lowest = min(gibbs_hartree)
     relative = [(value - lowest) * HARTREE_TO_KCAL for value in gibbs_hartree]
@@ -779,9 +566,7 @@ def free_energy_populations(
 def weighted_average(values: Sequence[float], populations: Sequence[float]) -> WeightedValue:
     """One scalar property, averaged over an ensemble at its populations.
 
-    Takes plain sequences rather than a result model because a dipole, a HOMO-LUMO gap and one
-    atom's Fukui index are the same arithmetic: a per-atom property is this function called once per
-    atom, and giving each its own function is how three of them come to disagree.
+    Plain sequences so dipoles, gaps and per-atom indices share one implementation.
     """
     if not values:
         raise ValueError("nothing to average")
@@ -801,18 +586,8 @@ def ensemble_from_members(
 ) -> ConformerEnsemble:
     """Weight a cached search's members into an ensemble at `temperature_k`.
 
-    The Boltzmann half of the same split the RRHO arithmetic above is the harmonic half of. Three
-    things it does, and each is a reason it is *not* baked into the cached payload:
-
-    - **Populations depend on the temperature**, which does not move the search. Recomputing them
-      here is what lets a second question at another temperature be a cache hit on the expensive
-      half rather than a second CREST run — the most expensive single calculation in the system.
-    - **Degeneracy multiplies the population.** Measured on n-butane, ignoring it puts the anti
-      conformer at 73% against CREST's own reported 59.1%; with it, 59.2%.
-    - **`max_members` truncates a finished answer**, so asking to see more of one already computed
-      is free. `total_found`, the populations and the entropy are properties of the *whole*
-      ensemble and are deliberately left alone — truncating them would turn "here are the 10 that
-      matter out of 47" into a quietly wrong claim that there were 10.
+    Done here, not in the cached payload, because populations depend on temperature. `max_members`
+    truncates only the listing; totals, populations and entropy describe the whole ensemble.
     """
     members = payload.members
     if not members:
@@ -822,15 +597,8 @@ def ensemble_from_members(
     degeneracies = [member.degeneracy for member in members]
     populations = boltzmann_populations(relative, degeneracies, temperature_k)
     entropy = ensemble_entropy(populations, degeneracies)
-    # **Sorted here, so "lowest-first" is a property of this function rather than of the server.**
-    # `ConformerEnsemble.lowest_structure_id` and `compose.refined_ensemble`'s "top N by electronic
-    # energy" both index `conformers[0:]` and both documented the order as given. Nothing in this
-    # repository established it: `EnsemblePayload` has no ordering validator, and the order held
-    # only because `Chemclaw3-mcp`'s `crest_cli` sorts on the way out. That is a real control in
-    # another repository, which is exactly the kind this tree declines to depend on silently — a
-    # backend that returned members unsorted would spend the Hessians on arbitrary conformers and
-    # report a lowest-energy geometry that was not one, with every number still internally
-    # consistent. One sort costs nothing and makes the claim local.
+    # Sorted here, so lowest-first is this function's guarantee rather than the server's:
+    # `ConformerEnsemble.lowest_structure_id` and `compose.refined_ensemble` both rely on it.
     ordered = sorted(zip(relative, populations, members, strict=True), key=lambda entry: entry[0])
     conformers = [
         Conformer(

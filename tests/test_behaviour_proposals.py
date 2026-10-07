@@ -1,25 +1,14 @@
-"""The queue's four rules, driven against both backends because a disagreement is the whole risk.
+"""The queue's rules, driven against both backends because a disagreement is the whole risk.
 
-`agent/behaviour_proposals.py` says a control with two implementations that disagree about whether
-a rejection can be reopened is a control nobody can reason about. That is not a claim a reader can
-check, so every rule here runs against **both** — the in-process backend a `session_store="memory"`
-deployment gets (the CLI is one) and the Postgres one a fleet gets — from one parametrised body, so
-a rule cannot be added to one and forgotten in the other.
+Every rule runs against the in-process backend (`session_store="memory"`) and the Postgres one
+from one parametrised body:
 
-The five rules, each stated as the thing that would be false without it:
-
-1. **An unchanged re-proposal cannot reopen a rejection.** Without it the model retries until a
-   person gives in, which is the whole reason the key is the content rather than the name.
-2. **A changed body supersedes an open sibling and never a decided one.** Retired `note_proposals`
-   shipped without the first half: migration 058 records a queue rendering versions nothing would
-   deliver and one decision then applied to both.
-3. **A decision is final.** A rejection that a later call can overwrite is not evidence.
-4. **A proposal is one person's.** Two chemists may be offered the same procedure, and one
-   rejecting it must not decide for the other.
-5. **A re-proposal of a superseded body is a proposal.** Rule 1's idempotence is over a *decision*;
-   `superseded` is a state this system produced and nobody answered. Applying rule 1 to it left the
-   body in the one state no route can move — invisible to `GET /proposals?state=open`, 409 from
-   `POST /proposals/{kind}/{name}`, and reported to the model as waiting for a chemist to decide.
+1. An unchanged re-proposal cannot reopen a rejection (the key is the content).
+2. A changed body supersedes an open sibling and never a decided one.
+3. A decision is final.
+4. A proposal is one person's.
+5. A re-proposal of a superseded body is a proposal: `superseded` is not a decision, and leaving
+   it there would strand the body where no route can move it.
 """
 
 import asyncio
@@ -46,11 +35,8 @@ _BODY = "---\nname: cold-quench\ndescription: how to quench this class cold\n---
 def actor() -> str:
     """A person nobody else's test has proposed for.
 
-    **The Postgres arm shares one database with every other test and with whatever a session drove
-    by hand**, and this table is deliberately append-only with no DELETE grant — so isolation
-    cannot come from truncating it. A fresh actor per test is the isolation the schema already
-    provides, since content identity is per person by design: that is the same property rule 4
-    asserts, spent here rather than worked around.
+    The table is append-only with no DELETE grant, so isolation comes from a fresh actor per test —
+    content identity is per person by design (rule 4).
     """
     return f"chemist-{uuid.uuid4().hex[:12]}"
 
@@ -75,16 +61,9 @@ def store(
 ) -> Iterator[ProposalStore]:
     """Both backends, from one body, so a rule cannot hold in one and not the other.
 
-    The Postgres arm skips without a migrated database and says so, rather than quietly running
-    half the file — `tests/conftest.py` counts that skip and names what the run is therefore not
-    evidence about.
-
-    **`asyncio.run` around the skip helper, and it is not decoration.** `migrated_db_or_skip` is a
-    coroutine, and the first spelling of this fixture called it without awaiting: the coroutine was
-    created and dropped, so the arm never skipped and only passed because this machine happened to
-    have a migrated database. `mypy --strict` caught it where no pytest rule would have — the same
-    hole `D-2026-09-16`'s review wrote down about a forgotten `await` inside an *async* test, which
-    is invisible because the warning is raised by the garbage collector after the test returns.
+    The Postgres arm skips without a migrated database, and `tests/conftest.py` counts the skip.
+    `migrated_db_or_skip` is a coroutine, so it is run with `asyncio.run`; un-awaited it would never
+    skip.
     """
     if request.param == "postgres":
         asyncio.run(migrated_db_or_skip())
@@ -126,12 +105,10 @@ def test_an_unchanged_re_proposal_cannot_reopen_a_rejection(
 def test_a_changed_body_supersedes_an_open_sibling_and_never_a_decided_one(
     store: ProposalStore, actor: str
 ) -> None:
-    """Rule 2, both halves, because retired `note_proposals` shipped with only the second.
+    """Rule 2, both halves.
 
-    Migration 058 records what the missing half costs: the queue renders two open versions of one
-    name, a reviewer cannot tell which a decision applies to, and the decision is then applied to
-    both. The other half matters as much — superseding a *decided* version would erase the evidence
-    rule 1 exists to keep.
+    Without the first, two open versions of one name render and a decision applies to both; without
+    the second, superseding a decided version would erase the evidence rule 1 keeps.
     """
     first = asyncio.run(store.propose(_proposal(actor=actor)))
     second = asyncio.run(store.propose(_proposal(_BODY.replace("cold.", "warm."), actor=actor)))
@@ -165,18 +142,11 @@ def test_a_changed_body_supersedes_an_open_sibling_and_never_a_decided_one(
 def test_re_proposing_a_superseded_body_puts_it_back_where_a_decision_can_reach_it(
     store: ProposalStore, actor: str
 ) -> None:
-    """Rule 5, and the state it was stuck in had no exit at all.
+    """Rule 5: re-proposing a superseded body puts it back where a decision can reach it.
 
-    Driven as the defect was: propose V1, propose V2 (which supersedes V1), re-propose V1. Before
-    the revive the row stayed `superseded` — `_arrival` branched only on `stored.decided` and
-    `superseded` is deliberately not a decision, so the call booked `already_open` for a row that
-    `list_for(states=["open"])` does not return and that `POST /proposals/{kind}/{name}` answers
-    409 for. `_DECIDE` is `AND state = 'open'`, so nothing else could move it either: a chemist's
-    decision had nowhere to land and the model was told it was waiting for one.
-
-    The second half is rule 2 holding *through* the revive. A revive is an arrival, so it sweeps
-    the sibling an insert would — otherwise this fix trades one bad state for the two-open-rows
-    state migration 058 exists to describe.
+    Propose V1, propose V2 (superseding V1), re-propose V1: the row must become open again, since
+    `_DECIDE` only moves `open` rows. A revive is an arrival, so it also supersedes the open sibling
+    (rule 2).
     """
     first = asyncio.run(store.propose(_proposal(actor=actor)))
     second = asyncio.run(store.propose(_proposal(_BODY.replace("cold.", "warm."), actor=actor)))
@@ -217,10 +187,8 @@ def test_re_proposing_a_superseded_body_puts_it_back_where_a_decision_can_reach_
 def test_a_revive_cannot_reopen_a_decision(store: ProposalStore, actor: str) -> None:
     """Rule 5 stops exactly where rule 1 starts, and the two are one `WHERE` clause apart.
 
-    `_REVIVE` carries `AND state = 'superseded'` for this: widening it to "any state that is not
-    open" would have made a rejected body reopenable by re-proposing it, which is the behaviour the
-    content key exists to prevent. Driven rather than argued, because the two clauses are adjacent
-    and a reader cannot tell a deliberate narrow one from a typo.
+    `_REVIVE` carries `AND state = 'superseded'`; any wider clause would make a rejected body
+    reopenable.
     """
     first = asyncio.run(store.propose(_proposal(actor=actor)))
     asyncio.run(
@@ -309,9 +277,7 @@ def test_a_proposer_can_tell_a_fresh_proposal_from_a_repeat(
 ) -> None:
     """The three outcomes `_arrival` distinguishes, which the counter labels and the tool reports.
 
-    A queue's usefulness is the gap between `proposed` and `accepted`/`rejected`, and a repeat
-    counted as a proposal reports a queue busier than it is — in the one series whose purpose is
-    telling an operator whether anybody is reading it.
+    A repeat counted as a proposal would report the queue busier than it is.
     """
     first = asyncio.run(store.propose(_proposal(actor=actor)))
     repeat = asyncio.run(store.propose(_proposal(actor=actor)))
@@ -322,11 +288,10 @@ def test_a_proposer_can_tell_a_fresh_proposal_from_a_repeat(
 
 
 def test_the_backend_follows_the_session_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Chosen the way the plan-approval store chooses one, and for the same reason.
+    """The backend follows the session store, as the plan-approval store's does.
 
-    A proposal authorizes a change to what the agent does for one person, and under
-    `session_store="memory"` that person's whole context is a process — so a durable queue would
-    outlive the thing it changes, and the two must not disagree about which backend is live.
+    Under `session_store="memory"` a person's whole context is a process, so a durable queue would
+    outlive what it changes.
     """
     monkeypatch.setattr(settings, "session_store", "postgres")
     assert isinstance(default_proposal_store(), PostgresProposalStore)
@@ -340,20 +305,9 @@ async def test_the_counter_distinguishes_the_four_arrivals_it_declares(
 ) -> None:
     """`_arrival`'s four outcomes reach the exposition, not just the tool's prose.
 
-    `test_a_proposer_can_tell_a_fresh_proposal_from_a_repeat`'s docstring says "the three outcomes
-    `_arrival` distinguishes, **which the counter labels** and the tool reports", and only the
-    second half was held: `_arrival` returning `"proposed"` unconditionally, and `_book` returning
-    without incrementing at all, both left this file and `tests/test_proposal_tools.py` at 19
-    passed. The one thing holding `chemclaw_behaviour_proposals_total` anywhere was
-    `test_every_declared_metric_is_named_somewhere_in_the_source` — the string's presence in a file.
-
-    That matters because this series' whole purpose is telling an operator whether anybody is
-    reading the queue, and a repeat booked as a fresh proposal reports it busier than it is — the
-    reassuring direction, and the one `_book`'s own docstring says it exists to avoid.
-
-    **`revived` is the fourth and it is the case that motivated counting four.** It used to book
-    `already_open` — the queue reported as being repeated at while it was in fact being refilled,
-    which is the same reassuring direction one state further on.
+    `chemclaw_behaviour_proposals_total` tells an operator whether anybody reads the queue, so a
+    repeat or a revive booked as a fresh proposal reports it busier than it is. `revived` is the
+    fourth outcome.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -405,12 +359,7 @@ async def test_the_counter_distinguishes_the_four_arrivals_it_declares(
 def test_a_listing_is_bounded_by_the_setting_and_keeps_the_newest(
     store: ProposalStore, actor: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`list_for` stops at `agent_proposals_list_max`, newest first, on both backends.
-
-    The bound was a literal `50` default written three times and passed by no caller, so
-    `GET /proposals?state=` — documented as the audit read — stopped at fifty with nothing saying
-    so. It is a setting now, and this holds both stores to reading it.
-    """
+    """`list_for` stops at `agent_proposals_list_max`, newest first, on both backends."""
     monkeypatch.setattr(settings, "agent_proposals_list_max", 2)
     names = ["first", "second", "third"]
     for name in names:

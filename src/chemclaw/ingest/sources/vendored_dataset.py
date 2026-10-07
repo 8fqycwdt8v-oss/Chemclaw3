@@ -1,28 +1,10 @@
-"""A reference corpus baked into the image at build time — the one sanctioned escalation of D-089.
+"""A reference corpus baked into the image at build time.
 
-D-089 fixed the scope: **this system takes no external data sources.** That decision stands and
-`tests/test_no_egress.py` keeps enforcing it. What it correctly rules out is a *runtime* dependency
-on somebody else's service — an address in first-party code, a network call on the retrieval path,
-an availability and licensing question the deployment cannot answer. What it was never meant to
-rule out is knowing things.
-
-The gap that leaves is concrete. `core/reagents.py` is a hand-maintained name→SMILES table, and
-it is the ceiling on `resolve_compound`: a molecule nobody typed into that file does not resolve, so
-a chemist naming an ordinary reagent gets nothing back. Every fix for that is a dataset.
-
-**So a dataset arrives the way a dependency arrives: pinned, checksummed, licensed, and installed at
-build time.** It is reviewed once, in a pull request, by a person who can read its licence — exactly
-like adding a package — and at runtime it is a file on local disk that this module reads. There is
-no network path here at all: this module imports no HTTP client, and it cannot, because the egress
-test asserts it.
-
-**What this does and does not claim to be.** It is a retriever over a local corpus, so a vendored
-reagent table can be *cited* like any other evidence. It is not an ingest half: vendored data is
-reference material, not experiments, and giving it a write path into the knowledge graph would put
-third-party records into `knowledge/` wearing this system's own provenance. That used to read
-"behind the PR-gate's back"; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the
-gate, which makes the argument stronger rather than weaker — nothing now stands between a written
-note and the chemist who reads it as evidence.
+This system takes no runtime external data sources (`tests/test_no_egress.py`), but it may know
+things: a dataset arrives like a dependency, pinned, checksummed, licensed, reviewed in a pull
+request and installed at build time, then read from local disk. This module imports no HTTP client.
+It is a retriever only, so vendored records can be cited as evidence; it has no ingest half, because
+third-party reference data must not enter `knowledge/` under this system's own provenance.
 """
 
 import csv
@@ -87,13 +69,8 @@ class DatasetManifest(BaseModel):
     def _a_mirror_names_who_refreshes_it(self) -> "DatasetManifest":
         """A mirrored corpus without an owner and a cadence is a stale corpus waiting to happen.
 
-        The fleet's `MODULES.md` states the rule and nothing enforced it on either side: "a stale
-        patent index that nobody knows is stale is worse than no patent index". Enforced at load
-        rather than in a review checklist, because a review that has to remember a rule is the
-        control this repository keeps finding gone.
-
-        Refused in the other direction too: naming a refresh owner for first-party content is a
-        claim about an upstream that does not exist, and the next reader would go looking for it.
+        Enforced at load. Conversely, first-party content may not name a refresh owner, since there
+        is no upstream.
         """
         named = [
             field
@@ -131,12 +108,8 @@ def _read_manifest(directory: Path) -> DatasetManifest:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise VendoredDatasetError(f"no vendored dataset manifest at {path}: {exc}") from exc
-    # `UnicodeDecodeError` is a *sibling* of `json.JSONDecodeError` under `ValueError`, not a child,
-    # and not an `OSError` — so a manifest that is not UTF-8 left this module as a bare
-    # `UnicodeDecodeError`, past the promise in this function's own name, and past
-    # `durable/publish._BAD_DATA_TYPES`, which classifies by class name and lists
-    # `VendoredDatasetError` precisely because "a retry re-reads the same bytes from the same image
-    # layer". The same sentence is what makes the decode error the *most* certain bad data here.
+    # `UnicodeDecodeError` is neither a `JSONDecodeError` nor an `OSError`, so it is wrapped
+    # explicitly into the non-retryable `VendoredDatasetError`.
     except UnicodeDecodeError as exc:
         raise VendoredDatasetError(
             f"{path} is not UTF-8: byte {exc.object[exc.start]:#04x} at offset {exc.start} is "
@@ -172,13 +145,8 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
 
     try:
         text = data.decode("utf-8")
-    # The checksum has already passed at this point, so these bytes are provably the ones the review
-    # approved — which makes this a *permanent* property of the image and the one case
-    # `_BAD_DATA_TYPES` exists to fail fast on. Driven before this existed: a latin-1 `records.csv`
-    # whose manifest checksum matched raised a bare `UnicodeDecodeError`, which that list does not
-    # match, so Temporal burned `activity_max_attempts` re-reading identical bytes from an immutable
-    # image layer. The byte and its offset are named because "not UTF-8" over a 40 MB corpus is not
-    # something an operator can act on.
+    # The checksum already passed, so the bytes are the reviewed ones and a decode failure is
+    # permanent: raised as the non-retryable error, naming the byte and offset.
     except UnicodeDecodeError as exc:
         raise VendoredDatasetError(
             f"vendored dataset {manifest.name} has a {path.name} that is not UTF-8: byte "
@@ -201,13 +169,8 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
         for row in rows
         if row.get(manifest.text_column)
     ]
-    # A row whose text cell is empty has nothing to retrieve, so it is dropped rather than refused —
-    # one blank line must not cost a corpus its whole load. But it was dropped with **no log, no
-    # count and no error, immediately after the checksum passed**: the bytes are provably the ones
-    # the review approved, and the loader then served fewer rows than the reviewed file holds, which
-    # is the one loss this module's own checksum argument cannot explain away. Measured: 3 rows in,
-    # 2 loaded, nothing said. One aggregated line per load, for `warn_late_arrivals`' reason — the
-    # count is what a reader needs and a line per row would be a storm on a broken export.
+    # Rows with an empty text cell are dropped rather than refused, but counted in one log line per
+    # load, since the reviewed file holds more rows than are served.
     if len(records) != len(rows):
         logger.warning(
             "vendored dataset %s: %d of %d rows in %s have an empty %r and were not loaded, so "
@@ -224,24 +187,15 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
 class VendoredDatasetRetriever:
     """Retrieve from a dataset baked into the image at build time. A `SourceRetriever`.
 
-    Loads lazily and once **on success**: a dataset is immutable for the life of the image, so
-    re-reading it per query would be pure cost. A load *failure* is not cached and not swallowed —
-    it raises, and `retrieval.fanout._sweep` degrades this one branch of the sweep with it.
-
-    **Caching the failure was the worse half of the two.** `_load` used to store `[]` behind
-    `if self._records is not None`, so a single unreadable manifest at the first query made this
-    corpus report "no matches" for the life of the pod, after one warning nobody was watching for.
-    Every later query was silent, and an empty answer from here is indistinguishable to
-    `gather_evidence` from a corpus that was read and held nothing — which is the sentence its
-    docstring promises the model means *nothing on file, never invented*.
+    Loads lazily and caches only on success, since the dataset is immutable. A load failure raises
+    and is not cached, so the evidence sweep marks this branch failed instead of the corpus
+    reporting "no matches" for the life of the pod.
     """
 
     def __init__(self, dataset_dir: str | None = None, name: str = "vendored") -> None:
         """Read from `dataset_dir`, or the configured `vendored_dataset_dir`.
 
-        `name` is the data-source name, passed by the registry from the manifest — see
-        `chemclaw.retrieval.retrievers.GraphRetriever.__init__` for why every retrieve half
-        takes one.
+        `name` is the data-source name the registry passes from the manifest.
         """
         self._dir = Path(dataset_dir) if dataset_dir is not None else settings.vendored_dataset_path
         self.name = name
@@ -249,14 +203,12 @@ class VendoredDatasetRetriever:
         self._manifest: DatasetManifest | None = None
 
     def _load(self) -> list[VendoredRecord]:
-        """The dataset's rows, read once per process — on success only.
+        """The dataset's rows, read once per process, on success only.
 
         Raises:
             VendoredDatasetError: The corpus is not there, does not match its checksum, or does not
-                have the column its manifest declares. Left to propagate, and left *uncached*: a
-                remembered failure outlives the condition that caused it, so a share mounted a
-                minute later would never be seen, while a corpus that is genuinely gone simply
-                fails this branch of every sweep — loudly, which is the honest report.
+                have the column its manifest declares. Not cached, so a corpus that appears later is
+                seen.
         """
         if self._records is not None:
             return self._records
@@ -274,14 +226,9 @@ class VendoredDatasetRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for records whose text contains `query`, best first.
 
-        Substring matching, deliberately: this is a *reference* corpus of short labelled records —
-        names, synonyms, structures — not prose, and a lookup table wants exact containment rather
-        than a relevance model. A shorter matching record ranks first, because on a name table the
-        shortest containing entry is the closest thing to an exact match.
-
-        Every chunk cites `vendored:<dataset>:<row>`. That is not a knowledge-graph note id, and
-        it is not pretending to be one: the citation must resolve to *something a reader can check*,
-        and for vendored data that is the row in the pinned, checksummed file.
+        Substring matching, since this is a table of short labelled records; a shorter matching
+        record ranks first as the closest to exact. Every chunk cites `vendored:<dataset>:<row>`,
+        the row in the pinned file, not a note id.
         """
         needle = query.strip().lower()
         if not needle:
@@ -298,9 +245,8 @@ class VendoredDatasetRetriever:
                 content=_describe(record),
                 source_note_id=f"vendored:{dataset}:{index}",
                 retriever=self.name,
-                # A lookup hit is exact or it is not there, so every match scores alike; ordering
-                # is carried by the list order RRF reads, not by a similarity this source cannot
-                # honestly compute.
+                # Every match scores alike; ordering is carried by list position, which fusion
+                # reads.
                 score=1.0,
             )
             for index, record in limited

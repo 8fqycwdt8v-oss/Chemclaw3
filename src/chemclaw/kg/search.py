@@ -1,24 +1,10 @@
-"""What a note's text *is* for a substring search, and how a query is split against it.
+"""What a note's text is for a substring search, and how a query is split against it.
 
-One definition, in layer 4, because there were three. `agent.graph_tools.find_notes` searched
-`id + type + compound_smiles + tags + body`; `retrieval.vector_index`'s own note-text
-builder, since consolidated into `search_text` below — which is what
-`GraphRetriever`, the dense embedding and the lexical tsvector all read — searched `id + tags +
-body`; `durable.digest` built a third by untyped `getattr` and matched the whole query as one
-phrase. Each of the three carried a docstring asserting it agreed with the others.
-
-Measured against the committed 38-note corpus, the disagreement was not theoretical: 5 notes
-matched the term `reaction` in the agent's haystack and not in the retriever's, and 14 notes were
-findable by their own `compound_smiles` in one and not the other. So `find_notes` handed the model
-a note that `gather_evidence` — and therefore every report section — could not then cite.
-
-The union wins rather than the intersection. A note's `type` and its structure are things a
-chemist searches *for*, and the retriever was the leg that could not see them.
-
-**What is not here.** Whether every term must match (`find_notes`, the digest) or whether a
-partial match still ranks (`GraphRetriever`'s widening fallback) is a ranking policy and stays
-with the caller that owns it. This module answers only "what text does a note have" and "what
-terms does a query ask for" — the two halves that must not differ.
+One definition shared by `agent.graph_tools.find_notes`, the retrievers, the embedding and lexical
+indexes and the digest, so a note one search finds the others can cite. The haystack is the union of
+the fields any of them searched. Whether every term must match or partial matches rank is the
+caller's ranking policy; this module answers only what text a note has and what terms a query asks
+for.
 """
 
 import re
@@ -27,35 +13,13 @@ from collections.abc import Sequence
 
 from chemclaw.kg.note import Note
 
-# The words a question is *framed* in, as opposed to the words it is *about*. English-only and
-# closed-class by construction: articles, prepositions, conjunctions, pronouns, determiners,
-# interrogatives, modals, auxiliaries and quantifiers — the categories a language does not coin new
-# members of, and therefore the categories no note can have as its subject. Not stemming and not a
-# language model.
-#
-# **The cost of an entry, and why it is paid here.** Each word here is one word a query can no
-# longer *require*, and that argument kept this list at fourteen from D-138 until it was measured
-# end to end. What the measurement showed is that the cost lands on the other side: a chemist asks
-# "Has anyone here run that before, and what conditions did they end up on?", `_rank_by_terms`
-# requires all twenty-two terms, nothing in any corpus satisfies `has AND here AND that AND
-# they AND …`, and the leg widens to *any* term — where every one of those words now **adds**
-# notes rather than removing them. Substring matching (`term_coverage`) makes that severe: `so` is
-# inside `isolated`, `dissolved` and `solvent`; `at` is inside `temperature`; `he` is inside
-# `ether`. Measured over the 19 independently-authored `knowledge.yaml` probes (44 gold pairs),
-# adding the closed classes moved micro recall 0.5682 → 0.7045 and micro precision 0.1645 →
-# 0.2138, and leave-one-out found no entry that costs a single gold note.
-#
-# **What is deliberately not here.** The open-class verbs a question frames itself with — `give`,
-# `use`, `get`, `need` and their inflections — were measured on the same probes and moved recall
-# by **exactly zero**, so they are not added: an entry that buys nothing still costs. Terms are
-# matched independently, so dropping `in` costs "in situ" nothing (the note is still found by
-# `situ`).
-#
-# **What this does not reach.** The two-letter element symbols that collide with function words
-# (`Be`, `At`, `Am`, `He`, `In`, `No`) are unusable as query terms either way: `term_coverage` is a
-# case-insensitive substring test, so `be` already matched `because` and `carbene` before it was
-# listed here. That is a property of substring membership at `_MIN_TERM_CHARS`, not a loss this
-# list introduces — a chemist searching for an element wants the structure tools.
+# The words a question is framed in, as opposed to the words it is about: English closed-class words
+# (articles, prepositions, conjunctions, pronouns, determiners, interrogatives, modals, auxiliaries,
+# quantifiers), which no note can be about. Kept out of queries because a query requiring all of
+# them matches nothing and then widens to any term, where substring matching makes short function
+# words hit everything (`so` in `solvent`). Open-class framing verbs are not listed: they did not
+# help recall. Two-letter element symbols that collide with function words are unsearchable by
+# substring anyway; use the structure tools.
 _STOPWORDS = frozenset(
     word
     for category in (
@@ -78,33 +42,18 @@ _STOPWORDS = frozenset(
 # Below this a term matches too much to be worth requiring; two characters is already `pd`.
 _MIN_TERM_CHARS = 2
 
-# The one tokeniser both halves of this module use, so a query term and a haystack token are the
-# same kind of thing and `term_frequencies` can compare them. `\W` with `re.UNICODE` (the default
-# for a `str` pattern) rather than `[^0-9a-z]`: the ASCII form split `Lösungsmittel` into `l` and
-# `sungsmittel` and dropped `超純水` entirely, while `core.fulltext.reference_tokens` — the other
-# half of the same rule one layer over — has always used the Unicode alphabet.
+# The one tokeniser for queries and haystacks, Unicode-aware (`\W`), so non-ASCII words stay whole,
+# as in `core.fulltext.reference_tokens`.
 _SPLIT = re.compile(r"[\W_]+")
 
 
 def search_text(note: Note) -> str:
     """The text a substring search sees for `note`: its metadata, structured figures, and body.
 
-    Also the text that is embedded and lexically indexed (`chemclaw.retrieval.vector_index`), so
-    the dense vector, the tsvector and the substring sweep agree on what "the note's content"
-    means — which is what the function it replaced claimed and did not do.
-
-    `conditions` and `source` are in the haystack because they were the fields all three search
-    legs could not see: `ProcessConditions` exists so "the figures a chemist compares reach the
-    note as frontmatter rather than only as sentences" — and this was the one function through
-    which none of those figures could be *found*, so an `outcome: failure` note was not findable
-    by the word "failure". Values only, not the field names: `temperature_c` as a token would
-    match every conditions-carrying note against a query about temperature.
-
-    Not memoized per note, deliberately: `Note` is frozen and shared out of the corpus cache, and
-    the two mechanisms that could attach a computed haystack to the instance (a private attribute,
-    a `__dict__` write) both make a cached note compare unequal to an identical uncached one —
-    measured against pydantic's own `__eq__`. ~30 ms per full sweep of a 10k-note corpus is the
-    accepted price of keeping equality honest.
+    Also the text that is embedded and lexically indexed, so all search legs agree on a note's
+    content. `conditions` and `source` values (not field names) are included so recorded figures and
+    outcomes are findable. Not memoized on the frozen, shared `Note`, since attaching state would
+    break equality with an identical uncached note.
     """
     parts = [note.id, note.type, note.compound_smiles or "", *note.tags, note.source or ""]
     if note.conditions is not None:
@@ -114,33 +63,18 @@ def search_text(note: Note) -> str:
 
 
 def query_terms(query: str) -> list[str]:
-    """The terms a note must contain to match `query` — lowercased, split on non-word characters.
+    """The terms a note must contain to match `query`: lowercased, split on non-word characters.
 
-    Punctuation splits rather than being stripped, because a chemist's query carries structure in
-    it (`Pd(OAc)2`, `4-bromoanisole`, `reactants>>products`) and the parts are what a note's text
-    holds. Falls back to the whole query when nothing survives filtering — a search for `the` is
-    still a search, and returning "no terms, therefore everything" would be worse than literal.
-
-    The fallback honours `_MIN_TERM_CHARS`: it used to hand back exactly the sub-minimum term the
-    filter had just rejected (`"C"` → `['c']`), a single letter that sits in essentially every
-    haystack — which turned the narrowest possible query into the broadest possible match. A
-    one-character query now returns no terms, and the caller's "nothing matched" is the honest
-    answer; a chemist searching a one-atom SMILES wants the structure tools, not a substring.
-
-    A blank query asks for nothing and gets nothing: no terms, so `term_coverage` is zero for every
-    note. Not the same case as the fallback above — `""` is in every haystack, so treating an empty
-    query as a term would return the entire corpus to a caller who typed nothing.
+    Punctuation splits rather than being stripped, so `Pd(OAc)2` yields its parts. If filtering
+    leaves nothing, the whole query is used, subject to `_MIN_TERM_CHARS`: a one-character query
+    yields no terms. A blank query yields no terms, so it matches nothing rather than everything.
     """
     stripped = query.strip()
     if not stripped:
         return []
     terms = [
         term
-        # `\W` with `re.UNICODE`, not `[^0-9a-z]`, so a non-ASCII letter is part of a term rather
-        # than a separator. The ASCII form split `Lösungsmittel` into `l` and `sungsmittel` and
-        # dropped `超純水` entirely, and `core.fulltext.reference_tokens` — the other half of the
-        # same rule, one layer over — has always used the Unicode alphabet. Two halves of one rule
-        # disagreeing about what a word is, which is what that module exists to prevent.
+        # Unicode-aware split, so a non-ASCII letter is part of a term rather than a separator.
         for term in _SPLIT.split(query.lower())
         if len(term) >= _MIN_TERM_CHARS and term not in _STOPWORDS
     ]
@@ -152,16 +86,9 @@ def query_terms(query: str) -> list[str]:
 def term_coverage(note: Note, terms: Sequence[str]) -> int:
     """How many of `terms` appear in `note`'s searchable text.
 
-    Coverage rather than a boolean because the two callers want different cuts of the same number:
-    `find_notes` and the digest require all of them, `GraphRetriever` ranks by how many matched and
-    widens to partial hits when nothing matches completely. Computing it once here is what keeps
-    "matched" meaning the same thing in all three.
-
-    **Substring, and deliberately not the token count `term_frequencies` takes.** This is the
-    coarseness this module's caller already documents — it is what makes `ester` find `polyester`
-    and a bare SMILES find the note that embeds it — and narrowing it here would change which rows
-    are hits, which is a recall decision rather than a ranking one. The two answer different
-    questions: this one decides membership, that one weighs it.
+    A count so callers can require all terms (`find_notes`, the digest) or rank by coverage
+    (`GraphRetriever`). Substring membership on purpose (`ester` finds `polyester`); this decides
+    which notes are hits, while `term_frequencies` weighs them.
     """
     haystack = search_text(note).lower()
     return sum(1 for term in terms if term in haystack)
@@ -170,43 +97,21 @@ def term_coverage(note: Note, terms: Sequence[str]) -> int:
 def matched_terms(note: Note, terms: Sequence[str]) -> list[str]:
     """Which of `terms` appear in `note`'s searchable text, in query order, without repeats.
 
-    The per-term form of `term_coverage`, over the same haystack and the same substring rule, so
-    "matched" cannot come to mean two things in two modules — which is the drift this module was
-    written to end. `retrieval.retrievers` carries the result to the model on every note-backed
-    chunk (`EvidenceChunk.matched_terms`), because a widened search returns hits that share a
-    couple of framing words with the question and nothing said so.
-
-    **Deduplicated, where `term_coverage` is not**, and the difference is deliberate rather than an
-    oversight in one of them. Coverage is compared against `len(terms)` to decide whether a hit
-    matched the query *completely*, so a chemist who types "buchwald" twice must be able to reach
-    that ceiling; this is a list a reader compares against their own question, where the same word
-    twice says nothing the once did not.
+    Same haystack and substring rule as `term_coverage`; shown to the model on each chunk so a weak,
+    widened match is visible. Deduplicated, unlike `term_coverage`, whose count is compared against
+    `len(terms)`.
     """
     haystack = search_text(note).lower()
     return [term for term in dict.fromkeys(terms) if term in haystack]
 
 
 def term_frequencies(note: Note, terms: Sequence[str]) -> dict[str, int]:
-    """How *often* each of `terms` appears in `note`'s searchable text, omitting the absent ones.
+    """How often each of `terms` appears in `note`'s searchable text, omitting the absent ones.
 
-    The same one haystack `term_coverage` counts, read once and reported in more detail, because
-    "how many terms matched" cannot separate the notes that tie on it — and on a corpus where every
-    hit matches every term, that is all of them. `GraphRetriever` needs a within-note signal to rank
-    by; this is the cheapest honest one, and it costs the same scan the boolean already paid for.
-
-    **Counted over tokens, not substrings, and that difference is a measured ranking defect rather
-    than a nicety.** `term_coverage` asks "does this term appear", and a substring answer is right
-    there — it is what makes `ester` find `polyester`, which this module's caller documents as a
-    deliberate coarseness. But *frequency* multiplies, and chemistry's short abbreviations live
-    inside ordinary English words: a work-up log reading "the organics were dried… drying was
-    repeated" scores `dr` **three** times without containing the term at all, and with saturating
-    tf-idf above it that log outranked the note reporting `dr 95:5`. `ee` behaves the same inside
-    *been*, *three*, *needed*, *between*, *degrees*.
-
-    So membership stays substring-based and unchanged — `term_coverage` is what decides which notes
-    are hits, and this function does not — while the weight a matched note earns counts whole
-    tokens. A note that matches only as a substring therefore appears in `term_coverage` and
-    contributes nothing here, which is the honest ordering: it matched, weakly.
+    A within-note ranking signal for notes that tie on coverage. Counted over whole tokens, not
+    substrings: short abbreviations like `dr` or `ee` occur inside ordinary words, and multiplying
+    those spurious hits would outrank the note that actually reports them. Membership stays with
+    `term_coverage`, so a substring-only match is a hit that earns no weight here.
     """
     wanted = set(terms)
     counts = Counter(token for token in _SPLIT.split(search_text(note).lower()) if token in wanted)

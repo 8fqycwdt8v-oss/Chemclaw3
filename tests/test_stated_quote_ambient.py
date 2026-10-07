@@ -1,23 +1,12 @@
 """The chemist's own words in this thread, and what a `basis="stated"` quote may be checked against.
 
-`core/turn_text.py` binds the ambient and `agent/protocol_design_tools.require_quotes_are_verbatim`
-grades against it. This file is about the *widening* — the ambient carried exactly the message that
-started the turn in flight, while `structure_experiment_request` tells the model to call it "first …
-while correcting it is still cheap", i.e. iteratively across turns. Measured before the widening: a
-chemist who wrote "24 wells, no DMF, by Friday please." on turn 1 and "ok go ahead" on turn 3 had
-the intake refused, because `'24 wells'` is not in "ok go ahead" — so an honest `stated` was
-unrepresentable, and the remedy the refusal prescribed recorded a real chemist constraint as a model
-inference.
+`core/turn_text.py` binds the ambient that `require_quotes_are_verbatim` grades against; it spans
+the chemist's recent messages in the thread, not only the current one, since intake is iterative.
+Two properties must survive that widening:
 
-Widening a check is where a check quietly stops checking, so the two properties that must survive it
-are asserted here rather than assumed:
-
-- **only a person's words enter it.** The model's own earlier prose quoted back as `stated` is
-  exactly the fabrication `core/turn_text` exists to refuse, and a mid-turn job-result push-back
-  enters the *graph* under the chemist's role — which is why the transcript, not the checkpointer,
-  is the source. Both are driven end to end here, on a real compiled graph.
-- **the window is bounded, and its refusal says so**, because the one thing worse than a refusal is
-  one a chemist cannot act on.
+- only a person's words enter it: the model's own prose and mid-turn job push-backs do not,
+  which is why the transcript, not the checkpointer, is the source (driven on a real graph);
+- the window is bounded, and its refusal says what was checked.
 """
 
 import asyncio
@@ -136,11 +125,9 @@ def test_the_turn_in_flight_survives_a_character_budget_it_alone_exceeds(
 def test_a_message_outside_the_window_is_refused_and_the_message_says_what_was_checked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bound is real, and its refusal has to be something a chemist can act on.
+    """A quote from outside the window is refused, and the message names the window and the remedy.
 
-    A quote from a message the window no longer reaches is indistinguishable, to the check, from
-    one nobody ever wrote — so the refusal must name both possibilities and the remedy, or the
-    model's only move is the mislabelling (`basis='inferred'`) this whole check exists to prevent.
+    Otherwise the model's only move is to mislabel the quote `basis='inferred'`.
     """
     monkeypatch.setattr(settings, "agent_stated_quote_turns", 1)
     token = set_current_user_texts([_TURN_ONE, "what about the base?", "ok go ahead"])
@@ -292,25 +279,11 @@ class _CountingHistory(InMemoryHistoryProvider):
 
 
 def test_the_ambient_read_is_bounded_by_the_session_and_not_by_the_table() -> None:
-    """The read on the answer path plans through the partial index, visiting no other session.
+    """The ambient read plans through the partial index, visiting no other session.
 
-    **A plan assertion, because the wall clock is not the finding.** Two independent measurements of
-    this statement agreed on the row counts and disagreed on the milliseconds by 50x; what is stable
-    is which index the planner picks and how many rows it throws away, and those are what decide
-    whether the read costs O(session) or O(table).
-
-    Measured on a replica of this table — one 12,000-row session plus 120,000 newer rows across 300
-    others — the shipped statement planned `Index Scan Backward using session_messages_pkey` and
-    discarded **120,020** rows to return 20, **on every turn**, because Postgres has no statistics
-    for the expression `message->>'type'` and takes the ordered primary-key walk expecting to stop
-    early. Migration `098` makes the human rows directly addressable: 0 rows discarded, 14.8 ms to
-    0.036 ms. Two other candidates were driven and are no-ops — `CREATE STATISTICS` on the
-    expression, and hoisting the type test into Python — so this index is the fix rather than one of
-    three bets.
-
-    Sequential scans are taken away for the reason `tests/test_reaction_records.py::_index_behind`
-    gives: a fixture table fits in one page, so the planner is right to scan it and the choice would
-    say nothing about which indexes exist.
+    A plan assertion, since the row counts are stable and timings are not: the read must cost
+    O(session), not O(table). Sequential scans are disabled because a fixture table fits in one page
+    (see `tests/test_reaction_records.py::_index_behind`).
     """
 
     async def _run() -> str:
@@ -341,15 +314,10 @@ def test_the_ambient_read_is_bounded_by_the_session_and_not_by_the_table() -> No
 def test_the_window_the_runner_reads_is_the_configured_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The knob reaches the query, and `0` is exactly the behaviour this widening replaced.
+    """The runner reads the configured window, and at `0` skips the store entirely.
 
-    Asserted through the runner rather than against the provider, because the setting has two jobs
-    there and a default of 20 hides both from every other case in this file. It **bounds** the read
-    — the number the query is given is the configured one, not a constant the runner picked — and
-    it makes the read **skippable**: at 0 the turn does not go to the store at all. That second
-    half is the one nothing would notice otherwise, because both providers refuse a non-positive
-    limit themselves, so dropping the runner's guard buys a per-turn round trip for a feature the
-    deployment turned off and changes no answer.
+    Asserted through the runner: the bound must be the configured value, and the skip saves a
+    round trip that the providers' own non-positive refusal would otherwise hide.
     """
     monkeypatch.setattr(settings, "agent_stated_quote_turns", 3)
     history = _CountingHistory()
@@ -373,12 +341,10 @@ def test_the_window_the_runner_reads_is_the_configured_one(
 
 
 async def test_the_agents_own_earlier_prose_is_not_quotable_as_the_chemist() -> None:
-    """A model quoting itself back as `stated` is the fabrication the check exists to refuse.
+    """The agent's own earlier prose is not quotable as the chemist.
 
-    The assistant says "let us run 96 wells" on turn 1 and the intake quotes it on turn 2. Nothing
-    about the words distinguishes them from a chemist's; what does is who is recorded as having
-    said them, which is why `chemist_words` filters the transcript rather than the check filtering
-    the prose.
+    The words are indistinguishable; who said them is recorded, so `chemist_words` filters the
+    transcript by role.
     """
     intake = _Intake("96 wells", value="96")
 
@@ -400,12 +366,7 @@ async def test_the_agents_own_earlier_prose_is_not_quotable_as_the_chemist() -> 
 async def test_a_store_that_cannot_be_read_refuses_rather_than_waives(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The degraded direction is the strict one — an outage must not open the check.
-
-    A transcript is a rendering and no rendering fails an answered turn, so the read is
-    best-effort. What it degrades *to* is what matters: no earlier words, which refuses a quote
-    the turn could otherwise have accepted, rather than a permissive ambient.
-    """
+    """A store that cannot be read refuses rather than waives: the degraded ambient is empty."""
     intake = _Intake("24 wells")
 
     class _Broken(InMemoryHistoryProvider):

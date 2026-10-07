@@ -1,24 +1,10 @@
-"""An absent answer used to be indistinguishable from a present one (W14 finding B).
+"""A widened retrieval hit says which terms of the question it matched.
 
-`GraphRetriever` ranks `complete or scored`: when no note matches every term of the query it
-widens to *any* term. Measured over the shipped corpus, complete matches in the top 8 were **0 of
-8** on questions the corpus does answer — so widening is the normal path, not the fallback, and
-the leg always fills `retrieval_top_k`. `gather_evidence("what is the melting point of
-ibuprofen")` returns sixteen chunks about aspirin, DCM and route scoring, shape-identical to a
-successful query, while `gather_evidence`'s own docstring tells the model that empty means
-"nothing on file, never invented".
-
-**Neither count discriminates, which is why this is not a classifier.** Measured on the 19
-`knowledge.yaml` probes against three absent-answer questions: mean top-chunk term coverage is
-0.372 where the answer is present and **0.400** where it is absent, and complete matches are 1/19
-against 0/3. What separates them is *which* terms matched — `melting` and `point` did,
-`ibuprofen` did not; `yield` did, `heck` and `tributylamine` did not — and that is a judgment the
-model can make and this system cannot. So the chunk carries the terms it matched and the model
-compares them against the question it asked.
-
-`restated_as_position` overwrites `score` with the merged rank in both merge modes, which is what
-destroyed the one number that used to carry match quality. Any signal added here has to survive
-that, and the last test in this file is that assertion.
+`GraphRetriever` widens to any-term matches when no note matches every term, which is the normal
+path, so an absent answer returns full-looking chunks. No count discriminates present from absent
+answers; which terms matched does, and that is the model's judgment. So each chunk carries its
+matched terms. `restated_as_position` overwrites `score` in both merge modes, so the signal must
+survive it, which the last test asserts.
 """
 
 import asyncio
@@ -44,12 +30,10 @@ def _corpus(directory: Path, *notes: Note) -> str:
 
 
 def test_a_widened_hit_says_which_of_the_question_it_actually_matched(tmp_path: Path) -> None:
-    """The measured defect: a chunk that matched two framing words looks like an answer.
+    """A widened hit says which of the question it actually matched.
 
-    The corpus here holds nothing about ibuprofen. The melting-point note for a *different*
-    compound matches `melting` and `point`, the widening rule serves it, and before this field the
-    chunk was byte-identical in shape to one that had matched the whole question — same excerpt,
-    same citation, same score.
+    The corpus holds nothing about ibuprofen; a melting-point note for another compound matches only
+    `melting` and `point`, and the field is what tells it apart from a full match.
     """
     root = _corpus(
         tmp_path,
@@ -95,13 +79,11 @@ def test_a_note_that_matched_the_whole_question_says_so_in_the_same_field(tmp_pa
 def test_a_source_that_cannot_report_term_matching_says_unknown_rather_than_none_matched(
     tmp_path: Path,
 ) -> None:
-    """`None` is not `[]`, for the reason `Hits.found` gives one class over.
+    """A source that cannot report term matching says unknown (`None`), not none matched (`[]`).
 
-    The share, warehouse, vendored-dataset and verifier legs build their chunks from raw document
-    text and never tokenise a query. An empty list there would assert "this document matched none
-    of your words", which is a claim nobody checked; the default says "this source did not report
-    it". A note-backed chunk's empty list, by contrast, is a real statement — the dense leg can
-    surface a note that shares no word with the question at all.
+    Legs built from raw document text never tokenise the query, so `[]` would be an unchecked claim.
+    A note-backed chunk's `[]` is real: the dense leg can surface a note sharing no word with the
+    question.
     """
     assert (
         EvidenceChunk(content="a document", source_note_id="doc-1", retriever="share").matched_terms
@@ -110,11 +92,10 @@ def test_a_source_that_cannot_report_term_matching_says_unknown_rather_than_none
 
 
 def test_match_quality_survives_the_rewrite_that_destroyed_the_last_one() -> None:
-    """`restated_as_position` is why `score` could not carry this, so it is asserted here.
+    """Match quality survives `restated_as_position`.
 
-    It rebuilds every chunk with `model_copy(update={"score": ...})` in *both* merge modes, so a
-    field is safe only for as long as nobody adds it to that update dict. This is the assertion
-    that fails if someone does.
+    It rebuilds every chunk with `model_copy(update={"score": ...})`; this fails if someone adds the
+    field to that update.
     """
     chunks = [
         EvidenceChunk(

@@ -1,15 +1,10 @@
-"""Skill visibility: the three narrowings over one discovered set, and that none of them widens.
+"""Skill visibility: the narrowings over one discovered set, and that none of them widens.
 
-Two seams, proven separately and then together:
-
-- **Role scoping** (Phase 6): with no gates every skill is visible (today's behavior); a gated
-  skill is hidden from a caller (the ambient identity) holding none of its roles and shown to one
-  holding a role; ungated skills are unaffected. Roles come from `chemclaw.core.identity_context`,
-  so the front door never threads identity through `build_agent`.
-- **Capability scoping** (D-2026-08-05): a skill whose *every* declared tool is absent from the
-  agent's surface is dropped, one surviving tool keeps it, and a skill declaring nothing is always
-  visible. The boundary is what the tests pin, because both neighbouring rules are defensible in
-  prose and only one of them leaves the shipped profiles usable.
+- Role scoping: with no gates every skill is visible; a gated skill is shown only to a caller
+  holding one of its roles, read from `chemclaw.core.identity_context`.
+- Capability scoping: a skill whose every declared tool is absent is dropped, one surviving tool
+  keeps it, and a skill declaring nothing is always visible; `requires:` tools must all be
+  present.
 """
 
 from typing import Any, cast
@@ -28,9 +23,7 @@ from chemclaw.core.identity_context import reset_current_identity, set_current_i
 def _discovered() -> set[str]:
     """Every skill name on disk, which is what the narrowings narrow.
 
-    `declared_tools`'s keys, because they *are* the discovered names — it walks the same tree the
-    skills backend walks, and reading them from the one first-party reader is what keeps the tests
-    from needing a second answer to "what skills exist".
+    Read from `declared_tools`, the one first-party walker of the skills tree.
     """
     return set(declared_tools(settings.skills_dirs))
 
@@ -78,23 +71,12 @@ def test_ungated_skills_are_unaffected_by_gates() -> None:
 
 
 def test_no_shipped_skill_declares_only_tools_no_manifest_advertises() -> None:
-    """Every shipped skill teaches something this *tree* declares — a corpus check, not a turn's.
+    """Every shipped skill teaches something this tree's manifests declare.
 
-    The other side of capability scoping, and the one that would catch the real drift: a skill
-    dropped here is not a filter bug, it is a skill whose whole subject has left the system — the
-    stale-judgment case `make skill-validate` catches for a *renamed* tool and cannot catch for a
-    capability that was simply disabled. Asserted against the default profile, which narrows
-    nothing, so any drop is real.
-
-    **The basis is deliberately the manifests, and the name now says so.** `_advertised_names` is
-    what this tree *declares* — the in-process registry plus every enabled bundle's allow-list —
-    which is the right question for "is a committed `SKILL.md` about capability this repository
-    still ships". It is the wrong question for a turn, and `skills_backend` used it there until the
-    2026-09-10 review measured two skills offered with no bound tool at all: a manifest does not
-    move when a server is unreachable. That gate now reads the bound set
-    (`tests/test_langgraph_agent.py::test_a_listed_skill_always_has_at_least_one_tool_this_turn_binds`);
-    this stays as it was, because a tree-versus-manifest check that narrowed with the fleet would
-    pass by going quiet exactly when a bundle is down.
+    A corpus check, asserted against the default profile: a dropped skill's whole subject has left
+    the system. It deliberately reads manifests, not the bound set, so it does not go quiet when a
+    bundle is down; the per-turn gate reads the bound set
+    (`tests/test_langgraph_agent.py::test_a_listed_skill_always_has_at_least_one_tool_this_turn_binds`).
     """
     from chemclaw.agent import chemclaw_agent
     from chemclaw.agent.profiles import get_profile
@@ -150,10 +132,8 @@ def test_a_skill_declaring_no_tools_is_always_visible() -> None:
 def test_one_reachable_tool_keeps_the_skill() -> None:
     """A skill survives on any single surviving tool — the conservative half of the rule.
 
-    Deliberately pinned rather than left implicit. Hiding on *any* missing tool is the reading a
-    future change is most likely to drift into, and it takes 20 of 28 skills off the shipped
-    `property-lookup` profile — including `calculation-selection`, which that profile's own
-    instructions tell the model to load.
+    Hiding on any missing tool would strip most skills from restricted profiles, including ones
+    their instructions tell the model to load.
     """
     declared = {"deep-research": frozenset({"gather_evidence", "sample_conformers"})}
     assert "deep-research" in _scoped_names(declared, available={"gather_evidence"})
@@ -170,17 +150,10 @@ def test_a_skill_with_no_reachable_tool_is_dropped() -> None:
 
 
 def test_an_absent_required_tool_hides_a_skill_the_declared_rule_would_keep() -> None:
-    """The `requires:` rule, on exactly the input the `tools:` rule keeps — so it is non-vacuous.
+    """An absent `requires:` tool hides a skill the `tools:` rule alone would keep.
 
-    Deliberately the *same* declaration and the *same* surface as
-    `test_one_reachable_tool_keeps_the_skill`: one of two declared tools is reachable, so the
-    all-absent rule leaves the skill visible, and that test pins that reading against drift. This
-    one adds `requires` naming the absent tool and asserts the opposite outcome from the same two
-    arguments, which is the only way to show the second rule decides anything.
-
-    Why the second rule exists is the measured case behind it: a skill whose *central* tools ship
-    with an opt-in bundle keeps peripheral ones, survives the all-absent test, and is listed in
-    every deployment's prefix as judgment about a path the turn cannot take.
+    Same declaration and surface as `test_one_reachable_tool_keeps_the_skill`, with the opposite
+    outcome, so the second rule is shown to decide something.
     """
     declared = {"deep-research": frozenset({"gather_evidence", "sample_conformers"})}
     available = {"gather_evidence"}
@@ -192,13 +165,7 @@ def test_an_absent_required_tool_hides_a_skill_the_declared_rule_would_keep() ->
 
 
 def test_every_required_tool_present_keeps_the_skill() -> None:
-    """`requires` is all-of, not any-of, and the satisfied case must still be visible.
-
-    The rule is `needed <= available`, so a skill naming two required tools is hidden until both
-    are there — the opposite quantifier from `tools:`, and the reason the two keys cannot be one.
-    Asserted in both directions off one declaration so the conjunction is pinned rather than
-    implied by a single passing case.
-    """
+    """`requires` is all-of, not any-of, asserted in both directions off one declaration."""
     declared = {"deep-research": frozenset({"gather_evidence", "sample_conformers", "predict_pka"})}
     required = {"deep-research": frozenset({"gather_evidence", "sample_conformers"})}
 
@@ -212,14 +179,10 @@ def test_every_required_tool_present_keeps_the_skill() -> None:
 
 
 def test_a_corpus_that_only_requires_still_narrows() -> None:
-    """The short-circuit reads both maps, because a `requires`-only corpus is still a narrowing.
+    """A corpus that only declares `requires` still narrows.
 
-    `ToolScopedSkills` skips the whole filter when nothing declares a dependency, and that guard
-    used to ask about `declared` alone. A corpus reaching this class through `required` with every
-    `declared` entry empty would then be waved through — visible everywhere, with the rule that
-    should have hidden it never consulted. The validator makes `requires` a subset of `tools`, so
-    the shipped corpus cannot take this shape; the guard is what keeps that a convention of the
-    corpus rather than an assumption this class depends on.
+    `ToolScopedSkills` must consult both maps before short-circuiting; the validator keeps
+    `requires` a subset of `tools`, but this class must not depend on that.
     """
     scoped = _scoped_names(
         {"deep-research": frozenset()},
@@ -261,15 +224,10 @@ def test_the_narrowings_compose_and_only_ever_remove() -> None:
 
 
 def test_the_control_arm_that_removes_skills_removes_both_tiers() -> None:
-    """`skill_names: []` means "no skills", and a chemist's own tier used to escape it.
+    """`skill_names: []` removes both the shared and the personal skills tier.
 
-    `data/evals/profiles/skills-removed.yaml` exists to be the clean control its own header demands
-    — the arm that varies skills and nothing else. The personal tier is mounted by the backend
-    rather than selected by `skill_names`, on a governance argument (`agent/local_skills.py`) that
-    is right about a *named subset* and wrong about the empty set, which is a profile author writing
-    down that this agent reaches no skill at all. Measured before this: the arm listed a personal
-    skill while listing none of the 28 shared ones, so every A/B it reported carried personal
-    judgment for any actor with a populated `/mine`.
+    The skills-removed eval arm must vary skills and nothing else, so an empty list means no skill
+    at all, including a chemist's own.
     """
     from chemclaw.agent.langgraph_agent import _skills_middleware
     from chemclaw.agent.local_skills import LOCAL_SKILLS_ROOT

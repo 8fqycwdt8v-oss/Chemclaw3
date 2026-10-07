@@ -1,18 +1,8 @@
-"""BoFire adapter — the only module that touches BoFire (plan Phase 1d, D-012; D-092).
+"""BoFire adapter — the only module that touches BoFire (D-012).
 
-Maps our neutral `OptimizationProblem`/`Observation` types to BoFire's domain and
-strategies, proposes candidates, and maps results back to our `Candidate` type.
-Nothing BoFire leaks past this boundary (gate G6), so the engine could be swapped
-without touching the campaign, agents, or skills. `factorial_design` (D-092) is the
-same adapter shape for BoFire's classical `FractionalFactorialStrategy`, alongside
-the Bayesian-optimization strategies — full grid by default, and a reduced two-level
-design when the chemist's plate cannot hold the whole one.
-
-Errors leak nowhere past this boundary either (Science-4): `_fractional_design` catches
-BoFire's own validator error and re-raises a plain `ValueError`, and `initial_candidates`/
-`propose_candidates` catch the botorch/gpytorch/linear-algebra exceptions a degenerate fit
-or acquisition step can raise and re-raise `SurrogateFitError` — see
-`_translating_surrogate_errors`.
+Maps the neutral problem types to BoFire strategies (Bayesian, factorial, optimal design) and back.
+No BoFire or botorch exception crosses this boundary: validator errors become `ValueError`,
+numerical failures `SurrogateFitError`.
 """
 
 import itertools
@@ -91,43 +81,23 @@ from chemclaw.science.bo.problem import (
     point_in_domain,
 )
 
-# How many rejection-sampling rounds `initial_candidates` will spend per requested point before it
-# gives up. A sampler drawing from a feasible domain needs one round; the allowance is for a domain
-# whose exclusion constraints make feasible points rare. Not a setting: it is not a quantity a
-# deployment tunes, it is the difference between "slow" and "wedged forever" (the loop had no bound
-# at all, and the inline `suggest_next_experiment` path has no Temporal budget above it).
+# Rejection-sampling rounds `initial_candidates` spends per requested point before giving up.
+# A feasible domain needs one; the allowance covers exclusions that make feasible points rare.
+# It bounds the loop on the inline path, which has no Temporal budget above it.
 _SEED_DRAW_ROUNDS = 8
 
 
 class SurrogateFitError(ChemclawError):
-    """BoFire's Bayesian strategy could not fit or query its surrogate (Science-4).
+    """BoFire's Bayesian strategy could not fit or query its surrogate.
 
-    Raised in place of whatever `botorch`/`gpytorch`/`linear_operator` exception the fit or the
-    acquisition step actually threw. The classical path (`_fractional_design`) already had this
-    boundary — it catches BoFire's validator error and re-raises a plain `ValueError` "so the
-    caller sees a plain ValueError instead of a pydantic ValidationError wrapping it" — and the
-    Bayesian path had no equivalent, so a duplicate observation or a degenerate kernel propagated
-    a raw library exception straight through the Temporal activity or the in-process campaign
-    loop. `chemclaw.core.errors.ChemclawError` is what `agent.tool_authz.surface_domain_errors`
-    catches for the in-process seam; for the durable one, this class's name is listed in
-    `chemclaw.durable.publish._BAD_DATA_TYPES`, because the failure is a property of the *input*
-    rather than a transient one a retry could fix.
-
-    **"Input" rather than "data", and the widening is deliberate.** One case reaching this class
-    has no surrogate and no observations at all: constraints that admit no point, refused on the
-    seeding path. It is non-retryable for the same reason — the same spec fails the same way — so
-    it belongs in `_BAD_DATA_TYPES`, but calling it bad *data* is what produced a message telling a
-    chemist to vary measurements that do not exist. The name stays as it is, because
-    `_BAD_DATA_TYPES` matches it as a string; `_translating_surrogate_errors` is what separates the
-    two causes.
+    Non-retryable: listed by name (do not rename) in `durable.publish._BAD_DATA_TYPES`. Also raised
+    for constraints that admit no point.
     """
 
 
-# The library exceptions a GP fit or an acquisition-optimization step is known to raise on
-# degenerate input: a near-singular kernel (duplicate/near-duplicate points), a covariance matrix
-# that stays non-positive-definite after every jitter attempt, or a fit that produces NaNs.
-# `ModelFittingError` does not subclass `BotorchError` (botorch's own hierarchy), so it is listed
-# separately rather than assumed to be covered by it.
+# Library exceptions a GP fit or acquisition step raises on degenerate input (near-singular
+# kernel, non-PD covariance after jitter, NaNs). `ModelFittingError` is not a `BotorchError`,
+# so it is listed separately.
 _SURROGATE_FAILURES: tuple[type[Exception], ...] = (
     BotorchError,
     ModelFittingError,
@@ -142,23 +112,8 @@ _SURROGATE_FAILURES: tuple[type[Exception], ...] = (
 def _translating_surrogate_errors(problem: OptimizationProblem, context: str) -> Iterator[None]:
     """Turn a known BoFire/botorch numerical failure into `SurrogateFitError`.
 
-    `context` names the step in the caller's own words (e.g. "fitting the surrogate to 3
-    observation(s)"), so the translated message says what was being attempted without this
-    helper needing to know which of `tell`/`ask` raised.
-
-    **Two causes, and the empty polytope is matched first because the generic advice is wrong for
-    it in both halves.** Contradictory constraints — `x1+x2 <= 1` beside `x1+x2 >= 4` — reach here
-    from the *seeding* path, where a `RandomStrategy` runs and there is no surrogate, over *zero*
-    observations. So "duplicate observations collapsing the model's kernel, or an objective with no
-    spread — vary the measured values" names a model that does not exist and an action the caller
-    cannot take, and a model handed it retries with different numbers against a polytope that is
-    still empty. The constraints are what is wrong, so they are what the message names, in the
-    chemist's own relation via `describe()`.
-
-    `problem` is a parameter rather than a closure for that sentence alone: the translator is the
-    only place that sees the failure, and the constraints are the only thing that can repair this
-    one. Matched on botorch's `InfeasibilityError` **type** rather than on its message, because a
-    substring read is how the generic advice got attached to this case to begin with.
+    An empty polytope (`InfeasibilityError`, matched by type) names the constraints rather than
+    advising to vary measurements.
     """
     try:
         yield
@@ -188,15 +143,10 @@ def _resolve_seed(seed: int | None) -> int:
 def _categorical_input(
     parameter: CategoricalParameter,
 ) -> CategoricalInput | CategoricalDescriptorInput:
-    """Map a categorical to BoFire, using its descriptors when it has been featurized (U1).
+    """Map a categorical to BoFire, using its descriptors when it has been featurized.
 
-    The distinction is the whole point of featurization and it is invisible at the call site,
-    so it is worth stating: a `CategoricalInput` is encoded ordinally inside a BoTorch
-    surrogate — the model sees an index and can only learn each label independently — while a
-    `CategoricalDescriptorInput` is descriptor-encoded, so the model sees the molecule's
-    position in descriptor space and can generalize to a category it has never been told
-    about. `tests/test_bo_featurize.py` pins that encoding, because it is a BoFire default we
-    depend on rather than one we set.
+    Descriptor encoding lets the surrogate generalize across categories; a bare `CategoricalInput`
+    is ordinal.
     """
     if parameter.descriptors is None:
         return CategoricalInput(key=parameter.name, categories=parameter.categories)
@@ -217,15 +167,13 @@ def _categorical_input(
 def _objective_output(problem: OptimizationProblem) -> ContinuousOutput:
     """The problem's **lead** objective as a BoFire output.
 
-    Kept for the classical design paths, which have no objective at all: `factorial_design` builds a
-    domain only because BoFire requires outputs, and its direction is never read. A screen over a
-    multi-objective problem is still one screen.
+    For the classical design paths, where BoFire requires an output but its direction is never read.
     """
     return _outputs(problem)[0]
 
 
 def _outputs(problem: OptimizationProblem) -> list[ContinuousOutput]:
-    """Every objective as a BoFire output, in declaration order (W3)."""
+    """Every objective as a BoFire output, in declaration order."""
     return [
         ContinuousOutput(
             key=objective.name,
@@ -242,9 +190,8 @@ def _outputs(problem: OptimizationProblem) -> list[ContinuousOutput]:
 def _exclusion(constraint: ExcludeConstraint) -> CategoricalExcludeConstraint:
     """Map a forbidden pairing of categorical options.
 
-    BoFire's conditions are positional — one per feature, combined by `logical_op` — so an `AND` of
-    two selections excludes exactly the cross product of the two option lists, which is what our
-    `parameters`/`options` pairing means.
+    BoFire's conditions are positional and combined by `logical_op`, so an `AND` of two selections
+    excludes exactly the cross product of the two option lists.
     """
     return CategoricalExcludeConstraint(
         features=list(constraint.parameters),
@@ -258,13 +205,8 @@ def _constraint(
 ) -> LinearEqualityConstraint | LinearInequalityConstraint | CategoricalExcludeConstraint:
     """Map one neutral constraint, normalizing `>=` by negation.
 
-    BoFire's inequality is `coefficients · x <= rhs` (measured, M-3a: 20 of 20 random points
-    satisfied `a + b <= 3`, none satisfied the reverse). That sense is *asserted by a test* rather
-    than assumed, because getting it backwards silently inverts a limit the chemist stated — the one
-    bug in this wave that produces a confidently wrong experiment rather than an error.
-
-    `>=` has no BoFire class, so it is the same inequality with every sign flipped: `a + b >= 3`
-    is `-a - b <= -3`.
+    BoFire's sense is `coefficients · x <= rhs` (pinned by a test); `a + b >= 3` becomes `-a - b <=
+    -3`.
     """
     if isinstance(constraint, ExcludeConstraint):
         return _exclusion(constraint)
@@ -295,11 +237,8 @@ def _to_domain(problem: OptimizationProblem) -> Domain:
     return Domain(
         inputs=Inputs(features=inputs),
         outputs=Outputs(features=_outputs(problem)),
-        # Honoured by **both** strategies that see this domain, which is the measurement that
-        # decided this wave: `RandomStrategy` seeds every cold-start campaign, and had it ignored
-        # constraints the schema would have claimed a limit was honoured while every seed point
-        # violated it. Measured 0 violations of 20 random points and 0 of 5 SOBO proposals, so no
-        # rejection-sampling path is needed here.
+        # Honoured by both strategies that see this domain (`RandomStrategy` seeding and SOBO
+        # proposals), so no rejection-sampling path is needed for linear constraints.
         constraints=Constraints(
             constraints=[_constraint(constraint) for constraint in problem.constraints]
         ),
@@ -328,20 +267,8 @@ def _observations_to_frame(
 def _frame_to_candidates(problem: OptimizationProblem, frame: pd.DataFrame) -> list[Candidate]:
     """Extract an ask() result into our `Candidate` type, the surrogate's belief included.
 
-    BoFire returns `<objective>_pred`, `<objective>_sd` and `<objective>_des` beside the parameter
-    columns whenever a model backs the proposal; a `RandomStrategy` returns the parameters alone.
-    Reading them conditionally is what lets one adapter serve both, and recovering the sd is the
-    point: it is computed on every model-guided ask and was dropped here, one function before it
-    could reach the `bo-candidate` note a chemist reads before booking lab time (F8-T1 follow-up).
-
-    `_des` is deliberately left behind. It is the acquisition/desirability score — a ranking
-    quantity in the strategy's own units, not a statement about the chemistry — and carrying it
-    would invite reading it as a confidence.
-
-    **A multi-objective ask returns the same columns per objective** (measured, M-1:
-    `yield_pred, impurity_pred, yield_sd, impurity_sd, …`), so the per-objective vectors are filled
-    from the same reader. The scalars keep the lead objective, which is what every persisted row and
-    every existing consumer already holds.
+    `<objective>_pred`/`_sd` are read when present (absent for `RandomStrategy`); `_des` is dropped
+    as a ranking quantity, not a confidence.
     """
     predicted_values, predicted_sds = {}, {}
     for objective in problem.objectives:
@@ -383,47 +310,28 @@ def initial_candidates(
 ) -> list[Candidate]:
     """Propose `n` space-filling starting points (random design, no model yet).
 
-    Used to seed a campaign before any observations exist — a GP needs data before
-    it can guide the search. In a finite (all-categorical) space the points are
-    made distinct — a duplicate seed would spend budget re-running an identical
-    experiment — and `n` beyond the space size is rejected because that many
-    distinct points cannot exist.
+    In a finite space the points are distinct, and `n` beyond its size is rejected.
     """
     _require_batch_fits_the_ceiling(n)
     strategy = strategies.map(RandomStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
-    # **Two different questions, and one of them must not be answered with `None`.**
-    # `discrete_space_size` is `None` only for a genuinely infinite (any-continuous) space;
-    # `discrete_candidate_count` is *also* `None` for a finite space too large to enumerate under
-    # an exclusion. Reading the second one here routed a merely-large space into the branch
-    # written for an infinite one, which silently dropped both guarantees the docstring above
-    # promises — measured on a 27-cell space with the ceiling lowered: 40 requested, 40 returned,
-    # **20 distinct**, and no refusal for asking 40 points of a 24-cell space. The ceiling is
-    # ENV-overridable, so any deployment that lowers it to bound the walk would have got that on
-    # ordinary spaces.
+    # `discrete_space_size` is `None` only for an infinite space; `discrete_candidate_count` is
+    # also `None` for a finite space too large to enumerate. Branch on the first, or a large finite
+    # space loses both guarantees above.
     size = discrete_space_size(problem)
     feasible = discrete_candidate_count(problem)
     with _translating_surrogate_errors(problem, "sampling initial candidates"):
         if size is None:
             return _frame_to_candidates(problem, strategy.ask(n))
-        # Refuse against the *feasible* count when it is known, since that is the number of points
-        # that can actually be drawn; fall back to the raw size when the exclusion walk was
-        # declined, where the rejection loop's own bound is what stops an impossible ask.
+        # Refuse against the feasible count when known; otherwise the raw size, with the rejection
+        # loop's own bound stopping an impossible ask.
         space = feasible if feasible is not None else size
         if n > space:
             raise ValueError(
                 f"cannot seed {n} distinct points: the discrete space has only {space}"
             )
-        # Re-ask until `n` distinct points are collected; each ask advances the
-        # strategy's RNG, and n <= space guarantees enough fresh points exist.
-        #
-        # **Bounded, because "they exist" is not "they arrive".** `n <= space` says the distinct
-        # points are *in* the domain; it says nothing about how many draws a rejection sampler needs
-        # to find them, and `_exclusion` puts `CategoricalExcludeConstraint`s on this domain, so the
-        # feasible region can be a small fraction of the enumerated space. An `ask` that returns
-        # nothing at all made this spin forever — and on the inline `suggest_next_experiment` path
-        # there is no Temporal budget above it to notice, only a wedged worker. The bound is
-        # generous (a well-behaved sampler needs one round) and the refusal names what it got, in
-        # the shape `_require_fresh_points_exist` uses one function below.
+        # Re-ask until `n` distinct points are collected; each ask advances the strategy's RNG.
+        # Bounded by `_SEED_DRAW_ROUNDS`, because exclusions can make feasible points rare and an
+        # `ask` returning nothing would otherwise spin forever.
         candidates: list[Candidate] = []
         seen: set[tuple[tuple[str, ParamValue], ...]] = set()
         for _attempt in range(max(_SEED_DRAW_ROUNDS, _SEED_DRAW_ROUNDS * n)):
@@ -452,15 +360,8 @@ def propose_candidates(
 ) -> list[Candidate]:
     """Propose the next `n` candidates from past observations — SOBO, or MOBO for a trade-off.
 
-    Requires at least `MIN_SEED_OBSERVATIONS` observations to fit the surrogate
-    (BoFire's floor); call `initial_candidates` first to seed. Raises `ValueError`
-    below that floor rather than surfacing an opaque BoFire error (gate G4).
-
-    **The strategy follows the problem, not a setting** (W3). One objective gets `SoboStrategy`;
-    more than one gets `MoboStrategy`, whose default acquisition is `qLogNEHVI`. Measured (M-1):
-    `MoboStrategy` validates with `ref_point` unset — it derives a *moving* reference per objective
-    (`AbsoluteMovingReferenceValue`) from the data rather than hiding a fixed one — and it fits at
-    two observations, the same floor SOBO has, so `MIN_SEED_OBSERVATIONS` is unchanged.
+    Needs `MIN_SEED_OBSERVATIONS` (raises `ValueError` below it). Several objectives use
+    `MoboStrategy` (`qLogNEHVI`).
     """
     if len(observations) < MIN_SEED_OBSERVATIONS:
         raise ValueError(
@@ -471,10 +372,8 @@ def propose_candidates(
     strategy, _ = _fitted_strategy(problem, observations, seed)
     with _translating_surrogate_errors(problem, f"asking for {n} candidate(s)"):
         candidates = strategy.ask(n)
-    # Fewer than `n` is allowed and is not an error: a discrete space with two fresh cells left
-    # should answer a request for three with two. Only *zero* is a failure, and the guard above
-    # already refused that. The durable loop never reaches the partial case — it stops on
-    # `space_exhausted` before asking — so this only ever shortens an inline answer.
+    # Fewer than `n` is allowed: a discrete space with two fresh cells answers a request for three
+    # with two. Only zero is a failure, refused above.
     return _frame_to_candidates(problem, candidates)
 
 
@@ -483,43 +382,18 @@ def _require_fresh_points_exist(
 ) -> None:
     """Refuse an ask a finite space cannot answer, before BoFire fails on it obscurely.
 
-    **This is the guard the inline path never had.** An ask/tell loop stops on `space_exhausted`
-    before asking; `suggest_next_experiment` — the path a chemist actually reaches — went straight
-    to `ask()`. When every cell of a discrete space has been run,
-    `_optimize_acqf_discrete` drops the already-run rows, hands an empty frame to
-    `domain.inputs.transform`, and raises `KeyError: '<parameter name>'`. That is neither a
-    `ValueError` nor one of `_SURROGATE_FAILURES`, so `connectors.server` replaces it with "an
-    internal error occurred" — nothing the model can repair, and it will simply retry.
-
-    Worth stating because it was a real mystery: `_require_observed_params_match`'s docstring
-    records a live `KeyError: 'base'` from this same BoFire frame that could not be reproduced and
-    was written up as **unproven**. It is this. The cause is exhaustion, not a parameter mismatch,
-    which is why driving mismatched parameters never reproduced it. W4 made it reachable sooner —
-    an exclusion removes cells, so a 2x2 minus one pairing exhausts after three runs, not four.
-
-    **The fix is this guard and not a wider `except`.** Adding `KeyError` to `_SURROGATE_FAILURES`
-    was tried and reverted: `test_propose_candidates_does_not_swallow_unrelated_errors` in
-    `tests/test_bo.py` exists to stop exactly that, and it is right — wrapping a `KeyError`
-    would misdiagnose a code
-    defect as bad chemistry data *and* make it non-retryable on the durable path, telling a chemist
-    to "vary the inputs" about a bug in this repository. A cause we understand gets a sentence; one
-    we do not gets a stack trace.
+    An exhausted space makes BoFire raise a bare `KeyError`, which is deliberately not translated.
     """
     space = discrete_candidate_count(problem)
     if space is None:
         return
-    # Counted under the same feasibility filter `space` was: an observation of an *excluded* point
-    # is not one of the cells `discrete_candidate_count` enumerated, and counting it as one refused
-    # a legitimate ask with "the screen is complete" while fresh cells remained. See
-    # `distinct_feasible_candidate_count`.
+    # Counted under the same feasibility filter as `space`: an observation of an excluded point is
+    # not one of the enumerated cells.
     run = distinct_feasible_candidate_count(problem, observations)
     if run < space:
-        # Fresh cells remain. Fewer than the batch asked for is fine — BoFire returns what it
-        # can — so the threshold here is *zero fresh points*, not `space_exhausted`'s "cannot fill
-        # a batch". The batch size is deliberately not a parameter of this guard: it was one, and
-        # the body never read it.
-        # That distinction matters: `space_exhausted` is the durable loop's signal to stop, and
-        # borrowing it here would refuse an ask for three that could honestly answer with two.
+        # Fresh cells remain. The threshold is zero fresh points, not `space_exhausted`'s "cannot
+        # fill a batch", which is the durable loop's stop signal and would refuse an ask that can
+        # answer partly.
         return
     raise ValueError(
         f"this decision space holds {space} distinct condition(s) and all {run} have been run, so "
@@ -534,14 +408,8 @@ def _fitted_strategy(
 ) -> tuple[Any, pd.DataFrame]:
     """Build the strategy the problem calls for and fit it to the observations.
 
-    Shared by the three things that need a fitted model — propose, predict, cross-validate — so all
-    three speak about *the same* surrogate rather than three independently configured ones. That is
-    the whole reason `_fit_quality_from`'s scores are trustworthy: BoFire picks the surrogate class
-    from the domain, so a fit quality measured off this strategy describes the model that made the
-    recommendation, and no surrogate class is named in our code (measured, M-7).
-
-    The fitted frame is returned beside the strategy because cross-validation needs the same rows,
-    and rebuilding them would be a second definition of "the experiments".
+    Shared by propose, predict and cross-validate so all describe one surrogate; returns the fitted
+    frame too.
     """
     if len(observations) < MIN_SEED_OBSERVATIONS:
         raise ValueError(
@@ -567,8 +435,7 @@ def _predictions_from(
 ) -> list[Prediction]:
     """Query an already-fitted strategy at the caller's points.
 
-    Takes the strategy rather than fitting one, so the prediction and the fit quality beside it
-    describe the same model rather than two identically-configured ones.
+    Takes the fitted strategy so the prediction and its fit quality describe the same model.
     """
     frame = pd.DataFrame(
         [{p.name: point.get(p.name) for p in problem.parameters} for point in points]
@@ -595,10 +462,8 @@ def _predictions_from(
 def _metric(results: Any, metric: RegressionMetricsEnum) -> float:
     """One number from a `CvResults`, pooled across folds rather than averaged over them.
 
-    `get_metric` returns a `pd.Series`, and its default `combine_folds=True` computes the metric
-    once over *all* held-out predictions together. That is the number to report: a mean of
-    per-fold R² weights a fold of two points the same as a fold of ten, and at campaign sizes the
-    folds are exactly that uneven.
+    `get_metric`'s default `combine_folds=True` scores all held-out predictions together, so uneven
+    small folds are not weighted equally.
     """
     return float(results.get_metric(metric).iloc[0])
 
@@ -606,11 +471,8 @@ def _metric(results: Any, metric: RegressionMetricsEnum) -> float:
 def _is_flat(spread: float, column: pd.Series) -> bool:
     """Whether these observations carry too little range for "variance explained" to mean anything.
 
-    Relative to the response's own magnitude, because R² is scale-free and this comparison must not
-    be: a spread of 1e-9 is the whole story on a column reading 42.0 and is nothing on one reading
-    1e-12. `abs(mean)` is the magnitude, so a column centred on zero needs an exactly flat spread —
-    which is the right answer there, since nothing else is available to scale by and a response
-    genuinely centred on zero with a 1e-30 range is not a case chemistry produces.
+    Relative to the response's magnitude (`abs(mean)`), since R² is scale-free; a column centred on
+    zero needs an exactly flat spread.
     """
     return spread <= abs(float(column.mean())) * settings.bo_flat_response_relative_spread
 
@@ -618,13 +480,8 @@ def _is_flat(spread: float, column: pd.Series) -> bool:
 def _resolve_folds(folds: int | None, n_observations: int) -> int:
     """How many folds to cross-validate over: the caller's number, or one the data can carry.
 
-    **A defaulted fold count adapts to the data; a stated one does not.** `bo_cv_folds` is 5, and a
-    three-run campaign cannot hold out a run per fold — which used to make `predict_outcome` *raise*
-    on exactly the early campaigns it is most useful for, because the tool always defaulted. When
-    the number came from config it is the system's choice, so it bends to the run count; when the
-    caller named it, asking for more folds than runs is a mistake worth a sentence rather than a
-    silent adjustment. Either way `FitQuality.folds` records what was actually used, so an adapted
-    count is visible rather than hidden.
+    A defaulted count adapts to the run count; a stated one is enforced. `FitQuality.folds` records
+    the result.
     """
     if folds is None:
         return max(2, min(settings.bo_cv_folds, n_observations))
@@ -642,10 +499,8 @@ def _fit_quality_from(
     problem: OptimizationProblem, strategy: Any, frame: pd.DataFrame, folds: int, n: int
 ) -> list[FitQuality]:
     """Cross-validate the surrogates an already-fitted strategy chose, one score per objective."""
-    # Matched on the surrogate's own output key rather than on position. `strict=True` catches a
-    # count mismatch but not an ordering one, and a mislabelled score is worse than a missing score:
-    # it would attach one objective's R² to another in the number the summary says "licenses reading
-    # the predictions at all".
+    # Matched on the surrogate's output key, not position: `strict=True` catches a count mismatch
+    # but not an ordering one, and a mislabelled R² is worse than a missing one.
     by_output = {spec.outputs[0].key: spec for spec in strategy.surrogate_specs.surrogates}
     missing = sorted({o.name for o in problem.objectives} - set(by_output))
     if missing:
@@ -658,24 +513,16 @@ def _fit_quality_from(
         for objective in problem.objectives:
             surrogate = surrogate_api.map(by_output[objective.name])
             _, test, _ = surrogate.cross_validate(frame, folds=folds)
-            # R² is the fraction of the target's variance the model explains, and with no variance
-            # it has no denominator. `get_metric` answers 1.0 there — measured on eight runs all
-            # reading 42 — so a flatlined assay was published as a perfect model. The spread is
-            # taken off the same frame the folds are cut from, so it is the spread of exactly the
-            # runs the score would have been about, and it is reported beside the score because R²
-            # is scale-free and a reader cannot otherwise see what range it is a fraction of.
+            # R² has no denominator without variance (`get_metric` answers 1.0 for a flat response).
+            # The spread is taken off the same frame the folds are cut from and reported beside the
+            # score, since R² is scale-free.
             column = frame[objective.name]
             spread = float(column.max() - column.min())
             scores.append(
                 FitQuality(
                     objective=objective.name,
-                    # **Relative, not `spread == 0.0`.** Exact equality catches a stuck assay and is
-                    # defeated by a systematic drift below its own noise: driven, eight runs of 42.0
-                    # differing by 1e-10 scored R² 0.9991 and published "predicts held-out runs with
-                    # R² 1.00", while pure 1e-9 jitter over the same values scored 0.175 — random
-                    # flatlines score honestly and a *trend* in the last decimal does not. See
-                    # `bo_flat_response_relative_spread` for why the threshold is a claim about
-                    # assays rather than about float arithmetic.
+                    # Relative, not `spread == 0.0`: a drift below the assay's own noise can still
+                    # score a high R². See `bo_flat_response_relative_spread`.
                     r2=(
                         None
                         if _is_flat(spread, column)
@@ -700,22 +547,9 @@ def interrogate_surrogate(
 ) -> tuple[list[Prediction], list[FitQuality]]:
     """Ask one fitted surrogate both questions: what it expects here, and how well it predicts.
 
-    **One fit, and that is the point rather than an optimization.** The score is only worth quoting
-    beside a prediction if it describes the model that made it; fitting twice would give two
-    identically-configured models and a sentence that was true only by construction.
-    `predict_outcome` asks this function for both halves at once, which is the shape the paragraph
-    above is about.
-
-    **Both thin wrappers over it are gone, and neither was reachable.** `surrogate_fit_quality` was
-    deleted unreferenced on 2026-08-27; `predict_at` — which baked in `assess_fit=False` and
-    projected the first half — followed on 2026-09-07 with zero `src/` callers, because a second
-    spelling of one question is a reader's problem long before it is a maintainer's. The
-    empty-`points` guard it carried is this function's own: asked for neither a prediction nor a fit
-    score, it raises here.
-
     Raises:
-        ValueError: Below the observation floor, when the caller named more folds than runs, or
-            when neither a point nor a fit assessment was asked for.
+        ValueError: Below the observation floor, when the caller named more folds than runs, or when
+            neither a point nor a fit assessment was asked for.
     """
     if not points and not assess_fit:
         raise ValueError("interrogate_surrogate was asked for neither a prediction nor a fit score")
@@ -733,16 +567,8 @@ def interrogate_surrogate(
 def _resolution(generator: str) -> int:
     """The resolution of a two-level design with this generator: its shortest defining word.
 
-    Computed rather than reported as a run count, because the run count does not say what was
-    given up. A generator string names one word per factor — a single letter for a base factor,
-    a product like `abc` for a factor aliased onto that interaction — so each derived factor
-    contributes the defining word `abc·d`, and the defining relation is every product of those.
-    The shortest word in that group *is* the resolution, which is the number a chemist needs to
-    know whether a main effect they read off the screen could really be a two-factor interaction.
-
-    Derived here rather than taken from BoFire because BoFire only exposes it as a formatted alias
-    listing (`bofire.utils.doe.get_alias_structure`), and parsing prose to recover a number is a
-    worse dependency than restating a three-line definition.
+    Each derived factor (e.g. `abc`) contributes the word `abc·d`; the shortest product in the group
+    is the resolution.
     """
     words = generator.split()
     # A factor whose word is a single letter is a base factor and aliases nothing.
@@ -766,17 +592,10 @@ def _two_level_names(problem: OptimizationProblem) -> list[str]:
 def _require_knobs_are_honoured(
     problem: OptimizationProblem, n_center: int, n_repetitions: int, reduced: bool
 ) -> None:
-    """Refuse the two knobs BoFire silently ignores rather than passing them into a no-op (W2).
+    """Refuse the two knobs BoFire silently ignores rather than passing them into a no-op.
 
-    Measured (M-5): on an all-categorical domain `n_center` and `n_repetitions` are **inert** —
-    three two-level categoricals give 8 runs at every value of either, exactly as `n_generators`
-    does. Threading an argument into a call that ignores it is how `n_generators` came to be
-    documented, imported and dead; a refusal naming the reason is the only honest alternative,
-    because there is no partial behaviour to fall back on.
-
-    A centre point also has to *mean* something. On the reduced path a categorical factor is
-    re-encoded onto [0, 1], so a centre row would put it at 0.5 — which decodes to neither of its
-    levels, and is why `n_center=0` was forced there from the start (D-2026-08-02).
+    On an all-categorical domain `n_center` and `n_repetitions` do not change the design. A centre
+    point also means nothing for a categorical re-encoded onto [0, 1]: 0.5 decodes to neither level.
     """
     continuous = _two_level_names(problem)
     if n_center and not continuous:
@@ -806,24 +625,8 @@ def _fractional_design(
 ) -> ScreeningDesign:
     """A reduced two-level screen: `2**-n_generators` of the grid, with its resolution stated.
 
-    BoFire fractionates the *continuous* half of a domain and always crosses the categorical half
-    in full (`FractionalFactorialStrategy._get_categorical_design` enumerates every combination and
-    never consults `n_generators`) — measured: seven two-level `CategoricalInput`s give 128 runs at
-    every `n_generators` value that validates at all. So the only way to express a reduced screen
-    over categorical factors is to hand BoFire the factors as continuous inputs on [0, 1], let it
-    build the fractional design at those two bounds, and map each bound back to its label.
-
-    **A continuous factor joins that set on its own bounds, and the union fractionates as one**
-    (measured, M-8): two real continuous factors beside three re-encoded categoricals give 32, 16
-    and 8 runs at `n_generators` 0, 1 and 2, with every factor at exactly two levels and the real
-    ones at their declared bounds. So `n_generators` counts against the *total* factor count, and
-    the generator — hence the resolution derived from it — describes the whole design rather than
-    part of it, which is what makes returning a resolution honest at all.
-
-    Two-level only, and a *categorical* factor with a different number of levels is **refused**
-    rather than quietly crossed in full: this is a two-level design by construction, and a
-    three-level factor smuggled in would make the returned resolution describe only part of the
-    design.
+    BoFire fractionates only continuous inputs, so categoricals are encoded onto [0, 1] and mapped
+    back; `n_generators` counts against all factors. Non-two-level categoricals are refused.
     """
     categoricals = [p for p in problem.parameters if isinstance(p, CategoricalParameter)]
     wrong_levels = [p.name for p in categoricals if len(p.categories) != 2]
@@ -833,9 +636,8 @@ def _fractional_design(
             "number of levels — give every factor exactly two levels, or ask for n_generators=0 "
             "to get the full grid"
         )
-    # Raised here rather than from inside the strategy's validator so the caller sees a plain
-    # ValueError ("Design not possible, as main factors are confounded with each other") instead of
-    # a pydantic ValidationError wrapping it.
+    # Raised here so the caller sees a plain ValueError rather than a pydantic ValidationError
+    # wrapping it.
     generator = get_generator(n_factors=len(problem.parameters), n_generators=n_generators)
     domain = Domain(
         inputs=Inputs(
@@ -883,35 +685,8 @@ def _full_design(
 ) -> ScreeningDesign:
     """Every combination: categorical levels crossed with each continuous factor's two bounds.
 
-    **The cross product is built here rather than asked of BoFire, because BoFire does not return
-    one for a mixed domain.** `FractionalFactorialStrategy._ask` combines its continuous and
-    categorical frames by tiling *both* — `concat([design] * len(cat))` beside
-    `concat([cat] * len(design))` — where a cross product repeats one and tiles the other. Row *i*
-    therefore pairs `continuous[i % N]` with `categorical[i % C]`, which enumerates the product only
-    when `gcd(N, C) == 1` and otherwise yields `lcm(N, C)` distinct rows each repeated `gcd(N, C)`
-    times.
-
-    Measured on this tree, two-level factors throughout, before this changed:
-
-        cat=1 cont=1: rows=4  distinct=2  expected=4   missing=2
-        cat=2 cont=1: rows=8  distinct=4  expected=8   missing=4
-        cat=2 cont=2: rows=16 distinct=4  expected=16  missing=12
-        cat=3 cont=1: rows=16 distinct=8  expected=16  missing=8
-
-    Three quarters of a 2x2 design absent, the survivors duplicated, and one factor perfectly
-    confounded with another — while `ScreeningDesign.resolution` stayed `None` and
-    `ScreeningDesign.summary` said "Exhaustive over the levels stated: every combination of them is
-    run." A screening design exists to attribute an effect to a factor; an aliased one cannot, and a
-    chemist reading that sentence has no way to know. `itertools.product` is what "full factorial"
-    means, it is three lines, and it cannot drift from the claim the summary makes.
-
-    The homogeneous paths went through the same combining step and are covered by the same product:
-    a categorical-only or continuous-only problem has nothing to cross, so the result is identical
-    to what BoFire returned for it.
-
-    `n_center` still means what it did — midpoint rows for the continuous factors, per combination
-    of the categorical ones, as `summary` describes — and `n_repetitions` replicates the factorial
-    part.
+    Built with `itertools.product` because BoFire tiles mixed frames instead of crossing them.
+    `n_center` adds midpoints per categorical combination; `n_repetitions` replicates the corners.
     """
     levels: list[list[ParamValue]] = []
     for parameter in problem.parameters:
@@ -952,11 +727,8 @@ def _full_design(
 def _randomized(design: ScreeningDesign, seed: int | None) -> ScreeningDesign:
     """Shuffle the run order reproducibly, and record that it was shuffled.
 
-    Done here rather than through `FractionalFactorialStrategy.randomize_runorder`, which exists
-    and works (measured: seed-reproducible and seed-sensitive). Two reasons for the boundary: the
-    two design paths construct their strategies differently, so shuffling once here is what makes
-    them randomize identically under one `bo_seed` default; and it keeps the guarantee ours if a
-    future BoFire release changes what that argument seeds from.
+    Done here rather than via `FractionalFactorialStrategy.randomize_runorder` so both design paths
+    randomize identically under one `bo_seed`, independent of how BoFire seeds.
     """
     shuffled = list(design.runs)
     random.Random(_resolve_seed(seed)).shuffle(shuffled)
@@ -965,15 +737,6 @@ def _randomized(design: ScreeningDesign, seed: int | None) -> ScreeningDesign:
 
 def _require_batch_fits_the_ceiling(n: int) -> None:
     """Refuse an ask beyond `bo_max_candidates_per_ask`, before the optimizer runs.
-
-    **In the engine and not in the MCP tool**, for the reason `_require_design_fits_the_ceiling`
-    gives in full one function below: a bound in the transport is a bound the in-process callers do
-    not get, and the durable campaign's per-round batch reaches these two functions without passing
-    through a tool schema at all.
-
-    Checked before the strategy is built rather than after the batch exists, because the cost this
-    bounds is the acquisition optimization itself — a batch that is refused once it has been
-    computed has already been paid for.
 
     Raises:
         ValueError: Naming the request, the ceiling and the setting that moves it.
@@ -995,32 +758,7 @@ def _require_design_fits_the_ceiling(
 ) -> None:
     """Refuse a screen whose run count exceeds `bo_max_design_runs`, before building it.
 
-    **The size of a full factorial is a product of model-supplied numbers, and nothing bounded
-    it.** Every level count comes from a category list the model wrote, so the corner count is
-    exponential in the parameter count: twenty two-level factors is 1 048 576 rows, each a dict of
-    twenty entries, materialized as a Python list before anything downstream sees it. That is not
-    an adversarial input — it is one plausible over-broad problem statement, and the pod dies
-    building the answer to it.
-
-    Counted rather than measured after the fact, because a bound that trips once the list exists
-    has already paid the memory. The arithmetic mirrors `_full_design`'s exactly: the factorial
-    corners (categorical levels, continuous factors at two bounds each) times `n_repetitions`,
-    plus `n_center` centre rows per categorical combination. A reduced design halves the corner
-    count per generator, so it is checked *after* the halving — 40 two-level factors at 30
-    generators really is 1 024 runs, and refusing it would refuse a design that fits.
-
-    **The product is computed in full, and the first version of this guard did not.** Stopping the
-    multiplication once it passed the ceiling looked like the careful thing to do and reproduced,
-    inside the fix, the defect this whole change is about: a partial product is *smaller* than the
-    true one, so shifting it right by `n_generators` could land back under the ceiling and admit a
-    design that never fits. Measured on this tree — 40 two-level factors at one generator passed a
-    4 096 ceiling on a partial product of 8 192, against a true reduced size of 2^39. Python
-    integers are arbitrary precision and this is one multiplication per parameter, so there was
-    nothing to optimise: counting is cheap at any magnitude, and it is *materializing the rows*
-    that is not.
-
-    This lives in the engine and not in the MCP tool deliberately, following the rule the fleet
-    states about slow tools: a bound in the transport is a bound the in-process callers do not get.
+    Counted with `_full_design`'s arithmetic over unbounded ints, so nothing is materialized first.
 
     Raises:
         ValueError: Naming the run count, the ceiling, and the two ways to get under it.
@@ -1028,12 +766,9 @@ def _require_design_fits_the_ceiling(
     if n_generators and any(
         len(p.categories) != 2 for p in problem.parameters if isinstance(p, CategoricalParameter)
     ):
-        # Say nothing about size here: a reduced design over a three-level factor is refused by
-        # `_fractional_design` a few lines later, and this guard's arithmetic (`corners >>
-        # n_generators`) models a design that cannot be built. It reported a fictional run count
-        # and then offered two remedies that were both wrong for the input — "screen fewer
-        # factors" and "ask for a reduced design with n_generators", to a caller who had already
-        # asked for one. The real error is the caller's to act on, so let it through.
+        # A reduced design over a non-two-level factor is refused by `_fractional_design`, whose
+        # error is the one the caller can act on; this arithmetic would describe a design that
+        # cannot be built.
         return
     corners = 1
     categorical_combinations = 1
@@ -1068,38 +803,14 @@ def factorial_design(
 ) -> ScreeningDesign:
     """Screen `problem`'s factors — the full grid, or a reduced fraction of it.
 
-    `n_generators=0` (the default) is every combination of the categorical levels crossed with each
-    continuous factor's two bounds. Each generator beyond that halves the run count, so seven
-    two-level factors go from 128 runs to 64, 32 or 16 — the difference between a design that fits a
-    96-well plate and one that does not.
-
-    **A continuous factor is admitted and held at its two bounds** (W2). This used to be refused
-    (D-092), because the class silently fractionates a continuous input to its two bounds and a
-    design that looks complete while quietly reshaping a factor is worse than a clear refusal. That
-    was right while nothing in the return could say what had been done; `ScreeningDesign` now
-    carries `two_level_continuous` and a `summary` naming every collapsed factor, so the condition
-    the refusal was waiting for is met. A screen still says nothing about what happens *between*
-    those bounds — use `propose_candidates` for that.
-
-    `n_center` adds centre runs at the midpoint of every continuous factor, which is what detects
-    curvature a two-level design cannot see; **BoFire adds them per categorical combination**, so
-    the total is not `corners + n_center` (measured: 4·2^k + n_center·2^k over k categoricals).
-    `n_repetitions` replicates the factorial part, which is what gives the screen a pure-error
-    estimate. `randomize` shuffles the run order against a drift over the session, reproducibly
-    under `seed`.
-
-    Both `n_center` and `n_repetitions` are **refused** on an all-categorical problem rather than
-    passed into a call that ignores them — see `_require_knobs_are_honoured`.
-
-    The returned `ScreeningDesign` carries the design's `resolution` and a `summary` naming it, so
-    a reduced design cannot be presented as an exhaustive one.
+    Continuous factors are held at their bounds (named in `ScreeningDesign`); each generator halves
+    the runs. `n_center` adds curvature-detecting midpoints, `n_repetitions` replicates, `randomize`
+    shuffles under `seed`; both knobs are refused on an all-categorical problem. The result states
+    its `resolution`.
     """
     if problem.constraints:
-        # Measured: `FractionalFactorialStrategy` rejects *every* constraint class at construction
-        # ("is not implemented for strategy FractionalFactorialStrategy"), linear and exclusion
-        # alike — a screen enumerates corners and there is no feasible-region step in it. So this
-        # refusal is not the safety; it is the message, raised where the caller can act on it
-        # instead of arriving as a pydantic error naming a BoFire class.
+        # `FractionalFactorialStrategy` rejects every constraint class; this refusal exists to give
+        # a message the caller can act on instead of a pydantic error naming a BoFire class.
         stated = "; ".join(constraint.describe() for constraint in problem.constraints)
         raise ValueError(
             f"a factorial screen cannot honour a constraint ({stated}): it enumerates the corners "
@@ -1125,11 +836,8 @@ def factorial_design(
     return _randomized(design, seed) if randomize else design
 
 
-#: BoFire's criterion class for each name `DESIGN_CRITERIA` exposes.
-#:
-#: A mapping rather than a string passed through, because the names on the left are this
-#: repository's surface and the classes on the right are somebody else's: a BoFire rename is a
-#: failure here rather than a model writing an unknown string into a tool argument.
+#: BoFire's criterion class for each name `DESIGN_CRITERIA` exposes; a mapping so a BoFire
+#: rename fails here rather than via a model-written string.
 _CRITERIA = {
     "d-optimal": DOptimalityCriterion,
     "a-optimal": AOptimalityCriterion,
@@ -1141,11 +849,8 @@ _CRITERIA = {
 def _model_terms(problem: OptimizationProblem, formula: str) -> int:
     """How many coefficients `formula` has over this problem's factors.
 
-    BoFire's own count, through the function its DoE strategy uses, rather than the arithmetic
-    re-derived here. The arithmetic is not hard — a fully quadratic model over k continuous factors
-    has 1 + 2k + k(k-1)/2 terms — and that is exactly why re-deriving it is the wrong call: a
-    categorical factor contributes one column per level *minus one*, so the two definitions agree
-    on the easy case and diverge on the case a chemist actually brings.
+    BoFire's own count rather than re-derived arithmetic: a categorical contributes one column per
+    level minus one, where a naive formula diverges.
     """
     return len(get_formula_from_string(model_type=formula, inputs=_to_domain(problem).inputs))
 
@@ -1155,19 +860,7 @@ def _require_design_can_estimate_its_model(
 ) -> None:
     """Refuse a design with fewer runs than the model it claims to be optimal for.
 
-    **BoFire does not refuse this, and the design it returns looks like any other.** Measured on
-    bofire 0.4.1: a `fully-quadratic` criterion over three continuous factors, asked for **3** runs
-    against a 10-term model, returns three rows and no error. The information matrix is singular,
-    so not one coefficient of that model is estimable — and nothing in the returned frame says so.
-
-    That is the shape this repository refuses everywhere else: a plausible answer that is wrong in
-    a way the reader cannot see. A chemist handed those three rows runs them, fits nothing, and
-    concludes the chemistry is noisy.
-
-    The bound is `n_experiments >= n_terms`, which is the condition for estimability and **not** a
-    recommendation — a design at exactly n_terms has zero residual degrees of freedom, so it fits
-    the model perfectly and can say nothing about how well. The message says so rather than
-    encoding a second, softer bound nobody asked for.
+    BoFire returns such a design silently with no estimable coefficient.
 
     Raises:
         ValueError: Naming the run count, the term count and the formula that set it.
@@ -1186,49 +879,27 @@ def _require_design_can_estimate_its_model(
 
 #: How far outside a declared linear constraint a returned run may sit before it is a failure.
 #:
-#: **Measured, not chosen.** BoFire's DoE solves a continuous optimization — SLSQP through
-#: `scipy.minimize` where cyipopt is absent, which is this deployment — so the point it lands on
-#: satisfies an active constraint to the optimizer's own tolerance rather than exactly. Driven over
-#: 20 seeds x 4 criteria on a two-parameter constrained domain, the worst excursion was **7.5e-06**
-#: (`temp` 70.00000746 against an active limit at 70.0).
-#:
-#: A first version of `tests/test_bo_optimal_design.py` asserted 1e-6. It passed here and **failed
-#: on CI**, whose different scipy build landed on the other side of a bound tighter than the solver
-#: ever promised — a flaky assertion rather than a flaky solver, and the reason this constant is a
-#: measurement with its method written down rather than a number somebody liked.
-#:
-#: 1e-4 is an order of magnitude above that worst case and orders below anything a chemist can set:
-#: nobody dials 70.0001 °C or weighs 3.0001 equivalents. So a breach of *this* bound is a real
-#: infeasibility rather than arithmetic, which is what makes refusing on it worth doing.
+#: BoFire's DoE solves a continuous optimization (SLSQP via scipy here), so an active constraint
+#: is met only to solver tolerance, and that varies across scipy builds. 1e-4 is well above that
+#: and far below anything a chemist can set, so a breach is a real infeasibility.
 _CONSTRAINT_TOLERANCE = 1e-4
 
 
 #: How close to a bound, as a fraction of the parameter's range, a solved value is solver noise
-#: rather than a condition. Measured on `a, b ∈ [0, 3]` with `a + b <= 3`, d-optimal, seeds 0-2:
-#: every corner the solver meant came back within 1.7e-13 of its bound (`2.99999999999984`,
-#: `1.17e-15`), so 1e-9 is four orders above that and five below anything a chemist can dial.
+#: rather than a condition: well above solver residue, far below anything a chemist can dial.
 _BOUND_SNAP_FRACTION = 1e-9
 
-#: Significant digits a solved interior value keeps. The same noise sits in the last few bits of an
-#: interior point, and a value nobody can set is not a difference between two runs. Ten digits moves
-#: a value by at most 5e-11 of *itself*, which is not inside the absolute `_CONSTRAINT_TOLERANCE`
-#: at every magnitude: at ~1e6, times a constraint's coefficients, it is more — measured, a
-#: space-filling design over `7·a + 13·b <= 3.1e7` was refused after rounding. So the breach check
-#: reads the solver's values, and a run whose cleaned form breaches is returned as solved
-#: (`_verified_clean_run`).
+#: Significant digits a solved interior value keeps. Relative rounding can exceed the absolute
+#: `_CONSTRAINT_TOLERANCE` at large magnitudes, so breaches are checked on the solver's values
+#: and a run whose cleaned form breaches is returned as solved (`_verified_clean_run`).
 _DESIGN_SIGNIFICANT_DIGITS = 10
 
 
 def _clean(parameter: ContinuousParameter | CategoricalParameter, value: ParamValue) -> ParamValue:
     """A solved value with its solver noise removed: snapped onto a bound it meant, else rounded.
 
-    **Without this, replicates were invisible and the chemist was handed noise.** The DoE solver
-    returns a corner it chose twice as `(3.0, 0.0)` and `(2.999999999999995, 1.17e-15)`, so
-    exact-equality duplicate detection reported `duplicate_runs=0` over a design that replicated
-    three corners, and the conditions read as though somebody should weigh 1e-15 equivalents.
-    Done *after* `_constraint_breaches`, which checks the solver's own values: its tolerance is
-    absolute, and neither this snap nor this rounding is bounded in absolute terms — so
-    `_verified_clean_run` checks the cleaned run again and keeps the raw one where it breaches.
+    Makes replicates detectable by equality and conditions readable. Not bounded in absolute terms,
+    so `_verified_clean_run` re-checks the cleaned run.
     """
     if not isinstance(parameter, ContinuousParameter) or not isinstance(value, float):
         return value
@@ -1244,14 +915,7 @@ def _constraint_breaches(
 ) -> list[str]:
     """Every run sitting outside a declared linear constraint by more than the tolerance.
 
-    **"Every run is feasible" is this function's claim, and before it the claim was only a
-    sentence.** Honouring a limit is `optimal_design`'s whole reason to exist over
-    `factorial_design`, and the ADR, the skill and `OptimalDesign.summary` all say so — so a solver
-    that quietly returned an infeasible corner would make three documents wrong at once and hand a
-    chemist conditions the chemistry forbids.
-
-    `point_is_feasible` does not cover this and is not the place to: it answers a different
-    question — does this run consume one of the space's cells — and reads `ExcludeConstraint` only.
+    Feasibility is `optimal_design`'s promise, so it is verified rather than assumed.
     """
     breaches: list[str] = []
     for index, run in enumerate(runs, start=1):
@@ -1280,12 +944,8 @@ def _verified_clean_run(
 ) -> dict[str, ParamValue]:
     """`run` cleaned by `_clean`, unless cleaning breaks a constraint — then `run` as solved.
 
-    The breach check reads the solver's values, because cleaning is not bounded in absolute terms
-    and a solve on its limit would otherwise be refused. But what the chemist receives is the
-    cleaned run, and a check that never read it verified nothing about it: at ~1e6, rounding a
-    value onto its limit carried the total 64 tolerances over. So the cleaned run is checked too,
-    and where it breaches, the verified raw run is what is returned — every returned run is one
-    `_constraint_breaches` passed, which is what `honoured_constraints` claims.
+    Every returned run is one `_constraint_breaches` passed, which is what `honoured_constraints`
+    claims.
     """
     cleaned = {p.name: _clean(p, run[p.name]) for p in problem.parameters}
     return run if _constraint_breaches(problem, [cleaned]) else cleaned
@@ -1300,28 +960,7 @@ def optimal_design(
 ) -> OptimalDesign:
     """Lay out `n_experiments` runs over `problem`, honouring its constraints.
 
-    The answer to the question `factorial_design` refuses. A factorial enumerates the corners of
-    the space and cannot honour a limit at all, so a chemist with a real constraint — "base plus
-    acid under 3 equivalents" — and a fixed run budget had no design to run. This honours the
-    constraints the problem declares and fills exactly the budget asked for.
-
-    **Two different questions live behind `criterion`.** An optimality criterion builds the design
-    that best estimates a *stated model*, so `formula` is part of the question rather than a
-    tuning knob: the same factors and budget give a different design for a linear model than a
-    quadratic one, and a design built for `linear` is blind to curvature by construction.
-    `space-filling` assumes no model and spreads the runs to cover the region, which is what to
-    use when the question is "what does this space even look like".
-
-    Args:
-        problem: The decision space, with any constraints it declares.
-        n_experiments: The run budget. Filled exactly.
-        criterion: One of `DESIGN_CRITERIA`.
-        formula: One of `DESIGN_FORMULAE`. Ignored by `space-filling`, which assumes no model.
-        seed: Reproducibility for the optimizer's own starting points.
-
-    Returns:
-        The runs, with the formula, the term count, the duplicate count and a `summary` stating
-        what the design cannot do.
+    An optimality criterion is optimal for the stated `formula`; `space-filling` assumes no model.
 
     Raises:
         ValueError: An unknown criterion or formula, a non-positive budget, a budget over
@@ -1344,10 +983,8 @@ def optimal_design(
             f"{n_experiments} runs is over this deployment's bo_max_design_runs "
             f"({settings.bo_max_design_runs}). Raise the setting, or ask for fewer."
         )
-    # **Refused before the solver, by name.** BoFire's DoE strategy cannot take the categorical
-    # exclusion `_exclusion` builds — measured, it raises "Feature cat is not a input feature" —
-    # and that surfaced as `SurrogateFitError` telling the chemist to add runs, which no budget
-    # fixes. `_constraint_breaches` could not have verified an exclusion either.
+    # Refused before the solver: BoFire's DoE strategy cannot take a categorical exclusion, and
+    # `_constraint_breaches` could not verify one.
     exclusions = [c for c in problem.constraints if isinstance(c, ExcludeConstraint)]
     if exclusions:
         raise ValueError(
@@ -1398,8 +1035,7 @@ def optimal_design(
         formula=None if space_filling else formula,
         n_terms=0 if space_filling else _model_terms(problem, formula),
         duplicate_runs=duplicates,
-        # Only what `_constraint_breaches` verified — on the returned runs themselves, via
-        # `_verified_clean_run`: exclusions are refused above, so this is every constraint the
-        # design carries, counted by the kind that was actually checked.
+        # Only constraints `_constraint_breaches` verified on the returned runs; exclusions are
+        # refused above, so this is every constraint the design carries.
         honoured_constraints=sum(isinstance(c, LinearConstraint) for c in problem.constraints),
     )

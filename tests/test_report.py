@@ -1,9 +1,7 @@
-"""Behavioral tests for the report harness (plan Phase 5b), runnable without a server.
+"""Behavioral tests for the report harness, runnable without a server.
 
-Proves the CHECKMATE 5b acceptance: a request produces a sectioned draft where every
-statement links a source note, unsupported sections are marked rather than hallucinated,
-fabricated claims are discarded by the verify step, and the harness core is source-agnostic
-(works with a fake retriever and with the real graph / fingerprint retrievers).
+Every statement links a source note, unsupported sections are marked rather than invented,
+fabricated claims are discarded by the verify step, and the harness core is source-agnostic.
 """
 
 import asyncio
@@ -135,11 +133,9 @@ def _section(*chunks: EvidenceChunk) -> SynthesizedSection:
 
 
 def test_an_ordinary_bullet_carries_no_extra_metadata() -> None:
-    """The common chunk — no conflict, no stated confidence, human-authored — renders as before.
+    """An ordinary chunk renders with no extra metadata line.
 
-    Provenance is rendered only where it is informative. Rendering all of it unconditionally is
-    the failure this pins: an empty metadata line under every bullet buries the one bullet that
-    carries a warning, which is the only bullet the reader had to see.
+    Provenance renders only where informative, so a warning bullet is not buried among empty ones.
     """
     chunk = EvidenceChunk(content="Yield rose to 85%.", source_note_id="reaction-a", retriever="g")
     body = report_note(Report(title="R", sections=[_section(chunk)])).body
@@ -147,12 +143,10 @@ def test_an_ordinary_bullet_carries_no_extra_metadata() -> None:
 
 
 def test_a_conflicting_chunk_warns_instead_of_reading_as_corroboration() -> None:
-    """A flagged disagreement must reach the page; the report dropped `conflicts_with` entirely.
+    """A conflicting chunk warns instead of reading as corroboration.
 
-    `kg.conflicts` exists so retrieval marks notes that disagree rather than returning both
-    silently, and the report is exactly where two agreeing-looking bullets get counted as two
-    independent confirmations. The conflicting id is named but *not* wikilinked: the report warns
-    about that note, it does not cite it, and a link would put it in the report's own citations.
+    The conflicting id is named but not wikilinked, so it does not become one of the report's
+    citations.
     """
     chunk = EvidenceChunk(
         content="Yield rose to 85%.",
@@ -167,12 +161,7 @@ def test_a_conflicting_chunk_warns_instead_of_reading_as_corroboration() -> None
 
 
 def test_two_chunks_differing_only_in_provenance_render_differently() -> None:
-    """An uncertain agent-drafted note read identically to a human-merged one (D-160).
-
-    Same sentence, same retriever: the only difference is who wrote the source note and how sure
-    it is — which is the whole of "how much of this was AI-drafted?", and the draft answered it
-    the same way for both.
-    """
+    """Two chunks differing only in authorship and confidence render differently."""
     text = "Yield rose to 85%."
     human = EvidenceChunk(content=text, source_note_id="reaction-a", retriever="g")
     agent = EvidenceChunk(
@@ -204,14 +193,10 @@ def test_verify_discards_unsupported_and_fabricated_claims() -> None:
 
 
 def test_a_document_citation_grounds_against_the_stored_chunk_id() -> None:
-    """A citation of a document chunk survives the two extractions disagreeing about colons.
+    """A document-chunk citation grounds against the stored `<retriever>:<doc>#<ordinal>` id.
 
-    Document chunks carry `<retriever>:<doc>#<ordinal>` as their source id, and `cited_ids`
-    partitions every wikilink at the first colon — so the citation for `[[docs:abc123#4]]`
-    arrives as `abc123#4` and, before `groundable_ids`, never equalled the stored id: measured,
-    every document citation in an answer scored as ungrounded (2026-08-27 review §5). Driven
-    through `cited_ids` rather than a hand-written citation so the coupling under test is the
-    real one.
+    `cited_ids` splits at the first colon, so it is driven through `cited_ids` to test the real
+    coupling with `groundable_ids`.
     """
     from chemclaw.kg.note import cited_ids
 
@@ -323,12 +308,7 @@ async def test_fingerprint_retriever_cites_reaction_records() -> None:
 
 
 async def test_graph_retriever_finds_a_note_through_ordinary_phrasing(tmp_path: Path) -> None:
-    """`the biaryl route` must find the biaryl note; the phrase-substring test never could.
-
-    The live failure this reproduces (D-138): asking about "the biaryl route" returned nothing
-    while "biaryl" returned three notes, so the agent told a project manager the knowledge graph
-    was empty on a programme it holds the campaign for — and then asked them to supply it.
-    """
+    """`the biaryl route` must find the biaryl note through ordinary phrasing."""
     (tmp_path / "a.md").write_text(
         "---\nid: campaign-biaryl\ntype: campaign\n---\nSuzuki scope for the product.\n",
         encoding="utf-8",
@@ -377,13 +357,7 @@ async def test_graph_retriever_still_answers_a_query_that_is_only_stopwords(tmp_
 
 
 def test_a_truncated_conflict_flag_says_how_many_it_is_not_naming() -> None:
-    """Three ids and no count read as three disagreements, which is a wronger claim than the list.
-
-    `conflicts_with` carries a note's *strongest* disagreements since the flood measured on a
-    programme-shaped corpus (~141 ids on every chunk, `conflict_max_per_note`). Truncating it
-    silently is the failure mode this repository names on sight: an incomplete list nothing marks
-    as incomplete is read as a complete one.
-    """
+    """A truncated conflict flag says how many it is not naming, so it is not read as complete."""
     chunk = EvidenceChunk(
         content="Yield rose to 85%.",
         source_note_id="reaction-a",
@@ -410,14 +384,7 @@ class _DeadRetriever:
 
 
 def test_one_dead_source_marks_the_section_without_discarding_the_others() -> None:
-    """A dead share must not throw away three working sources' evidence.
-
-    `gather_section` used its own `asyncio.gather` with no `return_exceptions`, so the first
-    raising retriever propagated out, failed the whole activity, burned its retry budget, and the
-    section rendered as "retrieval failed" with `evidence=[]` — the healthy sources' hits
-    discarded. The conversational sweep over the *same* retriever set degraded per source instead.
-    Two implementations of one question, with opposite error semantics; now there is one.
-    """
+    """A dead source marks the section without discarding the other sources' evidence."""
     section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
 
     healthy = _FakeRetriever(
@@ -458,17 +425,10 @@ def test_an_all_healthy_section_is_not_marked_failed() -> None:
 
 
 def test_a_note_two_sources_both_found_is_one_bullet_not_two() -> None:
-    """`gather_section` merges the per-source lists; concatenating them inflated the report.
+    """A note two sources both found is one bullet, not two.
 
-    Every text retriever excerpts the same note body, so a note two legs both return arrives
-    twice with byte-identical content and an identical citation. `report_note` renders one bullet
-    per chunk, so on `graph,vector,lexical` the same note was cited up to three times, differing
-    only in the trailing `via <source>` — measured over the committed corpus, 11 of the 24 bullets
-    in a drafted section repeated a note already cited above them.
-
-    That is the reading `report_note`'s own conflict warning exists to prevent, arrived at from
-    the other side and in the artifact a chemist signs; the conversational path has always
-    deduplicated, so the two disagreed about what "the evidence" is.
+    Text retrievers excerpt the same body, so concatenating per-source lists would cite one note
+    repeatedly and read as independent evidence.
     """
     section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
     excerpt = "Ethyl acetate, 85% after distillation."
@@ -527,18 +487,9 @@ def test_two_different_excerpts_of_one_note_are_still_two_pieces_of_evidence() -
 
 
 def test_a_multi_line_excerpt_stays_one_bullet_with_its_citation_attached() -> None:
-    """Evidence is counted by the reader, and the draft used to inflate the count.
+    """A multi-line excerpt stays one bullet with its citation attached.
 
-    Chunk content is multi-line by construction — a note body's first `note_excerpt_chars`, or up
-    to a share binding's `chunk_chars` of raw document text — and `report_note` interpolated it
-    straight into a Markdown body. Every embedded newline started a new line and every embedded
-    `- ` started a new bullet, while the provenance suffix landed only on the *last* line of the
-    excerpt. Measured on the committed corpus for the section query `aspirin`:
-
-        evidence chunks: 8   '- ' lines rendered: 23
-
-    Fifteen of those twenty-three were note frontmatter (`- substrate: compound-…`) reading as
-    independent, uncited evidence in the artifact a chemist signs at the PR-gate.
+    Embedded newlines and `- ` in chunk content would otherwise render as extra uncited bullets.
     """
     chunk = EvidenceChunk(
         content="---\ntype: reaction\ntags:\n  - amide-coupling\n  - scale-up\n---\n\n"
@@ -556,17 +507,10 @@ def test_a_multi_line_excerpt_stays_one_bullet_with_its_citation_attached() -> N
 
 
 def test_a_document_chunk_cannot_forge_a_citation_into_the_report_s_own_edges() -> None:
-    """A share or warehouse chunk is not a note, and its text is not the report's markup.
+    """A document chunk cannot forge a citation into the report's own edges.
 
-    `_excerpt` strips `[[wikilinks]]` out of a *note* body for exactly this reason, and the two
-    non-note sources never pass through it: they carry raw document text. So a document containing
-    `[[playbook-degassing]]` put a real outgoing edge on the PR-gated report — a citation to a note
-    no retriever returned, indistinguishable in review from one that was retrieved — and a chunk id
-    like `sharedrive:sop-7#0` rendered as `[[…]]` parsed as a *typed edge* rather than a citation,
-    dangling, which fails `kg-validate` and makes every share-sourced report PR unmergeable.
-
-    Measured before this, the forged draft's `outgoing_links()` was
-    `['playbook-degassing', 'reaction-101', 'sop-7#0']`.
+    Share and warehouse chunks are raw text, so their `[[wikilinks]]` are stripped and their ids are
+    not rendered as links; otherwise the report gains unretrieved or dangling edges.
     """
     chunk = EvidenceChunk(
         content=(
@@ -592,13 +536,7 @@ def test_a_document_chunk_cannot_forge_a_citation_into_the_report_s_own_edges() 
 
 
 def test_a_partially_failed_section_renders_the_evidence_it_kept() -> None:
-    """The renderer must not restore, one layer down, the loss `gather_section` was fixed for.
-
-    `retrieval_failed` is set by *any* failed source, and the gather deliberately keeps the
-    healthy sources' chunks — but the renderer used to `continue` past `section.evidence` on the
-    flag, so one dead share still threw three working sources' work out of the note a chemist
-    signs. The marker and the evidence must both render.
-    """
+    """A partially failed section renders both the failure marker and the evidence it kept."""
     partial = SynthesizedSection(
         heading="Yield",
         memory_layer="evidence",
@@ -646,15 +584,9 @@ async def _one_section(retrievers: list[Any]) -> SynthesizedSection:
 
 
 async def test_a_declined_source_and_a_failed_one_do_not_render_the_same_sentence() -> None:
-    """Two causes, two remedies — and one sentence, measured on the real sweep and renderer.
+    """A declined source and a failed one render different sentences, since their remedies differ.
 
-        B. vector raised (ConnectionError) → "_Some retrieval sources failed …re-run required._"
-        C. share declined (unentitled)     → "_Some retrieval sources failed …re-run required._"
-
-    Byte-identical. `sweep_sources` returns `failed` and `skipped` separately and
-    `SynthesizedSection` collapsed both into one bool. That the section is incomplete either way is
-    not in question — `gather_section` argues that correctly. The rendered *remedy* was wrong for
-    the second: re-running as the same actor produces the same section forever.
+    Re-running as the same actor cannot fix a declined (unentitled) source.
     """
     broken = await _one_section([_FakeRetriever("yield", _CHUNKS), _RaisingRetriever()])
     declined = await _one_section([_FakeRetriever("yield", _CHUNKS), _DecliningRetriever()])
@@ -683,12 +615,10 @@ async def test_a_declined_source_and_a_failed_one_do_not_render_the_same_sentenc
 
 
 def test_a_section_with_no_per_source_detail_renders_exactly_as_it_always_did() -> None:
-    """The control arm, and it is a compatibility claim rather than a stylistic one.
+    """A section with no per-source detail renders exactly as before.
 
-    `durable/report_workflow.py` constructs `SynthesizedSection(retrieval_failed=True)` for a
-    section whose *whole activity* failed — there is no per-source detail to have there — and every
-    report already written carries that wording. Both new fields default empty so that path is
-    untouched.
+    `durable/report_workflow.py` builds such sections when the whole activity failed, and existing
+    reports carry that wording.
     """
     whole = SynthesizedSection(
         heading="Yield", memory_layer="episodic", evidence=[], retrieval_failed=True

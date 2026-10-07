@@ -1,13 +1,8 @@
-"""A durable job's result can reach the same turn that launched it (gap AGT-2).
+"""A durable job's result can reach the same turn that launched it.
 
-The system's defining interaction — "compute this, then reason about the result" — was split in
-two: a tool returned a job id, the turn ended, and the result arrived as push-back the session only
-picked up on its *next* turn. Both halves of the machinery existed (the F3-T3 mailbox, the D-058
-todo flip); the missing piece was a bounded wait a live turn could perform.
-
-The properties that matter are the failure modes, not the happy path: the wait is opt-in, bounded,
-non-recursive, and degrades to the *previous* behavior (result on the next turn) rather than to an
-error — a database blip must not cost a chemist an answer the model already produced.
+"Compute this, then reason about the result" needs a bounded wait a live turn can perform. The
+properties that matter are the failure modes: the wait is opt-in, bounded and non-recursive, and
+degrades to the result arriving on the next turn rather than to an error.
 """
 
 import asyncio
@@ -45,11 +40,10 @@ class _JobLaunchingAgent(ScriptedTurn):
 
 
 def _events(agent: ScriptedTurn) -> list[Any]:
-    """One turn's events, driven on whichever engine is configured.
+    """One turn's events through the runner.
 
-    `connectors=[]` is stated for the reason it is stated in `tests/test_turn_signals.py` and one
-    more: on the graph engine the runner hands this list to the graph builder, and the default is
-    the other engine's connector representation.
+    `connectors=[]` is stated explicitly, as in `tests/test_turn_signals.py`, so the runner does not
+    build the deployment's connectors.
     """
 
     async def _collect() -> list[Any]:
@@ -160,18 +154,11 @@ def test_a_turn_that_starts_no_job_never_waits(
 def test_the_resume_continues_the_same_graph_with_the_job_results(
     monkeypatch: pytest.MonkeyPatch, enabled: None
 ) -> None:
-    """A turn that launched a job answers once, from both halves — the whole of AGT-2.
+    """A turn that launched a job answers once, from both halves.
 
-    The continuation is a second `graph_events` over the *same* graph and the same `thread_id`,
-    which is why the assertion is two model calls and one answer carrying text from each: a
-    continuation that started a fresh graph would answer without having seen the first half, and a
-    continuation that never ran would answer without the number.
-
-    It was written as `test_the_graph_resume_never_reaches_for_the_turns_agent`, pinning that
-    `run_turn` did not call `.run` on the `None` the front door passed in the agent slot — a real
-    crash under `CHEMCLAW_MID_TURN_RESUME_ENABLED=true`, covered by nothing, on an
-    operator-settable knob. That slot no longer exists, so the defect has no surface and only the
-    behaviour it protected is left to pin.
+    The continuation is a second `graph_events` over the same graph and `thread_id`, so the
+    assertion is two model calls and one answer carrying text from each: a fresh graph would not
+    have seen the first half, and no continuation would lack the number.
     """
 
     async def _fake_wait(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
@@ -234,18 +221,11 @@ def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: N
 
 
 def test_the_wait_leaves_other_jobs_push_back_alone() -> None:
-    """The defect: waiting on job A used to consume — and discard — job B's push-back.
+    """Waiting on job A leaves job B's push-back in the mailbox.
 
-    `await_job_results` tailed `session_events`, and that claim is *destructive*: it consumed every
-    unconsumed `job_completed` row for the session, kept only the ids it wanted, and dropped the
-    rest. The front door's `/sessions/{id}/events` stream, the consumer those rows belong to, never
-    saw them. The old docstring argued the front door "would already have claimed" them — a race,
-    not a guarantee, since both consumers poll the same rows.
-
-    Now the wait asks Temporal about the specific job ids and never touches the mailbox, so B's row
-    is still there afterwards. Temporal is unreachable in this sandbox, which is *fine and is the
-    point*: the wait degrades to "no result yet" while the mailbox stays intact. On the old code it
-    consumed B before failing, and this fails.
+    Claiming `session_events` is destructive, so the wait asks Temporal about specific job ids and
+    never touches the mailbox. Temporal is unreachable here, so the wait degrades to "no result yet"
+    while B's row stays for the front door's events stream.
     """
 
     async def _run() -> list[str]:
@@ -302,23 +282,11 @@ class _UndecodableResult:
 def test_a_job_that_cannot_be_collected_is_counted_not_narrated_as_pending(
     connect_patch: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The degradation this module says it counts must actually be counted, per job.
+    """A job that cannot be collected is counted as degraded, not narrated as pending.
 
-    `_collect` is gathered with `return_exceptions=True`, so nothing ever raised *out of* the
-    gather; the only exception `wait_for` can produce is `TimeoutError`, which the preceding clause
-    already handled. The `except Exception -> degraded(logger, "job_resume", ...)` block was
-    therefore unreachable, and measurement confirmed it: with the broker down, `collected` was `{}`,
-    no `job_resume` series was created, and the only trace was the INFO line reading "no result
-    yet" — which asserts the job is still pending when it could not be reached at all. That is the
-    exact sentence this module's own comment condemns one clause up, left live for the broker while
-    it was fixed for a failed workflow.
-
-    The second shape is the one the fix also has to cover: a workflow that *completes* and returns
-    something `completed_job_status` cannot decode raises `ValueError`, which is not a
-    `WorkflowFailureError`, so it too vanished into the gather with no count and no log.
-
-    Counted per job rather than once for the batch, because the label answers "how much of this
-    turn was lost", and two unreachable jobs are twice the loss of one.
+    `_collect` is gathered with `return_exceptions=True`, so failures must be inspected per result:
+    an unreachable broker, or a completed workflow whose result `completed_job_status` cannot decode
+    (`ValueError`), each count once per job, since two lost jobs are twice the loss.
     """
     from chemclaw.core.metrics import METRICS
 
@@ -343,15 +311,11 @@ def test_a_job_that_cannot_be_collected_is_counted_not_narrated_as_pending(
 
 
 def test_a_failed_job_is_reported_with_the_products_own_reason() -> None:
-    """A failed job must arrive with the sentence written for a chemist, not the wrapper's.
+    """A failed job is reported with the product's own reason, not the wrapper's.
 
-    Two defects, one line apart. `gather(return_exceptions=True)`'s result was never bound, so a
-    failed job was simply absent and the runner skipped the resume — leaving the model to finish the
-    turn on its pre-wait text, narrating a success that did not happen. And the first fix passed the
-    client-side `WorkflowFailureError` straight to `failure_reason`, which stops at the first frame
-    and yields "Workflow execution failed" — discarding "unknown ALPB solvent '2-MeTHF'; valid names
-    are …", the diagnostic that tells the chemist what to change. `connectors/jobs.py` documents
-    exactly that unwrapping in a comment.
+    The gather result must be bound so a failed job is present, and the client-side
+    `WorkflowFailureError` must be unwrapped to the cause written for a chemist (as
+    `connectors/jobs.py` does), not "Workflow execution failed".
     """
     from temporalio.client import WorkflowFailureError
     from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
@@ -405,13 +369,10 @@ def test_a_failed_job_is_reported_with_the_products_own_reason() -> None:
 
 
 def test_a_waiting_mailbox_reaches_the_models_next_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A job that finished while nobody was looking is told to the *model*, not only a browser.
+    """A completion waiting in the mailbox reaches the model's next turn.
 
-    `claim_unconsumed` had exactly one consumer — the SSE push-back stream — so with the tab
-    closed the completion reached nobody and the next turn's model still believed its job was
-    running: the flagship "compute then reason" exchange required the chemist to re-prompt and the
-    model to remember the job id. The mailbox is now read at turn start and appended to the
-    chemist's message as framed data, chemist's words first.
+    Without an open browser the SSE stream delivers it to nobody, so the mailbox is read at turn
+    start and appended to the chemist's message as framed data, chemist's words first.
     """
     from chemclaw.agent.session_events import SessionEvent
     from chemclaw.api import runner as runner_module

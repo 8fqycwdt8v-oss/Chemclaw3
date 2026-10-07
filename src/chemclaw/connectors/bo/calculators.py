@@ -1,16 +1,9 @@
 """The calculators a BO campaign consults, bound to the calculation server and the D-011 cache.
 
-`science/bo` states *what* it needs — electronic descriptors for a categorical option, a predicted
-log S for a candidate — as two injected callables (`PropertiesFor`, `LogSFor`). This module is where
-those are bound, and it exists because of a layering rule rather than a preference: the physics
-moved to `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`), the client that
-reaches it lives in `connectors/calc/remote.py`, and `chemclaw.science` may import `chemclaw.core`
-and nothing else. Excusing an edge from `science` up into `connectors` would declare a
-`science <-> connectors` cycle to save one argument at three call sites.
-
-Both bindings go through `cached_remote`, so the property both callers have always advertised is
-unchanged: a molecule seen before is served from the calculation store and never recomputed. What a
-campaign pays on a repeat is one `calculation_key` round trip, not an SCF.
+`science/bo` declares what it needs as injected callables (`PropertiesFor`, `LogSFor`); they are
+bound here because `chemclaw.science` may import only `chemclaw.core`, while the client lives in
+`connectors/calc/remote.py`. Both go through `cached_remote`, so a molecule seen before is served
+from the calculation store and never recomputed.
 """
 
 from chemclaw.connectors.calc.remote import cached_remote
@@ -26,10 +19,8 @@ def properties_for(store: ResultStore) -> PropertiesFor:
     async def lookup(smiles: str) -> tuple[ElectronicProperties, str]:
         """The electronic properties of one molecule, and the `calc_ref` they can be cited by.
 
-        The reference is read off the payload rather than derived: the server stamps every result
-        with its own `calc_key`, and a stored row keeps that stamp — which is what lets a
-        `experiment-proposal` note point at the calculations that shaped the space its surrogate
-        searched, on a cache hit as well as a miss.
+        The reference is the `calc_key` the server stamps on every result, read off the payload so
+        an `experiment-proposal` note can cite it on a cache hit as well as a miss.
         """
         payload, _ = await cached_remote(
             store, "compute_electronic_properties", {"smiles": smiles, "solvent": None}

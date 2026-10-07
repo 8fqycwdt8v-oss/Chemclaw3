@@ -1,31 +1,16 @@
 """Requests to the process holding a session's turn, from a replica that does not hold it.
 
-`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`. A running turn's pump,
-its readers and its cancel live in the memory of the process that started it
-(`api/detach.DetachableTurn`), so a reattach or a Stop arriving at any other replica used to answer
-404 "no turn is running for this session" — measured with two front-door processes on one
-database, while the turn ran on to its answer as if nobody had pressed Stop. The BFF reaches the
-front door through the Service, so on a two-replica deployment that was half of every reattach and
-half of every Stop.
+A running turn's pump, readers and cancel live in the memory of the process that started it
+(`api/detach.DetachableTurn`), so a reattach or Stop arriving at another replica must be relayed.
+A non-holding replica writes a request naming the turn's claim (`session_turns.holder`) — follow
+or stop — and polls for the answer. The holder polls for requests addressed to its claims
+(`api/turn_relay.TurnRelay`), acts with the same calls the local routes use, writes its answer, and
+for a follow relays frames into `session_turn_frames`, which the asker consumes by deleting them.
+Every statement borrows a pooled connection briefly; no LISTEN.
 
-This module is the durable half of the fix and holds nothing but rows. A replica that does not hold
-the turn writes a **request** naming the turn's claim (`session_turns.holder`) — follow it, or stop
-it — and polls for the answer; the holding process reads the requests addressed to its own claims
-on a poll of its own (`api/turn_relay.TurnRelay`), acts on them with the same in-process calls the
-local routes make, writes its answer onto the row, and for a follow relays the turn's frames into
-`session_turn_frames`, which the asker consumes by deleting them. Every statement borrows a pooled
-connection and gives it straight back, as the turn claim's do; nothing holds a connection for the
-length of a turn, and nothing here is a LISTEN.
-
-**A request is a lease**, refreshed by the asker as it polls: an asker whose process died stops
-refreshing, and the holder stops serving it after one lease and sweeps it. A request also names the
-claim's `holder`, so it can only ever be answered by the turn it was addressed to — the next turn on
-the session has another holder and never sees it.
-
-Both tables cascade from `session_owners` (`infra/sql/121_session_turn_remotes.sql`), so deleting a
-session, the retention sweep and an owner's erasure take every request and every undelivered frame
-with them. Only under `session_store="postgres"`: under the in-memory store a session is one
-process, and there is no other replica to ask from.
+A request is a lease the asker refreshes as it polls; a dead asker's request lapses after one
+lease and is swept. Naming the `holder` means only the addressed turn can answer it. Both tables
+cascade from `session_owners`. Postgres store only: in memory a session is one process.
 """
 
 import uuid
@@ -40,8 +25,7 @@ from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.core.jsonb import json_column
 
 #: What a request asks of the holder. `unload_stop` is a stop sent by a page being discarded, which
-#: the holder defers exactly as the local route does
-#: (`D-2026-10-03-an-unload-stop-waits-for-a-reload`).
+#: the holder defers exactly as the local route does.
 Kind = Literal["watch", "stop", "unload_stop"]
 
 #: The holder's answer, written onto the request. `asked` until the holder has read it; then
@@ -86,8 +70,7 @@ _REFRESH = (
 _TAKE = "DELETE FROM session_turn_frames WHERE remote_id = %s RETURNING seq, frame"
 _WITHDRAW = "DELETE FROM session_turn_remotes WHERE id = %s"
 # The holder's poll. `unnest` pairs the two arrays element-wise, so one statement reads every
-# request addressed to any turn this process holds, whatever the count; a lapsed request is
-# neither returned nor kept (`_SWEEP`).
+# request for any turn this process holds; lapsed requests are excluded (`_SWEEP`).
 _PENDING = (
     "SELECT r.id, r.session_id, r.holder, r.kind, r.actor, r.state "
     "FROM session_turn_remotes r "
@@ -105,7 +88,7 @@ _RELAY = "INSERT INTO session_turn_frames (remote_id, frame) VALUES (%s, %s)"
 
 
 class TurnRemotes:
-    """`session_turn_remotes` and `session_turn_frames`, on the session-store database (D-002)."""
+    """`session_turn_remotes` and `session_turn_frames`, on the session-store database."""
 
     def __init__(self) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""

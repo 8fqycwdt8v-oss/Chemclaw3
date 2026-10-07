@@ -1,66 +1,24 @@
 """Whether delegation pays, measured per *task* rather than as a delegation rate.
 
-**Why this is not `evals/ab.py`.** That module compares one metric with tools against the same
-metric without them, pairwise and dimensionless. Delegation cannot be scored that way for two
-reasons that are the whole point of the measurement: there are three arms rather than two, and the
-claimed benefit is *cost* (a helper reads in its own context and reports back small) while the
-claimed risk is *quality* (a summary is model prose about evidence the caller never saw). A single
-number that collapsed those would answer "did it pay" with a figure that hides which way it paid.
-So the quality axis reuses `compare_tool_utility` and the two cost axes are reported beside it,
-never folded in.
+Three arms rather than `evals/ab.py`'s two, and two kinds of effect: the claimed benefit is cost (a
+helper reads in its own context) and the claimed risk is quality (the caller sees only a summary).
+So quality reuses `compare_tool_utility` and the two cost axes (tokens, wall clock) are reported
+beside it, never folded in. The unit is a task, because a delegation rate is a mediator, not an
+outcome.
 
-**Why the unit is a task.** The corpus this replaces
-(`data/evals/probes/m12/routing.yaml`, deleted with the specialist team) measured *delegation rate*
-over fifteen one-tool probes, and `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`
-records why that could not work: a rate is a mediator rather than an outcome, and a one-tool
-question gives context isolation no mechanism by which it could appear. Its two runs disagreed
-sevenfold because they measured different systems. The denominator problem disappears the moment the
-unit is a task: a task either got done, for some spend, in some time.
+The arms: `no-helper` (asked not to call `task`; the tool cannot be removed, since
+`SubAgentMiddleware` is required upstream), `helper` (a helper on the caller's model) and
+`helper-routed` (a helper on its own model route). A baseline run that delegated anyway is
+**contaminated** and dropped.
 
-**The three arms, and why one of them is behavioural rather than structural.** `no-helper` is the
-model simply not calling `task`; `helper` is a helper on the caller's model; `helper-routed` is one
-on its own model via `CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'`. The first cannot be built by taking
-the tool away — `SubAgentMiddleware` is in `create_deep_agent`'s `_REQUIRED_MIDDLEWARE` and
-`_apply_excluded_middleware` raises rather than let a profile strip it, and an empty roster makes
-upstream re-insert its own ungoverned `general-purpose` subagent. So the baseline arm is *asked* not
-to delegate, and whether it complied is an observation rather than an assumption. A baseline run
-that delegated anyway is **contaminated**, and `compare_arms` reports it rather than averaging it
-in — the same discipline `evals/tool_utility.py` applies to an `ungraded` judge verdict, and for the
-same reason: a measurement that quietly absorbs its own failures reports a clean number about
-nothing.
+Medians, not means, so one timed-out repeat cannot dominate; aggregated per `(task, arm)` and
+reported per task. The comparison is intention-to-treat: arms are compared as assigned, and how
+often an arm actually delegated is reported beside the result (`delegated_in`/`repeats`) rather than
+used to select tasks. A non-delegating repeat dilutes the effect toward zero, the conservative
+direction. Only `contaminated` and `incomplete` (missing data) drop a task.
 
-**Medians, not means.** One timed-out repeat would dominate a mean on both cost axes and is exactly
-what repeats exist to survive. The aggregation is per `(task, arm)` and the report is per task,
-because "delegation helped here and hurt there" is the finding a rate destroys and the one selective
-routing would need.
-
-**This is an intention-to-treat comparison, and it took three tries to get there.** The arms are
-compared as *assigned*; how often the arm actually delegated is reported beside the result rather
-than deciding which tasks count. Both earlier shapes conditioned on the treatment and both
-flattered the instrument. Crediting an arm that delegated in at least one repeat while refusing a
-baseline that delegated in any was not symmetric; requiring every repeat and bounding the surviving
-share was worse — a Monte-Carlo puts the per-*repeat* delegation needed for an even chance of any
-report at ~87.4%, rising with the repeat count, so raising `MINIMUM_REPEATS` to steady the median
-guaranteed no median at all.
-
-Under ITT a repeat that did not delegate dilutes the effect toward zero, which is the conservative
-direction, and `TaskComparison.delegated_in`/`repeats` is what tells a reader how diluted. Nothing
-is dropped for the arm's *behaviour*: `undelegated` and `partially_delegated` are compliance
-reporting, not exclusions. The one drop that remains is `contaminated` — a baseline that delegated
-is not a baseline — and `incomplete`, which is a hole in the data rather than a selection on the
-result.
-
-This module runs no model. It is a pure comparison over runs somebody else recorded, which is what
-makes it testable without a gateway. **The run half is `evals/delegation_run.py` plus
-`cli/live_probes --suite delegation`, and it is now the missing credential that it once was not.**
-This paragraph twice said something weaker than the truth and once said something stronger: it read
-"the run half is what needs one" while no runner existed, and then that there was no runner while
-one was being written. What exists is four arms (`ARMS`), three profiles in `data/evals/profiles/`
-whose instruction bodies are identical and whose delegation asks are not, `delegated` observed off
-`audit_events` and `billed_tokens` off `turn_costs`. What the runner has never had is a model:
-driven against `cli.mock_llm` it exits non-zero on purpose, because a double supplies the *decision*
-to delegate and a run against one is evidence about the runner. `docs/planning/BACKLOG.md` carries
-what is left.
+This module runs no model; the run half is `evals/delegation_run.py` plus `cli/live_probes --suite
+delegation`, which needs a real gateway model.
 """
 
 from __future__ import annotations
@@ -76,12 +34,8 @@ from chemclaw.evals.ab import ABSummary, TaskScores, compare_tool_utility
 #: The arm a task is compared *against*: the model answering without calling `task`.
 BASELINE_ARM = "no-helper"
 
-#: How many repeats of one `(task, arm)` pair make an aggregate worth reporting.
-#:
-#: Three is the figure `docs/planning/BACKLOG.md` asks for, and it is a floor rather than a target.
-#: Below it a median is the middle of two points or a single observation wearing a robust-sounding
-#: name, which is the shape that let the deleted routing corpus report two numbers seven-fold apart
-#: as though each were a measurement.
+#: How many repeats of one `(task, arm)` pair make an aggregate worth reporting. A floor: below
+#: three, a median is one or two observations.
 MINIMUM_REPEATS = 3
 
 
@@ -101,10 +55,8 @@ class ArmRun(BaseModel):
     #: The task outcome on one axis where higher is better — `evals/tool_utility.VERDICT_SCORES`
     #: is the scale this is meant to carry, so a fabricated answer scores *below* a declined one.
     quality: float = Field(allow_inf_nan=False)
-    #: What the turn actually billed, from `turn_costs` rather than from an estimator. The whole
-    #: cost claim for delegation is that a helper's reading is billed in its own context and only
-    #: its report is billed in the caller's, so an estimate would be measuring the wrong thing with
-    #: a ratio `agent/context_budget.py` has twice found to be content-dependent.
+    #: What the turn actually billed, from `turn_costs`. The cost claim is about where tokens are
+    #: billed, so an estimate would measure the wrong thing.
     billed_tokens: int = Field(ge=0)
     wall_clock_seconds: float = Field(ge=0.0, allow_inf_nan=False)
     #: Whether this run actually spawned a helper.
@@ -122,9 +74,7 @@ class ArmAggregate(BaseModel):
     quality: float
     billed_tokens: float
     wall_clock_seconds: float
-    #: How many of the repeats spawned a helper. Reported rather than reduced to a bool, because
-    #: "delegated in one repeat of three" is a different fact from either extreme and is the shape
-    #: a behavioural arm actually produces.
+    # How many of the repeats spawned a helper; a count, because "one of three" is its own fact.
     delegated_in: int
 
 
@@ -143,12 +93,8 @@ class TaskComparison(BaseModel):
     #: The quality verdict from `compare_tool_utility`, above its noise floor:
     #: helped / hurt / no effect.
     verdict: str
-    #: How many of the arm's repeats actually delegated, out of how many it ran. Carried rather
-    #: than reduced to a bool because `ArmAggregate.delegated_in` is a *count* for a reason its own
-    #: docstring gives — "delegated in one repeat of three is a different fact from either extreme
-    #: and is the shape a behavioural arm actually produces" — and the comparator used to collapse
-    #: it to `if not under_test.delegated_in`, so a pair that delegated once in three was credited
-    #: as a delegation comparison with nothing in the report able to say so.
+    # How many of the arm's repeats actually delegated, out of how many it ran: the compliance a
+    # reader needs to judge dilution.
     delegated_in: int
     repeats: int
 
@@ -168,17 +114,12 @@ class DelegationReport(BaseModel):
     incomplete: list[str]
     #: Tasks where the *arm* never delegated, so the pair compares the baseline with itself.
     undelegated: list[str]
-    #: Tasks where the arm delegated in *some* repeats and not others. Kept apart from both
-    #: `undelegated` and the compared set: the aggregate over such a task is a mixture of two
-    #: behaviours, and the median over it answers neither question. The comparator credited these
-    #: as delegation while refusing the mirror-image baseline outright, which is an asymmetry that
-    #: flatters the arm — driven, an arm delegating in 1 of 3 repeats with that run scoring 1.0 at
-    #: 2,000 tokens against 0.5 at 10,000 reported `median_token_ratio: 1.0` and "no effect".
+    #: Tasks where the arm delegated in some repeats and not others: still compared
+    #: (intention-to-treat), but listed because the aggregate mixes two behaviours.
     partially_delegated: list[str]
-    #: Median across compared tasks of `arm / baseline`. Below 1.0 means delegation was cheaper.
-    #: `None` means this axis had no usable ratio, which is different from a ratio of 1.0 and must
-    #: not be rendered as one. It cannot mean "no task was compared" — `NoComparableTask` raises
-    #: before a report exists — so it means every compared task had a zero baseline on this axis.
+    #: Median across compared tasks of `arm / baseline`; below 1.0 means delegation was cheaper.
+    #: `None` means every compared task had a zero baseline on this axis, which must not be rendered
+    #: as 1.0.
     median_token_ratio: float | None
     median_wall_clock_ratio: float | None
 
@@ -195,23 +136,9 @@ class NoComparableTask(ValueError):
 def aggregate_runs(runs: Iterable[ArmRun]) -> list[ArmAggregate]:
     """Collapse repeats of each `(task, arm)` pair to its median on every axis.
 
-    Median rather than mean on all three axes, including quality: `VERDICT_SCORES` is a **four**-
-    point ordinal scale (`served` 1.0, `partial` 0.5, `unserved` 0.0, `fabricated` -1.0), and a
-    mean over it is not a verdict.
-
-    **The example this used to give was the one case that undercuts the argument.** It said
-    averaging `fabricated` with `served` "produces a number that names no verdict"; measured, it
-    produces exactly **0.0**, which is `unserved` — so the failure is not an unnameable number, it
-    is a *nameable and wrong* one, reporting an honest non-answer where one run invented data. The
-    case that really names nothing is `served` with `partial` at 0.75. Both are reasons to refuse
-    the mean, and the second is the weaker one.
-
-    **Quality takes `median_low`, and the difference is not pedantry.** `statistics.median` returns
-    the *mean of the two middle values* on an even-sized group, so at 4 or 6 repeats it reproduces
-    exactly the averaging this paragraph forbids — `MINIMUM_REPEATS` is a floor rather than a
-    target, so even counts are ordinary. `median_low` returns an observation, which is the property
-    the sentence above claims. The two cost axes keep `median`: tokens and seconds are continuous,
-    and the midpoint of two runs is a meaningful figure there.
+    Quality is a four-point ordinal scale (`VERDICT_SCORES`), so a mean is not a verdict, and it
+    uses `median_low`, which always returns an observation (`median` averages the two middle values
+    on an even count). The cost axes are continuous and use `median`.
     """
     grouped: dict[tuple[str, str], list[ArmRun]] = defaultdict(list)
     for run in runs:
@@ -233,9 +160,8 @@ def aggregate_runs(runs: Iterable[ArmRun]) -> list[ArmAggregate]:
 def _ratio(arm: float, baseline: float) -> float | None:
     """`arm / baseline`, or `None` where the baseline is zero and the ratio says nothing.
 
-    A zero baseline is not an error — a turn that failed before billing anything legitimately
-    records zero — but the ratio it produces is either a division by zero or an infinity that would
-    dominate a median. Dropping the task from *this axis only* keeps the other two.
+    A zero baseline is legitimate (a turn that failed before billing); the task is dropped from this
+    axis only.
     """
     return arm / baseline if baseline > 0 else None
 
@@ -256,17 +182,13 @@ def compare_arms(
         minimum_repeats: How many repeats of a `(task, arm)` pair make it comparable.
 
     Returns:
-        The per-task comparison, the quality A/B, and the three ways a task can fail to carry the
-        comparison — each as a list of task ids rather than a count, because the next question is
-        always *which*.
+        The per-task comparison, the quality A/B, and the ways a task can fail to carry the
+        comparison — each as a list of task ids.
 
     Raises:
         ValueError: `runs` is empty, or the two arms are the same arm.
-        NoComparableTask: Every task was dropped. An empty comparison reported as a summary is the
-            vacuous pass `compare_tool_utility` refuses for an empty task list and
-            `load_eval_cases` refuses for an empty case-set (G4); a delegation report over nothing
-            would read as "no effect anywhere", which is the answer this measurement most needs to
-            be unable to produce by accident.
+        NoComparableTask: Every task was dropped; an empty comparison would read as "no effect
+            anywhere".
     """
     if not runs:
         raise ValueError("no runs — a delegation comparison over nothing proves nothing")
@@ -299,29 +221,13 @@ def compare_arms(
         if base.repeats < minimum_repeats or under_test.repeats < minimum_repeats:
             incomplete.append(task_id)
             continue
-        # **The one drop, and the only one that is about the measurement rather than the result.**
-        # A baseline that delegated is not a baseline, so the pair compares delegation with
-        # delegation and averaging it in pulls every aggregate toward "no effect".
+        # The one behavioural drop: a baseline that delegated is not a baseline.
         if base.delegated_in:
             contaminated.append(task_id)
             continue
-        # **The arm's own behaviour is reported, never a reason to drop the task.** This is an
-        # intention-to-treat comparison: the arms are compared as *assigned*, and how often the
-        # treatment was actually taken is a number beside the result rather than a filter in front
-        # of it. Both earlier shapes were selection effects on the treatment. Crediting an arm that
-        # delegated in at least one repeat while refusing a baseline that delegated in any was not
-        # symmetric and flattered the arm; requiring every repeat and bounding the surviving share
-        # was worse in a way a Monte-Carlo shows at once — it demands ~87.4% per-*repeat*
-        # delegation for even a 50/50 chance of producing a report, and gets *stricter* as repeats
-        # rise, so 20 tasks x 10 repeats at 96% delegation with delegation helping everywhere
-        # refuses to report at all. An instrument that is unusable at realistic compliance is not a
-        # conservative instrument.
-        #
-        # Under ITT a non-delegating repeat dilutes the effect toward zero, which is the
-        # conservative direction, and `delegated_in`/`repeats` on every comparison is what tells a
-        # reader how diluted. That also restores what this module's own docstring asks for:
-        # "delegation helped here and hurt there" over every task, including the ones the arm
-        # declined — which is exactly where a selective router's decision shows up.
+        # The arm's own behaviour is reported, never a reason to drop the task (intention-to-treat).
+        # Conditioning on compliance would flatter the arm, and requiring delegation in every repeat
+        # would make the instrument refuse to report at realistic compliance rates.
         if not under_test.delegated_in:
             undelegated.append(task_id)
         elif under_test.delegated_in < under_test.repeats:
@@ -349,14 +255,8 @@ def compare_arms(
         if wall_clock is not None:
             wall_clock_ratios.append(wall_clock)
 
-    # Empty only, and that is now the whole of it. A share bound over the *surviving* tasks was
-    # added to stop "helped everywhere, 60% cheaper" over one task of eight, and it did not: it
-    # counted only the tasks the arm declined, so an arm that instead crashed or timed out on the
-    # hard seven reproduced that headline verbatim with the guard green — and an arm that ran and
-    # *lost* on seven, completing 2 of 3 repeats each, did too, struck from the denominator by a
-    # repeat-count technicality. Nothing is dropped for the arm's behaviour any more, so there is
-    # no surviving-share to bound; `incomplete` is what is left, and it is a hole in the *data*
-    # rather than a selection on the result, reported beside the report as it always was.
+    # Refuse only an empty comparison. Nothing is dropped for the arm's behaviour, so there is no
+    # surviving share to bound; `incomplete` is missing data, reported beside the report.
     if not comparisons:
         raise NoComparableTask(
             f"no task carried the comparison: {len(contaminated)} contaminated (the baseline "

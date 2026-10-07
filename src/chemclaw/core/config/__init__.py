@@ -1,50 +1,22 @@
 """Single, typed source of every environment-dependent value in Chemclaw.
 
-Why this exists: the plan forbids magic numbers and second config sources (CLAUDE.md "Config,
-never magic numbers"; plan step 0.3). Every URL, DSN, queue name, and timeout that code or
-infrastructure needs is declared here once, is type-checked, and is overridable via environment
-variables or a local `.env` file. `infra/docker-compose.yml` is wired to the same variable
-names, so the app and the dev stack can never drift apart.
+Every URL, DSN, queue name and timeout is declared once, type-checked, and overridable by
+environment variable or a local `.env`; `infra/docker-compose.yml` uses the same names. Only
+fields with a real consumer live here.
 
 Usage:
     from chemclaw.core.config import settings
     client_target = settings.temporal_address
 
-Only fields that are actually consumed (by code or by the compose stack) live here — no
-speculative "for later" settings. New phases add their own fields when the first real consumer
-lands.
+`Settings` is composed from one mixin per domain, each in its own module, so a concern's fields,
+validators and derived properties are in one file while attributes stay flat
+(`settings.postgres_dsn`) and env names unprefixed by section (`CHEMCLAW_POSTGRES_DSN`). Only
+rules spanning sections live on the composed class here.
 
-Structure: the flat `Settings` class is composed from one mixin per domain (`class
-Settings(ObservabilitySettings, TemporalSettings, ...)`), and each mixin lives in its own module
-of this package, named for its section (D-072 drew the section boundaries; the D-156-blessed
-split gave each section a file). Each mixin holds its section's fields, validators, and derived
-properties, so a reader finds everything about one concern in one file — while the composed
-class keeps every attribute flat (`settings.postgres_dsn`) and every env name
-unprefixed-by-section (`CHEMCLAW_POSTGRES_DSN`), exactly as before the split. A cross-field
-validator lives in the section that owns the relationship; only a rule that spans sections lives
-here on the composed class, because no single section can see both sides of it.
-
-House rule for a *collection* field — pick by what the elements are, not by taste:
-
-- **Delimited string** (`skills_dir`, `data_sources`, `data_sources_dir`, `connectors_dir`,
-  `skills_enabled`, `entra_expensive_actions`) when the elements are *bare keys* — names resolved
-  against a registry, or paths. An admin sets these like `PATH`, with no JSON quoting, and a bare
-  key has nothing to validate beyond resolving. Expose the parsed value through a derived
-  `*_list`/`*_dirs` property and read that, never the raw string.
-- **Plain mapping** (`connector_urls`) for a per-name deployment override of one scalar.
-
-There used to be a third: a **typed JSON list** whose elements each carried their own config, as a
-discriminated union of pydantic models — `McpServerSpec`, then `DataSourceSpec`. Both are gone, and
-they went the same way rather than by coincidence. Each described a *thing attached to this
-deployment* (an MCP server; an ELN drop directory), and each made attaching one an edit to this
-file: a new model, a new arm of the union, and a new branch at the single place that built from it.
-D-118 replaced the first with `connectors/<name>/connector.yaml` and D-120 the second with
-`sources/<name>/datasource.yaml`, so the config token is now a *path* to search and a *name* to
-enable, and the thing's own configuration lives with the thing.
-
-The rule that leaves behind, worth stating because it is what keeps this file from growing without
-bound: **config says which and where; a manifest says what.** If a proposed field would describe
-the internals of one attached thing, it belongs in that thing's manifest, not here.
+Collection fields: a delimited string (like `PATH`) when the elements are bare keys or paths, read
+through a derived `*_list`/`*_dirs` property; a plain mapping (`connector_urls`) for a per-name
+override of one scalar. Config says which and where; a manifest says what. A field describing the
+internals of one attached thing belongs in its manifest (D-118).
 """
 
 import logging
@@ -83,10 +55,7 @@ from chemclaw.core.egress import pin_langsmith_egress
 from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
 from chemclaw.core.netguard_preload import publish_state as publish_preload_state
 
-# The package's public surface, exactly what the single-file module exported: the composed class,
-# its singleton, every section mixin (a few are imported directly, e.g. `EvalSettings`), and the
-# one shared constant. Explicit because `mypy --strict` disables implicit re-export for names that
-# arrive via import — which is all of them, now that the sections live in their own modules.
+# Explicit, because `mypy --strict` disables implicit re-export of imported names.
 __all__ = [
     "NOTE_INDEX_SOURCES",
     "SCHEMA_VECTOR_DIM",
@@ -117,84 +86,30 @@ __all__ = [
 
 
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
-# `""` is in here for the callers that build a URL and ask whether its host is local — a value with
-# no host at all (`/var/chemclaw/outbox`) reads as local, which is what `publish/drivers/http.py`,
-# `deliver/driver.py` and `cli/validate_channels.py` want. **`require_pg_tls` deliberately does not
-# use that member**, and it is worth saying here rather than only there: for a Postgres DSN an empty
-# host does not mean local, it means libpq will resolve one from a `service=` file or from `PGHOST`,
-# neither of which the parse can see. See `_dial_is_offline` below.
+# `""` is here for callers that build a URL and ask whether its host is local (a path with no host
+# reads as local). `require_pg_tls` deliberately does not use it: in a Postgres DSN an empty host
+# means libpq resolves one from `PGHOST` or a `service=` file, which the parse cannot see.
 PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
-
-# `durable/connector_job.py::finish_headroom`, restated because it cannot be imported.
-#
-# `ConnectorJobWorkflow` is bounded by `wrapper_execution_timeout()` — its child's whole ceiling
-# plus what the wrapper still owes after that child returns: settle the effect ledger, write the
-# durable record, offer the result, write the note, push back to the session, and send the
-# `job-result` copy out of the building. Each is a queue wait plus a work budget, and the budgets
-# differ — **three** of the writes are light enough to pass `light_write_queue_wait_timeout()`
-# while the others carry core's hour.
-#
-# It said five steps and two light writes until 2026-09-14, when a sixth was added in `_finish`
-# and neither side of the restatement moved: 930 s of permitted spend outside a ceiling whose
-# whole job is to cover it.
-#
-# **This used to restate that as a count**, `activity_timeout_seconds * 4`, which bounds none of
-# them: it made every post-child step cost one activity's wall clock, and the validator below
-# therefore cleared a bound 12,810 s short of the one a `job` step actually carries. A wrapper that
-# hit its own ceiling was reaped before it could write its failure record or push back, so the
-# chemist was told nothing.
-#
-# It is a literal here and a literal there because `chemclaw.core` imports no sibling
-# (`tests/test_layering.py`, `core/README.md`), so this module cannot call the function that owns
-# the arithmetic. A restatement nothing checks would be the duplication moved rather than removed,
-# so `tests/test_template_job_step.py` drives this validator against the live
-# `wrapper_execution_timeout()` — a restatement that drifts fails there rather than here.
 
 
 def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
     """The host libpq will dial and the sslmode it will use, read with libpq's own parser.
 
-    **One parser, because a second spelling is a second answer.** This pair used to be hand-rolled
-    (`urlsplit` + `parse_qs` + a `dsn.split()` scan) while `core/db.py::_redact` round-tripped the
-    same strings through `conninfo_to_dict` for the reason it states — "every form psycopg accepts
-    is covered … not just the userinfo case a URL split can see". The two disagreed, and both
-    measured disagreements were in the direction that admits plaintext:
-
-    - libpq *connects* to `hostaddr` when it is set and reads `host` only as the name to verify
-      against, so `host=localhost hostaddr=10.0.0.5` took the loopback exemption while the socket
-      went over the network. `hostaddr or host` is therefore what a TLS decision is about.
-    - libpq resolves a repeated URL query parameter to its **last** occurrence and `parse_qs` to
-      its **first**, so `?sslmode=require&sslmode=disable` was checked as `require` and connected
-      as `disable`.
-
-    A DSN libpq cannot parse raises here rather than defaulting: `""` is a member of
-    `PG_LOOPBACK_HOSTS`, so *any* "could not tell" answer would exempt the connection, and nothing
-    can say what libpq would do with a string libpq will not read. It is refused as the
-    misconfiguration it is, naming the setting rather than the DSN — the value carries a password.
+    libpq's parser, because a hand-rolled one disagrees in the plaintext direction: libpq connects
+    to `hostaddr` when set (so `hostaddr or host` is what a TLS decision is about), and resolves a
+    repeated parameter to its last occurrence. An unparseable DSN raises, naming the setting and not
+    the DSN (it carries a password), since any "could not tell" answer would read as loopback.
     """
-    # Imported inside the function, not at module scope. `core/config` is reached by
-    # `ingest/sources/registry`, and `tests/test_datasource_isolation.py` asserts that asking which
-    # sources to ingest imports **no** third-party driver — a manifest is two strings and should
-    # cost two strings. Reading a DSN the way libpq reads it is worth a driver import; doing it at
-    # import time would put psycopg behind every caller of `settings`.
+    # Imported lazily: `ingest/sources/registry` reaches `core/config`, and asking which sources to
+    # ingest must import no third-party driver (`tests/test_datasource_isolation.py`).
     from psycopg import ProgrammingError, conninfo
 
     try:
         parts = conninfo.conninfo_to_dict(dsn)
     except ProgrammingError as exc:
-        # **The exception's message is deliberately not interpolated.** libpq quotes the offending
-        # token, and for two realistic single-character slips — a typo'd scheme, a stray leading
-        # space — that token is the whole DSN, userinfo included. This raise happens during
-        # `import chemclaw.core.config`, which is *before* `configure_logging()` installs
-        # `SecretRedactingFilter`, so a credential printed here reaches the container log with
-        # nothing able to scrub it. The docstring above already promised this ("naming the setting
-        # rather than the DSN — the value carries a password") and the first version of this code
-        # broke that promise in the same breath.
-        #
-        # The type is named because it is the one part of libpq's answer that carries no input, and
-        # it distinguishes "unparseable" from the other ways this can fail. `__cause__` keeps the
-        # original for a debugger; it is the traceback rather than the message, and a traceback is
-        # not what ships to a log aggregator from a startup refusal.
+        # Not interpolated: libpq quotes the offending token, which can be the whole DSN with its
+        # password, and this runs before the log redaction filter exists. The type name
+        # distinguishes the failure; `__cause__` keeps the original for a debugger.
         raise ValueError(
             f"{name} is not a connection string libpq can parse "
             f"({type(exc).__name__}), so nothing can say whether it would connect with TLS. "
@@ -209,18 +124,9 @@ def _pg_dial(dsn: str, name: str) -> tuple[str, str]:
 def _dial_is_offline(host: str) -> bool:
     """Whether every host libpq would dial is a Unix-domain socket rather than a network address.
 
-    libpq reads a `host` beginning with `/` as a socket *directory* and one beginning with `@` as an
-    abstract-namespace socket, and `sslmode` does not apply to either — there is no network to
-    encrypt, and libpq ignores the parameter outright on that transport. So a TLS guard has nothing
-    to require here, and requiring it anyway was a strict regression: the hand-rolled parse this
-    replaced could not see `host=` inside a URL query, so `postgresql:///db?host=/var/run/postgresql`
-    started, and the rewrite refused the whole class with the only passing spelling being
-    `sslmode=require` on a transport that ignores it — a lie written into a DSN to satisfy a guard.
-    A `pgbouncer` sidecar or a local cluster over a mounted socket is the deployment that means.
-
-    **Every element**, because `host` may be a comma-separated list libpq tries in order: one socket
-    directory beside one network host is a network connection, and `startswith` on the joined string
-    would answer otherwise.
+    A `host` starting with `/` (socket directory) or `@` (abstract socket) has no network to encrypt
+    and libpq ignores `sslmode` there, so a TLS guard has nothing to require. Every element of a
+    comma-separated host list must be a socket, since libpq tries them in order.
     """
     return all(part.strip().startswith(("/", "@")) for part in host.split(","))
 
@@ -228,46 +134,15 @@ def _dial_is_offline(host: str) -> bool:
 def pg_endpoint(dsn: str) -> tuple[str, str] | None:
     """The `(host, port)` libpq will dial, or `None` when the string is not parseable.
 
-    `hostaddr or host` for the reason `_pg_dial` already measures: libpq *connects* to `hostaddr`
-    and reads `host` only as the name to verify, so two DSNs differing in `host` alone are one
-    server. `None` on an unparseable DSN so the caller can take the strict branch — two DSNs it
-    cannot compare are treated as one server, which sums their pools against one ceiling rather
-    than checking each against a ceiling that may not exist.
+    `hostaddr or host`, as in `_pg_dial`. `None` lets the caller take the strict branch (treat two
+    incomparable DSNs as one server).
 
-    **This compares strings, so one server spelled two ways reads as two, and that is a known
-    property rather than an accident** — `tests/test_config.py` pins it with the number. Measured,
-    nine plausible spellings of one endpoint split here: an omitted port against `5432`, an
-    uppercased host, a trailing-dot FQDN, a Kubernetes short name against its `svc.cluster.local`
-    form, `localhost`/`127.0.0.1`/`::1`, a socket directory against a TCP host, and a multi-host
-    list. On the shipped chart the consequence is that a split whose two DSNs name one box is
-    charged 112 to a ceiling of 256 and 166 to a server that does not exist, where the *identical*
-    deployment spelled consistently is refused at 278. The direction is exhaustion.
+    A string comparison, so one server spelled two ways reads as two (`tests/test_config.py` pins
+    this). Normalising would reimplement libpq's precedence rules, and asking the server is
+    impossible at import time with no event loop. The runtime half, `core/db.same_server`, reads
+    `system_identifier` off a live connection and may collapse such a split back to one server.
 
-    **It is not normalised and it is not measured, and both refusals are on the record.**
-    Normalising the loopback aliases covers two of those nine and none of the three a cluster
-    actually produces, which is `require_pg_tls`'s own "a second spelling is a second answer" error
-    — a second implementation of libpq's precedence rules, where an omitted port is `PGPORT` before
-    it is 5432. Asking the server (`SELECT system_identifier FROM pg_control_system()`, 0.24 ms and
-    readable by an unprivileged role) answers it exactly, and cannot answer it *here*: `settings =
-    Settings()` runs at module import with no event loop and no pool, and a validator that dialled
-    would make every unit test and every `make *-validate` a network call and every database outage
-    a configuration error in every process. `inet_server_addr()` is not even the right probe —
-    measured, one server answered `NULL` over a socket, `127.0.0.1` over loopback and `172.18.0.2`
-    over the bridge, which is the DSN's own spelling laundered through the kernel. The runtime half
-    is where a measurement could live, and `core/db._session_store_max_connections` deliberately
-    reuses *this* comparison so the two halves cannot disagree about how many servers there are.
-
-    **The runtime half now has one** (`D-2026-09-23-the-server-says-which-server-it-is`).
-    `core/db.same_server` reads `system_identifier` off a borrow that has already succeeded and
-    caches it per endpoint, so the *gauge* can tell one box spelled two ways from two boxes while
-    this function keeps comparing strings — which is still the only thing it can do, for every
-    reason above. The two halves therefore *can* now disagree, deliberately and in one direction:
-    the startup check charges a phantom split to two ceilings, and the runtime half collapses it
-    back to one once a borrow has disproved it. Nothing here changes; this paragraph exists so the
-    next reader of "the two halves cannot disagree" knows where the exception is.
-
-    Imported lazily for the reason `_pg_dial` gives: `chemclaw.core.config` is imported by the
-    datasource manifests' offline validation, which may not have psycopg installed.
+    Imported lazily for the reason `_pg_dial` gives.
     """
     from psycopg import ProgrammingError, conninfo
 
@@ -281,22 +156,11 @@ def pg_endpoint(dsn: str) -> tuple[str, str] | None:
 def require_pg_tls(dsn: str, name: str) -> None:
     """Refuse a non-loopback Postgres DSN whose sslmode leaves plaintext or an unverified peer.
 
-    libpq's default is `prefer`: it tries TLS, silently falls back to cleartext when the server does
-    not offer it, and verifies no certificate even when it does negotiate. The full conversation
-    transcript, the turn checkpoints and the audit trail all cross this connection, so under the
-    enforced posture a non-loopback DSN must state `sslmode=require`/`verify-ca`/`verify-full`
-    (`verify-full` recommended, with `sslrootcert=`). Loopback dev and a Unix socket are exempt.
-
-    **An empty host is not the loopback exemption, and it used to take it.** `PG_LOOPBACK_HOSTS`
-    contains `""` for callers that ask the same question about a URL they built themselves, and
-    reading a DSN through that member is the fail-open `_pg_dial`'s docstring says it closes:
-    `conninfo_to_dict` is `PQconninfoParse`, which reads the *string* and applies neither libpq's
-    environment defaults (`PGHOST`) nor a `service=` file, so `service=chemclaw` and
-    `dbname=c user=u` both parse cleanly to no host and were exempted while libpq dialled a remote
-    server at `prefer`. Refused rather than resolved — resolving means a second implementation of
-    libpq's precedence rules, which is the "a second spelling is a second answer" error this guard
-    exists to have stopped making. Both escapes are one honest line: name the host, or state the
-    sslmode.
+    libpq's default `prefer` silently falls back to cleartext and verifies no certificate, and
+    transcripts, checkpoints and the audit trail cross this connection. So a non-loopback DSN must
+    state `sslmode=require`/`verify-ca`/`verify-full` (`verify-full` recommended, with
+    `sslrootcert=`). Loopback dev and a Unix socket are exempt. An empty host is not loopback here
+    (libpq may resolve it from `PGHOST` or a `service=` file); name the host or state the sslmode.
     """
     host, sslmode = _pg_dial(dsn, name)
     if sslmode in _TLS_SSLMODES or _dial_is_offline(host):
@@ -321,13 +185,10 @@ def require_pg_tls(dsn: str, name: str) -> None:
     )
 
 
-# One row per iteration-bounded Temporal Schedule: the setting that bounds how many iterations a
-# run may take, the setting that budgets one of its activities, and how many activities one
-# iteration dispatches. `_a_bounded_run_fits_the_ceiling_that_kills_it` multiplies them out; the
-# third column is *derived from each workflow's own loop* by
-# `tests/test_config.py::test_the_dispatch_count_each_bounded_drain_declares_is_the_one_it_runs`,
-# so a loop that gains an activity fails there rather than quietly overrunning the ceiling. A new
-# iteration-bounded drain is one row here and nothing else.
+# One row per iteration-bounded Temporal Schedule: the setting bounding its iterations, the setting
+# budgeting one activity, and activities dispatched per iteration.
+# `_a_bounded_run_fits_the_ceiling_that_kills_it` multiplies them out; the third column is checked
+# against each workflow's loop by `tests/test_config.py`.
 _BOUNDED_DRAINS: tuple[tuple[str, str, int], ...] = (
     ("corpus_sync_max_iterations", "corpus_sync_timeout_seconds", 1),
     ("document_sync_max_iterations", "document_sync_timeout_seconds", 3),
@@ -380,11 +241,9 @@ class Settings(
 
     @property
     def note_reindex_effective(self) -> bool:
-        """Whether the note reindex schedule runs — derived from the source list unless overridden.
+        """Whether the note reindex schedule runs: derived from the source list unless overridden.
 
-        Lives on the composed class because the answer spans two mixins: the flag is
-        `RetrievalSettings`' and the source list is `SourcesSettings`'. The field's own comment
-        carries the why; this is only the join.
+        On the composed class because the flag and the source list live in different mixins.
         """
         if self.note_reindex_enabled is not None:
             return self.note_reindex_enabled
@@ -394,18 +253,11 @@ class Settings(
     def longest_bundle_activity(self) -> tuple[float, str]:
         """The longest activity budget a connector bundle's child can spend, and its setting name.
 
-        **One definition, because two readers need the same number and they bound each other.**
-        `_the_job_ceiling_covers_the_activity_it_bounds` needs it to check that the ceiling covers
-        one attempt, and `durable/publish.py::connector_queue_wait_timeout` needs it to derive the
-        *headroom* a queued job may spend waiting — ceiling minus this minus one activity's
-        overhead. Written twice, the two could disagree, and the disagreement would be exactly the
-        composite that ends a healthy job as a bare `WorkflowExecutionTimedOut`.
-
-        A property on the composed class rather than a constant in either module, because the max
-        spans two sections (`CalculatorSettings` and `PublishSettings`) and neither can see the
-        other — the same reason the validators that read it live here. A bundle that adds a longer
-        activity is covered by being added to the tuple below; `durable/publish.py` then narrows
-        its own wait bound for free, because the headroom is computed rather than configured.
+        One definition for two readers that bound each other:
+        `_the_job_ceiling_covers_the_activity_it_bounds` and
+        `durable/publish.py::connector_queue_wait_timeout`, which derives a queued job's wait
+        headroom from it. On the composed class because the max spans `CalculatorSettings` and
+        `PublishSettings`.
 
         Returns:
             The largest activity budget in seconds and the name of the setting that carries it.
@@ -420,19 +272,11 @@ class Settings(
 
     @property
     def longest_fan_out_activity(self) -> tuple[float, str]:
-        """The longest activity budget a *fan-out* child can spend, and its setting name.
+        """The longest activity budget a fan-out child can spend, and its setting name.
 
-        The twin of `longest_bundle_activity` one level over: two fan-out children exist
-        (`ReportSectionWorkflow`'s retrieval, `PublishNoteWorkflow`'s note write) and both run a
-        single activity under `fan_out_child_timeout_seconds`. Two readers need the same number and
-        they bound each other — `_the_fan_out_ceiling_covers_the_section_it_bounds` checks that the
-        ceiling funds one attempt, and `durable/publish.py::fan_out_queue_wait_timeout` derives the
-        headroom a queued child may spend waiting as ceiling minus this minus one activity's
-        overhead — so it is written once, for the reason the bundle twin gives.
-
-        A property on the composed class because the max spans two sections (`ReportSettings` and
-        `PublishSettings`); a third fan-out child is covered by being added to the tuple below, and
-        the wait bound narrows itself for free.
+        The fan-out twin of `longest_bundle_activity`, read by
+        `_the_fan_out_ceiling_covers_the_section_it_bounds` and
+        `durable/publish.py::fan_out_queue_wait_timeout`.
 
         Returns:
             The largest activity budget in seconds and the name of the setting that carries it.
@@ -446,18 +290,12 @@ class Settings(
         return longest
 
     def _fleet_pool_widths(self, *, at_rollout_peak: bool = False) -> tuple[int, int]:
-        """`(one-connection pools, `pg_pool_max_size` pools)` on `postgres_dsn`'s server.
+        """`(one-connection pools, pg_pool_max_size pools)` on `postgres_dsn`'s server.
 
-        The decomposition the refusal above prints, derived through the same branches as
-        `fleet_connections_per_server` so the two cannot disagree — `wide * pg_pool_max_size +
-        narrow` is that function's first element by construction. Under a split the primary keeps
-        one full pool per pooled process and none of the readiness pools, which is why `narrow` is
-        zero there: they move to the session store with the checkpointer.
-
-        `at_rollout_peak` travels with it for the same reason the flag exists at all: the refusal
-        quotes this decomposition beside the total it refused, and a message describing the steady
-        fleet under a total taken at the peak is a message that sends its reader to the wrong
-        arithmetic.
+        The decomposition the refusal prints, derived through the same branches as
+        `fleet_connections_per_server` so the two always add up. Under a split, the narrow readiness
+        pools move to the session store, so `narrow` is zero. `at_rollout_peak` matches the total
+        being quoted.
         """
         primary, session = self.fleet_connections_per_server(at_rollout_peak=at_rollout_peak)
         pools, replicas = self.pg_fleet_pools, self.service_fleet_replicas
@@ -472,62 +310,21 @@ class Settings(
     def fleet_connections_per_server(self, *, at_rollout_peak: bool = False) -> tuple[int, int]:
         """`(connections on postgres_dsn's server, connections on the split session store's)`.
 
-        The one place the fleet's Postgres spend is added up, and it is a sum rather than a product
-        because two things break the product `pg_fleet_pools × pg_pool_max_size`.
-
-        **Not every pool is `pg_pool_max_size` wide.** A front door's `/readyz` pool asks for one
-        connection (`api/routes/ops.py`), so the fleet holds one narrow pool per front-door replica
-        and `pg_pool_max_size` for every other pool. Charging those eight apiece declared 208 for a
-        shipped chart that opens **166** — and the gap was not spare headroom but a refusal, since
-        the front door is the role that scales: at `maxReplicas: 9` the product reached 280 against
-        a declared 256 and every pod in the fleet CrashLooped against a database that could serve
-        it.
-
-        **A split `session_store_dsn` puts those pools on two servers.** Measured on the real
-        composition roots, each pooled process opens exactly one more `core/db` pool, because the
-        front door's `/readyz` and checkpointer pools both resolve `session_store_dsn or
-        postgres_dsn` and *move* while the stores' session pool is new. So the primary keeps one
-        full pool per pooled process — `pg_fleet_pools − 2 × service_fleet_replicas`, exact because
-        the chart derives both numbers from one autoscaling block — and the session store carries
-        everything the single-DSN case carried. Two DSNs naming one endpoint are one server and are
-        summed onto the primary, so a site that split *databases* rather than servers is checked
-        against the one ceiling it has; an unparseable DSN takes the same branch.
-
-        Both figures are ceilings, not readings: `chemclaw_pg_pool_max_size` is what a process
-        actually holds, and `tests/test_fleet_pools.py` is what pins the per-role pool counts these
-        two lines of arithmetic stand on.
-
-        **`at_rollout_peak` reads the same arithmetic against both generations.** A rolling update
-        runs the old pods and the new ones together, so for the length of an upgrade the fleet holds
-        every surging Deployment's pools twice — and the readiness term surges with it, because
-        that pool is one *per front-door pod*. Both inputs therefore move together
-        (`pg_fleet_pools_at_rollout_peak`, `service_fleet_replicas_at_rollout_peak`), rendered by
-        the chart because only it knows how many Deployments there are to surge. Substituting one
-        and not the other would charge a peak's pools against a steady replica count and
-        under-declare the narrow term, which is the direction that exhausts a server.
-
-        Undeclared (0, the code default) falls back to the steady pair, so a CLI, a test and any
-        hand-rolled deployment keep exactly today's answer.
-
-        Args:
-            at_rollout_peak: Charge both generations of every surging Deployment, as an upgrade
-                does, instead of the steady state it settles at.
+        The one place fleet Postgres spend is added up: one narrow (single-connection `/readyz`)
+        pool per front-door replica and `pg_pool_max_size` for every other pool. With a split
+        `session_store_dsn` the readiness and checkpointer pools move to the session store and each
+        pooled process opens one more; DSNs naming one endpoint (or unparseable) are summed onto the
+        primary. `at_rollout_peak` charges both generations of an upgrade using the chart-rendered
+        peak counts (falling back to the steady pair). `tests/test_fleet_pools.py` pins the per-role
+        pool counts.
         """
-        # The narrow pools are the front doors' `/readyz` ones, one apiece — but only if the
-        # declared total can actually contain them: a front door holds three pools, so fewer than
-        # `3 × replicas` means the pair was set by hand and does not describe a fleet the chart
-        # rendered. Then every pool is charged full width, which is the old arithmetic and the
-        # conservative direction. Without this, the code defaults (1 pool, 1 replica) subtract a
-        # readiness pool that is not there and declare **1** connection for a process holding 16 —
-        # an under-declaration, which is the direction that exhausts a server rather than starving
-        # one. `tests/test_fleet_pools.py` is what pins the three.
+        # Narrow pools are one per front door, but only if the declared total can contain them
+        # (three pools per front door). Otherwise the pair was set by hand and every pool is charged
+        # full width, the conservative direction.
         pools, replicas = self.pg_fleet_pools, self.service_fleet_replicas
         if at_rollout_peak and self.pg_fleet_pools_at_rollout_peak:
             pools = self.pg_fleet_pools_at_rollout_peak
-            # Both or neither: the peak replica count is what makes the readiness term below match
-            # the pools above. A chart that rendered one key and not the other is a chart whose two
-            # halves describe different fleets, so the steady count is the safe read of a pair that
-            # is only half declared.
+            # Both or neither: a half-declared peak pair falls back to the steady replica count.
             replicas = self.service_fleet_replicas_at_rollout_peak or self.service_fleet_replicas
         consistent = pools >= 3 * replicas
         readiness = replicas if consistent else 0
@@ -543,79 +340,31 @@ class Settings(
 
     @model_validator(mode="after")
     def _guards_that_the_comments_already_demand(self) -> Self:
-        """The combinations whose prose already forbids them, now enforced at startup.
+        """The combinations whose field comments forbid them, enforced at startup.
 
-        Each of these was documented in a field comment as "must stay below" / "this must stay 1"
-        and enforced by nothing, so a deployment could set it and find out in production. A rule
-        worth writing down is worth failing on. (Counted in the list below, not in this sentence —
-        a number in prose beside a list is a number that goes stale.)
+        - **A tool-result clear trigger above the conversation budget**: the lossless edit must fire
+          before the window.
+        - **A stated autonomy nothing enforces**: `harness_autonomy="plan_only"` with the harness
+          off, refused only under `entra_required`; the opt-out is `harness_autonomy=execute`.
+        - **`service_uvicorn_workers > 1`**, which breaks per-process guarantees (rate limiter,
+          budget tracker, attachment store, session LRU, metrics scrape). Scale with replicas
+          instead.
+        - **A fleet admitting more concurrent turns than its declared ceiling** (replicas x workers
+          x per-process cap).
+        - **A fleet opening more Postgres connections than the server serves**, counted by pools,
+          not processes.
+        - **A fleet dispatching more concurrent calculations than the backend serves** (durable half
+          only; `chemclaw_calc_requests_in_flight` covers the tool path).
+        - **A mid-turn resume wait longer than the turn deadline.**
+        - **Budgets enabled with every cap at zero** (zero means unlimited).
+        - **`embedding_dim` disagreeing with the `vector(N)` column** while anything writes the note
+          index, which pgvector would otherwise reject at reindex time.
 
-        - **A tool-result clear trigger above the conversation budget.** The lossless edit was
-          split off from the budget precisely so it could fire first; setting it higher means it
-          never fires before the window does, which is the behaviour the split removed. The
-          inverted setting is the worse of the two possible misconfigurations because it looks
-          like it took effect.
-        - **A stated autonomy that nothing enforces.** `harness_autonomy="plan_only"` with
-          `harness_enabled=False` is `gate_applies` returning False — the approval-first posture
-          named in one setting and attached by neither. Both are the *code defaults*, so this is
-          refused only under `entra_required`, which is the deployment that believes it is in the
-          enforced posture: the shipped chart sets the harness on, and the image run directly,
-          `docker compose` and any non-Helm deployment did not. The opt-out is
-          `harness_autonomy=execute`, in the same vocabulary as the thing being decided rather
-          than in a security knob that means something else; with the harness off it changes no
-          behaviour, which is what makes it a statement rather than a switch.
-        - **`service_uvicorn_workers > 1` silently breaks five per-process guarantees.** Until
-          those have a shared story (shared rate limiter, shared budget tracker, shared attachment
-          store, shared session LRU, shared metrics scrape), the knob is a foot-gun that offers no
-          operator response path. Replicas plus Route affinity remain the supported way to use more
-          CPU (entrypoint.sh comment, lines 13-20).
-        - **A fleet admitting more concurrent turns than its declared ceiling.** The admission cap
-          is per-process by design (SCALE-1), which makes `replicas × uvicorn workers × cap` the
-          number the shared LLM endpoint actually sees — and nothing stated it, so raising the
-          per-process cap multiplied fleet demand invisibly. Only checked once an operator declares
-          the ceiling their endpoint can serve; undeclared, there is nothing to check against.
-        - **A fleet opening more Postgres connections than the server will serve.** The same shape
-          one subject over, and `core/config/store.py` had stated the multiplication in prose since
-          the pool landed: `pg_pool_max_size` bounds one *pool*, and the deployment total is that
-          times every pool the fleet opens. Nothing computed it, so the shipped chart ran all
-          of its pods on the default 16 and the fleet ceiling was ~272 against the
-          `max_connections=100` D-119 measured against. Then the computation itself counted
-          *processes*, which is the same error one level in: a front-door process holds three pools
-          and opens 48 connections where `1 × 16` said 16. Same self-disabling convention:
-          undeclared means inert.
-        - **A fleet dispatching more concurrent calculations than the backend will serve.** The
-          third instance of the same shape, one subject over again: the activity cap bounds one
-          worker process and `servers/calc` is a single shared pod, so scaling the `calc` worker
-          multiplied CPU-bound load on it with nothing named for the product. Same self-disabling
-          convention: undeclared means inert. The *durable* half only — the bundle's own server
-          pods dispatch there from a tool call with no per-process cap, which no product can see
-          and `chemclaw_calc_requests_in_flight` can.
-        - **Mid-turn resume outliving the turn.** A resume wait longer than the turn deadline can
-          never complete; it just burns the turn's remaining time holding an admission permit.
-        - **Budgets enabled with every cap at zero.** `0` means unlimited for each cap, so this is
-          a guard that guards nothing while reporting itself as on.
-        - **`embedding_dim` disagreeing with the `vector(N)` column** in migration 012, *while
-          anything writes the note index*. pgvector rejects the insert at write time, so the
-          mismatch surfaces as a failed reindex rather than as the configuration error it is.
-          Still scoped rather than unconditional, because the embedder is used on its own (the hash
-          embedder's unit tests pick a small dim and touch no database) — but the scope was wrong
-          (DARK-8): it asked whether the *vector* source was enabled, while `reindex_notes` writes
-          the embedding column for **every** note-index-backed source. A `lexical`-only deployment
-          with a 768-wide model therefore passed validation and failed every reindex on a pgvector
-          dimension error, with nothing pointing at the setting that caused it. The question is
-          "does anything in this deployment write `note_index`", and `note_reindex_enabled` is the
-          third way that happens — the scheduled rebuild, which needs no retrieve source at all.
-
-        Every rule in this method **raises**, and that is what keeps the one rule that does not out
-        of it: `_a_durable_deployment_is_told_its_envelopes_will_orphan` below warns instead, for
-        the reason its own docstring measures. A method whose name promises refusal and whose body
-        sometimes logs is a method a reader stops trusting.
+        Fleet checks are inert until the operator declares the corresponding ceiling. Every rule
+        here raises; guards that must only warn live in their own validators.
         """
-        # Only when the operator *set* it. At its default the trigger is clamped instead, because a
-        # default is this repository's opinion and a budget is the deployment's: a small-context
-        # site setting `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET=20000` and nothing else would otherwise
-        # fail to construct `Settings()` at all, citing a variable it never heard of. That made a
-        # 30,000-token floor out of a field whose entire purpose is to sit *below* the budget.
+        # Only when the operator set it; at its default the trigger is clamped instead, so a
+        # small-context deployment setting only the budget still starts.
         if "agent_tool_result_clear_trigger" not in self.model_fields_set:
             self.agent_tool_result_clear_trigger = min(
                 self.agent_tool_result_clear_trigger, self.agent_context_token_budget
@@ -666,10 +415,8 @@ class Settings(
             require_pg_tls(self.postgres_dsn, "postgres_dsn")
             if self.postgres_migration_dsn:
                 require_pg_tls(self.postgres_migration_dsn, "postgres_migration_dsn")
-            # The third one, and the one the refusal message above literally describes: the session
-            # layer's own database holds `session_messages`, the LangGraph checkpoints, the plan
-            # approvals, the turn-cost rows and the effect ledger. Empty is not "unchecked" — it
-            # means "use `postgres_dsn`", which the first line already checked.
+            # The session layer's own database (transcripts, checkpoints, approvals, cost rows, the
+            # effect ledger). Empty means "use `postgres_dsn`", already checked above.
             if self.session_store_dsn:
                 require_pg_tls(self.session_store_dsn, "session_store_dsn")
         if self.service_uvicorn_workers > 1:
@@ -697,13 +444,9 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
-        # **A waiting message's ask is also its lease refresh**
-        # (`agent/session_queue`): every `service_turn_queue_poll_seconds` the waiter re-stamps its
-        # ticket, and a ticket not re-stamped within `service_turn_claim_lease_seconds` stops
-        # counting and is swept. A poll at or above the lease therefore lapses every ticket between
-        # two asks, and every queued message ends as "withdrawn" without anybody withdrawing it —
-        # a line that refuses everyone while reading as working. Both are this deployment's own
-        # numbers, so it is refused here rather than discovered by a chemist.
+        # A waiting message's poll also refreshes its lease (`agent/session_queue`), so a poll at or
+        # above the lease lapses every ticket between two asks and every queued message ends as
+        # withdrawn.
         if self.service_turn_queue_poll_seconds >= self.service_turn_claim_lease_seconds:
             raise ValueError(
                 f"service_turn_queue_poll_seconds ({self.service_turn_queue_poll_seconds:g}) must "
@@ -712,9 +455,7 @@ class Settings(
                 "place in line each time it asks, so at or above the lease every place lapses "
                 "between asks and every queued message reads as withdrawn."
             )
-        # The same shape one table over (`agent/turn_remotes`): a request another replica addresses
-        # to a running turn is refreshed every poll and lapses after its lease, so a poll at or
-        # above the lease lapses every follow and every Stop between two refreshes.
+        # The same shape for relayed requests to a running turn (`agent/turn_remotes`).
         if self.service_turn_relay_poll_seconds >= self.service_turn_relay_lease_seconds:
             raise ValueError(
                 f"service_turn_relay_poll_seconds ({self.service_turn_relay_poll_seconds:g}) must "
@@ -722,14 +463,9 @@ class Settings(
                 f"({self.service_turn_relay_lease_seconds:g}): a request to a turn on another "
                 "replica is refreshed each poll, so at or above the lease it lapses between polls."
             )
-        # **A fairness cap at or above the cap it divides refuses nothing while reading as
-        # protection**, and it publishes that reading on `chemclaw_turn_actor_capacity`. The chart's
-        # own pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`
-        # — so a `--set config.CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS=4` on a small node, or an env
-        # override of either key, escapes it entirely and ships a guard consulted on every request
-        # that can never fire. Checked here because this is the only place that sees the
-        # configuration a pod actually runs, which is the same argument the fleet product above
-        # makes. Zero is untouched: it is the documented off switch, not a narrow cap.
+        # A per-actor fairness cap at or above the cap it divides refuses nothing while reading as
+        # protection. Checked here because only this sees the configuration a pod actually runs (env
+        # overrides escape the chart test). Zero is the documented off switch.
         if (
             self.service_max_concurrent_turns_per_actor
             and self.service_max_concurrent_turns_per_actor >= self.service_max_concurrent_turns
@@ -742,35 +478,13 @@ class Settings(
                 "the guard refuses nothing. Set it strictly below "
                 "service_max_concurrent_turns, or to 0 to disable it deliberately."
             )
-        # The socket backstop against what this process's own caps can occupy — the cross-check
-        # that was missing beside the three fleet ones below it.
-        #
-        # `--limit-concurrency` (`deploy/entrypoint.sh`) counts open sockets including idle
-        # keep-alives and answers 503 *above* the ASGI app, so it is the liveness probe's bound as
-        # well as a request's: proven with 20 idle keep-alive sockets at a limit of 20, where a
-        # fresh `GET /healthz` got 503, and with 255 SSE streams held at 256, where both probes and
-        # every route answered 503 together. The shipped numbers made that reachable from the app's
-        # own supported state — `service_max_event_streams_total` was 78% of
-        # `service_max_connections` on its own — and the kubelet's response to a busy pod is to
-        # SIGKILL it, which kills every in-flight turn on the pod that is still serving.
-        #
-        # Refused rather than warned because both sides are this deployment's own numbers and the
-        # failure is silent until it is an outage. Turns and streams are added rather than maxed:
-        # they are different sockets and a chemist mid-turn with a push-back stream open holds one
-        # of each.
-        #
-        # **A turn is more than one socket once a session is shared**
-        # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`): besides its sender's own
-        # stream, up to `service_turn_max_watchers` participants may follow it, each on an open
-        # stream of its own.
-        #
-        # **Waiters are charged per process, not per local turn**
-        # (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`). A message
-        # waits on the replica its sender reached, whichever replica runs the turn ahead of it, so
-        # "`service_turn_queue_max` behind each of this process's turns" undercounted every waiter
-        # whose turn ran elsewhere. The turn route refuses a waiter past
-        # `service_max_concurrent_turns` × `service_turn_queue_max` on this process, and that
-        # enforced bound is what is charged here.
+        # The socket backstop must exceed what this process's own caps can occupy.
+        # `--limit-concurrency` (`deploy/entrypoint.sh`) counts every open socket and answers 503
+        # above the app, probes included, so reaching it gets a busy pod killed by the kubelet.
+        # Turns and streams are added, not maxed: a turn holds its sender's stream plus up to
+        # `service_turn_max_watchers` followers, and waiters are charged per process
+        # (`service_max_concurrent_turns` x `service_turn_queue_max`), the bound the turn route
+        # enforces.
         per_turn = 1 + self.service_turn_max_watchers
         waiters = self.service_max_concurrent_turns * self.service_turn_queue_max
         occupied = (
@@ -795,26 +509,14 @@ class Settings(
                 "merely busy — killing every turn in flight on it. Raise "
                 "service_max_connections, or lower the stream/turn caps it has to cover."
             )
-        # **The peak, because that is the number the server is actually asked for.** A rolling
-        # update runs both generations, so an upgrade is when the fleet holds the most connections
-        # it ever holds — and a ceiling that covers only the steady state is one a release breaches
-        # on the way to being correct, with every pod's own configuration valid. Undeclared, this
-        # is the steady figure and nothing changes.
+        # The rollout peak: an upgrade runs both generations, so that is when the fleet holds the
+        # most connections. Undeclared, this is the steady figure.
         primary_connections, session_connections = self.fleet_connections_per_server(
             at_rollout_peak=True
         )
         if self.pg_session_fleet_max_connections and not session_connections:
-            # Refused rather than ignored, and it is the one branch here that can be: the setting
-            # is new, so nothing has it set yet and no upgrade can trip on it. A ceiling for a
-            # server this deployment does not have is a knob with no referent — the runtime alert's
-            # second branch would compare an always-zero gauge against it and never fire — which is
-            # the `map_to_hpc_identity` shape this tree deletes.
-            #
-            # (This comment used to say the alert *adds* the two ceilings, so a declared phantom
-            # would silence it. That was true of the summed expression this same change replaced,
-            # and it survived into five documents describing the two-branch one. Driven: with the
-            # session server over, an undeclared ceiling is **silent** and a declared one **fires**.
-            # Declaring can only ever add a firing condition.)
+            # Refused: a session-server ceiling with no split session store has no referent.
+            # Declaring a ceiling can only add a firing condition to the runtime alert.
             raise ValueError(
                 "pg_session_fleet_max_connections declares a ceiling for a split session store "
                 "and there is none: session_store_dsn is unset, equal to postgres_dsn, or names "
@@ -824,18 +526,10 @@ class Settings(
                 "spelled differently from postgres_dsn, since the two are compared as strings."
             )
         if self.pg_fleet_max_connections and primary_connections > self.pg_fleet_max_connections:
-            # **Pools, not processes, and not every pool is `pg_pool_max_size` wide.** A process
-            # holds one pool per distinct `(dsn, libpq options, requested max_size)` key plus any
-            # foreign pool it registers, so a front door holds three — stores, `/readyz`'s own
-            # statement timeout, the checkpointer's autocommit pool — of which the middle one asks
-            # for a single connection. Multiplying by processes said `1 × 16 = 16` for a process
-            # measured at 48; multiplying by pools said 208 for a fleet that opens 166.
-            #
-            # The breakdown is printed from the terms this figure was actually built from. It used
-            # to print the raw settings, which only added up on the unsplit path: a split said 112
-            # beside a decomposition summing to 166, and a hand-set inconsistent pair said 32
-            # beside one summing to -13. An operator is told what to lower; the arithmetic they are
-            # shown has to reach the number they are refused over.
+            # Counted by pools, not processes: a front door holds three (stores, `/readyz`'s, the
+            # checkpointer's), and the `/readyz` one is a single connection. The breakdown is
+            # printed from the same terms as the total, so the operator's arithmetic reaches the
+            # refused number.
             narrow, wide = self._fleet_pool_widths(at_rollout_peak=True)
             raise ValueError(
                 f"this deployment may open {primary_connections} Postgres connections on "
@@ -847,11 +541,8 @@ class Settings(
                 "pg_pool_max_size or the number of pooled processes, or raise "
                 "pg_fleet_max_connections if the server's max_connections can serve it."
             )
-        # **Its own `if`, not nested under the primary's.** `postgres.maxConnections: 0` is a
-        # documented value meaning "declare no ceiling", and nesting made it silence a *declared*
-        # session ceiling too: measured, a session store charged 500 against a declared 180 built
-        # without a word. Two independent ceilings need two independent checks, and the runtime
-        # alert's branches were un-shared in the same change for the same reason.
+        # Its own `if`: `postgres.maxConnections: 0` (no primary ceiling) must not silence a
+        # declared session ceiling.
         if session_connections > self.pg_session_fleet_max_connections > 0:
             raise ValueError(
                 f"this deployment may open {session_connections} Postgres connections on the "
@@ -863,13 +554,9 @@ class Settings(
                 "pg_session_fleet_max_connections if that server can serve it."
             )
         if self.calc_backend_max_concurrent_requests:
-            # Three factors, not two: a solvent screen fans out inside one activity under
-            # `asyncio.Semaphore(calc_screen_max_parallel)` and each branch holds its own
-            # `calc_session` for the whole of its chain, so an activity is not one backend session.
-            # Measured over five solvents with the knob at 1/4/8: 1/4/6 concurrent sessions inside
-            # a single activity. `connectors/calc/compose.py` has exactly two concurrency sites,
-            # both bounded by this one knob and neither nested inside the other, so one extra
-            # factor is the whole correction.
+            # Three factors: a solvent screen fans out inside one activity under
+            # `calc_screen_max_parallel`, each branch holding its own `calc_session`. Those are the
+            # only concurrency sites in `connectors/calc/compose.py`, and they do not nest.
             dispatched = (
                 self.calc_fleet_worker_processes
                 * self.worker_max_concurrent_activities
@@ -895,15 +582,9 @@ class Settings(
             raise ValueError(
                 "mid_turn_resume_timeout_seconds must be smaller than service_turn_timeout_seconds"
             )
-        # **A revision is a whole extra model round-trip, and nothing related it to the deadline.**
-        # Each round ends in a judge call of its own (`build_answer_event` re-scores the revised
-        # answer), so the loop adds `answer_review_max_rounds` model calls *and* that many judge
-        # calls to a turn that `service_turn_timeout_seconds` already bounds. The model half has no
-        # declared ceiling to multiply — a gateway call is bounded only by the turn deadline — so
-        # what is checkable is the half that does: if the judge calls alone can fill the turn's
-        # deadline, the rounds cannot finish and every one of them is spend bought for an answer
-        # the chemist will never see. `mid_turn_resume_timeout_seconds` above is the same shape of
-        # guard for the same reason.
+        # Each review round adds a model call and a judge call to a turn bounded by
+        # `service_turn_timeout_seconds`. Only the judge half has a declared timeout, so refuse when
+        # the judge calls alone could fill the deadline.
         if self.answer_review_max_rounds and self.verifier_enabled:
             judging = (self.answer_review_max_rounds + 1) * self.verifier_timeout_seconds
             if judging >= self.service_turn_timeout_seconds:
@@ -931,10 +612,7 @@ class Settings(
         writes_note_index = self.note_reindex_effective or bool(
             NOTE_INDEX_SOURCES & set(self.data_source_list)
         )
-        # Inert wherever the note vectors do not live in that column, exactly as
-        # `require_schema_vector_width()` is for the document one: an external store's deployment
-        # may legitimately run a 768-wide model, and refusing it over a column nothing writes would
-        # be this check inventing a constraint instead of reporting one.
+        # Inert where note vectors do not live in that column: an external store may run any width.
         pgvector_notes = self.vector_store_provider == "pgvector"
         if writes_note_index and pgvector_notes and self.embedding_dim != SCHEMA_VECTOR_DIM:
             raise ValueError(
@@ -949,54 +627,16 @@ class Settings(
     def _a_durable_deployment_is_told_its_envelopes_will_orphan(self) -> Self:
         """`session_store="postgres"` with no `framing_envelope_secret`: warned about, not refused.
 
-        The condition. `agent/framing.py::_envelope_nonce` falls back to `secrets.token_hex(8)`
-        per *process* when the secret is empty, and the agent instructions say only an envelope
-        carrying **exactly** the current tag marks retrieved content as data. A durable session
-        outlives a process, so a replayed thread carries envelopes written under a previous
-        process's nonce: they no longer match, and the ELN text, note bodies and uploaded
-        attachments inside them are presented to the model as ordinary prose. The prompt-injection
-        marking switches itself off for precisely the oldest material it exists to cover
-        (`D-2026-08-06-an-envelope-that-only-survives-its-own-process`, which shipped the setting
-        and left the pairing unchecked).
+        Without the secret, `agent/framing.py::_envelope_nonce` is random per process, so a durable
+        session replayed in a later process carries envelopes whose tag no longer matches and its
+        retrieved content is no longer marked as data.
 
-        **Why this one warns where every rule in `_guards_that_the_comments_already_demand`
-        raises**, which is the decision rather than an omission
-        (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`):
+        Warned, not raised, because the shipped chart is this configuration and raising would fail
+        every pod on upgrade. The loss is bounded: defanging is unaffected, and any tool call an
+        injected instruction reaches still passes authorization, the plan gate and audit.
 
-        - What a raise would cost is measured, not estimated: `deploy/helm/chemclaw/values.yaml`
-          ships `CHEMCLAW_SESSION_STORE: "postgres"` and lists `framingEnvelopeSecret` under
-          `secrets.optionalKeys`, so the flagged pairing **is the shipped default release**. A
-          `ValueError` here is not "some deployments" — it is every pod of every existing release,
-          front door and workers alike, failing to construct `Settings()` on `helm upgrade`, over a
-          condition the operator did not change and this repository documented as the default.
-          Scoping the raise to `entra_required` — the escape the harness guard above takes — buys
-          nothing, because the same file sets `CHEMCLAW_ENTRA_REQUIRED: "true"`.
-        - What the lapse costs is real and bounded. It is a *marking*, not a gate: no verdict is
-          computed from an envelope's presence, so nothing here is a degraded check clearing the
-          gate it guards (`D-2026-08-08-a-degraded-check-must-not-clear-the-gate`). The defang half
-          of the mechanism — the half that closes forgery, and the half D-2026-08-06 measured a
-          real bypass in — runs at framing time and is untouched by a rotated nonce. Every tool
-          call an injected instruction could reach still passes `authorize_tool`, the plan gate and
-          the audit trail, so a payload that lands cannot exceed the caller's own entitlements.
-        - Failing the fleet to start is itself the larger harm, and the surprising one: a
-          deployment that answers nothing is worse than one whose oldest retrieved content is read
-          unmarked. That is the same trade D-2026-08-08 took for `usage_tokens` — instrument the
-          defect, decline to make an upgrade a full outage.
-
-        The one thing this cannot buy is a fix. Persisting the nonce beside the session is the root
-        cause's answer and a schema decision; the two cheap alternatives (a fixed public tag,
-        deriving from another credential) were both rejected by D-2026-08-06 and stay rejected.
-
-        Emitted with the standard library's logger rather than `core/logging.py::log_event`,
-        matching `core/logging.py::_warn_about_sensitive_data`, which announces what a
-        configuration now means the same way. Not a preference: `core/logging.py` does `from
-        chemclaw.core.config import settings` at import, so importing it from here — during the
-        `Settings()` at the bottom of this module, before that name is bound — is a circular
-        import. That also fixes *when* the line lands: at import, ahead of `configure_logging()`,
-        so it reaches stderr through `logging.lastResort` and not through `JsonFormatter`. An
-        unconfigured process still prints it, which is the half that decides whether a deployment
-        sees anything, and `tests/test_config.py` pins it with a subprocess rather than trusting
-        it.
+        Uses the standard logger because `core/logging.py` imports this module; at import the line
+        goes to stderr via `logging.lastResort` (`tests/test_config.py` pins it).
         """
         if self.session_store == "postgres" and not self.framing_envelope_secret.get_secret_value():
             logging.getLogger(__name__).warning(
@@ -1021,26 +661,10 @@ class Settings(
     def _a_split_session_store_is_told_its_second_server_is_unbounded(self) -> Self:
         """A `session_store_dsn` on another server, with no ceiling declared for that server.
 
-        The condition, measured rather than reasoned: with the session layer on a second database
-        every pooled process opens one more `core/db` pool, and the front door's `/readyz` and
-        checkpointer pools move there, so the shipped chart's 26 declared pools are really 40 and
-        166 of its 278 connections land on a server `pg_fleet_max_connections` was never about.
-        (208 of 320 was the uniform-width arithmetic this same commit replaced — the readiness
-        pools are one connection wide, and `fleet_connections_per_server` and the warning below
-        have said 166 since.)
-        `fleet_connections_per_server` now charges each side its own, which leaves exactly one
-        thing no pod can derive: what that second server will serve.
-
-        **Warned rather than refused**, and unlike the sibling above the reason is not that the
-        shipped chart is this configuration — it is not, and a release with no split never reaches
-        this line. It is that the setting is new: an existing split deployment would fail to build
-        `Settings()` on the `helm upgrade` that introduces it, over a variable its operator has
-        never seen — an outage caused by a chart bump
-        (D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment).
-        The primary server's half still raises, exactly as it always did.
-
-        Kept out of `_guards_that_the_comments_already_demand`, whose docstring promises that every
-        rule in it refuses.
+        With a split, a large share of the fleet's connections land on the session server, which
+        `pg_fleet_max_connections` does not cover, and only the operator knows what it will serve.
+        Warned rather than refused because the setting is new and an existing split deployment would
+        otherwise fail on upgrade. The primary's check still raises.
         """
         _, session_connections = self.fleet_connections_per_server()
         if session_connections and not self.pg_session_fleet_max_connections:
@@ -1066,32 +690,11 @@ class Settings(
     def _the_fan_out_ceiling_covers_the_section_it_bounds(self) -> Self:
         """The same rule as below, on the other parent/child pair that has a ceiling.
 
-        A fan-out child's longest single piece of work is one report section, budgeted by
-        `report_section_timeout_seconds` (`durable/report_workflow.py`). A ceiling at or under that
-        pre-empts a section that was still running and reports it as a timed-out child — the guard
-        causing the failure it exists to bound. Strictly greater, because equality is the defect.
-
-        **It checked the work and not the wait, which is the correction
-        `connector_queue_wait_timeout` was written for and which was never applied here.** Both
-        children passed core's flat `queue_wait_timeout()` as their `schedule_to_start`, and the
-        wait precedes the work, so what the ceiling has to contain is `q + w` — 3,600 + 300 = 3,900
-        against a 3,600 ceiling on the section, 3,600 + 120 = 3,720 on the note. The ceiling was
-        *exactly* the wait, so a section's own `SCHEDULE_TO_START` expiry could not be observed:
-        driven on the real broker scaled 1000:1, both children came back as bare
-        `ChildWorkflowError: Child Workflow execution timed out` — an execution timeout is not
-        delivered to workflow code — where the shape below produces the designed
-        `retrieval_failed` marker with `activity_failure_reason`'s "nothing is serving that queue"
-        cause behind it.
-
-        The composite is made to fit *by construction* rather than by a second number to keep in
-        step: `durable/publish.py::fan_out_queue_wait_timeout` subtracts this rule's own floor from
-        the ceiling, so `(C - w - a) + w = C - a` whatever the three numbers are. This rule is what
-        keeps that wait strictly positive, which is why it now reserves one activity's overhead
-        exactly as `_the_job_ceiling_covers_the_activity_it_bounds` does.
-
-        Scoped here rather than to `ReportSettings` because the max spans two sections; both
-        settings the max reads live in `longest_fan_out_activity`, read rather than restated for
-        the reason that property gives.
+        A fan-out child's longest work is one report section (`report_section_timeout_seconds`), and
+        its queue wait precedes it, so the ceiling must contain wait plus work. The wait is derived
+        to fit (`durable/publish.py::fan_out_queue_wait_timeout` subtracts this rule's floor from
+        the ceiling); this rule keeps it strictly positive, reserving one activity's overhead.
+        Strictly greater, because equality is the defect.
         """
         longest, budget = self.longest_fan_out_activity
         needed = longest + self.activity_timeout_seconds
@@ -1109,36 +712,14 @@ class Settings(
 
     @model_validator(mode="after")
     def _a_bounded_run_fits_the_ceiling_that_kills_it(self) -> Self:
-        """A drain that bounds its own run must be able to *finish* one inside `run_timeout`.
+        """A drain that bounds its own run must be able to finish one inside `run_timeout`.
 
-        Four Schedules drain in chunks and hand their position to a fresh execution with
-        `continue_as_new` after `*_max_iterations` of them (`durable/corpus_sync.py`,
-        `document_sync.py`, `label_sync.py`, `eln_sync.py`). `schedule_run_timeout_seconds` is the
-        `run_timeout` on that same run. Nothing checked that the first number's worth of work fits
-        the second, and at the shipped defaults it did not: 100 iterations of a 900 s activity plus
-        the planning activity is **90,900 s against an 86,400 s ceiling**, and the document share's
-        loop dispatches three activities per iteration, which is 270,900 s.
-
-        **What that costs is the whole reason this is a refusal rather than a comment.** A run
-        killed at the ceiling is a `TIMED_OUT` that no `except` sees, and the setting's own
-        paragraph names the two jobs that keep no row between runs — `corpus_sync` in release mode
-        and `document_sync` — so their next *fire* starts from page one. A corpus large enough to
-        use its iteration budget therefore burnt a day of a worker slot per fire and made no net
-        progress: the wedge the ceiling exists to prevent, arrived at from the other side.
-
-        **Work only, and the queue wait is deliberately not charged.** A dispatch may also sit up
-        to `activity_queue_wait_seconds` on the queue, which at the shipped hour would dominate
-        every term here and force `document_sync_max_iterations` to 6. That is the wrong reading of
-        what the ceiling is for: a run that overruns because its activities are unclaimed is
-        precisely the stuck run this ceiling is the backstop for, and killing it is correct. A run
-        that overruns doing its own budgeted work is the defect, and that is what this refuses.
-        The residual is real and is stated rather than argued away — under sustained backpressure a
-        bounded run can still be killed, and for the two uncursored jobs that still costs the whole
-        drain.
-
-        `_BOUNDED_DRAINS` carries the arithmetic's third term because a loop body is not something
-        this object can see; the test named there derives it from the workflow's own source, so the
-        declaration cannot go stale in silence.
+        Four Schedules drain in chunks and `continue_as_new` after `*_max_iterations`
+        (`durable/corpus_sync.py`, `document_sync.py`, `label_sync.py`, `eln_sync.py`). A run killed
+        at `schedule_run_timeout_seconds` is a `TIMED_OUT` no code sees, and the jobs without a
+        cursor restart from page one, so a run's budgeted work must fit. Queue wait is deliberately
+        not charged: a run overrunning because nothing claims its activities is what the ceiling
+        exists to kill. `_BOUNDED_DRAINS` supplies the activities-per-iteration term.
         """
         for iterations_name, budget_name, per_iteration in _BOUNDED_DRAINS:
             iterations: int = getattr(self, iterations_name)
@@ -1161,24 +742,15 @@ class Settings(
     def template_step_ceilings(self) -> dict[str, tuple[float, str]]:
         """The longest one step of each kind may take, and the words that name the budget.
 
-        **One definition, two readers, because they ask different questions of it.** The validator
-        below asks for the *maximum* — the honest machine-checkable floor when the templates
-        themselves are invisible, which they are to this object. `cli/validate_templates.py` asks
-        for the *sum over the steps a file actually declares*, which is the bound that matters and
-        which only a reader holding the YAML can compute. Two copies of this arithmetic is the
-        defect class this repository keeps finding; `templates/registry.unrunnable_reason` says the
-        same thing about `step_problems` one seam over.
+        One definition for two readers: the validator below takes the maximum (one step must fit),
+        and `cli/validate_templates.py` sums over the steps a template file declares. Keyed by the
+        manifest's `kind` values, so a new kind missing here raises `KeyError` rather than counting
+        as free.
 
-        Keyed by the manifest's own `kind` values, so a new step kind that forgets to appear here
-        raises a `KeyError` at the gate rather than being silently counted as free.
-
-        `job` is not an activity and that is the whole reason this is not one number. It starts
-        `ConnectorJobWorkflow` as a child under `durable/connector_job.wrapper_execution_timeout()`
-        — `connector_job_timeout_seconds` plus what the wrapper still owes after the child returns,
-        which `finish_headroom` sums and this restates because `core` cannot import `durable` —
-        the module-level comment naming that restatement, near the top of this file, is the other
-        half of the same borrowing. The count of post-child steps is deliberately not written as a
-        number in either place: it was six, then it was not.
+        A `job` step is not an activity: it starts `ConnectorJobWorkflow` under
+        `durable/connector_job.wrapper_execution_timeout()`, the child ceiling plus the wrapper's
+        post-child headroom (`finish_headroom`). `core` cannot import `durable`, so that sum is
+        restated here, and `tests/test_template_job_step.py` checks it against the live function.
 
         Returns:
             `{kind: (seconds, why)}`, where `why` is phrased to be read inside a refusal.
@@ -1206,43 +778,15 @@ class Settings(
     def _the_template_run_ceiling_covers_one_step(self) -> Self:
         """The same rule again, on the template run and the longest step it has to contain.
 
-        `templates/registry.py` starts `TemplateWorkflow` with `template_run_timeout_seconds` as an
-        execution timeout. A run ceiling at or below the longest step's budget kills the procedure
-        inside that step — with a bare `WorkflowExecutionTimedOut` naming neither setting, and with
-        the per-step timeout that was *meant* to fire made unreachable, so `agent_step_retry`'s
-        attempts become a number that can never be spent.
+        `templates/registry.py` runs `TemplateWorkflow` under `template_run_timeout_seconds`; a
+        ceiling at or below the longest step's budget kills the run inside that step with a bare
+        `WorkflowExecutionTimedOut`, so failure notification never runs and per-step retries are
+        unreachable. The longest step is usually a `job` step (see `template_step_ceilings`).
+        Strictly greater, because equality is the defect.
 
-        **A step's budget is not one number, and this rule read the wrong one for the kind of step
-        that costs the most.** `template_step_timeout_seconds` (900 s) is the `start_to_close` of an
-        `agent` or a `tool` step, both of which are activities. A `job` step is not an activity: it
-        starts `ConnectorJobWorkflow` as a child under `wrapper_execution_timeout()`
-        (`durable/template_job.py`), which is `connector_job_timeout_seconds` plus what the
-        wrapper's post-child steps may spend — 18,120 s against a run ceiling of 7,200 s when this
-        was first measured, and more since, because that headroom was then found to be counted
-        rather than summed, and more again when a sixth step was added to it. The count is not
-        written here for that reason; `finish_headroom` sums it and this validator restates the
-        sum.
-        So a CREST search well inside its own budget ended the whole run as a silent `TIMED_OUT`:
-        an execution timeout is not delivered to workflow code, so `TemplateWorkflow`'s `except
-        BaseException -> _notify_failure` never ran, the chemist was told nothing on the session
-        stream, and the connector child was terminated with its parent before it could write its
-        own `job_records` failure row. Seven of the nine shipped templates have a `job` step.
-
-        Only `connector_job_timeout_seconds` can move to close that: its own floor is the CREST
-        search plus the activity's overhead (`_the_job_ceiling_covers_the_activity_it_bounds`), so
-        raising the run ceiling is the one direction available.
-
-        Strictly greater rather than at least, because equality is the defect. Only one step is
-        required rather than N: how many steps a template has is a property of a YAML file this
-        object cannot see, so the honest machine-checkable floor is "a single step fits".
-
-        **That floor is not the bound, and for a while it was the only check there was.** On the
-        shipped defaults one `job` step is 39,330 s against a run ceiling of 45,330 s, so this
-        validator passes and a file with *two* of them misses by 33,330 s — and misses silently,
-        because a workflow execution timeout is not delivered to workflow code. The N-step half
-        lives where the YAML is readable: `agent/template_surface.run_ceiling_problems`, read by
-        `make template-validate` and by `registry.unrunnable_reason`, over the step ceilings
-        `template_step_ceilings` defines once for this validator and that gate alike.
+        This checks only that one step fits; the N-step bound needs the YAML and lives in
+        `agent/template_surface.run_ceiling_problems` (`make template-validate`,
+        `registry.unrunnable_reason`).
         """
         longest, budget = max(self.template_step_ceilings().values(), key=lambda pair: pair[0])
         if self.template_run_timeout_seconds <= longest:
@@ -1259,56 +803,20 @@ class Settings(
     def _the_job_ceiling_covers_the_activity_it_bounds(self) -> Self:
         """A parent ceiling no larger than its child's longest activity is not a ceiling.
 
-        `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an **execution**
-        timeout (`durable/connector_job.py`), and the longest thing inside any child is
-        `run_xtb_calculation` — a CREST conformer search budgeted by `xtb_job_timeout_seconds`
-        (`connectors/calc/workflows.py`). Set the ceiling at or below that and the longest activity
-        cannot finish once: an operator who raises `xtb_job_timeout_seconds` for a large molecule
-        observes no change whatsoever and gets a bare `WorkflowExecutionTimedOut` naming neither
-        setting.
+        `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an execution
+        timeout (`durable/connector_job.py`); at or below the child's longest activity budget, that
+        activity can never finish and the run ends as a bare `WorkflowExecutionTimedOut`. Strictly
+        greater, by one activity's overhead.
 
-        **What it guarantees is one attempt, and it cannot be asked for two.** This paragraph used
-        to claim the check also keeps `BAD_DATA_RETRY` alive — "a single attempt already exhausts
-        the parent's whole budget, so `activity_max_attempts` is a number that can never be
-        reached" — and that is a property the arithmetic below cannot deliver, in either direction.
-        A bundle activity's attempt costs its queue wait plus its work, and
-        `connector_queue_wait_timeout` is *derived* as `C - longest - activity_timeout_seconds`, so
-        a worst-case attempt costs
-        `C - activity_timeout_seconds` for **every** ceiling `C` and exactly one of them fits by
-        construction. Measured at the shipped defaults: `longest` 15,000 s, ceiling 25,200 s, queue
-        wait 10,170 s, one attempt 25,170 s, 30 s left over, `activity_max_attempts` 5. Raising the
-        ceiling raises the wait in lockstep and changes none of it.
-
-        That is not a defect and `activity_max_attempts` is not a dead knob — the two just meet
-        somewhere else than this rule. Retries are spendable by attempts that end **well short of
-        their own budget**, which is what the failures `BAD_DATA_RETRY` classifies actually do: an
-        unreachable calculation server, a payload the far side rejects, a transient refusal. What
-        no ceiling here funds is a *second full-length* attempt, and an operator tuning
-        `activity_max_attempts` for a CREST search that times out should read it as one.
-        `durable/connector_job.finish_headroom` states the same reservation from the other side —
-        "one attempt each, deliberately" — and the two now agree; they did not, and the
-        operator-facing one was the wrong one. Funding a guaranteed second attempt would need
-        `C > 2*(q + w)`, which this derivation cannot express, and is a new decision rather than a
-        larger number.
-
-        This is the same rule that used to be written against the DFT poll's 24 h budget. The tier
-        it guarded is gone (`D-2026-08-26-semiempirical-is-the-whole-tier`) and the rule is not: the
-        ceiling still has to cover the longest activity under it, and that activity is now a CREST
-        search. The allowance is one short activity's worth of the child's own overhead, and it is
-        strictly greater rather than at least, because equality is the defect.
-
-        Scoped to `Settings` and not to either section because it is one of the rules here that
-        spans two: the ceiling is a connector-wide deployment choice and the search budget is the
-        calculators' own, and neither section can see the other.
+        It guarantees one full-length attempt, never two: `connector_queue_wait_timeout` is derived
+        from the same ceiling, so a worst-case attempt (wait plus work) always consumes nearly all
+        of it. Retries remain spendable by attempts that fail quickly, which is what
+        `BAD_DATA_RETRY`'s transient failures do. On the composed class because the ceiling and the
+        budgets live in different sections.
         """
-        # The **max over every activity budget a bundle child can spend**, not the one activity
-        # this rule was first written against. Naming `xtb_job_timeout_seconds` alone is how the
-        # `results` bundle's republish walk got past it: that walk scans two never-pruned tables
-        # and was handed `connector_job_timeout_seconds` itself, which the ceiling equals rather
-        # than exceeds. It is `longest_bundle_activity` above rather than a `max` written here,
-        # because `durable/publish.py` derives the queue wait from the *same* number: what is left
-        # of this ceiling once the longest attempt is paid for is exactly the headroom a queued job
-        # may spend waiting, and two spellings of one max is how that composite came apart.
+        # The max over every activity budget a bundle child can spend, from
+        # `longest_bundle_activity`, the same number `durable/publish.py` derives the queue wait
+        # from.
         longest, budget = self.longest_bundle_activity
         needed = longest + self.activity_timeout_seconds
         if self.connector_job_timeout_seconds <= needed:
@@ -1327,27 +835,11 @@ class Settings(
     def _the_heartbeat_fits_inside_the_budget_it_reports_within(self) -> Self:
         """A heartbeat timeout outside the budget it sits under is a control that does nothing.
 
-        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's long
-        background activities — the note reindex, the retention sweep, the result-publish drain and
-        the artifact eviction sweep, which said "three" here until eviction became the fourth — and
-        its own comment asserts as fact that it sits "far below every start-to-close budget it sits
-        under". The `min()` below is over the budgets rather than over a count, so the guard stayed
-        correct while the sentence went stale; eviction is budgeted by `retention_timeout_seconds`,
-        which is already in it. Nothing checked that, and both directions of getting it wrong are
-        silent:
-
-        - **Above the budget it guards.** `CHEMCLAW_RESULT_PUBLISH_TIMEOUT_SECONDS=30` with one
-          configured sink gives the drain a 30 s start-to-close under a 60 s heartbeat timeout, so
-          the heartbeat can never fire first and the failure detection it exists for is inert.
-        - **Large enough that the beat outlives the budget.** `durable/heartbeat.py::beating`
-          derives its interval as `timeout / 4`, so a 3600 s heartbeat timeout beats every 900 s —
-          longer than the 600 s `retention_timeout_seconds` — and the activity therefore sends *no*
-          beat at all before its start-to-close expires. The sweep fails on a timeout that has
-          nothing to do with the sweep.
-
-        One rule covers both, because both are the same inequality: the heartbeat timeout must be
-        strictly below the shortest budget it sits under. `result_publish_timeout_seconds` is taken
-        alone rather than times the sink count, since one sink is the smallest that budget can be.
+        `background_activity_heartbeat_timeout_seconds` covers core's long background activities. It
+        must be strictly below the shortest start-to-close budget it sits under: above it the
+        heartbeat can never fire first, and since `durable/heartbeat.py::beating` beats every
+        `timeout / 4`, a large one sends no beat before the budget expires.
+        `result_publish_timeout_seconds` is taken for one sink, its smallest value.
         """
         shortest, budget = min(
             (
@@ -1370,15 +862,10 @@ class Settings(
     def _the_activity_budget_covers_the_search_it_awaits(self) -> Self:
         """The same rule one level down: the activity must outlive its longest single client call.
 
-        Inside the xTB activity the longest await is the sampler's —
-        `calc_sampling_timeout_seconds`, deliberately matched to the server's own CREST ceiling so
-        the *server* bounds a search. The two budgets shipped equal (14400 s each), and equality is
-        the defect here exactly as it is for the parent above: a search that ran to its client
-        bound exhausted the activity's `start_to_close` at the same instant, so Temporal killed the
-        activity as a bare timeout instead of letting the client's own timeout surface as an error,
-        and `activity_max_attempts` was a number that could never be reached. The margin is the
-        activity's other work around the search — key probe, embed, cache write — bounded by
-        `activity_timeout_seconds`, mirroring the parent ceiling's allowance.
+        The xTB activity's longest await is the sampler's `calc_sampling_timeout_seconds`, matched
+        to the server's CREST ceiling. The activity budget must exceed it by
+        `activity_timeout_seconds` (the key probe, embed and cache write around it), so a client
+        timeout surfaces as an error rather than a bare activity timeout.
         """
         needed = self.calc_sampling_timeout_seconds + self.activity_timeout_seconds
         if self.xtb_job_timeout_seconds <= needed:
@@ -1398,31 +885,18 @@ class Settings(
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""
 
-# The one line in this file that *does* something, and it is here for the reason the rest of the
-# file exists: this module is the single import every entrypoint makes (`api/app.py`,
-# `cli/chat.py`, `cli/connectors_dev.py`, `connectors/server_entry.py`,
-# `durable/background_worker.py`), so a decision applied here is applied by every process without
-# each launcher having to remember. `langsmith` turns its own tracing on from ambient environment
-# and would otherwise post prompts and completions to a third party that D-2026-08-11 declined;
-# `chemclaw.core.egress` documents why the pin needs both the in-process global and the environ
-# write, and why it overrides rather than defaults.
+# Applied here because every entrypoint imports this module. `langsmith` enables tracing from the
+# ambient environment and would send prompts to a third party; `chemclaw.core.egress` explains the
+# pin.
 pin_langsmith_egress(allowed=settings.langsmith_tracing_allowed)
 
-# The in-process egress guard, armed beside the LangSmith pin and for the same reason: this module
-# is the one import every entrypoint makes, so arming here makes the guard a property of the system
-# rather than of a launcher. The allowlist is derived from the destinations this deployment dials
-# (the LLM gateway, Postgres, Temporal, the connector endpoints, the IdP), so a host outside it —
-# a dependency fetching model weights, a usage ping, a DNS licence check — is refused. It is defence
-# in depth behind the NetworkPolicy for the "only LLM traffic leaves" invariant. What *this* layer
-# cannot reach — a child process, a compiled extension's own syscalls — is `netguard_preload.c`'s
-# job, the `LD_PRELOAD` interposition `deploy/entrypoint.sh` arms; `chemclaw.core.netguard` and
-# `chemclaw.core.netguard_preload` document the split and what is left over after both.
+# Armed here for the same reason. The allowlist is derived from the destinations this deployment
+# dials (LLM gateway, Postgres, Temporal, connectors, the IdP), as defence in depth behind the
+# NetworkPolicy. Child processes and compiled extensions are covered by the `LD_PRELOAD` layer
+# (`chemclaw.core.netguard_preload`).
 arm_egress_guard(settings)
 
-# And publish whether that second layer is actually loaded here, **unconditionally** — including
-# when `egress_guard_enabled` is false. Which layers a process has is a fact about the process, not
-# a consequence of a setting, and the finding that licensed the compiled layer is exactly that one
-# gauge reporting health while another path was open. `is_armed()` asks the dynamic linker rather
-# than reading `LD_PRELOAD`, because a preload naming a path that does not exist is ignored in
-# silence.
+# Publish whether that preload layer is loaded, unconditionally: it is a fact about the process,
+# not a setting. `is_armed()` asks the dynamic linker, since a preload naming a missing path is
+# ignored silently.
 publish_preload_state()

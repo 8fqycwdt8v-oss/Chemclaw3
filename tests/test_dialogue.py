@@ -1,16 +1,9 @@
-"""Asking instead of guessing, and asking what *would* happen (gaps AGT-5, IDEA-4).
+"""Asking instead of guessing, and asking what *would* happen.
 
-AGT-5: `_INSTRUCTIONS` tells the agent to say plainly when the data is silent, but there was no
-contract for it to *ask*. An ambiguous question therefore produced a best-guess sweep across every
-matching reading — worse and more expensive than asking which one was meant.
-
-IDEA-4: every expensive path is idempotent and cached, but there was no way to ask "what would you
-do, what would it cost" without doing it — a natural primitive for a deployment whose production
-default autonomy is `plan_only`.
-
-The property that matters for the dry run is that it is **ambient, not a tool argument**: the model
-must be able to neither set it (turning a real request into a no-op) nor clear it (turning a
-requested dry run into a real job submission).
+The agent has a contract to ask a clarifying question rather than sweep every matching reading,
+and a dry run answers "what would you do, what would it cost" without doing it. The dry run is
+**ambient, not a tool argument**: the model can neither set it (turning a real request into a
+no-op) nor clear it (turning a requested dry run into a real submission).
 """
 
 import asyncio
@@ -163,11 +156,10 @@ def test_a_normal_turn_is_untouched() -> None:
 
 
 def test_the_refusal_can_never_be_mistaken_for_a_real_result() -> None:
-    """The one genuinely harmful failure mode: a dry-run answer read as a real one.
+    """A dry-run answer can never be mistaken for a real result.
 
     It reaches the model as a refusal rather than a return value, so
-    `surface_authorization_denials` relays it verbatim — the path `PlanNotApprovedError` already
-    proves works — instead of MAF's opaque "Function failed."
+    `surface_authorization_denials` relays it verbatim, as it does `PlanNotApprovedError`.
     """
     token = set_dry_run(True)
     try:

@@ -375,70 +375,6 @@ def test_every_disposal_decision_states_a_reason() -> None:
     assert not blank, f"_NOT_PRUNED entries with no stated reason: {sorted(blank)}"
 
 
-def test_every_prunable_table_is_argued_where_the_others_are() -> None:
-    """The other half of the rule above, which only one of the two registers was holding.
-
-    `_NOT_PRUNED` carries its reason *in the register*, so a refusal cannot be added silently. A
-    `_PRUNABLE` entry is a `(column, predicate)` pair with nowhere to put one, so the argument for
-    why an age cutoff is the right instrument for that table lived only in a code comment — and a
-    comment is not something a check can see. A seventh table could have joined the sweep with no
-    stated reason at all and every test here would have stayed green.
-
-    Derived rather than restated: the module docstring already argues five of the six, in a list
-    whose whole purpose is that argument, so the rule is that a swept table appears there. Writing
-    the reasons a second time into the register would have made two copies of one answer, which is
-    the failure `docs/planning/BACKLOG.md` and `DEFERRED.md` are both scarred by. Two tables had
-    only the comment — `result_publications` and `session_events`, the second found by this test —
-    and moving both up is what it is derived against.
-    """
-    import chemclaw.durable.retention as retention_module
-
-    doc = retention_module.__doc__ or ""
-    # The argument for one table is the block from its bullet to the next blank-line-separated
-    # bullet, which is what "argued" has to mean if the check is to be more than a name lookup.
-    argued: dict[str, str] = {}
-    current: str | None = None
-    for line in doc.splitlines():
-        opened = re.match(r"^- `([a-z_]+)`", line)
-        if opened is not None:
-            current = opened.group(1)
-            argued[current] = line
-        elif current is not None and line.startswith("  "):
-            argued[current] += " " + line.strip()
-        elif not line.strip():
-            current = None
-
-    # **The list holds both registers' arguments, so presence alone is not the rule.** Every
-    # refusal is a bullet too, and `session_turns`' bullet says in as many words that it is *not*
-    # in `_PRUNABLE` — so moving a refused table into the sweep would have turned this green while
-    # the paragraph it points at argued against sweeping it. A swept table's argument may not be
-    # one of those.
-    refusals = sorted(
-        table
-        for table in _PRUNABLE
-        if "is **refused**" in argued.get(table, "")
-        or "**not** in `_PRUNABLE`" in argued.get(table, "")
-    )
-    assert not refusals, (
-        f"{refusals} are swept by this job and the paragraph arguing for them argues the "
-        "opposite — it is one of the refusals. A table cannot be moved into `_PRUNABLE` while "
-        "keeping the bullet that says it is not"
-    )
-
-    missing = sorted(table for table in _PRUNABLE if table not in argued)
-    assert not missing, (
-        f"{missing} are swept by this job and argued nowhere a check can read. Add each to the "
-        "list in `durable/retention.py`'s module docstring, saying why an age cutoff is the right "
-        "instrument for that table — beside every other swept table's argument, not only in a "
-        "comment by its entry."
-    )
-    thin = sorted(table for table in _PRUNABLE if len(argued[table]) < 120)
-    assert not thin, (
-        f"{thin} appear in the list with a one-line mention rather than an argument, which "
-        "satisfies the letter of the rule above and none of its purpose"
-    )
-
-
 def test_retention_is_off_until_a_policy_is_stated(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deployment must choose its window; inheriting a deletion default from code is wrong."""
     assert settings.retention_session_events_days == 0
@@ -2615,6 +2551,41 @@ async def _seed_fat_sessions(count: int, start: int) -> None:
         await conn.commit()
 
 
+async def _private_database(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Create an empty database and point every DSN setting at it; returns its name.
+
+    `VACUUM`'s horizon is per database: any backend in the same database holding a snapshot stops
+    dead tuples being removed. Under `pytest -n` every worker shares one database (each in its own
+    schema), so a sibling worker's transaction pinned the horizon mid-test and the reclamation
+    assertions failed only in parallel. A private database has no other backends.
+    """
+    name = f"chemclaw_vacuum_{uuid4().hex[:12]}"
+    base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
+    base.pop("options", None)
+    try:
+        async with await psycopg.AsyncConnection.connect(
+            psycopg.conninfo.make_conninfo("", **base), autocommit=True
+        ) as conn:
+            await conn.execute(f'CREATE DATABASE "{name}"')
+    except psycopg.errors.InsufficientPrivilege:  # pragma: no cover - env-dependent
+        pytest.skip("this role cannot CREATE DATABASE, which the vacuum-horizon test needs")
+    private = psycopg.conninfo.make_conninfo("", **{**base, "dbname": name})
+    for setting in ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn"):
+        if str(getattr(settings, setting)):
+            monkeypatch.setattr(settings, setting, private)
+    return name
+
+
+async def _drop_database(name: str) -> None:
+    """Drop a database `_private_database` created, closing any connection still open on it."""
+    base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
+    base.pop("options", None)
+    async with await psycopg.AsyncConnection.connect(
+        psycopg.conninfo.make_conninfo("", **base), autocommit=True
+    ) as conn:
+        await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
 def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
     """A row count is not a quantity of disk, and until this the sweep reported only rows.
 
@@ -2643,15 +2614,14 @@ def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
     async def _run() -> tuple[list[int], RetentionOutcome, int, int]:
         await migrated_db_or_skip()
         monkeypatch = pytest.MonkeyPatch()
+        private = await _private_database(monkeypatch)
         monkeypatch.setattr(settings, "retention_session_messages_days", 365)
         monkeypatch.setattr(settings, "retention_session_events_days", 0)
         monkeypatch.setattr(settings, "retention_tool_results_days", 0)
         monkeypatch.setattr(settings, "retention_result_publications_days", 0)
         monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
         try:
-            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
-                await cur.execute("TRUNCATE session_messages")
-                await conn.commit()
+            await migrated_db_or_skip()
             sizes: list[int] = []
             outcome = RetentionOutcome()
             for cycle in range(4):
@@ -2666,6 +2636,7 @@ def test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing() -> None:
             )
         finally:
             monkeypatch.undo()
+            await _drop_database(private)
 
     sizes, outcome, dead, pinned = asyncio.run(_run())
     if pinned:

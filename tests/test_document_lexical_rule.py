@@ -1,23 +1,13 @@
 """The document index's two backends answer a lexical question the same way.
 
-**This is the same finding PR #173 fixed for notes, on the backend it did not touch.**
-`PostgresDocumentIndex._lexical` was `websearch_to_tsquery` alone — which ANDs — while
-`InMemoryDocumentIndex.search_lexical`, the reference every mounted-share test stands on, scored any
-chunk sharing a token. So the share's lexical leg returned nothing to an ordinary multi-word
-question in production and everything in the tests, and the RRF fusion in `DocumentShareRetriever`
-ran one-legged on the live evidence path. Measured against PostgreSQL 16 / pgvector 0.8.0 on the
-four-document corpus below, "amide coupling solvent screen": the durable backend returned **0**
-chunks, the reference **4**.
+`PostgresDocumentIndex._lexical` must OR terms like `InMemoryDocumentIndex.search_lexical` (the
+reference the share tests stand on); `websearch_to_tsquery` alone ANDs, which would silence the
+share's lexical leg on ordinary multi-word questions and leave the RRF fusion one-legged.
 
-The tests below pin the agreement itself rather than either backend's numbers, because the numbers
-are allowed to differ: `ts_rank` is not a token-coverage fraction. What may not differ is which
-chunks are hits and that a complete match outranks a partial one.
-
-**The one residual, deliberately not closed.** The reference has no stop-word list, so "the and of"
-is a query to it and no query at all to Postgres. Shipping one would be a second text-search
-configuration to keep in step with the server's; the boolean rule is what these two must share.
-
-The server-backed half needs a real Postgres and skips in the offline sandbox.
+The tests pin agreement, not numbers: `ts_rank` is not a coverage fraction, but the set of hits
+and a complete match outranking a partial one must agree. Deliberately not closed: the reference
+has no stop-word list, so "the and of" is a query to it and none to Postgres; matching would mean
+a second text-search configuration. The server-backed half skips offline.
 """
 
 import asyncio
@@ -108,10 +98,7 @@ async def test_the_reference_matches_any_term_and_ranks_a_complete_match_first()
 async def test_the_two_document_backends_state_the_same_boolean_rule() -> None:
     """The durable backend and the reference return the same chunks, complete match first.
 
-    The regression this pins: the durable statement ANDed the four stems and matched **0 rows** on
-    this corpus while the reference matched four, so no unit test could see that the share's
-    lexical leg was silent. Scores still differ — `ts_rank` against a coverage fraction — so this
-    asserts on the set and on the top position, which is what the two are required to agree about.
+    Asserted on the set and the top position, since scores legitimately differ.
     """
     durable = await _durable()
     reference = InMemoryDocumentIndex()
@@ -129,9 +116,7 @@ async def test_the_two_document_backends_state_the_same_boolean_rule() -> None:
 async def test_a_negated_term_is_excluded_by_both_document_backends(backend: str) -> None:
     """`-solvent` removes the solvent documents from the share instead of asking for them.
 
-    Both halves of the same rule, and neither had it: the durable statement honoured the exclusion
-    only because it also ANDed everything else, and the reference read the `-` as punctuation and
-    scored `solvent` as a term the reader had asked for.
+    Both backends must honour the exclusion, independently of how they combine other terms.
     """
     index: DocumentIndex = InMemoryDocumentIndex() if backend == "reference" else await _durable()
     await _load(index)
@@ -150,9 +135,8 @@ async def test_a_negated_term_is_excluded_by_both_document_backends(backend: str
 async def test_a_query_that_only_excludes_returns_what_is_left(backend: str) -> None:
     """`-solvent` on its own is a query, and both backends answer it with the rest of the corpus.
 
-    The edge the two most easily diverge on: the durable backend returns these rows with a
-    `ts_rank` of zero, and a reference that dropped them on a zero-score floor would disagree with
-    it while every ordinary query still agreed.
+    The durable backend returns those rows with `ts_rank` zero, so a reference dropping zero scores
+    would diverge here only.
     """
     index: DocumentIndex = InMemoryDocumentIndex() if backend == "reference" else await _durable()
     await _load(index)

@@ -1,14 +1,9 @@
 """The pre-execution plan gate: read the plan a session proposes, and record the human decision.
 
-These routes are the HTTP half of the harness's approval line (D-137/D-167): the agent proposes a
-plan, a human approves the exact plan they were shown (hash-bound), and `chemclaw.agent.plan_gate`
-enforces the recorded decision. Deliberately routes and not agent tools — see `decide_plan`.
-
-**Two of them are per session and the third is not, and that asymmetry is the point.** A decision
-belongs to the conversation that raised it, but *finding* the conversation cannot: a chemist who
-closed the tab holds no session id, and every other plan surface is addressed by one.
-`pending_plans` is the cross-session read — see its docstring for the narrower predicate an inbox
-needs and why it is not the one the in-turn card uses.
+The agent proposes a plan, a human approves the exact plan they were shown (hash-bound), and
+`chemclaw.agent.plan_gate` enforces the recorded decision. These are routes, not agent tools, so a
+model can never approve its own plan. Two routes are per session; `pending_plans` is the
+cross-session inbox, because a chemist who closed the tab holds no session id.
 """
 
 import logging
@@ -32,9 +27,7 @@ from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# One row of the ownership listing, as `SessionOwners.list_for_owner` returns it:
-# `(session_id, created_at, updated_at, title, profile)`. Named here rather than repeated at
-# each signature — it is the shape `_owned_sessions` pages over.
+# One row of `SessionOwners.list_for_owner`: `(session_id, created_at, updated_at, title, profile)`.
 _OwnedSession = tuple[str, datetime, datetime, str | None, str | None]
 
 
@@ -42,63 +35,49 @@ _OwnedSession = tuple[str, datetime, datetime, str | None, str | None]
 class _Candidate:
     """A plan-gated session the inbox may read: the caller's own, or one they are a member of.
 
-    `owned` decides whose plans in it are the caller's to decide. In their own session that is
-    `plan_gate.may_decide` with the caller as owner — their plans, and an unattributed one, which
-    the owner decides. In a session they are only a member of it is **only the plans they
-    authored**: a member is never the owner, so the unattributed fallback is never theirs.
+    `owned` decides whose plans are the caller's to decide: in their own session, their plans and
+    unattributed ones; in a session they are only a member of, only the plans they authored.
     """
 
     session_id: str
     updated_at: datetime
     title: str | None
     owned: bool
-    # Whose session it is — the caller for an owned one, the owner of record for a shared one
-    # (`None` where the membership store keeps no owner). Carried to `PendingPlan.owner`.
+    # The caller for an owned session, the owner of record for a shared one (`None` if unknown).
     owner: str | None
 
 
 @dataclass(frozen=True)
 class _PlanRead:
-    """One session's plan as the two stores answer it, before either route interprets it.
+    """One session's plan as the two stores answer it, shared by `get_plan` and `pending_plans`.
 
-    Extracted so `get_plan` and `pending_plans` read a plan the same way. They ask different
-    questions of the answer — one renders it, one filters on it — and a second read path would let
-    the inbox and the session's own page disagree about what this session is proposing, which is
-    the class of defect `agent/plan_state` exists to prevent one layer down.
-
-    `todos` is `None` when the plan could not be read at all, and that is deliberately not folded
-    into `[]`: a session whose checkpoint is unreachable has an *unknown* plan, which the inbox
-    counts as unread rather than reporting as nothing waiting.
+    One read path keeps the inbox and the session page from disagreeing about the plan. `todos` is
+    `None` when the plan could not be read: an unknown plan counts as unread, not as nothing
+    waiting.
     """
 
     todos: list[str] | None
-    # Every tool the plan's steps declare — what approving it would authorize, and what a surface
-    # has to show beside the steps for the decision to be an informed one
-    # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+    # Every tool the plan's steps declare: what approving it would authorize, shown beside the
+    # steps.
     scope: list[str]
     # The identity a decision is recorded against, or `None` when there is nothing to decide on.
     approvable: str | None
     # The latest *effective* decision; `None` when nobody has decided at all.
     decision: Decision | None
-    # Whose turn last wrote the plan, when one is recorded — the one person who may decide on it
-    # (`plan_gate.may_decide`).
+    # Whose turn last wrote the plan, if recorded — the person who may decide on it.
     author: str | None
 
     @property
     def plan_hash(self) -> str:
-        """The identity to display: the approvable one, or the global empty-plan constant.
-
-        A client needs *an* identity even for a session proposing nothing — see `get_plan`.
-        """
+        """The identity to display: the approvable one, or the global empty-plan constant."""
         return self.approvable or EMPTY_PLAN_HASH
 
 
 async def _read_plan(session_id: str, approvals: ApprovalStore) -> _PlanRead:
-    """The plan `session_id` proposes and the decision standing against it — one read, both routes.
+    """The plan `session_id` proposes and the decision standing against it.
 
-    The decision is looked up only for an approvable plan, because `plan_identity` returns `None`
-    for an empty one and a row recorded against the empty-plan constant would say "someone approved
-    the empty plan" — an identity every session in every deployment shares.
+    The decision is looked up only for an approvable plan: a row against the empty-plan constant
+    would be shared by every session.
     """
     plan = await session_plan(session_id)
     todos = None if plan is None else [str(step["content"]) for step in plan]
@@ -117,28 +96,10 @@ async def _read_plan(session_id: str, approvals: ApprovalStore) -> _PlanRead:
 def _plan_gated(profile_name: str | None) -> bool:
     """Whether a plan on this profile can be waiting on a person.
 
-    `gate_applies` — the same predicate `chemclaw.api.runner` uses to decide whether to show the
-    decision card at all, so the inbox and the card cover the same sessions. It answers two things
-    at once, and both are needed here: with the harness off there is no todo list to read
-    (`build_langgraph_agent` attaches `TodoListMiddleware` under `harness_enabled_for`), and under
-    `harness_autonomy="execute"` there is a plan but no gate — the agent acts without asking, so
-    nothing about that plan is anyone's decision.
-
-    This is also the filter that keeps `GET /plans/pending` cheap for every session the gate does
-    not govern: a skipped session costs no checkpointer statement, and every checkpointer statement
-    is serialized against every concurrent turn on the pod.
-
-    **It is not free in the *default* deployment, and this sentence said it was twice.** It first
-    said "where `harness_enabled` is off", which `D-2026-09-13-the-default-is-the-posture-every-
-    deployment-already-runs` falsified; the correction swapped the mechanism name to `gate_applies`
-    and left the premise standing. Measured at the shipped settings — `harness_enabled=True`,
-    `harness_autonomy="plan_only"` — `gate_applies(DEFAULT_PROFILE)` is **True**, so the default
-    deployment reads a checkpoint per session here. What the filter still saves is a session on a
-    profile that turns the harness off or sets `autonomy="execute"`.
-
-    A profile the registry no longer knows is treated as gated rather than skipped: the deployment
-    dropped a profile out from under an existing session, and guessing *away* from a plan that may
-    be sitting there is the direction that loses a chemist's blocked work. It costs one read.
+    Uses `gate_applies`, the predicate the runner uses for the decision card, so the inbox and the
+    card cover the same sessions. A skipped session costs no checkpointer statement. A profile the
+    registry no longer knows is treated as gated: guessing away from a possible plan loses blocked
+    work, and the cost is one read.
     """
     try:
         return gate_applies(get_profile(profile_name))
@@ -155,39 +116,11 @@ async def _owned_sessions(
 ) -> tuple[int, list[_OwnedSession], bool]:
     """Every session of the caller's the inbox could still spend its scan budget on.
 
-    Returns how many sessions were enumerated, of those the plan-gated ones in listing order
-    (newest activity first), and whether the walk stopped before the listing ran out — the
-    `considered`, `gated` and `truncated` the response reports.
-
-    **The loop stops when another page could not change the answer, or when it has spent its
-    budget** — and the second half is why this reads as two conditions rather than one. Once more
-    than `budget` gated sessions are in hand every further page only adds rows past the scan
-    ceiling, and `unread` already says the answer is partial; a short page ends it too, which is
-    the listing running out and the only case where the inbox can honestly claim to have seen
-    everything. Neither of those can fire when *nothing* is gated — `_plan_gated` is False for
-    every session where the gate does not apply — which, until D-2026-09-13 made the harness the
-    default, was every session under the shipped configuration — so the walk used
-    to page through the caller's whole history on every request and return `plans: []`: measured
-    at 5,000 sessions and the shipped page of 100, **51** keyset statements where the route before
-    paging issued one, repeatable by the caller at will.
-
-    So the walk spends the *same* budget the reads do, in the unit it spends it in: at most
-    `budget` pages. That is the honest ceiling rather than a second number, because a page can
-    contribute at most one page's worth of gated rows — in a gated deployment `budget` pages can
-    always fill a budget of `budget` reads, and in an ungated one no number of pages ever can,
-    which is exactly the case that has to be capped. Stopping there is reported rather than
-    silent: reaching the ceiling means the last page was *full*, so there is more listing behind
-    it (at most one page of false alarm, when the history ends on a page boundary), and an inbox
-    that quietly answers from a prefix of a chemist's history is the confident emptiness the three
-    counts exist to prevent.
-
-    A registry that is not the durable store answers one call and is done: `page_for_owner` lives
-    on `SessionOwnerStore` rather than on the `SessionOwners` protocol, and `GET /sessions` makes
-    the same split for the same reason — a front door handed some other registry through
-    `create_app(owner_store=...)` can answer a listing but not resume one. **That is a test's
-    registry and not a site's**: `create_app`'s arguments are a test seam no configuration can
-    reach, and `api/state.py` builds a `SessionOwnerStore` in every shipped configuration, so the
-    early return below is exercised from `tests/` and nowhere else.
+    Returns `(considered, gated, truncated)`-shaped data: sessions enumerated, the plan-gated ones
+    newest first, and whether the walk stopped before the listing ran out. The walk stops on a short
+    page or after `budget` pages — the same budget the reads spend — so a deployment where nothing
+    is gated cannot page through the caller's whole history. Stopping at the ceiling is reported as
+    `truncated`. A registry without `page_for_owner` (a test seam) answers one call.
     """
     if not isinstance(owners, SessionOwnerStore):
         rows = await owners.list_for_owner(oid)
@@ -209,23 +142,16 @@ async def _owned_sessions(
 async def _shared_sessions(oid: str | None) -> list[_Candidate]:
     """The plan-gated sessions somebody else owns that the caller is a member of.
 
-    `D-2026-10-01-a-queued-message-waits-in-its-senders-request`, the inbox half: a member's turn in
-    somebody else's session can write a plan only that member may decide, and until this the only
-    place it surfaced was the in-turn card — the inbox paged the caller's *owned* sessions. The list
-    comes from the same registry `GET /sessions/shared` reads, so the inbox can never name a session
-    the caller would then be refused.
-
-    Not paged: a membership is an owner's deliberate act, so the list is bounded by how many
-    conversations people have let this caller into, and the plan reads it feeds are held to the same
-    `service_max_plan_scans` budget as the owned ones.
+    Read from the registry `GET /sessions/shared` uses, so the inbox never names a session the
+    caller would be refused. Not paged: memberships are deliberate grants, and the plan reads share
+    the `service_max_plan_scans` budget.
     """
     if not oid:
         return []
     return [
         _Candidate(
             session_id=shared.session_id,
-            # A session with no turn yet has no `updated_at` and no plan; the admission time keeps
-            # it orderable without claiming activity it has not had.
+            # A session with no turn yet has no `updated_at`; the admission time keeps it orderable.
             updated_at=shared.updated_at or shared.added_at,
             title=shared.title,
             owned=False,
@@ -243,49 +169,19 @@ async def get_plan(
 ) -> PlanStatusOut:
     """The plan awaiting a decision, with the hash a client must post back to approve it.
 
-    `approved` is the **effective** state, not merely the recorded one: a decision exists, it
-    was a yes, and it has not already been spent by the turn it authorized. Reporting the stored
-    row alone would tell a surface a plan is approved while every state-changing call under it
-    is refused — the same disagreement between what a surface displays and what the system
-    enforces that let DARK-1 sit unnoticed, reintroduced one layer up. That is now one question
-    rather than two: `ApprovalStore.decision` folds `plan_approvals.consumed_at` into the
-    verdict, so a route cannot forget the second half. `decided_by` still names whoever decided,
-    because "approved earlier, already used" is a different thing to show than "nobody has
-    decided".
-
-    A session proposing no work items is asked nothing: its identity is the global
-    `EMPTY_PLAN_HASH`, which the gate refuses outright, so a stored row against it — one
-    written before the decision route refused to — must not come back as `approved=true` here
-    either. The hash is still reported, because a client needs *an* identity to display.
-
-    **The plan is read from the checkpointer** (`agent/plan_state.session_plan`), not from an
-    in-process session object. It used to come off `live.session`, the handle the front door held
-    per live session, because MAF's harness kept its todo list inside it — and that handle is
-    exactly what an LRU eviction or a pod roll dropped, which is half of why a rehydrated session
-    used to propose the empty plan and meet its own already-spent approval. The plan is durable now
-    because turn state is.
-
-    **`mode` is derived, not stored, and that closes DARK-1 from the other side.** MAF kept a
-    session mode beside the approval, so "may this session act" had two answers that could
-    disagree — and did: `grant_execute` was a latch, nothing moved a session back, so the mode kept
-    saying execute after the approval it was granted for had been spent. There is no mode here;
-    what a surface renders is one fact seen twice.
+    `approved` is the effective state (a yes not yet spent by its turn), matching what the gate
+    enforces; `decided_by` names whoever decided. A session proposing nothing still reports the
+    global `EMPTY_PLAN_HASH` as its identity. The plan is read from the checkpointer, so it survives
+    eviction and pod rolls.
     """
     read = await _read_plan(session_id, state(request).plan_approvals)
-    # One read, one question. Calling `chemclaw.agent.plan_gate.approval_stands` here as well
-    # would issue a second query whose answer could differ from this one — a route reporting
-    # `approved=false` beside the name of whoever approved it is a worse surface than either fact
-    # alone.
+    # One read, one question: a second query via `approval_stands` could disagree with this one.
     approved = bool(read.decision and read.decision[0])
     return PlanStatusOut(
         session_id=session_id,
         plan_hash=read.plan_hash,
         plan=read.todos or [],
-        # What approving this plan would authorize. Shown beside the steps because the decision is
-        # only informed if the person can see it: the gate refuses a state-changing tool no step
-        # declared, so a surface that rendered the steps alone would be asking for a yes to
-        # something it had not displayed
-        # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+        # What approving this plan would authorize; the decision is informed only if this is shown.
         scope=read.scope,
         mode="execute" if approved else "plan",
         approved=approved,
@@ -297,68 +193,20 @@ async def get_plan(
 async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlansOut:
     """Every plan of the caller's that nobody has decided yet — the cross-session inbox.
 
-    The plan gate is answered per session, and until this route existed *finding* the session was
-    the unsolved half: the decision card lives inside a turn, a reload recovers it only for a
-    conversation somebody opens, and a chemist who closed the tab holds no session id. So a plan
-    could sit blocking work with nothing anywhere able to say which conversation it was in.
+    Lists plans with no `plan_approvals` row at all; a spent approval or a rejection is an answer,
+    so unlike the in-turn card the inbox does not re-list them. Sessions come from the same
+    registries as `GET /sessions` and `GET /sessions/shared`, and a plan is listed only for the
+    person who may decide it.
 
-    **The predicate is narrower than the card's, deliberately.** `runner._pending_plan_approval`
-    prompts whenever a plan holds no *live* approval, which is right inside a turn and wrong for an
-    inbox: an approval is spent at the end of the turn it authorized (D-167), so every finished
-    plan-gated conversation would sit here forever. This lists a plan with **no decision at all** —
-    `plan_approvals` holds no row for this session and this plan hash. A spent approval and a
-    rejection are both answers; asking again is the conversation's job, and the card does it there.
-
-    What that misses, stated rather than left to be found: a plan re-proposed byte-identically after
-    its approval was spent hashes to a row that exists, so it does not list — while the card, on the
-    next turn's end, still shows. The alternative misses nothing and drowns the queue in decided
-    work, which is the failure mode that makes an inbox stop being read.
-
-    **Ownership comes from the same registry `GET /sessions` reads**, so this can never name a
-    session the caller would then be refused — the property `list_sessions` relies on, for the same
-    reason. **Membership comes from the one `GET /sessions/shared` reads**, and a member's sessions
-    are scanned beside the caller's own, newest activity first across both
-    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). In either kind of session a plan
-    is listed only for the person who may decide it — its author, or the owner where no author was
-    recorded — because an inbox row whose decision answers 403 is the failure an inbox exists to
-    prevent. So a member sees only the plans their own turns wrote.
-
-    Bounded twice, and the response says so rather than truncating quietly. Sessions that cannot be
-    holding a decision are skipped for free (`_plan_gated`); of what remains, at most
-    `service_max_plan_scans` have their plan read, because each read is a statement on a
-    checkpointer that serializes them against every concurrent turn on the pod. `unread` counts
-    what was left — including a session whose checkpoint could not be read at all, which is an
-    unknown plan rather than an absent one.
-
-    **The listing is paged through, not read once**, and that is the one bound this route must not
-    inherit. `service_max_listed_sessions` became a *page* when `X-Next-Cursor` was added to
-    `GET /sessions`; this reader stayed on the first call, so `considered` was a page count
-    presented as a population and `unread` counted only what the scan budget skipped *inside* that
-    page. The failure is not an inaccurate field: an unanswered plan means the conversation takes
-    no further turns, so its `updated_at` never moves and it never rises back above the page
-    boundary — a chemist whose blocked plan sits on an older conversation is told "nothing is
-    waiting on you" for good. Measured at a page of 2 over five owned sessions:
-    `{"plans": [], "considered": 2, "gated": 2, "unread": 0}`.
-
-    Paging costs one indexed keyset statement per page and is bounded by the same
-    `service_max_plan_scans` the reads are, counted in pages — a sentence that used to say the
-    loop was "bounded by the work the route was already allowed to do" and was true only where
-    something is gated. Under the old `harness_enabled=False` default nothing ever was, so the only
-    remaining exit was a short page and the walk ran the caller's whole history on every request.
-    D-2026-09-13 inverted that: with the gate on by default the budget now binds on an ordinary
-    request, so the ceiling this paragraph describes is doing work it never used to do rather than
-    standing in for an exit that could not be reached. See
-    `_owned_sessions` for the measurement and for why a page ceiling is the same budget rather
-    than a second one. `truncated` is what that ceiling costs the answer, and it is a fourth
-    reading of an empty `plans` rather than a fifth kind of `unread`. The expensive half is
-    unchanged: still at most `service_max_plan_scans` checkpointer reads, still serialized behind
-    one lock.
+    Bounded and reported: ungated sessions are skipped, at most `service_max_plan_scans` checkpoints
+    are read, `unread` counts what was left (including unreadable ones) and `truncated` says the
+    listing walk hit its ceiling. The listing is paged, since a blocked conversation never moves its
+    `updated_at`.
     """
     owners = state(request).session_owners
     if owners is None:
-        # No durable registry to enumerate — the same emptiness, and for the same reason, that
-        # `GET /sessions` returns under `session_store="memory"`. `gated=0` tells the surface this
-        # is a property of the deployment rather than of the caller's work.
+        # No durable registry to enumerate, as `GET /sessions` under `session_store="memory"`;
+        # `gated=0` says this is the deployment, not the caller's work.
         return PendingPlansOut(plans=[], considered=0, gated=0, unread=0)
     budget = settings.service_max_plan_scans
     considered, owned, truncated = await _owned_sessions(owners, principal.oid, budget)
@@ -380,9 +228,8 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
         if read.todos is None:
             unread += 1
             continue
-        # A plan somebody else's turn wrote is not waiting on the caller — only its author may
-        # decide it — so an owner's inbox does not list a member's plan it would then refuse, and a
-        # member's does not list the owner's (or an unattributed one, which the owner decides).
+        # Only the plan's decider sees it: an owner's inbox skips a member's plan, and a member's
+        # skips the owner's and unattributed ones.
         decides = (
             may_decide(read.author, principal.oid, principal.oid)
             if candidate.owned
@@ -418,38 +265,11 @@ async def decide_plan(
     principal: CurrentUser,
     live: CurrentSession,
 ) -> Response:
-    """Approve (or reject) a harness plan — the pre-execution gate, finally enforced.
+    """Approve (or reject) a harness plan — the pre-execution gate; a route, never an agent tool.
 
-    Deliberately an HTTP route and **not** an agent tool, for the reason D-005 gave for the note
-    decision this sentence used to name (`POST /proposals/{id}/decision`, deleted with the PR-gate
-    by `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): a model must never be able to
-    authorize its own plan. Under MAF that took work — the framework advertised a `mode_set` tool
-    by default, so the agent moved itself out of plan mode and the audit trail recorded it under
-    the asking chemist's identity, and `PlanApprovalModeProvider` had to subclass-and-mutate to
-    retract it.
-    Nothing advertises such a tool here; the model is not given one, which is the same guarantee
-    obtained by not building the thing rather than by removing it afterwards.
-
-    The posted `plan_hash` must match the plan the session is proposing *now*. A mismatch is a
-    409, not a silent approval of the current plan: it means the plan changed between being
-    shown and being approved, and the human agreed to something else.
-
-    **"The plan" there includes what each step declares**, and for a while it did not
-    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`). The guard
-    compared the posted hash against an identity taken over step *text*, while the scope recorded
-    below is read off the live plan — so a rewrite keeping every step's text and widening its
-    `tools` passed the guard on the chemist's own hash and was stamped as what they had approved.
-    Measured end to end: shown scope `[]`, rewritten scope `['record_knowledge_note', 'watch_for']`,
-    hash unchanged, 204, both tools then ran. No concurrency was needed — an unapproved plan is not
-    a hold, so any follow-up message takes a turn while the card is open, and `out_of_scope_refusal`
-    tells the model in as many words to make exactly that rewrite.
-
-    A session proposing **no** work items has nothing to decide on, and this refused nothing:
-    the empty todo list hashes to a global constant, so a decision could be recorded against
-    "the empty plan" — an identity every session shares and comes back to whenever it loses its
-    todo state. `plan_identity` returning `None` for an empty plan is where that refusal lives, and
-    it is the same function the gate asks, so the route and the enforcement cannot disagree about
-    what counts as a plan.
+    The posted `plan_hash` must match the plan proposed now, declared tools included, or it is a
+    409. An empty plan has no identity (`plan_identity` returns `None`) and is refused, by the same
+    function the gate asks.
     """
     plan = await session_plan(session_id) or []
     plan_hash = plan_identity(plan)
@@ -464,11 +284,8 @@ async def decide_plan(
             status_code=409,
             detail="the plan changed since it was shown; re-read it and decide again",
         )
-    # **Only the plan's author decides on it** (`D-2026-09-27-in-a-shared-session-the-sender-
-    # governs`). In a shared session the session gate above admits every member, and a plan is the
-    # proposal one person's turn made about what *their* turns will do — so another member's yes,
-    # or the owner's, is not consent to it. 403 rather than the gate's 404: the caller is already
-    # in the session, and the plan they were refused is on their screen.
+    # Only the plan's author decides on it: another member's yes is not consent to it. 403 rather
+    # than 404, because the caller is already in the session and can see the plan.
     approvals = state(request).plan_approvals
     author = await approvals.author(session_id, plan_hash)
     if not may_decide(author, live.owner, principal.oid):
@@ -477,51 +294,30 @@ async def decide_plan(
             status_code=403,
             detail="only the person whose message produced this plan may decide on it",
         )
-    # Recording *is* the re-arm. An approval authorizes one turn and is spent when that turn
-    # ends (D-167), so re-approving an unchanged plan has to mean "yes, again" rather than a
-    # no-op that silently leaves the session unable to act — and since the store is append-only
-    # and reads the latest row, a second decision is a fresh, unspent one by construction. It
-    # used to need a separate `rearm_plan` call against session state, which is one more thing a
-    # future route could forget to do.
+    # Recording is the re-arm: an approval authorizes one turn, and the append-only store reads the
+    # latest row, so re-approving an unchanged plan yields a fresh, unspent approval.
     await approvals.record(
         session_id,
         plan_hash,
         principal.oid or "",
         body.approved,
-        # The scope is taken from the plan being decided on, here, once — not read back from the
-        # todo list when a call is gated. That is what stops the model widening an approval it
-        # already has: the gate reads this row and never the live declaration.
-        #
-        # **What stops it widening the approval being given is the guard above**, and that took a
-        # second decision (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-
-        # nobody-read`). This comment used to argue the opposite — that hashing `content` only was
-        # harmless here because the gate reads the row — and the hole was that this line derives the
-        # row from the *live* plan: a rewrite keeping every step's text and widening its `tools`
-        # hashed identically, so the chemist's own hash matched and the widened declaration was what
-        # got stamped. `plan_identity` covers the declaration now, so the 409 fires instead.
+        # The scope is fixed here, from the plan being decided on; the gate reads this row and never
+        # the live declaration, so the model cannot widen an approval it already has. The hash guard
+        # above covers the declared tools, so a widened rewrite gets a 409 rather than being
+        # stamped.
         declared_scope(plan),
     )
-    # Nothing else to flip. This used to call `grant_execute` as well, moving the session's MAF
-    # mode — a second piece of state saying the same thing, on a different lifetime, which is what
-    # let the displayed mode outlive the approval it came from. The recorded decision is the whole
-    # authorization now, and `enforce_plan_approval` reads exactly it.
+    # The recorded decision is the whole authorization; `enforce_plan_approval` reads exactly it.
     return Response(status_code=204)
 
 
 def register(app: FastAPI) -> None:
     """Attach this module's routes to `app` — called once, by `create_app` only.
 
-    Registered with the app's own decorators rather than an `APIRouter` + `include_router`:
-    since FastAPI 0.139 `include_router` is lazy — `app.routes` would hold opaque
-    `_IncludedRouter` nodes, invisible to everything that walks the route table by type
-    (`tests/test_route_auth_coverage.py`, the session-scope inventory in
-    `tests/test_service.py`) — and a standalone router's routes carry no
-    `dependency_overrides_provider`, which silently disables `app.dependency_overrides`.
-    Registering on the app keeps both exactly as they were when these handlers lived in
-    `create_app`.
+    Registered on the app rather than via `include_router`: since FastAPI 0.139 that is lazy, which
+    hides routes from tests that walk the route table and disables `app.dependency_overrides`.
     """
     app.get("/sessions/{session_id}/plan")(get_plan)
     app.post("/sessions/{session_id}/plan/decision", status_code=204)(decide_plan)
-    # Not under `/sessions/…`: it is a question about all of them, and a path that named one
-    # session would need an id the caller is asking this route to find.
+    # Not under `/sessions/…`: it asks about all sessions, without an id.
     app.get("/plans/pending")(pending_plans)

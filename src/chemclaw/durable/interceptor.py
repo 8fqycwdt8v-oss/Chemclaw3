@@ -1,46 +1,15 @@
 """One worker interceptor, so every activity in this system says that it ran and how it ended.
 
-**The measurement this exists for.** Against a live broker on 2026-08-27, one
-`ConnectorJobWorkflow` was run twice — once succeeding, once failing on a `ValueError`. The
-successful job emitted **zero** log records; the failed one emitted zero first-party records and
-moved no metric. The only output either produced was two `temporalio` SDK warnings. At the time
-`grep -rn "activity.logger" src/` returned nothing, 39 of 43 activities logged nothing at all, and
-the four that did used a plain module logger, so no line carried the workflow id, the attempt or
-the task queue.
+Around every activity it binds the turn's actor, session and correlation id to the ambient
+context (so worker log lines and audit rows are attributed), logs `activity.started` and
+`activity.finished`, counts failed attempts and drain cancellations, tracks activities in
+flight, and refuses a result too large for the broker. An interceptor, so a new activity is
+instrumented the day it is written.
 
-Two other absences met in the same place, which is why this is one object rather than three:
-
-- **`set_current_correlation_id` had no caller outside the front door** (`api/middleware.py` and
-  `api/runner.py`, two call sites in one process). Every line a worker wrote therefore rendered
-  `correlation_id="-" actor="-"
-  session_id="-"`, while `deploy/README.md` told an operator to join on those fields. The ids were
-  never missing: they ride in the activity's own argument (`ConnectorJobInput.correlation_id`,
-  `JobRecord.session_id`, `StepIdentity.actor`). Nothing bound them to the ambient context that
-  `core/logging.py`'s `ContextFilter` reads.
-- **A failed activity attempt was counted nowhere.** Temporal's own history knows about a retry
-  storm; no series did, so "every attempt at this activity has failed for an hour" and "nobody has
-  called it" were the same picture on every dashboard.
-
-**Why an interceptor and not 43 edits.** An obligation that must hold for every activity belongs to
-the one place they all run through — the same rule `ConnectorJobWorkflow` follows for the durable
-record, the note write and the push-back, and for the same reason: "each activity remembers" is the
-discipline that fails silently. It also means a *new* activity is instrumented the day it is
-written, with nothing to forget.
-
-The binding is read from the activity's **arguments**, not from a header or a memo. An activity
-cannot read its workflow's memo, and the argument is where this system already puts the three ids
-— by an explicit design decision in each case (`ConnectorJobInput` documents why the actor travels
-in the payload rather than on the transport). So the walk below looks for the field *names* this
-codebase already standardised on, one level into a nested identity model, and binds nothing it does
-not find.
-
-Two spellings, because this tree has two. Most activities take a model that declares the ids; four
-take them as bare strings beside a model-authored payload, deliberately, so that the payload's
-digest can be a cache key identity cannot move. The second group was invisible to a walk that skips
-`str`, so their own `activity.started`/`activity.finished` lines carried `actor=-` — including the
-fleet's longest-running activity. They are read off the activity function's **signature** instead,
-which is first-party Python, so the rule that a model-authored payload can never supply an identity
-is unchanged: a payload cannot rename the parameter it is bound to.
+The ids are read from the activity's arguments: fields with the standard names on an argument
+model (one level into a nested identity), or identically named `str` parameters of the activity
+function's own signature. A model-authored payload can never supply an identity, and roles are
+never taken from arguments at all.
 """
 
 import asyncio
@@ -68,35 +37,18 @@ from chemclaw.core.session_context import reset_current_session_id, set_current_
 
 logger = logging.getLogger(__name__)
 
-# The field names this codebase already carries the three ids under, in the order a walk should
-# prefer them. Literals rather than a protocol because the models they name are unrelated —
-# `ConnectorJobInput`, `JobRecord`, `JobPublishInput` and `StepIdentity` share no base beyond
-# `BaseModel`, and giving them one would be an abstraction with four callers and no behaviour.
+# The field names this codebase carries the three ids under, in order of preference.
 _ACTOR_FIELDS = ("requested_by", "actor")
 _SESSION_FIELDS = ("session_id",)
 _CORRELATION_FIELDS = ("correlation_id",)
-# Where a nested identity model hides. `template_activities`' three step inputs carry theirs as
-# `identity: StepIdentity` rather than flat, and that is the shape the template path — the one
-# path whose failures were completely silent (J4) — actually uses.
+# Where a nested identity model hides (`identity: StepIdentity` on template step inputs).
 _NESTED_FIELDS = ("identity",)
-# The same names again, read as *parameters* of the activity function rather than as fields of its
-# argument models. Four activities carry identity beside a model-authored payload rather than
-# inside a model — `connectors/calc/activities.py::run_xtb_calculation`,
-# `connectors/bo/activities.py::record_campaign_run`,
-# `durable/memory_jobs.py::publish_memory_note_activity` and
-# `durable/report_workflow.py::propose_report` — precisely because the payload's digest is a cache
-# key and identity must not be able to change it. `_models` skips `str` outright, so the walk saw
-# none of them and both of this module's own records rendered `actor=- correlation_id=-` for the
-# fleet's longest-running activity while its dispatch ran fully attributed.
-#
-# Reading them by *parameter name* keeps the rule `_models` is written for: the name comes from
-# first-party Python — the activity's own signature — never from data, so a model-authored payload
-# still cannot supply an identity however it spells its keys.
+# The same names read as parameters of the activity function. Some activities carry identity as
+# bare strings beside a model-authored payload (so it cannot change the payload's cache-key
+# digest). The names come from the function's signature, never from data.
 _NAMED_IDENTITY_PARAMETERS = frozenset(_ACTOR_FIELDS + _SESSION_FIELDS + _CORRELATION_FIELDS)
 
-# How many activities this worker is running right now, and whether it is draining. Plain module
-# state and no lock: a worker is one event loop in one process, so these are only ever touched from
-# tasks on that loop.
+# Activities running now, and whether the worker is draining. No lock: one event loop per worker.
 _IN_FLIGHT = 0
 _DRAINING = False
 
@@ -104,10 +56,7 @@ _DRAINING = False
 def activities_in_flight() -> int:
     """How many activities this worker is currently executing.
 
-    Read by `durable/serve.py` at the moment a stop signal arrives, because "the drain was carrying
-    nothing" and "the drain was carrying eleven ELN pages" are the two states its log line could not
-    tell apart. The interceptor is the only place that knows: the SDK's worker exposes no count, and
-    an activity's own body has no reason to keep one.
+    Read by `durable/serve.py` when a stop signal arrives; the SDK exposes no such count.
     """
     return _IN_FLIGHT
 
@@ -116,11 +65,8 @@ def activities_in_flight() -> int:
 def draining() -> Iterator[None]:
     """Mark this worker as draining, so a cancelled activity is attributed to the drain.
 
-    A flag rather than a before/after subtraction in `serve_worker`, because the two readings it
-    would subtract are both taken *after* `Worker.shutdown()` has returned — by which time every
-    cancelled activity has already unwound and the difference is indistinguishable from the
-    activities that simply finished in time. The cancellation itself is the event, and this is the
-    only frame that sees one.
+    A flag rather than a before/after subtraction, since both readings would be taken after
+    `Worker.shutdown()` returned; the cancellation itself is the event.
     """
     global _DRAINING
     _DRAINING = True
@@ -131,12 +77,7 @@ def draining() -> Iterator[None]:
 
 
 class ActivityContext:
-    """The three ambient ids one activity execution should run under, and its roles if it has any.
-
-    A tiny value object rather than a tuple because four fields positionally is exactly how the
-    session id and the actor got stamped by different subsets of the template step activities —
-    the drift `template_activities._acting_as` was written to end.
-    """
+    """The three ambient ids one activity execution runs under, and its roles if it has any."""
 
     __slots__ = ("actor", "correlation_id", "roles", "session_id")
 
@@ -157,11 +98,8 @@ class ActivityContext:
 def _models(args: Sequence[Any]) -> Iterator[Any]:
     """Every argument that could carry an id, and one level into a nested identity field.
 
-    One level and no deeper, deliberately: the ids are declared at the top of an activity's input
-    model or on the identity model it embeds, and an unbounded walk over arbitrary payloads would
-    read model-authored `payload` dictionaries — where an `actor` key would be a field the LLM
-    could fill in, which is precisely why `ConnectorJobInput` puts the real one beside the payload
-    rather than in it.
+    No deeper: an unbounded walk would read model-authored `payload` dictionaries, where an `actor`
+    key would be something the LLM could fill in.
     """
     for arg in args:
         if arg is None or isinstance(arg, (str, bytes, int, float, bool)):
@@ -186,10 +124,8 @@ def _first(models: Sequence[Any], fields: Sequence[str]) -> str:
 def _named_strings(fn: Any, args: Sequence[Any]) -> dict[str, str]:
     """The identity-bearing *parameters* of `fn` that this call bound to a non-empty string.
 
-    Positional only, because that is how Temporal invokes an activity: the SDK passes the decoded
-    payloads in order, so zipping the signature's parameter names against `args` is the binding.
-    A signature that cannot be read (a builtin, a C callable) yields nothing rather than raising —
-    this runs around every activity and must never be the reason one fails.
+    Positional only, as Temporal invokes an activity. An unreadable signature yields nothing rather
+    than raising, since this runs around every activity.
     """
     try:
         parameters = list(inspect.signature(fn).parameters)
@@ -207,32 +143,16 @@ def _named_strings(fn: Any, args: Sequence[Any]) -> dict[str, str]:
 def activity_context(args: Sequence[Any], fn: Any = None) -> ActivityContext:
     """The turn context an activity's own arguments carry, for logging and attribution.
 
-    Public because it is the whole testable part of this module: everything else needs a running
-    activity, and "the ids the front door stamped reach the worker's log lines" is a property that
-    should be checkable without a broker.
-
-    **Roles are never taken from the payload; the actor is.** A relayed workflow argument is data,
-    not a verified claim, so binding a role from it would let anyone who can enqueue an activity
-    forge a privileged role (security review, `D-2026-08-28`) — authorization binds an *empty* set,
-    which every gate treats as fail-closed (`authz.authorize_trigger`,
-    `documents/retriever._entitled`). Lifting the actor, session and correlation is safe on the same
-    reasoning: they are attribution, not authority, and what it buys is that `agent/audit.py` and
-    `kg/record.py`, which read the ambient actor and booked `""` for every row a worker ever
-    wrote, now name the person the run was launched for.
+    Public so it can be tested without a broker. Roles are never taken from the payload: actor,
+    session and correlation are attribution, not authority, and are lifted; roles bind as an empty
+    set, which every gate treats as fail-closed.
     """
     models = list(_models(args))
-    # Roles are NOT taken from the payload. A workflow argument is data the broker relays, not a
-    # verified claim: anyone who can enqueue an activity (a plaintext broker, a compromised worker,
-    # a replay) could otherwise put `roles=["Chemclaw.Privileged"]` in the payload and satisfy the
-    # privileged gate, because `authz._has_required_role` reads exactly the contextvar this binds.
-    # Actor, session and correlation are still lifted, for attribution — the audit trail and job
-    # records name the person a run was launched for — but authorization binds an *empty* set,
-    # which every gate treats as fail-closed (`authz.authorize_trigger`,
-    # `documents/retriever._entitled`). A durable job that legitimately needs a user's entitlements
-    # was already authorized at the front door before the workflow started
-    # (`connectors/jobs.prepare_job_launch`); propagating role-scoped authority *into* the durable
-    # boundary safely needs a signed payload (a Temporal codec), a separate decision — see
-    # `D-2026-08-28`. Until then, fail closed.
+    # Roles are NOT taken from the payload: a relayed workflow argument is not a verified claim, and
+    # anyone who can enqueue an activity could otherwise forge a privileged role. A durable job that
+    # needs a user's entitlements was authorized at the front door before the workflow started;
+    # carrying roles across the boundary safely would need a signed payload. Until then, fail
+    # closed.
     named = _named_strings(fn, args) if fn is not None else {}
 
     def _named(fields: Sequence[str]) -> str:
@@ -249,32 +169,17 @@ def activity_context(args: Sequence[Any], fn: Any = None) -> ActivityContext:
 class ActivityResultTooLarge(ChemclawError):
     """An activity produced a result the broker will refuse to store, so it is refused here first.
 
-    **A `ChemclawError`, hence non-retryable** (its name is in `durable/publish._BAD_DATA_TYPES`),
-    because the result is a deterministic function of the arguments: the next attempt serializes to
-    the same number of bytes and is refused again. That is not a theoretical claim — it is what the
-    unrefused version *did*. Driven against a live broker on 2026-09-19 with a 6 MB result, the
-    worker retried the attempt indefinitely against a gRPC `ResourceExhausted`, each attempt logging
-    `activity.finished … completed`, while the workflow sat `RUNNING` and the chemist's call timed
-    out.
-
-    The message names the size, the ceiling and the setting, because the operator's next action is
-    either to bound the activity's output or to raise both this ceiling and the broker's blob limit,
-    and neither is derivable from "payload too large".
+    A `ChemclawError`, hence non-retryable: the result is deterministic, so a retry would be refused
+    identically while the workflow sat `RUNNING`. The message names the size, the ceiling and the
+    setting, since the fix is to bound the output or raise both ceilings.
     """
 
 
 def _result_payload_bytes(result: Any) -> int:
     """The serialized size of an activity's result, as the broker will count it.
 
-    Measured through the activity's *own* payload converter (`activity.payload_converter()`), not
-    through a serializer chosen here: this worker runs `pydantic_data_converter`, a codec would
-    change the bytes again, and a number taken off a different serializer is a number about a
-    different wire (`tasks/lessons.md`, "take the number off the wire, not off a serializer you
-    chose").
-
-    `ByteSize()` of each payload rather than `len(payload.data)`, because Temporal's blob limit is
-    charged against the whole payload — metadata included. Measured on a 6,000,000-byte string the
-    two differ by 36 bytes, which is noise at this ceiling and would not be at a small one.
+    Measured through the activity's own payload converter, so codecs and the configured data
+    converter are accounted for; `ByteSize()` because the blob limit charges metadata too.
     """
     payloads = activity.payload_converter().to_payloads([result])
     return sum(payload.ByteSize() for payload in payloads)
@@ -287,10 +192,8 @@ class _ObservedActivity(ActivityInboundInterceptor):
         """Run the activity inside the ambient context its own argument declares."""
         info = activity.info()
         context = activity_context(input.args, input.fn)
-        # Typed `Any` rather than `object` because it is splatted into `log_event`'s `**fields`,
-        # which sits beside two typed keyword-only parameters (`level`, `exc_info`) — a
-        # `dict[str, object]` splat is a type error against those, and narrowing the values is the
-        # honest fix rather than adding an ignore.
+        # `Any` rather than `object`: it is splatted into `log_event`'s `**fields` beside typed
+        # keyword-only parameters.
         fields: dict[str, Any] = {
             "activity": info.activity_type,
             "attempt": info.attempt,
@@ -298,30 +201,15 @@ class _ObservedActivity(ActivityInboundInterceptor):
             "workflow_id": info.workflow_id or "",
             "run_id": info.workflow_run_id or "",
         }
-        # **Bound and counted *inside* the `try`, because the `finally` is what unbinds them.**
-        # The three `set_current_*` calls, the counter and the start line used to run above it, so
-        # the block whose comment says the contextvars are unbound "unconditionally" did not cover
-        # the statements that bound them: a `log_event` that raised — a formatting fault, a filter,
-        # a full disk — leaked all three tokens and one increment of `_IN_FLIGHT` permanently, and
-        # a leaked identity token is the *next* activity on this worker running under the last
-        # one's actor. The tokens are declared before the `try` so the `finally` can see them
-        # whatever it inherits.
+        # Bound and counted inside the `try`, because the `finally` is what unbinds them; the tokens
+        # are declared before it so the `finally` can see them.
         identity_token: tuple[object, object] | None = None
         session_token: object = None
         correlation_token: object | None = None
         started = time.perf_counter()
         global _IN_FLIGHT
         try:
-            # First inside the `try`, because it is the one statement here that cannot raise and
-            # the `finally` decrements unconditionally — anything before it would let a fault
-            # subtract a count that was never added.
-            #
-            # Of the four things this `try` now covers, only the counter's leak is observable from
-            # a test: `ActivityEnvironment` (and, in production, the task the worker runs an
-            # activity in) gives the call its own `contextvars.Context`, so a token left set does
-            # not escape into the next activity — measured, and `tests/test_durable_observability`
-            # says so where it used to assert otherwise. The tokens are reset here anyway, because
-            # the `finally` is where the reset belongs whatever the blast radius turns out to be.
+            # First inside the `try`: it cannot raise, and the `finally` decrements unconditionally.
             _IN_FLIGHT += 1
             identity_token = (
                 set_current_identity(context.actor, context.roles) if context.actor else None
@@ -342,18 +230,9 @@ class _ObservedActivity(ActivityInboundInterceptor):
                 **fields,
             )
             result = await self.next.execute_activity(input)
-            # **The upload is outside this frame, so the size has to be checked before the
-            # return.** `self.next.execute_activity` hands the result back to the worker's task
-            # handler, which converts it and calls `RespondActivityTaskCompleted` — after this
-            # method has returned, outside this `try`, and therefore outside the failure counter,
-            # the `activity.finished` line and the workflow's terminal record. An
-            # `ActivityOutbound` interceptor does not see the upload either; a pre-check is the
-            # only hook this layer has.
-            #
-            # Inside the `try` on purpose: the raise below is what books
-            # `chemclaw_activity_failures_total`, logs `activity.finished … failed` and reaches the
-            # workflow, which is the whole point — three reports that a refused result used to move
-            # not at all. See `ActivityResultTooLarge` for the drive.
+            # The result upload happens after this method returns, outside this `try`, so the size
+            # is checked before the return. Inside the `try` so a refusal is counted, logged and
+            # reaches the workflow.
             size = _result_payload_bytes(result)
             if size > settings.activity_result_max_bytes:
                 raise ActivityResultTooLarge(
@@ -364,18 +243,9 @@ class _ObservedActivity(ActivityInboundInterceptor):
                 )
         except BaseException as exc:
             elapsed = time.perf_counter() - started
-            # One row **per attempt**, which is the whole point: a counter booked once per
-            # activity would report a retry storm as a single failure, and the storm is the part
-            # an operator can act on.
-            #
-            # **A cancellation is not a failure and is deliberately not counted here.** This clause
-            # catches `BaseException` so the ambient context is unwound however the activity ends,
-            # and that swept `asyncio.CancelledError` into the failure series: a graceful drain of
-            # eight activities booked eight activity failures, and `cancel_durable_job` booked one.
-            # `deploy/helm/chemclaw/templates/prometheusrule.yaml`'s `ChemclawActivityRetryStorm`
-            # reads this series and asserts "Every attempt of this activity is failing", so an
-            # ordinary rolling update paged on a rollout it had itself caused. A cancellation
-            # already has its own counter one line down, and the drain is where the number belongs.
+            # One row per attempt, so a retry storm is visible. A cancellation is not a failure (a
+            # graceful drain would otherwise page `ChemclawActivityRetryStorm`); it has its own
+            # counter below.
             if not isinstance(exc, asyncio.CancelledError):
                 record_metric(
                     lambda m: m.increment(
@@ -383,17 +253,13 @@ class _ObservedActivity(ActivityInboundInterceptor):
                     )
                 )
             if _DRAINING and isinstance(exc, asyncio.CancelledError):
-                # The work is not lost — Temporal redelivers it — but it is paid for twice, which
-                # is the cost `durable/serve.py`'s docstring names and which nothing measured. It
-                # is counted here rather than in the drain, because the cancellation is the event
-                # and this is the only frame that sees one.
+                # Temporal redelivers the work, so it is paid for twice; counted here because only
+                # this frame sees the cancellation.
                 record_metric(
                     lambda m: m.increment("chemclaw_worker_activities_cancelled_on_drain_total")
                 )
-            # WARNING and not ERROR: an attempt that fails is usually retried and the retry usually
-            # works, so this is a caution about something that may matter. The *job* failing is a
-            # separate record with its own outcome (`connector_job.py`), and that one is the one
-            # worth paging on.
+            # WARNING, not ERROR: a failed attempt is usually retried successfully; the job's own
+            # failure record is the one worth paging on.
             log_event(
                 logger,
                 "activity.finished",
@@ -426,11 +292,8 @@ class _ObservedActivity(ActivityInboundInterceptor):
             return result
         finally:
             _IN_FLIGHT -= 1
-            # Unbound in the reverse order they were bound, and unconditionally: a contextvar left
-            # set leaks one run's identity into whatever this worker picks up next, which is the
-            # failure `template_activities._acting_as` already carries a `finally` for. Each is
-            # reset only if it was actually bound, because the binding itself now happens inside
-            # the `try` and a fault between two of them must not turn into a second fault here.
+            # Unbound in reverse order, each only if it was bound, so one run's identity never leaks
+            # into the next activity.
             if correlation_token is not None:
                 reset_current_correlation_id(correlation_token)
             if session_token is not None:
@@ -443,10 +306,7 @@ class ChemclawWorkerInterceptor(Interceptor):
     """Install `_ObservedActivity` around every activity this worker serves.
 
     Registered on every `Worker(...)` in the tree (`durable/background_worker.py`,
-    `connectors/worker.py`), because a worker that serves work without recording it is exactly the
-    state this module's docstring measured — and a second worker wiring only some of the
-    cross-cutting concerns is the failure `durable/serve.py` was written to prevent for probes and
-    shutdown.
+    `connectors/worker.py`).
     """
 
     def intercept_activity(self, next: ActivityInboundInterceptor) -> ActivityInboundInterceptor:
