@@ -2564,12 +2564,12 @@ async def _private_database(monkeypatch: pytest.MonkeyPatch) -> str:
     base.pop("options", None)
     try:
         async with await psycopg.AsyncConnection.connect(
-            psycopg.conninfo.make_conninfo(**base), autocommit=True
+            psycopg.conninfo.make_conninfo("", **base), autocommit=True
         ) as conn:
             await conn.execute(f'CREATE DATABASE "{name}"')
     except psycopg.errors.InsufficientPrivilege:  # pragma: no cover - env-dependent
         pytest.skip("this role cannot CREATE DATABASE, which the vacuum-horizon test needs")
-    private = psycopg.conninfo.make_conninfo(**{**base, "dbname": name})
+    private = psycopg.conninfo.make_conninfo("", **{**base, "dbname": name})
     for setting in ("postgres_dsn", "postgres_migration_dsn", "session_store_dsn"):
         if str(getattr(settings, setting)):
             monkeypatch.setattr(settings, setting, private)
@@ -2581,7 +2581,7 @@ async def _drop_database(name: str) -> None:
     base = psycopg.conninfo.conninfo_to_dict(settings.postgres_dsn)
     base.pop("options", None)
     async with await psycopg.AsyncConnection.connect(
-        psycopg.conninfo.make_conninfo(**base), autocommit=True
+        psycopg.conninfo.make_conninfo("", **base), autocommit=True
     ) as conn:
         await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 

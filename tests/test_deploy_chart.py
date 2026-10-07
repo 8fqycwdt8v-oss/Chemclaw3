@@ -1873,7 +1873,7 @@ def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
     assert "pip-audit" in (DEPLOY.parent / "Makefile").read_text(), (
         "deps-audit target must invoke pip-audit"
     )
-    # The *image* scan is deliberately not asserted here; `BACKLOG.md` says why.
+    # The *image* scan is deliberately not asserted here: this target audits the locked closure.
 
 
 def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> None:
