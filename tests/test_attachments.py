@@ -1,24 +1,12 @@
 """Where a session's uploads live, what the store drops, and who can reach them.
 
-Two defects, one file, because both are about what a chemist is told about a file they sent.
+The store evicts past `attachment_max_per_session` and the byte budget, and says so: a log
+record, a metric, and a field on both model-facing tools, so a dropped upload is never reported as
+one that never arrived. Uploads are session state, not pod state
+(`D-2026-10-04-an-upload-is-session-state-not-pod-state`), so any replica can read them.
 
-**Dropped silently.** The store evicts a session's oldest uploads past `attachment_max_per_session`
-and past the byte budget, and for the whole life of that bound the eviction was *silent*: no log
-record, no metric, no field on either model-facing tool. Measured at the shipped cap of 10 —
-thirteen uploads, ten held, `plate-00/01/02.csv` gone, and `read_attachment("plate-00.csv")`
-answering `no attachment named 'plate-00.csv' in this conversation` about a file the chemist had
-just uploaded *to this conversation*. The model relays that as fact.
-
-**Held by one replica.** The store was a dict in the memory of the pod that took the upload. With
-two processes on one database, the second resolved the session (200) and answered
-`read_attachment("runs.csv")` with the same false sentence — and the companion UI's BFF reaches the
-front door through its Service, where the Route's affinity cookie that papered over this does not
-exist (`D-2026-10-04-an-upload-is-session-state-not-pod-state`).
-
-The behavioural tests run on both backends, because `InMemoryAttachmentStore` is a real backend —
-what a deployment without durable sessions runs — and a failure names which one. The Postgres-only
-tests are about what a database keeps: another process reading it, the session gate in front of
-it, and the three disposals a conversation's rows follow.
+Behavioural tests run on both backends (`InMemoryAttachmentStore` is a real backend); the
+Postgres-only tests cover cross-process reads, the session gate, and disposal.
 """
 
 import asyncio
@@ -119,11 +107,9 @@ async def test_a_session_remembers_which_uploads_it_dropped(backend: str) -> Non
 async def test_the_byte_bound_records_its_evictions_too(backend: str) -> None:
     """Both per-session bounds drop the same way, so both must leave the same record.
 
-    The byte half is the one that bites on real spreadsheets: `attachment_max_bytes` bounds the
-    *upload* and the parsed expansion is bounded by `document_max_expanded_bytes`, which is larger
-    than the per-session budget. ASCII text, so resident bytes (memory) and stored UTF-8 bytes
-    (Postgres) differ only by an object header, and the files are one byte over a third each so
-    the budget is breached on both counts rather than on the header alone.
+    The byte bound bites on real spreadsheets, whose parsed expansion exceeds the per-session
+    budget. Each file is one byte over a third of it, so the budget is breached on both backends
+    regardless of object-header overhead.
     """
     store, session = await _backend(backend), _session()
     per_file = settings.attachment_store_max_bytes // 3 + 1
@@ -167,11 +153,9 @@ async def test_a_listing_reads_excerpts_and_a_read_reads_the_whole_file(backend:
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 async def test_the_listing_says_what_it_is_not_showing(backend: str, bound_to: Any) -> None:
-    """`list_attachments` claimed "everything attached to a session" over a truncated list.
+    """`list_attachments` says what it is not showing.
 
-    The verdict is a `computed_field` rather than a property for the reason
-    `FingerprintSearch.verdict` is: a bare property is not serialized, so the one sentence that
-    tells the model its list is short would never leave this process.
+    The verdict is a `computed_field` because a bare property is not serialized.
     """
     store, session = await _backend(backend), _session()
     bound_to(store, session)
@@ -208,11 +192,9 @@ async def test_the_listing_verdict_says_nothing_was_dropped_when_nothing_was(
 async def test_reading_a_dropped_upload_says_it_was_dropped_not_that_it_never_arrived(
     backend: str, bound_to: Any
 ) -> None:
-    """The worst half: silence became a false statement about the chemist.
+    """Reading a dropped upload says it was dropped, not that it never arrived.
 
-    `no attachment named 'plate-00.csv' in this conversation` is a claim, and it is wrong — the
-    file was uploaded to this conversation and this store dropped it. A model told that tells the
-    chemist they never sent it.
+    Otherwise the model tells the chemist they never sent the file.
     """
     store, session = await _backend(backend), _session()
     bound_to(store, session)
@@ -329,11 +311,10 @@ def _on_another_replica(session: str, name: str) -> dict[str, Any]:
 
 
 def test_an_upload_taken_by_one_replica_is_read_by_another(durable_app: Any) -> None:
-    """The defect, end to end: upload through one process, read it from a different one.
+    """Upload through one process, read it from a different one.
 
-    Before `session_attachments` the second process answered "no attachment named 'runs.csv' in
-    this conversation". Nothing of the upload may be left in this process's memory either, or the
-    first half of the proof would be reading a copy only this replica has.
+    Nothing of the upload may stay in the first process's memory, or the proof would read a local
+    copy.
     """
     session = str(_as(durable_app, _ANA).post("/sessions").json()["session_id"])
     uploaded = _upload(durable_app, _ANA, session, "runs.csv", b"temp,yield\n80,0.91\n")
@@ -352,10 +333,8 @@ def test_a_stranger_cannot_upload_into_or_read_from_somebody_elses_session(
 ) -> None:
     """The session id in the path is a client's claim; the session gate is what answers it.
 
-    A stranger's upload into Ana's session is a 404 indistinguishable from an unknown session, and
-    nothing is stored. A stranger's own conversation reads its own uploads and never Ana's, because
-    the tools read only the turn's bound session — there is no id a model or a client can pass
-    that names another one.
+    A stranger's upload into another session is an indistinguishable 404 and stores nothing; tools
+    read only the turn's bound session, so no id can name another.
     """
     session = str(_as(durable_app, _ANA).post("/sessions").json()["session_id"])
     assert _upload(durable_app, _ANA, session, "ana.csv", b"secret,1\n").status_code == 200

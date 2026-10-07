@@ -1,9 +1,7 @@
-"""The ingest half, proven against a fake warehouse — no tenant, no driver, no credentials.
+"""The ingest half, proven against a fake warehouse: no tenant, no driver, no credentials.
 
-These tests are the evidence for the claim the package is built on: that attaching a warehouse ELN
-is writing a binding rather than writing Python. So they assert the two things that claim reduces
-to — that the *statement* the engine sends is the one the sync's contract requires, and that a
-schema change is a change to YAML and to nothing else.
+Attaching a warehouse ELN is writing a binding, not Python, so these tests assert the statement
+the engine sends meets the sync's contract and that a schema change is a YAML change only.
 """
 
 import asyncio
@@ -161,9 +159,8 @@ def _one_reaction(binding: dict[str, Any], tables: dict[str, list[dict[str, Any]
 def _filed(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Capture what the adapter files in the rejection ledger, with no database under it.
 
-    The ledger is the point of these three assertions: a row this fetch loses is a record a chemist
-    will later assume is in the corpus, and a worker log line is not an answer anybody can be given
-    (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`).
+    A row the fetch loses is a record a chemist will later assume is in the corpus, so it must be
+    filed where it can be answered for, not only logged.
     """
     filed: dict[str, str] = {}
 
@@ -177,18 +174,10 @@ def _filed(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 def test_an_unparseable_amendment_stamp_is_refused_rather_than_read_as_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A present-but-unreadable `modified_at` is bad data, and it read as "never amended".
+    """A present but unparseable `modified_at` is refused, not read as "never amended".
 
-    The two same-named `_optional_timestamp` functions — this module's and `json_adapter`'s —
-    diverged on **6 of 9** realistic warehouse cell values: `01/09/2026`, `0000-00-00 00:00:00`,
-    `N/A`, `-`, `01-SEP-2026` and a Unix epoch integer all raised there and answered `None` here.
-    The JSON twin's docstring states the rule this restores: treating a present but unparseable
-    value as absent "would reinstate the exact silence this field exists to break".
-
-    What the silence costs is specific to this column: `entry_window` falls back to creation, so
-    the row never re-enters the fetch window and **the correction is never ingested** — which is
-    the failure `test_the_cursor_filters_on_the_later_of_created_and_modified` exists to prevent,
-    arriving through the reader instead of through the SQL.
+    Read as absent, `entry_window` falls back to creation, the row never re-enters the fetch window,
+    and the correction is never ingested. Matches `json_adapter`'s rule.
     """
     filed = _filed(monkeypatch)
     tables = _rows()
@@ -208,12 +197,9 @@ def test_an_unparseable_amendment_stamp_is_refused_rather_than_read_as_absent(
 def test_an_unparseable_withdrawal_stamp_is_refused_rather_than_read_as_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same reader, on the column where the silence keeps a withdrawn record answering.
+    """A present but unparseable `retracted_at` is refused, not read as absent.
 
-    `retracted_at` reading `None` means the source's explicit withdrawal is never seen and the row
-    stays live as current knowledge, against
-    `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`. Asserted separately from the amendment
-    case because the two call sites are separate and only one of them was covered by anything.
+    Read as `None`, the source's withdrawal would never be seen and the row would stay live.
     """
     filed = _filed(monkeypatch)
     binding = _binding()
@@ -228,11 +214,10 @@ def test_an_unparseable_withdrawal_stamp_is_refused_rather_than_read_as_absent(
 
 
 def test_a_blank_amendment_stamp_is_still_simply_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The half that must not become a refusal: an empty cell is a row nobody has amended.
+    """A blank amendment stamp is still simply absent.
 
-    Pinned beside the two above because the obvious over-fix — refusing anything that does not
-    parse — would refuse every un-amended row in every warehouse, i.e. the whole corpus. `NULL`,
-    `''` and whitespace are the source saying nothing, which is the ordinary state.
+    `NULL`, `''` and whitespace are the ordinary un-amended state; refusing them would refuse the
+    whole corpus.
     """
     filed = _filed(monkeypatch)
     for blank in (None, "", "   "):
@@ -247,12 +232,10 @@ def test_a_blank_amendment_stamp_is_still_simply_absent(monkeypatch: pytest.Monk
 def test_a_row_with_no_usable_key_reaches_the_rejection_ledger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two faults in one assertion's neighbourhood: truthiness, and a WARNING-only loss.
+    """A row with no usable key reaches the rejection ledger; a key of `0` is kept.
 
-    `keyed = [row for row in rows if row.get(entry.key)]` dropped on **truthiness**, so an integer
-    primary key of `0` and an empty-string key were removed by the same test that removes a NULL.
-    The `0` row now survives; the blank one is refused *into the ledger* rather than counted in a
-    worker log, which is what the third loss path in the same method already did.
+    Keys are tested for presence, not truthiness, and a blank key is filed in the ledger rather than
+    only logged.
     """
     filed = _filed(monkeypatch)
     tables = _rows()
@@ -274,12 +257,10 @@ def test_a_row_with_no_usable_key_reaches_the_rejection_ledger(
 def test_two_rows_sharing_one_key_leave_a_ledger_row_naming_the_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A repeated key collapses two reactions, and the comment beside it says so itself.
+    """Two rows sharing one key leave a ledger row naming the id.
 
-    "The reactions it collapses would otherwise vanish with no explanation at all" — and a worker
-    log line is not an explanation a chemist can be given. Both are refused into the ledger under
-    the id they share, which is also the id the survivor is ingested under: that row is what tells a
-    citation of it that it does not name one run.
+    The survivor is ingested under that id, so the ledger row is what tells a citation it does not
+    name one run.
     """
     filed = _filed(monkeypatch)
     tables = _rows()
@@ -292,11 +273,10 @@ def test_two_rows_sharing_one_key_leave_a_ledger_row_naming_the_id(
 
 
 def test_a_warehouse_impurity_known_only_by_its_rrt_is_named_rather_than_dropped() -> None:
-    """The identical hole `json_adapter._impurities` had, in the other adapter.
+    """A warehouse impurity known only by its RRT is named rather than dropped.
 
-    `Impurity._identifiable` refuses an RRT-only row and prescribes the remedy — a name of the form
-    "the RRT 0.94 peak" — and both adapters dropped the row instead. A site's analytics table is
-    exactly where unresolved peaks live, and they are routinely the largest ones in the profile.
+    `Impurity._identifiable` prescribes a name of the form "the RRT 0.94 peak"; unresolved peaks are
+    often the largest in the profile.
     """
     binding = _binding()
     binding["ingest"]["impurities"] = [
@@ -328,11 +308,10 @@ def test_a_warehouse_impurity_known_only_by_its_rrt_is_named_rather_than_dropped
 
 @pytest.mark.parametrize("rrt", [Decimal("0.94"), "0.94"], ids=["numeric-column", "text-column"])
 def test_an_rrt_only_peak_is_named_whatever_type_the_driver_hands_back(rrt: object) -> None:
-    """A NUMERIC RRT is a `Decimal` and a text one a `str`, and neither passed `isinstance(float)`.
+    """An RRT-only peak is named whether the driver returns a `Decimal` or a `str`.
 
-    With no `number` transform on the column, the value arrives as the driver typed it, so an
-    RRT-only peak on a NUMERIC(4,2) column was dropped here while `json_adapter`'s `float()` named
-    the same peak. Named from the coerced value, and carried as a float.
+    Without a `number` transform the value arrives as the driver typed it; it is coerced and carried
+    as a float.
     """
     binding = _binding()
     binding["ingest"]["impurities"] = [
@@ -355,11 +334,10 @@ def test_an_rrt_only_peak_is_named_whatever_type_the_driver_hands_back(rrt: obje
 
 
 def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
-    """An amended run counts as new, which is the ELN sync's contract and not a nicety.
+    """The cursor filters on the later of created and modified, so an amended run counts as new.
 
-    Asserted on the emitted SQL because the failure is silent: filtering on creation alone ingests
-    a run once and never sees the correction a chemist makes to it the following week. There is no
-    exception and no rejected row — the amendment simply never arrives.
+    Asserted on the emitted SQL, because filtering on creation alone would silently never ingest a
+    correction.
     """
     since = datetime(2026, 4, 1, tzinfo=UTC)
     _fetch(_binding(), _rows(), since)
@@ -372,18 +350,12 @@ def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
 
 
 def test_a_declared_withdrawal_column_is_in_the_cursor_and_an_undeclared_one_is_not() -> None:
-    """A retraction the cursor cannot see is a tombstone written at the site and fetched by nobody.
+    """A declared withdrawal column is in the cursor, and an undeclared one leaves the SQL
+    unchanged.
 
-    Asserted on the emitted SQL for the same reason the amendment case above is, and because the
-    fake warehouse mirrors the watermark's *semantics* rather than parsing the clause — so only
-    this pins the two together. Both directions: a binding that declares the column filters on it,
-    and one that does not is byte-for-byte unchanged, because every site without a withdrawal
-    column must keep the predicate it had.
-
-    `COALESCE(retracted, W)` inside the `GREATEST` is the load-bearing half: warehouses disagree
-    about `GREATEST` over a NULL, and under the propagating reading the bare form would move every
-    un-retracted row's watermark to NULL and stop the source dead. This module names no vendor, so
-    it may not assume the forgiving one.
+    The fake mirrors the watermark's semantics without parsing the clause, so only the SQL pins them
+    together. `COALESCE(retracted, W)` inside `GREATEST` matters because some warehouses propagate
+    NULL through `GREATEST`, which would stop the source dead.
     """
     binding = _binding()
     binding["ingest"]["entry"]["retracted_at"] = "RETRACTED_TS"
@@ -467,11 +439,9 @@ def test_the_site_vocabulary_and_units_are_mapped_by_the_binding() -> None:
 
 
 def test_a_new_child_table_reaches_the_payload_with_no_python_change() -> None:
-    """The claim the package exists for, stated as a test.
+    """A new child table reaches the payload with no Python change.
 
-    A site adds an analytics table; the binding gains a `related:` block and an `impurities:` block
-    and nothing else changes anywhere. If this ever needs an edit outside the binding, the promise
-    has been broken.
+    The binding gains a `related:` and an `impurities:` block and nothing else changes.
     """
     binding = _binding()
     binding["ingest"]["related"].append(
@@ -530,11 +500,9 @@ def test_the_attribute_bag_is_bounded() -> None:
 
 
 def test_attributes_never_reach_the_chemistry() -> None:
-    """The structural identity of a reaction is unchanged by its unmodelled columns.
+    """Unmodelled attribute columns never change a reaction's structural identity.
 
-    The specific failure this forbids is a structure arriving through an unvalidated bag of strings
-    and changing a fingerprint — which would make two identical reactions look different, or two
-    different ones look the same, on the strength of a vessel id.
+    Otherwise a vessel id could make identical reactions fingerprint differently.
     """
     bare = _binding()
     bare["ingest"]["attributes"] = {"include": []}
@@ -605,16 +573,11 @@ def test_a_fallback_column_keeps_the_older_half_of_the_history() -> None:
 def test_a_connection_block_is_whatever_its_driver_takes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Any modern database, in its own words: the block is the driver's keyword arguments.
+    """A connection block is whatever its driver takes: the driver's own keyword arguments.
 
-    The vocabulary below belongs to no shipped driver on purpose — `dsn`, `api_key`, `collection`
-    is roughly what a vector database wants and nothing like what a lakehouse wants. Nothing in this
-    engine knows any of those words, and that is the property under test: attaching a database this
-    repository has never heard of is a driver module plus a manifest, with no field added to a
-    shared model (`D-2026-08-26-the-driver-s-signature-is-the-schema`).
-
-    The `*_env` suffix is the one convention that survives, and it is a *rule about secrets* rather
-    than about a vendor: the binding names the variable, the value is read here, at connect time.
+    The vocabulary below belongs to no shipped driver, so attaching an unknown database is a driver
+    module plus a manifest. The `*_env` suffix is the one convention: the binding names a secret's
+    variable and the value is read at connect time.
     """
     monkeypatch.setenv("TEST_STORE_KEY", "sk-live-1")
     binding = _binding()
@@ -649,17 +612,11 @@ def test_a_missing_credential_fails_naming_the_variable(
 
 
 def test_a_null_column_leaves_the_schema_default_rather_than_rejecting_the_row() -> None:
-    """A field the source was silent about is omitted, not passed as `None`.
+    """A NULL column leaves the schema default rather than rejecting the row.
 
-    The two are not the same for every field: `reaction_id` omitted raises "field required", which
-    names the actual problem, where an explicit `None` would raise a type error about a value the
-    source never had.
-
-    `outcome_class` is the worked example and it changed meaning, which is why it is still the one
-    tested here. It used to be non-optional with a SUCCESS default, so a NULL status column came out
-    as a claim that the run worked. Since `D-2026-08-26-silence-is-not-a-successful-run` the model
-    carries the silence itself, and the row says nobody stated an outcome — while a value that *is*
-    present still maps exactly as before.
+    A silent field is omitted, not passed as `None`, so a missing `reaction_id` raises "field
+    required". `outcome_class` carries silence as "no outcome stated" rather than success, while a
+    present value maps as before.
     """
     binding = _binding()
     binding["ingest"]["reaction"]["outcome_class"] = {
@@ -714,17 +671,11 @@ def _charge_rows(entry_id: str) -> list[dict[str, Any]]:
 
 
 def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
-    """The wedge: the fetch pages on the amendment watermark, so the cursor must advance on it.
+    """A page of amended rows does not stall the sync forever.
 
-    Three already-created rows are amended today — more than one page (`fetch_limit: 2`) — and one
-    genuinely new reaction is created after them. Every fetch returns the amended page first, so a
-    cursor that advances on `created_at` alone never moves past it: `NEW-1` is never ingested, on
-    this run or any future one, and nothing reports it (the batch is not truncated by the
-    workflow's reckoning either, so the wedge guard in `durable/eln_sync.py` is never reached).
-
-    Driven through `sync_entries` rather than the adapter alone because the defect is the seam
-    between them, and against a warehouse that honours WHERE/ORDER BY/LIMIT because the fake that
-    ignores them cannot tell a wedged sync from a sync with nothing to do.
+    The fetch pages on the amendment watermark, so the cursor must advance on it; otherwise more
+    amended rows than one page would hide a new reaction forever. Driven through `sync_entries`
+    against a fake that honours WHERE/ORDER BY/LIMIT, since the defect is the seam between them.
     """
     old = datetime(2026, 1, 1, tzinfo=UTC)
     amended = datetime(2026, 6, 1, tzinfo=UTC)
@@ -787,14 +738,8 @@ def _drain(
 ) -> tuple[set[str], list[str]]:
     """Run `ElnSyncWorkflow`'s own chunk loop against `adapter`, returning what it ingested.
 
-    The loop is transcribed rather than imported because it *is* the subject: the workflow decides
-    when to come back for another chunk (`has_more`), and its wedge guard decides when a source
-    that reports more work but no cursor advance is stopped and said out loud. A test that called
-    `sync_entries` directly would see neither.
-
-    `records` is supplied by a caller that needs to read what was transcribed rather than only
-    which ids were, and it survives between calls — which is what lets one test drive a first sync
-    and then a withdrawal against the same corpus.
+    Transcribed because the loop's `has_more` decision and wedge guard are the subject. `records`
+    persists between calls so a test can run a first sync and then a withdrawal on one corpus.
     """
 
     async def _run() -> tuple[set[str], list[str]]:
@@ -854,14 +799,10 @@ def _tied_warehouse(count: int, watermark: datetime, later: datetime | None = No
 
 
 def test_a_watermark_block_larger_than_one_page_is_drained_rather_than_truncated() -> None:
-    """The silent, permanent truncation: more rows share one watermark than a page can hold.
+    """A watermark block larger than one page is drained rather than truncated.
 
-    The page was ordered and cut on the watermark alone, and the persisted cursor is that same
-    timestamp — so the cursor could only ever advance *to* the tie value, every later fetch
-    returned the same first page, and the rest of the block was never seen again. Two entirely
-    ordinary shapes produce it: a `created_at:` bound to a DATE column, where every entry of one
-    day ties, and a bulk `UPDATE … SET LAST_MODIFIED_TS = now()` reload, which ties every row it
-    touched. Nothing reported it — the run logged `ingested=0 rejected=0` and read as a quiet day.
+    If more rows share one watermark than a page holds, a cursor equal to that timestamp would
+    return the same page forever. A DATE-bound `created_at` or a bulk `UPDATE` produces such ties.
     """
     tie = datetime(2026, 6, 1, tzinfo=UTC)
     binding = _binding()
@@ -883,14 +824,10 @@ def test_a_watermark_block_larger_than_one_page_is_drained_rather_than_truncated
 def test_a_block_too_large_to_page_past_stops_the_source_out_loud(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A tie the fetch cannot get past within its bound is reported, not silently truncated.
+    """A tie block too large to page past within the bound stops the source out loud.
 
-    There is a bound on how far one fetch will page inside a single watermark value, because the
-    rows are held in memory; past it the source is genuinely un-resumable on a timestamp cursor and
-    the honest outcome is to say so. What must not happen is the old one: `has_more` false, a
-    cursor that never moves, and a log line that reads like there was nothing to do. Here the fetch
-    reports itself truncated, so the workflow's "reported more entries but no cursor advance" guard
-    is reached — and the adapter names the watermark value an operator has to fix the binding for.
+    The fetch reports itself truncated, so the workflow's no-cursor-advance guard is reached, and
+    the adapter names the watermark value the binding must be fixed for.
     """
     tie = datetime(2026, 6, 1, tzinfo=UTC)
     binding = _binding()
@@ -908,17 +845,11 @@ def test_a_block_too_large_to_page_past_stops_the_source_out_loud(
 def test_one_row_with_no_creation_timestamp_costs_itself_and_not_the_source(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """One unreadable `created_at` used to stop the whole ELN, permanently and silently.
+    """One row with no creation timestamp costs itself, not the source.
 
-    `_raw_entry` raised out of `fetch_new_entries`, which `sync_entries` calls *before* its `try:`
-    — so the reject-and-continue every other refusal gets never ran — and `ElnMappingError` is in
-    `durable/publish._BAD_DATA_TYPES`, so Temporal marked the activity non-retryable. The cursor
-    never advanced and every scheduled run re-fetched the same page and failed the same way.
-
-    The row is reachable because the binding declares `modified_at`: `COALESCE(modified, created)`
-    passes an amended row whose creation column is NULL, which is what an outer-join miss or a
-    column the site backfilled looks like. Driven through the workflow's own chunk loop, because
-    what the defect cost is the *cursor*, and only that loop can see it move.
+    `fetch_new_entries` runs before `sync_entries`' reject-and-continue, and `ElnMappingError` is
+    non-retryable, so a raise there would stop the ELN permanently. Such a row arrives via
+    `COALESCE(modified, created)`. Driven through the workflow's chunk loop to see the cursor move.
     """
     old = datetime(2026, 1, 1, tzinfo=UTC)
     amended = datetime(2026, 6, 1, tzinfo=UTC)
@@ -954,25 +885,14 @@ def test_one_row_with_no_creation_timestamp_costs_itself_and_not_the_source(
 
 
 def test_a_binding_may_name_the_intent_column_but_not_carve_one_out_of_prose() -> None:
-    """The rule `json_adapter` states in Python was reachable through YAML, and now is not.
+    """A binding may name the intent column but not carve one out of prose.
 
-    `ingest.eln.json_adapter` reads `hypothesis` from the entry's own field and refuses to guess one
-    from the procedure, "because a hypothesis extracted by pattern-matching would be
-    indistinguishable, downstream, from one the chemist wrote". The binding vocabulary has a `regex`
-    transform, so a site whose objective lives inside the protocol text could write exactly that
-    guess in a manifest — and it loaded, validated, ingested, and rendered a `Tested:` line no
-    reader could tell from the chemist's own words. One half of a codebase refusing what the
-    other permits
-    is not a rule (D-2026-08-26-silence-is-not-a-successful-run).
-
-    A plain column is untouched: an `OBJECTIVE` column *is* the chemist's own field, which is what
-    this maps. And the fallback chain is checked too, because a rule about a field that stops at its
-    first binding is a rule with a documented way around it.
+    A hypothesis extracted by pattern-matching is indistinguishable downstream from one the chemist
+    wrote, so `regex`-style transforms are refused for it, across the whole fallback chain. A plain
+    column is the chemist's own field and is allowed.
     """
-    # A column holding the stated aim is exactly what this field is for — including with its
-    # padding trimmed. Only transforms that can put text in the field which the cell does not hold
-    # are refused; a rule that also failed `strip` would reject a chemist's own OBJECTIVE column at
-    # worker startup, accusing the binding of carving intent out of prose.
+    # Only transforms that can put text in the field which the cell does not hold are refused;
+    # `strip` is allowed.
     allowed_shapes = (
         {"path": "root.OBJECTIVE"},
         {"path": "root.OBJECTIVE", "transform": [{"strip": {}}]},
@@ -1012,16 +932,11 @@ def test_a_binding_may_name_the_intent_column_but_not_carve_one_out_of_prose() -
 
 
 def test_a_bounded_chunk_asks_the_warehouse_for_the_chunk_and_not_for_the_page() -> None:
-    """The read is bounded at the source, which is the half of the quadratic drain a source can fix.
+    """A bounded chunk asks the warehouse for the chunk, not the whole page.
 
-    The durable sync drains in chunks of `eln_sync_batch_size` and truncates whatever comes back to
-    that (`durable/eln_sync.py::_BoundedIngest`), so every continuation chunk of a drain asked this
-    warehouse for the binding's whole `fetch_limit` — 5,000 rows at the default — and kept 100. A
-    50x over-read of a table, per chunk, for the length of the drain.
-
-    Asserted on the `LIMIT` the engine actually binds and on the rows that come back, against the
-    fake that honours WHERE/ORDER BY/LIMIT — the plain fake answers every statement with the whole
-    primed table and so cannot tell a bounded page from an unbounded one.
+    The sync drains in chunks of `eln_sync_batch_size`, so the `LIMIT` the engine binds must be the
+    chunk size rather than `fetch_limit`. Asserted against the fake that honours WHERE/ORDER
+    BY/LIMIT.
     """
     since = datetime(2026, 1, 1, tzinfo=UTC)
     binding = _binding()
@@ -1070,22 +985,12 @@ def test_a_bounded_chunk_asks_the_warehouse_for_the_chunk_and_not_for_the_page()
 def test_a_site_that_withdraws_a_row_reaches_the_record_without_touching_its_amendment_column() -> (
     None
 ):
-    """The live connector's producer half, through the wiring a scheduled sync actually runs.
+    """A site's withdrawal reaches the record without touching its amendment column.
 
-    `RawEntry.retracted_at` is the only thing that may set `reaction_records.retracted_at`, so a
-    binding that cannot name the site's withdrawal column makes the whole five-part retraction
-    change unreachable in every shipped configuration — a producer nobody can write
-    (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
-
-    Driven through `_drain`, which is the workflow's own chunk loop over `_BoundedIngest`. That
-    matters twice over: `BACKLOG.md` recorded this half as needing `_BoundedIngest` to expose a
-    public `inner` for a capability walk, and it does not — a field on `RawEntry` rides the wrapper
-    through untouched, which only a run through the wrapper can show.
-
-    The withdrawal deliberately leaves `LAST_MODIFIED_TS` alone, which is the case the watermark
-    exists for: the cursor has passed the row's creation, so a source stamping only its retraction
-    column would never re-export it. `RX-KEPT` is created alongside and never withdrawn, so the
-    assertion is a difference rather than an emptiness.
+    `RawEntry.retracted_at` is the only setter of `reaction_records.retracted_at`, so the binding
+    must be able to name the withdrawal column. Driven through `_drain` to show the field survives
+    `_BoundedIngest`. `LAST_MODIFIED_TS` is untouched, so the watermark must include the withdrawal
+    column; `RX-KEPT` makes the assertion a difference.
     """
     created = datetime(2026, 5, 1, tzinfo=UTC)
     pulled = datetime(2026, 8, 1, tzinfo=UTC)

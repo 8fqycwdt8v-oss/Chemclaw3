@@ -1,32 +1,16 @@
-"""The Helm chart's configuration matches the app's `Settings` (DA-10/D-2, the deployment edge).
+"""The Helm chart's configuration matches the app's `Settings`.
 
-The chart is the one artifact no other test exercises: it is rendered by `helm install`, in a
-cluster, on deployment day. `make helm-validate` (CI) checks the rendered YAML against the
-Kubernetes schemas — but a schema check cannot know whether `CHEMCLAW_FOO` is a *real* setting.
-Two failure modes live in that gap, and both are silent until production:
+`make helm-validate` checks rendered YAML against Kubernetes schemas but cannot know whether
+`CHEMCLAW_FOO` is a real setting. Two silent failure modes are closed here, offline, against the
+`Settings` the pods construct:
 
-1. **A key that is not a field** — pydantic-settings tolerates an unknown prefixed *environment*
-   variable (unlike an unknown key in a `.env` file, which is what broke the quickstart in DA-1),
-   so the operator who sets it gets no error and no effect. A setting they believe they turned on
-   is quietly ignored. For a deployment that is worse than a crash.
-2. **A malformed value on a real field** — this one *does* crash, at import, in every pod at once.
+1. A key that is not a field: pydantic-settings ignores an unknown prefixed environment variable,
+   so the setting has no effect and no error.
+2. A malformed value on a real field: every pod crashes at import.
 
-These tests close both, offline, against the same `Settings` the pods construct.
-
-**What they read, and therefore what they cannot see.** Everything below asserts against the
-chart's *source*: `values.yaml` parsed as YAML, and the `templates/` files as text. Nothing here
-renders. So a claim of the form "the mount is read-only" is really "the string `readOnly: true`
-appears inside that helper's body" — true of a helper that wraps it in a `{{- if }}` no deployment
-satisfies, and true of one whose surrounding block never renders at all. The same holds for every
-`include "…"` count and every "this key appears only in that file" check.
-
-That is not a gap anyone can close here: `helm` is not a Python dependency and is absent from the
-sandbox this suite runs in. It is closed *in CI*, but only halfway — the `chart` job renders with
-`helm template` and pipes the result to `kubeconform`, which asks whether the YAML is schema-valid
-and never asks whether it says what these tests claim. Asserting on rendered documents needs
-`helm` in the job that runs pytest, which is a CI change rather than a test change; see
-`docs/planning/BACKLOG.md` (LIVE — "assert on rendered chart YAML"). Until then, read a green run
-here as "the template source says so", not "the cluster will see so".
+These tests read the chart's source (`values.yaml` as YAML, `templates/` as text) and render
+nothing, so a green run means "the template source says so", not "the cluster will see so".
+Rendered-chart assertions live in `tests/test_deploy_chart.py`.
 """
 
 import asyncio
@@ -48,12 +32,9 @@ _VALUES: dict[str, Any] = yaml.safe_load((_CHART / "values.yaml").read_text(enco
 # refs. The pod sees these too, so a parity check that ignored them would miss half the surface.
 _TLS_ENV = {"CHEMCLAW_TEMPORAL_TLS_CERT", "CHEMCLAW_TEMPORAL_TLS_KEY", "CHEMCLAW_TEMPORAL_TLS_CA"}
 
-# Not every `CHEMCLAW_*` env the chart sets is read by Python: the entrypoint dispatches on
-# `CHEMCLAW_COMPONENT`, and the knowledge-sync init/sidecar takes its whole configuration
-# (repo URL, checkout paths, push credential, interval) from `deploy/knowledge-sync.sh`. Those are
-# first-party consumers, just shell ones. They are *discovered* from the scripts rather than listed
-# here, so the exemption can never be wider than what something actually reads — an enumerated
-# guard catches drift; a hardcoded one only catches what someone already thought of.
+# Some `CHEMCLAW_*` envs are read by shell, not Python: the entrypoint dispatches on
+# `CHEMCLAW_COMPONENT`, and `deploy/knowledge-sync.sh` takes its configuration from env. They are
+# discovered from the scripts, so the exemption is never wider than what something reads.
 _DEPLOY_SCRIPTS = (Path(__file__).resolve().parents[1] / "deploy").glob("*.sh")
 _SHELL_CONSUMED_ENV = {
     key
@@ -70,26 +51,19 @@ def _field_for(env_key: str) -> str:
 def _helper_env_keys() -> set[str]:
     """`CHEMCLAW_*` names injected from `_helpers.tpl` rather than the ConfigMap.
 
-    Read from the template text: these arrive as literal `- name:` entries (mTLS paths, the
-    knowledge-sync block), so they are pod env exactly like the ConfigMap keys and belong in the
-    same parity check.
+    They arrive as literal `- name:` entries (mTLS paths, the knowledge-sync block), so they belong
+    in the same parity check as ConfigMap keys.
     """
     template = (_CHART / "templates" / "_helpers.tpl").read_text(encoding="utf-8")
     return set(re.findall(r"name:\s*(CHEMCLAW_[A-Z0-9_]+)", template))
 
 
 def _derived_config_keys() -> set[str]:
-    """`CHEMCLAW_*` keys the ConfigMap *computes* rather than copying from `.Values.config`.
+    """`CHEMCLAW_*` keys the ConfigMap computes rather than copying from `.Values.config`.
 
-    REV-15: the parity check read `.Values.config` and the helpers and stopped there, so the two
-    keys `templates/config.yaml` derives — `CHEMCLAW_NOTE_REPO_DIR` from the knowledge volume
-    layout and `CHEMCLAW_CONNECTOR_URLS` from the enabled bundle set — were outside *both* tests.
-    Neither "is this a real setting" nor "does this value load" applied to them, and
-    `connector_urls` is a `dict[str, str]` parsed from rendered JSON, which is exactly the shape
-    that crashes every pod at import when it renders wrong.
-
-    Discovered from the template rather than listed, so a third derived key is covered on the day
-    it is added.
+    `CHEMCLAW_NOTE_REPO_DIR` and `CHEMCLAW_CONNECTOR_URLS` are derived in `templates/config.yaml`;
+    the latter is a `dict[str, str]` parsed from rendered JSON, the shape that crashes pods when
+    wrong. Discovered from the template so a new derived key is covered.
     """
     template = (_CHART / "templates" / "config.yaml").read_text(encoding="utf-8")
     return set(re.findall(r"^\s*(CHEMCLAW_[A-Z0-9_]+):", template, flags=re.MULTILINE))
@@ -98,20 +72,16 @@ def _derived_config_keys() -> set[str]:
 def _rendered_publish_path() -> str:
     """What `chemclaw.knowledgePublishPath` renders to under the chart's own values.
 
-    Rendered from the template text rather than recomputed from `values.yaml`, because the claim
-    being tested is about the *helper*: that the directory the knowledge-sync containers write to is
-    the expression `Settings.knowledge_path` evaluates, over the same two values the ConfigMap hands
-    the pods. Recomputing it here would only prove that two lines of this file agree.
+    Rendered from the helper's template text, since the claim is that the helper's path equals what
+    `Settings.knowledge_path` evaluates over the same values.
     """
     template = (_CHART / "templates" / "_helpers.tpl").read_text(encoding="utf-8")
     # `[1]` starts mid-action (` -}}\n…`); drop through that closing delimiter to the body itself.
     define = template.split('define "chemclaw.knowledgePublishPath"')[1]
     body = define.split("-}}", 1)[1].split("{{- end -}}")[0]
-    # `required "<message>" .Values.X` renders exactly as `.Values.X` whenever X is set, and this
-    # helper reads a `config` key that must never be absent — an empty one publishes to
-    # `<noteRepoPath>/`, where no reader looks. The wrapper is stripped rather than matched
-    # verbatim so this substitution keeps asserting the *path*, and the refusal it adds is asserted
-    # where it can be: `tests/test_deploy_chart.py` renders the key-absent case with `helm`.
+    # `required "<message>" .Values.X` renders as `.Values.X` when X is set, so the wrapper is
+    # stripped to keep asserting the path; the refusal itself is rendered with `helm` in
+    # `tests/test_deploy_chart.py`.
     body = re.sub(r'\{\{ required "[^"]*" (\.Values\.[A-Za-z0-9_.]+) \}\}', r"{{ \1 }}", body)
     rendered = (
         body.replace("{{ .Values.knowledge.noteRepoPath }}", _VALUES["knowledge"]["noteRepoPath"])
@@ -128,11 +98,8 @@ def _rendered_publish_path() -> str:
 def _rendered_derived_values() -> dict[str, str]:
     """What the ConfigMap's derived keys render to under the chart's own values.
 
-    The helper's logic is reproduced here, which is a duplication worth taking: the alternative is
-    shelling out to `helm`, and this suite is the *offline* half that runs everywhere (the rendered
-    check is `make helm-validate`). What it buys is that the JSON `CHEMCLAW_CONNECTOR_URLS`
-    actually produces is fed through `Settings`, so a render that emits something `dict[str, str]`
-    cannot parse fails here rather than in the cluster.
+    The helper's logic is reproduced here to stay offline; it feeds the `CHEMCLAW_CONNECTOR_URLS`
+    JSON through `Settings`, so a render `dict[str, str]` cannot parse fails here.
     """
     # `cfg["url"]` wins where it is set: that bundle's server is hosted outside this release, so
     # there is no Service to compute an address from (`chemclaw.connectorUrls`).
@@ -162,20 +129,10 @@ def _rendered_derived_values() -> dict[str, str]:
 def _connector_token_envs() -> set[str]:
     """`CHEMCLAW_*` bearer-token names read directly by name, never through a `Settings` field.
 
-    `chem`'s and `safety`'s manifests name their bearer with `token_env`
-    (`connectors/manifest.py::BearerAuth`), and `connectors/identity.py::_EnvBearerAuth` reads it
-    from `os.environ` per request rather than through the typed `Settings` object — so
-    `_field_for("CHEMCLAW_CHEM_TOKEN")` is never going to be in `Settings.model_fields`, and the
-    generic orphan check below would otherwise flag every one of these as a key nothing reads. The
-    `calc` sibling server's bearer is the same shape one step removed: its name is a *setting's
-    value* (`settings.calc_server_token_env`) rather than a manifest field, because `calc`'s own
-    manifest must stay off `CHEMCLAW_CONNECTORS_DIR`
-    (`D-2026-08-16-the-physics-leaves-the-cache-stays`).
-
-    Reused from `chemclaw.cli.validate_prose_contract`, the module that already has to solve this
-    exact problem for operator prose, rather than re-deriving it: both readers need "is this name
-    genuinely consumed", and a second implementation is a second place for the two to drift as a
-    fourth connector brings its own token.
+    Connector manifests name their bearer with `token_env`, read from `os.environ` per request by
+    `connectors/identity.py::_EnvBearerAuth`; the `calc` backend's name is the value of
+    `settings.calc_server_token_env`. Reused from `chemclaw.cli.validate_prose_contract`, which
+    solves the same "is this name consumed" question.
     """
     from chemclaw.cli.validate_prose_contract import _connector_token_envs as _declared_names
 
@@ -196,19 +153,11 @@ def _chart_env_keys() -> set[str]:
 
 
 def test_no_values_key_is_declared_twice() -> None:
-    """A duplicate key in a YAML mapping is not an error to any parser this repository uses.
+    """No values key is declared twice.
 
-    Helm's takes the last one, `yaml.safe_load` takes the last one, and neither warns — so the whole
-    gate agrees on a value while the file shows two. `config.CHEMCLAW_CALC_SERVER_URL` was declared
-    twice, and the *first* occurrence is the one sitting under the comment block explaining why the
-    key is stated at all ("**Stated rather than left to the code default**, which is a loopback
-    address … every tool and all five durable jobs raised `CalcServerError` against nothing"). An
-    operator who reads that paragraph and edits the line beneath it gets a rendered ConfigMap that
-    still names the old address, and the failure they then hit is the one the paragraph describes.
-
-    `yaml.compose()` rather than `safe_load`, because the duplicate is exactly what `safe_load`
-    throws away: the node tree keeps every key, so the check is a walk over the mapping nodes.
-    Applied to the whole document rather than to `config:`: any block can grow the same defect.
+    Helm and `yaml.safe_load` both silently take the last duplicate, so an operator editing the
+    first occurrence changes nothing. `yaml.compose()` keeps every key, so the check walks mapping
+    nodes over the whole document.
     """
     duplicates: list[str] = []
 
@@ -237,10 +186,8 @@ def test_no_values_key_is_declared_twice() -> None:
 def test_chart_config_keys_have_a_consumer() -> None:
     """Every `CHEMCLAW_*` key the chart injects has a reader.
 
-    A `Settings` field, a deploy script, or a connector's own bearer-token lookup — a key that is
-    none of those is accepted silently by pydantic-settings when it arrives as an
-    environment variable, so the operator who sets it gets no error and no effect. This is the only
-    place that mistake can be caught.
+    A `Settings` field, a deploy script, or a connector's bearer lookup; anything else is silently
+    ignored by pydantic-settings as an environment variable.
     """
     orphans = {
         key
@@ -253,25 +200,19 @@ def test_chart_config_keys_have_a_consumer() -> None:
     assert not orphans, f"chart sets env nothing reads: {sorted(orphans)}"
 
 
-#: Bearer slots for fleet bundles this image does not ship, read by a manifest that reaches a pod
-#: only through `extraConnectors`. No tree here declares the variable, so `_connector_token_envs`
-#: cannot see the reader; that the fleet's manifest names exactly this variable is asserted against
-#: the sibling checkout by `tests/test_sibling_manifest_agreement.py::
-#: test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart`.
+#: Bearer slots for fleet bundles this image does not ship, reaching a pod only through
+#: `extraConnectors`. Agreement with the fleet's manifest is asserted in
+#: `tests/test_sibling_manifest_agreement.py`.
 _MOUNTED_BUNDLE_TOKENS = frozenset({"CHEMCLAW_PYEXEC_TOKEN"})
 
 
 def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The chart's own values construct a valid `Settings` — the pods' boot path, proven offline.
+    """The chart's own values construct a valid `Settings`: the pods' boot path, proven offline.
 
-    Models the real pod environment: the ConfigMap block, plus placeholder values for the
-    secret-provided keys and the mTLS paths the chart mounts. A malformed value (a bad enum, an
-    out-of-range number) would crash every pod at import; here it fails a test instead.
-
-    Secret keys that no `Settings` field claims are skipped rather than forced in: the knowledge
-    repo's push credential is consumed by `deploy/knowledge-sync.sh`, so passing it as an init
-    kwarg would model the pod wrongly (the pod gets it as *env*, which pydantic-settings ignores)
-    and fail on `extra="forbid"` for a configuration that is in fact correct.
+    Models the pod environment: the ConfigMap block plus placeholders for secret-provided keys and
+    mounted mTLS paths. Secret keys no field claims (the knowledge repo's push credential, consumed
+    by `deploy/knowledge-sync.sh`) are skipped, since passing them as init kwargs would fail
+    `extra="forbid"` for a correct configuration.
     """
     overrides = {_field_for(key): str(value) for key, value in _VALUES["config"].items()}
     for env_key in _VALUES["secrets"]["keys"].values():
@@ -286,12 +227,8 @@ def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -
         # DSN in that posture. A production secret must carry the same (documented in the runbook).
         "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw?sslmode=verify-full"
     )
-    # The two keys the ConfigMap derives rather than copies, passed as *environment* — which is
-    # how the pod receives them and, for `connector_urls`, the only way the value works at all:
-    # pydantic-settings JSON-decodes a complex field from an env var and does not from an init
-    # kwarg, so handing the rendered JSON string to `Settings(...)` fails with `dict_type`. That
-    # asymmetry is why modelling the pod matters here rather than merely type-checking a literal,
-    # and it is the half of the pod environment this test did not reach before (REV-15).
+    # Derived keys are passed as environment, as the pod receives them: pydantic-settings
+    # JSON-decodes a complex field from env but not from an init kwarg.
     for env_key, value in _rendered_derived_values().items():
         monkeypatch.setenv(env_key, value)
 
@@ -306,106 +243,23 @@ def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -
 def test_chart_declares_only_the_documented_secrets() -> None:
     """The chart names exactly the plain secrets the architecture signed off.
 
-    Deliberately without a number: the count belongs in the assertion below, not in a sentence
-    describing it (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose).
+    The list is written out rather than derived, so each addition is argued here. In brief:
 
-    Everything else is workload-identity federation, i.e. no client secret at rest; a new plain
-    secret is an architecture change (D-047), so it should not pass unnoticed. Each addition is
-    argued here rather than waved through, which is why this list is written out instead of derived.
+    - `keys` are rendered as required `secretKeyRef`s on every pod: credentials whose absence
+      silently
+      breaks a capability (LLM, database, knowledge-repo push). The push token is
+      required only where a remote is configured.
+    - `optionalKeys` exist because the Secret is operator-managed and predates a new chart version,
+      so
+      a required addition would break every pod on `helm upgrade`. They include the framing envelope
+      key (unset means a per-process tag, unshared across replicas), the connector bearers (fail
+      closed with `MissingConnectorCredential` when unset), credentials for features off by default
+      (LLM fallback, vector store, Temporal Cloud, a split session store), the MCP face bearer (the
+      face refuses without it), and bearers for bundles that ship off.
+    - Credentials never go in `config`, which renders into a ConfigMap the `view` role can read.
 
-    The knowledge-repo push credential is the fourth (gap DEP-2, D-088): the PR-gate submitter
-    shells out to `git push`, and a git host authenticates that push with a token — there is no
-    federated exchange for it the way there is for Entra-fronted APIs. Without it every
-    agent-authored note fails at push in-cluster.
-
-    The webhook-signing secret is the fifth (D-2026-07-31-a-proposal-is-a-record-not-a-branch), and
-    it is the same argument one step further along the same path: the git host now tells the
-    deployment which notes were merged, and that claim closes a proposal — so it must be
-    authenticated, and the host authenticates itself by signing, not by holding an Entra identity.
-    Without it every reviewed note stays in the queue forever, which is a review surface nobody
-    works. Note the polarity: an *absent* secret is safe here (the route refuses to decide
-    anything), unlike the four above, where absent means the capability fails.
-
-    The framing envelope key is the sixth, and it is the first to land in `optionalKeys` rather
-    than `keys` — a distinction that exists because putting it in `keys` broke every upgrade.
-    `chemclaw.env` renders `keys` as a **required** `secretKeyRef`, and `secrets.create` defaults to
-    false, so the Secret is operator-managed and predates any chart version naming a new key: a
-    required addition takes every pod of an existing release into `CreateContainerConfigError` on
-    `helm upgrade`. `chemclaw.migrationEnv` had already made that argument, two helpers below.
-
-    Required is right for a credential whose absence silently breaks a capability — the four above.
-    This one is the HMAC key `agent/framing.py` derives `ENVELOPE_TAG` from, it defaults to `""`,
-    and the app starts either way. Not because unset is harmless: this docstring said the tag was
-    then merely *predictable*, and `_envelope_nonce` actually falls back to `secrets.token_hex(8)`,
-    a fresh random per process — so the tag is unguessable and *unshared*, and a durable session
-    replayed by another replica or after a restart carries envelopes whose tag no longer matches,
-    which the agent instructions make it read as ordinary prose. It is optional because the app
-    starts and a required key breaks every upgrade, not because the deployment is fine without it.
-    So it gets a Secret slot (not a `config` entry, which would render into a ConfigMap the `view`
-    role can read) and an `optional: true` reference.
-
-    The `chem`, `safety` and `calc` bearer tokens are the seventh through ninth, and they land in
-    `optionalKeys` for the same *upgrade* reason the framing key does, not because their absence is
-    harmless — it is not. `connectors/identity.py::_EnvBearerAuth` raises
-    `MissingConnectorCredential` on the very first call with no token present, and for `calc` that
-    first call is every SMILES-in tool and every durable calc job. They fit the "required is right"
-    sentence above by that test alone; they are not `keys` anyway, because `chemclaw.env` is
-    included by every Deployment the chart renders, not just the pods that call these three
-    bundles, so a required entry would take the front door and every worker into
-    `CreateContainerConfigError` on `helm upgrade` for a Secret edit that has nothing to do with
-    them. `optionalKeys` is therefore doing two different jobs across its members: for the
-    framing key, "optional" describes the capability; for a connector bearer, it describes only the
-    upgrade, and an operator still has to set it before the bundle it gates works at all. (That
-    sentence used to say "its four members" and count them; the map has grown twice since, so the
-    number is gone and the assertion below is the count.)
-
-    The tenth through fourteenth are the ones that were **missing**, and each is an exposure
-    *reduction* rather than a new secret at rest — which is why they belong here without an
-    architecture change. Every one has a live reader and a documented setting; what none of them
-    had was a correct place to put the value. `chemclaw.env` mounts only what these maps name, so
-    the sole remaining seam was `.Values.config` — a ConfigMap the OpenShift `view` role reads and
-    `helm get values` prints — and `test_no_secret_is_carried_in_the_plaintext_config_map` refuses
-    that, correctly, leaving the operator with nowhere to go. They are `optionalKeys` for the
-    upgrade reason above and, unlike the connector bearers, genuinely optional in capability too:
-    each gates a feature the shipped release does not use.
-
-    `rxnlabelToken` is the labelling server's bearer, one hop away exactly as `calcToken` is.
-    `llmFallbackApiKey` is the failover endpoint's own credential — `core/config/llm.py` calls the
-    gap it closes "total rather than degraded", and enabling it took three keys of which this was
-    the one with no slot. `vectorStoreApiKey` is Qdrant's / Databricks Vector Search's, unused by
-    the `pgvector` default. `temporalApiKey` made the Temporal Cloud path unreachable from this
-    chart at all. `sessionStoreDsn` falls back to `CHEMCLAW_POSTGRES_DSN`, so splitting the session
-    store off had no seam.
-
-    `mcpFaceToken` is the fifteenth, and it is the first whose *absence* is safe in the strong sense
-    rather than the weak one. It is the bearer the read-only MCP face requires on `/mcp`, and the
-    middleware fails **closed** on an unset variable: a face deployed without it answers 401 rather
-    than serving the knowledge graph anonymously
-    (`D-2026-08-29-a-digest-nobody-receives-is-not-delivered`). So "optional" here describes the
-    capability honestly — the surface simply refuses — and the pod is not rendered at all unless
-    `mcpFace.enabled`. It is a Secret slot rather than a `config` entry for the standing reason:
-    `config` renders into a ConfigMap the `view` role can read, and anyone who learns this value can
-    read the whole corpus through that surface.
-
-    `rxnpredictToken` is the last, and it is not a new *kind* — it is a fourth of the seventh-
-    through-ninth kind, arriving with the `rxnpredict` bundle that made `Chemclaw3-mcp`'s
-    reaction/condition predictors addressable from this release at all. Its manifest names the
-    variable with `token_env`, `_EnvBearerAuth` reads it per request, and unset means every
-    prediction raises `MissingConnectorCredential` rather than degrading — the same fail-closed
-    direction, and the same operator obligation, as `chem` and `safety`.
-
-    The six bearers for bundles that ship **off** — the five process-development bundles and
-    `pyexec`, which arrives through `extraConnectors` — are more of that same kind, and were the
-    first to be slotted *before* anyone enables them: `optional: true` makes an absent key free, and
-    without a slot enabling a bundle meant a Secret-plumbing edit too (only the kind lane's values
-    file had one). `tests/test_sibling_manifest_agreement.py` derives this from the fleet's
-    manifests.
-
-    The knowledge-repo token stays in `keys` but is rendered required only when a remote is
-    configured (`test_the_push_token_is_required_only_where_something_pushes`).
-
-    Both maps are asserted, because "which secrets does this chart name" is one question and
-    splitting the answer across two values is exactly how a key comes to be in neither.
+    Both maps are asserted, because splitting the answer across two values is how a key ends up in
+    neither.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
@@ -438,14 +292,11 @@ def test_chart_declares_only_the_documented_secrets() -> None:
 
 
 def test_the_migration_credential_is_mounted_on_the_hook_job_and_nowhere_else() -> None:
-    """A credential that can rewrite the audit trail must not live on a pod for its whole life.
+    """The migration credential is mounted on the hook Job and nowhere else.
 
-    The migration DSN owns the schema: it issues DDL, and under a split principal it is the only
-    role that can `UPDATE` or `DELETE` `audit_events`
-    (D-2026-08-05-append-only-by-grant-not-by-contract). `chemclaw.env` is included by every
-    Deployment, so listing it in `secrets.keys` would mount it on the front door and every worker
-    permanently — which would leave the exposure exactly where it was while appearing to fix it.
-    Hence a second map and a second helper, used only by the hook Job.
+    It owns the schema and, under a split principal, is the only role that can rewrite
+    `audit_events`. `chemclaw.env` is on every Deployment, so it has its own map and helper used
+    only by the hook Job.
     """
     assert set(_VALUES["secrets"]["migrationKeys"].values()) == {"CHEMCLAW_POSTGRES_MIGRATION_DSN"}
     assert not (
@@ -468,16 +319,11 @@ def test_the_migration_credential_is_mounted_on_the_hook_job_and_nowhere_else() 
 
 
 def test_the_document_share_is_read_only_and_only_on_the_worker_that_crawls_it() -> None:
-    """The share is mounted, never called — and never written to.
+    """The document share is read-only and only on the worker that crawls it.
 
-    Two claims the chart has to make true rather than merely intend. `readOnly` on both the volume
-    and the mount is what makes "this system never writes to a site's file share" enforced by the
-    kubelet instead of by a promise in a docstring. And only the background worker gets it: the
-    front door answers from the index, so a mount there would be attack surface bought for nothing.
-
-    No entry appears under `secrets` because there is none to add — the CIFS mount credential
-    belongs to the PersistentVolume and is read by the CSI driver, which is the whole point of
-    mounting the share instead of speaking SMB from Python.
+    `readOnly` on volume and mount makes "never writes to a site's share" kubelet-enforced, and only
+    the background worker needs it. No Secret: the CIFS credential belongs to the PersistentVolume
+    and is read by the CSI driver.
     """
     share = _VALUES["documentShare"]
     assert share["enabled"] is False, "a share nobody declared must not be crawled by default"
@@ -500,11 +346,9 @@ def test_the_document_share_is_read_only_and_only_on_the_worker_that_crawls_it()
 
 
 def _hook_documents() -> dict[str, str]:
-    """`migrate-job.yaml`'s two Job documents, keyed by the component label each carries.
+    """`migrate-job.yaml`'s two Job documents, keyed by their component label.
 
-    Split on the YAML document separator rather than parsed: the file is a Go template, so
-    `yaml.safe_load_all` cannot read it — the same limitation the module docstring states for
-    everything else here.
+    Split on the document separator, since the Go template cannot be YAML-parsed.
     """
     text = (_CHART / "templates" / "migrate-job.yaml").read_text()
     documents = {}
@@ -518,9 +362,8 @@ def _hook_documents() -> dict[str, str]:
 def _entrypoint_case(component: str) -> str:
     """The body of `deploy/entrypoint.sh`'s `case` branch for `component`.
 
-    The hook Jobs stopped carrying their own `command:` when a chart `command:` turned out to
-    replace the image `ENTRYPOINT` and so skip the block that arms the compiled egress layer. What
-    each Job runs is therefore a property of the script, and these tests read it there.
+    A chart `command:` would replace the image `ENTRYPOINT` and skip arming the compiled egress
+    layer, so the hook Jobs name a component and what they run lives in the script.
     """
     script = (_CHART.parents[1] / "entrypoint.sh").read_text(encoding="utf-8")
     body = script.split(f"\n  {component})\n", 1)
@@ -529,30 +372,12 @@ def _entrypoint_case(component: str) -> str:
 
 
 def test_the_pre_upgrade_hook_migrates_then_reconciles_grants() -> None:
-    """Three steps whose order is not optional, in one process so the shell enforces it.
+    """The pre-upgrade hook migrates, sets up the agent store, then reconciles grants, in order.
 
-    The grants name tables the earlier steps create, so a grant applied before its table exists
-    fails.
-    One container rather than two hook Jobs, so the ordering is a shell sequence rather than two
-    hook weights two documents apart — and so a failed migration is never followed by a grant run
-    at all.
-
-    **The sequence moved from the chart to `deploy/entrypoint.sh` and this test moved with it**
-    (`D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`). A Kubernetes `command:`
-    *replaces* the image `ENTRYPOINT`, so the `sh -c "… && …"` that used to be here ran with the
-    compiled egress layer unarmed. Under `set -e` the two-line sequence in the `migrate)` case means
-    exactly what the `&&` meant, and the Job now names its component instead of its command.
-
-    The stored-message conversion used to be the middle term and is deliberately not in either; the
-    test below is what says where it went and why.
-
-    **The middle term is now `chemclaw.agent.store_setup`**
-    (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`). `store`/`store_migrations` are
-    upstream's schema created at *runtime*, so the grants file guards them with
-    `IF to_regclass(...) IS NOT NULL` and on a fresh install found nothing — invisible while
-    durable memory shipped off, and the first-boot experience once it does not.
-    `tests/test_database_privileges.py` holds the ordering with the reason; this holds the exact
-    list, which is what catches a fourth step arriving without anybody deciding where it goes.
+    The grants name tables the earlier steps create, including `store`/`store_migrations`, which
+    upstream creates at runtime (`chemclaw.agent.store_setup`). One container under `set -e`, so a
+    failed step stops the sequence. Asserted as the exact list, so a new step needs a decision about
+    where it goes; `tests/test_database_privileges.py` holds the reasoning for the order.
     """
     documents = _hook_documents()
     migrate = " ".join(documents["migrate"].split())
@@ -575,18 +400,12 @@ def test_the_pre_upgrade_hook_migrates_then_reconciles_grants() -> None:
 
 
 def test_the_ddl_runs_before_the_rollout_and_the_data_conversion_after_it() -> None:
-    """The whole of D-2026-08-27, asserted on the two hooks it splits.
+    """The DDL runs before the rollout and the data conversion after it.
 
-    An additive migration is safe for the release still running, so the DDL keeps its `pre-upgrade`
-    slot. Rewriting `session_messages` into a shape the previous release's reader raises on is not,
-    so the conversion moved to `post-upgrade`: a release that fails its rollout — the case a
-    pre-deploy hook exists to protect against — now converts nothing at all, because the hook that
-    would have done it never fires.
-
-    The credential split is the second half and is checked per *document*, not per file. Both Jobs
-    live in `migrate-job.yaml`, so the file-level check above this cannot see which of them mounts
-    the schema-owning DSN — and the converter runs as the runtime role, which already holds UPDATE
-    on `session_messages`, so it must not hold it.
+    Additive DDL is safe for the running release; rewriting `session_messages` into a shape the old
+    reader rejects is not, so it runs `post-upgrade` and a failed rollout converts nothing.
+    Credentials are checked per document: the converter runs as the runtime role and must not mount
+    the schema-owning DSN.
     """
     documents = _hook_documents()
     assert set(documents) == {"migrate", "convert"}, documents.keys()
@@ -616,10 +435,7 @@ def test_the_ddl_runs_before_the_rollout_and_the_data_conversion_after_it() -> N
 def _settings_from_chart(monkeypatch: pytest.MonkeyPatch) -> Settings:
     """`Settings` as the pods build them, from the chart's own values.
 
-    Shared by the tests below, which are the *inverse* of the parity check above: parity asks
-    whether a shipped value loads, these ask whether the thing it switches on actually happens.
-    That distinction is the whole of REV-15 — `otel_enabled=True` loaded perfectly and then
-    CrashLoopBackOff'd every pod, because loading a bool proves nothing about executing it.
+    The tests below ask whether what a value switches on actually works, not only whether it loads.
     """
     overrides = {_field_for(key): str(value) for key, value in _VALUES["config"].items()}
     for env_key in _VALUES["secrets"]["keys"].values():
@@ -642,23 +458,11 @@ def _settings_from_chart(monkeypatch: pytest.MonkeyPatch) -> Settings:
 def test_the_chart_publishes_the_graph_where_settings_reads_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The synced knowledge tree lands on the path every reader resolves — one directory, not two.
+    """The chart publishes the knowledge graph where `Settings` reads it.
 
-    This is the inverse of a parity check and the reason it is needed: the chart used to declare
-    `knowledge.publishPath: /app/knowledge` and mount an `emptyDir` there, while `Settings` resolved
-    `knowledge_path` as `note_repo_dir / knowledge_dir` = `/var/lib/chemclaw/note-repo/knowledge`.
-    Both paths were valid, both were mounted, and nothing compared them — this file *modelled* the
-    mismatch (`_rendered_derived_values` fed the real `CHEMCLAW_NOTE_REPO_DIR` into `Settings`) and
-    then asserted nothing about where the sync wrote.
-
-    Nothing failed, which is the whole problem. `load_notes` `rglob`s a directory that does not
-    exist, yields nothing and raises nothing, so the default install answered every question with
-    zero knowledge-graph evidence and reported it nowhere; the configured install published merges
-    into a directory no process read. A missing note is not an error, it is just less evidence.
-
-    Asserted against `Settings` rather than against a literal, because the two ends must move
-    together: change `noteRepoPath`, `CHEMCLAW_KNOWLEDGE_DIR` or the helper, and this fails unless
-    all of them still name one place.
+    A mismatch fails silently: `load_notes` over a missing directory yields nothing, so every
+    question gets zero graph evidence. Asserted against `Settings` so `noteRepoPath`,
+    `CHEMCLAW_KNOWLEDGE_DIR` and the helper must all still name one place.
     """
     chart = _settings_from_chart(monkeypatch)
     published = _rendered_publish_path()
@@ -686,18 +490,12 @@ def test_the_chart_publishes_the_graph_where_settings_reads_it(
 
 
 def test_a_config_change_restarts_the_pods_that_read_it() -> None:
-    """Every pod template carries a ConfigMap checksum, or a `helm upgrade` changes nothing.
+    """Every pod template carries a ConfigMap checksum, so a config change restarts the pods that
+    read it.
 
-    Non-secret config reaches a pod only through `envFrom: configMapRef`, and environment is read
-    once at process start. Without an annotation derived from the ConfigMap, `helm upgrade` with a
-    new `CHEMCLAW_LLM_BASE_URL`, `CHEMCLAW_ENTRA_REQUIRED`, `CHEMCLAW_BUDGET_ENABLED` or rate limit
-    updated the ConfigMap, reported success, and applied to no running pod. With the HPA on by
-    default the next scale-up then started pods that *did* read the new values — a fleet split
-    across two configurations with no signal anywhere.
-
-    Counted per pod template rather than checked per file: `deployment-connectors.yaml` holds two
-    (the bundle's server and its worker), and a checksum on one of them is the same silent
-    half-rollout in miniature.
+    Environment is read once at start; without the annotation `helm upgrade` updates the ConfigMap
+    and no running pod, and later scale-ups split the fleet across two configurations. Counted per
+    pod template, since `deployment-connectors.yaml` holds two.
     """
     expected = {
         "deployment-service.yaml": 1,
@@ -719,19 +517,12 @@ def test_a_config_change_restarts_the_pods_that_read_it() -> None:
 
 
 def test_the_temporal_mtls_paths_are_gated_on_the_secret_the_chart_asks_for() -> None:
-    """The three PEM paths, the volume and the mount are one switch — or none of them are.
+    """The Temporal mTLS paths, volume and mount are gated together on the Secret.
 
-    `_tls_config()` short-circuits only when all three settings are empty, so exporting the paths
-    unconditionally means `read_bytes()` on files that may not exist. The chart did exactly that
-    against a Secret it never creates, mounted `optional: true`: a deployment without
-    `chemclaw-temporal-tls` got `FileNotFoundError: /etc/temporal/tls/tls.crt` from the post-install
-    hook Job — naming neither Temporal nor a Secret — and a worker crash loop, while the front door
-    passed both probes because `/readyz` never touches Temporal. No value could turn the env off, so
-    the plaintext path `connect_options()` documents was unreachable from the chart at any value.
-
-    Both halves are asserted because either alone reintroduces a version of the bug: `optional:
-    true` without a gate is the silent `FileNotFoundError`, and a gate that leaves the mount
-    optional turns a missing Secret back into a runtime failure instead of an admission one.
+    `_tls_config()` reads the files whenever any path is set, so unconditional paths over an
+    optional mount fail with a bare `FileNotFoundError`, and the plaintext path is unreachable. Both
+    halves are
+    asserted: the gate, and a non-optional mount so a missing Secret fails at admission.
     """
     helpers = (_CHART / "templates" / "_helpers.tpl").read_text(encoding="utf-8")
     gate = "{{- if .Values.secrets.temporalTls.enabled }}"
@@ -756,17 +547,11 @@ def test_the_temporal_mtls_paths_are_gated_on_the_secret_the_chart_asks_for() ->
 
 
 def test_the_public_route_carries_the_only_control_that_bounds_it() -> None:
-    """`/metrics` is on the external host, and the chart says so instead of naming a rule.
+    """The public Route carries the only control that bounds `/metrics`.
 
-    The compensating control was asserted in four places — `api/app.py`, this chart's NetworkPolicy
-    comment, an ADR and a test — and held in none: a NetworkPolicy selects peers, not paths, and the
-    front door's Route declares no `spec.path`, so every path the app serves is published wherever
-    the Route is. The ingress rule *has* to allow the router; that is not containment.
-
-    What is asserted here is the control that does exist at this layer — a source-CIDR allowlist on
-    the Route — and that the chart no longer claims the other one. Empty by default, because a chart
-    cannot invent a deployment's corporate ranges, and because what makes the endpoint acceptable by
-    default is D-152's declared-label allowlist rather than anything in `deploy/`.
+    A NetworkPolicy selects peers, not paths, and the Route publishes every path, so the control at
+    this layer is a source-CIDR allowlist on the Route. Empty by default: the chart cannot know a
+    deployment's ranges, and the declared-label allowlist is what makes the default acceptable.
     """
     route = (_CHART / "templates" / "service-route.yaml").read_text(encoding="utf-8")
     assert "haproxy.router.openshift.io/ip_whitelist" in route, (
@@ -782,17 +567,11 @@ def test_the_public_route_carries_the_only_control_that_bounds_it() -> None:
 
 
 def test_the_shipped_budget_guard_actually_refuses_a_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`CHEMCLAW_BUDGET_ENABLED: "true"` must refuse past a cap, not merely parse (REV-16).
+    """The shipped budget guard actually refuses a turn past a cap.
 
-    Off is the right *code* default — a CLI or a test must not 429 — but a deployment serving real
-    users has no reason to be unguarded. A turn is iteration-capped and the *number* of turns is
-    not, so a client or an automated push-back loop can accumulate unbounded LLM spend; the load
-    run that validated this system ran with budgets on, so "on" is the configuration that was
-    actually measured.
-
-    Executed rather than asserted on the flag, because `budget_enabled=true` with every cap at 0
-    also parses and guards nothing — a configuration the composed-`Settings` validator now rejects,
-    and which this would catch independently.
+    Off is the right code default for CLIs and tests; a deployment serving users needs it on because
+    the number of turns is unbounded. Executed rather than read off the flag, since enabled with
+    every cap at 0 parses and guards nothing.
     """
     from chemclaw.api.budget import BudgetTracker
 
@@ -810,22 +589,12 @@ def test_the_shipped_budget_guard_actually_refuses_a_turn(monkeypatch: pytest.Mo
 def test_the_chart_states_its_privileged_roles_rather_than_omitting_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shipped chart closes every expensive job, and has to *say* so where an operator looks.
+    """The chart states its privileged roles rather than omitting them.
 
-    `expensive: true` in a connector manifest derives into the trigger gate, and that gate fails
-    closed on an empty role set. So under the shipped `CHEMCLAW_ENTRA_REQUIRED=true` with no
-    privileged role, `sample_conformers` and its siblings are refused for every authenticated
-    user — while the pod boots, both probes pass, and reads work. There is no crash to notice.
-
-    That is the intended posture (the chart cannot know an organization's role names, and inventing
-    a plausible one would ship a config that *looks* configured, grants nothing, and points the
-    operator at Entra group membership instead of at `values.yaml`). What is not acceptable is
-    reaching it by omission: an absent key appears in neither `helm show values`, nor the rendered
-    ConfigMap, nor an operator's values diff, so "nothing works and nobody knows why" is the whole
-    user experience. Present-and-empty appears in all three.
-
-    So this pins the two halves together — the key is declared, it is empty, and empty means every
-    declared-expensive job is refused — because either half alone is a fact about nothing.
+    An expensive job's trigger gate fails closed on an empty role set, so with Entra required and no
+    privileged role every expensive job is refused while the pod looks healthy. That is intended
+    (the chart cannot know an organisation's role names), but present-and-empty shows in `helm show
+    values`, the ConfigMap and values diffs, where an absent key does not. Both halves are pinned.
     """
     from chemclaw.agent.authz import AuthorizationError, authorize_trigger
     from chemclaw.connectors.registry import enabled
@@ -861,20 +630,11 @@ def test_the_chart_states_its_privileged_roles_rather_than_omitting_them(
 
 
 def test_no_secret_is_carried_in_the_plaintext_config_map() -> None:
-    """A credential in `.Values.config` is a credential in a ConfigMap.
+    """No secret is carried in the plaintext ConfigMap.
 
-    `templates/config.yaml` ranges over `.Values.config` into a `kind: ConfigMap`, so anything
-    listed there is readable by every principal holding `get configmaps` — which the OpenShift
-    `view` role grants, and which is a far wider audience than `get secrets`. `secrets.keys` is the
-    other slot and the only correct one for a credential.
-
-    Written as a check against the redaction inventory rather than against a hand-kept list,
-    because those are the same question asked twice: `_SECRET_SETTINGS` is this codebase's own
-    statement of which settings hold a credential, so a value it names has already been declared
-    too sensitive to appear in a log line, and a ConfigMap is more durable than a log line. The
-    framing envelope key was in `config`'s position by omission — it is not a credential to an
-    external system, so it was never given a Secret slot — and that is exactly the case a
-    name-shaped heuristic would miss and this one catches.
+    `.Values.config` renders into a ConfigMap readable by the `view` role. Checked against the
+    redaction inventory (`_SECRET_SETTINGS`), the codebase's own list of credential settings, which
+    also catches non-obvious ones like the framing envelope key.
     """
     from chemclaw.core.logging import _SECRET_SETTINGS
 
@@ -887,16 +647,11 @@ def test_no_secret_is_carried_in_the_plaintext_config_map() -> None:
 
 
 def test_the_verifier_opt_in_is_documented_in_the_values_file() -> None:
-    """The commented-out `CHEMCLAW_VERIFIER_*` block is the chart's opt-in surface — pinned as text.
+    """The commented-out `CHEMCLAW_VERIFIER_*` opt-in block is pinned as text.
 
-    The verifier ships off (code default and chart alike), so the chart cannot *render* anything
-    to assert; what a deployer has instead is the documented block in `values.yaml` naming the two
-    facts that make the flip safe — the startup capability probe, and the review band. Prose in a
-    values file is exactly the kind of claim that silently vanishes in a refactor, which is what
-    this pin exists to make loud. It checks the raw text because the keys are comments: parsed
-    YAML deliberately does not carry them, and that they are NOT in the parsed config is asserted
-    too — an uncommented default would switch every deployment's judge on from a values edit that
-    read like documentation.
+    The verifier ships off, so the documented block (naming the startup capability probe and the
+    review band) is the opt-in surface. Checked on raw text because the keys are comments; that they
+    are absent from parsed config is asserted too, so documentation cannot switch the judge on.
     """
     text = (_CHART / "values.yaml").read_text(encoding="utf-8")
     for key in ("CHEMCLAW_VERIFIER_ENABLED", "CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD"):
@@ -908,23 +663,12 @@ def test_the_verifier_opt_in_is_documented_in_the_values_file() -> None:
 
 
 def test_every_credential_this_deployment_holds_has_a_secret_slot() -> None:
-    """A credential with no Secret slot has exactly one chart seam left: the plaintext ConfigMap.
+    """Every credential this deployment holds has a Secret slot.
 
-    `chemclaw.env` mounts every `secrets.keys`/`optionalKeys` entry on every pod, and
-    `secrets.migrationKeys` on the hook Job — so a credential named in none of the three can only
-    be set through `.Values.config`, which `templates/config.yaml` ranges into a `kind: ConfigMap`.
-    `test_no_secret_is_carried_in_the_plaintext_config_map` then correctly refuses to let it be
-    declared there, which leaves an operator with a documented setting and no correct way to set
-    it. Four were in that state — `llm_fallback_api_key` (whose own comment calls the gap it closes
-    "total rather than degraded"), `vector_store_api_key`, `temporal_api_key` (so the Temporal Cloud
-    path was unreachable from the chart) and `session_store_dsn` — and the natural operator action
-    for each is `--set config.CHEMCLAW_…=<secret>`, i.e. the credential in a ConfigMap the
-    OpenShift `view` role reads and in `helm get values` output.
-
-    Driven off `Settings` rather than a hand-kept list, so a credential added to the config object
-    arrives here rather than at a deployment. It is the same question
-    `tests/test_credentials.py::test_every_credential_shaped_setting_is_in_the_redaction_inventory`
-    asks of the log filter, asked of the chart.
+    A credential in none of `keys`, `optionalKeys` or `migrationKeys` can only be set through the
+    ConfigMap, which the test above refuses. Driven off `Settings`, so a new credential arrives here
+    rather than at a deployment; the log filter's equivalent is
+    `tests/test_credentials.py::test_every_credential_shaped_setting_is_in_the_redaction_inventory`.
     """
     from tests.test_credentials import _credential_shaped
 
@@ -941,33 +685,18 @@ def test_every_credential_this_deployment_holds_has_a_secret_slot() -> None:
         for name, field in Settings.model_fields.items()
         if name.endswith("_token_env")
     }
-    # `live_probe_token` is the one exemption, and it is not a deployment credential at all: the
-    # live lane mints it (`infra/live/processes.sh`) for a *client* pointed at a running front
-    # door. Nothing in a pod reads it, so a Secret slot would be a credential this release neither
-    # holds nor needs.
+    # `live_probe_token` is minted by the live lane for a client; no pod reads it.
     wanted -= {"CHEMCLAW_LIVE_PROBE_TOKEN"}
     assert wanted <= slots, f"credentials with no Secret slot: {sorted(wanted - slots)}"
 
 
 def test_the_labelling_server_is_addressable_from_the_chart() -> None:
-    """`rxnlabel` is dialled by a live Temporal Schedule and had no deployment surface at all.
+    """The labelling server is addressable from the chart.
 
-    `durable/schedules.py` creates a `reaction-labels` Schedule for any data source that `provides`
-    reactions — deliberately with no separate enable flag (`core/config/labels.py`: "There is
-    deliberately no `labels_enabled`"), so attaching a reaction corpus is the whole trigger. The
-    client's default address is `http://127.0.0.1:8865/mcp`, chosen for a dev process, and the
-    chart named no host, no bearer and no egress port for it.
-
-    In a cluster that is D-131 exactly: the drain dials the *worker's own pod*, where nothing
-    listens, and the corpus is never labelled — so every faceted precedent question answers from an
-    empty label index, with no error anywhere. `connectors/registry.py` records the same defect
-    ("in a cluster the front door probed `127.0.0.1:881x` — its own pod") and the connector seam
-    fixed it for every bundle; this is the one client that was never given a chart value.
-
-    The egress port is asserted with it because the two only work together: a NetworkPolicy egress
-    rule restricts by port independently of its `to:` peer list, so an operator who sets the URL
-    and adds the host to `egressDestinations` still has every packet dropped. That is the trap
-    `values.yaml` documents for `chem`/`safety`/`calc` and did not apply to this one.
+    A `reaction-labels` Schedule exists for any source providing reactions, and the client's default
+    address is loopback, which in a cluster is the worker's own pod: the corpus would never be
+    labelled and precedent questions would answer from an empty index. The egress port is asserted
+    with the URL, since a NetworkPolicy rule restricts by port independently of its peers.
     """
     url = _VALUES["config"].get("CHEMCLAW_RXNLABEL_SERVER_URL")
     assert url, "the chart states no address for the labelling server"
@@ -977,31 +706,18 @@ def test_the_labelling_server_is_addressable_from_the_chart() -> None:
     assert port, "networkPolicy.egressPorts names no rxnlabel port"
     assert str(port) in url, f"the egress port {port} is not the port the URL dials ({url})"
 
-    # That the entry is actually *emitted* is asserted against the rendered NetworkPolicy in
+    # That the entry is emitted is asserted on the rendered NetworkPolicy in
     # `tests/test_deploy_chart.py::test_every_declared_egress_port_reaches_the_rendered_policy`.
-    # It used to be `"egressPorts.rxnlabel" in <the template text>`, which asked whether somebody
-    # had written a line naming this key — a question that stopped meaning anything the moment the
-    # rule started ranging the whole map, and never covered a key an operator added themselves.
 
 
 def test_every_externally_hosted_connector_can_actually_be_dialled() -> None:
-    """The test above, generalised off the bundle set instead of one hand-written server.
+    """Every externally hosted connector can actually be dialled.
 
-    `connectors.<name>.url` says a sibling repository hosts this capability, and three separate
-    things have to line up before a packet reaches it: the address, a `networkPolicy.egressPorts`
-    entry carrying *that* port, and the rule actually emitting it. Miss the second and the
-    connection is dropped even with the host in `egressDestinations`, because a NetworkPolicy
-    egress rule restricts by port independently of its `to:` peer list. The third is asked of the
-    rendered object next door
-    (`tests/test_deploy_chart.py::test_every_declared_egress_port_reaches_the_rendered_policy`),
-    because it is the question a knob that renders nothing fails
-    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`) and the template text could only
-    ever answer it for keys somebody had already written a line for.
-
-    Derived from the values file rather than listed, so the *next* externally-hosted bundle is
-    covered on the day its `url:` is written. The hand-written version above stays because
-    `rxnlabel` is not a connector at all — its address is a `config` key, and no walk of the
-    `connectors` block can see it.
+    A `connectors.<name>.url` needs a matching `networkPolicy.egressPorts` entry, or packets are
+    dropped even with the host in `egressDestinations`; that the rule emits it is asserted on the
+    rendered object (`tests/test_deploy_chart.py`). Derived from the values file so the next bundle
+    is covered; `rxnlabel` is checked separately because its address is a `config` key, not a
+    connector.
     """
     ports = _VALUES["networkPolicy"]["egressPorts"]
     external = {name: cfg["url"] for name, cfg in _VALUES["connectors"].items() if cfg.get("url")}
@@ -1021,14 +737,9 @@ def test_every_externally_hosted_connector_can_actually_be_dialled() -> None:
 def _fleet_addresses() -> dict[str, tuple[str, str, int]]:
     """Every address in `values.yaml` that names a `Chemclaw3-mcp` server, by where it is declared.
 
-    Each entry is `(service name, whole host, port)`. The host is matched on the shape the fleet's
-    Services have — `chemclaw-mcp-<server>` — deliberately *loosely*, as `chemclaw<digits?>-mcp-`,
-    so that a wrong spelling is picked up and checked rather than silently falling out of the set
-    it is wrong about. The chart shipped `chemclaw3-mcp-calc` for exactly that reason, and a
-    pattern anchored on the correct name would have found nothing to complain about.
-
-    Only the host's first label is the Service name: a deployment that qualifies the address
-    (`chemclaw-mcp-props.chemclaw-tools.svc`) still names the same Service.
+    Each entry is `(service name, whole host, port)`. Hosts are matched loosely
+    (`chemclaw<digits?>-mcp-`) so a misspelling is picked up and checked rather than silently
+    excluded. Only the first label is the Service name.
     """
     found: dict[str, tuple[str, str, int]] = {}
 
@@ -1052,9 +763,7 @@ def _fleet_addresses() -> dict[str, tuple[str, str, int]]:
 def _fleet_services(checkout: Path) -> dict[str, int]:
     """Every Service the sibling fleet actually creates, name onto port.
 
-    Read from `servers/*/deploy/service.yaml` — the objects `kubectl apply` puts in the namespace —
-    rather than from that repository's prose. The fleet ships no Chart.yaml and no kustomization,
-    so nothing prefixes or transforms these names between the file and the cluster.
+    Read from `servers/*/deploy/service.yaml`, which the fleet applies untransformed.
     """
     services: dict[str, int] = {}
     for manifest in sorted(checkout.glob("servers/*/deploy/service.yaml")):
@@ -1064,23 +773,11 @@ def _fleet_services(checkout: Path) -> dict[str, int]:
 
 
 def test_every_fleet_address_names_a_service_the_sibling_actually_creates() -> None:
-    """The addresses this chart dials are objects in another repository, so measure them there.
+    """Every fleet address names a Service the sibling actually creates.
 
-    Five values named `chemclaw3-mcp-<server>` and the fleet's Services are `chemclaw-mcp-<server>`
-    — one character, five NXDOMAINs, and one of them is `CHEMCLAW_CALC_SERVER_URL`, which
-    `connectors/calc/remote.py::calc_session` dials for **every** calculation this system performs
-    (there is no second tier: `D-2026-08-26-semiempirical-is-the-whole-tier`). The failure is
-    silent by the chart's own account — the pod's `/healthz` never touches it and the probes stay
-    green — so nothing in a cluster reports it either.
-
-    Prose could not have caught it and had already failed to: `values.yaml` stated the correct rule
-    ("whatever Service the sibling repo's chart gives its `calc` server in this namespace") in the
-    comment directly above the wrong name. The name was wrong *by its own definition*, which is
-    what makes this a measurement rather than a style check.
-
-    **A skip is not a pass.** Without the sibling checkout this asserts nothing, and says which
-    addresses it therefore did not check, so a CI job that never clones the fleet cannot read a
-    green line as evidence about these five values.
+    A wrong name is an NXDOMAIN the probes never see; `CHEMCLAW_CALC_SERVER_URL` is dialled for
+    every calculation. Without the sibling checkout this asserts nothing and says which addresses it
+    did not check, so a skip does not read as a pass.
     """
     addresses = _fleet_addresses()
     assert addresses, (

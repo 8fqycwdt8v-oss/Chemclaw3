@@ -1,20 +1,10 @@
 """The exclusion guarantees, exercised concurrently rather than in sequence.
 
-Every guard here is documented as holding *under contention*, and every existing test drives it one
-call at a time. That gap is not academic: a sequential test of `claim`/`release` passes identically
-whether the SQL is one atomic statement or a read followed by a write, which is the only
-distinction the guard is for. The same is true of the budget tracker's lock and of the submit
-`flock`, whose docstring says it "genuinely excludes other processes" — a claim no test in this
-repository has ever put a second process behind.
-
-So each test here creates the race the prose describes and then asserts what the prose promises.
-Three of them can only fail intermittently by construction, which is why the contention is made
-large rather than symbolic: 32 racing claimants, not two.
-
-**Bounds are pinned where the design accepts an overshoot.** `BudgetTracker` documents that up to
-`service_max_concurrent_turns` turns may pass `check` before any of them `record` — an accepted
-best-effort property, not a bug. An accepted bound that nothing measures is indistinguishable from
-an unbounded one the day it changes, so it is asserted at its stated width.
+A sequential test passes whether a guard is one atomic statement or a read then a write, so each
+test here creates the race and asserts the promise, with large contention (32 claimants) because
+some failures are intermittent by construction. Where the design accepts an overshoot
+(`BudgetTracker` admits up to `service_max_concurrent_turns` before any records), the bound is
+asserted at its stated width.
 """
 
 from __future__ import annotations
@@ -48,14 +38,8 @@ async def _claims_or_skip() -> SessionTurnClaims:
 async def test_only_one_of_many_racing_workers_claims_a_session() -> None:
     """Thirty-two workers reach for one session at once; exactly one may get it.
 
-    The sequential version of this test (`test_session_store.py`) passes whether `claim` is one
-    `INSERT … ON CONFLICT … WHERE expires_at <= now() RETURNING` or a `SELECT` followed by an
-    `INSERT`, because with one caller there is no gap to interleave. This is the test that can
-    tell them apart, and it matters at the width the chart ships: two front-door replicas, each
-    admitting turns concurrently, against one shared row.
-
-    Every claimant is its own store — a separate connection, as a separate pod would be — because
-    a shared connection would serialize them in the client and test nothing.
+    Each claimant is its own store and connection, as separate pods are; a shared connection would
+    serialize them in the client.
     """
     await _claims_or_skip()
     session_id = "sess-race-exclusive"
@@ -76,13 +60,10 @@ async def test_only_one_of_many_racing_workers_claims_a_session() -> None:
 
 
 async def test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim() -> None:
-    """The two guards that keep a slow worker from corrupting the one that replaced it.
+    """A lapsed holder can neither refresh nor release the new owner's claim.
 
-    Both operations are `WHERE session_id = %s AND holder = %s`, and both docstrings explain why:
-    a worker whose lease lapsed and was taken over must not extend — or delete — the new owner's
-    claim, because doing so hands a second turn onto a conversation that already has one. The
-    interesting case is not that they are no-ops when the row is *gone*; it is that they are
-    no-ops when the row is *someone else's*, which is the only state that can cause damage.
+    Both are `WHERE session_id = %s AND holder = %s`; the damaging state is a row that is someone
+    else's, not a missing one.
     """
     claims = await _claims_or_skip()
     session_id = "sess-race-stale-holder"
@@ -92,10 +73,8 @@ async def test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_cl
     assert await claims.claim(session_id, "slow", -1.0) is True  # already lapsed
     assert await claims.claim(session_id, "new", 60.0) is True  # taken over
 
-    # The lapsed worker, still running, doing exactly what a live holder does. `refresh`
-    # reports that the claim is no longer its own — the signal `_hold_turn_claim` acts on, and
-    # the thing that was silently discarded until the 2026-08-05 review: the UPDATE matched no
-    # row, raised nothing, and the caller could not tell a takeover from a healthy heartbeat.
+    # The lapsed worker, still running, refreshes as a live holder would; `refresh` reports the
+    # claim is no longer its own, which `_hold_turn_claim` acts on.
     assert await claims.refresh(session_id, "slow", 600.0) is False
     await claims.release(session_id, "slow")
 
@@ -115,10 +94,8 @@ async def test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_cl
 def _budgeted(monkeypatch: pytest.MonkeyPatch) -> None:
     """Budgets on, only the per-session turn cap tightened — the one these tests race against.
 
-    Enabled explicitly rather than skipped on the default, because `budget_enabled` is off in dev
-    and a concurrency test that only runs where nobody runs it is not a test. The tracker's own
-    behaviour under the flag is `tests/test_budget.py`'s question; this file's is what happens when
-    several threads ask at once.
+    Enabled explicitly, since `budget_enabled` is off in dev. Single-threaded tracker behaviour is
+    `tests/test_budget.py`'s.
     """
     monkeypatch.setattr(settings, "budget_enabled", True)
     monkeypatch.setattr(settings, "budget_max_turns_per_session", 4)
@@ -133,9 +110,8 @@ def _budgeted(monkeypatch: pytest.MonkeyPatch) -> None:
 def _race_checks(tracker: BudgetTracker, session_id: str, threads: int) -> int:
     """How many of `threads` simultaneous `check` calls were admitted.
 
-    Real threads, not coroutines: the tracker's guard is a `threading.Lock`, and an asyncio-only
-    race would never enter it. A barrier rather than a stagger, so every caller is inside `check`
-    at the same moment — the whole window this measures is the one between a check and a booking.
+    Real threads, because the guard is a `threading.Lock`; a barrier puts every caller inside
+    `check` at once.
     """
     admitted = 0
     lock = threading.Lock()
@@ -163,11 +139,9 @@ def _race_checks(tracker: BudgetTracker, session_id: str, threads: int) -> int:
 
 
 def test_a_session_already_at_its_cap_refuses_every_simultaneous_turn(_budgeted: None) -> None:
-    """No amount of concurrency gets a turn past a cap that is already reached.
+    """A session already at its cap refuses every simultaneous turn.
 
-    The half of the guard that must be exact. The overshoot below is accepted because it is
-    bounded by what can be in flight; *this* is not an overshoot at all — the usage is booked, the
-    cap is reached, and a race that let one through would be a lock that does not hold.
+    This half must be exact: usage is booked and the cap reached, so any admission is a broken lock.
     """
     tracker = BudgetTracker()
     session_id = "sess-budget-at-cap"
@@ -179,16 +153,11 @@ def test_a_session_already_at_its_cap_refuses_every_simultaneous_turn(_budgeted:
 
 
 def test_the_overshoot_at_the_boundary_never_exceeds_the_admission_cap(_budgeted: None) -> None:
-    """One turn short of the cap, every concurrent turn checks at once: how many get through?
+    """The overshoot at the boundary never exceeds the admission cap.
 
-    This is the documented TOCTOU window. `check` and `record` are separate calls, so every turn
-    admitted before any of them books sees the same usage — `BudgetTracker`'s own docstring calls
-    it "a bounded overshoot acceptable for a best-effort guard, not an exact accountant" and names
-    the bound: `service_max_concurrent_turns`, since nothing more than that can be in flight.
-
-    An accepted bound that nothing measures is indistinguishable from an unbounded one the day it
-    changes. So the bound is asserted and the exact figure is not — that is a scheduling artefact,
-    and pinning it would make this a flaky test about the GIL rather than a check on the design.
+    `check` and `record` are separate, so concurrent turns see the same usage; `BudgetTracker`
+    documents the bound as `service_max_concurrent_turns`. The bound is asserted, not the exact
+    count, which is a scheduling artefact.
     """
     concurrent = settings.service_max_concurrent_turns
     tracker = BudgetTracker()
@@ -203,10 +172,8 @@ def test_the_overshoot_at_the_boundary_never_exceeds_the_admission_cap(_budgeted
     )
 
 
-# Run in a *child interpreter*, because that is the whole point: an `flock` is tied to the open
-# file description, so a second attempt from this same process on a new file object is a genuine
-# second holder, but a second *process* is what the docstring promises and what a second replica
-# sharing a PVC actually is.
+# Run in a child interpreter: a second process is what the lock promises to exclude and what a
+# second replica sharing a PVC is.
 _SECOND_PROCESS = """
 import sys
 from chemclaw.kg.git_writer import GitWriteError, _checkout_lock
@@ -222,15 +189,9 @@ except GitWriteError as exc:
 def test_the_submit_lock_excludes_a_second_operating_system_process(tmp_path: Path) -> None:
     """A second process cannot take the checkout lock while this one holds it.
 
-    `_checkout_lock`'s docstring is explicit — "it genuinely excludes other processes" — and until
-    now nothing put a process behind that claim. It stayed load-bearing when the submission moved
-    into its own worktree (D-2026-08-05): two submitters sharing `note_repo_dir` both mutate
-    `.git/worktrees/` and the ref store, and — the part that makes it structural — each submission
-    sweeps every worktree under the shared root, which is only safe because no other submission can
-    own one.
-
-    The child is a real interpreter, not a thread and not a second file object in this process,
-    since only a separate process tests what the sentence says.
+    Submitters sharing `note_repo_dir` mutate `.git/worktrees/` and the ref store, and each
+    submission sweeps every worktree under the shared root, which is safe only under exclusion. The
+    child is a real interpreter, not a thread.
     """
     repo = tmp_path / "clone"
     (repo / ".git").mkdir(parents=True)
@@ -277,11 +238,8 @@ _BLOCK_SECONDS = 0.3
 def _queued_short_call_ms(reserved: int, *, install: bool) -> float:
     """Saturate the process's `to_thread` pool with `reserved` blocking calls, then time a tiny one.
 
-    The tiny call stands in for `api/auth.py`'s `await asyncio.to_thread(validate_token, ...)`,
-    which every authenticated request makes; the blocking ones stand in for the corpus parses,
-    embeddings and attachment parses that share the same pool. What is measured is the thing an
-    operator actually feels: how long authentication waits when the admission cap's worth of
-    chemistry is already in flight.
+    The tiny call stands in for `api/auth.py`'s `to_thread(validate_token, ...)`; the blocking ones
+    for corpus parses and embeddings sharing the pool.
     """
 
     async def _scenario() -> float:
@@ -304,16 +262,11 @@ def _queued_short_call_ms(reserved: int, *, install: bool) -> float:
 
 
 def test_a_short_call_does_not_queue_behind_a_full_admission_cap_of_blocking_work() -> None:
-    """Authentication latency must not be a function of corpus size.
+    """A short call does not queue behind a full admission cap of blocking work.
 
-    `asyncio.to_thread` is `run_in_executor(None, ...)` — the loop's single default pool, sized
-    `min(32, cpu_count + 4)`, i.e. **8 on a 4-CPU pod**, which is exactly the shipped
-    `service_max_concurrent_turns`. So the admission cap could fill the whole offload budget on its
-    own and every subsequent request queued its token validation behind a note-corpus parse; the
-    audit measured a queued short call at 0.2 ms with 1 concurrent `load_notes`, 565.5 ms with 8
-    and 813.4 ms with 16. The fix is that the process states its own caps and gets a pool wider
-    than them, so this test drives exactly that: the caps' worth of blocking work, then one short
-    call.
+    The default `to_thread` pool is `min(32, cpu_count + 4)`, which the admission cap can fill
+    alone, queueing token validation behind corpus parses. The process sizes its pool wider than its
+    caps; this drives the caps' worth of blocking work, then one short call.
     """
     reserved = settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses
 
@@ -340,23 +293,11 @@ def test_the_installed_pool_is_wider_than_the_caps_that_can_fill_it() -> None:
 
 
 async def test_two_turns_in_one_process_are_two_holders_not_one() -> None:
-    """The same-worker arm the test above misses by using two different holder names.
+    """Two turns in one process are two holders, not one.
 
-    `test_a_lapsed_holder_can_neither_refresh_nor_release_the_new_owners_claim` proves the guards
-    hold across *holders* — "slow" and "new" — which production never produces: both turns are in
-    one process, and the durable claim used to be keyed by `_WORKER_ID`, which is per process. So
-    the exact failure `TurnLease.token` was added to fix lived on undisturbed in the durable twin:
-
-    ```
-    turnA claim(P, 1s):  True        [lease lapses]
-    turnB claim(P, 60s): True        <- same process, a new turn
-    turnA refresh(P):    True        <- A cannot tell it lost; it extended B's lease
-    turnA release(P):    rows []     <- A's teardown deleted B's claim
-    turnC claim(Q, 60s): True        <- a second replica admitted beside the live turn B
-    ```
-
-    `api/state.claim_holder` is what makes two turns in one process two holders, so this drives the
-    two turns the way the routes now do — through that function — rather than by inventing names.
+    The test above uses two holder names; production has both turns in one process. A per-process
+    holder would let a lapsed turn refresh and release its successor's claim. This drives both turns
+    through `api/state.claim_holder`, as the routes do.
     """
     claims = await _claims_or_skip()
     session_id = "sess-race-same-worker"

@@ -1,8 +1,7 @@
-"""The logging switch applies the configured level (admin-troubleshooting, P0).
+"""Logging and telemetry configuration: levels, span pipeline, context fields and redaction.
 
-Proves `configure_logging` is genuinely config-driven — an admin raising `CHEMCLAW_LOG_LEVEL`
-changes the root logger's threshold — and is case-insensitive, without asserting on any
-specific handler wiring (which `logging.basicConfig` owns).
+`configure_logging` is config-driven and case-insensitive about `CHEMCLAW_LOG_LEVEL`; handler
+wiring is `logging.basicConfig`'s and is not asserted.
 """
 
 import datetime
@@ -56,25 +55,11 @@ def test_configure_telemetry_is_safe_when_disabled(monkeypatch: pytest.MonkeyPat
 
 
 def test_telemetry_off_installs_a_noop_meter_provider_rather_than_leaving_none() -> None:
-    """Off must mean a no-op provider, not the *absence* of one — the front door's memory leak.
+    """Telemetry off installs a no-op meter provider rather than leaving none.
 
-    With no meter provider set, the OpenTelemetry API does not discard instrument calls: it
-    **proxies** them and keeps every proxy forever, so it can back them if a provider arrives
-    later (`_ProxyMeterProvider._meters` and `_ProxyMeter._instruments` are module-level lists
-    that only ever grow). MAF creates one duration histogram per exposed MCP function and this
-    system rebuilds its connector tool surface every turn, so a turn with telemetry off leaked
-    35 `_ProxyMeter`s, 35 `_ProxyHistogram`s, 70 locks and 35 lists — permanently.
-
-    Measured end to end with `chemclaw.cli.leak_probe` against the real front door: **+178 live
-    objects and +20.7 KB of RSS per turn before, +3.3 objects and +2.7 KB after** — and what
-    remains is the session LRU filling toward its cap, which is bounded by construction.
-
-    The test this replaces asserted that disabled telemetry "does nothing", which was true and
-    was the defect.
-
-    **In a subprocess, deliberately**, and for the same reason as the test below it: a meter
-    provider is global and can be set exactly once, so proving this in-process would decide the
-    question for every test that ran afterwards.
+    With no provider set, the OpenTelemetry API proxies every instrument and keeps the proxies
+    forever so a later provider can back them; with tool surfaces rebuilt per turn that is a
+    per-turn leak. Run in a subprocess because a meter provider is global and can be set only once.
     """
     probe = (
         "from chemclaw.core.logging import configure_telemetry; configure_telemetry();"
@@ -102,12 +87,8 @@ def test_telemetry_off_installs_a_noop_meter_provider_rather_than_leaving_none()
 def _without_proxy_variables() -> dict[str, str]:
     """This process's environment minus every proxy variable, for a subprocess arm.
 
-    The subject here is whether the OTel SDK is installed and starts under the value the chart
-    ships, and the chart ships no proxy. Inheriting one makes the arm assert something else:
-    `core/netguard.refuse_proxied_egress` charges the OTLP endpoint, because the gRPC exporter
-    resolves a proxy without consulting the target's scheme, so a subprocess that inherits this
-    sandbox's own corporate proxy is *correctly* refused and the arm fails for a true reason that
-    is not its own. Stripped rather than allowlisted, so the arm says what it is about.
+    The chart ships no proxy, and an inherited one makes `core/netguard.refuse_proxied_egress`
+    correctly refuse the OTLP endpoint, failing the arm for a reason that is not its subject.
     """
     return {
         name: value
@@ -117,24 +98,12 @@ def _without_proxy_variables() -> dict[str, str]:
 
 
 def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
-    """OTel must actually start under the value the chart ships, not merely validate.
+    """OTel actually starts under the value the chart ships, not merely validates.
 
-    `deploy/helm/chemclaw/values.yaml` sets `CHEMCLAW_OTEL_ENABLED: "true"`, and
-    `configure_telemetry` is called unconditionally at process start by the front door
-    (`api/app.py::_lifespan`), the background worker and every connector worker. The OTel
-    SDK and OTLP exporter were not declared dependencies, so that call raised and *every* Python
-    component CrashLoopBackOff'd on first deploy.
-
-    The existing chart test only constructed `Settings(**helm_values)` — which succeeds, because
-    the value is a perfectly valid bool. That is the gap this closes: a production value has to be
-    *executed*, not type-checked. Any regression that drops the SDK from the dependency closure
-    fails here instead of in the cluster.
-
-    **In a subprocess, deliberately.** `configure_telemetry` installs a *global* tracer provider
-    and starts a background export loop. Run in-process, this test would leave every later test in
-    the session exporting spans to a collector that is not there — which it did, filling the run
-    with `Failed to export traces` errors. The thing under test is a process startup path, so a
-    process is the honest place to test it.
+    `values.yaml` sets `CHEMCLAW_OTEL_ENABLED: "true"` and every component calls
+    `configure_telemetry` at start, so a missing SDK or exporter dependency would crash every pod. A
+    production value must be executed, not type-checked. Run in a subprocess because it installs a
+    global tracer provider and starts an export loop that would outlive the test.
     """
     result = subprocess.run(
         [
@@ -154,30 +123,19 @@ def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
     assert result.returncode == 0, f"startup failed under the shipped OTel config:\n{result.stderr}"
 
 
-# --- the span pipeline this module now builds itself ------------------------------------------
+# --- the span pipeline this module builds itself ------------------------------------------------
 #
-# `configure_telemetry` used to be one line into the agent framework
-# (`agent_framework.observability.configure_otel_providers`), and removing that framework would
-# have stopped tracing for the whole process **without failing a single test**: every helper in
-# `core/tracing.py` degrades to a no-op when no provider is installed, which is right for a turn and
-# is exactly what makes the silence undetectable. The three tests below are what makes it audible: a
-# span reaches the exporter carrying the service that produced it, a second call does not build a
-# second pipeline, and the missing-extras path still names the dependency. ("Off stays off" is the
-# pair above, which predates this and is unchanged.)
+# Every helper in `core/tracing.py` degrades to a no-op without a provider, so a broken bootstrap is
+# silent. The tests below make it audible: a span reaches the exporter named by its service, a
+# second call builds no second pipeline, and missing extras name the dependency.
 
 
 def test_a_span_reaches_the_exporter_carrying_the_service_that_produced_it() -> None:
-    """The bootstrap has to *work*, not merely import: span in, span out, named by service.
+    """The bootstrap works: span in, span out, named by service.
 
-    Driven against a real in-memory exporter rather than a mock, because the failure this replaces
-    is "nothing is exported at all" — and a mock asserting that `BatchSpanProcessor` was constructed
-    would pass against a pipeline whose spans go nowhere. `service.name` is asserted because it is
-    what a collector groups by: a provider that exports spans attributed to `unknown_service` is a
-    trace nobody can find, which is the shape the previous bootstrap actually shipped (it named
-    every Chemclaw process `agent_framework`).
-
-    In-process is safe here precisely because `_build_tracer_provider` is the half that installs
-    nothing globally.
+    Against a real in-memory exporter, since a mock would pass a pipeline whose spans go nowhere.
+    `service.name` is what a collector groups by. In-process is safe because
+    `_build_tracer_provider` installs nothing globally.
     """
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -196,18 +154,12 @@ def test_a_span_reaches_the_exporter_carrying_the_service_that_produced_it() -> 
 
 
 def test_a_second_configure_telemetry_does_not_install_a_second_pipeline() -> None:
-    """Called twice it must be a no-op — the CLI, the workers and the tests all call it.
+    """A second `configure_telemetry` call installs no second pipeline.
 
-    The observable cost of getting this wrong is not a warning: `trace.set_tracer_provider` refuses
-    the second provider and logs, but the *building* of it has already started a second
-    `BatchSpanProcessor` export thread and opened a second gRPC channel, both of which the API then
-    discards and neither of which anything closes. So the assertion is on threads — a real,
-    countable consequence — rather than on whether a flag was read.
-
-    The same subprocess also pins the two things a first-party bootstrap has to get right and that
-    nothing else would notice: the installed provider is the real SDK one (not the API's no-op
-    default, which is what "tracing silently stopped" looks like), and `CHEMCLAW_OTEL_ENDPOINT` is
-    bridged to the standard `OTEL_EXPORTER_OTLP_ENDPOINT` the OTLP exporter resolves itself.
+    Building a second provider starts an export thread and a gRPC channel that the API discards and
+    nothing closes, so the assertion counts threads. The same subprocess checks the installed
+    provider is the real SDK one and that `CHEMCLAW_OTEL_ENDPOINT` is bridged to
+    `OTEL_EXPORTER_OTLP_ENDPOINT`.
     """
     probe = (
         "import json, os, threading;"
@@ -255,11 +207,10 @@ def test_a_second_configure_telemetry_does_not_install_a_second_pipeline() -> No
 def test_enabling_telemetry_without_the_extras_names_the_missing_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An admin who flips the flag on an install without the extras gets a directive error.
+    """Enabling telemetry without the extras raises an error naming the missing dependency.
 
-    The OTLP exporter is blocked by putting `None` in `sys.modules` — the import system's own way
-    of making a module unimportable — rather than by patching a fake over it, so the code under
-    test takes the identical path it would on a machine where the distribution is absent.
+    The exporter is made unimportable via `None` in `sys.modules`, so the code takes the same path
+    as on a machine without the distribution.
     """
     from chemclaw.core import logging as core_logging
 
@@ -276,20 +227,10 @@ def test_enabling_telemetry_without_the_extras_names_the_missing_dependency(
 
 # --- what a log line has to carry, and what it must never carry -------------------------------
 #
-# Two findings in one readiness row, and they are not the same problem.
-#
-# *Nothing joined.* One `%`-format string, no JSON option, and no filter injecting the
-# correlation/actor/session ContextVars — which already existed and were already read by audit,
-# authorization and the connector headers. So an ordinary WARNING sat beside the audit trail and
-# the traces and could be tied to neither.
-#
-# *Nothing redacted.* `core/db.py::_redact` strips a password from a DSN before it is echoed, in
-# exactly one place — the tell that the concern is real and unsystematised.
-#
-# What is deliberately *not* redacted is the audit trail's arguments. `SECURITY.md` states that the
-# trail records tool-call arguments, that they are user free text and may hold PII, and that this is
-# **intentional**: the trail exists to be an attributable "who did what to which inputs" record.
-# Redacting it would break the very thing it is for.
+# Log records carry the correlation, actor and session ContextVars so a line can be joined to the
+# audit trail and traces, and credentials are redacted systematically. The audit trail's tool-call
+# arguments are deliberately not redacted: `SECURITY.md` records them as the attributable
+# "who did what to which inputs" record.
 
 _DSN = "postgresql://chemclaw:sup3rs3cret-password@db.internal:5432/chemclaw"
 _KEY = "sk-live-0123456789abcdef"
@@ -330,11 +271,10 @@ def test_a_dsn_password_is_scrubbed_even_when_only_the_password_is_quoted(_secre
 
 
 def test_a_secret_passed_as_an_argument_is_caught_too(_secrets: None) -> None:
-    """`logger.info("dsn=%s", dsn)` keeps the secret in `record.args` until formatting.
+    """A secret passed as a format argument is caught too.
 
-    A filter inspecting only `record.msg` would pass this untouched and a formatter would then
-    render the credential — precisely how one escapes a naive redactor. The filter runs on the
-    *rendered* message and clears `args` so nothing can re-render the original.
+    It stays in `record.args` until formatting, so the filter redacts the rendered message and
+    clears `args` so nothing can re-render the original.
     """
     record = _record("connecting: %s", _DSN)
     SecretRedactingFilter().filter(record)
@@ -345,9 +285,7 @@ def test_a_secret_passed_as_an_argument_is_caught_too(_secrets: None) -> None:
 def _emitted(record: logging.LogRecord) -> str:
     """Everything a handler would write for `record`: message, traceback and stack alike.
 
-    `_rendered` above returns only `getMessage()`, which is exactly the blind spot this group of
-    tests exists for — a credential can be in the message, in the exception, or in a stack dump,
-    and only the first was ever redacted.
+    A credential can be in any of the three, and `_rendered` covers only the message.
     """
     SecretRedactingFilter().filter(record)
     return logging.Formatter("%(message)s").format(record)
@@ -367,12 +305,10 @@ def _record_with_exception(message: str, exc: BaseException) -> logging.LogRecor
 
 
 def test_a_credential_inside_an_exception_never_reaches_the_stream(_secrets: None) -> None:
-    """The finding: the filter rewrote the message and never touched the traceback.
+    """A credential inside an exception never reaches the stream.
 
-    `logger.exception(...)` / `exc_info=True` renders the exception at *format* time, so every
-    credential in the inventory was readable in the log lines a failure produces — which is the
-    worst case, because a failure is exactly when a DSN or an auth header ends up in the error
-    text. Measured leaking both an API key and a DSN password verbatim before the fix.
+    `exc_info` renders the exception at format time, and a failure is exactly when a DSN or auth
+    header lands in error text, so the traceback must be redacted too.
     """
     try:
         raise RuntimeError(f"auth failed for {_KEY} against {_DSN}")
@@ -394,11 +330,10 @@ def test_a_credential_in_a_stack_dump_never_reaches_the_stream(_secrets: None) -
 
 
 def test_a_token_carried_as_the_whole_userinfo_is_redacted(_secrets: None) -> None:
-    """`scheme://token@host` — how a PAT reaches a git remote — was passing through verbatim.
+    """A token carried as the whole userinfo (`scheme://token@host`) is redacted.
 
-    Only `scheme://user:password@host` was matched, so the *more common* credential form for a
-    token was the one that escaped. The host is kept, because a redacted line still has to say
-    which remote failed.
+    This is how a PAT reaches a git remote. The host is kept so the line still says which remote
+    failed.
     """
     url = "https://ghp_abcdefghijklmnop@github.com/org/repo.git"
     emitted = _rendered(_record("push failed: %s", url))
@@ -422,12 +357,10 @@ def test_an_at_sign_in_a_path_is_not_mistaken_for_a_credential(_secrets: None) -
 
 
 def test_a_shipped_default_is_not_treated_as_a_credential() -> None:
-    """A value committed to this repository is not a secret, and redacting it only corrupts logs.
+    """A shipped default is not treated as a credential.
 
-    The dev Postgres default is `postgresql://chemclaw:chemclaw@localhost:5432/chemclaw`, whose
-    password is the literal string `chemclaw` — long enough to pass the length floor. Treating it
-    as a credential replaced the product's own name with `***` in every dev and CI log line that
-    mentioned it, including lines with nothing to do with the database.
+    The dev Postgres password is the literal `chemclaw`; redacting it would replace the product's
+    name with `***` in unrelated log lines.
     """
     from chemclaw.core.config import settings as live
 
@@ -439,15 +372,10 @@ def test_a_shipped_default_is_not_treated_as_a_credential() -> None:
 def test_a_published_password_stays_published_when_the_dsn_is_repointed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The derived half: a *modified* DSN is a secret, but the shipped password inside it is not.
+    """A repointed DSN is redacted, while the published password inside it is not.
 
-    This is the case a first attempt missed and only CI could see. `tests/conftest.py` repoints
-    `postgres_dsn` at an isolated schema, so under CI the DSN is not the shipped default and is
-    redacted correctly — while the password inside it is still the literal `chemclaw`, which then
-    replaced the product's own name with `***` in unrelated lines. Locally there is no Postgres,
-    nothing repoints, and comparing whole values passed.
-
-    So both must hold at once: the repointed DSN is hidden, and the published password is not.
+    CI repoints `postgres_dsn` at an isolated schema, so the DSN differs from the default while its
+    password is still `chemclaw`; both conditions must hold at once.
     """
     repointed = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw?options=-csearch_path%3Dt1"
     monkeypatch.setattr("chemclaw.core.config.settings.postgres_dsn", repointed)
@@ -542,19 +470,12 @@ def test_a_traceback_stays_inside_the_json_object() -> None:
 
 
 def test_filtering_a_record_never_imports_anything() -> None:
-    """A filter may not import on the logging path, and this is why.
+    """Filtering a record never imports anything.
 
-    A filter runs at arbitrary moments — including from inside another module's import, and from
-    inside Temporal's workflow sandbox, which hooks `__import__` and logs a warning whenever
-    sandboxed code touches something restricted. With the import inside `ContextFilter.filter`,
-    that warning re-entered the filter, which imported again into a now half-initialised module,
-    which tripped another restriction: the workflow worker wedged until the suite's global timeout
-    fired. Watching `__import__` for the duration of one `filter` call is the smallest faithful
-    reproduction, and it holds for both filters rather than only the one that had the defect.
-
-    The hook *records* rather than raises, and the assertions run after it is uninstalled: raising
-    inside `__import__` takes pytest's own reporting machinery down with it, so the failure arrives
-    as an INTERNALERROR naming a pytest module instead of naming this test.
+    A filter runs at arbitrary moments, including inside Temporal's workflow sandbox, which hooks
+    `__import__` and logs on restricted access; importing inside a filter can re-enter it and wedge
+    the worker. The hook records rather than raises, since raising inside `__import__` breaks
+    pytest's own reporting.
     """
     import builtins
 
@@ -578,11 +499,10 @@ def test_filtering_a_record_never_imports_anything() -> None:
 
 
 def test_configure_logging_installs_both_filters_on_the_handler() -> None:
-    """On the *handler*, not a logger — the distinction is load-bearing.
+    """`configure_logging` installs both filters on the handler, not on a logger.
 
-    Every module logs through `getLogger(__name__)`, so almost every record reaches the root handler
-    by propagation, and a filter attached to a logger is not consulted for propagated records.
-    Installed on the logger, redaction would silently apply to almost nothing.
+    Records reach the root handler by propagation, and a logger's filters are not consulted for
+    propagated records.
     """
     configure_logging()
     handlers = logging.getLogger().handlers
@@ -595,12 +515,10 @@ def test_configure_logging_installs_both_filters_on_the_handler() -> None:
 def test_the_knowledge_repo_token_is_redacted_though_it_has_no_settings_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The git push credential is in every pod's env (`_helpers.tpl`) but names no `Settings` field.
+    """The knowledge-repo token is redacted though it has no `Settings` field.
 
-    `_SECRET_SETTINGS` is read through `getattr(settings, name, ...)`, so nothing there can ever
-    see a credential that is not config — this one is consumed only by
-    `deploy/knowledge-sync.sh`. A bare `repr(os.environ)` in a traceback would log it in the clear
-    (Sec-6) unless the filter reads the environment variable directly, which is what this proves.
+    It is in every pod's environment and consumed only by `deploy/knowledge-sync.sh`, so the filter
+    must read the environment variable directly.
     """
     token = "ghp_knowledge-repo-push-credential-0123456789"
     monkeypatch.setenv("CHEMCLAW_KNOWLEDGE_REPO_TOKEN", token)
@@ -608,11 +526,10 @@ def test_the_knowledge_repo_token_is_redacted_though_it_has_no_settings_field(
 
 
 def test_a_connector_bearer_token_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A per-connector bearer token is resolvable but was never enumerated (Sec-6).
+    """A per-connector bearer token is redacted.
 
-    `_EnvBearerAuth` reads `os.environ[token_env]` per request; the variable *name* is
-    manifest-declared, so the filter can enumerate every enabled connector's `token_env` and
-    redact whatever value sits behind it, the same way it redacts a `Settings`-held secret.
+    The variable name is manifest-declared, so the filter enumerates every enabled connector's
+    `token_env` and redacts the value behind it.
     """
     from types import SimpleNamespace
 
@@ -639,24 +556,11 @@ def test_a_connector_bearer_token_is_redacted(monkeypatch: pytest.MonkeyPatch) -
 def test_a_credential_supplied_through_the_env_file_is_redacted_after_registration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: "pathlib.Path"
 ) -> None:
-    """`register_secret_env` names a variable; the value may never be in `os.environ` at all.
+    """A credential supplied through the env file is redacted after `register_secret_env`.
 
-    `Settings.model_config` declares `env_file=".env"`, and pydantic-settings reads that file
-    itself — it does **not** export what it read. So for every deployment configured the documented
-    `.env` way (local, `infra/live`, the compose stack), a registered name resolved to `""` and the
-    credential was never redacted, no matter how correctly the read site called
-    `register_secret_env`. That is a property of the mechanism rather than of any one credential:
-    it covered `vector_store_api_key`, whose `core/config/store.py` comment named this exact
-    registration as its protection, and it would cover the next settings-backed variable registered
-    at its read site.
-
-    Seeded through a real `env_file` rather than `monkeypatch.setenv`, because exporting the
-    variable is the one configuration under which the defect does not reproduce.
-
-    **`_SECRET_SETTINGS` is taken away for the duration**, so what is measured is the registration
-    path alone. The field is in that inventory now as well — a credential that is a `Settings` field
-    belongs in the value inventory whatever else covers it — and leaving it there would make this
-    test green through the other mechanism and blind to a regression in this one.
+    pydantic-settings reads `.env` without exporting it, so the registered name must resolve through
+    settings, not only `os.environ`. Seeded through a real `env_file`, since exporting the variable
+    hides the defect. `_SECRET_SETTINGS` is emptied so only the registration path is measured.
     """
     env_file = tmp_path / ".env"
     env_file.write_text("CHEMCLAW_VECTOR_STORE_API_KEY=Qdr-supersecret-abcdef123456\n")
@@ -686,11 +590,10 @@ def test_a_credential_supplied_through_the_env_file_is_redacted_after_registrati
 def test_a_registered_name_that_configures_nothing_still_resolves_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half of the same resolution, and the one that must not have been traded away.
+    """A registered name that configures nothing still resolves from the environment.
 
-    Most registered names come from a *manifest* — a warehouse password, a sink token, a connector
-    bearer — and name no `Settings` field at all. Those have only the environment to resolve
-    against, so the settings fallback has to be a fallback rather than a replacement.
+    Manifest-declared credentials name no `Settings` field, so the settings lookup is a fallback,
+    not a replacement.
     """
     monkeypatch.setenv("CHEMCLAW_TEST_WAREHOUSE_PASSWORD", "wh-supersecret-0123456789")
     register_secret_env("CHEMCLAW_TEST_WAREHOUSE_PASSWORD")
@@ -700,31 +603,12 @@ def test_a_registered_name_that_configures_nothing_still_resolves_from_the_envir
 
 
 def test_every_named_secret_is_a_real_settings_field() -> None:
-    """The credential inventory names fields that exist, so a rename cannot silently disarm it.
+    """Every name in `_SECRET_SETTINGS` is a real settings field, so a rename cannot disarm it.
 
-    `_SECRET_SETTINGS` is read through `getattr(settings, name, "")`, which turns a name that no
-    longer resolves into an empty string and then skips it as too short to redact. That is silent
-    by construction: the inventory keeps listing the credential, the filter keeps running, and
-    nothing redacts anything. `knowledge_repo_token` sat here in exactly that state — it is not a
-    `Settings` field and never was one under that name.
-
-    No credential was actually exposed by it, because the entry was dead rather than wrong. The
-    hazard is the next rename: renaming a listed field in `config.py` would leave a real secret
-    reaching the log with the suite still green. (`temporal_api_key` was one of three that no other
-    test touched at all; since 2026-08-26 `tests/test_credentials.py` drives it through its real
-    consumer, and the other two went with the HPC tier.)
-
-    Deliberately one-directional *here*. It does not assert that every secret-looking field is
-    listed, because "secret-looking" is exactly the name-pattern heuristic the inventory's own
-    comment rejects — `calc_server_token_env` holds a variable *name*,
-    `budget_max_tokens_per_user` is an integer, and `temporal_tls_key` is a path to a PEM rather
-    than key material.
-
-    The other direction now exists and does not use a heuristic:
-    `tests/test_credentials.py::test_every_secret_str_on_the_settings_object_is_also_redacted`
-    asserts it over the *type*, since
-    `D-2026-08-26-a-credential-is-a-type-not-a-convention` made every non-DSN credential a
-    `SecretStr`. Declaring the type is the human judgement; both protections then follow from it.
+    The inventory is read through `getattr(..., "")`, so a stale name silently redacts nothing.
+    Deliberately one-directional: the other direction is
+    `tests/test_credentials.py::test_every_secret_str_on_the_settings_object_is_also_redacted`,
+    which uses the `SecretStr` type rather than a name heuristic.
     """
     unknown = sorted(set(_SECRET_SETTINGS) - set(Settings.model_fields))
     assert not unknown, (
@@ -749,17 +633,11 @@ def _json_emitted(record: logging.LogRecord) -> str:
 def test_a_credential_inside_an_exception_never_reaches_either_formatter(
     _secrets: None, emit: "Callable[[logging.LogRecord], str]"
 ) -> None:
-    """The finding: the redaction was real and the JSON formatter discarded it.
+    """A credential inside an exception reaches neither the plain nor the JSON formatter.
 
-    `SecretRedactingFilter` renders and scrubs the traceback into `record.exc_text` precisely so a
-    formatter cannot switch redaction off — and `JsonFormatter.format` then called
-    `formatException(record.exc_info)`, reaching past the scrubbed copy into the original exception
-    and emitting the credential in full.
-
-    The leak existed **only in production**: the chart sets `CHEMCLAW_LOG_JSON=true`, while every
-    redaction test above ran the plain formatter. That is why this one is parametrized over both
-    rather than added as a third JSON case — the assertion set is identical and the formatter is
-    the only axis, so a future formatter cannot be introduced with its own private blind spot.
+    The filter scrubs the traceback into `record.exc_text`; a formatter that re-renders
+    `record.exc_info` bypasses that. Production uses JSON, so the test is parametrised over both
+    formatters and a new one cannot bring its own blind spot.
     """
     try:
         raise RuntimeError(f"auth failed for {_KEY} against {_DSN}")
@@ -772,11 +650,10 @@ def test_a_credential_inside_an_exception_never_reaches_either_formatter(
 
 
 def test_the_json_formatter_redacts_even_without_the_filter(_secrets: None) -> None:
-    """Defence in depth: a handler someone else configured still must not emit the key.
+    """The JSON formatter redacts even without the filter.
 
-    The filter is the mechanism and this is the backstop. It cannot see the per-connector bearer
-    tokens (only the filter resolves those), so it is not a replacement — but it must never be the
-    reason a credential is written.
+    A backstop for a handler configured elsewhere; it cannot see per-connector bearer tokens, so it
+    does not replace the filter.
     """
     import json
 
@@ -806,15 +683,10 @@ def test_a_stack_dump_survives_into_the_json_object(_secrets: None) -> None:
 def test_configure_logging_reaches_a_non_propagating_logger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The front door's uvicorn loggers were outside the redaction boundary entirely.
+    """`configure_logging` reaches a non-propagating logger.
 
-    `deploy/entrypoint.sh` starts the API as `exec uvicorn ... --factory` with no `--log-config`, so
-    uvicorn installs its own dictConfig first and gives `uvicorn` a handler with `propagate: false`.
-    `uvicorn.error` logs every unhandled ASGI exception with `exc_info` — the records most likely to
-    carry a DSN or an auth header — and they reached a stream this module had never touched.
-
-    Asserting on the filters rather than on captured output because that is the property that
-    generalises: any logger that opts out of propagation must still be swept.
+    uvicorn installs its own config with `propagate: false`, and `uvicorn.error` logs unhandled
+    exceptions with `exc_info`, so every logger that opts out of propagation must still be swept.
     """
     private = logging.getLogger("chemclaw.test.uvicorn_like")
     private.propagate = False
@@ -848,12 +720,10 @@ def test_configure_logging_reaches_a_non_propagating_logger(
     ],
 )
 def test_a_credential_this_process_does_not_hold_is_still_redacted(secret: str, label: str) -> None:
-    """The value inventory can only cover what this process configured.
+    """A credential this process does not hold is still redacted.
 
-    Everything that merely passes through — the caller's own bearer token, a PAT quoted in an
-    upstream error — was outside it, and eleven realistic shapes were measured reaching the stream
-    verbatim. These rules are anchored on a vendor-assigned prefix and a long opaque tail, so they
-    are structural without being a guess.
+    The value inventory covers only what this process configured; pass-through credentials are
+    caught by structural rules anchored on a vendor prefix and a long opaque tail.
     """
     assert secret not in redact_secrets(f"upstream rejected {secret} at 09:31")
 
@@ -908,27 +778,19 @@ def test_an_opaque_bearer_credential_is_redacted_and_the_scheme_kept() -> None:
     ],
 )
 def test_the_structural_rules_never_touch_ordinary_content(innocent: str) -> None:
-    r"""The reason pattern matching was rejected once, held to — and the way it first failed.
+    r"""The structural rules never touch ordinary content.
 
-    A false positive corrupts a log line, and a rule that ate a SMILES, an InChIKey, a note slug or
-    an ADR id would be worse than the leak it closed. The first version of these rules did something
-    worse still: an over-broad value class after a key name ate this repository's own source lines,
-    which are the one text guaranteed to appear in a traceback. An adversarial review measured 41
-    changed lines across the tree, four of them executable source.
-
-    That version passed the earlier form of this test, which carried only the six identifiers above.
-    The source lines and the prose are here because their absence is what made it pass.
+    A false positive corrupts a log line: a rule eating a SMILES, an InChIKey, a slug, an ADR id or
+    this repository's own source lines (the text guaranteed to appear in a traceback) would be worse
+    than the leak it closes. Source lines and prose are in the table for that reason.
     """
     assert redact_secrets(innocent) == innocent
 
 
 def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> None:
-    """Narrowing must not have removed the floor it was added for.
+    """Narrowing the structural rules kept every real pass-through shape redacted.
 
-    The digit requirement and the opaque character class were added to stop the rules eating source
-    lines. This is the other half: the eleven measured pass-through shapes must still be redacted,
-    including the two spellings the first version missed entirely (`PGPASSWORD=` and a `repr`'d
-    config dict), which the narrowing pass folded in.
+    Includes `PGPASSWORD=` and a `repr`'d config dict.
     """
     for secret, sample in [
         (
@@ -949,17 +811,11 @@ def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> N
 
 
 def test_a_variable_name_survives_the_line_that_tells_an_operator_to_set_it() -> None:
-    """`NAME=NAME` is a hint, not a credential — and the exemption must not open either direction.
+    """`NAME=NAME` is a hint, not a credential, and the exemption opens neither direction.
 
-    `_SECRET_ENV_SETTINGS` argues that a `*_token_env` setting holds a variable *name* and that
-    redacting it "would scrub the variable name out of every line that helpfully tells an operator
-    which credential to set". The SCREAMING_CASE rule was doing precisely that: the shape
-    `.env.example` carries three times came back with the question kept and the answer replaced.
-
-    The other three rows are the two ways a wider carve-out would have leaked. Exempting the *key*
-    alone would log an operator's pasted token in the clear; exempting the *value* alone would drop
-    every uppercase credential, base32 secrets among them, which are exactly the shape that has no
-    lower-case tail to be caught by.
+    A `*_token_env` value is a variable name and must survive the line telling an operator what to
+    set. Exempting the key alone would leak a pasted token; exempting the value alone would drop
+    uppercase credentials such as base32 secrets.
     """
     for line, expected in [
         (
@@ -1011,28 +867,13 @@ _KEY_ANCHORED_SPELLINGS = {
 def test_a_key_anchored_credential_survives_no_depth_of_json_escaping(
     sample: str, credential: str, depth: int
 ) -> None:
-    r"""Every key-anchored rule, at the escape depth this module's own redactor creates.
+    r"""Every key-anchored rule redacts at depths 0-2 of JSON escaping.
 
-    **The gap this holds closed was in the framing, not in the key names, and it was reached by the
-    redactor rendering the value itself.** `_redacted_field` writes a non-string `extra=` with
-    `json.dumps(value, default=str)` and scrubs the *rendered* text, so a credential one level down
-    arrives as `{\"password\": \"...\"}` — and the rules framed their separator `["']?\s*[=:]`,
-    which a literal backslash defeats: the optional quote matches nothing and `[=:]` meets `\`.
-    Measured at depth 1 before `_KEY_FRAMING`, on exactly this table: ten of the twelve spellings
-    reached the stream verbatim, and the two that did not were the bare-header `Authorization:`
-    spelling and — the reason nobody saw it — the *single*-quoted `{'password': '...'}` form, which
-    `json.dumps` does not escape.
-
-    Depth 2 is here because escaping doubles: text already encoded once before this process saw it
-    spells a quote `\\\"`, which is what a driver quoting a JSON payload back at us produces after
-    one more render. Depth 0 is the spelling that always worked and is kept so a fix that only
-    handles the escaped form cannot pass.
-
-    This is not only log hygiene, which is why it is parametrized rather than asserted once:
-    `redact_secrets` is what `kg/record.py` runs a note's rendered body through before **committing
-    it to Git**, what `deliver/message.py` runs a recipient, subject, body and attachment through
-    before **sending them off-cluster**, and what `core/tracing.py` runs a span description
-    through. All three take model- or driver-authored text, and all three were measured leaking.
+    `_redacted_field` renders non-string extras with `json.dumps`, so a nested credential arrives as
+    `{\"password\": \"...\"}` and a separator framed `["']?\s*[=:]` meets a backslash. Depth 2 is
+    text already encoded once before rendering; depth 0 keeps a fix for the escaped form honest.
+    `redact_secrets` also guards notes committed to Git (`kg/record.py`), off-cluster messages
+    (`deliver/message.py`) and span descriptions (`core/tracing.py`).
     """
     text = sample
     for _ in range(depth):
@@ -1044,17 +885,10 @@ def test_a_key_anchored_credential_survives_no_depth_of_json_escaping(
 
 
 def test_every_rule_that_anchors_on_a_key_name_allows_an_escaped_quote() -> None:
-    r"""The structural half: no rule may frame its separator with a quote that cannot be escaped.
+    r"""Every rule anchored on a key name takes its framing from `_KEY_FRAMING`.
 
-    The behavioural test above passes on a table somebody wrote; this one fails on a *rule*, which
-    is what makes a reword visible. A pattern that reaches its value through `[=:]` is anchored on
-    a key name, and every such pattern must take its framing from `_KEY_FRAMING` — reverting one of
-    them to the bare `["']?\s*[=:]\s*["']?` spelling, or writing a new rule that way, is the whole
-    defect and it is invisible in a table of samples that nobody extended to cover it.
-
-    Read off the compiled patterns rather than a list in this file, because a hand-maintained list
-    of "the rules that anchor on a key" is what
-    `test_every_structural_rule_has_a_pathological_unit` exists to record going stale.
+    This fails on a rule rather than on a sample table, so a reworded or new rule using the bare
+    `["']?\s*[=:]\s*["']?` spelling is caught. Read off the compiled patterns, not a list.
     """
     from chemclaw.core import logging as chemclaw_logging
 
@@ -1070,11 +904,9 @@ def test_every_rule_that_anchors_on_a_key_name_allows_an_escaped_quote() -> None
     )
 
 
-#: The adversarial repeating unit per rule that frames a key with `_KEY_FRAMING`, in the *escaped*
-#: spelling. A separate table from `_QUADRATIC_UNITS` because it grows a different axis: those units
-#: repeat the bare key name and measure the tail, these repeat the escape run and measure the
-#: framing itself, which is where a quantifier that can backtrack into a run of backslashes would
-#: show up. Held against the rule table by the test below, exactly as that one is.
+#: The adversarial repeating unit per rule that frames a key with `_KEY_FRAMING`, escaped. Separate
+#: from `_QUADRATIC_UNITS`: these repeat the escape run and measure the framing itself. Held against
+#: the rule table by the test below.
 _ESCAPED_FRAMING_UNITS = {
     "escaped-password": 'password\\":\\"',
     "escaped-api-key": 'api_key\\":\\"',
@@ -1086,13 +918,10 @@ _ESCAPED_FRAMING_UNITS = {
 
 
 def test_every_rule_that_frames_a_key_has_an_escaped_pathological_unit() -> None:
-    """A rule that adopts `_KEY_FRAMING` owes this table a unit, or its escaped cost is unmeasured.
+    """Every rule that frames a key has an escaped pathological unit.
 
-    The same check `test_every_structural_rule_has_a_pathological_unit` makes, on the other axis:
-    four rules frame a key today, and the two extra units are the degenerate runs — a backslash run
-    and a quote run that never reach a separator — which are the inputs a non-possessive framing
-    would have backtracked through. Counting is the weakest check that still fails on the next rule
-    to adopt the framing.
+    The two extra units are degenerate backslash and quote runs that never reach a separator. A
+    count is the weakest check that still fails on the next rule to adopt the framing.
     """
     from chemclaw.core import logging as chemclaw_logging
 
@@ -1110,31 +939,13 @@ def test_every_rule_that_frames_a_key_has_an_escaped_pathological_unit() -> None
 
 @pytest.mark.parametrize("unit", _ESCAPED_FRAMING_UNITS.values(), ids=_ESCAPED_FRAMING_UNITS.keys())
 def test_the_escaped_quote_framing_is_not_quadratic(unit: str) -> None:
-    r"""`_KEY_FRAMING` widened every key-anchored rule, so its own cost is measured here.
+    r"""The escaped-quote framing is not quadratic.
 
-    The rule this module records twice over is that a redaction rule's blow-up is a denial of
-    service on every thread's logging: this filter runs inside `Handler.handle`, holding the stdlib
-    logging lock, and on the front door inside the single event loop. `_KEY_FRAMING` adds a
-    quantified run (`\\{0,4}`) in front of a quote that may not be there — which is exactly the
-    shape that made `_PEM_RFC1421` exponential and `_HAS_DIGIT` quadratic before they were bounded
-    and made possessive. It is possessive for that reason, and this is what says so.
-
-    Measured on the shipped form, growing 8x and again 8x (10 KB / 80 KB / 640 KB): linear on all
-    six units, within ~1.3x of the blind spelling it replaced. The bound is generous rather than
-    tight — the claim is that the cost is not quadratic, not that it is fast on a loaded box.
-
-    **What this test does not hold, measured: removing the possessiveness leaves it green.** Both
-    spellings are linear, because the framing's two runs are bounded by a constant and nothing
-    repeats around them — the missing ingredient of both blow-ups this module records. The
-    possessive form is ~10% cheaper and is what ships; this guard is here for the next rule that
-    widens the framing into something ambiguous, not as evidence that the current one had to be
-    possessive. `_KEY_FRAMING`'s own comment says the same thing, so the two cannot drift.
-
-    **Each size is the fastest of several runs, not one.** A single-shot ratio fails on one
-    scheduler stall: measured ~3 ms for 10 KB against ~25 ms for 80 KB, so a ~50 ms pause during
-    the large call alone crosses the threshold on linear code — plausible under
-    `PYTEST_WORKERS=4` or a loaded runner. The minimum discards a one-off stall and keeps the
-    threshold exactly as strict, because a quadratic cost is paid on every repeat.
+    The filter holds the logging lock (and on the front door the event loop), so a rule's blow-up is
+    a denial of service. `_KEY_FRAMING` adds a bounded run before an optional quote, the shape that
+    has caused super-linear regexes, so its cost is measured. Removing the possessiveness still
+    passes; this guards future widening, not the current form. Each size is the fastest of several
+    runs so a scheduler stall cannot fail linear code; a quadratic cost is paid on every repeat.
     """
     import timeit
 
@@ -1155,10 +966,9 @@ def test_the_escaped_quote_framing_is_not_quadratic(unit: str) -> None:
     )
 
 
-#: The four shapes a credential reaches `_redacted_field` in, each measured leaking before
-#: `_KEY_FRAMING`. The point of the table is that none of them is a string: a string `extra=` was
-#: already swept by the filter, and everything else is rendered — with `json.dumps` escaping the
-#: quotes of any string one level down — and scrubbed afterwards.
+#: The non-string shapes a credential reaches `_redacted_field` in. A string `extra=` is swept by
+#: the filter; everything else is rendered with `json.dumps` (escaping nested quotes) and then
+#: scrubbed.
 _NESTED_EXTRAS: dict[str, object] = {
     "json text inside a dict": {"resp": {"body": '{"password": "W4rehousePw"}'}},
     "json text inside a list": ['{"api_key": "sk_live_9f3a2b1c8d7e6f"}'],
@@ -1169,17 +979,11 @@ _NESTED_EXTRAS: dict[str, object] = {
 
 @pytest.mark.parametrize("value", _NESTED_EXTRAS.values(), ids=_NESTED_EXTRAS.keys())
 def test_a_nested_credential_is_scrubbed_in_the_form_the_stream_receives(value: object) -> None:
-    """`_redacted_field`'s own docstring, held: rendered first, and *then* actually scrubbed.
+    """A nested credential is scrubbed in the rendered form the stream receives.
 
-    That docstring argues the render-then-scrub order is what makes a credential inside a dict, a
-    list or an exception reachable at all — and the rendering step was itself what hid these four:
-    `json.dumps` escapes the quotes of every string one level down, and the key-anchored rules could
-    not see through that. Measured before `_KEY_FRAMING`: all four returned the credential verbatim
-    while the same credential in a top-level string was redacted correctly, so the claim was true
-    about reachability and false about the result.
-
-    `bytes` is in the table because `default=str` renders it as a `repr`, whose quote escaping is
-    the same shape — so it needs no branch of its own, and this is what says so.
+    Render-then-scrub makes a credential inside a dict, list or exception reachable, and the
+    rendering escapes nested quotes, so the key-anchored rules must see through that. `bytes`
+    renders as a `repr` with the same quote escaping, so it needs no branch of its own.
     """
     scrubbed = _redacted_field(value, swept=True)
     rendered = scrubbed if isinstance(scrubbed, str) else json.dumps(scrubbed, default=str)
@@ -1189,12 +993,10 @@ def test_a_nested_credential_is_scrubbed_in_the_form_the_stream_receives(value: 
 
 
 def test_a_nested_credential_does_not_reach_the_json_line(_secrets: None) -> None:
-    """End to end, because the unit above scrubs a value and a leak is what gets *written*.
+    """A nested credential does not reach the emitted JSON line, end to end.
 
-    The whole stack a record goes through: `SecretRedactingFilter` (which deliberately sweeps only
-    string `extra=` values) and then `JsonFormatter`, which is where a non-string is rendered. Three
-    of the shapes the filter cannot see — a JSON document nested in a dict, the same in `bytes`, and
-    an exception whose message holds one — measured leaking into the emitted line.
+    Through `SecretRedactingFilter` (which sweeps only string extras) and then `JsonFormatter`,
+    where non-strings are rendered.
     """
     formatter = JsonFormatter()
     redaction = SecretRedactingFilter()
@@ -1216,14 +1018,9 @@ def test_a_nested_credential_does_not_reach_the_json_line(_secrets: None) -> Non
         assert json.loads(line)["fields"], line
 
 
-# One pathological repeating unit per structural rule. A unit is the shortest string that makes the
-# rule's own prefix match over and over, which is what forces the engine to try and re-try the tail.
-#
-# **This list is checked against the rule table rather than trusted**, by the test below it: the
-# docstring here has always said "covered by construction", and it was a hand-written list that sat
-# unchanged while five rules were added — one of which was quadratic (35.8 s for 160 KB) and
-# unauthenticated-reachable. A claim of completeness that nothing verifies is the shape this
-# repository has an ADR about.
+# One pathological repeating unit per structural rule: the shortest string that makes the rule's
+# prefix match repeatedly, forcing the engine to retry the tail. Checked against the rule table by
+# the test below rather than trusted.
 _QUADRATIC_UNITS = {
     "jwt": "-eyJ",
     "password": "password=",
@@ -1242,10 +1039,8 @@ _QUADRATIC_UNITS = {
     "databricks": "dapi0123456789abcdef0123456789abcde",
     "gitlab": "glpat-0123456789abcde",
     # The PEM unit is the header plus an RFC 1421 header section whose body is one character short
-    # of the 20 the lookahead requires — the input that makes the separator walk its whole 64-step
-    # window and each header line's tail, and then fail, at every one of thousands of start
-    # positions. The bare header alone (what this unit was) does not reach the separator at all,
-    # so it measured a rule the encrypted shape had never been run through.
+    # of the 20 the lookahead requires, so the separator walks its whole window and fails at every
+    # start position.
     "pem": (
         "-----BEGIN PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
         "DEK-Info: AES-256-CBC,0A1B\n\nMIIEpAIBAAKC!"
@@ -1257,44 +1052,14 @@ _QUADRATIC_UNITS = {
 @pytest.mark.parametrize("groups", [4, 5])
 @pytest.mark.parametrize("header", [name for name, _ in _PEM_RFC1421_HEADERS])
 def test_the_pem_preamble_is_not_exponential_in_its_header_count(header: str, groups: int) -> None:
-    r"""The axis the quadratic guard above cannot grow, and the one that was exponential.
+    r"""The PEM preamble is not exponential in its header count.
 
-    **That test grows the line LENGTH, and this rule's blow-up is in the number of alternations
-    after a single `-----BEGIN`.** Its `pem` unit pins the header lines at two per repetition, so
-    `unit * N` multiplies the *start positions* — linear, and it passed throughout. The exponential
-    axis is one header followed by whitespace the gap branch `[\s\\]` can *also* consume: with *k*
-    spaces there are *k+1* ways to split them between the header's tail and the enclosing `{0,64}`
-    repetition, and a lookahead that must fail enumerates the product once per group.
-
-    **The header name is a parameter derived from `_PEM_RFC1421_HEADERS` rather than written here,
-    and that is the defect this test is the second version of.** The first hard-coded `Proc-Type:`,
-    which is the *narrower* tail of the two — so leaving `DEK-Info:[^\r\n\\]{0,96}` greedy passed
-    all 120 tests in this file, including this one, at 117 s on 553 bytes with the logging lock
-    held. `test_every_structural_rule_has_a_pathological_unit` counts units against rules and
-    cannot see a second axis *inside* one rule; only deriving the axes from the declaration can, so
-    a third header line added to that tuple brings its own case with it.
-
-    Measured on this box through `redact_secrets` itself, with the header line as a branch inside
-    the `{0,64}` window (the shape this replaces), growing groups rather than length:
-
-    | groups | payload | `Proc-Type:` | `DEK-Info:` |
-    | --- | --- | --- | --- |
-    | 2 | 128 B / 126 B | 2.2 ms | 6.3 ms |
-    | 4 | 228 B / 224 B | **1.22 s** | **2.30 s** |
-    | 5 | 278 B / 273 B | **14.9 s** | **25.8 s** |
-    | 6 | 328 B / 322 B | **192 s** | **258 s** |
-
-    ~12x per group, from **model-authored text**, on a filter that holds the stdlib logging lock
-    and, on the front door, the single event loop.
-
-    **Every case here fails by its own assertion, which the sizes are chosen for.** The payload is
-    `28 + 50 * groups` bytes, so 4 and 5 groups are 228 B and 278 B; both are already seconds under
-    the old shape and both still *return*, where 6 groups (328 B, three minutes) would be killed by
-    the suite's wall-clock cap instead — and `tests/conftest.py`'s own epilogue disclaims a
-    wall-clock kill as evidence about the code under test. pytest runs parameters in declaration
-    order, so the cheapest case of each axis runs first and the most expensive is last; that is the
-    opposite of "fails the largest first", which is what this docstring used to claim. The 0.5 s
-    bound separates the two regimes by three orders of magnitude rather than by a tuned margin.
+    The quadratic guard grows line length; this rule's risk is the number of alternations after one
+    `-----BEGIN`. Whitespace that both a header's tail and the gap branch `[\s\\]` can consume
+    yields exponentially many splits for a failing lookahead. Header names come from
+    `_PEM_RFC1421_HEADERS`, so each header's tail is exercised and a new one brings its own case.
+    Sizes of 4 and 5 groups would take seconds under an exponential shape yet still return, so each
+    case fails by its own 0.5 s assertion rather than by the suite's wall-clock kill.
     """
     payload = "-----BEGIN PRIVATE KEY-----" + (header + " " * 40) * groups + "!"
 
@@ -1310,12 +1075,10 @@ def test_the_pem_preamble_is_not_exponential_in_its_header_count(header: str, gr
 
 
 def test_every_structural_rule_has_a_pathological_unit() -> None:
-    """The parametrization above must grow with `_STRUCTURAL_SECRETS`, not with who remembers.
+    """Every structural rule has a pathological unit.
 
-    A rule with no unit is a rule whose cost nothing measures, and the one that shipped quadratic
-    got there exactly this way. Counting is the weakest check that still fails on the next
-    addition: a unit cannot be derived from a compiled pattern automatically, so what this asserts
-    is that somebody had to look at the new rule and write one.
+    A rule with no unit is a rule whose cost nothing measures. Units cannot be derived from a
+    compiled pattern, so this forces someone to write one for each new rule.
     """
     from chemclaw.core import logging as chemclaw_logging
 
@@ -1328,25 +1091,12 @@ def test_every_structural_rule_has_a_pathological_unit() -> None:
 
 @pytest.mark.parametrize("unit", _QUADRATIC_UNITS.values(), ids=_QUADRATIC_UNITS.keys())
 def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
-    r"""Every pattern's cost is linear in the line, because this runs holding the logging lock.
+    r"""Redaction cost is linear in the line length for every structural rule.
 
-    **Every pattern is passed, because two of them were quadratic while one was not.** Measured,
-    `password=` ran at 63.9x and `api_key=` at 56.2x for an 8x input — while `-eyJ`, the pattern
-    the first fix targeted, was already linear. The cause was shared:
-    `_HAS_DIGIT` was written `_OPAQUE*\d` and reintroduced, in a lookahead, exactly the unbounded
-    tail `_NOT_MID_TOKEN` had been added to remove. Measured then: 18 KB -> 0.5 s, 36 KB -> 2.0 s,
-    72 KB -> 8.1 s.
-
-    The reach is what makes it serious. `uvicorn.access` is a
-    non-propagating logger, so `_handlers_that_reach_an_output_stream` attaches this filter to it —
-    and it is the one logger that writes the raw request URL. A 115 KB request line stalled the pod
-    for 21 s, unauthenticated, on a 404, before any ASGI middleware ran.
-
-    Parametrized so a new pattern is covered by construction rather than by whoever remembers —
-    and the count is asserted against the rule table above, because "by construction" was written
-    here while the list was hand-maintained and five rules went past it. The
-    bound is generous rather than tight: the claim is that the cost is not quadratic, not that it is
-    fast, so this stays honest on a loaded box.
+    The filter holds the logging lock and is attached to `uvicorn.access`, which logs the raw
+    request URL, so a super-linear rule is an unauthenticated denial of service. Parametrised over
+    `_QUADRATIC_UNITS`, whose count is asserted against the rule table. The bound is generous: the
+    claim is "not quadratic", not "fast".
     """
     import time
 
@@ -1370,21 +1120,11 @@ def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
 
 
 def test_a_log_call_that_declines_a_traceback_does_not_crash_the_filter() -> None:
-    """`exc_info=False` is a bool on the record, and the filter used to subscript it.
+    """A log call with `exc_info=False` does not crash the filter.
 
-    Found by a cross-lane review, and invisible to every lane that produced it. The logging lane
-    moved traceback rendering into the filter (so a credential in a traceback is redacted before a
-    deployment's own formatter sees it) guarded by `record.exc_info is not None`. The enforcement
-    lane then added `degraded(..., exc_info: bool = True)`, which forwards straight to
-    `logger.log`. `Logger._log` stores what it is handed, so `exc_info=False` is a *bool* on the
-    record: `False is not None` is true, and `formatException(False)` raises
-    `TypeError: 'bool' object is not subscriptable`.
-
-    Filters run inside `Handler.handle`, outside logging's own error handling, so it propagated to
-    the caller. The one production site passing it is `skill_manifest`, inside the `except` whose
-    entire job is to skip a malformed `SKILL.md` and carry on — so one bad manifest made
-    `build_agent` raise instead. `logging`'s own `Formatter.format` tests truthiness here; the fix
-    is to match it.
+    `Logger._log` stores the bool on the record, so `record.exc_info is not None` is not the right
+    guard; the filter tests truthiness as `Formatter.format` does. Filters run outside logging's
+    error handling, so a raise here lands at the caller.
     """
     record = logging.LogRecord(
         name="probe",
@@ -1449,21 +1189,12 @@ def _non_string_exc_text(logger: logging.Logger) -> None:
 def test_a_malformed_log_call_is_reported_by_logging_not_raised_at_the_caller(
     make_call: Callable[[logging.Logger], None], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A record the filter cannot process must behave exactly as it does with no filter installed.
+    """A malformed log call is reported by logging, not raised at the caller.
 
-    The sibling of `exc_info=False` one test up, and the same mechanism: `Handler.handle` calls
-    `self.filter(record)` *outside* the try/except that wraps `emit()`, so anything the filter
-    raises lands in whoever called `logger.info(...)`. Without the filter every one of these five
-    malformations is logging's own to report — `handleError` writes `--- Logging error ---` to
-    stderr and the caller returns normally. With the filter installed each one raised instead.
-
-    That matters most where it is least visible: `metrics_bridge.degraded()` builds
-    `"degraded[%s]: " + message` and forwards `*args`, so a mismatched `degraded()` call inside an
-    `except` block replaced the degradation being reported with a `TypeError` — precisely what
-    `metrics_bridge` exists to prevent.
-
-    Asserts the whole `Handler.handle` path, not `filter()` in isolation, because the defect is
-    about *where* the exception surfaces rather than about the filter's return value.
+    `Handler.handle` calls the filter outside the try/except around `emit()`, so anything it raises
+    reaches the caller; with no filter installed, logging reports these via `handleError`. Matters
+    for `metrics_bridge.degraded()`, whose call sites sit in `except` blocks. Asserted through
+    `Handler.handle`.
     """
     from chemclaw.core.logging import SecretRedactingFilter
 
@@ -1487,20 +1218,11 @@ def test_a_malformed_log_call_is_reported_by_logging_not_raised_at_the_caller(
 def test_logging_own_error_report_does_not_print_the_unredacted_record(
     _secrets: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    r"""The exit the fail-open filter left open: `handleError` prints the *original* msg and args.
+    r"""Logging's own error report does not print the unredacted record.
 
-    `SecretRedactingFilter.filter` swallows anything `_redact` raises and keeps the record — right,
-    and unchanged. The consequence its docstring names is that the record travels on carrying the
-    text redaction never touched, and the test above pins where it ends up: `Formatter.format` hits
-    the same malformation, `emit` raises, and `Handler.handleError` reports it. CPython 3.11.15
-    writes `'Message: %r\nArguments: %s\n' % (record.msg, record.args)` to stderr, so the argument
-    holding the DSN is printed verbatim — with `logging.raiseExceptions` True by default, i.e. in
-    every deployment.
-
-    Asserts both halves. Absence of the credential alone would also be satisfied by
-    `logging.raiseExceptions = False`, which is the tempting one-liner and the wrong fix: it buys
-    the redaction by deleting every handler diagnostic in the process. So the diagnostic — and the
-    surviving argument that makes it diagnostic at all — must still be there.
+    When formatting fails, `Handler.handleError` prints the original `msg` and `args`, which would
+    include a credential. Both halves are asserted: the credential is absent and the diagnostic is
+    still printed, ruling out the wrong fix of `logging.raiseExceptions = False`.
     """
     private = logging.getLogger("chemclaw.test.handle_error_redaction")
     private.handlers.clear()
@@ -1531,13 +1253,10 @@ def test_logging_own_error_report_does_not_print_the_unredacted_record(
 
 
 def test_the_filter_survives_a_second_test_that_built_the_front_door() -> None:
-    """The order dependence that hid the bug above from every per-lane test run.
+    """The filter survives a second test that built the front door.
 
-    `configure_logging()` installs this filter on handlers that outlive the test that built them,
-    so `pytest tests/test_degraded.py` alone passed while
-    `pytest tests/test_auth.py tests/test_degraded.py` failed two. A defect reachable only in a
-    particular order is one that every lane's own green run is structurally unable to see, which is
-    why this asserts the composed state rather than the isolated one.
+    `configure_logging()` installs filters on handlers that outlive their test, so a defect can
+    appear only in a particular test order; this asserts the composed state.
     """
     from chemclaw.core.metrics_bridge import degraded
 
@@ -1547,13 +1266,10 @@ def test_the_filter_survives_a_second_test_that_built_the_front_door() -> None:
 
 
 def test_configure_logging_twice_does_not_stack_filters(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`configure_logging` is documented as safe to call more than once — for every handler.
+    """Calling `configure_logging` twice does not stack filters on any handler.
 
-    `force=True` resets the *root's* handlers, so the root was always fine. A non-propagating
-    logger's handlers are not ours to reset, and the sweep added a fresh pair to each on every call:
-    measured 2 -> 4 -> 6 filters over three calls. Every record on the front door's hot path would
-    then be redacted N times, and `SecretRedactingFilter.__init__` walks the connector registry off
-    disk, so the startup-only ERROR and counter fired once per handler per call instead.
+    `force=True` resets only the root's handlers; non-propagating loggers' handlers must be
+    deduplicated, or every record is redacted N times and startup diagnostics repeat.
     """
     private = logging.getLogger("chemclaw.test.repeat_configure")
     private.propagate = False
@@ -1570,29 +1286,12 @@ def test_configure_logging_twice_does_not_stack_filters(monkeypatch: pytest.Monk
 
 
 def test_the_logger_sweep_survives_a_logger_created_during_the_sweep() -> None:
-    """The sweep snapshots `loggerDict`; it does not iterate the live view.
+    """The logger sweep snapshots `loggerDict` rather than iterating the live view.
 
-    `configure_logging()` runs in the app factory while worker startup, a lazy connector import or
-    OTel's first use may be creating loggers on another thread. Iterating the live mapping raises
-    `RuntimeError: dictionary changed size during iteration`, and the raise aborts configuration
-    with filters attached to only some handlers — the worst of the three outcomes, because it looks
-    like success.
-
-    **Deterministic, where this test used to be probabilistic, and the rewrite is the point.** It
-    ran four threads creating a *unique* logger per loop while the main thread swept 2,000 times,
-    so the sweep was quadratic against a dict growing without bound: 9,568 loggers at iteration 0,
-    563,217 by iteration 250, 1,027,003 by iteration 494, never reaching 2,000. It terminated only
-    in isolation, where `loggerDict` starts nearly empty, and once `conftest` had imported the tree
-    it hung — taking the whole session with it, because `pytest-timeout`'s signal method crashes
-    pytest's traceback renderer. Bounding the churn made it finish in half a second and **stop
-    catching the defect**: reintroducing the live-view iteration still passed, because the race
-    window had gone with the volume. Fast and vacuous is worse than slow and meaningful.
-
-    So the mutation is provoked from *inside* the iteration instead of from another thread. The
-    loop body reads `.propagate` on each entry, so an entry whose `propagate` inserts a key changes
-    the mapping's size at exactly the moment a live view would be mid-iteration — deterministically,
-    with no threads, no volume and no timing. Against the snapshot the sweep actually takes, the
-    insertion lands in a copy nobody is iterating and nothing happens.
+    Loggers may be created on other threads during `configure_logging()`, and a mid-iteration size
+    change would abort configuration with filters only partly attached. The mutation is provoked
+    deterministically from inside the iteration: an entry whose `.propagate` inserts a key, which
+    does nothing against a snapshot.
     """
     registry = logging.root.manager.loggerDict
     planted = "chemclaw.test.sweep.trap"
@@ -1626,19 +1325,11 @@ def test_the_logger_sweep_survives_a_logger_created_during_the_sweep() -> None:
 def test_a_credential_redacted_from_the_logs_is_also_withheld_from_a_child_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The two credential inventories answer one question and must not answer it differently.
+    """A credential redacted from logs is also withheld from a child process's environment.
 
-    `_SECRET_ENV_SETTINGS` — every `*_token_env` field, i.e. the settings that name the variable a
-    bearer lives in rather than holding it — was added for the log filter and `secret_env_names()`
-    went on deriving from `_SECRET_SETTINGS` alone. So the calculation backend's bearer, the
-    labelling server's and the MCP face's were scrubbed from every log line and handed, in the
-    clear, to every `git` child `kg/git_writer.py` starts — where a credential helper, a `git`
-    hook or a remote configured on the notes checkout reads its environment. That is the exact class
-    `_git_child_env` exists to withhold, and both its docstring and `secret_env_names`' said the two
-    sets "cannot drift".
-
-    Asserted over `_SECRET_ENV_SETTINGS` rather than over the three names it holds today, so a
-    fourth `*_token_env` field is covered by the edit that adds it.
+    `secret_env_names()` must include `_SECRET_ENV_SETTINGS`, or bearers scrubbed from logs are
+    handed to every `git` child `kg/git_writer.py` starts, where hooks and helpers can read them.
+    Asserted over the whole set, so a new `*_token_env` field is covered.
     """
     assert _SECRET_ENV_SETTINGS, "the inventory is derived from the field names; it cannot be empty"
     for index, field in enumerate(_SECRET_ENV_SETTINGS):
@@ -1663,21 +1354,11 @@ def test_a_credential_redacted_from_the_logs_is_also_withheld_from_a_child_proce
 def test_the_one_security_alarm_in_this_module_can_actually_be_formatted(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`degraded[log_redaction]` is the marker to alert on, and it could not be printed.
+    """The `degraded[log_redaction]` alarm can be formatted with the shipped log format.
 
-    `configure_logging` called `basicConfig(format=settings.log_format, force=True)` and *then*
-    constructed the two filters — but `SecretRedactingFilter.__init__` logs when the connector
-    registry raises, and the shipped `log_format` demands `%(correlation_id)s`, which only
-    `ContextFilter` puts on a record. With no `ContextFilter` on the handler yet,
-    `Formatter.format` raised `ValueError: Formatting field not found in record: 'correlation_id'`
-    and `handleError` dumped the record to stderr as a "--- Logging error ---" traceback, with the
-    raw `'degraded[%s]: …'` and `Arguments: ('log_redaction',)` on separate lines. So the one
-    *security* degradation in this file — the process runs with connector bearer tokens unredacted
-    for its whole life — is the one line a log-stack rule matching the marker cannot match.
-
-    Driven through the real `configure_logging` with the real shipped format and the documented
-    trigger (a connector registry that raises), because the defect is an ordering between two
-    statements: a test that formats a record by hand would pass against the code that fails.
+    The format requires `%(correlation_id)s`, which `ContextFilter` supplies, so `ContextFilter`
+    must be installed before `SecretRedactingFilter.__init__` can log. Driven through the real
+    `configure_logging` with a raising connector registry, since the defect is statement ordering.
     """
     monkeypatch.setattr(
         settings,
@@ -1704,18 +1385,11 @@ def test_the_one_security_alarm_in_this_module_can_actually_be_formatted(
 
 
 def test_a_dsn_password_survives_no_ordinary_stringification() -> None:
-    """The three DSNs were plain `str`, so every sink that is not `logging` disclosed the password.
+    """A DSN password survives no ordinary stringification.
 
-    The log path is fully defended and was measured so: the same `repr(settings)` through the
-    configured handler comes out clean, because `_SECRET_SETTINGS` names all three DSNs and the
-    `_URL_USERINFO` structural rule catches the shape independently. That defence is the reason
-    this one is easy to miss — the residual is every sink that is *not* a `LogRecord`: a `print`, a
-    debugger, a crash reporter, a `model_dump()` written to a file or a response, and (until it was
-    fixed alongside this) an exported span. Measured before the fix, with three marker passwords
-    loaded: `repr`, `str`, `model_dump()` and `model_dump_json()` each leaked all three.
-
-    The type is also the machine-readable signal the next reviewer reads, and plain `str` said
-    "not a secret".
+    The log path is defended by `_SECRET_SETTINGS` and `_URL_USERINFO`; the DSNs are `SecretStr` so
+    `repr`, `str`, `model_dump()` and `model_dump_json()` (print, debugger, crash reporter, file) do
+    not disclose them either.
     """
     from chemclaw.core.config import Settings
 
@@ -1745,27 +1419,14 @@ def test_a_dsn_password_survives_no_ordinary_stringification() -> None:
 
 # --- The prefix inventory, and whether anybody has looked at it lately ---------------------------
 #
-# **The maintenance risk is the finding here, not the line count.** `_STRUCTURAL_SECRETS` is a
-# hand-written table of vendor prefixes, and a vendor that mints a new prefix does not tell this
-# repository. Nothing in the module can notice that: every existing test asks whether the rules
-# that *are* there still work, which stays green forever while the world moves. So the
-# reconciliation
-# is recorded as a date with its sources, and this file fails when it is overdue — the cheapest
-# thing that turns "somebody should re-check the inventories" into work that lands in a pull
-# request.
-#
-# `detect-secrets` itself stays out of the runtime, and the reasons are in
-# `docs/planning/BACKLOG.md`'s row and worth keeping here too: it is scan-shaped (it returns spans,
-# not redactions), it has no equivalent of `(?P<keep>…)`, it carries no ReDoS bounds of its own, and
-# it declares `requests` — an outbound HTTP client in the process whose posture is no egress. What
-# is imported is the *inventory*, by reading it.
+# `_STRUCTURAL_SECRETS` is a hand-written table of vendor prefixes, and vendors do not announce new
+# ones. The last reconciliation is recorded as a date with its sources, and this file fails when it
+# is overdue. `detect-secrets` stays out of the runtime: it returns spans not redactions, has no
+# `(?P<keep>…)` equivalent or ReDoS bounds, and depends on `requests`. Only its inventory is read.
 
-#: Where the vendor shapes below were read from, and when.
-#:
-#: Each is a published list of credential prefixes rather than somebody's blog post: the
-#: `detect-secrets` plugin directory, GitHub's own documented token prefixes, AWS's documented
-#: unique-id prefixes for access keys, and the vendor documentation for each key this family
-#: actually holds (Anthropic, OpenAI, Databricks, GitLab, Slack).
+#: Where the vendor shapes below were read from: published prefix lists (the `detect-secrets` plugin
+#: directory, GitHub's token prefixes, AWS access-key prefixes) and vendor documentation for the
+#: keys this family holds.
 PREFIX_INVENTORY_SOURCES = (
     "detect-secrets/plugins (the plugin directory, read as an inventory rather than imported)",
     "GitHub docs: token formats (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_)",
@@ -1774,12 +1435,7 @@ PREFIX_INVENTORY_SOURCES = (
 )
 
 #: The day `_STRUCTURAL_SECRETS` was last compared against every source above, shape by shape.
-#:
-#: Bumping this means having done that comparison, not having seen this test fail. What the last one
-#: found is in the module: AWS was one prefix where it is four (`ASIA`, the *temporary* credential a
-#: pod actually runs with, was uncovered), Slack's app-level `xapp-` was outside the character class
-#: that named its five siblings, OpenAI's `sk-admin-` fell between two rules, and a **PEM private
-#: key block had no rule at all** — the highest-value secret on the list.
+#: Bumping it means having done that comparison, not having seen this test fail.
 PREFIX_INVENTORY_RECONCILED = datetime.date(2026, 9, 16)
 
 #: How long a reconciliation is trusted for. Six months is chosen against the rate the table itself
@@ -1794,17 +1450,9 @@ RECONCILE_EVERY = datetime.timedelta(days=180)
 def _shaped(prefix: str, body: str) -> str:
     """Join a vendor prefix to a body at runtime, so no whole credential is a literal in this file.
 
-    **Every sample below is synthetic, and GitHub's push protection blocked them anyway** — Slack,
-    Databricks and Stripe shapes were each flagged on a first push of this table. That is the
-    scanner working: a string with a real prefix, a real length and a real alphabet is
-    indistinguishable from a live key *by shape*, which is precisely the property these fixtures
-    need in order to prove the redaction rules fire.
-
-    So the prefix and the body are stored apart and joined here. The scanner reads a file; the test
-    reads the assembled string, which is byte-identical to what it was before. Nothing is weakened
-    — `_VENDOR_SHAPES` still carries a full-shape sample for every rule the table claims — and
-    nothing is smuggled past a control: there is no credential here to smuggle, and the alternative
-    on offer was an unblock link that teaches the next author to click it.
+    The samples are synthetic, but a real prefix, length and alphabet are indistinguishable from a
+    live key by shape, so push protection blocks them as literals. The assembled string is
+    identical, and `_VENDOR_SHAPES` still carries a full-shape sample per rule.
     """
     return prefix + body
 
@@ -1838,12 +1486,8 @@ _VENDOR_SHAPES = {
         "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC0123456789abcd\\n"
         "-----END PRIVATE KEY-----"
     ),
-    # **The passphrase-protected form, which is the likelier one and was covered by nothing.**
-    # `openssl genrsa -aes256`, `openssl rsa -aes256` and `ssh-keygen -m PEM -N <pass>` all emit
-    # RFC 1421 — two header lines and a blank line between `-----BEGIN` and the body — and the
-    # warehouse key-pair credential the PEM rule's own comment cites as its motivation is more
-    # likely to carry a passphrase than not. Measured before the fix: `redacted=False`, the whole
-    # block through verbatim.
+    # The passphrase-protected form: `openssl genrsa -aes256` and `ssh-keygen -m PEM -N <pass>` emit
+    # RFC 1421 header lines and a blank line between `-----BEGIN` and the body.
     "pem private key, encrypted (rfc 1421)": (
         "-----BEGIN RSA PRIVATE KEY-----\n"
         "Proc-Type: 4,ENCRYPTED\n"
@@ -1854,20 +1498,12 @@ _VENDOR_SHAPES = {
     ),
 }
 
-#: Shapes the same reconciliation saw and **declined**, with the reason, and asserted below to be
-#: still uncovered.
-#:
-#: A register rather than a silence, for the reason `BACKLOG.md` exists: "we did not add a Stripe
-#: rule" and "nobody looked at Stripe" are indistinguishable from the table, and only one of them is
-#: a decision. The reason is the same for all of them — no part of this family holds one, and the
-#: *value* inventory (`_SECRET_SETTINGS`, `register_secret_env`) covers any credential this process
-#: is actually configured with, whoever minted it. A rule per vendor that never appears here is
-#: pure false-positive surface on every log line in the system.
-#:
-#: Two more were declined for a different reason and have no sample to hold: an **Azure AD client
-#: secret** has no decisive prefix (a 40-character string containing `~`), and a **Google service
-#: account** ships its credential as a JSON `"private_key"` — which the PEM rule and the key-name
-#: rule already cover between them.
+#: Shapes the reconciliation saw and declined, asserted below to be still uncovered, so "not added"
+#: is distinguishable from "not looked at". No part of this family holds one, and the value
+#: inventory covers any credential this process is configured with; a rule per absent vendor is pure
+#: false-positive surface. Also declined, with no sample: an Azure AD client secret (no decisive
+#: prefix) and a Google service-account JSON `"private_key"` (covered by the PEM and key-name
+#: rules).
 _DECLINED_SHAPES = {
     "google api key": _shaped("AIza", "SyD-0123456789abcdefghijklmnopqrstu"),
     "stripe live key": _shaped("sk_live", "_0123456789abcdefghijABCD"),
@@ -1882,11 +1518,10 @@ _DECLINED_SHAPES = {
 
 @pytest.mark.parametrize("sample", _VENDOR_SHAPES.values(), ids=_VENDOR_SHAPES.keys())
 def test_every_vendor_shape_the_inventory_claims_is_actually_redacted(sample: str) -> None:
-    """The table's claims, held one by one, in the line shape they arrive in.
+    """Every vendor shape the inventory claims is redacted, embedded in prose.
 
-    Embedded in prose rather than passed alone, because that is how a credential reaches a log
-    line — inside an upstream error message — and because a rule anchored on the start of a string
-    would pass a bare sample and fail the real thing.
+    Credentials reach logs inside upstream error messages, and a rule anchored on string start would
+    pass a bare sample.
     """
     assert sample not in redact_secrets(f"upstream rejected {sample} at 09:31"), (
         f"{sample!r} is in the declared prefix inventory and reached the stream verbatim"
@@ -1896,12 +1531,9 @@ def test_every_vendor_shape_the_inventory_claims_is_actually_redacted(sample: st
 #: One line of PEM body, reused by every shape below so one substring check covers all four.
 _PEM_BODY_LINE = "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyzABCDEF"
 
-#: The shapes that walked past a version of the PEM rule, each named by the number — or, for the
-#: last two, the *quantifier* — that let it. Kept as a table rather than folded into
-#: `_VENDOR_SHAPES` because three of them need an assertion that table cannot make: a sample
-#: repeated across many lines is *not* in the output verbatim even when most of it survived, which
-#: is exactly how the 8192-character run bound hid a leak of 85 body lines behind a `***` that
-#: looked like a redaction.
+#: PEM shapes that a looser version of the rule let past, each named by the number or quantifier
+#: responsible. Separate from `_VENDOR_SHAPES` because a body repeated over many lines can be absent
+#: verbatim from the output while most of it survived, which needs a per-line assertion.
 _PEM_SHAPES_THAT_WALKED_PAST = {
     # `openssl genrsa -aes256` / `openssl rsa -aes256` / `ssh-keygen -m PEM -N <pass>`: two RFC 1421
     # header lines and a blank line stand between the header and the body, and the separator window
@@ -1935,24 +1567,10 @@ _PEM_SHAPES_THAT_WALKED_PAST = {
         + "\n".join([_PEM_BODY_LINE] * 240)
         + "\n-----END PRIVATE KEY-----\n"
     ),
-    # The two the *possessive* tails let past, which is a narrowing rather than a number. A
-    # possessive `[^\r\n\\]{0,40}+` stops only at `\r`, `\n` or `\\`, so where the RFC 1421 header
-    # lines are separated by anything else — a PEM rendered onto one line, which is what any
-    # `.replace("\n", " ")` or a single-line formatter produces — the tail swallows the next header
-    # and the body with it, and the enclosing window cannot give the characters back. Measured at
-    # the commit that introduced them: `redacted=False`, the whole key body through verbatim. The
-    # ten shapes that commit drove had a real newline or a JSON `\n` in every one, so its corpus
-    # could not see it.
-    #
-    # **The IV is sixteen hex characters because thirty-two hides the leak, and that is a property
-    # of the pattern rather than a fixture detail.** The possessive tail stops after exactly 40
-    # characters, which lands five characters inside the IV either way. What decides the outcome is
-    # the unbroken base64 run left after it: with `openssl -aes-128-cbc`'s 16-hex IV that run is 11
-    # characters, short of the 20 the discriminator needs, so the lookahead fails and the body goes
-    # out verbatim — while `-aes-256-cbc`'s 32-hex IV leaves 27, so the lookahead succeeds at a
-    # *mid-token* position and the block is redacted by accident. Written first with the 32-hex
-    # spelling, this fixture passed with the possessive tails in place, which is the whole defect
-    # wearing the shape of a green test.
+    # A possessive `[^\r\n\\]{0,40}+` tail stops only at `\r`, `\n` or `\\`, so on a one-line PEM it
+    # would swallow the next header and the body. The IV is sixteen hex characters on purpose: a
+    # 32-hex IV leaves a long enough base64 run for the lookahead to succeed mid-token and redact by
+    # accident.
     "encrypted rfc 1421 on one line, tab-separated (aes-128-cbc iv)": (
         "-----BEGIN RSA PRIVATE KEY-----\tProc-Type: 4,ENCRYPTED\t"
         "DEK-Info: AES-128-CBC,0123456789ABCDEF\t\t" + _PEM_BODY_LINE
@@ -1968,25 +1586,12 @@ _PEM_SHAPES_THAT_WALKED_PAST = {
     "block", _PEM_SHAPES_THAT_WALKED_PAST.values(), ids=_PEM_SHAPES_THAT_WALKED_PAST.keys()
 )
 def test_a_pem_body_is_redacted_whatever_shape_the_key_arrives_in(block: str) -> None:
-    r"""A private key is the highest-value secret this filter sees, and six spellings walked past.
+    r"""A PEM body is redacted whatever shape the key arrives in.
 
-    The substring asserted is one *prefix* of a body line rather than the whole block, because the
-    block-level check `_VENDOR_SHAPES` makes is the one that could not see the fourth shape: a body
-    repeated over 240 lines is absent from the output verbatim whether none of it survived or most
-    of it did. Sixteen characters of base64 is short enough to survive any wrap in the table and
-    long enough that it appears nowhere else.
-
-    The first four are one rule and one fix, and the reason they are one fix is that they are the
-    same mistake: each number in the pattern — an eight-character gap, a thirty-two-character run,
-    an 8192-character body — was a guess about a shape rather than a property of the format, and
-    each was true of the unencrypted 64-column PEM somebody had in front of them. **The last two
-    are the same mistake made without a number**: a possessive quantifier, adopted to close a
-    denial of service, on the argument that it "removes the ambiguity rather than narrowing the
-    class, so the language matched is unchanged". It narrows it — the tail is bounded by `\r`, `\n`
-    and `\\` and by nothing else, so a header separated by a tab or a space is a header the tail
-    eats. The cost was paid the other way round from the four above: those looked unredacted, this
-    one shipped a control whose stated invariant was false, which is what the next author reaches
-    for.
+    The asserted substring is a 16-character prefix of a body line, since a block repeated over many
+    lines can be absent verbatim while most of it survived. The cases cover fixed-size gaps, runs
+    and body bounds that held only for an unencrypted 64-column PEM, and possessive tails that
+    cannot give back characters when RFC 1421 headers are separated by a tab or space.
     """
     redacted = redact_secrets(f"driver rejected the key:\n{block}\nat 09:31")
     assert _PEM_BODY_LINE[:16] not in redacted, f"a PEM body reached the stream: {redacted[:200]!r}"
@@ -1999,12 +1604,9 @@ def test_a_pem_body_is_redacted_whatever_shape_the_key_arrives_in(block: str) ->
 
 @pytest.mark.parametrize("sample", _DECLINED_SHAPES.values(), ids=_DECLINED_SHAPES.keys())
 def test_a_shape_the_inventory_declined_is_still_declined(sample: str) -> None:
-    """An absence test, so a rule that starts covering one of these moves its row.
+    """A shape the inventory declined is still not covered.
 
-    The register is only worth keeping if it is true. A shape that quietly became covered would
-    leave a row saying "deliberately not covered" about a rule that exists — which is the
-    `BACKLOG.md` failure mode, in a file nobody re-reads. Move the row into `_VENDOR_SHAPES` in the
-    same commit that adds the rule.
+    If a rule starts covering one, move its row into `_VENDOR_SHAPES` in the same commit.
     """
     assert redact_secrets(sample) == sample, (
         f"{sample!r} is recorded in `_DECLINED_SHAPES` as deliberately uncovered and is now being "
@@ -2013,12 +1615,10 @@ def test_a_shape_the_inventory_declined_is_still_declined(sample: str) -> None:
 
 
 def test_the_prefix_inventory_has_been_reconciled_this_half_year() -> None:
-    """A hand-written vendor table goes stale in silence, so the staleness is what is asserted.
+    """The vendor prefix inventory has been reconciled within the last half year.
 
-    Every other test in this section asks whether the rules that exist still work — which stays
-    green forever while vendors mint prefixes nobody here has heard of. This is the only check that
-    can fail for the thing that actually goes wrong. Bumping the date means having re-read the
-    sources; a bump with no diff is a legitimate outcome and says the table was still complete.
+    The other tests only check that existing rules still work. Bumping the date means re-reading the
+    sources; a bump with no table diff is a legitimate outcome.
     """
     overdue = datetime.date.today() - (PREFIX_INVENTORY_RECONCILED + RECONCILE_EVERY)
     assert overdue.days <= 0, (

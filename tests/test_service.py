@@ -1,9 +1,7 @@
-"""The front-door HTTP surface runs a turn end-to-end with a fake agent (plan step F2-T1/F2-T2).
+"""The front-door HTTP surface runs a turn end-to-end with a fake agent.
 
-Exercises the real FastAPI app (health/readiness, session creation, the SSE message stream, the
-static chat page) with an injected fake streaming agent — so the whole surface is proven without a
-live model, MCP subprocess, or credentials. The MCP lifecycle is asserted to open/close exactly once
-per turn via a spy tool.
+Exercises the real FastAPI app (health, readiness, sessions, the SSE stream, the static page) with
+an injected fake streaming agent, so no live model, MCP subprocess or credentials are needed.
 """
 
 import asyncio
@@ -102,10 +100,8 @@ def _no_connectors(_profile: str | None = None) -> list[Any]:
 def _app(agent: ScriptedTurn | None = None, **kwargs: Any) -> FastAPI:
     """The app under test, wired to one fake through the seam a turn is driven by.
 
-    `graph_factory` is how the fake gets in (see `tests.fakes_turn.ScriptedTurn`), so a test never
-    needs a model credential and never builds a graph of its own. Connectors default to none for
-    the reason `_no_connectors` records; a test that does want one passes a spec
-    (`tests.test_capability_degradation._dark_connector`).
+    `graph_factory` is how the fake gets in (see `tests.fakes_turn.ScriptedTurn`). Connectors
+    default to none; a test that wants one passes a spec.
     """
     fake = agent if agent is not None else _FakeAgent()
     kwargs.setdefault("connector_factory", _no_connectors)
@@ -121,18 +117,11 @@ def _client(
 
 
 def test_every_name_the_front_door_re_exports_has_a_reader() -> None:
-    """`__all__` here is a *test seam*, and a name in it with no reader is dead weight.
+    """Every name the front door re-exports in `__all__` has a reader.
 
-    The list documents itself as "collaborators the suite patches on this module; routes read them
-    through it at call time", which makes it the one place an import can survive both ruff and a
-    reviewer: being in `__all__` is what keeps F401 quiet. `request_note_reindex` did exactly that
-    — no route read `front_door.request_note_reindex`, no test patched it, and its only production
-    starter is a merge webhook this app does not serve.
-
-    Four ways to be read, because the list holds four kinds of name: a route reading it back
-    through this module at call time, `create_app` calling it here, a test patching it by dotted
-    path, and a test importing it from here (the types and pure helpers, which moved but kept this
-    module as their front page).
+    `__all__` is a test seam that silences F401, so an unread name could survive unnoticed. A reader
+    is a route reading it through this module, `create_app` calling it, a test patching it by dotted
+    path, or a test importing it from here.
     """
     import chemclaw.api.app as app_module
 
@@ -177,13 +166,7 @@ def _unreachable_database(*_args: Any, **_kwargs: Any) -> Any:
 def test_readyz_reports_unready_when_the_store_it_needs_is_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Under `session_store="postgres"` a pod that cannot reach Postgres cannot serve a turn.
-
-    It reported itself ready anyway until the 2026-08-05 database review: the route probed every
-    enabled connector — each of which costs the agent one capability — and never the store the
-    session claim, the conversation history, the owner lookup and the audit sink all go through
-    (D-2026-08-05-readiness-answers-for-the-store-it-cannot-serve-without).
-    """
+    """Under `session_store="postgres"`, `/readyz` reports unready when Postgres is unreachable."""
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
     monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _unreachable_database)
@@ -196,11 +179,9 @@ def test_readyz_reports_unready_when_the_store_it_needs_is_unreachable(
 def test_a_database_outage_drains_the_pod_without_restarting_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Liveness must not follow readiness here, or an outage becomes a fleet-wide crash loop.
+    """A database outage drains the pod without failing liveness.
 
-    Restarting every front-door pod because a shared database is down destroys the capacity that
-    would serve the moment it returns, and a restarted pod is no closer to reaching it. Draining
-    them from the Route is the whole of the correct response.
+    Restarting every pod for a shared outage destroys capacity and does not help reach the database.
     """
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
@@ -213,18 +194,9 @@ def test_a_database_outage_drains_the_pod_without_restarting_it(
 def test_a_raising_connector_sweep_still_answers_a_readiness_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Connector health is *reported, never gating* — so it must not be able to fail the probe.
+    """A raising connector sweep still answers the readiness probe.
 
-    `_probe_database` catches its own failures and returns `False`; `_sweep_connectors` caught
-    nothing and leaned entirely on `probe_connectors`'s "never raises" docstring. That promise
-    covers the gathered probes, not the loop above them (`enabled()`, `health_url`,
-    `bundle_queue`) or a `_probe_queues` failure outside its own except clause. Measured with the
-    sweep replaced by a raiser: `readyz` answered **500** with
-    `{"detail": "The request could not be completed due to an internal error."}` — a hard failure
-    on the pod's readiness probe, draining it, from a signal this route's own docstring says must
-    not gate, and with no diagnosis for the operator running `curl`.
-
-    Whether the shipped sweep *can* raise is not what this pins; it pins the half the route owns.
+    Connector health is reported, never gating, so a raise in the sweep must not become a 500.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
@@ -266,18 +238,10 @@ def test_readyz_does_not_probe_a_database_a_memory_deployment_does_not_have(
 def test_readyz_refuses_a_pod_whose_image_is_ahead_of_the_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """New code against an old schema must fail at rollout, not in traffic.
+    """`/readyz` refuses a pod whose image is ahead of the schema.
 
-    The probe was `SELECT 1` only, which every schema answers. Measured against a database
-    migrated through `080` while the code was current: `/readyz` answered
-    `200 {"status": "ready"}`, the pod joined the Route, and `outbox`,
-    `calculation_results.epoch` and `turn_costs.turn_id` were all missing under it. The Helm
-    `pre-upgrade` hook Job normally prevents that state; `--no-hooks`, a `kubectl set image` and
-    an ArgoCD sync that proceeds past a failed hook all reach it.
-
-    Driven by naming a migration this image "ships" that no ledger can hold, against the real
-    `schema_migrations` — the query, the connection and the ledger are the shipped ones, and only
-    the filename is arranged.
+    `--no-hooks`, `kubectl set image` or a sync past a failed hook can skip the migration Job.
+    Driven against the real `schema_migrations` with one unshippable migration filename.
     """
     asyncio.run(migrated_db_or_skip())
     monkeypatch.setattr(settings, "session_store", "postgres")
@@ -298,14 +262,10 @@ def test_readyz_refuses_a_pod_whose_image_is_ahead_of_the_schema(
 def test_readyz_stays_ready_when_the_schema_is_ahead_of_the_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rollback must serve. The schema check is one-directional, and this is that direction.
+    """`/readyz` stays ready when the schema is ahead of the image, the normal state after a
+    rollback.
 
-    An image behind its database is the *normal* state after a rollback: the schema only goes
-    forward, by a merged decision, so ledger rows past the newest file this image ships are
-    expected and must not gate. Making the comparison symmetric — "the ledger equals the file
-    set" — would refuse traffic on every rolled-back pod, which is a worse failure than the
-    forward one being fixed. The backwards case is reported by `core/migrate.py`'s
-    `migrate.database_ahead` warning instead, where an operator can act on it.
+    That direction is reported by `core/migrate.py`'s `migrate.database_ahead` warning instead.
     """
     asyncio.run(migrated_db_or_skip())
     monkeypatch.setattr(settings, "session_store", "postgres")
@@ -326,25 +286,10 @@ def test_readyz_stays_ready_when_the_schema_is_ahead_of_the_image(
 def test_a_database_with_no_migration_ledger_takes_the_pod_out_of_the_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No `schema_migrations` is the strongest evidence of a mismatch, not the absence of any.
+    """A database with no `schema_migrations` takes the pod out of the Route.
 
-    **This test asserted the opposite until 2026-09-19, and the sentence it asserted was the
-    defect.** It said a database with no ledger "reports itself and stays ready", on the argument
-    that a ledger the probe *cannot read* must not take a pod out of the Route. That argument is
-    about **privilege** — a split session store whose role may use the store and may not select the
-    ledger — and it was implemented by catching `UndefinedTable` beside `InsufficientPrivilege`, so
-    the shape admitted was much wider than the case argued: `schema_migrations` is created by the
-    first migration, so its absence means *nothing has been applied*.
-
-    Driven against an empty database under the chart's shipped `CHEMCLAW_SESSION_STORE=postgres`:
-    `/readyz` answered `200 {"status":"ready","connectors_unhealthy":8}`, so the pod would have
-    joined the Route and failed every session write, every audit row and every owner lookup. Reached
-    by the three paths `_schema_carries_this_image` names (`--no-hooks`, `kubectl set image`, an
-    ArgoCD sync past a failed hook) and by the two-releases-one-database hazard the chart's own
-    `temporal.namespace` refusal admits no guard can cover.
-
-    The privilege case it was standing in for now has its own test below, which is the half nothing
-    covered: it was proved by a *missing table*, which is not what it claims.
+    The first migration creates the ledger, so its absence means nothing has been applied. Only an
+    unreadable ledger (a privilege denial, tested below) stays ready.
     """
     schema = f"{TEST_SCHEMA}_no_ledger"
     base = settings.postgres_dsn.split("?")[0]
@@ -376,21 +321,12 @@ def test_a_database_with_no_migration_ledger_takes_the_pod_out_of_the_route(
 def test_a_ledger_this_role_may_not_select_does_not_take_the_pod_out_of_the_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The case the trade actually argues, proved by a real privilege denial for the first time.
+    """A ledger this role may not select does not take the pod out of the Route.
 
-    A split session store can put the probe on a different server from the one `migrate()` runs
-    against, with a role that may use the store and may not read the ledger. Refusing there would
-    turn a diagnostic into a fleet-wide outage over somebody else's grant table, so this stays
-    ready — and it is the *only* unreadable-ledger shape that does.
-
-    **Driven through a real `InsufficientPrivilege`**, which is the point: the trade was covered by
-    a test that dropped the *table*, so what it proved was `UndefinedTable`'s branch and the
-    privilege branch had no test at all. The ledger here exists, is resolvable on the search path,
-    and the session's role has `USAGE` on the schema and no `SELECT` on it — so the failure is
-    exactly "cannot select the ledger" rather than "cannot see the schema".
-
-    `-c role=` in the DSN rather than a second login: the connection runs as the restricted role
-    without a password, a `pg_hba` entry or a second DSN, and the role is dropped in the `finally`.
+    A split session store may use a role that cannot read the ledger; refusing would be an outage
+    over another server's grants. Driven through a real `InsufficientPrivilege`: the role has
+    `USAGE` on the schema and no `SELECT` on the ledger, set via `-c role=` in the DSN and dropped
+    in the `finally`.
     """
     asyncio.run(migrated_db_or_skip())
     schema = f"{TEST_SCHEMA}_norights"
@@ -471,23 +407,11 @@ def test_readyz_reuses_its_database_verdict_inside_the_window(
 def test_readyz_bounds_the_whole_database_leg_not_just_the_statement_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`service_readiness_db_timeout_seconds` must bound acquiring a connection, not only using one.
+    """`service_readiness_db_timeout_seconds` bounds acquiring a connection, not only using one.
 
-    `statement_timeout_seconds` becomes a Postgres-side `statement_timeout` GUC
-    (`core.db._merged_options`) — it bounds a query's execution *after* a connection already
-    exists, and does nothing for however long acquiring one takes. Before this test,
-    `_probe_database` passed that kwarg and awaited the whole `async with db.connection(...)`
-    block with no outer bound, so a connection that hangs while being acquired (a blackholed host,
-    a saturated pool) held the probe for `pg_connect_timeout_seconds` or `pg_pool_timeout_seconds`
-    instead — both independent of the readiness budget and, by default, five times it. The Helm
-    chart derives `readinessProbe.timeoutSeconds` from `service_readiness_db_timeout_seconds`
-    (`tests/test_deploy_chart.py::test_the_readiness_probe_outlasts_the_work_readyz_does`), so a gap
-    between the two is a kubelet draining a front door that would have answered correctly.
-
-    The stand-in sleeps for `hang_seconds`, far longer than the readiness budget and comfortably
-    under the connect/pool timeouts widened below — the same shape as
-    `test_connector_health.py`'s `_slow_connect`: a regression turns into a slow, still-passing wait
-    (`hang_seconds`) rather than a genuine multi-second hang.
+    `statement_timeout` applies only after a connection exists, so the whole database leg needs an
+    outer bound; the chart derives the probe timeout from this setting. The stand-in hangs well past
+    the readiness budget, so a regression is a slow still-passing wait rather than a real hang.
     """
     budget = 0.2
     hang_seconds = 2.0
@@ -508,11 +432,9 @@ def test_readyz_bounds_the_whole_database_leg_not_just_the_statement_timeout(
 
     @asynccontextmanager
     async def _hanging_connection(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
-        # A connect or checkout that never arrives — the failure `pg_connect_timeout_seconds` and
-        # `pg_pool_timeout_seconds` bound and `service_readiness_db_timeout_seconds` cannot reach at
-        # all without the outer `wait_for`. Yields a working connection once it wakes, so an
-        # unbounded probe reports `200 ready` (wrongly, `hang_seconds` late) rather than failing for
-        # an unrelated reason — the two behaviors this test tells apart.
+        # A connect or checkout that never arrives within the readiness budget. It yields a working
+        # connection when it wakes, so an unbounded probe reports `200 ready` late rather than
+        # failing for an unrelated reason.
         await asyncio.sleep(hang_seconds)
         yield _StubConn()
 
@@ -534,15 +456,10 @@ def test_readyz_bounds_the_whole_database_leg_not_just_the_statement_timeout(
 async def test_concurrent_readiness_probes_cost_one_connector_sweep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fifty simultaneous `/readyz` probes must cost one sweep, not fifty.
+    """Fifty simultaneous `/readyz` probes cost one connector sweep, not fifty.
 
-    The cache is a check-then-act with an `await` between the check and the write, so the window
-    only ever suppressed *sequential* repeats: under concurrency every in-flight request misses.
-    Measured on the real app, 50 concurrent probes inside one 5 s window did 50 full connector
-    fan-outs. `/readyz` is unauthenticated by necessity and therefore also outside
-    `require_principal`'s per-principal budget, so the amplification factor is chosen by the
-    caller — which is what makes one unauthenticated TCP connection worth N outbound connections
-    to the connector fleet.
+    `/readyz` is unauthenticated, so a caller could otherwise amplify one connection into many
+    outbound ones.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 60.0)
@@ -569,12 +486,9 @@ async def test_concurrent_readiness_probes_cost_one_connector_sweep(
 async def test_concurrent_readiness_probes_cost_one_database_checkout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same, for the probe that borrows from a 16-connection pool.
+    """Concurrent readiness probes cost one database checkout from the shared pool.
 
-    Under `session_store="postgres"` (what the chart ships) each miss checks out a pooled
-    connection, so 50 concurrent probes requested 50 checkouts against `pg_pool_max_size=16` —
-    and every authenticated request needing the store in that window waits behind them and, past
-    `pg_pool_timeout_seconds`, is shed 503.
+    Otherwise they starve authenticated requests waiting on the same pool.
     """
     monkeypatch.setattr(settings, "session_store", "postgres")
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 60.0)
@@ -631,11 +545,9 @@ def test_static_chat_page_is_served() -> None:
 
 
 def test_security_headers_reach_a_streaming_sse_response() -> None:
-    """The SSE turn stream carries the same headers as a static page.
+    """The streamed SSE response carries the same security headers as a static page.
 
-    The static-page test above passes under *any* middleware implementation; a streamed
-    `EventSourceResponse` is the case that distinguishes them, because it is the response whose
-    headers are sent long before its body exists.
+    Its headers are sent before its body exists, which distinguishes middleware implementations.
     """
     agent = _FakeAgent()
     with _client(agent) as client:
@@ -649,19 +561,10 @@ def test_security_headers_reach_a_streaming_sse_response() -> None:
 
 
 async def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
-    """A handler cancelled before it responds must not be turned into a 500 with a traceback.
+    """A handler cancelled before it responds closes the connection instead of returning a 500.
 
-    This is the multi-worker blocker, and it is not hypothetical: a 50-user load run logged 44
-    `RuntimeError("No response returned.")` tracebacks, every one on the SSE turn route, each
-    served to a chemist as an HTTP 500. `BaseHTTPMiddleware` produced them — it runs the app in a
-    second task and pipes its ASGI messages through a memory stream, so a handler that ends
-    without responding (a pod draining mid-stream, a client that gave up waiting for an
-    admission permit) reaches `call_next` as a closed stream and is re-raised as a server error.
-
-    Driven at the raw ASGI level rather than through `TestClient`, because the distinction *is*
-    the ASGI contract: cancellation must propagate out of the app (the server then simply closes
-    the connection) rather than being converted into a response. Counterfactual: with the old
-    `BaseHTTPMiddleware` this raises `RuntimeError`, not `CancelledError`.
+    Driven at the raw ASGI level: cancellation must propagate out of the app rather than be
+    converted into a response, as `BaseHTTPMiddleware` would do.
     """
     app = _app()
 
@@ -711,14 +614,9 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
                 if line.startswith("data:"):
                     events.append(json.loads(line[len("data:") :].strip()))
 
-    # Order is chronological: the fake announces the job *before* yielding its text, and the
-    # consolidated sink (core.turn_signals) drains at the top of each update for exactly that
-    # reason — a tool that ran while the model was producing an update ran before the text it then
-    # produced. main's original assertion had token-first, which reported the text ahead of the job
-    # that preceded it; the property this test names ("before the answer") holds either way.
-    # Dropping `capability_degraded` first: no Temporal broker runs in a test process, so every
-    # turn truthfully opens by announcing the durable subsystem is down. What this test is about
-    # is that a launched job reaches the browser, and where in the order it does.
+    # Order is chronological: the fake announces the job before its text, and the turn-signal sink
+    # drains at the top of each update. `capability_degraded` is dropped first, since no Temporal
+    # broker runs here and every turn truthfully announces that.
     streamed = [e for e in events if e["type"] != "capability_degraded"]
     assert [e["type"] for e in streamed] == ["job_started", "token", "answer"]
     assert streamed[0]["job_id"] == "qm-sse"
@@ -742,10 +640,8 @@ def _stream_events(  # type: ignore[no-untyped-def]
 def test_a_waiting_turn_says_so_and_is_shed_on_the_stream(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """At capacity the turn reports `queued`, then ends with an error event — not an HTTP 503.
 
-    The admission wait used to happen before the response existed, so a client saw nothing at all
-    for up to `service_turn_admission_timeout_seconds` and then a bare 503: a busy front door and
-    a dead one were indistinguishable for the whole of that window (D-166). Now the stream opens
-    first and the wait is on it.
+    The stream opens before the admission wait, so a busy front door is distinguishable from a dead
+    one.
     """
     import asyncio
 
@@ -780,12 +676,7 @@ def test_an_uncontended_turn_emits_no_queued_event() -> None:
 
 
 def test_a_queued_turn_runs_once_a_permit_frees(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Waiting is not failing: a turn that queues still answers when capacity returns.
-
-    The half a shed-only test cannot see. Moving admission inside the generator put the acquire
-    on the same code path as the run, and a mistake there (releasing a permit never taken, or
-    returning after the wait) would end the stream instead of continuing into the turn.
-    """
+    """A queued turn runs once a permit frees."""
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
@@ -827,11 +718,9 @@ def test_a_queued_turn_runs_once_a_permit_frees(monkeypatch) -> None:  # type: i
 
 
 def test_permit_is_released_after_each_turn(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A finished turn returns its permit, so more turns than permits still all succeed (AG-15).
+    """A finished turn returns its permit, so more turns than permits still all succeed.
 
-    Guards the subtle half of admission control — the `finally: semaphore.release()` in the SSE
-    generator. With a single permit, three sequential turns can only all pass if each releases; a
-    dropped release would silently collapse capacity (every later turn would 503 until restart).
+    With one permit, three sequential turns pass only if each releases.
     """
     import asyncio
 
@@ -894,13 +783,9 @@ def test_a_session_is_owner_scoped() -> None:
 def test_null_owner_session_is_unreachable_once_entra_is_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A NULL-owner session must not become everyone's once identity enforcement turns on (Sec-3).
+    """A NULL-owner session is unreachable once Entra is required.
 
-    `session_owners.owner` is nullable by design (a dev/system session with no Entra oid is still
-    reattachable) and `entra_required=True` never *mints* a new NULL row — but a row written while
-    the deployment ran in dev mode survives a later flip to enforcement. Reverting
-    `_owner_authorizes` to the old `owner is not None and owner != principal.oid` check makes this
-    test fail (a stranger reads the session), proving the fix is load-bearing.
+    Rows written in dev mode survive a flip to enforcement and must not become everyone's.
     """
     from chemclaw.api.auth import Principal, require_principal
     from chemclaw.core.config import settings
@@ -958,16 +843,9 @@ def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ig
 
 
 def test_pushback_streams_a_question_waiting_on_a_person(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """An `awaiting-answer` row reaches the browser instead of aging out unclaimed.
+    """Push-back streams an `awaiting-answer` row instead of letting it age out unclaimed.
 
-    `AwaitAnswerWorkflow._push` has written this row since the workflow existed, and this route
-    claimed `("job_completed", "job_failed")` — two kinds, and this is a third. So the notification
-    was written, never claimed and aged out under retention, while the only thing a chemist saw was
-    the `record_job_started(handle.id, "awaiting")` recorded beside it: an ask rendered as a durable
-    job that runs for seven days and then silently expires.
-
-    The claim is kind-scoped precisely so a selective consumer leaves other kinds for theirs, so
-    widening it steals from nobody — `AWAITING_KIND` had no consumer at all.
+    The claim is kind-scoped, so including this kind steals from no other consumer.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -1023,12 +901,9 @@ def test_pushback_streams_a_question_waiting_on_a_person(monkeypatch) -> None:  
 
 
 def test_pushback_streams_an_expired_question(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The expiry push carries fewer fields, and must not be lost to validation.
+    """The expiry push, which lacks `kind`, `asked_of` and `due_at`, is not lost to validation.
 
-    "Told, not silently abandoned" is the workflow's own reason for sending it, and it is the one
-    outcome nobody is watching for. It carries no `kind`, no `asked_of` and no `due_at` — so a model
-    that required them would drop exactly this notification, and the row is already claimed by the
-    time this route reads it, which means there is no second delivery.
+    The row is claimed before this route reads it, so there is no second delivery.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -1073,18 +948,9 @@ def test_pushback_streams_an_expired_question(monkeypatch) -> None:  # type: ign
 def test_pushback_survives_an_awaiting_payload_from_another_build(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A payload this build did not write costs one blank field, never the notification.
 
-    Same rule `_digest` states for the same reason, one channel over: the row is claimed before this
-    code sees it, so a `ValidationError` here destroys a notification rather than deferring it — and
-    the request it names is still open, still on its deadline and still in `GET /pending`.
-
-    **`reminders="many"`, because the first version of this test proved nothing.** It passed
-    `"2"`, and pydantic v2's lax mode already coerces that to `2` — so the mapper's own guard could
-    be deleted and all three awaiting tests stayed green. `"many"` is the input that separates
-    them: `int("many")` raises, and a raise here does not merely drop one field. It kills the
-    generator, so every event queued behind this row dies; the handler books it on
-    `chemclaw_db_unavailable_total`, which is how an operator tells a Postgres outage from anything
-    else; and `restore_unconsumed` puts the row back, so the client retries into the same crash for
-    ever while the rows claimed in the same batch are already consumed and gone.
+    The row is already claimed, and a raise would kill the generator and every queued event.
+    `reminders="many"` is used because lax pydantic coerces `"2"`, which would not exercise the
+    mapper's guard.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -1115,19 +981,10 @@ def test_pushback_survives_an_awaiting_payload_from_another_build(monkeypatch) -
 
 
 def test_pushback_collapses_a_replayed_backlog_of_reminders(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A month of daily reminders reaches the browser as one open notice and one expiry.
+    """A backlog of daily reminders reaches the browser as one open notice and one expiry.
 
-    **The rows were never pruned, so the first connect claims all of them.** Retention removes
-    `session_events` only `WHERE consumed_at IS NOT NULL` and `retention_session_events_days`
-    defaults to 0, so every `awaiting-answer` row written since the workflow was built is still on
-    disk unconsumed — `durable/digest.py` says exactly this in the present tense about its own
-    kind. Widening the claim therefore does not deliver *the* notification, it delivers the whole
-    history: measured on one BO campaign opened, chased daily and expired a month ago, sixteen
-    frames on a single poll, fifteen of them `waiting` for a question that is closed.
-
-    A reminder carries no fact the open did not — the request is open — so the stream reports each
-    request's *state* rather than its log. The transition that matters is always sent, which is why
-    the expiry survives the collapse and is the last thing the client sees.
+    Unconsumed rows are not pruned, so the first connect claims the whole history. The stream
+    reports each request's state, and the expiry, the transition that matters, is always sent last.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -1177,19 +1034,8 @@ def test_pushback_collapses_a_replayed_backlog_of_reminders(monkeypatch) -> None
 def test_pushback_reports_the_newest_state_of_a_collapsed_backlog(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The surviving frame of a collapsed run is the newest one, not the oldest.
 
-    `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`. The sibling above asserts
-    that a month of reminders arrives as one open notice and one expiry. What it cannot see is
-    *which* open notice: its fake replaces the tailer, so the per-connection suppression is the only
-    thing running, and that suppression decides one row at a time against rows that arrive
-    oldest-first — so the frame it kept carried `reminders=0` while `reminders=14` was the truth at
-    connect time. Driven here: `[0, 14]` against the `[14, 14]` a surface needs.
-
-    **So this drives the real tailer**, with only its claim faked, because the defect and the fix
-    both live in the seam between the two: the batch exists inside one claim and nowhere else, and
-    the reduction is `stream_new_events`' `collapse` argument. Reading that argument out of
-    `kwargs` rather than passing `_newest_per_state` in by hand is what makes the test fail if the
-    route stops handing it over — a test that supplied the collapse itself would pass against a
-    route that had dropped it.
+    Drives the real tailer with only its claim faked, reading `collapse` from `kwargs`, so a route
+    that stopped passing it fails.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent import session_events as session_events_module
@@ -1303,10 +1149,8 @@ class _FakeOwnerStore:
         # profile survive an eviction rather than a fake supplying what the column would (REV-14).
         self.profiles: dict[str, str | None] = {}
         self.created: dict[str, datetime] = {}
-        # The two facts a conversation list is built from. `titles` is written by the turn route on
-        # a session's first turn, which is also what makes a session *listable* — the real query
-        # derives last-activity from `session_messages` and drops a session with none, so here a
-        # session with no `updated` entry is one nobody has spoken in.
+        # The two facts a conversation list is built from. `titles` is written on a session's first
+        # turn; a session with no `updated` entry is one nobody has spoken in and is not listed.
         self.titles: dict[str, str] = {}
         self.updated: dict[str, datetime] = {}
 
@@ -1380,19 +1224,9 @@ class _SharedTurnClaims:
 async def test_a_turn_running_on_another_worker_is_waited_for_not_run_beside() -> None:
     """A turn already claimed by another process is waited for here, not admitted a second time.
 
-    The 409 guard was a `set` in one process's memory while the shipped chart runs the front door
-    at `minReplicas: 2`, so a double-submit that landed on the other replica was admitted and the
-    two turns interleaved their messages into one conversation thread — the exact corruption the
-    guard exists to prevent. The claim row is the only trace of the sibling process this one can
-    see, so seeding it *is* the other worker, faithfully: nothing else about that turn is
-    observable from here.
-
-    Since `D-2026-10-01-a-queued-message-waits-in-its-senders-request` the message is not refused:
-    it waits in the session's line, keeps asking the durable claim, and runs once the other
-    worker's turn lets go — never before, and without disturbing that worker's claim meanwhile.
-
-    Counterfactual: with only the per-process set this process has no record of the session's
-    running turn and answers at once.
+    The front door runs several replicas, so the durable claim row is the only trace of the
+    sibling's turn; seeding it stands in for the other worker. The message waits in the session's
+    line and runs only once that claim is released, without disturbing it.
     """
     claims = _SharedTurnClaims()
     app = _app(owner_store=_FakeOwnerStore(), turn_claims=claims)
@@ -1436,9 +1270,7 @@ def test_a_finished_turn_hands_its_cross_process_claim_back() -> None:
 class _UnreachableOwnerStore(_FakeOwnerStore):
     """An ownership registry whose every call fails the way a starved pool checkout does.
 
-    `chemclaw.core.db.connection` maps both `PoolTimeout` and an unreachable server to
-    `ConnectionError`, so this is exactly what a route sees when no pooled connection can be
-    handed over in time.
+    `chemclaw.core.db.connection` maps `PoolTimeout` and an unreachable server to `ConnectionError`.
     """
 
     async def record(self, session_id: str, owner: str | None, profile: str | None = None) -> None:
@@ -1446,17 +1278,7 @@ class _UnreachableOwnerStore(_FakeOwnerStore):
 
 
 def test_a_failed_postgres_checkout_sheds_with_503_and_is_counted() -> None:
-    """Creating a session when no connection can be got is a retryable 503, never a 500.
-
-    `create_session` writes the owner row before it returns an id, and under load 16 of those
-    writes raised `psycopg_pool.PoolTimeout` with no handler anywhere — HTTP 500, which tells a
-    client the request is broken and must not be retried. It is the opposite: the pool held 13 of
-    a permitted 64 connections and opened none, so the caller was waiting for a connection that
-    was free, and retrying is precisely the right move.
-
-    Counterfactual: without the `ConnectionError` handler this call raises out of the app and
-    `TestClient` re-raises it (a 500 in production), and the counter stays at 0.
-    """
+    """Creating a session when no connection can be got is a counted, retryable 503, never a 500."""
     before = METRICS.value("chemclaw_db_unavailable_total")
     app = _app(owner_store=_UnreachableOwnerStore())
     with TestClient(app) as client:
@@ -1477,13 +1299,8 @@ def _turn(client: TestClient, session_id: str, message: str) -> None:
 def test_session_list_is_owner_scoped_and_most_recently_used_first() -> None:
     """`GET /sessions` returns the caller's own sessions, most recently used first — nobody else's.
 
-    The list is how a client that lost its local state finds sessions it still owns; ids are
-    minted server-side, so one it forgot is otherwise unreachable while its history sits in the
-    store. Scoping is the security half: a session id is a capability, and listing someone else's
-    would hand it out.
-
-    Ordered by last activity rather than by creation, which is the order a conversation list is
-    actually read in — `first` is used again below and has to come back to the top.
+    A session id is a capability, so listing another owner's would hand it out. Ordered by last
+    activity, so `first` returns to the top when used again.
     """
     from chemclaw.api.auth import Principal, require_principal
 
@@ -1541,12 +1358,9 @@ def test_session_list_names_each_conversation_after_its_opening_question() -> No
 
 
 def test_session_list_omits_a_session_nobody_ever_spoke_in() -> None:
-    """A created-but-unused session is not a conversation, and must not be listed as one.
+    """A created-but-unused session is not listed as a conversation.
 
-    The companion UI mints the session on the first keystroke so the first message costs one
-    round-trip instead of two, which means every abandoned draft leaves an ownership row. Listing
-    those gave a client a column of empty conversations indistinguishable from ones whose
-    transcript had failed to load — both read as an empty array from outside.
+    The UI mints a session on the first keystroke, so abandoned drafts leave ownership rows.
     """
     from chemclaw.api.auth import Principal, require_principal
 
@@ -1567,16 +1381,10 @@ def test_session_list_omits_a_session_nobody_ever_spoke_in() -> None:
 def test_a_registry_that_cannot_resume_advertises_no_cursor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The route must not tell a caller to do the one thing it refuses.
+    """A registry that cannot resume advertises no `X-Next-Cursor`.
 
-    `X-Next-Cursor` used to be emitted on any full page, while `after=` is honoured only by a
-    `SessionOwnerStore` — so a deployment whose `create_app(owner_store=...)` registry is some
-    other implementation answered `200` with a cursor and `422` to the client that followed it.
-    Only reachable through that constructor, which is exactly what this fake registry is.
-
-    The page ceiling is lowered rather than 25 sessions being created: what makes a page "full" is
-    `service_max_listed_sessions`, and driving it from the setting is what keeps this test about
-    the branch rather than about a number.
+    Only a `SessionOwnerStore` honours `after=`. The page ceiling is lowered via
+    `service_max_listed_sessions` to make a page full.
     """
     from chemclaw.api.auth import Principal, require_principal
     from chemclaw.core.config import settings
@@ -1624,10 +1432,8 @@ def test_session_list_is_empty_without_a_durable_registry() -> None:
 def test_transcript_reads_back_the_stored_thread() -> None:
     """`GET /sessions/{id}/messages` returns the session's stored thread, so a reload restores it.
 
-    History is seeded through `app.state.history` — the very provider a real turn stores through —
-    rather than by running the fake agent, which yields updates without persisting anything. That
-    keeps the test on the route's own behavior (ownership gate, ordering, message flattening)
-    instead of re-implementing storage in a fake and asserting the fake.
+    Seeded through `app.state.history`, the provider a real turn stores through, so the test covers
+    the route's ownership gate, ordering and flattening.
     """
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1661,18 +1467,8 @@ def test_transcript_reads_back_the_stored_thread() -> None:
 def test_a_turn_writes_itself_into_the_transcript() -> None:
     """A turn that ran is readable afterwards — the half the seeded test cannot see.
 
-    `test_transcript_reads_back_the_stored_thread` seeds `session_messages` by calling
-    `save_messages` itself, deliberately and for a stated reason: it pins the route's ordering,
-    flattening and ownership gate without re-implementing storage in a fake. The cost is that it
-    asserts over rows it wrote itself, so it passes whether or not a turn writes anything — and for
-    a while none did. `session_messages` was
-    filled as a side effect of MAF's history provider; the graph keeps its thread in the
-    checkpointer and calls no such hook, so when the MAF branch went the table stopped being
-    written. Measured at the time: one complete turn, 0 rows, while the same session accumulated 8
-    checkpoint rows. The conversation was intact and the transcript route returned `[]`.
-
-    So this one seeds nothing. It posts a message, lets the turn run, and reads the route back —
-    which is the only shape of test that can fail when the writer disappears again.
+    The graph keeps its thread in the checkpointer, so the runner must write `session_messages`
+    itself. This test seeds nothing: it posts a message, lets the turn run, and reads the route.
     """
     from chemclaw.api.auth import Principal, require_principal
 
@@ -1857,22 +1653,10 @@ def test_turn_is_refused_over_budget(monkeypatch) -> None:  # type: ignore[no-un
 def test_a_concurrent_burst_cannot_overrun_the_budget_by_more_than_the_permits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The budget's documented overshoot bound is the permit count — it was the request count.
+    """A concurrent burst cannot overrun the budget by more than the permit count.
 
-    `BudgetTracker`'s docstring promises "up to `service_max_concurrent_turns` in-flight turns may
-    pass `check` before any of them `record`". That was a statement about a call site rather than
-    about the class, and the call site made it false: `check` ran at request entry, before
-    admission, so *every* turn in a burst passed it while the first was still streaming. Measured
-    with production-shaped values — 8 permits, 40 concurrent POSTs, a one-turn-per-user cap —
-    **40 turns ran and 40,000 tokens were booked, with no 429 at all**.
-
-    Here, scaled down so the assertion is a bound and not a race: one permit, a one-turn cap, ten
-    concurrent posts on ten sessions of one user. With the re-check after the permit, at most one
-    turn can be past both gates at once, so exactly one answers and the rest end with a
-    `budget_exhausted` error event on their own stream (D-166 — the stream is already open by
-    then, so a 429 is no longer available to say it).
-
-    Counterfactual: delete the re-check in `_turn_events` and this reports ten answers.
+    `check` is repeated after admission, so with one permit and a one-turn cap, exactly one of ten
+    concurrent posts answers and the rest end with a `budget_exhausted` event on their stream.
     """
     from chemclaw.api.auth import Principal, require_principal
     from chemclaw.core.config import settings
@@ -1962,9 +1746,8 @@ def test_live_sessions_never_exceeds_capacity() -> None:
 def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: str) -> _FakeAgent:
     """A fake whose turn for `blocked_message` parks on `gate` (concurrency tests).
 
-    The sync TestClient runs each request to completion before returning, so it cannot hold one
-    turn open while another is issued — these tests drive the app over httpx's ASGI transport on
-    a real event loop instead, with `started`/`gate` sequencing the overlap deterministically.
+    These tests use httpx's ASGI transport on a real loop, since the sync TestClient cannot hold
+    one turn open while issuing another.
     """
 
     class _GatedAgent(_FakeAgent):
@@ -1982,12 +1765,8 @@ def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: s
 async def test_concurrent_turn_on_same_session_waits_in_line() -> None:
     """While one turn runs, a second POST to the same session waits for it instead of running.
 
-    Two concurrent turns would drive `agent.run` against the same TurnSession at once,
-    interleaving two turns' messages into one conversation thread — so the second must not run
-    beside the first. It used to be shed with 409; since
-    `D-2026-10-01-a-queued-message-waits-in-its-senders-request` it joins the session's line and
-    runs when the first ends. A *third* message from the same sender while the second still waits is
-    the one that is refused: one place per sender per session.
+    Two concurrent turns would interleave messages in one thread. A third message from the same
+    sender while the second waits is refused: one place per sender per session.
     """
     gate = asyncio.Event()
     started = asyncio.Event()
@@ -2075,14 +1854,8 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
 def test_a_client_cancelled_mid_admission_leaves_a_turn_that_finishes_itself(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A disconnect during the admission wait detaches the client; the turn queues, runs, frees.
 
-    This test used to pin the opposite: the cancellation freed the session's slot immediately,
-    because a disconnect *was* the stop. Under
-    `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` the turn belongs to the chemist's request
-    rather than to the socket that carried it — so the abandoned turn keeps its claim (a 409 for
-    a concurrent second tab is *correct*: the session is genuinely busy), takes its permit when
-    capacity returns, runs to completion unwatched, and only then frees the slot. What must not
-    happen is the old leak this test was born for: a slot held forever by a turn that no longer
-    exists. The turn existing and finishing is what prevents that now.
+    The turn belongs to the request, not the socket, so it keeps its claim, runs unwatched, and only
+    then frees the slot; the slot is never held by a turn that no longer exists.
     """
     import contextlib
 
@@ -2123,17 +1896,10 @@ def test_a_client_cancelled_mid_admission_leaves_a_turn_that_finishes_itself(mon
 
 
 def test_a_session_with_a_turn_in_flight_is_pinned_against_eviction(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Capacity pressure must not evict a mid-turn session and mint a second live handle (A5).
+    """A session with a turn in flight is pinned against eviction from the live cache.
 
-    The live cache is a pure-capacity LRU with no notion of "in use": evicting a session does not
-    stop its running turn — the turn holds the `TurnSession` object directly — it makes the next
-    request rehydrate a brand-new handle over the same durable history, and the two then diverge
-    in `session.state`. So a session whose turn is in flight (an unexpired `active_turns` lease)
-    is pinned, and the cache briefly holds over capacity instead.
-
-    Counterfactual: drop the pin (`_LiveSessions.add` evicting purely by LRU) and the identity
-    assertion fails — the transcript read rehydrates a second handle while the first still
-    streams.
+    Evicting it would rehydrate a second handle over the same history while the first still
+    streams; the cache briefly holds over capacity instead.
     """
     from chemclaw.core.config import settings
 
@@ -2199,13 +1965,8 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
                     await asyncio.sleep(0.01)
             second = await client.get(f"/sessions/{session_id}/events")
             assert second.status_code == 429  # the per-user cap binds
-            # **And it carries `Retry-After`**, which decides how the shipped client renders it:
-            # `Chemclaw3_ui`'s `errorFromStatus` splits 429 on the header's *presence*, and without
-            # one it raises `budget_exhausted` — "the usage budget for this service is exhausted" —
-            # which locks the composer and which that module's own comment says nothing in the UI
-            # clears. This cap lifts the moment the client closes a stream, so both halves of that
-            # sentence would be false. Found while the turn route was being hardened against the
-            # identical mistake.
+            # It carries `Retry-After`: the UI treats a 429 without one as an exhausted budget and
+            # locks the composer, while this cap lifts as soon as a stream closes.
             assert second.headers.get("retry-after"), (
                 "a 429 with no Retry-After renders as a permanent budget_exhausted in the UI"
             )
@@ -2220,27 +1981,11 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
 
 
 def test_events_route_claims_a_named_set_of_kinds_and_not_every_kind(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The push-back route names the kinds it claims, and claiming is destructive.
+    """The push-back route claims a named set of kinds, because claiming is destructive.
 
-    The claim marks rows consumed atomically, so claiming every kind and filtering afterwards would
-    silently destroy events meant for another consumer. That is the invariant, and it is not the
-    same as any particular *number* of kinds — this test asserted `("job_completed", "job_failed")`
-    as a literal and so went red on the commit that legitimately added a third, which is a tripwire
-    doing its job and a name (`..._only_the_job_outcome_kinds`) that had stopped describing it.
-
-    Three are claimed, and each is here for its own reason:
-
-    * `job_completed` — a durable job that finished after its turn ended.
-    * `job_failed` — the same job dying. Until 2026-08-04 only the successful one could reach the
-      asker, so a failure left a "job started" promise standing for ever.
-    * `awaiting-answer` — a workflow that has stopped and is waiting for a person
-      (`D-2026-09-05-a-push-nobody-claims-is-not-a-push`). Written on every open, reminder and
-      expiry since the workflow existed, and claimed by nothing until that change.
-
-    The exact-set assertion is the point rather than a subset check: **`DIGEST_KIND` must stay
-    out.** Digests are claimed by `GET /digests` on a per-principal channel, and a session stream
-    that swept them up would consume them where nobody is rendering them — which, the claim being
-    destructive, is not a display bug but a deletion.
+    Claiming marks rows consumed, so claiming every kind would destroy other consumers' events. The
+    set is `job_completed`, `job_failed` and `awaiting-answer`, asserted exactly so `DIGEST_KIND`,
+    claimed per principal by `GET /digests`, stays out.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -2267,16 +2012,10 @@ def test_events_route_claims_a_named_set_of_kinds_and_not_every_kind(monkeypatch
 
 
 def test_a_failed_job_reaches_the_asker_with_its_reason(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A durable job that fails after its turn must say so, and say why.
+    """A durable job that fails after its turn reaches the asker with its reason.
 
-    Found live (2026-08-04): `compare_solvents` was launched, the turn told the chemist it was
-    running, and it failed ~30 s later on an unknown ALPB solvent name. `ConnectorJobWorkflow`
-    awaited its child with no failure path, so `notify_session_best_effort` was never reached and
-    no event of any kind was emitted — the "job started" promise stood forever and the reason was
-    reachable only by polling `get_durable_job_status` with an id nobody had kept.
-
-    The reason travels because a failure without one is the defect this repository has now met
-    three times: an outcome that says nothing is an invitation to assume the good one.
+    Otherwise the "job started" promise stands forever, and an outcome that says nothing is read as
+    success.
     """
     import chemclaw.api.app as app_module
     from chemclaw.agent.session_events import SessionEvent
@@ -2305,19 +2044,10 @@ def test_a_failed_job_reaches_the_asker_with_its_reason(monkeypatch) -> None:  #
 
 
 def test_a_session_with_no_plan_has_nothing_to_decide_on() -> None:
-    """`POST /plan/decision` must refuse a session that is proposing nothing.
+    """`POST /plan/decision` refuses a session that is proposing nothing, with 409.
 
-    The empty todo list hashes to a constant — the same string for every session in every
-    deployment — so a decision recorded against it is not a fact about this session's plan, and it
-    is one a rehydrated session (which has lost its todo state) proposes again for free. The route
-    recorded it anyway, with no emptiness check. (The CLI's `/approve` looked like it had one, and
-    did not: it guarded on `todo_titles` — the *display* list, which counts the launcher's
-    `awaiting-job:` rows — while recording against a hash that strips them, so a bookkeeping-only
-    session recorded the same useless approval there too. Both now ask `approvable_plan_hash`.)
-
-    409 rather than 422: the request is well-formed, it conflicts with the session's current state,
-    which is exactly what the sibling "the plan changed since it was shown" refusal means. The hash
-    posted here is the real one `GET /plan` reports, so this cannot pass by mismatching.
+    The empty plan hashes to a constant shared by every session, so a decision on it means nothing.
+    The hash posted is the real one `GET /plan` reports, so this cannot pass by mismatch.
     """
     with _client(_FakeAgent()) as client:
         session_id = client.post("/sessions").json()["session_id"]
@@ -2346,9 +2076,8 @@ def test_a_session_with_no_plan_has_nothing_to_decide_on() -> None:
 def test_every_session_scoped_route_is_ownership_gated() -> None:
     """Every route carrying a session id resolves ownership — a non-owner gets 404 on all of them.
 
-    Enumerates the app's routes rather than hardcoding today's two, so a future session-scoped
-    route that skips the `_resolve_session` gate fails here: the inventory assertion forces a
-    conscious update, and the behavioral sweep then proves the new route 404s for a non-owner.
+    Enumerates the app's routes, so a new session-scoped route forces an inventory update and is
+    then swept.
     """
     from fastapi.routing import APIRoute
 
@@ -2379,21 +2108,12 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         # is hung off a session at all: a ref is the SHA-256 of a result's own text, so it is
         # unguessable but not secret, and this gate — not the ref — is what says who may read it.
         ("/sessions/{session_id}/tool-results/{ref}", "GET"),
-        # The explicit stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop). Owner-scoped
-        # because cancelling someone else's running turn is exactly the interference the
-        # ownership gate exists to refuse — and 404 either way, so a stranger cannot learn
-        # whether a session is mid-turn.
+        # The explicit stop. Owner-scoped, since cancelling another's turn is interference; 404
+        # either way, so a stranger cannot learn whether a session is mid-turn.
         ("/sessions/{session_id}/turn/stop", "POST"),
-        # Deleting the conversation
-        # (`D-2026-08-27-a-session-list-is-a-cursor-and-a-session-is-deletable`). Owner-scoped
-        # through the *same* gate reading it is, deliberately: a caller who cannot read a session
-        # must not be able to delete it, and one gate cannot drift from itself. 404 either way, so
-        # a stranger cannot use it to learn which ids exist.
-        # Branching the conversation (`D-2026-08-29-an-iteration-cap-is-not-a-cost-cap`).
-        # Owner-scoped through the same gate reading it is, and for a stronger reason than the
-        # others: a fork *copies the parent's whole transcript* under a new id the caller then
-        # owns, so an ungated fork would be an unauthenticated read of somebody's entire session
-        # wearing the clothes of a create. 404 either way, like every route above it.
+        # Fork and delete go through the same gate as reading: a caller who cannot read a session
+        # must not delete it, and a fork copies the whole transcript, so ungated it would be a read.
+        # 404 either way, so a stranger cannot learn which ids exist.
         ("/sessions/{session_id}/fork", "POST"),
         ("/sessions/{session_id}", "DELETE"),
         # Who else may reach the session (`D-2026-09-27-in-a-shared-session-the-sender-governs`).
@@ -2402,17 +2122,13 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         ("/sessions/{session_id}/members", "GET"),
         ("/sessions/{session_id}/members/{actor}", "PUT"),
         ("/sessions/{session_id}/members/{actor}", "DELETE"),
-        # The session's line and the running turn's live view
-        # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A stranger is 404 on all
-        # three, so none of them says whether a turn is running or who is waiting; what a member may
-        # do on them is `tests/test_session_turn_queue.py`'s subject.
+        # The session's line and the running turn's live view. A stranger is 404 on all of them;
+        # `tests/test_session_turn_queue.py` covers what a member may do.
         ("/sessions/{session_id}/queue", "GET"),
         ("/sessions/{session_id}/queue/{ticket}", "DELETE"),
         ("/sessions/{session_id}/turn/stream", "GET"),
-        # The artefacts beside the chat
-        # (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). A stranger is 404 on
-        # every one, reads and writes alike, so none of them says whether an artefact exists; that
-        # a member may read *and* revise is `tests/test_exhibit_routes.py`'s subject.
+        # The artefacts beside the chat. A stranger is 404 on reads and writes alike;
+        # `tests/test_exhibit_routes.py` covers members.
         ("/sessions/{session_id}/exhibits", "GET"),
         ("/sessions/{session_id}/exhibits", "POST"),
         ("/sessions/{session_id}/exhibits/{exhibit_id}", "GET"),
@@ -2470,17 +2186,10 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
 def test_the_per_connector_health_gauge_actually_renders_a_series(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`chemclaw_connector_unhealthy` was declared, panelled, and bound by nothing.
+    """`chemclaw_connector_unhealthy` renders a series per connector.
 
-    A gauge *family* renders only what its bound source returns, so an unbound one contributes no
-    lines to `/metrics` at all — and the "Connector reachability" panel querying
-    `max by (connector) (chemclaw_connector_unhealthy)` was therefore a graph that could never
-    draw. Empty for a healthy fleet and empty for a broken one is exactly the failure the
-    unlabelled count beside it exists to end, reproduced one level up by the metric that was
-    supposed to say *which*.
-
-    Asserted over the rendered exposition rather than over the binding, because the binding is not
-    the thing that was missing — the series was.
+    An unbound gauge family renders nothing, so the panel could never draw. Asserted over the
+    rendered exposition.
     """
     from chemclaw.api import app as service_app
     from chemclaw.connectors.health import ConnectorHealth
@@ -2510,19 +2219,10 @@ def test_the_per_connector_health_gauge_actually_renders_a_series(
 def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`/readyz` is outside `require_principal` by necessity, so its body is a public document.
+    """`/readyz` does not name the connector fleet to an unauthenticated caller.
 
-    A kubelet cannot present a token, which is why the route is open and why that is right. What
-    the body carried was more than a readiness verdict: the name of every enabled connector and
-    which of them was currently down — an inventory of the deployment's internal capability
-    surface, plus a live signal of when a dependency is degraded, to anyone who can reach the pod
-    or the Route (which declares no `spec.path`, so `/readyz` is reachable on the external host).
-
-    The verdict and a count answer every question a probe or an operator's `curl` actually asks;
-    the names stay where they were already accepted as scrape-visible —
-    `chemclaw_connectors_unhealthy` on `/metrics`, and the per-connector WARNING each failed probe
-    already logs. The chart's own comment accepts "operational reconnaissance" for `/metrics`
-    counts; it never argued it for names.
+    The route is open by necessity, so its body is public; it carries the verdict and a count. Names
+    stay on `/metrics` and in the per-connector WARNING logs.
     """
     from chemclaw.api import app as service_app
     from chemclaw.connectors.health import ConnectorHealth
@@ -2549,24 +2249,11 @@ def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
 async def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`reserved` is the front door's claim about its own caps, and it charged a turn one thread.
+    """The thread pool covers the tool calls one admitted turn can fan out.
 
-    `install_default_executor`'s contract is "how many threads this process's *own* admission caps
-    can occupy simultaneously". A turn's tool batch runs under LangGraph's `max_concurrency` =
-    `agent_max_parallel_tool_calls` (`agent/state.turn_config`), and every tool body both offloads
-    (`asyncio.to_thread` in `graph_tools`/`protocol_tools`) and borrows a pooled connection — so an
-    admitted turn holds up to that many threads, not one. Passing
-    `service_max_concurrent_turns + attachment_max_concurrent_parses` therefore claimed 8 where the
-    caps allow 64, and `service_thread_pool_headroom` — documented as "reserved for the calls that
-    are microseconds long and must never wait: token validation, a readiness probe, an SSE
-    reconnect" — was not reserved at all. Measured on the real app with a model emitting 8 parallel
-    tool calls across 8 concurrent turns: peak 18 concurrent `to_thread` bodies against a pool of
-    18, headroom included. Timed directly at that demand, one short offload waited **854.1 ms**
-    against a pool of 18 and **0.6 ms** against the pool this arithmetic asks for. That is
-    precisely the regression `core/executor.py` was written to close, reopened one factor up.
-
-    Asserted against the product read from settings — the specification — rather than against the
-    expression in `app.py`, and observed on the argument the real lifespan actually passes.
+    Each admitted turn may hold up to `agent_max_parallel_tool_calls` threads, so the reserved count
+    is turns times that, plus parses, before `service_thread_pool_headroom` is added. Asserted
+    against the product read from settings, on the argument the real lifespan passes.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -2613,20 +2300,11 @@ def _held_keepalive_sockets(port: int, count: int) -> list[socket.socket]:
 
 
 def test_the_connection_limit_refuses_the_liveness_probe_above_the_app() -> None:
-    """The premise `service_max_connections`'s cross-check rests on, driven rather than believed.
+    """uvicorn's connection limit refuses `/healthz` along with everything else, above the app.
 
-    uvicorn's `--limit-concurrency` (`deploy/entrypoint.sh`) is answered in `h11_impl`, *above* the
-    ASGI app, and it counts open sockets including idle keep-alives — so at the limit `/healthz` is
-    refused with everything else and the kubelet SIGKILLs a pod that is merely busy, killing every
-    turn in flight on it. Nothing in this suite could see that, because a `TestClient` request never
-    reaches a real transport.
-
-    Driven on a bare ASGI app rather than on `create_app`, deliberately: the claim under test is a
-    property of the *transport*, and mixing the front door's own startup into it would leave a
-    failure here ambiguous between the two. What makes it matter to this repository is the second
-    half — `Settings` refuses a configuration whose own stream and turn caps could reach this bound,
-    so the shipped front door cannot arrive here by doing what it is configured to do. If uvicorn
-    ever exempts a path from the limit, this test fails and that cross-check can be relaxed.
+    It counts open sockets, including idle keep-alives, so at the limit a busy pod fails liveness.
+    Driven on a bare ASGI app since this is a transport property; `Settings` cross-checks the caps
+    so the shipped front door cannot reach it. If uvicorn exempts a path, relax that check.
     """
 
     async def app(scope: Any, receive: Any, send: Any) -> None:
@@ -2650,10 +2328,8 @@ def test_the_connection_limit_refuses_the_liveness_probe_above_the_app() -> None
 
     held: list[socket.socket] = []
     try:
-        # `limit - 1`, because the refusal is `len(connections) >= limit` and the *arriving*
-        # connection is already in that set — so the usable socket capacity is one below the number
-        # an operator writes down. `service_connection_headroom` absorbs that off-by-one many times
-        # over, which is the point of having a headroom term at all rather than an exact equality.
+        # `limit - 1`: the arriving connection is already counted, so usable capacity is one below
+        # the configured number; `service_connection_headroom` absorbs that.
         held = _held_keepalive_sockets(port, limit - 1)
         fresh = socket.create_connection(("127.0.0.1", port), timeout=5)
         held.append(fresh)
@@ -2670,20 +2346,14 @@ def test_the_connection_limit_refuses_the_liveness_probe_above_the_app() -> None
 
 
 def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() -> None:
-    """The other half: the shipped configuration cannot walk into the 503 above.
+    """The socket budget cannot be reached by the stream and turn caps it is meant to cover.
 
-    `service_max_event_streams_total` was 200 against a `service_max_connections` of 256 — 78% of
-    the transport bound consumed by one documented, supported state — and *nothing cross-checked
-    them*, in a validator that carefully cross-checks fleet turns, fleet Postgres connections and
-    fleet calc requests. One pod lost, the survivor takes all 200 streams, `/readyz` drains at ~30 s
-    and `/healthz` SIGKILLs at ~60 s: a cascade rather than a queue.
+    Otherwise a lost replica pushes all streams onto the survivor and liveness kills it.
     """
     from chemclaw.core.config import Settings
 
-    # A turn is its sender's stream plus the participants following it
-    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`); waiting messages are charged
-    # per process, wherever the turn ahead of them runs, at the bound the turn route enforces
-    # (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`).
+    # A turn is its sender's stream plus its watchers; waiting messages are charged per process at
+    # the bound the turn route enforces.
     per_turn = 1 + settings.service_turn_max_watchers
     waiters = settings.service_max_concurrent_turns * settings.service_turn_queue_max
     assert (

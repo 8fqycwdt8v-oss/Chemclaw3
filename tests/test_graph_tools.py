@@ -46,12 +46,9 @@ def test_find_notes_matches_tag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_find_notes_matches_all_words_not_a_literal_phrase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every word in the query must appear somewhere in the note — not as one exact phrase.
+    """Every word in the query must appear somewhere in the note, not as one exact phrase.
 
-    Regression guard: a natural multi-word question ("target reaction") used to require that
-    exact run of text to appear verbatim, so it missed a note whose words are present but not
-    adjacent in that order — a real live-e2e finding where the model then reported "no data"
-    even though the corpus had it.
+    A multi-word question must find a note whose words are present but not adjacent.
     """
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -65,12 +62,9 @@ def test_find_notes_matches_all_words_not_a_literal_phrase(
 def test_find_notes_returns_nothing_when_one_word_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """All-words matching widens rather than dropping to nothing — and says it widened.
+    """All-words matching widens rather than dropping to nothing, and says it widened.
 
-    A query with one absent word used to return `[]`, while the sweep's graph leg widened to
-    partial matches over the same corpus — so the two tools the prompt chains disagreed about one
-    question. The partial hit now comes back marked `widened`, which is the honest version of
-    both behaviours.
+    The partial hit comes back marked `widened`, consistent with the sweep's graph leg.
     """
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -92,14 +86,10 @@ def test_expand_note_returns_neighbors(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_expand_unknown_note_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Expanding an unknown id is a clear error (G4), and a `ChemclawError` specifically.
+    """Expanding an unknown id is a clear `ChemclawError`.
 
-    `ChemclawError` (a `ValueError` subclass) is chemclaw's own always-safe "bad input"
-    contract, so `chemclaw.agent.tool_authz.surface_domain_errors` surfaces this message to the
-    model
-    verbatim instead of MAF's opaque generic failure — the common real cause is a citation to a
-    note still pending PR-gate review, which the chemist can otherwise not distinguish from a
-    typo or a deleted note.
+    `ChemclawError` (a `ValueError` subclass) is the always-safe bad-input contract, so
+    `chemclaw.agent.tool_authz.surface_domain_errors` shows the message to the model verbatim.
     """
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -148,13 +138,10 @@ def _seed_computed_note(tmp_path: Path) -> None:
 def test_the_calculation_a_claim_rests_on_reaches_the_reader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`calc_refs` is a citation, and a citation nobody can read is not one.
+    """The calculation a claim rests on reaches the reader.
 
-    `record_knowledge_note` tells the model to file these keys "so a stale calculation can be
-    traced to the conclusions drawn from it". Every reader of a note — the model through
-    `expand_note`/`find_notes`, the chemist through `GET /notes/{id}`, which returns this same
-    `NoteView` — went through `_ref`, and `_ref` dropped both fields. So the one field on a
-    computed note that says what the number came from was write-only.
+    `calc_refs` is a citation: `expand_note`, `find_notes` and `GET /notes/{id}` all build through
+    `_ref`, which must carry it so a stale calculation can be traced to its conclusions.
     """
     _seed_computed_note(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -168,17 +155,11 @@ def test_the_calculation_a_claim_rests_on_reaches_the_reader(
 def test_a_notes_frontmatter_reaches_the_model_with_no_live_delimiter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The body is framed and the frontmatter beside it was not — one message, two channels.
+    """A note's frontmatter reaches the model with no live delimiter.
 
-    `tags`, `source` and `compound_smiles` are the fields `Note` leaves unconstrained, so a
-    delimiter written into any of them arrived **live** in the same tool result as the envelope it
-    closes — through `find_notes`, through `expand_note`'s subject note and through every
-    neighbour, all of which build through `_ref`. `find_knowledge_gaps` reads the same tags, and its
-    `dangling_links` are `[[wikilink]]` targets, whose pattern admits `<`.
-
-    Asserted on the *reference* rather than on the whole view: the body's own closing delimiter is
-    the envelope working, so a search of the serialized view would pass on the note that has no
-    frontmatter at all.
+    `tags`, `source` and `compound_smiles` are unconstrained and travel in the same tool result as
+    the framed body, through `find_notes`, `expand_note` and every neighbour. Asserted on the
+    reference, since the body's own closing delimiter is the envelope working.
     """
     from chemclaw.agent.framing import ENVELOPE_TAG
     from chemclaw.agent.graph_tools import find_knowledge_gaps
@@ -314,9 +295,7 @@ def _seed_playbook(tmp_path: Path, **frontmatter: str) -> None:
 def _submitted(submission: NoteWrite, tmp_path: Path) -> dict[str, Note]:
     """Parse every file in a submission back off disk, keyed by note id.
 
-    Round-tripping through the parser rather than reading the model in memory is the point: what
-    a reviewer merges is these bytes, so a correction that only exists in the object graph is not
-    a correction.
+    What is written is these bytes, so a correction only in the object graph is not a correction.
     """
     parsed = {}
     for index, file in enumerate(submission.files):
@@ -330,12 +309,10 @@ def _submitted(submission: NoteWrite, tmp_path: Path) -> dict[str, Note]:
 def test_record_failure_records_a_refutation_conflict_detection_can_see(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The loop that closes: a chemist's report becomes a note that flags the claim it refutes.
+    """`record_failure` writes a refutation that conflict detection can see.
 
-    Asserted through `find_conflicts` over the merged corpus rather than by inspecting the note's
-    fields, because "the graph now knows this is disputed" is the behaviour — a `failure-mode` note
-    whose edge conflict detection cannot read would satisfy every structural check and change
-    nothing a chemist ever sees.
+    Asserted through `find_conflicts` over the corpus: a `failure-mode` note whose edge conflict
+    detection cannot read would pass every structural check and change nothing.
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -383,11 +360,10 @@ def test_record_failure_attributes_the_report_to_the_authenticated_user(
 def test_record_failure_leaves_the_refuted_note_current_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reporting a claim wrong does not mean it was true until today, so nothing is retired.
+    """`record_failure` leaves the refuted note current by default.
 
-    `valid_to` is a valid-time bound: closing a never-true claim would assert it held up to the
-    reporting date, and would drop it out of the retrieval-time conflict scan that is the only
-    thing marking it disputed. So the default submission is the failure note alone.
+    `valid_to` is a valid-time bound: closing a never-true claim would assert it held until today
+    and drop it out of the conflict scan that marks it disputed.
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -403,11 +379,9 @@ def test_record_failure_leaves_the_refuted_note_current_by_default(
 def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The correction half: the superseded claim stops reading as current, in one reviewable PR.
+    """`record_failure` can retire a claim that stopped holding, in the same submission.
 
-    Both files ride together so a human signs off on the refutation and the retirement as the one
-    decision they are. The amended note keeps its own content and gains the end date plus a link to
-    the note that ended it.
+    The amended note keeps its content and gains the end date plus a link to the note that ended it.
     """
     _seed_playbook(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -430,11 +404,9 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
     assert not amended.is_current(date(2026, 6, 1))  # and no longer reads as current fact
     assert "Use 5 mol% Pd" in amended.body  # the original claim is kept, never edited away
     assert failure.id in amended.outgoing_links()  # and points at what ended it
-    # The retirement must OVERWRITE: the refuted note already exists on the base branch, and a file
-    # marked overwrite=False (a `dependencies` entry) is skipped by `_write_and_push` when it exists
-    # on base — so the retirement was silently dropped on the real git path and the refuted claim
-    # stayed served as current. `superseded` marks it overwrite=True. Asserted on the submission
-    # because the FakeWriter never runs the skip, which is why this bug survived the old test.
+    # The retirement must overwrite: the refuted note already exists, and a file marked
+    # `overwrite=False` (a dependency) is skipped when present. Asserted on the submission because
+    # the fake writer never runs that skip.
     retirement_file = next(f for f in fake.writes[0].files if f.path.endswith("playbook-pd.md"))
     assert retirement_file.overwrite is True
 
@@ -442,11 +414,10 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
 def test_record_failure_refuses_to_reclose_an_already_retired_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Re-closing would extend a closed note's validity and append the marker twice — so it says so.
+    """Re-closing an already retired note is refused, naming the date that holds.
 
-    Refused rather than quietly skipped. Both dates came from a person, and dropping one of them
-    is the same silent correction `close_refuted_note` already refuses when the window ends before
-    it starts; the message names the date that already holds so the chemist can pick.
+    Both dates came from a person; extending the validity or dropping one silently would be a
+    correction nobody made.
     """
     _seed_playbook(tmp_path, valid_to="2025-01-01")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -534,16 +505,11 @@ def _seed_typed(tmp_path: Path) -> None:
 def test_expand_note_reports_the_typed_edge_and_its_direction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A neighbour that contradicts or supersedes this note arrives legible as one.
+    """`expand_note` reports each neighbour's typed edge and its direction.
 
-    D-134 put `rel` on every edge and `_assemble_graph` has carried it since; no reader in this
-    repository read it. So `record_failure` wrote a `contradicts` edge for the express purpose that
-    a refuted note "arrives marked as disputed", and `expand_note` returned that neighbour
-    indistinguishable from an ordinary citation.
-
-    Direction is asserted separately because it is the claim: `relations_in` on `playbook-old` says
-    the *neighbours* supersede and contradict *it*, and the opposite reading is a different fact
-    about which note is current.
+    A neighbour that contradicts or supersedes this note must be legible as one, not as an ordinary
+    citation. Direction is asserted separately: `relations_in` on `playbook-old` says the neighbours
+    supersede and contradict it, the opposite fact from the reverse reading.
     """
     _seed_typed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
@@ -598,11 +564,9 @@ def test_expand_note_two_hop_neighbour_asserts_no_relation(
 def test_find_notes_ignores_a_dangling_link_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sweep is over notes, so an id nothing defines can never be returned as a match.
+    """`find_notes` never returns a dangling link target as a match.
 
-    `find_notes` used to iterate the assembled graph's nodes, which include link targets that have
-    no note behind them; they were skipped one line later, so this pins the behaviour rather than a
-    change to it — and pins that reading `load_notes` instead of `build_graph` kept it.
+    The sweep is over notes, not graph nodes, which include link targets with no note behind them.
     """
     (tmp_path / "r.md").write_text(
         "---\nid: reaction-r\ntype: reaction\ntags: [target]\n---\nrests on [[compound-pending]]\n",
@@ -637,19 +601,11 @@ def test_find_notes_truncates_in_id_order(tmp_path: Path, monkeypatch: pytest.Mo
 def test_find_notes_says_whether_there_was_a_corpus_to_miss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Three different answers rendered byte-identically, and one of them is an outage.
+    """`find_notes` says whether there was a corpus to miss.
 
-    Measured: on a zero-note corpus, `find_notes("aspirin")`, `find_notes("")` and a genuine miss
-    over a one-note corpus all returned `{'matches': [], 'total_matches': 0, 'widened': False}`.
-    "We have no note on aspirin" and "there is no knowledge graph on this deployment" are not the
-    same statement, and the honest form already existed one module away — `gather_evidence` reports
-    `sources_skipped={'graph': 'no notes found under <path>'}` and `find_knowledge_gaps()` already
-    reports `total_notes: 0`.
-
-    The tool's docstring did say "an empty result means not even one term matched — it does not
-    mean the topic is absent from the graph", which is the docstring-only pattern the verdict field
-    exists to end: read once when the tool is defined, absent from the payload that sits in the
-    context window when the answer is written.
+    "No note on aspirin", an empty query, and "no knowledge graph on this deployment" must not
+    render identically; the verdict sits in the payload the answer is written from, like
+    `gather_evidence`'s `sources_skipped` and `find_knowledge_gaps`'s `total_notes`.
     """
     # Two directories rather than one seeded halfway through: `load_notes` caches behind a stat
     # fingerprint whose mtime resolution is coarser than this test, so writing into the directory
@@ -686,22 +642,10 @@ def test_find_notes_says_whether_there_was_a_corpus_to_miss(
 
 
 def test_no_docstring_on_the_write_path_still_promises_a_human_reviewer() -> None:
-    """The write path commits directly, and three docstrings said in the present tense it did not.
+    """No docstring on the write path still promises a human reviewer.
 
-    Measured: `record_failure` → `record_note` → `GitNoteWriter` commits, with nothing between the
-    tool returning and the note being served as current evidence. Meanwhile
-    `memory/failure.py`'s module docstring said "It writes through the PR-gate like everything
-    else", `failure_note`'s `Returns:` said the note "is *proposed*, never written… a human decides
-    whether the graph accepts the correction", `get_note`'s 404 paragraph named "a note still
-    awaiting its PR-gate review" as the commonest cause of an unknown id, and this module's
-    `record_failure` told a reader "the reviewer signs off". Every one of them is a claim about a
-    commit (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`), and each is now false.
-
-    An **absence** test, on the pattern the empty `audit_events.agent` column left behind: prose is
-    the only place this defect can live, so the assertion has to be that the sentence is gone. The
-    phrases are the measured ones rather than the word "gate", because the honest sentences here
-    *do* name the gate — in the past tense, saying what it used to explain and why it no longer
-    can.
+    `record_failure` → `record_note` → `GitNoteWriter` commits directly. An absence test over the
+    specific phrases that claimed review, since prose is the only place this defect can live.
     """
     root = Path(__file__).resolve().parent.parent / "src" / "chemclaw"
     claims = {
@@ -743,11 +687,10 @@ def _hit_id(store: InMemoryFingerprintStore, query: str) -> str:
 def test_a_molecule_indexed_from_an_eln_run_expands_although_no_note_was_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Found live: thirteen `expand_note` calls on `similar_molecules` ids, thirteen "no note".
+    """A molecule indexed from an ELN run expands although no note was written.
 
-    The id comes from the search itself rather than from `compound_id` here, so the test is about
-    the ids the tool really returns. The view is the compound note the ingest would have written,
-    and it says, outside the framed body, that nobody wrote it.
+    The id comes from the search itself. The view is the compound note the ingest would have
+    written, and says, outside the framed body, that nobody wrote it.
     """
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))

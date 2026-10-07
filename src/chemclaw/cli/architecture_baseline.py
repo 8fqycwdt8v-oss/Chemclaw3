@@ -71,14 +71,14 @@ def _prose_by_package() -> dict[str, dict[str, float]]:
         out[package] = {"code_lines": code, "prose_share": round(prose / max(prose + code, 1), 3)}
         grand = [grand[0] + doc, grand[1] + comment, grand[2] + code]
     prose = grand[0] + grand[1]
-    out["__total__"] = {"code_lines": grand[2], "prose_share": round(prose / (prose + grand[2]), 3)}
+    share = round(prose / max(prose + grand[2], 1), 3)
+    out["__total__"] = {"code_lines": grand[2], "prose_share": share}
     return out
 
 
 def _agent_build() -> dict[str, Any]:
     """Time the first and a steady-state compile, and count the root graph's middleware."""
     import deepagents.graph as deep_graph
-    import langchain.agents as lc_agents
     from langchain_core.language_models.fake_chat_models import (
         GenericFakeChatModel,
     )
@@ -92,13 +92,13 @@ def _agent_build() -> dict[str, Any]:
             return self
 
     seen: list[int] = []
-    original = deep_graph.create_agent
+    original = getattr(deep_graph, "create_agent")  # noqa: B009 - not an explicit export
 
     def _counting(*args: Any, **kwargs: Any) -> Any:
         seen.append(len(kwargs.get("middleware", ())))
         return original(*args, **kwargs)
 
-    deep_graph.create_agent = _counting
+    setattr(deep_graph, "create_agent", _counting)  # noqa: B010
     try:
         timings = []
         for _ in range(4):
@@ -107,8 +107,7 @@ def _agent_build() -> dict[str, Any]:
                 build_langgraph_agent(_Model(messages=iter([])))
             timings.append(round(time.perf_counter() - start, 3))
     finally:
-        deep_graph.create_agent = original
-    del lc_agents
+        setattr(deep_graph, "create_agent", original)  # noqa: B010
     return {
         "first_build_s": timings[0],
         "steady_build_s": min(timings[1:]),
@@ -154,8 +153,8 @@ def main() -> None:
     result = {
         "date": date.today().isoformat(),
         "import_s": {
-            "chemclaw.api.app_first": _import_seconds("chemclaw.api.app"),
-            "chemclaw.api.app_second": _import_seconds("chemclaw.api.app"),
+            "api_app_cold_first": _import_seconds("chemclaw.api.app"),
+            "api_app_cold_second": _import_seconds("chemclaw.api.app"),
         },
         "agent_build": _agent_build(),
         "prose": _prose_by_package(),

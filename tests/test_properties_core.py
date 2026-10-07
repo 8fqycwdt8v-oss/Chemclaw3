@@ -1,27 +1,10 @@
-"""Property-based tests over the pure cores — the invariants, not a handful of examples.
+"""Property-based tests over the pure cores: the invariants, not a handful of examples.
 
-Every test in this repository was example-based until now, and the gap that leaves is specific:
-an example proves a function works on the input someone thought of. These modules are all
-*identity* and *bounding* primitives — a hash that keys the calculation cache, an LRU that bounds
-four maps whose unbounded growth has been fixed three times, a citation parser the PR-gate and the
-answer verifier both read with. Their contracts are universally quantified ("equivalent inputs
-collapse to the same key", "never exceeds capacity"), so they are exactly the shape a generator
-tests better than a person does.
-
-Deliberately scoped to the pure layer: no database, no network, no Temporal. A property test whose
-failures need a live stack to reproduce is a flaky test, and the counterexample — the whole point —
-becomes unusable. `hypothesis` prints and replays the minimal failing input, which is the artefact
-worth having here.
-
-Three more invariants joined the beachhead (T11), each one a claim some module already makes in
-prose and no test quantified: the note serialization round-trip that `kg/render.py`'s docstring
-states as an equation, the PR-gate submission's dedup, and the budget tracker's monotonicity. The
-round-trip writes to a `tempfile` — still no service, and the counterexample still replays.
-
-The fourth candidate, "the in-memory and Postgres `find` backends agree", is deliberately *not*
-here: it needs a database, which is the one thing this file will not take.
-`tests/test_postgres_store.py::test_find_matches_the_in_memory_backend` compares them on fixed
-fixtures, and `docs/planning/BACKLOG.md` carries the generated version.
+These are identity and bounding primitives (the cache-key hash, the bounded LRU, the citation
+readers) plus the note round trip, the record write order and the budget tracker's monotonicity,
+whose contracts are universally quantified. Scoped to the pure layer, no database or network, so
+`hypothesis` can replay the minimal counterexample. The in-memory/Postgres `find` agreement needs
+a database and lives in `tests/test_postgres_store.py`.
 """
 
 from __future__ import annotations
@@ -72,11 +55,10 @@ def test_stable_hash_is_deterministic(payload: object) -> None:
 
 @given(st.dictionaries(st.text(max_size=12), st.integers(), max_size=8))
 def test_stable_hash_ignores_mapping_order(mapping: dict[str, int]) -> None:
-    """Key order must not change the key. `sort_keys=True` is the mechanism; this is the contract.
+    """Key order must not change the key.
 
-    It matters because payloads reach `stable_hash` from JSON bodies, pydantic dumps and hand-built
-    dicts, and nothing upstream promises an order. Two chemists asking the identical question
-    through different surfaces must land on one cache entry.
+    Payloads reach `stable_hash` from JSON bodies, pydantic dumps and hand-built dicts with no
+    guaranteed order, and identical questions must share one cache entry.
     """
     reversed_mapping = dict(reversed(list(mapping.items())))
     assert stable_hash(mapping) == stable_hash(reversed_mapping)
@@ -86,10 +68,8 @@ def test_stable_hash_ignores_mapping_order(mapping: dict[str, int]) -> None:
 def test_stable_hash_separates_distinct_values(left: object, right: object) -> None:
     """Distinct canonical forms give distinct keys, at the width the module ships.
 
-    Stated over the *canonical form* rather than over the Python value, because that is what the
-    function actually hashes — `1` and `1.0` and `True` are not distinguishable here and the
-    docstring does not claim they are. Asserting more than the code promises is how a test becomes
-    a fiction about the contract.
+    Stated over the canonical form, which is what is hashed: `1`, `1.0` and `True` are not
+    distinguished, and the docstring does not claim they are.
     """
     assume(
         json.dumps(left, sort_keys=True, separators=(",", ":"), default=str)
@@ -110,11 +90,10 @@ def test_stable_hash_width_is_what_was_asked_for(chars: int) -> None:
 )
 @settings(max_examples=200)
 def test_bounded_lru_never_exceeds_capacity(capacity: int, keys: list[int]) -> None:
-    """The bound holds for every insertion order, which is the only thing it is for.
+    """The count bound holds for every insertion order.
 
-    Four call sites depend on it — the front door's session and budget maps, the rate limiter's
-    per-principal buckets, and the agent's attachment store — and the growth bug it exists to
-    prevent has been fixed three times in this codebase, most recently for metric label series.
+    The front door's session and budget maps, the rate limiter's buckets and the attachment store
+    depend on it.
     """
     lru: BoundedLru[int, int] = BoundedLru(capacity)
     for key in keys:
@@ -151,14 +130,11 @@ def test_bounded_lru_keeps_what_it_last_touched(capacity: int, keys: list[int]) 
 def test_bounded_lru_never_exceeds_its_weight_bound(
     max_weight: int, items: list[tuple[int, int]]
 ) -> None:
-    """The byte bound holds for every insertion order, the same property the count bound has.
+    """The weight bound holds for every insertion order.
 
-    The attachment store needs this one and not the count: its entries differ in size by orders of
-    magnitude, so a map that is under its entry cap can still be holding twenty times the pod.
-
-    Every generated value fits the budget on its own (`max_weight >= 32`, the widest weight), which
-    is what makes this the *exact* bound rather than a bound with an exception in it. The entry that
-    does not fit is its own case below, because what the map does then is a different decision.
+    The attachment store's entries differ in size by orders of magnitude, so an entry cap alone does
+    not bound memory. Every generated value fits on its own (`max_weight >= 32`), making this the
+    exact bound; the oversized entry is its own case below.
     """
     lru: BoundedLru[int, int] = BoundedLru(
         1_000_000, weight=lambda value: value, max_weight=max_weight
@@ -171,16 +147,9 @@ def test_bounded_lru_never_exceeds_its_weight_bound(
 def test_bounded_lru_does_not_empty_itself_for_an_entry_that_cannot_fit() -> None:
     """An entry heavier than the whole budget is held, and nothing is evicted to make room for it.
 
-    The entry just put is never the victim, so when it alone exceeds `max_weight` no eviction can
-    reach the bound — and the loop that ran until the bound was met or no candidate was left did
-    neither: measured, ten entries destroyed and the map still five times over budget. Paying every
-    other caller's data for a bound that stays breached is strictly worse than holding the one entry
-    alone, which is what the attachment store's shipped defaults made reachable
-    (`document_max_expanded_bytes` exceeds `attachment_store_max_bytes`, so one chemist's upload
-    evicted every other session's files).
-
-    The excess is not permanent, which is the other half of the bound: the next entry that *can*
-    fit resumes eviction and takes the oversized one with it.
+    The entry just put is never the victim, so evicting others cannot meet the bound and would only
+    destroy every other caller's data. The next entry that does fit resumes eviction and takes the
+    oversized one with it.
     """
     lru: BoundedLru[str, int] = BoundedLru(1_000_000, weight=lambda value: value, max_weight=100)
     for index in range(10):
@@ -213,12 +182,10 @@ def test_bounded_lru_refuses_half_a_weight_bound() -> None:
     st.lists(st.text(alphabet="abcdefghijklmnopqrstuvwxyz-", min_size=1, max_size=12), max_size=6)
 )
 def test_cited_ids_finds_every_wikilink_it_is_given(ids: list[str]) -> None:
-    """Every `[[id]]` written is an id returned — the citation contract, in both directions.
+    """Every `[[id]]` written is an id returned by `cited_ids`.
 
-    `cited_ids` is read by the note schema, the answer verifier and the live eval's citation score.
-    A local regex once disagreed with it and reported a clean record for an answer whose nine
-    citations were every one of them dangling, so "one reader for one syntax" is enforced by using
-    the production function — and this pins that the production function sees what it is shown.
+    The note schema, the answer verifier and the eval citation score all read with this one
+    function, so it must see what it is shown.
     """
     body = " ".join(f"[[{note_id}]]" for note_id in ids)
     assert set(cited_ids(body)) == set(ids)
@@ -226,11 +193,10 @@ def test_cited_ids_finds_every_wikilink_it_is_given(ids: list[str]) -> None:
 
 @given(st.text(max_size=200))
 def test_citation_readers_never_raise_on_arbitrary_prose(body: str) -> None:
-    """Neither reader may throw on text a model wrote — they run on every answer.
+    """Neither citation reader raises on arbitrary text a model wrote.
 
-    An exception here is not a parse failure, it is a turn that dies after the model has already
-    produced its answer. The generated corpus includes unbalanced brackets, which is exactly the
-    shape a truncated stream produces.
+    They run on every answer, so an exception would kill the turn after the answer exists. Generated
+    text includes unbalanced brackets, the shape of a truncated stream.
     """
     assert isinstance(cited_ids(body), list)
     assert isinstance(mentioned_ids(body), list)
@@ -238,18 +204,11 @@ def test_citation_readers_never_raise_on_arbitrary_prose(body: str) -> None:
 
 @given(st.text(max_size=120))
 def test_both_citation_readers_dedupe_and_keep_first_seen_order(body: str) -> None:
-    """The one contract both readers actually share, stated by both docstrings.
+    """Both citation readers dedupe and keep first-seen order.
 
-    Not a subset relation — the first version of this test asserted `cited_ids ⊆ mentioned_ids`,
-    which is a fiction: they read *different syntaxes* to answer different questions. `cited_ids`
-    reads `[[wikilinks]]`, what an author claims; `mentioned_ids` reads what a tool payload
-    contains, what the turn actually retrieved. Their own docstrings say so, and asserting more
-    than the code promises is how a test becomes a story about the contract rather than a check on
-    it.
-
-    What they do share is normalisation: deduped, first-seen order preserved. That is load-bearing
-    — the grounding score is a set difference between them, and a reader that reordered or
-    duplicated would move the number without any behaviour changing.
+    They read different syntaxes (`cited_ids` wikilinks, `mentioned_ids` tool payloads), so no
+    subset relation holds. The shared normalisation matters because the grounding score is a set
+    difference between them.
     """
     for reader in (cited_ids, mentioned_ids):
         ids = reader(body)
@@ -264,20 +223,10 @@ _SLUGS = st.from_regex(r"\A[a-z0-9][a-z0-9._-]{0,20}\Z").filter(
     lambda slug: ".." not in slug and not slug.endswith(".") and not slug.endswith(".lock")
 )
 
-# Bodies are generated **stripped and carriage-return-free**, and both exclusions are findings
-# rather than convenience. `python-frontmatter` strips the content it parses, so a body of `" "`
-# comes back `""`; and `Path.read_text` translates newlines, so `"a\rb"` comes back `"a\nb"`. Both
-# are normalisations of characters Markdown does not distinguish, so neither is worth fixing — but
-# `render.py` stated the round trip as an unqualified equation, and it is not one. Its docstring
-# now says which two things it is up to.
-#
-# Surrogates are excluded for a different reason, and it is a rejection rather than a
-# normalisation: `Note._text_is_writable` refuses any string UTF-8 cannot encode, because a note is
-# stored as a UTF-8 file and an unpaired surrogate breaks every writer that touches it. This
-# generator produces *valid* notes to round-trip; `test_a_note_refuses_text_utf8_cannot_encode`
-# below is where the refusal itself is pinned. (It was this generator that found the gap — it drew
-# a body of `"\ud800"` and `Path.write_text` raised `UnicodeEncodeError` from inside the round
-# trip.)
+# Bodies are generated stripped and CR-free: `python-frontmatter` strips content and
+# `Path.read_text` translates newlines, both normalisations Markdown does not distinguish (and
+# `render.py`'s docstring says so). Surrogates are excluded because `Note._text_is_writable` refuses
+# them; `test_a_note_refuses_text_utf8_cannot_encode` pins that refusal.
 _TEXT = st.characters(exclude_categories=["Cs"])
 _BODIES = st.text(
     alphabet=st.characters(exclude_characters="\r", exclude_categories=["Cs"]), max_size=120
@@ -323,14 +272,11 @@ def _notes(draw: st.DrawFn) -> Note:
 @given(_notes())
 @settings(max_examples=150)
 def test_a_note_survives_the_write_read_round_trip(note: Note) -> None:
-    """`parse_note(write(render_note(n))) == n`, quantified rather than asserted in a docstring.
+    """`parse_note(write(render_note(n))) == n`, quantified over notes.
 
-    This is the graph's durability claim. Every agent-authored note reaches Git through
-    `render_note` and comes back through `parse_note`, so a field that does not survive is a fact
-    the system silently forgets between proposing it and reading it — and `exclude_none=True`
-    means an optional field that round-tripped wrongly would look like an absence rather than an
-    error. The existing tests cover one hand-written note; a generator covers every combination of
-    the nine optional fields, which is where an omission would actually hide.
+    Every agent-authored note reaches Git through `render_note` and returns through `parse_note`,
+    and `exclude_none=True` would make a lost optional field look like an absence. Generating covers
+    every combination of the optional fields.
     """
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "note.md"
@@ -351,18 +297,12 @@ _SURROGATE = "\ud800"
     ],
 )
 def test_a_note_refuses_text_utf8_cannot_encode(field: str, value: object) -> None:
-    r"""Every *unconstrained* string a note carries is checked, not only the body.
+    r"""Every unconstrained string a note carries is checked for UTF-8 encodability, not only the
+    body.
 
-    An unpaired surrogate is reachable input rather than a curiosity: an agent-authored note
-    arrives as JSON, `json.loads('"\ud800"')` returns one without complaint, and the resulting
-    `str` then raises `UnicodeEncodeError` in whichever writer touches it first — the PR-gate's
-    `write_text`, the proposal store, or the index refresh. Refusing it at the schema boundary
-    turns three late crashes into one rejected proposal. Found by the round-trip generator above,
-    which drew a body of `"\ud800"`; the fixed examples had never supplied one.
-
-    Parametrized across the field *kinds* `_text_is_writable` walks — a plain string, two optional
-    ones, and a list — because the defect it replaces was exactly "one field was checked and its
-    neighbours were not".
+    `json.loads('"\ud800"')` yields an unpaired surrogate that later raises `UnicodeEncodeError` in
+    whichever writer touches it; refusing at the schema turns that into one rejected note.
+    Parametrized over the field kinds `_text_is_writable` walks.
     """
     with pytest.raises(ValidationError, match="UTF-8 cannot encode"):
         Note(id="n", type="reaction", **{field: value})  # type: ignore[arg-type]
@@ -381,18 +321,11 @@ def test_a_note_refuses_text_utf8_cannot_encode(field: str, value: object) -> No
 def test_an_already_validated_field_is_refused_before_our_validator(
     kwargs: dict[str, object],
 ) -> None:
-    """The other half of the split `_text_is_writable` documents, pinned rather than assumed.
+    """Fields already validated elsewhere are refused before our validator.
 
-    Two existing checks already refuse a surrogate before the model validator runs, which is why
-    it walks neither. Measured: pydantic's own constrained-string validation rejects `id`, `type`
-    and `Relation.rel`/`to` (all `min_length=1`) with `string_unicode`; and `_calc_ref_shape` /
-    `_artifact_ref_shape` reject the ref lists because a lone surrogate is not a calculation key.
-    Walking them anyway would be code that cannot run — which reads as coverage while proving
-    nothing.
-
-    This test is what makes that omission safe: it asserts the note is rejected without asserting
-    *who* rejects it, so if a pydantic upgrade or a loosened ref shape stops doing its half, the
-    gap fails here instead of reaching a writer.
+    Pydantic's constrained strings reject `id`, `type` and `Relation.rel`/`to`, and the ref-shape
+    validators reject the ref lists, so `_text_is_writable` skips them. This asserts rejection
+    without asserting who rejects, so if either stops doing its half the gap fails here.
     """
     with pytest.raises(ValidationError):
         Note(**{"id": "n", "type": "reaction", **kwargs})  # type: ignore[arg-type]
@@ -408,29 +341,12 @@ def test_an_already_validated_field_is_refused_before_our_validator(
 def test_a_write_writes_each_note_once_in_dependency_subject_retirement_order(
     note: Note, dependencies: list[Note], superseded: list[Note], directory: str
 ) -> None:
-    """One path per note, in the order `_build_write`'s docstring claims and a reader depends on.
+    """A write writes each note once, in dependency → subject → retirement order.
 
-    **dependencies, then the subject, then the retirements** — each cites the one before it, so a
-    reader walking the tree mid-write never sees a note before what it cites. The docstring argues
-    both ends: a subject written first would cite a note that is not there, and a retirement
-    written first would point `superseded-by` at a successor that does not exist yet, which is the
-    dangling wikilink `kg-validate` exists to prevent.
-
-    **The retirement half was asserted by nothing.** Hoisting the `superseded` loop above the
-    subject left the whole suite green — 148 tests — because the two order tests that existed both
-    passed `dependencies` only, and the one retirement test read the files into a dict keyed by id,
-    which discards order by construction. Generating over all three legs at once is what closes
-    that, and it also pins the dedup across legs: a note may appear as a dependency *and* as a
-    retirement, and the first occurrence must win.
-
-    The dedup half is worth generating over rather than exemplifying, because the collisions a
-    fixed example cannot enumerate are exactly the interesting ones: a dependency repeated, a
-    dependency that *is* the subject, and two distinct notes sharing an id and differing in body —
-    the racing-renderings case.
-
-    The count in the commit message is pinned here too. `test_pr_gate.py` held it and was deleted
-    with the gate; measured, `len(files) - 1` -> `+ 1` and the threshold `> 1` -> `>= 1` both
-    survived the whole suite afterwards.
+    Each leg cites the one before it, so a reader mid-write never sees a note before what it cites;
+    a retirement written first would point `superseded-by` at a missing successor. Generating over
+    all three legs also pins cross-leg dedup (first occurrence wins), including a dependency that is
+    the subject and two notes sharing an id. The commit-message count is pinned too.
     """
     write = _build_write(note, directory, dependencies, superseded)
     paths = [file.path for file in write.files]
@@ -449,11 +365,9 @@ def test_a_write_writes_each_note_once_in_dependency_subject_retirement_order(
         if retired.id != note.id and retired.id not in {d.id for d in dependencies}:
             assert ids.index(retired.id) > subject, "a retirement lands before its successor"
 
-    # **Which leg a file is in decides whether it may overwrite**, and that is set here rather
-    # than in the writer — which honours the flag and was the only half anything tested. A
-    # dependency is machine-rendered and re-rides on every write that cites it, so overwriting it
-    # would silently revert a chemist's edit; a retirement *is* that copy with `valid_to` closed,
-    # so rewriting it is the whole point.
+    # Which leg a file is in decides whether it may overwrite: a dependency re-rides on every citing
+    # write, so overwriting would revert a chemist's edit; a retirement is that copy with `valid_to`
+    # closed, so rewriting is the point.
     for file in write.files[:subject]:
         assert file.overwrite is False, "a dependency may overwrite a human's edit"
     for file in write.files[subject:]:
@@ -479,24 +393,15 @@ def _id_of(path: str, directory: str) -> str:
 )
 @settings(max_examples=100)
 def test_the_budget_refusal_is_permanent_once_a_cap_is_reached(turns: list[int], cap: int) -> None:
-    """A scope that has been refused stays refused — the guard's one safety property.
+    """A scope that has been refused by the budget stays refused.
 
-    The tracker is documented as best-effort about *overshoot*: concurrent turns may pass `check`
-    before any of them `record`. It is not best-effort about the other direction. A cap that
-    un-fired would let the "$400 in twenty minutes" runaway resume by itself, and nothing upstream
-    re-checks. So: once `check` raises for a session, no later `record` may make it pass again.
-
-    Negative token counts are generated deliberately — a provider's usage field is not
-    trustworthy, `_book` clamps with `max(tokens, 0)`, and a clamp that was removed would let a
-    bad usage report *refund* a session's budget.
+    Overshoot under concurrency is tolerated; un-firing is not, since nothing upstream re-checks.
+    Negative token counts are generated because `_book` clamps provider usage with `max(tokens, 0)`,
+    and without the clamp a bad report would refund a budget.
     """
-    # The manual `MonkeyPatch()` is required here and is the one place in this repository that is
-    # true: pytest's `monkeypatch` fixture is function-scoped, and a function-scoped fixture is set
-    # up *once* around a `@given` test while the body runs once per example — so every example
-    # after the first would inherit whatever the previous one left. Hypothesis says so by raising
-    # `HealthCheck.function_scoped_fixture`. Patching and undoing inside the body is what gives
-    # each example a clean tracker. (The `suppress_health_check` that used to sit on `@settings`
-    # here suppressed nothing, because this test takes no fixture for it to fire on.)
+    # A manual `MonkeyPatch()`: pytest's `monkeypatch` is set up once around a `@given` test, so
+    # each example would inherit the previous one's state. Patching and undoing in the body gives
+    # each example a clean tracker.
     patch = pytest.MonkeyPatch()
     patch.setattr(config, "budget_enabled", True)
     patch.setattr(config, "budget_max_turns_per_session", cap)

@@ -1,42 +1,13 @@
 """Every agent-callable tool is exercised by a probe, or is exempt with a pointer to what covers it.
 
-`tests/test_repo_map.py` proves the pattern this file copies: a declaration checked against the tree
-**in both directions**, so neither side can drift quietly. There it is directories against
-`ARCHITECTURE.md`; here it is `data/evals/probes/` against the tool surface.
+Like `tests/test_repo_map.py`, a declaration checked against the tree in both directions: here
+`data/evals/probes/` against the tool surface, so new tools cannot arrive unprobed. An exemption
+must name the suite that covers the tool instead (e.g. `write_todos` is driven as a conversation
+by `data/evals/probes/m12/plan_gate.yaml`).
 
-**The hole this closes opened silently and would have kept opening.** The 2026-08-25 field benchmark
-measured 232 probes naming 50 of 67 agent-callable tools, and the seventeen with no probe were not a
-random seventeen — they were the *newest* surface. The scratchpad and memory tools the M-phases
-added, and `task`, the subagent seam three merged ADRs argue about. Nobody removed their coverage;
-the corpus was written against the capability the system had when the corpus was written, and
-nothing re-derived it afterwards.
-
-**There used to be a second list beside `EXEMPT`, and it is gone because it was paid off.**
-`GRANDFATHERED` recorded the tools already on the surface when this gate arrived, so the gate could
-be introduced without blocking unrelated work; seventeen of them came from the single merge that
-added seventeen tools and 32% to the static context floor, which is exactly the event this file
-exists to make visible and which landed while the file was still on a branch. Every one of them is
-now probed by `data/evals/probes/multistep-calculation.yaml`, so the list is deleted rather than
-left empty — a debt list that outlives its debt reads as live state, which is the rule
-`BACKLOG.md`, `BACKLOG.md` and `test_context_floor.py::KNOWN_OVERSIZED` all run on. Nothing about
-enforcement changes: a tool added after this gate existed could never reach that list anyway, so
-the only thing it ever held was a closed, dated record.
-
-**The exemption list is the design decision, and an exemption must name what covers it instead.**
-Some tools genuinely should not appear in an `expects_tools` line — `write_todos` is the plan
-surface and is driven as a *conversation* by `data/evals/probes/m12/plan_gate.yaml`, which is the
-right shape for it. An exemption that names another suite is a statement about where the coverage
-moved. An exemption that names nothing is a hole with a note on it, so this file refuses one.
-
-**The second subject is the claim that runs the other way, and it arrived because this file could
-not see it.** A probe may also assert that a capability is *absent*, and
-`D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing` found six sites
-doing so while the declared `safety` bundle bound all three capabilities they denied. Nothing here
-caught it, for a structural reason:
-`test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer` builds `by_tool` from
-`expects_tools`, and a probe that wrongly asserts a capability is absent names no tool at all. So
-`Probe.asserts_absent` makes the claim structured, and the three tests below resolve it against the
-same surface every other assertion in this file reads.
+The second subject runs the other way: a probe may assert a capability is absent, and
+`Probe.asserts_absent` makes that claim structured so it can be resolved against the same surface
+(`D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing`).
 """
 
 from __future__ import annotations
@@ -55,10 +26,8 @@ from tests.siblings import SIBLING_SKIP, fleet_published_tool_names, sibling_roo
 
 PROBE_DIR = Path(__file__).resolve().parents[1] / "data" / "evals" / "probes"
 
-#: Tools no probe names, each mapped to what covers it instead.
-#:
-#: **The value is not a comment, it is the exemption.** A tool here without a real pointer is a
-#: coverage hole wearing a label, which is the thing this file exists to make impossible.
+#: Tools no probe names, each mapped to what covers it instead. The value is the exemption: an entry
+#: without a real pointer is a coverage hole with a label.
 EXEMPT: dict[str, str] = {
     "write_todos": (
         "the plan surface, driven as a conversation rather than a turn — "
@@ -69,10 +38,9 @@ EXEMPT: dict[str, str] = {
         "an answer — tests/test_subagents.py, and D-2026-08-10-a-subagent-is-an-attenuation-"
         "not-a-new-actor for the invariants it must keep"
     ),
-    # Both act on an artefact that already exists, which a single-question probe cannot set up:
-    # the turn that created it is the one a probe can ask (`kn-31` expects `create_exhibit`). The
-    # stale-base refusal, the exactly-once `edits` rule and the chemist's-changes diff are driven
-    # against a real store instead.
+    # Both act on an artefact that already exists, which a single-question probe cannot set up
+    # (`kn-31` covers `create_exhibit`). Their refusal and diff rules are driven against a real
+    # store.
     "read_exhibit": "an artefact a previous turn made — tests/test_exhibit_tools.py",
     "revise_exhibit": "an artefact a previous turn made — tests/test_exhibit_tools.py",
 }
@@ -81,9 +49,7 @@ EXEMPT: dict[str, str] = {
 def _probes() -> list[Probe]:
     """Every probe in the corpus, from both the flat files and the M12 suites.
 
-    Parsed through `ProbeSet` rather than read as loose dicts, so this file also fails when a probe
-    is malformed — a `bucket` typo or a `section` outside 1-17 would otherwise sit in the corpus
-    being counted and never asked.
+    Parsed through `ProbeSet`, so a malformed probe (bad `bucket` or `section`) fails here too.
     """
     found: list[Probe] = []
     for path in sorted(PROBE_DIR.rglob("*.yaml")):
@@ -115,11 +81,9 @@ def test_every_agent_callable_tool_is_probed_or_exempt() -> None:
 
 
 def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
-    """The second direction: a probe naming a tool that is gone can never fail correctly.
+    """No probe expects a tool that does not exist.
 
-    It passes for the wrong reason — the model was never going to call a name that is not on the
-    surface — so the probe stops testing while still counting toward the corpus. Measured zero on
-    2026-08-25, and worth keeping at zero.
+    Such a probe passes for the wrong reason while still counting toward the corpus.
     """
     phantom = sorted(
         _expected_tools() - available_tool_names() - fleet_expected_tools() - withheld_tools()
@@ -133,13 +97,10 @@ def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
 
 
 def withheld_tools() -> set[str]:
-    """Launchers this tree declares and this deployment withholds — real tools, not phantoms.
+    """Launchers this tree declares and this deployment withholds: real tools, not phantoms.
 
-    `republish_calculations` is withheld while no result sink is enabled (its manifest's
-    `unavailable_reason`), which is the shipped default, so du-05 and du-11 name a tool the bare
-    surface lacks and that exists the moment a sink is named. Public for the reason
-    `fleet_expected_tools` is: `tests/test_live_probes.py` asserts the same rule and imports this
-    rather than restating it.
+    `republish_calculations` is withheld while no result sink is enabled (the default). Public so
+    `tests/test_live_probes.py` imports it rather than restating the rule.
     """
     return _withheld_tool_names()
 
@@ -147,21 +108,10 @@ def withheld_tools() -> set[str]:
 def fleet_expected_tools() -> set[str]:
     """Expected tool names that a probe declared a fleet bundle for and this tree cannot resolve.
 
-    Public because `tests/test_live_probes.py` asserts the same rule over the live runner's own
-    loader and must not restate this one — two definitions of one invariant is how the second
-    becomes the weaker, and it already had: that file's copy covered 336 probes to this file's 338.
-
-    Surface-aware on purpose. A probe is allowed to mix the two — an-04 pastes six injections and
-    wants `replicate_precision` from the fleet's `suitability` *and* `predict_pka` from this tree —
-    so forgiving every name on a `needs_bundle:` probe would quietly exempt the local ones from the
-    phantom check too, and a renamed in-process tool would stop being caught on the probes that
-    need catching most.
-
-    Read from the probes rather than from a list beside this test, so the declaration lives on the
-    question that depends on it. What this returns is only "the corpus says these come from a bundle
-    we do not declare"; whether that is *true* is
-    `test_every_fleet_served_expectation_names_a_tool_that_bundle_declares`'s question, and it needs
-    the sibling checkout to answer.
+    Public so `tests/test_live_probes.py` shares one definition. Surface-aware: a `needs_bundle:`
+    probe may mix fleet and local tools, so only the unresolvable names are forgiven and a renamed
+    local tool is still caught. Whether the bundle really declares them is checked by
+    `test_every_fleet_served_expectation_names_a_tool_that_bundle_declares`.
     """
     surface = available_tool_names()
     return {
@@ -174,42 +124,14 @@ def fleet_expected_tools() -> set[str]:
 
 
 def test_every_fleet_served_expectation_names_a_tool_that_bundle_declares() -> None:
-    """The cross-repository half: a `needs_bundle:` pairing is checked against the fleet's manifest.
+    """A `needs_bundle:` expectation names a tool that bundle's fleet manifest declares.
 
-    `needs_bundle` is what lets a probe name a tool this checkout cannot resolve, so on its own it
-    is an assertion with nothing behind it — exactly the shape
-    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about. This is what
-    puts something behind it: the fleet's published `manifests/` are read off disk, and every name a
-    `needs_bundle:` probe expects has to be either on this tree's own surface or declared by the
-    bundle it named. Both halves, because a probe may legitimately mix them.
-
-    Reading YAML from a shallow clone rather than running the fleet's servers, deliberately — the
-    cheap tier `tests/test_sibling_manifest_agreement.py` uses, so this is plausible in CI where the
-    schema measurement in `tests/test_context_floor.py` is not. What the fleet *declares* and what
-    it *serves* are held to each other on that side, by `assert_manifest_matches` against a running
-    server, so a declared-but-unserved name fails there rather than passing quietly here.
-
-    **It does less in the lane that mounts the fleet, and that is worth saying rather than
-    discovering.** With `CHEMCLAW_CONNECTORS_DIR` pointed at the fleet's `manifests/`, every name a
-    `needs_bundle:` probe expects is already on the surface, `unresolved` is empty, and this returns
-    before it reads any manifest. So the guard against a *typo in a fleet name* is this one, and it
-    is the **bare** checkout that runs it — which makes the bare lane the one that has to stay
-    green, not an impoverished version of a better lane.
-
-    **What used to stand here said that lane was guarded by the test above instead, and it is
-    not.** The sentence claimed the fleet lane was "the lane where
-    `test_every_agent_callable_tool_is_probed_or_exempt` has 121 tools to account for instead of
-    114"; measured on this commit, the bare surface is not 114 and the fleet surface is not 121, and
-    more importantly that test does not *pass* with the fleet mounted at all — the corpus is
-    written against the surface this repository declares, so every fleet tool no probe names is
-    unprobed there. Two stale figures dressing up a claim that was false in kind is
-    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`, so no figure is transcribed here:
-    what each lane binds is `available_tool_names()` under that lane's
-    `CHEMCLAW_CONNECTORS_DIR`, and the only number worth reading is the one an assertion computes.
-
-    **A skip, loudly, rather than a green line.** With no sibling checkout this cannot tell a fleet
-    tool from a typo, and `tests/conftest.py::_report_sibling_skips` counts the skip so the run says
-    what it did not look at.
+    Reads the fleet's published `manifests/` from the sibling checkout (YAML only, so plausible in
+    CI); every expected name must be on this tree's surface or declared by the named bundle. The
+    fleet holds declared against served on its side. With the fleet mounted on
+    `CHEMCLAW_CONNECTORS_DIR` nothing is unresolved and this returns early, so the bare checkout is
+    the lane that catches a typo in a fleet name. Without a sibling checkout it skips, and
+    `tests/conftest.py::_report_sibling_skips` counts the skip.
     """
     declaring = [probe for probe in _probes() if probe.needs_bundle is not None]
     if not declaring:
@@ -250,12 +172,10 @@ def _knowledge_note_ids() -> set[str]:
 
 
 def test_no_probe_expects_a_note_that_does_not_exist() -> None:
-    """The offline half of the gold set: a label pointing at a note that is gone grades nothing.
+    """No probe expects a note that does not exist.
 
-    It fails for the wrong reason — the retriever was never going to return an id the corpus does
-    not hold — so the pair stops measuring retrieval and starts measuring the label, while still
-    counting toward the run's recall. This is the half CI can run; the recall itself needs a front
-    door and is scored by `make live-probes`.
+    A gold label pointing at a missing note measures the label, not retrieval. Recall itself is
+    scored by `make live-probes`.
     """
     expected = {name for probe in _probes() for name in probe.expects_notes}
     assert expected, "no probe declares `expects_notes`; this test proves nothing"
@@ -267,18 +187,10 @@ def test_no_probe_expects_a_note_that_does_not_exist() -> None:
 
 
 def test_every_note_a_direction_names_is_declared_as_data() -> None:
-    """The pairs stay readable as data rather than sliding back into prose.
+    """Every note a probe's `direction:` names is also declared as data.
 
-    46 labelled (query, note) pairs across 20 probes existed for months inside `direction:`, where
-    only a human grader could read them — `BACKLOG.md` recorded the consequence as "the shipped
-    graph has none", then corrected itself to "unreadable as data because `Probe` is
-    `extra='forbid'`". Transcribing them once fixes that instant and nothing keeps it fixed: the
-    next probe written in the same style re-opens the same hole, silently, because a direction
-    naming a note still reads like a complete probe.
-
-    So this asserts the direction and the field agree. A note id a direction names and the field
-    omits is the hole coming back; the converse is allowed, because a label may be more precise
-    than the prose that motivated it.
+    Otherwise labelled pairs drift back into prose only a human grader reads. A label may be more
+    precise than the direction, so only the converse is refused.
     """
     corpus = _knowledge_note_ids()
     missing: dict[str, list[str]] = {}
@@ -326,28 +238,10 @@ def test_no_exemption_names_a_tool_that_does_not_exist() -> None:
 
 
 def test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer() -> None:
-    """A tool covered solely by a bucket-C probe is a tool the corpus does not exercise.
+    """No tool's only coverage is a bucket-C probe.
 
-    The corpus is deliberately mixed: bucket A the surface should answer, B partly, **C not at
-    all**. That mix is right for measuring honesty, and it means "this tool appears in a probe" and
-    "this tool is exercised" are different statements — a C probe is satisfied by the system
-    *declining*, so a tool whose only probe is a C is covered on paper and never called.
-
-    This is the thin half of the concentration question, and it is the half that turned out to
-    matter. Measured 2026-09-15: 39 of 114 agent-callable tools are named by exactly **one** probe —
-    34% of the surface resting on a single phrasing — and **zero** of them rest on a C. So the tail
-    is thin and not hollow, and this assertion is what keeps it that way.
-
-    That figure read 45 for one day and was stale on the commit that wrote it: `process-chemistry`
-    (28 probes) and `delegation` (8) landed in the same merge range, which is
-    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to a paragraph that cites
-    it two tests below. The **zero** is the load-bearing half and is what the assertion holds; the
-    ratio is a snapshot and is dated so a reader can tell which it is.
-
-    A count is not asserted, deliberately. A ratchet on "how many tools have one probe" would block
-    every new tool until somebody wrote it a second question, which is a toll on adding capability
-    rather than a bound on risk. What must not happen is a tool arriving with coverage that cannot
-    call it.
+    A C probe is satisfied by the system declining, so a tool covered only by one is never called.
+    No count of single-probe tools is ratcheted, since that would tax adding capability.
     """
     by_tool: dict[str, list[Probe]] = {}
     for probe in _probes():
@@ -369,22 +263,8 @@ def test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer() -> Non
 def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
     """No single tool may be what most of the corpus measures.
 
-    Measured on 2026-08-25: `gather_evidence` was in 116 of 232 probes — half the corpus testing one
-    retrieval path. A corpus shaped like that reports broad coverage and delivers narrow coverage,
-    and it is also why ChemToolAgent's finding (that tools do not consistently beat the base model)
-    could not be reproduced against this system.
-
-    The bound is deliberately loose. This is not asking for a flat distribution — a retrieval tool
-    *should* be the most common thing an agent reaches for — it is asking that no one tool be a
-    majority of what the suite knows how to check.
-
-    **Re-measured 2026-09-15 and the concentration has gone**: `gather_evidence` is in 139 of 333
-    probes, **41.7%**. The 2026-08-25 figure above is kept because it is why the bound exists, not
-    because it is current — a paragraph that reads as a live measurement is the thing
-    `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` is about, and the live number is
-    whatever this assertion computes. Which is why the 126-of-297 this said first was wrong within
-    its own merge: the same range added 36 probes — 28 in `process-chemistry.yaml`, 8 in
-    `delegation.yaml` — and nothing re-ran the count.
+    A corpus dominated by one retrieval path reports broad coverage while checking narrow coverage.
+    The bound is loose: a retrieval tool should be the most common, just not a majority.
     """
     probes = _probes()
     counts: dict[str, int] = {}
@@ -403,19 +283,10 @@ def test_the_corpus_is_not_concentrated_on_one_tool() -> None:
 
 
 def test_a_tool_the_deployment_does_not_bind_is_not_scored_as_a_miss() -> None:
-    """The scoring half of `needs_bundle:`, driven rather than trusted.
+    """A tool the deployment does not bind is not scored as a miss.
 
-    `test_every_fleet_served_expectation_names_a_tool_that_bundle_declares` above proves the corpus
-    may *name* a fleet tool. This proves the other half does not then punish it: a probe whose tools
-    are absent from the surface the run was launched against is not measuring the model, and scoring
-    it as a miss is how a corpus comes to penalise capability that exists somewhere else — the same
-    defect as the six probes in
-    `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing`, arriving
-    from the other direction.
-
-    Three arms, because the middle one is what makes the first mean anything: a name nothing binds
-    is not scored, a name that *is* bound and was not called **is** scored as a miss, and a bound
-    name that was called passes.
+    Three arms: an unbound name is not scored, a bound name not called is a miss, and a bound name
+    called passes. The middle arm makes the first meaningful.
     """
     from chemclaw.evals.live import ProbeOutcome, _tool_expectation_applies
 
@@ -456,28 +327,15 @@ def test_a_tool_the_deployment_does_not_bind_is_not_scored_as_a_miss() -> None:
     ), "a bundle whose server did not answer this turn is the deployment's failure, not the model's"
 
 
-#: A snake_case token — the only shape an `asserts_absent` marker can carry that is unambiguously a
-#: tool name rather than prose. Single-word tool names (`task`, `grep`, `ls`, `delete`) are
-#: deliberately outside it: a scan that matched those would fire on any sentence containing the
-#: word, so the marker arm cannot see a denial of one of *those* capabilities. Stated rather than
-#: left to be found, because it is the hole in the half of this control that is already the weaker.
+#: A snake_case token: the only shape in an `asserts_absent` marker unambiguously a tool name.
+#: Single-word names (`task`, `grep`, `ls`, `delete`) are outside it, so the marker arm cannot see a
+#: denial of those.
 _TOOL_SHAPED = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 
-#: How close a name has to sit to a bound tool before it is read as a misspelling of that tool
-#: rather than as a capability this system genuinely lacks. Measured on the shipped surface:
-#: `ich_impurity_limits` scores above this against `ich_impurity_limit` and `screen_genotoxic_alert`
-#: against `screen_genotoxic_alerts`, while the corpus's two real tool-name claims — `run_python`
-#: and `delete`, the filesystem verb `agent/scratchpad.py` withholds — match nothing at all.
-#:
-#: **`run_python` used to be described here as one "no deployment here binds", and that is false.**
-#: The fleet's `pyexec` serves it and `infra/live/e2e-full-stack/up.sh` both puts
-#: `Chemclaw3-mcp/manifests/` on `CHEMCLAW_CONNECTORS_DIR` and starts that server — measured, pc-07
-#: and ws-12 fail `test_no_probe_asserts_a_capability_the_agent_surface_serves` in that lane. That
-#: is not a defect to reword:
-#: `D-2026-09-16-an-absence-claim-that-names-no-capability-cannot-be-refuted` argues it shut in its
-#: own "what this does not close" section — the asymmetry is *useful*, because in a lane that binds
-#: `pyexec` those two probes genuinely are stale and going red is the correct report. What was wrong
-#: was only the parenthesis here saying no deployment binds it.
+#: How close a name must be to a bound tool to read as a misspelling of it rather than a capability
+#: this system lacks: `ich_impurity_limits` and `screen_genotoxic_alerts` score above it, while
+#: `run_python` and `delete` match nothing. In a lane binding the fleet's `pyexec`, probes denying
+#: `run_python` correctly go red.
 NEAR_MISS_RATIO = 0.85
 
 #: The shortest a `NO-TOOL` marker's phrase may be. Not a quality bar and it cannot be one — a
@@ -496,19 +354,9 @@ def absence_claims_the_surface_refutes(
 ) -> list[str]:
     """The claims `surface` contradicts, each as a sentence naming the probe and what is bound.
 
-    Two arms, because there are two ways to assert an absence and both can be false:
-
-    - **A tool name that is bound.** This is the defect
-      `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing` measured,
-      stated so that it resolves: a probe claiming `ich_impurity_limit` is absent fails the moment
-      the `safety` bundle is declared, which it has been the whole time.
-    - **A marker that names a bound tool inside its own prose.** Without this the marker arm is a
-      way to launder the first: `"NO-TOOL no ich_impurity_limit here"` would pass a check that only
-      looked at bare names. A marker is for a capability *no tool name reaches*, so a tool name
-      inside one is either the defect or the wrong arm.
-
-    Shared by the corpus assertion and by the driven one below, which is what stops this being a
-    guard nobody has watched refuse.
+    Two arms: a bare tool name that is bound, and a marker whose prose contains a bound tool name
+    (otherwise markers would launder the first arm). Shared by the corpus assertion and the driven
+    test.
 
     Args:
         claims: `(probe id, claim)` pairs, as `_absence_claims` produces them.
@@ -533,22 +381,11 @@ def absence_claims_the_surface_refutes(
 
 
 def test_every_bucket_c_probe_names_the_capability_it_asserts_is_missing() -> None:
-    """A bucket-C probe's absence claim is a field, so that something other than a reader has it.
+    """Every bucket-C probe names the capability it asserts is missing.
 
-    Required on C, permitted on B — gr-27's *"alert screening is available; M7 classification and
-    TTC-based control limits are not"* is a B probe whose **`direction:` prose** carries an absence
-    claim, and the corpus should be able to say which half in a field instead — and refused on A,
-    where a probe would be asserting both that the capability exists and that it does not. (gr-27
-    carries no `asserts_absent` of its own; the sentence above is quoted from its direction, and
-    saying so matters because citing it as an example of the field is what the field exists to stop
-    a reader doing with prose.)
-
-    The shape rules are the whole of what a machine can say about the marker arm: a marker carries a
-    phrase rather than standing in for one, and a bare entry looks like a tool name rather than like
-    a sentence somebody forgot to prefix. Beyond that the marker **buys a reviewable lie in place of
-    an invisible one rather than an impossible one**, which is the sentence
-    `docs/planning/BACKLOG.md` asked to survive into the implementation: an author who would write
-    the absence claim wrongly will write the marker wrongly too.
+    Required on C, permitted on B, refused on A (which would assert the capability both exists and
+    does not). A marker must carry a phrase and a bare entry must look like a tool name. A marker
+    makes a wrong claim reviewable, not impossible.
     """
     probes = _probes()
     silent = sorted(
@@ -583,13 +420,10 @@ def test_every_bucket_c_probe_names_the_capability_it_asserts_is_missing() -> No
 
 
 def test_no_probe_asserts_a_capability_the_agent_surface_serves() -> None:
-    """The point of the field: an absence claim the deployment refutes fails here, not in a run.
+    """No probe asserts a capability the agent surface serves.
 
-    What that failure looked like before this existed: an-28 asked for the ICH Q3D limit for
-    palladium, carried `expects_tools: []`, and forbade *"an ICH Q3D PDE value in ug/day"* while
-    `ich_impurity_limit` returned exactly that with its Table A.2.1 citation — so a model that
-    looked it up and cited it scored as fabricating, and one that refused scored correct. Six sites
-    were stale that way and nothing in this file could see any of them, because they named no tool.
+    Otherwise a model that looked up and cited a served value would score as fabricating, and one
+    that refused would score as correct.
     """
     refuted = absence_claims_the_surface_refutes(_absence_claims(_probes()), available_tool_names())
     assert not refuted, (
@@ -602,12 +436,10 @@ def test_no_probe_asserts_a_capability_the_agent_surface_serves() -> None:
 
 
 def test_a_claim_naming_a_bound_tool_is_refused_whichever_arm_it_arrives_on() -> None:
-    """Driven against its own defect, because a guard nobody has watched refuse is a claim.
+    """A claim naming a bound tool is refused on either arm, and benign claims are left alone.
 
-    Four arms. The first two are the defect in each arm — a bare name that is bound, and the same
-    name laundered through a marker — and the second two are what stops a check that always
-    returned something from passing the first two: a name nothing binds and an ordinary marker are
-    both left alone.
+    Four arms: a bound bare name, the same name in a marker, an unbound name and an ordinary marker,
+    so a helper that always returns something cannot pass.
     """
     bound = sorted(available_tool_names())[0]
     assert absence_claims_the_surface_refutes([("x", bound)], available_tool_names())
@@ -629,20 +461,9 @@ def absence_claims_that_near_miss_a_bound_tool(
 ) -> list[str]:
     """The claims that misspell a bound tool, on either arm, each as a sentence naming the probe.
 
-    The bare-name arm is the one this started as: `ich_impurity_limits` is not bound, so
-    `absence_claims_the_surface_refutes` has nothing to say about it, and a probe claiming it is
-    missing would be the an-28 defect with a letter added.
-
-    **The marker arm was outside it, and that is the hole this closes.**
-    `absence_claims_the_surface_refutes` already looks *inside* a marker for a bound tool name,
-    precisely so the marker cannot launder a bare claim — but it resolves those names exactly, so
-    `NO-TOOL nothing like ich_impurity_limits here` escaped the near-miss check and the exact-name
-    scan at once, which is both arms of one control declining the same string. A tool-shaped token
-    in a marker gets the same near-miss reading the bare arm gets.
-
-    Ordinary prose cannot reach this: `_TOOL_SHAPED` requires an underscore, and no marker in the
-    shipped corpus contains a single token of that shape — so the marker arm fires on zero claims
-    today, which is what a guard with no false positives looks like before it has a subject.
+    A tool-shaped token inside a marker gets the same near-miss reading as a bare claim, so neither
+    arm lets a one-letter variant of a bound tool through. `_TOOL_SHAPED` requires an underscore, so
+    ordinary prose cannot trigger it.
 
     Args:
         claims: `(probe id, claim)` pairs, as `_absence_claims` produces them.
@@ -672,11 +493,9 @@ def absence_claims_that_near_miss_a_bound_tool(
 
 
 def test_an_absence_claim_one_edit_from_a_bound_tool_is_read_as_the_typo_it_is() -> None:
-    """The hole in both arms: a misspelling is absent from the surface and so passes them.
+    """An absence claim one edit from a bound tool is read as a typo.
 
-    A claim that close to a bound name is a typo rather than a capability this system lacks. The
-    expensive half — a claim that is simply *wrong* about a capability nobody named — is what a
-    reader is for, and nothing here pretends otherwise.
+    A claim simply wrong about an unnamed capability is left to a reader.
     """
     typos = absence_claims_that_near_miss_a_bound_tool(
         _absence_claims(_probes()), available_tool_names()
@@ -689,11 +508,9 @@ def test_an_absence_claim_one_edit_from_a_bound_tool_is_read_as_the_typo_it_is()
 
 
 def test_a_near_miss_is_caught_on_the_marker_arm_as_well_as_the_bare_one() -> None:
-    """Driven against its own defect, for the reason the adjacent driven test gives.
+    """A near miss is caught on the marker arm as well as the bare one.
 
-    Four arms, the same shape the adjacent driven test uses over the other helper: the defect in
-    each arm, then the two cases that must be left alone, so a helper that always returned
-    something could not pass the first two.
+    Same four-arm shape as the adjacent driven test.
     """
     surface = available_tool_names()
     bound = sorted(surface)[0]
@@ -713,19 +530,11 @@ def test_a_near_miss_is_caught_on_the_marker_arm_as_well_as_the_bare_one() -> No
 
 
 def test_no_probe_names_one_tool_in_both_expects_tools_and_asserts_absent() -> None:
-    """A probe cannot both reach for a tool and deny it exists — and nothing said so.
+    """No probe names one tool in both `expects_tools` and `asserts_absent`.
 
-    Every other check here reads one field against the surface, so the *pair* is nobody's subject.
-    For a **bound** name the contradiction is already loud: `asserts_absent` fails on
-    `test_no_probe_asserts_a_capability_the_agent_surface_serves`. The case that survives is a name
-    this tree does not bind and a fleet bundle serves — `fleet_expected_tools()` forgives the
-    expectation because the probe declares `needs_bundle:`, and the denial passes because the name
-    really is off this surface. The probe then grades the model for *calling* that tool in the lane
-    that mounts the bundle and for *not fabricating* it in the lane that does not, off one
-    declaration, which is the two halves of `needs_bundle`'s own rule pointed at each other.
-
-    Measured zero on the shipped corpus. Free to keep at zero, and lane-independent by
-    construction: no surface is consulted, so this answers the same with the fleet mounted or not.
+    For a bound name the absence check already fails. For an unbound fleet tool under
+    `needs_bundle:` both checks pass while the probe grades opposite behaviour in the two lanes. No
+    surface is consulted, so this is lane-independent.
     """
     contradictory = sorted(
         f"{probe.id}: {sorted(set(probe.expects_tools) & set(probe.asserts_absent))}"

@@ -1,24 +1,9 @@
 """The graph leg ranks by relevance, not by note id.
 
-`GraphRetriever` is the only text retriever enabled by default (`retrieval_mode` is `graph`), so
-whatever it puts in its top `retrieval_top_k` is, in the shipped configuration, the whole of what a
-chemist's question retrieves. It used to order its hits by `(-coverage, -confidence, note.id)`, and
-that is not a ranking for the case that actually occurs:
-
-- `coverage` is how many query terms matched, so on any query whose hits all match every term —
-  the ordinary case for a two- or three-word question — it is identical for every candidate;
-- `confidence` is a **trust** signal rather than a relevance one, and it ties constantly: over the
-  38 notes committed to `knowledge/` it takes ten distinct values, and 18 of those notes share one
-  of two of them;
-- so the ranking fell through to `note.id`, **alphabetically**.
-
-Measured before the fix, on 5,000 notes that all matched every term: the leg returned
-`reaction-00000`, `reaction-00001`, `reaction-00002` … — the first eight ids in the corpus. On the
-fixture below, three notes answer the question and 250 routine logs merely mention its words; the
-old ranking returned eight logs and none of the answers.
-
-These tests are written against *outcomes* — "the note that answers the question is returned" —
-rather than against the scoring function, so a better ranker than BM25-lite passes them unchanged.
+`GraphRetriever` is the default text retriever, so its top `retrieval_top_k` is all a question
+retrieves. Coverage ties whenever every hit matches every term, and `confidence` is a trust signal
+that ties often, so a ranking on those falls through to the id. The tests assert outcomes ("the
+note that answers is returned"), so a better ranker than BM25-lite passes unchanged.
 """
 
 import asyncio
@@ -65,11 +50,9 @@ def _corpus(directory: Path, noise: int = 250) -> None:
 
 
 def test_the_notes_that_answer_the_question_survive_the_cut(tmp_path: Path) -> None:
-    """All three answering notes are returned, from a corpus of 253 that all match every term.
+    """All three answering notes are returned from a corpus of 253 that all match every term.
 
-    This is the whole finding in one assertion. The candidate set is 253 and `retrieval_top_k` is 8,
-    so 245 notes are discarded on every query of this shape — which of them is discarded is the only
-    thing the ranker decides, and before this change it decided by spelling.
+    With `retrieval_top_k` at 8, which notes are discarded is all the ranker decides.
     """
     _corpus(tmp_path)
     chunks = asyncio.run(GraphRetriever(str(tmp_path)).retrieve("coupling yield", {}))
@@ -93,12 +76,9 @@ def test_a_note_about_the_query_outranks_one_that_merely_mentions_it(tmp_path: P
 
 
 def test_a_rarer_term_carries_more_weight_than_a_common_one(tmp_path: Path) -> None:
-    """A note matching the query's *informative* term beats one matching its ubiquitous one.
+    """A note matching the query's informative term beats one matching its ubiquitous one.
 
-    This is the half `coverage` cannot express. Both candidates below match one of the two terms, so
-    coverage ties at 1 and confidence is equal by construction; only the inverse document frequency
-    separates them. Without it the tie would again fall through to the id, and `common-only` sorts
-    first.
+    Coverage ties at 1 and confidence is equal, so only inverse document frequency separates them.
     """
     for index in range(60):
         note_id = f"filler-{index:03d}"
@@ -119,11 +99,9 @@ def test_a_rarer_term_carries_more_weight_than_a_common_one(tmp_path: Path) -> N
 
 
 def test_trust_still_breaks_a_tie_between_equally_relevant_notes(tmp_path: Path) -> None:
-    """KM-5's intent survives the demotion: `confidence` decides among *equally relevant* notes.
+    """`confidence` still breaks a tie between equally relevant notes.
 
-    Confidence was the primary key and is now the third. It has not been discarded — where two notes
-    say the same thing with the same weight, the better-attested one is still the one that survives
-    truncation, which is all that rule could ever honestly decide.
+    The better-attested note survives truncation when relevance is equal.
     """
     body = "Coupling yield rose with base loading, then plateaued."
     for note_id, confidence in (("aaa-doubted", 0.4), ("zzz-trusted", 0.95)):

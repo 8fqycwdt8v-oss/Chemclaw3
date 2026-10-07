@@ -1,15 +1,8 @@
 """A computed geometry is an address the next calculation takes, not coordinates in a transcript.
 
-`D-2026-08-21-a-geometry-is-an-address-not-a-payload`. Three properties, and the first is the one
-everything else rests on: **every `structure_id` the agent is shown resolves.** It holds because the
-write and the projection are two halves of one act — the walker that strips a geometry out of a
-model-facing payload is the walker that found it to be kept — so these drive the real composites
-against the fake server rather than asserting about the walker alone.
-
-The measurements quoted here were taken on `main` before the change, on celecoxib (40 atoms) at the
-shipped `crest_max_members`: a conformer search's envelope was 29,086 characters carrying 2,400
-distinct numeric values, and one stored `xtb.conformers` row was 66,520 characters against a
-`calc_find_max_results` of 50.
+The property everything rests on: every `structure_id` the agent is shown resolves. The walker that
+strips a geometry from a model-facing payload is the walker that stores it, so these drive the real
+composites against the fake server rather than the walker alone.
 """
 
 from __future__ import annotations
@@ -117,13 +110,11 @@ def test_a_lookalike_that_is_not_a_geometry_is_left_alone() -> None:
 
 
 def test_the_projection_removes_the_bulk_and_the_numeric_flood() -> None:
-    """Both halves of the measured harm: the characters, and what they do to the grounding pool.
+    """The projection removes the bulk and the numeric flood.
 
-    `api/runner_trace._capped_numbers` collects every distinct value a result returned so a figure
-    in an answer can be recognised as quoted, and caps the list at `stream_max_result_numbers`
-    (512) on the stated grounds that the cap is "unreachable in normal traffic". A twenty-member
-    ensemble of a drug-sized molecule returns 2,400 — 4.7x over — which both drops real values and
-    fills the pool with coordinates that will round-match almost any claim.
+    `api/runner_trace._capped_numbers` collects a result's distinct values for answer grounding,
+    capped at `stream_max_result_numbers`. A conformer ensemble's coordinates would exceed the cap,
+    dropping real values and filling the pool with numbers that round-match almost any claim.
     """
     # Celecoxib, the molecule the measurement was taken on: 40 atoms with hydrogens, which is an
     # ordinary drug-sized case rather than a contrived one.
@@ -190,12 +181,10 @@ def test_the_smiles_route_still_asks_the_smiles_tool(monkeypatch: pytest.MonkeyP
 
 
 def test_a_fukui_ranking_runs_at_the_named_conformer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The regiochemistry question a chemist asks *after* a conformer search.
+    """A Fukui ranking runs at the named conformer.
 
-    `predict_site_reactivity` was the one geometry-describing calculator that could not take a
-    handle, because the server had `compute_properties_at` and no `compute_fukui_at`. That gap is
-    what `BACKLOG.md` carried, and the honest consequence while it stood was that "which site is
-    reactive in this conformer" was answered on a fresh force-field embedding.
+    Site reactivity after a conformer search must use that conformer, through `compute_fukui_at`,
+    rather than a fresh force-field embedding.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -214,12 +203,10 @@ def test_a_fukui_ranking_runs_at_the_named_conformer(monkeypatch: pytest.MonkeyP
 def test_a_second_fukui_mode_at_one_geometry_costs_no_calculation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One row serves every mode, at a named geometry exactly as at an embedded one.
+    """A second Fukui mode at one geometry costs no calculation.
 
-    The three single points behind a Fukui ranking do not depend on the mode — the server computes
-    all three indices and `ranked_for` sorts locally — so `compute_fukui_at` is keyed with an empty
-    params tuple. Keying on `mode` would write three rows for one calculation and, worse, make a
-    cache hit authoritative about an ordering it never chose.
+    The server computes all three indices and `ranked_for` sorts locally, so `compute_fukui_at` is
+    keyed without the mode; keying on it would store three rows for one calculation.
     """
     server = install(monkeypatch, FakeCalcServer())
     store = InMemoryStore()
@@ -274,12 +261,10 @@ def test_a_handle_for_a_different_molecule_is_refused(monkeypatch: pytest.Monkey
 
 
 def test_a_divergent_server_address_is_reported(caplog: pytest.LogCaptureFixture) -> None:
-    """The one failure that costs no calculation and breaks every lookup from then on.
+    """A divergent server address is reported.
 
-    The server's `structure_id` is a `computed_field` and arrives on every payload; ours is a
-    property, so pydantic drops it. The two derivations agree only while the rounding does, and the
-    server's is an ENV-overridable setting where this side holds a constant — so a disagreement is
-    possible, silent, and permanent.
+    The server's `structure_id` is a computed field derived with an overridable rounding setting
+    while this side holds a constant, so a disagreement would silently break every later lookup.
     """
     payload = _structure().model_dump(mode="json") | {"structure_id": "st_something_else"}
     with caplog.at_level("ERROR"):
@@ -303,16 +288,12 @@ def test_an_agreeing_server_address_says_nothing(caplog: pytest.LogCaptureFixtur
 def test_a_listed_calculation_is_bounded_and_says_when_it_was(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`find_calculations` was the biggest unbounded model-facing payload and nothing said so.
+    """A listed calculation is bounded and says when it was.
 
-    A stored `xtb.conformers` row holds every member the search found — 66,520 characters on one
-    40-atom molecule — and `calc_find_max_results` is 50, so one read-only call on two agent
-    profiles could render ~830,000 tokens. Past a provider's context limit the failure is hard
-    rather than graceful (`agent/compaction.py`), which is why this is a bound and not a hope.
-
-    Both halves are asserted: geometries become addresses, and what is *still* over the ceiling is
-    withheld whole with `result_omitted` set — never trimmed, because a truncated payload that
-    still parses reads as a complete one.
+    A stored conformer row holds every member, and `calc_find_max_results` rows of them could exceed
+    a provider's context limit, which fails hard. Geometries become addresses, and what is still
+    over the ceiling is withheld whole with `result_omitted`, never trimmed into a payload that
+    reads complete.
     """
     from datetime import UTC, datetime
 
@@ -390,11 +371,10 @@ def test_a_geometry_keyed_calculation_is_findable_by_its_geometry(
 
 
 async def test_the_geometry_store_round_trips_through_postgres() -> None:
-    """The backend the deployment actually uses, not just the in-memory twin.
+    """The geometry store round-trips through Postgres.
 
-    The cross-process reach is the whole reason a durable backend exists: the conformer search runs
-    on the `calc` bundle's queue and the follow-up optimization is launched from the chat service,
-    so an in-process map would resolve nothing.
+    The conformer search runs on the `calc` bundle's queue and the follow-up is launched from the
+    chat service, so an in-process map would resolve nothing.
     """
     from chemclaw.science.calc.postgres_structures import PostgresStructureStore
     from tests.pg import migrated_db_or_skip

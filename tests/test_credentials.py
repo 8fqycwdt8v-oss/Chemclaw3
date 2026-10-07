@@ -1,19 +1,13 @@
 """Every credential on `Settings` is a `SecretStr`, and every consumer still sends the real value.
 
-Two assertions that look like one and are not
-(`D-2026-08-26-a-credential-is-a-type-not-a-convention`):
+Two separate guarantees, tested together because a change satisfying either alone is a
+regression:
 
-- **The type.** A `SecretStr` reprs as `**********`, so the value cannot reach a dump, a pydantic
-  error message or a debugger through a route `core/logging.py`'s exact-match redaction has not been
-  taught about. That filter stays and is still the control; this is the same guarantee where the
-  filter is not looking.
+- **The type.** A `SecretStr` reprs as `**********`, so the value cannot reach a dump, a
+  pydantic error or a debugger where `core/logging.py`'s redaction is not looking.
 - **The transmission.** An f-string does *not* unwrap a `SecretStr`, so a credential formatted
-  into a header, a signature or a client option compiles, runs, and sends `**********`. The call
-  then fails as a 401 rather than leaking — the right direction, and still a failure. "The
-  credential is present" and "the credential is correct" are different assertions, and only the
-  second one catches it. Every consumer below asserts the second.
-
-The two halves are tested together on purpose: a change that satisfies either alone is a regression.
+  into a header or signature would send `**********`. Every consumer below asserts the real
+  value is sent.
 """
 
 import re
@@ -25,21 +19,16 @@ from pydantic import SecretStr
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.logging import _SECRET_SETTINGS, redact_secrets
 
-# The three DSNs, explicitly out of the type change: 34 lines across 27 modules read one, all
-# feeding psycopg conninfo, which needs the plain string straight back. They are still redacted —
-# they are in `_SECRET_SETTINGS` — which is why this list is an exception to the type rule rather
-# than to the inventory.
+# The three DSNs stay plain strings because psycopg conninfo needs them; they are still redacted
+# via `_SECRET_SETTINGS`, so this is an exception to the type rule, not to the inventory.
 _DSNS = frozenset({"postgres_dsn", "postgres_migration_dsn", "session_store_dsn"})
 
 
 def test_every_redacted_setting_that_is_not_a_dsn_is_a_secret_str() -> None:
     """Driven off the redaction inventory, so the two lists cannot drift apart.
 
-    A new credential added as a plain `str` fails here; a `SecretStr` added without a
-    `_SECRET_SETTINGS` row fails in the test below. Together that is "declare it once and both
-    protections follow", which is the property worth having — the previous arrangement lost
-    `llm_fallback_api_key` from the inventory entirely, and it was the one credential in `Settings`
-    that nothing redacted at all.
+    A credential added as a plain `str` fails here; a `SecretStr` without a `_SECRET_SETTINGS` row
+    fails below. Declare it once and both protections follow.
     """
     plain = sorted(
         name
@@ -53,9 +42,8 @@ def test_every_redacted_setting_that_is_not_a_dsn_is_a_secret_str() -> None:
 def test_every_secret_str_on_the_settings_object_is_also_redacted() -> None:
     """The other direction: a typed credential the log filter has never heard of.
 
-    The type hides a value from a `repr`; the filter catches it in a log line that quoted it some
-    other way. Neither subsumes the other, so a field with one and not the other is half protected
-    and reads as fully protected.
+    The type hides a value from `repr`; the filter catches it quoted some other way in a log line.
+    Neither subsumes the other.
     """
     typed = {
         name
@@ -65,17 +53,12 @@ def test_every_secret_str_on_the_settings_object_is_also_redacted() -> None:
     assert typed - set(_SECRET_SETTINGS) == set(), "a SecretStr no log line would redact"
 
 
-# What a credential-shaped field name ends in. **Anchored, and read together with the type
-# below** — which is what separates this from the name-pattern heuristic
-# `core/logging.py`'s own comment rejects and `tests/test_logging.py` restates. That heuristic
-# was unanchored and untyped, so it swept in `calc_server_token_env` (a variable *name*),
-# `budget_max_tokens_per_user` (an integer) and `temporal_tls_key` (a path to a PEM). None of the
-# three survives this one: `_env` is not a terminal credential word, an `int` is not a `str`, and
-# `api_key` does not match `tls_key`.
+# What a credential-shaped field name ends in. Anchored, and read together with the `str` type
+# below, so it does not sweep in `*_token_env` (a variable name), `*_max_tokens_*` (an int) or
+# `temporal_tls_key` (a path).
 #
-# The residual is a credential whose name ends in none of these words. That is a real gap and it is
-# the *reason* the inventory stays a hand-written list — this guard cannot replace the judgement,
-# only make the common shape impossible to forget.
+# A credential whose name ends in none of these words is missed, which is why the inventory stays
+# a hand-written list; this guard only makes the common shape impossible to forget.
 _CREDENTIAL_NAME = re.compile(r"(api_key|token|secret|password|dsn|credential)$")
 
 
@@ -89,16 +72,11 @@ def _credential_shaped(model: type[Settings]) -> set[str]:
 
 
 def test_every_credential_shaped_setting_is_in_the_redaction_inventory() -> None:
-    """The direction neither existing test covers: a credential added as a plain `str`.
+    """A credential added as a plain `str` and listed nowhere must be caught.
 
-    The two tests above are a closed loop over `_SECRET_SETTINGS` and the `SecretStr` fields — a
-    field in *neither* is invisible to both, which is exactly how `vector_store_api_key` and
-    `live_probe_token` sat outside every redaction mechanism while the suite stayed green. Each was
-    found by a separate audit reading the file; nothing failed.
-
-    Asserted in both directions, so this is also the row-in-review the inventory's comment asks for:
-    adding a credential-shaped setting fails here until it is listed, and listing a field that no
-    longer looks like a credential fails here too.
+    The two tests above are a closed loop over `_SECRET_SETTINGS` and the `SecretStr` fields, so a
+    field in neither is invisible to both. Both directions: a credential-shaped setting must be
+    listed, and a listed field must still look like a credential.
     """
     shaped = _credential_shaped(Settings)
     assert shaped == set(_SECRET_SETTINGS), (
@@ -110,9 +88,8 @@ def test_every_credential_shaped_setting_is_in_the_redaction_inventory() -> None
 def test_the_guard_above_fires_for_a_credential_nobody_has_added_yet() -> None:
     """A guard that is green because it can never fail is not a guard.
 
-    The assertion above passes today by construction — every name it finds is already listed — so
-    on its own it says nothing about the *next* credential. This adds one, the way a future
-    settings section would, and asserts the shape-check sees it.
+    The assertion above passes by construction today; this adds a credential the way a future
+    settings section would and asserts the shape-check sees it.
     """
 
     class _Later(Settings):
@@ -126,20 +103,12 @@ def test_the_guard_above_fires_for_a_credential_nobody_has_added_yet() -> None:
 def test_every_bearer_named_by_a_setting_is_redacted_by_its_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The third shape of credential setting, invisible to both directions above by construction.
+    """The bearer a `*_token_env` setting names is redacted by its value.
 
-    `calc_server_token_env`, `rxnlabel_server_token_env` and `mcp_face_token_env` hold a variable
-    *name*, not a value — which is why `_CREDENTIAL_NAME` deliberately does not match `_env`, and
-    why a `SecretStr` would be the wrong type for them. The consequence was that the bearer each
-    one points at was outside every mechanism: not in `_SECRET_SETTINGS` (whose members are
-    values), not a connector manifest's `token_env`, and never passed to `register_secret_env`.
-    Measured, all three survived `redact_secrets` verbatim — including the one guarding the
-    read-only MCP face and the one for the calculation backend, "the hottest and most privileged
-    connection in the system".
-
-    Driven off `Settings.model_fields` rather than the three names, so a fourth such setting is
-    covered on the day it is declared. The assertion is on the *value*, since a bearer in a log
-    line or a rendered traceback rarely arrives beside its variable name.
+    Such settings hold a variable *name*, so they are neither a `SecretStr` nor in
+    `_SECRET_SETTINGS`, and the bearer they point at must be registered for redaction separately.
+    Driven off `Settings.model_fields`, so a new such setting is covered when declared; asserted on
+    the *value*, since a leaked bearer rarely appears beside its variable name.
     """
     bearers = {}
     for name in sorted(Settings.model_fields):
@@ -157,11 +126,9 @@ def test_every_bearer_named_by_a_setting_is_redacted_by_its_value(
 
 
 def test_a_secret_str_hides_its_value_from_the_shapes_that_leak() -> None:
-    """The premise of the whole change, asserted rather than believed.
+    """The premise: a `SecretStr` hides its value from `repr` and `model_dump`.
 
-    Both are pydantic behaviour rather than ours — which is exactly why they are pinned here: if a
-    future pydantic renders the value in either, this change stops buying anything and the ADR's
-    argument is void.
+    Pydantic behaviour, pinned because if it changes the type buys nothing.
     """
     holder = settings.model_copy(update={"llm_api_key": SecretStr("sk-real-value")})
     assert "sk-real-value" not in repr(holder.llm_api_key)
@@ -172,15 +139,9 @@ def test_a_secret_str_hides_its_value_from_the_shapes_that_leak() -> None:
 def test_masking_a_dsn_leaves_a_dsn() -> None:
     """The guard's *positive* property: everything that is not the password survives the mask.
 
-    Both existing tests of this function assert the password is **absent**, and absence is cheap —
-    `mask_dsn` returning `""`, or the userinfo becoming the string `"None"`, passes every one of
-    them. Measured with the whole userinfo line replaced by `None`, the masked DSN came back as
-    `postgresql://Nonehost:5432/db`: no password, no username, no port, and not a DSN.
-
-    That matters because this is a *serializer*. `model_dump()` is where an operator reads which
-    server a failing deployment was dialling — the module docstring calls that the whole reason the
-    host is not masked too — so a mask that destroys the rest of the URL trades a disclosure for a
-    diagnosis nobody can make.
+    Asserting only absence would pass a mask that returns `""` or destroys the URL. `model_dump()`
+    is where an operator reads which server a failing deployment dialled, so the rest of the DSN
+    must survive intact.
     """
     from chemclaw.core.config.dsn import _MASK, mask_dsn
 
@@ -209,12 +170,10 @@ def test_masking_a_dsn_leaves_a_dsn() -> None:
 def test_the_envelope_nonce_is_derived_from_the_real_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deployment-stable nonce that is stable across deployments *for the wrong reason*.
+    """The envelope nonce is derived from the real secret, not from `**********`.
 
-    `framing_envelope_secret` is not a credential to anything — it is the HMAC key the envelope tag
-    is derived from, and the agent instructions say only an envelope carrying exactly that tag marks
-    retrieved content as data. Derived from `**********` instead, every deployment that set *any*
-    secret would share one nonce, which is precisely the property the secret exists to prevent.
+    `framing_envelope_secret` is the HMAC key the envelope tag is derived from; derived from the
+    mask, every deployment would share one nonce, which is what the secret exists to prevent.
     """
     import hmac
     from hashlib import sha256

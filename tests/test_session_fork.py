@@ -1,15 +1,9 @@
 """A fork carries the whole thread, leaves the parent alone, and is a session in its own right.
 
-**Three properties, and the third is the one a row count cannot see.** That a fork copied the right
-number of rows says nothing about whether the copy *works* — a thread whose blobs were copied at the
-wrong versions has exactly the right row count and resumes with holes. So the last test here
-resumes the fork on a real checkpointer and reads the history back through the graph, which is the
-only assertion that could have caught the failure `agent/session_fork.py`'s docstring is about.
-
-Every test needs a real Postgres and says so by skipping without one (`tests/pg.py`), and every one
-that touches a checkpoint table creates it first: `AsyncPostgresSaver.setup()` makes those tables,
-not a migration, so a database that has never run the agent does not have them — and on a dev
-database an unqualified name resolves through `public` and passes locally while failing in CI.
+Row counts cannot show blobs copied at the wrong versions, so one test resumes the fork on a
+real checkpointer and reads the history back through the graph. Every test needs Postgres and
+creates the checkpoint tables first, since `AsyncPostgresSaver.setup()`, not a migration, makes
+them.
 """
 
 import asyncio
@@ -49,18 +43,10 @@ _NOW = datetime.now(UTC)
 
 
 def _seeded_ts(index: int) -> str:
-    """The `ts` for the `index`-th seeded checkpoint — **distinct, and ordered oldest first**.
+    """The `ts` for the `index`-th seeded checkpoint — distinct, and ordered oldest first.
 
-    Distinct because `_RESTAMP_NEWEST` picks one row by `ORDER BY ts DESC LIMIT 1`, and a fixture
-    that stamps every checkpoint with the same instant makes `DESC` and `ASC` interchangeable. A
-    mutation audit measured exactly that: stamping the *oldest* row instead of the newest, and
-    stamping *every* row, both passed the entire 6,154-test suite. The module's docstring claims in
-    bold that only the newest is restamped and that older checkpoints keep the times the parent
-    wrote them; neither half was established anywhere, because no thread reaching that code had two
-    different timestamps in it.
-
-    An hour apart, so ordering is unambiguous and both rows still sit inside any realistic
-    retention window.
+    `_RESTAMP_NEWEST` picks the newest by `ORDER BY ts DESC`, so identical timestamps would make the
+    restamp tests unable to tell which row moved. An hour apart, inside any retention window.
     """
     return (_NOW - timedelta(hours=len(_VERSIONS) - index)).isoformat()
 
@@ -74,16 +60,9 @@ async def _seed(
 ) -> None:
     """A thread with two checkpoints and one blob per version — the shape a fork must preserve.
 
-    **Two versions is the point, not padding.** `checkpoint_blobs` rows are shared across a
-    thread's checkpoints, so a channel written at version 1 and unchanged since is referenced by
-    the newest checkpoint without belonging to it. A fork that copied "the tip" would take the
-    version-2 row and leave version 1 behind, which no assertion about the newest checkpoint could
-    detect.
-
-    `transcript=False` is the state a real session is in for the whole of its first turn: the
-    checkpointer writes from the first graph node, `runner._record_transcript` writes only once the
-    answer is assembled. Every other seed here is the *end* of a turn, so nothing reached the
-    middle of one.
+    Blobs are shared across checkpoints, so the version-1 blob is referenced by the newest
+    checkpoint without belonging to it; copying "the tip" would lose it. `transcript=False` seeds
+    the state of a session mid-first-turn: checkpoints written, no transcript row yet.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -95,11 +74,8 @@ async def _seed(
                     (
                         thread_id,
                         f"ckpt-{index}",
-                        # **Relative to now, never a literal date.** A hardcoded `ts` is a slow
-                        # fuse: every seeded thread ages in real time, so a month after it was
-                        # written the aged-fork test's `prune_expired_rows()` — which sweeps the
-                        # whole schema, not one thread — would start expiring the other tests'
-                        # fixtures and failing them for a reason none of them names.
+                        # Relative to now, never a literal date, or the fixtures would age into the
+                        # retention sweep the aged-fork test runs over the whole schema.
                         Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": _seeded_ts(index)}),
                     ),
                 )
@@ -225,21 +201,11 @@ def test_forking_a_session_that_has_taken_no_turn_is_refused() -> None:
 def test_forking_before_the_first_answer_is_refused_rather_than_minting_an_unlistable_session() -> (
     None
 ):
-    """A checkpoint is not enough to fork from; the owner listing needs a transcript row.
+    """Forking before the first answer is refused rather than minting an unlistable session.
 
-    This is failure 2 of this module's own enumerated list ("A fork that copied only graph state
-    would be a session the chemist who asked for it could not find") reached from the other side:
-    the transcript copy exists and there is nothing for it to copy. `_COUNT_CHECKPOINTS` alone
-    admits exactly that state, because the two tables are written at very different moments — the
-    checkpointer from the first graph node, `runner._record_transcript` only once the answer is
-    assembled. Measured before the second guard existed: 1 checkpoint and 0 messages copied, a
-    `200` carrying the child's id, and `page_for_owner` never listing it.
-
-    A second, concurrency-free trigger reaches the same state: any session whose only turn produced
-    no prose (an empty answer, a stop, a timeout) has checkpoints and no messages forever.
-
-    The assertion is on the refusal *and* on nothing having been minted, because a guard that
-    raised after the copy would satisfy the first half and still leave the orphan behind.
+    The owner listing needs a transcript row, which is written only once an answer is assembled. The
+    refusal and the absence of any minted rows are both asserted, so a guard that raised after the
+    copy would fail.
     """
 
     async def _run() -> tuple[list[str], int]:
@@ -267,12 +233,10 @@ def test_forking_before_the_first_answer_is_refused_rather_than_minting_an_unlis
 
 
 def test_the_fork_resumes_with_the_parent_s_history_and_then_diverges() -> None:
-    """The assertion no row count can make: the copy actually *works* as a thread.
+    """The fork resumes with the parent's history and then diverges.
 
-    A real checkpointer, a real compiled graph, and three turns — one on the parent, then a fork,
-    then one on each. What is proven is that the fork's second turn sees the parent's first (so the
-    thread was carried, not merely counted) and that the two threads then move independently (so
-    the fork is a branch rather than an alias).
+    A real checkpointer and compiled graph: the fork's turn sees the parent's first, and then the
+    two threads move independently.
     """
 
     async def _run() -> tuple[list[str], list[str]]:
@@ -302,10 +266,8 @@ def test_the_fork_resumes_with_the_parent_s_history_and_then_diverges() -> None:
             await graph("the parent's answer").ainvoke(
                 turn_input("first question"), config=turn_config(parent)
             )
-            # A turn writes two records, and driving the graph directly writes only one. The
-            # transcript is `api/runner.py::_record_transcript`'s, which lives above the graph and
-            # is what makes a session listable at all — so a fixture that stops at the checkpoint
-            # is a session mid-first-turn, which `fork_session` now refuses by design.
+            # A turn writes two records; driving the graph directly writes only the checkpoint, so
+            # the transcript row is written here to make the session forkable.
             await PostgresHistoryProvider().save_messages(
                 parent, [HumanMessage(content="first question")]
             )
@@ -341,15 +303,10 @@ def test_the_fork_resumes_with_the_parent_s_history_and_then_diverges() -> None:
 
 
 def test_a_copy_that_fails_partway_leaves_no_half_session_behind() -> None:
-    """The atomicity claim, asserted rather than trusted to the connection's defaults.
+    """A copy that fails partway leaves no half session behind.
 
-    `fork_session` copies four tables and says it does so in one transaction. That is only true if
-    the connection is *not* autocommit — it is not (`db.connection` yields `autocommit=False`), but
-    "not true today" and "cannot become true" are different, and a pool option flipped somewhere
-    else would turn a failed fork into a session that lists in `GET /sessions` and cannot load.
-
-    Failure is injected by pointing the copy at a fourth table that does not exist, so three
-    tables' rows are already written when it raises — the exact shape a partial fork would take.
+    The copy is pointed at a missing fourth table, so three tables are written when it raises; the
+    single transaction must roll them back.
     """
 
     async def _run() -> None:
@@ -383,23 +340,13 @@ def test_a_copy_that_fails_partway_leaves_no_half_session_behind() -> None:
 
     before, after = asyncio.run(_drive())
 
-    # **The set, not a count over the whole table.** The fork mints its own child id and the call
-    # raises before returning it, so there is no id to look for — and the first version of this
-    # assertion counted every row not belonging to the parent, which passed alone and failed beside
-    # the other tests in this file, whose threads share the schema. Comparing the set before with
-    # the set after names exactly this fork's leftovers and nobody else's.
+    # Compare the set of threads before and after, since other tests share the schema and the failed
+    # fork never returned its id.
     assert after == before, f"a failed fork left threads behind: {sorted(after - before)}"
 
 
 def test_a_memory_deployment_says_it_cannot_fork_rather_than_failing_oddly() -> None:
-    """The route is registered and reachable, and answers honestly with no durable store.
-
-    An API-level case beside the store-level ones above, because the two can fail independently: a
-    correct `fork_session` behind an unregistered route is a 404, and a registered route that
-    assumed a store would be a 500 on the shipped `session_store=memory` default. 501 says the
-    deployment does not have the feature, which is the true answer — a fork copies a *thread*, and
-    a memory deployment has none to copy.
-    """
+    """With no durable store the fork route answers 501, not 404 or 500."""
     from fastapi.testclient import TestClient
 
     from tests.test_service import _app
@@ -449,16 +396,8 @@ async def _thread_age_days(thread_id: str) -> float:
 def test_a_fork_of_an_aged_conversation_is_not_expired_the_moment_it_is_made() -> None:
     """The fork's retention clock starts at the fork, not at the parent's last turn.
 
-    **The failure this pins is silent and total.** `durable/retention.py` expires a thread on
-    `max((checkpoint->>'ts')::timestamptz)`, and a copied checkpoint carries the parent's `ts`. So a
-    fork of a conversation last touched a year ago was already past the window when it was created:
-    the next sweep deleted its whole thread while `session_owners` and `session_messages` survived,
-    leaving a session that lists, opens, and renders every turn of its transcript — and then takes
-    its next turn with **no history at all**, because context comes from the checkpointer and not
-    from the rows the chemist can see.
-
-    Asserted through the real sweep rather than on the timestamp alone, because the timestamp is
-    only interesting for what retention does with it.
+    Otherwise the next sweep deletes the fork's thread while its transcript survives, and its next
+    turn runs with no history. Asserted through the real sweep.
     """
 
     async def _run() -> tuple[float, dict[str, int], dict[str, int]]:
@@ -503,15 +442,10 @@ def test_a_fork_of_an_aged_conversation_is_not_expired_the_moment_it_is_made() -
 
 
 def test_a_forks_ownership_row_commits_with_its_data_or_not_at_all() -> None:
-    """No copied transcript can exist without the ownership row that makes erasure find it.
+    """A fork's ownership row commits with its data or not at all.
 
-    `agent/leaver.py` scopes erasure through `SELECT session_id FROM session_owners WHERE owner =
-    ANY(...)`. A fork whose rows landed without an ownership row is therefore **structurally
-    unreachable** by the one sweep that must never miss anything — a chemist's transcript survives
-    their own erasure while the report says it was complete.
-
-    Injected at the ownership write specifically, because that is the statement the first version
-    of this module ran *after* the commit, on a separate round trip.
+    Erasure finds sessions through `session_owners`, so copied rows without an owner row would
+    survive their owner's erasure. The failure is injected at the ownership write.
     """
 
     async def _run() -> None:
@@ -544,10 +478,7 @@ def test_a_forks_ownership_row_commits_with_its_data_or_not_at_all() -> None:
 
     before, after = asyncio.run(_drive())
 
-    # **The set, not a count.** This file's other tests create sessions in the same schema, so
-    # "how many transcript rows exist" is not a question about this fork — the first version of
-    # this assertion counted theirs, passed alone and failed beside them. The same isolation
-    # mistake the atomicity test above already had to be corrected for.
+    # The set, not a count: other tests create sessions in the same schema.
     assert after == before, (
         f"a failed fork stranded transcript rows under {sorted(after - before)} with no ownership "
         "row — erasure scopes through session_owners and cannot reach them"
@@ -555,15 +486,10 @@ def test_a_forks_ownership_row_commits_with_its_data_or_not_at_all() -> None:
 
 
 def test_a_fork_can_still_fetch_the_tool_results_its_transcript_points_at() -> None:
-    """The fork carries the links, so a stored result resolves instead of collapsing to a preview.
+    """A fork can still fetch the tool results its transcript points at.
 
-    A `session_messages` row holds a `result_ref` handle; `api/tool_results.py` resolves it through
-    `tool_result_links` joined on `session_id`. Copy the transcript without the links and every
-    handle in the fork resolves to nothing — the chemist sees the 400-character preview where the
-    parent shows what the tool actually returned (`D-2026-08-09-a-preview-is-not-a-result`).
-
-    The blob is shared rather than copied, which the hash assertion pins: a fork must cost one row
-    per result, not a second copy of the bytes.
+    `result_ref` resolves through `tool_result_links` joined on `session_id`, so the links are
+    copied. The blob is shared, not duplicated.
     """
 
     async def _run() -> tuple[list[str], list[str]]:
@@ -590,17 +516,10 @@ def test_a_fork_can_still_fetch_the_tool_results_its_transcript_points_at() -> N
 
 
 def test_the_route_forks_under_the_caller_and_keeps_the_parents_profile() -> None:
-    """The success path of `POST /sessions/{id}/fork`, which nothing exercised.
+    """`POST /sessions/{id}/fork` forks under the caller and keeps the parent's profile.
 
-    **Both arguments the route passes are security-relevant and neither was covered.** Mutating the
-    handler to `fork_session(session_id, "somebody-else", None)` left 64 tests green: the fork
-    would land under a principal who never asked for it, and would drop the parent's profile —
-    which is attenuation-only, so restoring the default *widens* what the child may do. That is the
-    exact widening `session_fork`'s docstring argues against and `test_the_fork_is_owned_by_the_
-    caller_and_keeps_the_parent_s_profile` pins one layer down, at a function the route could stop
-    calling correctly without anything noticing.
-
-    Driven through the real app with a durable store, because the seam under test *is* the handler.
+    Both are security-relevant: the wrong owner, or a dropped attenuation-only profile, would widen
+    access. Driven through the real app with a durable store.
     """
     from fastapi.testclient import TestClient
 
@@ -640,12 +559,7 @@ def test_the_route_forks_under_the_caller_and_keeps_the_parents_profile() -> Non
 
 
 def test_forking_a_session_with_no_state_is_a_409_not_a_500() -> None:
-    """A caller error is reported as one — the mapping `SessionForkError` exists to produce.
-
-    Untested until now: dropping the `except SessionForkError` clause turns this into an unhandled
-    exception and a 500, which tells a chemist "the service broke" about a request that was simply
-    made too early. 409 says *this session has taken no turn yet*, which is actionable.
-    """
+    """Forking a session with no state is a 409, via `SessionForkError`, not a 500."""
     from fastapi.testclient import TestClient
 
     from chemclaw.agent.session_store import SessionOwnerStore
@@ -675,20 +589,10 @@ def test_forking_a_session_with_no_state_is_a_409_not_a_500() -> None:
 
 
 def test_a_forks_transcript_is_as_young_as_the_fork_and_survives_the_sweep() -> None:
-    """The other half of the fork's clock, and the half fixing the first half nearly hid.
+    """A fork's transcript is as young as the fork and survives the message-retention sweep.
 
-    `_RESTAMP_NEWEST` gives the fork's *checkpoints* their own age. `session_messages.created_at`
-    was still copied verbatim, and two readers date a session from it: `_OWNER_LIST` derives
-    `updated_at` from `max(created_at)`, so a fork of an old conversation sorted to the bottom of
-    the sidebar stamped a year ago — and `durable/retention.py` prunes that table per row, so with
-    a message window configured the fork's **whole transcript** went on the first sweep. A session
-    with no messages then drops out of `GET /sessions` entirely, which is failure 2 in
-    `session_fork`'s own list reached from the other direction: the fix had moved "lists but has no
-    history" to "has history but does not list".
-
-    **The first version of the aged-fork test above set `retention_session_messages_days = 0`**,
-    which disables exactly the window that exposes this. That is worth naming: a test that switches
-    off the sweep it is standing next to will pass over the defect it was written to catch.
+    `created_at` dates the session for the listing and for retention, so copying it verbatim would
+    sink the fork in the sidebar or prune its transcript. The message window is enabled here.
     """
 
     async def _run() -> tuple[float, dict[str, int]]:
@@ -745,19 +649,10 @@ def test_a_forks_transcript_is_as_young_as_the_fork_and_survives_the_sweep() -> 
 
 
 def test_deleting_a_fork_and_its_parent_reclaims_the_shared_blob() -> None:
-    """A fork must not make its parent's stored results immortal.
+    """Deleting a fork and its parent reclaims the shared blob.
 
-    The blob delete spares content any *other* session links — correct, or deleting one
-    conversation would unlink another's result. But it counted links from sessions that no longer
-    exist, and `tool_result_links` has no DELETE grant (a link may only disappear behind its blob),
-    so a deleted session leaves an orphan row that blocks the blob for ever. Two sessions sharing
-    bytes, both deleted: the first spares the blob for the second, the second spares it for the
-    first's orphan, and nothing can reach it again. The only collector left is
-    `retention_tool_results_days`, which ships at 0.
-
-    Coincidental sharing made that rare. A fork copies the parent's links by design, so it made it
-    certain — every forked conversation left its parent's results unreclaimable. The predicate now
-    counts only links whose session still exists, which fixes the older case too.
+    The blob delete spares content linked by other sessions, counting only links whose session
+    still exists; links cannot be deleted, so orphans would otherwise keep the blob forever.
     """
 
     async def _run() -> tuple[int, int]:
@@ -801,21 +696,10 @@ def test_deleting_a_fork_and_its_parent_reclaims_the_shared_blob() -> None:
 
 
 def test_only_the_newest_checkpoint_is_restamped_and_the_rest_keep_the_parents_times() -> None:
-    """Both halves of the claim `_RESTAMP_NEWEST` makes in bold, neither of which was pinned.
+    """Only the newest checkpoint is restamped; the rest keep the parent's times.
 
-    The module says only the newest copied checkpoint is restamped, and that the older ones keep
-    "their true creation times, which are facts about when the parent wrote them and are not this
-    module's to rewrite". A mutation audit found **both** halves free: stamping the oldest row
-    instead of the newest, and stamping every row of the thread, each passed the entire suite.
-
-    The cause was the fixture rather than the assertions. Every seeded checkpoint carried the same
-    literal `ts`, so `ORDER BY ts DESC LIMIT 1` and `ASC LIMIT 1` selected interchangeably and
-    `max(ts)` came out `now()` whichever row moved — retention's question was answered correctly by
-    a fork that had rewritten the wrong row, or all of them. `_seeded_ts` now spaces them an hour
-    apart, which is what makes this test able to tell the three cases apart.
-
-    Rewriting the whole thread is the more damaging of the two: it destroys the parent-authored
-    history the fork copied in order to preserve, and does it silently.
+    Restamping the oldest, or every row, would rewrite parent-authored history. `_seeded_ts` spaces
+    the checkpoints so the three cases are distinguishable.
     """
 
     async def _run() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
@@ -924,11 +808,9 @@ def test_a_fork_carries_each_artefact_as_it_stands_under_a_new_id() -> None:
 
 
 def test_a_forked_artefact_carries_every_figure_people_introduced_across_its_history() -> None:
-    """The fork copies the head alone, so it records the union of the source's chemist figures.
+    """A forked artefact records the union of the source's chemist-introduced figures.
 
-    Before, revision 1 of the copy carried only the head's own column: a figure a person introduced
-    two revisions back — or one written before migration 119 and derived — counted for nothing in
-    the child, and its first agent revision flagged the chemist's own value as unchecked.
+    The fork copies only the head, so figures from earlier revisions must be carried explicitly.
     """
 
     def _table(*values: float) -> Any:

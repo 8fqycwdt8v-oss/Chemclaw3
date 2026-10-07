@@ -1,8 +1,7 @@
-"""The turn event contract serializes stably and the runner emits the documented sequence (F2-T3).
+"""The turn event contract serializes stably and the runner emits the documented sequence.
 
-Pure and fast: proves each event round-trips through JSON with its `type` discriminator, and that
-`run_turn` translates a scripted stream of model updates into tokens + a tool-call trace + a final
-answer — without any live model (a fake streaming agent is injected).
+Each event round-trips through JSON with its `type` discriminator, and `run_turn` translates a
+scripted stream into tokens, a tool-call trace and a final answer, with a fake agent.
 """
 
 import asyncio
@@ -18,10 +17,8 @@ from tests.fakes_turn import Piece, ScriptedTurn
 class _FakeAgent(ScriptedTurn):
     """A fake agent whose turn is two streamed text pieces.
 
-    Deliberately prose only: the whole event sequence for a tool-calling turn is
-    `tests/test_langgraph_stream.py`'s conformance test, driven on a real compiled graph, and this
-    file pins the serialization and the error path. It used to yield streamed-update doubles for
-    the previous engine's shape, which no engine has produced since the LangGraph rebuild.
+    Prose only: the tool-calling sequence is `tests/test_langgraph_stream.py`'s conformance test on
+    a real graph; this file pins serialization and the error path.
     """
 
     def create_session(self, *, session_id: str) -> TurnSession:

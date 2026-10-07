@@ -1,13 +1,8 @@
-"""Profiles authored as files, and selected per session — the two halves of Stage D.
+"""Profiles authored as files and selected per session.
 
-A profile only becomes a *use-case configuration* when both are true: it can be written without
-touching Python, and a caller can ask for it. Either alone is not enough — a registry no one can
-select from is dead code, and a selectable name with no way to author it is still a redeploy.
-
-The load-bearing assertions are about narrowing spanning both halves of the tool surface (the
-in-process registry and the connectors' allow-lists), because that is what makes a profile
-expressible at all now that the domain capabilities are out of process — and about the invariant
-underneath everything: a profile *attenuates*, it never authorizes.
+A profile is a use-case configuration only if it can be written without Python and a caller can
+ask for it. The load-bearing assertions: narrowing spans the in-process registry and the
+connectors' allow-lists, and a profile attenuates, never authorizes.
 """
 
 from collections.abc import Iterator
@@ -41,9 +36,7 @@ tool_names:
 def profiles_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Point profile discovery at an empty temp tree, and unregister whatever a test adds.
 
-    The registry is module state, so a leaked profile would be visible to every later test — and
-    `load_profiles` is deliberately idempotent, which would hide the leak rather than surface
-    it.
+    The registry is module state, and `load_profiles` is idempotent, which would hide a leak.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", str(tmp_path))
     before = set(registered_profile_names())
@@ -131,9 +124,8 @@ def test_a_bundle_can_ship_its_own_profile(monkeypatch: pytest.MonkeyPatch) -> N
 def test_the_shipped_profile_narrows_both_halves_of_thesurface() -> None:
     """`property-lookup` gets four connector tools and one in-process tool, and nothing else.
 
-    This is the property that makes a profile useful after the domain capabilities moved out of
-    process: one `tool_names` dial reaches the in-process registry *and* each connector's
-    agent-facing allow-list, dropping connectors left with nothing.
+    One `tool_names` dial narrows the in-process registry and each connector's allow-list, dropping
+    connectors left with nothing.
     """
     load_profiles()
     agent = surface("property-lookup")
@@ -148,15 +140,10 @@ def test_the_shipped_profile_narrows_both_halves_of_thesurface() -> None:
 def test_advertised_tool_names_matches_the_surface_the_agent_really_builds(
     profile: str | None,
 ) -> None:
-    """`advertised_tool_names` must equal what `build_agent` + `connector_tools` actually produce.
+    """`advertised_tool_names` equals what `build_agent` + `connector_tools` actually produce.
 
-    It has to answer that question *without* calling `connector_tools`, because constructing a
-    connector's MCP tool opens an `httpx.AsyncClient` that only a turn's exit stack ever closes —
-    so it reads the manifests and re-applies the same two narrowings by hand. Re-applying a rule is
-    exactly how two implementations of it drift, and the drift would be invisible: the skill
-    surface would simply be scoped against a slightly wrong set of tools and every turn would look
-    fine. So the two are compared here, over both the full surface and the narrowing profile,
-    which is the case where the rules actually do something.
+    It re-applies the narrowing from manifests to avoid opening connector HTTP clients, so the two
+    implementations are compared here, over the full surface and a narrowing profile.
     """
     load_profiles()
     advertised = surface(profile)
@@ -171,30 +158,19 @@ def test_advertised_tool_names_matches_the_surface_the_agent_really_builds(
 
 
 def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
-    """The invariant under all of this: narrowing is layered *under* RBAC, never around it.
+    """A profile cannot widen what its caller may do.
 
-    A profile chooses from the surface; the audit middleware and the per-tool authorization gate
-    are attached afterwards and unconditionally, so a profile that named a tool the caller may
-    not use would still be refused at call time.
+    Audit and per-tool authorization are attached after narrowing, unconditionally, so a profile
+    naming a forbidden tool is still refused at call time.
     """
     from chemclaw.agent.tool_authz import enforce_tool_authz
 
     load_profiles()
 
-    # Asserted against *the chain the default agent gets*, not as a count: the chain has grown
-    # (error surfacing was added around audit + authz) and a hardcoded number would have failed
-    # on that addition while saying nothing about the property that matters.
-    # Compared by *name*, because the audit entry is a closure built per agent: identity would
-    # differ for two agents that are nonetheless governed identically, which is the property here.
-    #
-    # **A superset, in order, rather than equality** — and the difference is a decision, not a
-    # loosened assertion. A narrowing profile now carries one extra middleware,
-    # `refuse_undeclared_writes`, which words the refusal a tool the profile was narrowed away from
-    # earns (D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only). That is strictly *more*
-    # governance for the narrowed agent, which is the direction this invariant is about: what must
-    # never happen is a narrowed profile losing an entry, and equality would have made the safe
-    # direction fail as loudly as the unsafe one. The order is checked too, because the nesting is
-    # load-bearing (`tool_governance_middleware` argues each position).
+    # Compared by name against the default agent's chain (the audit entry is a per-agent closure),
+    # not by count. A superset in order rather than equality: a narrowing profile adds
+    # `refuse_undeclared_writes`, which is more governance; what must never happen is losing an
+    # entry. The order is checked because nesting is load-bearing.
     from chemclaw.agent.langgraph_agent import tool_call_middleware
     from chemclaw.agent.profiles import get_profile
 
@@ -234,11 +210,8 @@ def test_a_session_selects_its_profile_and_keeps_it() -> None:
         ]
     assert app.state.live_sessions.get(default).profile is None
     assert app.state.live_sessions.get(narrowed).profile == "property-lookup"
-    # The profile is *all* the session carries about its surface. There used to be an assertion
-    # here that one agent was built per distinct profile and cached — an agent was configuration,
-    # not per-session state. Nothing is cached per process now: a graph binds its tools at
-    # construction and is compiled per turn, so the profile recorded on the session is what decides
-    # each turn's surface.
+    # The profile is all the session carries about its surface; a graph is compiled per turn, so the
+    # recorded profile decides each turn's tools.
 
 
 def test_an_unknown_profile_is_refused_at_session_creation() -> None:
@@ -253,19 +226,11 @@ def test_an_unknown_profile_is_refused_at_session_creation() -> None:
 def test_a_profile_file_is_read_through_the_one_bounded_manifest_reader(
     profiles_dir: Path,
 ) -> None:
-    """The sixth manifest loader, and the one where the prose *is* the system prompt.
+    """A profile file is read through `core/manifest_io.read_manifest`, the bounded manifest reader.
 
-    `D-2026-09-06-a-manifest-is-data-in-every-field-that-executes` routed five loaders through
-    `core/manifest_io.read_manifest` and left this one on a bare `yaml.safe_load`. That is the
-    wrong one to leave: a connector's prose becomes a tool description, while a profile's
-    `instructions` is the system message itself, re-sent on every model call of every turn on that
-    profile — outside the ratchet `tests/test_context_floor.py` holds, which measures shipped
-    bundles.
-
-    Three arms, each measured against the unbounded loader first: 500,000 characters of
-    `instructions` loaded and reached the prefix; a 209-byte alias bomb expanded to 4,782,969
-    nodes; and 2,000-deep nesting raised a bare `RecursionError`, which is neither a `ProfileError`
-    nor a `ValueError`, so it escaped every `except ValueError` an entry point wraps startup in.
+    A profile's `instructions` is the system message on every call, outside the context-floor
+    ratchet. Three arms: oversized `instructions`, a YAML alias bomb and deep nesting (whose
+    `RecursionError` would escape every `except ValueError`) are refused.
     """
     (profiles_dir / "huge.yaml").write_text(f"instructions: {'A' * 500_000}\n")
     with pytest.raises(ProfileError, match="instructions"):
@@ -292,15 +257,9 @@ def test_a_profile_file_is_read_through_the_one_bounded_manifest_reader(
 def _tool_universe() -> frozenset[str]:
     """Every name any shipped profile declares as a tool, plus the in-process registry.
 
-    The universe is what separates a *tool* name in a profile's prose from an argument or field
-    name that happens to be snake_case — `structure_id` is a property on a calculation model and
-    `artifact_refs` is a note field, and both appear in `evidence.yaml`'s prose legitimately.
-
-    Built from the declarations rather than from a running graph on purpose. A connector that is
-    unreachable in this environment drops its tools from the *advertised* surface — measured, the
-    `computation` profile advertises 20 of the 41 names it declares with no fleet running — so a
-    check against the live surface would fail on a laptop and pass in a pod, which is the opposite
-    of what a repository-owned guard should do.
+    Separates tool names from snake_case argument or field names in prose. Built from declarations,
+    not the live surface, which shrinks when a connector is unreachable and would make the check
+    environment-dependent.
     """
     from chemclaw.core.tool_registry import registered_tool_names
 
@@ -311,13 +270,10 @@ def _tool_universe() -> frozenset[str]:
 
 
 def _shipped_profiles() -> list[AgentProfile]:
-    """Every profile under `data/profiles/`, read through the registry rather than the loader.
+    """Every profile under `data/profiles/`, read through the registry.
 
-    **`load_profiles()` returns what it *newly* registered, not what exists**, and that is a trap
-    worth naming: it is idempotent by skipping names already in the registry, so the second call in
-    a process returns `[]`. The first draft of the guard below iterated it, measured an empty list,
-    and passed green over a defect this file had already been shown — the guard-that-cannot-fail
-    shape, reached through a contract nobody misread so much as assumed.
+    `load_profiles()` returns only what it newly registered, so a second call returns `[]` and a
+    guard iterating it would pass vacuously.
     """
     load_profiles()
     shipped = (name for name in registered_profile_names() if name != DEFAULT_PROFILE.name)
@@ -325,23 +281,11 @@ def _shipped_profiles() -> list[AgentProfile]:
 
 
 def test_no_shipped_profiles_prose_names_a_tool_that_profile_does_not_bind() -> None:
-    """The defect `PromptBlock` exists to end, surviving one function along.
+    """No shipped profile's prose names a tool that profile does not bind.
 
-    `instructions_for` narrows the *default* prose block by block against the graph's surface, and
-    passes a profile's own `instructions:` through whole — its docstring's reason being that a
-    profile's prose is "text this repository did not write and cannot cut into blocks". The six
-    profiles under `data/profiles/` **are** text this repository wrote, so that exemption does not
-    cover them and nothing checked them.
-
-    Measured when this was written: `evidence.yaml` told the evidence specialist that "a spectrum is
-    the band list compute_thermochemistry returned" while binding fourteen names, none of them that
-    one. A model reads a tool name in its own system prompt as a tool it has — that is the whole
-    premise of `PromptBlock.requires` — so the specialist whose brief is explicitly "never compute a
-    new value" was pointed at a calculation tool it cannot call.
-
-    Scoped to the profiles in this repository, deliberately. A site's own profile is a manifest this
-    tree cannot see, and the general fix for one — a profile supplying *blocks* so its prose is
-    narrowed like the default's — is a `BACKLOG.md` row rather than an abstraction with no caller.
+    `instructions_for` passes a profile's own instructions through whole, and a model reads a tool
+    name in its prompt as a tool it has. The profiles in `data/profiles/` are this repository's
+    text, so they are checked; a site's own profiles are outside this tree.
     """
     universe = _tool_universe()
     offences: dict[str, list[str]] = {}

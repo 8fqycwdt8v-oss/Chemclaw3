@@ -1,11 +1,8 @@
 """The session lifecycle routes over a real database: paging the list, and deleting one.
 
-Everything here drives the production app (`create_app`) with the *real* durable stores rather than
-the in-memory fakes `tests/test_service.py` injects, because both behaviours under test are
-statements about SQL: a keyset page boundary and a twelve-table delete cannot be proven against a
-registry that holds a dict. CI provides Postgres; the offline sandbox skips (`tests/pg.py`).
-
-`D-2026-08-27-a-session-list-is-a-cursor-and-a-session-is-deletable` is the decision these pin.
+Drives `create_app` with the real durable stores, because a keyset page boundary and a
+twelve-table delete are statements about SQL. Skipped without Postgres (`tests/pg.py`).
+Decision: `D-2026-08-27-a-session-list-is-a-cursor-and-a-session-is-deletable`.
 """
 
 import asyncio
@@ -67,17 +64,13 @@ async def _conversation(session_id: str, owner: str | None, message: str = "a tu
 async def _checkpoint_for(session_id: str) -> None:
     """The graph state a fork branches from — the half `_conversation` does not write.
 
-    `_conversation` writes the transcript, which is what makes a session *listable*; a fork also
-    needs a checkpoint, which is what makes it a thread. Written straight into the checkpointer's
-    table rather than by running a graph, because nothing in this file runs a turn.
+    Written straight into the checkpointer's table, since nothing here runs a turn.
     """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                # `ts` from `now()` rather than a literal date, for the reason
-                # `tests/test_session_fork.py::_seed` gives: a hardcoded timestamp is a slow fuse,
-                # because `durable/retention.py` sweeps the whole schema and would start expiring
-                # this fixture once real time caught up with it.
+                # `ts` from `now()` rather than a literal date, so `durable/retention.py` never
+                # expires this fixture once real time passes it.
                 "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, checkpoint, "
                 "metadata) VALUES (%s, '', 'ckpt-1', "
                 "jsonb_build_object('v', 1, 'id', 'ckpt-1', 'ts', now()::text), '{}'::jsonb) "
@@ -90,10 +83,8 @@ async def _checkpoint_for(session_id: str) -> None:
 async def _rows_for(session_id: str) -> int:
     """How many rows of the delete's own table set still name this session.
 
-    The caller must have run `create_checkpoint_tables()`: this counts the checkpointer's three
-    tables unqualified, and a database that has never run the agent does not have them. Skipping
-    an absent one here instead would make the count *silently* stop covering the graph state — the
-    half of a session delete that has no migration to guarantee it exists.
+    The caller must run `create_checkpoint_tables()` first: the three checkpointer tables are
+    counted unqualified, and skipping an absent one would silently stop covering graph state.
     """
     total = 0
     async with db.connection(settings.postgres_dsn) as conn:
@@ -115,12 +106,8 @@ def test_the_session_list_pages_past_its_ceiling_and_stays_a_bare_array(
 ) -> None:
     """A client can reach every conversation it owns, and an old client sees no change at all.
 
-    Both halves matter. The cursor is what makes the older conversations reachable — before it,
-    `service_max_listed_sessions` silently *was* the list. And it is carried in a response header
-    rather than in the body precisely because the body is a bare JSON array that the companion UI
-    parses as one (`src/api/client.ts`: `request<SessionSummary[]>('/sessions')`): an envelope would
-    have broken every deployed client in order to add a field. So this asserts the shape as well as
-    the paging — a list of objects, each still carrying exactly the four fields it always had.
+    The cursor travels in a response header because the body is a bare JSON array the UI parses as
+    one; asserted as a list of objects carrying exactly the four original fields.
     """
     asyncio.run(migrated_db_or_skip())
     sessions = [f"sess-api-page-{index}" for index in range(5)]
@@ -155,9 +142,7 @@ def test_the_session_list_pages_past_its_ceiling_and_stays_a_bare_array(
 def test_a_cursor_the_service_did_not_mint_is_refused_rather_than_answered() -> None:
     """A junk cursor is the caller's error (422), never a 500 and never a silent first page.
 
-    Silently answering page one would be the worst of the three: a client that mangles its cursor
-    would page forever over the same two rows, which reads as data corruption rather than as the
-    bad request it is.
+    A silent first page would make a client with a mangled cursor page forever over the same rows.
     """
     asyncio.run(migrated_db_or_skip())
     client = _client(_durable_app())
@@ -167,11 +152,7 @@ def test_a_cursor_the_service_did_not_mint_is_refused_rather_than_answered() -> 
 def test_an_owner_deletes_their_own_session_and_it_stops_existing() -> None:
     """204, the durable rows are gone, and the id no longer resolves *on this pod either*.
 
-    The last clause is the one worth a test. The front door holds live sessions in an in-process
-    LRU that `_resolve_session` consults before the store, so a delete that only cleared the
-    database would leave this process happily serving — and writing new messages into — a
-    conversation whose ownership row no longer exists, under an id no session-scoped sweep in this
-    system could ever find again.
+    `_resolve_session` consults an in-process LRU first, so the delete must evict it too.
     """
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
@@ -191,10 +172,7 @@ def test_an_owner_deletes_their_own_session_and_it_stops_existing() -> None:
 def test_a_stranger_cannot_delete_a_session_and_learns_nothing_by_trying() -> None:
     """Deleting is authorized exactly as reading is: a non-owner gets the unknown-id 404.
 
-    Not 403 — the same refusal `GET /sessions/{id}/messages` gives, because a status that
-    distinguished "not yours" from "no such thing" would turn this route into an oracle for which
-    session ids exist. That the rows are still there afterwards is the half a status code alone
-    would not prove.
+    Not 403, which would be an oracle for which ids exist; the rows must still be there afterwards.
     """
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
@@ -212,14 +190,9 @@ def test_a_stranger_cannot_delete_a_session_and_learns_nothing_by_trying() -> No
 def test_a_session_with_a_turn_in_flight_refuses_the_delete() -> None:
     """409 while a turn is running, from either lease — and nothing is deleted.
 
-    A delete landing mid-turn would race the turn's own writes: the transcript row and the
-    checkpoint the turn is about to commit would arrive *after* the sweep, leaving exactly the
-    orphaned rows the sweep exists to prevent. So the delete claims the session's turn slot the same
-    way `POST /sessions/{id}/messages` claims it, and refuses on the same 409 when it cannot.
-
-    Both leases are exercised because they answer different questions: the durable claim is another
-    *pod* running the turn (the shipped chart runs two replicas), and the in-process lease is this
-    one.
+    A mid-turn delete would race the turn's own writes and leave orphan rows, so it claims the turn
+    slot as `POST /sessions/{id}/messages` does. Both leases: the durable claim (another pod) and
+    the in-process lease (this one).
     """
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
@@ -251,18 +224,9 @@ def test_a_session_with_a_turn_in_flight_refuses_the_delete() -> None:
 def test_a_session_with_a_turn_in_flight_refuses_the_fork() -> None:
     """409 while a turn is running — the same claim pair `DELETE` takes, for the same reason.
 
-    A fork reads five tables of the parent and writes them under a new id in one transaction. At
-    READ COMMITTED each statement takes its own snapshot, so a turn committing between two of them
-    puts a checkpoint in the child whose blob rows were copied before it existed — the "resumes
-    with holes" failure `agent/session_fork.py` opens by naming, arrived at through concurrency
-    rather than through copying the tip.
-
-    The forkability guard has the same exposure: the parent's transcript row can land between the
-    count and the copy, so a fork admitted mid-turn is a fork whose answer to "is this a session
-    yet" was true of neither the moment before nor the moment after.
-
-    Both leases, exactly as the delete test drives them: the durable claim is another *pod* running
-    the turn, the in-process lease is this one.
+    A fork reads five tables statement by statement at READ COMMITTED, so a commit between them
+    could copy a checkpoint without its blobs, and the forkability check could change between count
+    and copy. Both leases, as in the delete test.
     """
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
@@ -298,9 +262,8 @@ def test_each_transcript_message_names_the_turn_that_stored_it(
 ) -> None:
     """`correlation_id` comes back from `session_messages`, so a detached turn is found by identity.
 
-    A client whose stream dropped used to find its answer by matching text, which cannot tell two
-    turns that said the same thing apart. Two turns under two ids, and one row stored off the
-    request path, which has no turn and so reads back as `None` rather than as `""`.
+    Two turns under two ids; a row stored off the request path has no turn and reads back as `None`,
+    not `""`.
     """
     import uuid
 

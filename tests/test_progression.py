@@ -1,9 +1,8 @@
-"""Tests for reading an optimization series as a sequence (D-162).
+"""Reading an optimization series as a sequence (D-162).
 
-The behaviour under test is what a technician working one step for weeks needs the system to
-see: the runs in the order they were performed, what changed at each step, what the record does
-*not* license (a trajectory over undated runs, a motive behind a change), and the hypothesis the
-run was testing surviving ingestion. In-memory throughout — no store, no git, no LLM.
+Runs in the order performed, what changed at each step, what the record does not license (a
+trajectory over undated runs, a motive behind a change), and the run's hypothesis surviving
+ingestion. In-memory throughout.
 """
 
 from datetime import date
@@ -88,16 +87,11 @@ def test_a_setpoint_change_is_named_with_its_units() -> None:
 
 
 def test_a_setpoint_one_run_did_not_record_is_not_a_change() -> None:
-    """A missing number is a gap in the *record*, so diffing against it invents a change.
+    """A setpoint one run did not record is not a change.
 
-    This test asserted the opposite until 2026-08-26 — `time 4 h → —` — which is the defect
-    `agent/condense._changes` had already been fixed for and `progression` had not
-    (`BACKLOG.md` §2). Absent-to-present is a difference in what someone wrote down, never in what
-    they did, and the two are indistinguishable to a reader once they are in the same column of
-    `optimization_campaign_note`. One rule now, `both_recorded`, applied inside `number_change` and
-    `text_change` rather than guarded separately at each call site.
-
-    A *recorded* zero still compares: it is a setpoint, not a gap.
+    Absent-to-present is a difference in what was written down, not in what was done.
+    `both_recorded` applies inside `number_change` and `text_change`. A recorded zero still
+    compares.
     """
     assert changes_between(_run("a", time_h=4), _run("b", time_h=None)) == []
     assert changes_between(_run("a", time_h=None), _run("b", time_h=4)) == []
@@ -107,13 +101,10 @@ def test_a_setpoint_one_run_did_not_record_is_not_a_change() -> None:
 
 
 def test_a_species_set_is_diffed_even_when_one_side_is_empty() -> None:
-    """The asymmetry `both_recorded` is drawn around, pinned so it cannot be "unified" by mistake.
+    """A species set is diffed even when one side is empty.
 
-    A setpoint is an optional scalar and `None` means nobody wrote it down. A role's species set is
-    derived from a components list that is present either way, so an empty `reagent` set beside a
-    full one is the record stating the run used no reagent — a real change, and the most common one
-    a series carries. Applying the absence rule to both would have traded a rare fabrication (a
-    partially transcribed source) for a routine erasure.
+    Unlike an optional setpoint, a role's species set comes from a components list that is always
+    present, so an empty `reagent` set states that no reagent was used: a real change.
     """
     changes = changes_between(_run("a", solvent=None), _run("b"))
     assert [c.describe() for c in changes] == ["solvent — → N,N-dimethylformamide"]
@@ -260,21 +251,11 @@ def test_a_run_with_no_recorded_hypothesis_says_nothing_about_one() -> None:
 
 
 def test_two_spellings_of_one_solvent_are_not_reported_as_a_change() -> None:
-    """The one comparison that works on solvent *names* could not tell two names apart.
+    """Two spellings of one solvent are not reported as a change.
 
-    `canonical_condition` folds `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` to one token through
-    `core.reagents`, and its docstring says why: without it "an optimization campaign could be
-    split in two by spelling alone". It had no caller in `src/` at all — kept alive by a test that
-    called it directly, which is the `reject_widening` / `map_to_hpc_identity` shape `CLAUDE.md`
-    names. Meanwhile `text_change`, the comparison a chemist actually reads in the turn-time
-    "Changed vs previous" column, compared casefolded prose:
-
-        'DMF' vs 'N,N-dimethylformamide':
-            canonical_condition folds -> True
-            text_change reports       -> solvent DMF → N,N-dimethylformamide
-
-    A fabricated lever, in the artifact built for reading levers off. What is *displayed* is still
-    what was written; only the decision about whether anything moved is folded.
+    `text_change` folds names through `canonical_condition` (`core.reagents`), so `DMF` and
+    `N,N-dimethylformamide` are one token for the decision whether anything moved. What is displayed
+    is still what was written.
     """
     for before, after in (
         ("DMF", "N,N-dimethylformamide"),

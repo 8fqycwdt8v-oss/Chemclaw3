@@ -1,10 +1,9 @@
 """The keyset watermark that turns a daily corpus re-walk into a daily delta.
 
-Two halves, and the second is the one worth having. The first is that `corpus_cursors` round-trips
-a position — which is a table. The second is that the *drain activity* consults it only where the
-binding claims the source is append-only, because that is the decision
-`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop` actually takes: a release keeps the behaviour
-it had, and only a source whose author asserted monotonic keys resumes.
+Two halves: `corpus_cursors` round-trips a position, and the drain activity consults it only
+where the binding declares the source append-only — a release keeps re-walking, and only a
+source whose author asserted monotonic keys resumes
+(`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
 """
 
 import asyncio
@@ -33,9 +32,8 @@ async def _resumes_at_a400(source: str, dsn: str | None = None) -> str:
 def test_a_release_binding_is_not_append_only_and_a_feed_says_so() -> None:
     """The default is the release, so an existing manifest keeps draining from the top.
 
-    Asserted rather than assumed because the whole change is additive *in behaviour* only as long
-    as this default holds: a binding that silently became append-only would start skipping rows a
-    vendor re-issued below the watermark.
+    A binding that silently became append-only would skip rows a vendor re-issued below the
+    watermark.
     """
     assert CorpusBinding.model_validate(_BINDING).append_only is False
     assert CorpusBinding.model_validate({**_BINDING, "append_only": True}).append_only is True
@@ -66,9 +64,8 @@ async def test_the_cursor_round_trips_and_an_unknown_source_starts_at_the_beginn
 async def test_an_empty_position_never_overwrites_a_real_one() -> None:
     """A pass that advanced past nothing must not reset the source to the top.
 
-    `drain_corpus` returns `cursor=after` for an empty page, and the activity stores it every page
-    rather than only the last — so without this guard the first quiet day of a live feed would
-    re-walk the whole corpus on the next fire, which is the failure the table exists to prevent.
+    `drain_corpus` returns `cursor=after` for an empty page and the activity stores every page, so
+    without this guard a quiet day would re-walk the whole corpus on the next fire.
     """
     await migrated_db_or_skip()
 
@@ -81,12 +78,10 @@ async def test_an_empty_position_never_overwrites_a_real_one() -> None:
 def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The `append_only` flag is what decides whether the stored position is consulted at all.
+    """The `append_only` flag decides whether the stored position is consulted at all.
 
-    Driven through `drain_reaction_corpus` rather than through `drain_corpus`, because the branch
-    under test is in the activity: the workflow spells "start of this source" as an empty `after`
-    both on the first page and after it pops a finished source, and the activity is the only place
-    that may turn that into a database read.
+    Driven through the activity, because that is the only place allowed to turn the workflow's empty
+    `after` ("start of this source") into a database read.
     """
     from chemclaw.durable import corpus_sync
 
@@ -115,10 +110,8 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
     monkeypatch.setattr(corpus_sync, "_warehouse_for", lambda _source: object())
     monkeypatch.setattr(corpus_sync, "_label_index", lambda: object())
     monkeypatch.setattr(corpus_sync, "_corpus_molecules", lambda: None)
-    # A sentinel rather than `None`, because the assertion below is what keeps the wiring alive:
-    # deleting `reactions=_corpus_reactions()` from the activity left every other test in this
-    # change green, so the corpus reaction index would have stopped being written with nothing
-    # failing. This is the only test that drives the production call site.
+    # A sentinel rather than `None`, so the assertion below proves the activity still passes
+    # `reactions=_corpus_reactions()`; this is the only test that drives the production call site.
     reaction_store = object()
     monkeypatch.setattr(corpus_sync, "_corpus_reactions", lambda: reaction_store)
 
@@ -147,14 +140,9 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
 def test_a_page_that_did_not_advance_writes_no_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stalled feed must not refresh `updated_at`, or the column means nothing.
 
-    `store_corpus_cursor` already refuses an *empty* position, but a stalled feed does not return
-    one: it returns the same non-empty key it resumed from, so writing it unconditionally re-stamps
-    `updated_at` on every fire and a source that stopped exporting reads as freshly synced forever.
-    That is the signal `ingest/labels/cursor.py` and `072` both describe over that column, and the
-    first version of this change made it unfirable.
-
-    The gate is `report.advanced`, computed in `drain_corpus` where both the resumed position and
-    the reached one are in scope — the same field the workflow's "no cursor advance" warning reads.
+    A stalled feed returns the same non-empty key it resumed from, so an unconditional write would
+    re-stamp `updated_at` every fire and a dead source would read as freshly synced. The gate is
+    `report.advanced`, computed in `drain_corpus` where both positions are in scope.
     """
     from chemclaw.durable import corpus_sync
 

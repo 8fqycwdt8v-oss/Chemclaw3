@@ -1,17 +1,9 @@
 """What the front door lets a caller put into a log record, a metric or a 422 body.
 
-Every test here pins a *bound* rather than a value, and each one was measured unbounded first. The
-shape they share is the one `_RequestObservability`'s own docstring already argues about the `route`
-label — "a 115 KB request line reaching the redaction filter through uvicorn's access log stalled a
-pod for 21 s with the logging lock held, *unauthenticated*" — reappearing one field, one handler and
-one gate along from where that argument was won. `SecretRedactingFilter` regex-scans every record it
-is handed, at 0.07 ms per 100 characters and 3.9 ms per 16 KB, holding the logging lock on the one
-interpreter that serves every SSE stream; so "how long may this string be" is a throughput question
-and not a tidiness one.
-
-Driven through the real app wherever the defect needs a stack (a `path_params` entry exists only
-once a route has matched, and an unauthenticated 401 exists only with `entra_required` on), and
-against the handler directly where the shape cannot be produced by any route this app ships today.
+Every test pins a bound. `SecretRedactingFilter` regex-scans each record while holding the logging
+lock on the interpreter serving every SSE stream, so an unbounded caller-supplied string is a
+throughput problem. Driven through the real app where the defect needs a stack, and against the
+handler directly where no shipped route produces the shape.
 """
 
 import asyncio
@@ -54,13 +46,10 @@ def _records(caplog: pytest.LogCaptureFixture, logger_name: str) -> list[logging
 def test_an_unauthenticated_401_books_no_session_id_from_the_path(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`path_params` is filled at route *match*, which is before any dependency has run.
+    """An unauthenticated 401 books no session id from the path.
 
-    So reading it in `_record_request` put the caller's own unbounded string into the record on a
-    request that had not authenticated: measured with `entra_required=True`,
-    `GET /sessions/<6000 Q's>/messages` answered 401 and booked a **6,000-character** `session_id`.
-    The id is now stamped by `bind_request_session`, which runs inside the ownership gate — so on a
-    401 there is nothing to stamp, and the field is empty.
+    `path_params` is filled at route match, before any dependency runs, so the id is stamped by
+    `bind_request_session` inside the ownership gate; on a 401 the field is empty.
     """
     monkeypatch.setattr(settings, "entra_required", True)
     client = TestClient(_app(_FakeAgent()))
@@ -169,11 +158,10 @@ def test_the_authz_refusal_clips_the_id_it_refused(caplog: pytest.LogCaptureFixt
 
 
 def test_a_validation_failure_does_not_reflect_the_body_back(client: TestClient) -> None:
-    """`_MAX_VALIDATION_ERRORS` bounds the error *count*; a v2 error object embeds its `input`.
+    """A validation failure does not reflect the body back.
 
-    So one error was enough: measured, a 200,025-byte body came back as a **200,119-byte** 422,
-    and with `service_max_request_bytes` at 4,000,000 the ceiling was the request itself. The
-    webhook this constant's comment used to claim parity with answers a 2 MB body in 135 bytes.
+    `_MAX_VALIDATION_ERRORS` bounds the error count, but a v2 error object embeds its `input`, so
+    one error could echo the whole body; the input is clipped.
     """
     session_id = client.post("/sessions").json()["session_id"]
     body = {"message": {"junk": "Y" * 200_000}}
@@ -194,10 +182,8 @@ def test_a_validation_error_location_cannot_carry_the_caller_s_own_key(
 ) -> None:
     """The `loc` tail is a caller-chosen string for `extra_forbidden` and for a bad dict key.
 
-    No route this app ships produces either shape today — no body model forbids extras and none is
-    a bare mapping — which is exactly why this drives the handler rather than a route: the handler
-    is registered for every route there will ever be, and the comment above `first_locations`
-    claims a property of *it*.
+    No shipped route produces either shape, so this drives the handler, which is registered for
+    every route there will ever be.
     """
     key = "K" * 5000
     error = {"type": "extra_forbidden", "loc": ("body", key), "msg": "Extra inputs", "input": key}
@@ -218,16 +204,11 @@ def test_a_validation_error_location_cannot_carry_the_caller_s_own_key(
 def test_an_error_object_that_is_not_a_mapping_still_answers_the_caller(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The 422's two halves make the same defensive claim, and only one of them held.
+    """An error object that is not a mapping still answers the caller.
 
-    `_render_errors` passes a non-mapping error through as it came — "not every producer of a
-    `RequestValidationError` is pydantic" — while the log line built above it read `e.get("loc")`
-    on the same objects, and it runs *first*. Measured: a bare string raised `AttributeError`
-    inside the handler, so the caller's malformed request would come back as a **500** with
-    `chemclaw_request_validation_failures_total` already counting a 422 nobody was sent.
-
-    Driven directly, like the `loc`-clipping test above and for the same reason: no route this app
-    ships produces this shape, and the property is the handler's or it is nothing's.
+    `_render_errors` passes a non-mapping error through, so the log line built before it must too,
+    or the 422 becomes a 500 with a 422 already counted. Driven directly, since no route produces
+    this shape.
     """
     request = Request({"type": "http", "method": "POST", "path": "/sessions", "headers": []})
 
@@ -252,12 +233,10 @@ def test_an_error_object_that_is_not_a_mapping_still_answers_the_caller(
 
 
 def test_a_response_start_without_headers_is_still_answered() -> None:
-    """`MutableHeaders(scope=message)` raises `KeyError` when `headers` is absent.
+    """A response start without headers is still answered.
 
-    That raise reached the middleware's own `except` with `answered` already true, took the
-    `if answered: raise` arm — written for an SSE stream that died mid-answer, where there is
-    genuinely nothing left to send — and so sent **nothing at all**. A spec-legal response became a
-    connection the client waits out. The `setdefault` runs before both.
+    `MutableHeaders(scope=message)` raises `KeyError` when `headers` is absent, which would reach
+    the `if answered: raise` arm and send nothing; the `setdefault` runs first.
     """
 
     async def _bare(scope: Scope, receive: Receive, send: Send) -> None:
@@ -291,14 +270,10 @@ def test_a_response_start_without_headers_is_still_answered() -> None:
 
 
 def test_the_front_door_s_prose_does_not_restate_the_series_cap() -> None:
-    """Three comments said 64 for as long as the constant said 128, one of them arithmetically.
+    """The front door's prose does not restate the series cap.
 
-    `_MAX_SERIES_PER_COUNTER` was raised to 128 *because* the front door's route table had grown
-    into the old margin — so "one route away from not being" became 65 routes away in the same
-    commit that made it false. The number lives in `core/metrics.py` and the arithmetic is asserted
-    against the constant in `tests/test_api_observability.py`; a prose copy is a claim nothing
-    checks, which is the failure mode this repository has already fixed for a target count, a skip
-    count and a port table.
+    The number lives in `core/metrics.py` and the arithmetic is asserted in
+    `tests/test_api_observability.py`; a prose copy goes stale unchecked.
     """
     stale = re.compile(r"\b64\b")
     for path in (

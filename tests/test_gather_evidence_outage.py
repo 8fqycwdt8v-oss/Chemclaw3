@@ -1,14 +1,8 @@
 """`gather_evidence` must not report an outage as "nothing on file".
 
-The tool's docstring is the model's contract, and it says an empty result means *nothing on file,
-never invented*. Every evidence source swallowed its own failure into an empty list, so a chemist
-asking "have we run this nitration before?" during a Postgres blip was told, confidently, that the
-company has no prior art — with nothing on the stream or in the answer saying a source was down.
-
-The fix is narrow on purpose. A single flaky source still costs its own leg and not the turn, which
-is the trade `fanout._sweep` argues for and is right about. What changed is the case where *nothing*
-could be asked: there is no honest empty answer to give, so the tool raises and the model reports a
-failure it can say out loud.
+The model's contract says an empty result means nothing on file. A single flaky source still costs
+only its own leg; when no source could be asked at all there is no honest empty answer, so the tool
+raises and the model reports a failure.
 """
 
 import asyncio
@@ -137,20 +131,12 @@ def test_one_source_down_still_answers_from_the_others(monkeypatch: pytest.Monke
 def test_the_shipped_retrieve_halves_report_a_failure_instead_of_an_empty_result(
     tmp_path: Path,
 ) -> None:
-    """The other half of the same defect, one layer down — and where it actually lived.
+    """The shipped retrieve halves report a failure instead of an empty result.
 
-    The two tests above pin `sweep_sources`'s channel and `gather_evidence`'s guard, both of which
-    were correct all along. What made them unreachable is that three of the shipped retrieve halves
-    caught everything internally and returned `[]`, so their branch reported `failed=False,
-    chunks=0` — byte-identical to a source that ran fine and matched nothing. Driving the real
-    `sweep_sources` with the real halves over unreachable backings measured it:
-
-        raising halves    sources_failed=['sharedrive', 'eln-warehouse', 'vendored'] -> raises
-        swallowing halves sources_failed=[]                                          -> no raise
-
-    Row two was the shipped configuration. A retriever may still *decide* that a condition is not a
-    failure — an unentitled caller, a filter this source cannot honour, a blank query — and those
-    still return `[]`. What it may not do is decide that on behalf of its own backing store.
+    Driving the real `sweep_sources` with the real halves over unreachable backings must name the
+    failed sources and raise. A retriever may still decide a condition is not a failure (an
+    unentitled caller, a filter it cannot honour, a blank query) and return `[]`; it may not decide
+    that for its own backing store.
     """
     share_root = tmp_path / "share"
     (share_root / "docs").mkdir(parents=True)
@@ -204,12 +190,10 @@ def test_the_shipped_retrieve_halves_report_a_failure_instead_of_an_empty_result
 def test_a_vendored_corpus_that_failed_to_load_is_retried_rather_than_remembered_as_empty(
     tmp_path: Path,
 ) -> None:
-    """A cached failure is worse than a transient one: it outlives the condition that caused it.
+    """A vendored corpus that failed to load is retried rather than remembered as empty.
 
-    `_load` used to store `[]` behind `if self._records is not None`, so one unreadable manifest at
-    the first query made the corpus report empty for the life of the pod — after a single warning
-    at startup, with every later query silent. The dataset is still read once *on success*; what
-    may not be cached is the failure.
+    The dataset is read once on success; a cached failure would outlive the condition that caused
+    it.
     """
     dataset = tmp_path / "reagents"
     dataset.mkdir()
@@ -227,12 +211,9 @@ def test_a_vendored_corpus_that_failed_to_load_is_retried_rather_than_remembered
                 "licence": "CC-BY-4.0",
                 "retrieved_from": "https://example.invalid/reagents.csv",
                 "description": "reagent names",
-                # `retrieved_from` above names somebody else's file, so this corpus is a mirror and
-                # `DatasetManifest` requires it to say who re-takes the snapshot and how often
-                # (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`). Written out here
-                # rather than flipped to `mirrored: false`, because a fixture that dodges the rule
-                # by claiming to be first-party while pointing at a URL is the shape the rule is
-                # about.
+                # `retrieved_from` names somebody else's file, so this is a mirror and
+                # `DatasetManifest` requires an owner and cadence; the fixture states them rather
+                # than dodging the rule.
                 "mirrored": True,
                 "refresh_owner": "the process-chemistry data team",
                 "refresh_cadence": "quarterly",
@@ -250,18 +231,11 @@ def test_a_vendored_corpus_that_failed_to_load_is_retried_rather_than_remembered
 
 
 def test_a_corrupt_fingerprint_index_is_a_failure_while_a_prose_anchor_is_an_answer() -> None:
-    """The last swallow of the same defect: `FingerprintError` names two unrelated facts.
+    """A corrupt fingerprint index is a failure, while a prose query with no anchor is an answer.
 
-    `FingerprintReactionRetriever.retrieve` caught the type whole. One half of it is the caller's
-    own input — `gather_evidence` is asked with a prose question and no reaction anchor parses out
-    of it, which is a legitimate "this source has nothing for that query" and must stay `[]`, or
-    every text search would fail a structural leg it never meant to ask. The other half is the
-    index: `cannot compare fingerprints of different widths` says the stored bits and the query's
-    bits were built under different parameters, so this corpus cannot be searched at all. Reported
-    as `[]`, that reads to a chemist as "no similar reaction has ever been run here".
-
-    Both halves are asserted in one test because the fix is the *distinction*: narrowing the catch
-    without keeping the prose case empty would trade one wrong answer for another.
+    `FingerprintError` covers both: a prose question with no parseable reaction anchor is
+    legitimately `[]`, while mismatched fingerprint widths mean the index cannot be searched at all.
+    Both are asserted because the fix is the distinction.
     """
     records = _NoMetadata()
     anchor = "CC(=O)O.OCC>>CC(=O)OCC"
